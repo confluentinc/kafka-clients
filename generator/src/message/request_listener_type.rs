@@ -23,7 +23,7 @@ use serde::{Deserialize, Serialize};
 pub enum RequestListenerType {
     /// Broker listener
     Broker,
-    
+
     /// Controller listener
     Controller,
 }

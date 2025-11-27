@@ -23,23 +23,23 @@ use serde::{Deserialize, Serialize};
 pub enum MessageSpecType {
     /// Kafka request RPCs
     Request,
-    
+
     /// Kafka response RPCs
     Response,
-    
+
     /// Kafka RPC headers
     Header,
-    
+
     /// KIP-631 controller records
     Metadata,
-    
+
     /// Other message spec types
     Data,
-    
+
     /// Coordinator key types
     #[serde(rename = "coordinator-key")]
     CoordinatorKey,
-    
+
     /// Coordinator value types
     #[serde(rename = "coordinator-value")]
     CoordinatorValue,

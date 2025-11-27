@@ -14,12 +14,13 @@
 // limitations under the License.
 
 pub mod common;
-pub mod message;
 
 // Include generated message definitions
+#[cfg(not(feature = "skip-generated"))]
 #[allow(dead_code)]
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
 }
 
+#[cfg(not(feature = "skip-generated"))]
 pub use generated::*;

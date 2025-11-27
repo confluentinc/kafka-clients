@@ -16,7 +16,7 @@
 use std::io::{self, Write};
 
 /// A buffer for generating code with automatic indentation support.
-/// 
+///
 /// Translated from org.apache.kafka.message.CodeBuffer
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CodeBuffer {
@@ -27,10 +27,7 @@ pub struct CodeBuffer {
 impl CodeBuffer {
     /// Creates a new empty CodeBuffer.
     pub fn new() -> Self {
-        CodeBuffer {
-            lines: Vec::new(),
-            indent: 0,
-        }
+        CodeBuffer { lines: Vec::new(), indent: 0 }
     }
 
     /// Increments the indentation level.
@@ -39,7 +36,7 @@ impl CodeBuffer {
     }
 
     /// Decrements the indentation level.
-    /// 
+    ///
     /// # Panics
     /// Panics if indentation would become negative.
     pub fn decrement_indent(&mut self) {
@@ -50,7 +47,7 @@ impl CodeBuffer {
     }
 
     /// Adds a line to the buffer with current indentation.
-    /// 
+    ///
     /// Use the `printf!` macro instead for formatted output.
     pub fn printf(&mut self, line: impl Into<String>) {
         let indent_str = self.indent_spaces();
@@ -110,12 +107,15 @@ mod tests {
         buffer.printf(format!("System.out.println(\"{}\");\n", "hello world"));
         buffer.decrement_indent();
         buffer.printf("}\n");
-        
+
         let mut output = Vec::new();
         buffer.write(&mut output).unwrap();
         let result = String::from_utf8(output).unwrap();
-        
-        assert_eq!(result, "public static void main(String[] args) throws Exception {\n    System.out.println(\"hello world\");\n}\n");
+
+        assert_eq!(
+            result,
+            "public static void main(String[] args) throws Exception {\n    System.out.println(\"hello world\");\n}\n"
+        );
     }
 
     #[test]
@@ -128,7 +128,7 @@ mod tests {
         buffer.printf("line3");
         buffer.decrement_indent();
         buffer.printf("line4");
-        
+
         assert_eq!(buffer.lines[0], "line1");
         assert_eq!(buffer.lines[1], "    line2");
         assert_eq!(buffer.lines[2], "        line3");
@@ -140,13 +140,13 @@ mod tests {
         let mut buffer1 = CodeBuffer::new();
         let mut buffer2 = CodeBuffer::new();
         assert_eq!(buffer1, buffer2);
-        
+
         buffer1.printf("hello world");
         assert_ne!(buffer1, buffer2);
-        
+
         buffer2.printf("hello world");
         assert_eq!(buffer1, buffer2);
-        
+
         buffer1.printf("foo, bar, and baz");
         buffer2.printf("foo, bar, and baz");
         assert_eq!(buffer1, buffer2);

@@ -15,8 +15,8 @@
  * limitations under the License.
  */
 
-use serde::{Deserialize, Deserializer};
 use crate::message::{FieldSpec, MessageSpecType, RequestListenerType, StructSpec, Versions};
+use serde::{Deserialize, Deserializer};
 
 /// Top-level message specification for Kafka messages
 #[derive(Debug, Clone, PartialEq)]
@@ -77,17 +77,13 @@ impl MessageSpec {
 
         // Validate listeners
         if !listeners.is_empty() && msg_type != MessageSpecType::Request {
-            return Err(
-                "The `requestScope` property is only valid for messages with type `request`"
-                    .to_string(),
-            );
+            return Err("The `requestScope` property is only valid for messages with type `request`".to_string());
         }
 
         // Validate latestVersionUnstable
         if latest_version_unstable && msg_type != MessageSpecType::Request {
             return Err(
-                "The `latestVersionUnstable` property is only valid for messages with type `request`"
-                    .to_string(),
+                "The `latestVersionUnstable` property is only valid for messages with type `request`".to_string(),
             );
         }
 
@@ -187,7 +183,7 @@ impl MessageSpec {
                 // Append the Data suffix to request/response/header classes to avoid
                 // collisions with existing objects
                 format!("{}Data", self.name())
-            }
+            },
             _ => self.name().to_string(),
         }
     }

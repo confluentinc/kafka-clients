@@ -13,11 +13,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use serde::{Deserialize, Serialize};
 use super::field_type::FieldType;
+use serde::{Deserialize, Serialize};
 
 /// Represents the entity type of a field (e.g., transactional ID, topic name).
-/// 
+///
 /// Translated from org.apache.kafka.message.EntityType
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -105,7 +105,7 @@ mod tests {
             FieldType::Int64,
             FieldType::Array(Box::new(FieldType::String)),
         ];
-        
+
         for field_type in field_types {
             assert!(EntityType::Unknown.verify_type_matches("unknown", &field_type).is_ok());
         }
@@ -114,36 +114,90 @@ mod tests {
     #[test]
     fn test_verify_type_matches() {
         // Test all entity types with correct field types
-        assert!(EntityType::TransactionalId.verify_type_matches("transactionalIdField", &FieldType::String).is_ok());
-        assert!(EntityType::TransactionalId.verify_type_matches("transactionalIdField", 
-            &FieldType::Array(Box::new(FieldType::String))).is_ok());
-        
-        assert!(EntityType::ProducerId.verify_type_matches("producerIdField", &FieldType::Int64).is_ok());
-        assert!(EntityType::ProducerId.verify_type_matches("producerIdField",
-            &FieldType::Array(Box::new(FieldType::Int64))).is_ok());
-        
-        assert!(EntityType::GroupId.verify_type_matches("groupIdField", &FieldType::String).is_ok());
-        assert!(EntityType::GroupId.verify_type_matches("groupIdField",
-            &FieldType::Array(Box::new(FieldType::String))).is_ok());
-        
-        assert!(EntityType::TopicName.verify_type_matches("topicNameField", &FieldType::String).is_ok());
-        assert!(EntityType::TopicName.verify_type_matches("topicNameField",
-            &FieldType::Array(Box::new(FieldType::String))).is_ok());
-        
-        assert!(EntityType::BrokerId.verify_type_matches("brokerIdField", &FieldType::Int32).is_ok());
-        assert!(EntityType::BrokerId.verify_type_matches("brokerIdField",
-            &FieldType::Array(Box::new(FieldType::Int32))).is_ok());
+        assert!(
+            EntityType::TransactionalId
+                .verify_type_matches("transactionalIdField", &FieldType::String)
+                .is_ok()
+        );
+        assert!(
+            EntityType::TransactionalId
+                .verify_type_matches("transactionalIdField", &FieldType::Array(Box::new(FieldType::String)))
+                .is_ok()
+        );
+
+        assert!(
+            EntityType::ProducerId
+                .verify_type_matches("producerIdField", &FieldType::Int64)
+                .is_ok()
+        );
+        assert!(
+            EntityType::ProducerId
+                .verify_type_matches("producerIdField", &FieldType::Array(Box::new(FieldType::Int64)))
+                .is_ok()
+        );
+
+        assert!(
+            EntityType::GroupId
+                .verify_type_matches("groupIdField", &FieldType::String)
+                .is_ok()
+        );
+        assert!(
+            EntityType::GroupId
+                .verify_type_matches("groupIdField", &FieldType::Array(Box::new(FieldType::String)))
+                .is_ok()
+        );
+
+        assert!(
+            EntityType::TopicName
+                .verify_type_matches("topicNameField", &FieldType::String)
+                .is_ok()
+        );
+        assert!(
+            EntityType::TopicName
+                .verify_type_matches("topicNameField", &FieldType::Array(Box::new(FieldType::String)))
+                .is_ok()
+        );
+
+        assert!(
+            EntityType::BrokerId
+                .verify_type_matches("brokerIdField", &FieldType::Int32)
+                .is_ok()
+        );
+        assert!(
+            EntityType::BrokerId
+                .verify_type_matches("brokerIdField", &FieldType::Array(Box::new(FieldType::Int32)))
+                .is_ok()
+        );
     }
 
     #[test]
     fn test_verify_type_mismatches() {
         // Test that incorrect type combinations fail
-        assert!(EntityType::TransactionalId.verify_type_matches("transactionalIdField", &FieldType::Int32).is_err());
-        assert!(EntityType::ProducerId.verify_type_matches("producerIdField", &FieldType::String).is_err());
-        assert!(EntityType::GroupId.verify_type_matches("groupIdField", &FieldType::Int8).is_err());
-        assert!(EntityType::TopicName.verify_type_matches("topicNameField",
-            &FieldType::Array(Box::new(FieldType::Int64))).is_err());
-        assert!(EntityType::BrokerId.verify_type_matches("brokerIdField", &FieldType::Int64).is_err());
+        assert!(
+            EntityType::TransactionalId
+                .verify_type_matches("transactionalIdField", &FieldType::Int32)
+                .is_err()
+        );
+        assert!(
+            EntityType::ProducerId
+                .verify_type_matches("producerIdField", &FieldType::String)
+                .is_err()
+        );
+        assert!(
+            EntityType::GroupId
+                .verify_type_matches("groupIdField", &FieldType::Int8)
+                .is_err()
+        );
+        assert!(
+            EntityType::TopicName
+                .verify_type_matches("topicNameField", &FieldType::Array(Box::new(FieldType::Int64)))
+                .is_err()
+        );
+        assert!(
+            EntityType::BrokerId
+                .verify_type_matches("brokerIdField", &FieldType::Int64)
+                .is_err()
+        );
     }
 
     #[test]

@@ -16,7 +16,7 @@
 use std::fmt;
 
 /// Represents the different field types supported in Kafka message schemas.
-/// 
+///
 /// Translated from org.apache.kafka.message.FieldType
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum FieldType {
@@ -42,7 +42,7 @@ impl FieldType {
     /// Parses a field type from a string representation.
     pub fn parse(s: &str) -> Result<Self, String> {
         let trimmed = s.trim();
-        
+
         match trimmed {
             "bool" => Ok(FieldType::Bool),
             "int8" => Ok(FieldType::Int8),
@@ -59,15 +59,13 @@ impl FieldType {
             _ => {
                 if let Some(element_type_str) = trimmed.strip_prefix(Self::ARRAY_PREFIX) {
                     if element_type_str.is_empty() {
-                        return Err(format!(
-                            "Can't parse array type {}. No element type found.",
-                            trimmed
-                        ));
+                        return Err(format!("Can't parse array type {}. No element type found.", trimmed));
                     }
                     let element_type = Self::parse(element_type_str)?;
                     if element_type.is_array() {
                         return Err(
-                            "Can't have an array of arrays. Use an array of structs containing an array instead.".to_string()
+                            "Can't have an array of arrays. Use an array of structs containing an array instead."
+                                .to_string(),
                         );
                     }
                     Ok(FieldType::Array(Box::new(element_type)))
@@ -76,7 +74,7 @@ impl FieldType {
                 } else {
                     Err(format!("Can't parse type {}", trimmed))
                 }
-            }
+            },
         }
     }
 
@@ -98,11 +96,7 @@ impl FieldType {
     pub fn serialization_is_different_in_flexible_versions(&self) -> bool {
         matches!(
             self,
-            FieldType::String
-                | FieldType::Bytes
-                | FieldType::Records
-                | FieldType::Struct(_)
-                | FieldType::Array(_)
+            FieldType::String | FieldType::Bytes | FieldType::Records | FieldType::Struct(_) | FieldType::Array(_)
         )
     }
 
@@ -135,11 +129,7 @@ impl FieldType {
     pub fn can_be_nullable(&self) -> bool {
         matches!(
             self,
-            FieldType::String
-                | FieldType::Bytes
-                | FieldType::Records
-                | FieldType::Struct(_)
-                | FieldType::Array(_)
+            FieldType::String | FieldType::Bytes | FieldType::Records | FieldType::Struct(_) | FieldType::Array(_)
         )
     }
 
@@ -240,10 +230,7 @@ mod tests {
     fn test_parse_array() {
         let field_type = FieldType::parse("[]int32").unwrap();
         assert!(field_type.is_array());
-        assert_eq!(
-            field_type.element_type(),
-            Some(&FieldType::Int32)
-        );
+        assert_eq!(field_type.element_type(), Some(&FieldType::Int32));
     }
 
     #[test]
@@ -287,9 +274,6 @@ mod tests {
         assert_eq!(FieldType::Int32.to_string(), "int32");
         assert_eq!(FieldType::String.to_string(), "string");
         assert_eq!(FieldType::Struct("TopicData".to_string()).to_string(), "TopicData");
-        assert_eq!(
-            FieldType::Array(Box::new(FieldType::Int32)).to_string(),
-            "[]int32"
-        );
+        assert_eq!(FieldType::Array(Box::new(FieldType::Int32)).to_string(), "[]int32");
     }
 }

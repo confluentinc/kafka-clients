@@ -41,75 +41,74 @@ mod tests {
         assert!(format!("{:?}", req).contains("FetchRequestData"));
         assert_eq!(fetch_request::FetchRequestData::API_KEY, 1);
     }
-    
+
     #[test]
     fn test_nested_struct_generation() {
         // Test that nested structs are properly generated
         use offset_for_leader_epoch_request::*;
-        
+
         // Create nested struct instances
         let partition = OffsetForLeaderPartition::new();
         assert_eq!(partition.partition, 0);
         assert_eq!(partition.leader_epoch, 0);
-        
+
         let topic = OffsetForLeaderTopic::new();
         assert_eq!(topic.topic, "");
         assert_eq!(topic.partitions.len(), 0);
-        
+
         // Create the main request with nested data
         let mut req = OffsetForLeaderEpochRequestData::new();
-        assert_eq!(req.replica_id, 0);
+        assert_eq!(req.replica_id, -2); // Default is -2 per Kafka spec
         assert_eq!(req.topics.len(), 0);
-        
+
         // Add a topic with partitions
         let mut topic_with_data = OffsetForLeaderTopic::new();
         topic_with_data.topic = "test-topic".to_string();
         topic_with_data.partitions.push(partition);
         req.topics.push(topic_with_data);
-        
+
         assert_eq!(req.topics.len(), 1);
         assert_eq!(req.topics[0].topic, "test-topic");
         assert_eq!(req.topics[0].partitions.len(), 1);
     }
-    
+
     #[test]
     fn test_common_structs_generation() {
         // Test that commonStructs are properly generated
         use add_partitions_to_txn_request::*;
-        
+
         let topic = AddPartitionsToTxnTopic::new();
         assert_eq!(topic.name, "");
         assert_eq!(topic.partitions.len(), 0);
-        
+
         let mut transaction = AddPartitionsToTxnTransaction::new();
         transaction.transactional_id = "txn-1".to_string();
         transaction.producer_id = 12345;
         transaction.topics.push(topic);
-        
+
         assert_eq!(transaction.topics.len(), 1);
     }
-    
+
     #[test]
     fn test_uuid_type_generation() {
         // Test that UUID fields are properly generated
-        use share_group_describe_response::*;
         use confluent_kafka_rust::common::Uuid;
-        
+        use share_group_describe_response::*;
+
         // Create a TopicPartitions with UUID
         let mut topic_partitions = TopicPartitions::new();
         assert!(topic_partitions.topic_id.is_zero());
-        
+
         // Set a UUID value
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
         topic_partitions.topic_id = uuid;
-        
+
         assert_eq!(topic_partitions.topic_id.most_sig_bits(), 0x0123456789ABCDEF);
         assert_eq!(topic_partitions.topic_id.least_sig_bits(), 0xFEDCBA9876543210);
         assert!(!topic_partitions.topic_id.is_zero());
-        
+
         // Test UUID string conversion (base64 URL encoding without padding)
         let uuid_str = topic_partitions.topic_id.to_string();
         assert_eq!(uuid_str, "ASNFZ4mrze_-3LqYdlQyEA");
     }
 }
-

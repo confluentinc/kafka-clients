@@ -13,68 +13,68 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use regex::Regex;
-use serde::{Deserialize, Serialize};
 use super::entity_type::EntityType;
 use super::field_type::FieldType;
 use super::versions::Versions;
+use regex::Regex;
+use serde::{Deserialize, Serialize};
 
 /// Specification for a field in a Kafka message schema.
-/// 
+///
 /// Translated from org.apache.kafka.message.FieldSpec
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct FieldSpec {
     name: String,
-    
+
     #[serde(default = "default_versions_string")]
     versions: String,
-    
+
     #[serde(default)]
     fields: Vec<FieldSpec>,
-    
+
     #[serde(rename = "type")]
     field_type: String,
-    
+
     #[serde(default, rename = "mapKey")]
     map_key: bool,
-    
+
     #[serde(default, rename = "nullableVersions")]
     nullable_versions: Option<String>,
-    
+
     #[serde(default, rename = "default")]
-    field_default: String,
-    
+    field_default: Option<serde_json::Value>,
+
     #[serde(default)]
     ignorable: bool,
-    
+
     #[serde(default, rename = "entityType")]
     entity_type: EntityType,
-    
+
     #[serde(default)]
     about: String,
-    
+
     #[serde(default, rename = "taggedVersions")]
     tagged_versions: Option<String>,
-    
+
     #[serde(default, rename = "flexibleVersions")]
     flexible_versions: Option<String>,
-    
+
     #[serde(default)]
     tag: Option<i32>,
-    
+
     #[serde(default, rename = "zeroCopy")]
     zero_copy: bool,
-    
+
     // Parsed/computed fields (not in JSON)
     #[serde(skip)]
     parsed_type: Option<FieldType>,
-    
+
     #[serde(skip)]
     parsed_versions: Option<Versions>,
-    
+
     #[serde(skip)]
     parsed_nullable_versions: Option<Versions>,
-    
+
     #[serde(skip)]
     parsed_tagged_versions: Option<Versions>,
 }
@@ -95,10 +95,7 @@ impl FieldSpec {
         }
 
         // Parse tagged versions
-        self.parsed_tagged_versions = Some(Versions::parse(
-            self.tagged_versions.as_deref(),
-            Versions::NONE,
-        )?);
+        self.parsed_tagged_versions = Some(Versions::parse(self.tagged_versions.as_deref(), Versions::NONE)?);
 
         // Parse versions with default to tagged versions if not set
         let tagged_vers = self.parsed_tagged_versions.unwrap();
@@ -107,7 +104,7 @@ impl FieldSpec {
         } else {
             tagged_vers
         };
-        
+
         self.parsed_versions = Some(if self.versions.is_empty() {
             default_versions
         } else {
@@ -118,10 +115,7 @@ impl FieldSpec {
         self.parsed_type = Some(FieldType::parse(&self.field_type)?);
 
         // Parse nullable versions
-        self.parsed_nullable_versions = Some(Versions::parse(
-            self.nullable_versions.as_deref(),
-            Versions::NONE,
-        )?);
+        self.parsed_nullable_versions = Some(Versions::parse(self.nullable_versions.as_deref(), Versions::NONE)?);
 
         // Validate nullable versions
         let nullable_vers = self.parsed_nullable_versions.unwrap();
@@ -133,7 +127,8 @@ impl FieldSpec {
         }
 
         // Verify entity type matches field type
-        self.entity_type.verify_type_matches(&self.name, self.parsed_type.as_ref().unwrap())?;
+        self.entity_type
+            .verify_type_matches(&self.name, self.parsed_type.as_ref().unwrap())?;
 
         // Validate tag invariants
         self.check_tag_invariants()?;
@@ -152,10 +147,12 @@ impl FieldSpec {
         if !self.fields.is_empty() {
             let field_type = self.parsed_type.as_ref().unwrap();
             if !field_type.is_array() && !field_type.is_struct() {
-                return Err(format!(
-                    "Non-array or Struct field {} cannot have fields",
-                    self.name
-                ));
+                return Err(format!("Non-array or Struct field {} cannot have fields", self.name));
+            }
+
+            // Validate nested fields recursively
+            for field in &mut self.fields {
+                field.validate()?;
             }
         }
 
@@ -164,7 +161,7 @@ impl FieldSpec {
 
     fn check_tag_invariants(&self) -> Result<(), String> {
         let tagged_vers = self.parsed_tagged_versions.unwrap();
-        
+
         if let Some(tag_value) = self.tag {
             if tag_value < 0 {
                 return Err(format!(
@@ -172,7 +169,7 @@ impl FieldSpec {
                     self.name, tag_value
                 ));
             }
-            
+
             if tagged_vers.empty() {
                 return Err(format!(
                     "Field {} specifies a tag of {}, but has no tagged versions.",
@@ -240,8 +237,8 @@ impl FieldSpec {
         self.parsed_nullable_versions.unwrap_or(Versions::NONE)
     }
 
-    pub fn field_default(&self) -> &str {
-        &self.field_default
+    pub fn field_default(&self) -> Option<&serde_json::Value> {
+        self.field_default.as_ref()
     }
 
     pub fn ignorable(&self) -> bool {
@@ -261,9 +258,9 @@ impl FieldSpec {
     }
 
     pub fn flexible_versions(&self) -> Option<Versions> {
-        self.flexible_versions.as_ref().and_then(|s| {
-            Versions::parse(Some(s), Versions::NONE).ok()
-        })
+        self.flexible_versions
+            .as_ref()
+            .and_then(|s| Versions::parse(Some(s), Versions::NONE).ok())
     }
 
     pub fn tag(&self) -> Option<i32> {

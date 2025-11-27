@@ -58,7 +58,7 @@ pub trait Writable {
         self.write_long(uuid.least_sig_bits() as i64)?;
         Ok(())
     }
-    
+
     /// Write bytes from a slice (convenience method).
     fn write_bytes(&mut self, data: &[u8]) -> io::Result<()> {
         self.write_byte_array(data)

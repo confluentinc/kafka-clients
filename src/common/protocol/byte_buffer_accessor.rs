@@ -18,8 +18,8 @@
 //! Corresponds to org.apache.kafka.common.protocol.ByteBufferAccessor
 
 use super::readable::Readable;
-use super::writable::Writable;
 use super::varint;
+use super::writable::Writable;
 use std::io;
 
 /// A struct that implements both Readable and Writable traits for a byte buffer.
@@ -33,18 +33,12 @@ pub struct ByteBufferAccessor {
 impl ByteBufferAccessor {
     /// Create a new ByteBufferAccessor with the given capacity.
     pub fn new(capacity: usize) -> Self {
-        ByteBufferAccessor {
-            buffer: Vec::with_capacity(capacity),
-            position: 0,
-        }
+        ByteBufferAccessor { buffer: Vec::with_capacity(capacity), position: 0 }
     }
 
     /// Create a ByteBufferAccessor from existing bytes.
     pub fn from_bytes(bytes: Vec<u8>) -> Self {
-        ByteBufferAccessor {
-            buffer: bytes,
-            position: 0,
-        }
+        ByteBufferAccessor { buffer: bytes, position: 0 }
     }
 
     /// Get the current position in the buffer.
@@ -93,10 +87,7 @@ impl ByteBufferAccessor {
         if size > remaining {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!(
-                    "Error reading {} byte(s): only {} byte(s) available",
-                    size, remaining
-                ),
+                format!("Error reading {} byte(s): only {} byte(s) available", size, remaining),
             ));
         }
         Ok(())
@@ -113,10 +104,7 @@ impl Readable for ByteBufferAccessor {
 
     fn read_short(&mut self) -> io::Result<i16> {
         self.check_remaining(2)?;
-        let value = i16::from_be_bytes([
-            self.buffer[self.position],
-            self.buffer[self.position + 1],
-        ]);
+        let value = i16::from_be_bytes([self.buffer[self.position], self.buffer[self.position + 1]]);
         self.position += 2;
         Ok(value)
     }
@@ -253,7 +241,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(10);
         buf.write_byte(42).unwrap();
         buf.write_byte(-128).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_byte().unwrap(), 42);
         assert_eq!(buf.read_byte().unwrap(), -128);
@@ -264,7 +252,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(10);
         buf.write_short(1000).unwrap();
         buf.write_short(-1000).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_short().unwrap(), 1000);
         assert_eq!(buf.read_short().unwrap(), -1000);
@@ -275,7 +263,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(10);
         buf.write_int(1000000).unwrap();
         buf.write_int(-1000000).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_int().unwrap(), 1000000);
         assert_eq!(buf.read_int().unwrap(), -1000000);
@@ -286,7 +274,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(20);
         buf.write_long(1000000000000).unwrap();
         buf.write_long(-1000000000000).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_long().unwrap(), 1000000000000);
         assert_eq!(buf.read_long().unwrap(), -1000000000000);
@@ -297,7 +285,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(20);
         buf.write_double(3.14159).unwrap();
         buf.write_double(-2.71828).unwrap();
-        
+
         buf.flip();
         assert!((buf.read_double().unwrap() - 3.14159).abs() < 0.00001);
         assert!((buf.read_double().unwrap() - (-2.71828)).abs() < 0.00001);
@@ -308,7 +296,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(20);
         let data = vec![1u8, 2, 3, 4, 5];
         buf.write_byte_array(&data).unwrap();
-        
+
         buf.flip();
         let read_data = buf.read_array(5).unwrap();
         assert_eq!(read_data, data);
@@ -322,7 +310,7 @@ mod tests {
         buf.write_varint(-1).unwrap();
         buf.write_varint(300).unwrap();
         buf.write_varint(-300).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_varint().unwrap(), 0);
         assert_eq!(buf.read_varint().unwrap(), 1);
@@ -339,7 +327,7 @@ mod tests {
         buf.write_unsigned_varint(128).unwrap();
         buf.write_unsigned_varint(16383).unwrap();
         buf.write_unsigned_varint(16384).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_unsigned_varint().unwrap(), 0);
         assert_eq!(buf.read_unsigned_varint().unwrap(), 127);
@@ -356,7 +344,7 @@ mod tests {
         buf.write_varlong(-1).unwrap();
         buf.write_varlong(1000000000).unwrap();
         buf.write_varlong(-1000000000).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.read_varlong().unwrap(), 0);
         assert_eq!(buf.read_varlong().unwrap(), 1);
@@ -370,7 +358,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(20);
         let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
         buf.write_uuid(&uuid).unwrap();
-        
+
         buf.flip();
         let read_uuid = buf.read_uuid().unwrap();
         assert_eq!(read_uuid, uuid);
@@ -381,7 +369,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(20);
         let text = "Hello, Kafka!";
         buf.write_byte_array(text.as_bytes()).unwrap();
-        
+
         buf.flip();
         let read_text = buf.read_string(text.len()).unwrap();
         assert_eq!(read_text, text);
@@ -392,7 +380,7 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(10);
         buf.write_int(42).unwrap();
         buf.write_int(43).unwrap();
-        
+
         buf.flip();
         assert_eq!(buf.remaining(), 8);
         buf.read_int().unwrap();
@@ -406,12 +394,12 @@ mod tests {
         let mut buf = ByteBufferAccessor::new(10);
         buf.write_int(42).unwrap();
         assert_eq!(buf.len(), 4);
-        
+
         buf.flip();
         assert_eq!(buf.position(), 0);
         buf.read_byte().unwrap();
         assert_eq!(buf.position(), 1);
-        
+
         buf.set_position(0).unwrap();
         assert_eq!(buf.position(), 0);
     }

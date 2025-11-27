@@ -83,10 +83,7 @@ pub fn read_unsigned_varint(buffer: &[u8]) -> Result<(u32, usize), String> {
     tmp = buffer[pos] as i8;
     result |= (tmp as u32) << 28;
     if tmp < 0 {
-        return Err(format!(
-            "Varint is too long, value so far: {}",
-            result
-        ));
+        return Err(format!("Varint is too long, value so far: {}", result));
     }
 
     Ok((result, pos + 1))
@@ -315,7 +312,7 @@ mod tests {
     #[test]
     fn test_varlong_zig_zag() {
         let test_values = vec![0i64, 1, -1, 100, -100, i64::MAX, i64::MIN];
-        
+
         for value in test_values {
             let mut buf = Vec::new();
             write_varlong(value, &mut buf).unwrap();

@@ -13,8 +13,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-use std::fmt;
 use serde::{Deserialize, Serialize};
+use std::fmt;
 
 /// A version range.
 ///
@@ -41,16 +41,10 @@ impl Versions {
     pub const NONE_STRING: &'static str = "none";
 
     /// A range representing all versions.
-    pub const ALL: Versions = Versions {
-        lowest: 0,
-        highest: i16::MAX,
-    };
+    pub const ALL: Versions = Versions { lowest: 0, highest: i16::MAX };
 
     /// A range representing no versions.
-    pub const NONE: Versions = Versions {
-        lowest: 0,
-        highest: -1,
-    };
+    pub const NONE: Versions = Versions { lowest: 0, highest: -1 };
 
     /// Parses a version range from a string.
     ///
@@ -91,9 +85,7 @@ impl Versions {
             return Ok(Versions::new(lowest, highest)?);
         }
 
-        let version = input
-            .parse::<i16>()
-            .map_err(|e| format!("Failed to parse version: {}", e))?;
+        let version = input.parse::<i16>().map_err(|e| format!("Failed to parse version: {}", e))?;
         Ok(Versions::new(version, version)?)
     }
 
@@ -130,10 +122,7 @@ impl Versions {
         if new_lowest > new_highest {
             return Versions::NONE;
         }
-        Versions {
-            lowest: new_lowest,
-            highest: new_highest,
-        }
+        Versions { lowest: new_lowest, highest: new_highest }
     }
 
     /// Returns a new version range that trims some versions from this range, if possible.
@@ -158,10 +147,7 @@ impl Versions {
                 // Note: it is safe to assume that other.highest() + 1 will not overflow.
                 // The reason is because if other.highest() were i16::MAX,
                 // other.highest() < highest could not be true.
-                Some(Versions {
-                    lowest: other.highest() + 1,
-                    highest: self.highest,
-                })
+                Some(Versions { lowest: other.highest() + 1, highest: self.highest })
             }
         } else if other.highest >= self.highest {
             let new_highest = other.lowest - 1;
@@ -170,10 +156,7 @@ impl Versions {
                 Some(*self)
             } else if new_highest < self.highest {
                 // Case 5: trim some values from the end of this range.
-                Some(Versions {
-                    lowest: self.lowest,
-                    highest: new_highest,
-                })
+                Some(Versions { lowest: self.lowest, highest: new_highest })
             } else {
                 // Case 6: other is a disjoint range that is higher than this. Trim nothing.
                 Some(*self)
@@ -222,7 +205,10 @@ mod tests {
         assert_eq!(Versions::parse(None, Versions::NONE).unwrap(), Versions::NONE);
         assert_eq!(Versions::parse(Some(" "), Versions::ALL).unwrap(), Versions::ALL);
         assert_eq!(Versions::parse(Some(""), Versions::ALL).unwrap(), Versions::ALL);
-        assert_eq!(Versions::parse(Some(" 4-5 "), Versions::NONE).unwrap(), Versions::new(4, 5).unwrap());
+        assert_eq!(
+            Versions::parse(Some(" 4-5 "), Versions::NONE).unwrap(),
+            Versions::new(4, 5).unwrap()
+        );
     }
 
     #[test]
@@ -274,9 +260,18 @@ mod tests {
 
     #[test]
     fn test_intersections() {
-        assert_eq!(Versions::new(2, 3).unwrap(), Versions::new(1, 3).unwrap().intersect(Versions::new(2, 4).unwrap()));
-        assert_eq!(Versions::new(3, 3).unwrap(), Versions::new(0, i16::MAX).unwrap().intersect(Versions::new(3, 3).unwrap()));
-        assert_eq!(Versions::NONE, Versions::new(9, i16::MAX).unwrap().intersect(Versions::new(2, 8).unwrap()));
+        assert_eq!(
+            Versions::new(2, 3).unwrap(),
+            Versions::new(1, 3).unwrap().intersect(Versions::new(2, 4).unwrap())
+        );
+        assert_eq!(
+            Versions::new(3, 3).unwrap(),
+            Versions::new(0, i16::MAX).unwrap().intersect(Versions::new(3, 3).unwrap())
+        );
+        assert_eq!(
+            Versions::NONE,
+            Versions::new(9, i16::MAX).unwrap().intersect(Versions::new(2, 8).unwrap())
+        );
         assert_eq!(Versions::NONE, Versions::NONE.intersect(Versions::NONE));
     }
 
@@ -288,7 +283,7 @@ mod tests {
         assert!(v.contains(5));
         assert!(v.contains(7));
         assert!(!v.contains(8));
-        
+
         // Test contains_range
         assert!(Versions::new(2, 3).unwrap().contains(3));
         assert!(Versions::new(2, 3).unwrap().contains(2));
@@ -322,14 +317,46 @@ mod tests {
     #[test]
     fn test_subtract() {
         assert_eq!(Versions::NONE, Versions::NONE.subtract(Versions::NONE).unwrap());
-        assert_eq!(Versions::new(0, 0).unwrap(), Versions::new(0, 0).unwrap().subtract(Versions::NONE).unwrap());
-        assert_eq!(Versions::new(1, 1).unwrap(), Versions::new(1, 2).unwrap().subtract(Versions::new(2, 2).unwrap()).unwrap());
-        assert_eq!(Versions::new(2, 2).unwrap(), Versions::new(1, 2).unwrap().subtract(Versions::new(1, 1).unwrap()).unwrap());
-        assert!(Versions::new(0, i16::MAX).unwrap().subtract(Versions::new(1, 100).unwrap()).is_none());
-        assert_eq!(Versions::new(10, 10).unwrap(), Versions::new(1, 10).unwrap().subtract(Versions::new(1, 9).unwrap()).unwrap());
-        assert_eq!(Versions::new(1, 1).unwrap(), Versions::new(1, 10).unwrap().subtract(Versions::new(2, 10).unwrap()).unwrap());
-        assert_eq!(Versions::new(2, 4).unwrap(), Versions::new(2, i16::MAX).unwrap().subtract(Versions::new(5, i16::MAX).unwrap()).unwrap());
-        assert_eq!(Versions::new(5, i16::MAX).unwrap(), Versions::new(0, i16::MAX).unwrap().subtract(Versions::new(0, 4).unwrap()).unwrap());
+        assert_eq!(
+            Versions::new(0, 0).unwrap(),
+            Versions::new(0, 0).unwrap().subtract(Versions::NONE).unwrap()
+        );
+        assert_eq!(
+            Versions::new(1, 1).unwrap(),
+            Versions::new(1, 2).unwrap().subtract(Versions::new(2, 2).unwrap()).unwrap()
+        );
+        assert_eq!(
+            Versions::new(2, 2).unwrap(),
+            Versions::new(1, 2).unwrap().subtract(Versions::new(1, 1).unwrap()).unwrap()
+        );
+        assert!(
+            Versions::new(0, i16::MAX)
+                .unwrap()
+                .subtract(Versions::new(1, 100).unwrap())
+                .is_none()
+        );
+        assert_eq!(
+            Versions::new(10, 10).unwrap(),
+            Versions::new(1, 10).unwrap().subtract(Versions::new(1, 9).unwrap()).unwrap()
+        );
+        assert_eq!(
+            Versions::new(1, 1).unwrap(),
+            Versions::new(1, 10).unwrap().subtract(Versions::new(2, 10).unwrap()).unwrap()
+        );
+        assert_eq!(
+            Versions::new(2, 4).unwrap(),
+            Versions::new(2, i16::MAX)
+                .unwrap()
+                .subtract(Versions::new(5, i16::MAX).unwrap())
+                .unwrap()
+        );
+        assert_eq!(
+            Versions::new(5, i16::MAX).unwrap(),
+            Versions::new(0, i16::MAX)
+                .unwrap()
+                .subtract(Versions::new(0, 4).unwrap())
+                .unwrap()
+        );
     }
 
     #[test]

@@ -15,17 +15,17 @@
  * limitations under the License.
  */
 
-use std::collections::{BTreeMap, HashMap, HashSet};
 use crate::message::{CodeBuffer, FieldSpec, FieldType, MessageSpec, StructSpec, Versions};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 /// Generates Schemas for Kafka MessageData classes
 pub struct SchemaGenerator {
     /// Maps message names to message information
     messages: HashMap<String, MessageInfo>,
-    
+
     /// The versions that implement a KIP-482 flexible schema
     message_flexible_versions: Versions,
-    
+
     /// Registry of common structs
     struct_registry: StructRegistry,
 }
@@ -34,7 +34,7 @@ pub struct SchemaGenerator {
 struct MessageInfo {
     /// The versions of this message that we want to generate a schema for
     versions: Versions,
-    
+
     /// Maps versions to schema declaration code
     /// If the schema for a particular version is the same as that of a previous version,
     /// there will be no entry in the map for it
@@ -43,10 +43,7 @@ struct MessageInfo {
 
 impl MessageInfo {
     fn new(versions: Versions) -> Self {
-        MessageInfo {
-            versions,
-            schema_for_version: BTreeMap::new(),
-        }
+        MessageInfo { versions, schema_for_version: BTreeMap::new() }
     }
 }
 
@@ -64,10 +61,7 @@ struct StructInfo {
 
 impl StructRegistry {
     pub fn new() -> Self {
-        StructRegistry {
-            structs: HashMap::new(),
-            common_struct_names: HashSet::new(),
-        }
+        StructRegistry { structs: HashMap::new(), common_struct_names: HashSet::new() }
     }
 
     /// Register all the structures contained in a message spec
@@ -86,10 +80,7 @@ impl StructRegistry {
             }
             self.structs.insert(
                 name.to_string(),
-                StructInfo {
-                    spec: struct_spec.clone(),
-                    parent_versions: struct_spec.versions(),
-                },
+                StructInfo { spec: struct_spec.clone(), parent_versions: struct_spec.versions() },
             );
             self.common_struct_names.insert(name.to_string());
         }
@@ -102,12 +93,8 @@ impl StructRegistry {
     fn add_struct_specs(&mut self, parent_versions: Versions, fields: &[FieldSpec]) -> Result<(), String> {
         for field in fields {
             let type_name = match field.field_type() {
-                FieldType::Array(element_type) if element_type.is_struct() => {
-                    Some(element_type.to_string())
-                }
-                field_type if field_type.is_struct() => {
-                    Some(field_type.to_string())
-                }
+                FieldType::Array(element_type) if element_type.is_struct() => Some(element_type.to_string()),
+                field_type if field_type.is_struct() => Some(field_type.to_string()),
                 _ => None,
             };
 
@@ -115,35 +102,18 @@ impl StructRegistry {
                 if self.common_struct_names.contains(&type_name) {
                     // If we're using a common structure, we can't specify its fields
                     if !field.fields().is_empty() {
-                        return Err(format!(
-                            "Can't re-specify the common struct {} as an inline struct.",
-                            type_name
-                        ));
+                        return Err(format!("Can't re-specify the common struct {} as an inline struct.", type_name));
                     }
                 } else if self.structs.contains_key(&type_name) {
                     return Err(format!("Struct {} was specified twice.", type_name));
                 } else {
                     // Synthesize a StructSpec from the fields
                     let versions_str = field.versions().to_string();
-                    let spec = StructSpec::new(
-                        type_name.clone(),
-                        Some(&versions_str),
-                        None,
-                        field.fields().to_vec(),
-                    )?;
-                    self.structs.insert(
-                        type_name,
-                        StructInfo {
-                            spec,
-                            parent_versions,
-                        },
-                    );
+                    let spec = StructSpec::new(type_name.clone(), Some(&versions_str), None, field.fields().to_vec())?;
+                    self.structs.insert(type_name, StructInfo { spec, parent_versions });
                 }
 
-                self.add_struct_specs(
-                    parent_versions.intersect(field.versions()),
-                    field.fields(),
-                )?;
+                self.add_struct_specs(parent_versions.intersect(field.versions()), field.fields())?;
             }
         }
         Ok(())
@@ -154,11 +124,8 @@ impl StructRegistry {
             FieldType::Array(element_type) => element_type.to_string(),
             field_type if field_type.is_struct() => field_type.to_string(),
             _ => {
-                return Err(format!(
-                    "Field {} cannot be treated as a structure.",
-                    field.name()
-                ));
-            }
+                return Err(format!("Field {} cannot be treated as a structure.", field.name()));
+            },
         };
 
         self.find_struct_by_name(&struct_field_name)
@@ -168,9 +135,7 @@ impl StructRegistry {
         self.structs
             .get(name)
             .map(|info| &info.spec)
-            .ok_or_else(|| {
-                format!("Unable to locate a specification for the structure {}", name)
-            })
+            .ok_or_else(|| format!("Unable to locate a specification for the structure {}", name))
     }
 
     pub fn common_structs(&self) -> impl Iterator<Item = &StructSpec> {
@@ -207,7 +172,8 @@ impl SchemaGenerator {
         self.struct_registry.register(message)?;
 
         // Collect common structs to avoid borrowing issues
-        let common_structs: Vec<(String, StructSpec, Versions)> = self.struct_registry
+        let common_structs: Vec<(String, StructSpec, Versions)> = self
+            .struct_registry
             .common_structs()
             .map(|s| (s.name().to_string(), s.clone(), message.struct_spec().versions()))
             .collect();
@@ -335,12 +301,7 @@ impl SchemaGenerator {
         Ok(())
     }
 
-    fn find_last_valid_field_index(
-        &self,
-        struct_spec: &StructSpec,
-        version: i16,
-        tagged_only: bool,
-    ) -> Option<usize> {
+    fn find_last_valid_field_index(&self, struct_spec: &StructSpec, version: i16, tagged_only: bool) -> Option<usize> {
         struct_spec
             .fields()
             .iter()
@@ -412,55 +373,55 @@ impl SchemaGenerator {
                     return Err("Type Bool cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Boolean".to_string())
-            }
+            },
             FieldType::Int8 => {
                 if nullable {
                     return Err("Type Int8 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Int8".to_string())
-            }
+            },
             FieldType::Int16 => {
                 if nullable {
                     return Err("Type Int16 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Int16".to_string())
-            }
+            },
             FieldType::Uint16 => {
                 if nullable {
                     return Err("Type Uint16 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Uint16".to_string())
-            }
+            },
             FieldType::Uint32 => {
                 if nullable {
                     return Err("Type Uint32 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Uint32".to_string())
-            }
+            },
             FieldType::Int32 => {
                 if nullable {
                     return Err("Type Int32 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Int32".to_string())
-            }
+            },
             FieldType::Int64 => {
                 if nullable {
                     return Err("Type Int64 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Int64".to_string())
-            }
+            },
             FieldType::Uuid => {
                 if nullable {
                     return Err("Type Uuid cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Uuid".to_string())
-            }
+            },
             FieldType::Float64 => {
                 if nullable {
                     return Err("Type Float64 cannot be nullable.".to_string());
                 }
                 Ok("SchemaType::Float64".to_string())
-            }
+            },
             FieldType::String => {
                 if flexible {
                     Ok(if nullable {
@@ -477,7 +438,7 @@ impl SchemaGenerator {
                     }
                     .to_string())
                 }
-            }
+            },
             FieldType::Bytes => {
                 if flexible {
                     Ok(if nullable {
@@ -494,14 +455,14 @@ impl SchemaGenerator {
                     }
                     .to_string())
                 }
-            }
+            },
             FieldType::Records => {
                 if flexible {
                     Ok("SchemaType::CompactRecords".to_string())
                 } else {
                     Ok("SchemaType::Records".to_string())
                 }
-            }
+            },
             FieldType::Array(element_type) => {
                 let element_schema = self.field_type_to_schema_type(element_type, false, version)?;
                 if flexible {
@@ -512,26 +473,23 @@ impl SchemaGenerator {
                     };
                     Ok(format!("{}({})", prefix, element_schema))
                 } else {
-                    let prefix = if nullable {
-                        "ArrayOf::nullable"
-                    } else {
-                        "ArrayOf::new"
-                    };
+                    let prefix = if nullable { "ArrayOf::nullable" } else { "ArrayOf::new" };
                     Ok(format!("{}({})", prefix, element_schema))
                 }
-            }
+            },
             FieldType::Struct(struct_name) => {
                 let floor_version = self.floor_version(struct_name, version)?;
                 Ok(format!("{}::SCHEMA_{}", struct_name, floor_version))
-            }
+            },
         }
     }
 
     /// Find the lowest schema version for a given class that is the same as the given version
     fn floor_version(&self, class_name: &str, version: i16) -> Result<i16, String> {
-        let message = self.messages.get(class_name).ok_or_else(|| {
-            format!("Unable to find message info for class {}", class_name)
-        })?;
+        let message = self
+            .messages
+            .get(class_name)
+            .ok_or_else(|| format!("Unable to find message info for class {}", class_name))?;
 
         message
             .schema_for_version
@@ -543,9 +501,10 @@ impl SchemaGenerator {
 
     /// Write the message schema to the provided buffer
     pub fn write_schema(&self, class_name: &str, buffer: &mut CodeBuffer) -> Result<(), String> {
-        let message_info = self.messages.get(class_name).ok_or_else(|| {
-            format!("Unable to find message info for class {}", class_name)
-        })?;
+        let message_info = self
+            .messages
+            .get(class_name)
+            .ok_or_else(|| format!("Unable to find message info for class {}", class_name))?;
 
         let versions = message_info.versions;
 
@@ -580,14 +539,8 @@ impl SchemaGenerator {
         buffer.printf("];");
         buffer.printf("");
 
-        buffer.printf(format!(
-            "pub const LOWEST_SUPPORTED_VERSION: i16 = {};",
-            versions.lowest()
-        ));
-        buffer.printf(format!(
-            "pub const HIGHEST_SUPPORTED_VERSION: i16 = {};",
-            versions.highest()
-        ));
+        buffer.printf(format!("pub const LOWEST_SUPPORTED_VERSION: i16 = {};", versions.lowest()));
+        buffer.printf(format!("pub const HIGHEST_SUPPORTED_VERSION: i16 = {};", versions.highest()));
 
         Ok(())
     }

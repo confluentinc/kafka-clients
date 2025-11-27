@@ -18,11 +18,11 @@
 //! This module provides traits and implementations for reading and writing
 //! Kafka protocol messages to/from byte streams.
 
-pub mod readable;
-pub mod writable;
 pub mod byte_buffer_accessor;
+pub mod readable;
 pub mod varint;
+pub mod writable;
 
-pub use readable::{Readable, RawTaggedField};
-pub use writable::Writable;
 pub use byte_buffer_accessor::ByteBufferAccessor;
+pub use readable::{RawTaggedField, Readable};
+pub use writable::Writable;

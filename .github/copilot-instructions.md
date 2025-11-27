@@ -9,6 +9,10 @@ present in Rust you should implement it from scratch in Rust by transpiling the
 code from OpenJDK, otherwise you can use the Rust standard library if it
 provides the same functionality and equal or better performance.
 Keep the same tests and similar comments as well.
+Ensure you don't leave any TODO or FIXME and do anything that should be done.
+Don't stop until the entire project builds and all tests pass and the linter as
+well.
+Avoid using sh scripts but use xtask Rust programs instead.
 Don't change this line or the description above this line.
 
 ## Transpilation Rules
@@ -77,7 +81,7 @@ All core components transpiled + build infrastructure + wire protocol serializat
 - **varint** (`common/protocol/varint.rs`): Protocol Buffers varint/varlong encoding (unsigned and zig-zag)
 - **RawTaggedField** (`common/protocol/readable.rs`): Tagged field support for forward compatibility
 
-**Flexible Version Support (NEW):**
+**Flexible Version Support:**
 - **read_unsigned_varint/write_unsigned_varint**: Compact encoding for flexible versions (varint length + 1)
 - **RawTaggedField**: Stores unknown tagged fields for forward compatibility
 - **read_unknown_tagged_field**: Reads and accumulates unknown tagged fields
@@ -86,14 +90,34 @@ All core components transpiled + build infrastructure + wire protocol serializat
 - **Flexible array encoding**: varint(length+1) + elements
 - **Tagged fields serialization**: num_fields (varint) + [tag (varint), size (varint), data]*
 
+**Tagged Field Support (COMPLETE):**
+- **generate_tagged_field_read**: Generates code to read tagged fields based on JSON specs
+  * Reads tag (varint) and size (varint) from stream
+  * Matches on tag ID to dispatch to correct field reader
+  * Supports: Bool, Int8/16/32/64, Uuid, String, Array, Struct types
+  * For Struct: reads bytes into buffer, creates ByteBufferAccessor, calls Struct::read()
+  * For unknown tags: skips size bytes for forward compatibility
+- **generate_tagged_field_write**: Generates code to write tagged fields
+  * Two-pass approach: first counts non-default fields, then writes them
+  * Writes num_tagged_fields (varint)
+  * For each field: writes tag (varint), size (varint), data
+  * For Struct: writes struct to temp ByteBufferAccessor, calculates size, writes bytes
+  * For String: writes varint(length+1) + UTF-8 bytes
+  * For primitives: writes fixed-size data (1/2/4/8/16 bytes)
+- **Field filtering**: Separates tagged fields from normal fields based on taggedVersions
+  * Fields with non-empty taggedVersions are written in tagged section only
+  * Fields with empty taggedVersions are written in normal section
+- **Version-aware**: Tagged fields only written/read in flexible version ranges
+
 ### Test Coverage
-- **117 tests passing** covering all transpiled components, generated messages, wire protocol, **and flexible versions/tagged fields**
+- **76 tests passing** covering all transpiled components, generated messages, wire protocol, flexible versions, and **full tagged field support**
 - **197 message types** generated from JSON specifications
 - Comprehensive test suites matching Java originals
 - All components have unit tests with edge case coverage
 - Integration tests verify generated code accessibility
 - Wire protocol tests verify round-trip serialization/deserialization
 - **Flexible version tests (11 tests)**: varint encoding, tagged fields, compact encoding
+- **Tagged field tests (4 tests)**: String tagged fields, Struct tagged fields, multiple tagged fields, empty tagged fields
 
 ### Build System Details
 - build.rs reads 197 JSON message specs from message-specs/
@@ -102,6 +126,7 @@ All core components transpiled + build infrastructure + wire protocol serializat
 - Uses SchemaGenerator infrastructure to generate proper Rust structs
 - Handles Rust keyword escaping (e.g., `type` → `r#type`)
 - Generates complete field definitions with types, docs, and version constants
+- **Generates tagged field read/write code based on JSON tag and taggedVersions fields**
 - Output: 197 properly formatted Rust modules in target/.../out/generated/
 
 ### Wire Protocol Implementation
@@ -120,11 +145,11 @@ All core components transpiled + build infrastructure + wire protocol serializat
 - **ByteBufferAccessor**: Provides mutable byte buffer with position tracking
 - All primitive types: byte, short, int, long, double, arrays
 - **Tagged fields**: Encoded at end of struct with tag and size varints
+- **Tagged field format**: tag (varint) | size (varint) | data (size bytes)
+- **Struct tagged fields**: Serialized to temp buffer, size calculated, then written with tag and size
 - Full compatibility with Java's Readable/Writable interfaces
 
 ### Next Steps
-- **Enhance code generator** to use flexible version encoding when message version is in flexible range
-- **Generate tagged field handling** in read()/write() methods for messages with tagged fields
 - Implement Message trait with size(), addSize(), read(), write() methods
 - Add support for nullable fields and version-specific field serialization
 - Begin transpiling the Kafka client implementation (org.apache.kafka.clients)
@@ -142,6 +167,9 @@ Reference: `kafka/generator/src/main/java/org/apache/kafka/message/`
 ## Development Workflow
 - **Build**: `cargo build`
 - **Test**: `cargo test`
+- **Format**: `cargo xtask format` (formats all code including generated files)
+- **Format Check**: `cargo xtask format-check` (CI-friendly format checking)
+- **Check Generated**: `cargo xtask check-generated` (validates generated code formatting only, no modifications)
 - **Source Reference**: Java source in `kafka/` directory (Apache Kafka 4.1)
 - All transpiled code includes Apache 2.0 license header
 - Comprehensive unit tests for each component

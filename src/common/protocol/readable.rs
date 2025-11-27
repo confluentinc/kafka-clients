@@ -58,10 +58,9 @@ pub trait Readable {
     /// Read a UTF-8 string of the given length.
     fn read_string(&mut self, length: usize) -> io::Result<String> {
         let bytes = self.read_array(length)?;
-        String::from_utf8(bytes)
-            .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+        String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
     }
-    
+
     /// Read bytes into the provided buffer.
     fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
         let data = self.read_array(buf.len())?;
@@ -104,7 +103,7 @@ pub trait Readable {
 
 /// Raw tagged field for forward compatibility.
 /// Stores unknown tagged fields that can be passed through.
-/// 
+///
 /// Corresponds to org.apache.kafka.common.protocol.types.RawTaggedField
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RawTaggedField {

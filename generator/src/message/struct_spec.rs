@@ -15,9 +15,9 @@
  * limitations under the License.
  */
 
+use crate::message::{FieldSpec, Versions};
 use serde::{Deserialize, Deserializer};
 use std::collections::HashSet;
-use crate::message::{FieldSpec, Versions};
 
 /// Specification for a structure in a Kafka message schema
 #[derive(Debug, Clone, PartialEq)]
@@ -35,19 +35,21 @@ impl StructSpec {
         name: String,
         versions_str: Option<&str>,
         deprecated_versions_str: Option<&str>,
-        fields: Vec<FieldSpec>,
+        mut fields: Vec<FieldSpec>,
     ) -> Result<Self, String> {
         let versions = match Versions::parse(versions_str, Versions::NONE)? {
             v if v.empty() => {
-                return Err(format!(
-                    "You must specify the version of the {} structure.",
-                    name
-                ));
-            }
+                return Err(format!("You must specify the version of the {} structure.", name));
+            },
             v => v,
         };
 
         let deprecated_versions = Versions::parse(deprecated_versions_str, Versions::NONE)?;
+
+        // Validate each field (this parses field types, versions, etc.)
+        for field in &mut fields {
+            field.validate()?;
+        }
 
         // Validate fields
         let mut tags = HashSet::new();
@@ -59,7 +61,9 @@ impl StructSpec {
                 if !tags.insert(tag) {
                     return Err(format!(
                         "In {}, field {} has a duplicate tag ID {}. All tag IDs must be unique.",
-                        name, field.name(), tag
+                        name,
+                        field.name(),
+                        tag
                     ));
                 }
             }
@@ -68,7 +72,8 @@ impl StructSpec {
             if !names.insert(field.name()) {
                 return Err(format!(
                     "In {}, field {} has a duplicate name. All field names must be unique.",
-                    name, field.name()
+                    name,
+                    field.name()
                 ));
             }
         }
@@ -85,13 +90,7 @@ impl StructSpec {
 
         let has_keys = fields.iter().any(|f| f.map_key());
 
-        Ok(StructSpec {
-            name,
-            versions,
-            deprecated_versions,
-            fields,
-            has_keys,
-        })
+        Ok(StructSpec { name, versions, deprecated_versions, fields, has_keys })
     }
 
     pub fn name(&self) -> &str {
@@ -135,7 +134,7 @@ impl<'de> Deserialize<'de> for StructSpec {
         }
 
         let helper = StructSpecHelper::deserialize(deserializer)?;
-        
+
         StructSpec::new(
             helper.name,
             helper.versions.as_deref(),
@@ -153,13 +152,7 @@ mod tests {
 
     #[test]
     fn test_struct_spec_creation() {
-        let spec = StructSpec::new(
-            "TestStruct".to_string(),
-            Some("0-5"),
-            None,
-            vec![],
-        )
-        .unwrap();
+        let spec = StructSpec::new("TestStruct".to_string(), Some("0-5"), None, vec![]).unwrap();
 
         assert_eq!(spec.name(), "TestStruct");
         assert_eq!(spec.versions(), Versions::new(0, 5).unwrap());
@@ -169,12 +162,7 @@ mod tests {
 
     #[test]
     fn test_struct_spec_requires_versions() {
-        let result = StructSpec::new(
-            "TestStruct".to_string(),
-            Some("none"),
-            None,
-            vec![],
-        );
+        let result = StructSpec::new("TestStruct".to_string(), Some("none"), None, vec![]);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("must specify the version"));
@@ -182,24 +170,25 @@ mod tests {
 
     #[test]
     fn test_duplicate_field_names() {
-        let field1 = serde_json::from_str::<FieldSpec>(r#"{
+        let field1 = serde_json::from_str::<FieldSpec>(
+            r#"{
             "name": "field1",
             "type": "int32",
             "versions": "0+"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
-        let field2 = serde_json::from_str::<FieldSpec>(r#"{
+        let field2 = serde_json::from_str::<FieldSpec>(
+            r#"{
             "name": "field1",
             "type": "string",
             "versions": "0+"
-        }"#).unwrap();
+        }"#,
+        )
+        .unwrap();
 
-        let result = StructSpec::new(
-            "TestStruct".to_string(),
-            Some("0+"),
-            None,
-            vec![field1, field2],
-        );
+        let result = StructSpec::new("TestStruct".to_string(), Some("0+"), None, vec![field1, field2]);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("duplicate name"));
@@ -207,26 +196,29 @@ mod tests {
 
     #[test]
     fn test_duplicate_tag_ids() {
-        let field1 = serde_json::from_str::<FieldSpec>(r#"{
+        let field1 = serde_json::from_str::<FieldSpec>(
+            r#"{
             "name": "field1",
             "type": "int32",
             "versions": "0+",
-            "tag": 0
-        }"#).unwrap();
+            "tag": 0,
+            "taggedVersions": "0+"
+        }"#,
+        )
+        .unwrap();
 
-        let field2 = serde_json::from_str::<FieldSpec>(r#"{
+        let field2 = serde_json::from_str::<FieldSpec>(
+            r#"{
             "name": "field2",
             "type": "string",
             "versions": "0+",
-            "tag": 0
-        }"#).unwrap();
+            "tag": 0,
+            "taggedVersions": "0+"
+        }"#,
+        )
+        .unwrap();
 
-        let result = StructSpec::new(
-            "TestStruct".to_string(),
-            Some("0+"),
-            None,
-            vec![field1, field2],
-        );
+        let result = StructSpec::new("TestStruct".to_string(), Some("0+"), None, vec![field1, field2]);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("duplicate tag ID"));
@@ -234,26 +226,29 @@ mod tests {
 
     #[test]
     fn test_non_contiguous_tag_ids() {
-        let field1 = serde_json::from_str::<FieldSpec>(r#"{
+        let field1 = serde_json::from_str::<FieldSpec>(
+            r#"{
             "name": "field1",
             "type": "int32",
             "versions": "0+",
-            "tag": 0
-        }"#).unwrap();
+            "tag": 0,
+            "taggedVersions": "0+"
+        }"#,
+        )
+        .unwrap();
 
-        let field2 = serde_json::from_str::<FieldSpec>(r#"{
+        let field2 = serde_json::from_str::<FieldSpec>(
+            r#"{
             "name": "field2",
             "type": "string",
             "versions": "0+",
-            "tag": 2
-        }"#).unwrap();
+            "tag": 2,
+            "taggedVersions": "0+"
+        }"#,
+        )
+        .unwrap();
 
-        let result = StructSpec::new(
-            "TestStruct".to_string(),
-            Some("0+"),
-            None,
-            vec![field1, field2],
-        );
+        let result = StructSpec::new("TestStruct".to_string(), Some("0+"), None, vec![field1, field2]);
 
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("not contiguous"));

@@ -15,9 +15,8 @@
 
 //! Common types and utilities for Kafka (org.apache.kafka.common)
 
-pub mod uuid;
 pub mod protocol;
+pub mod uuid;
 
+pub use protocol::{ByteBufferAccessor, Readable, Writable};
 pub use uuid::Uuid;
-pub use protocol::{Readable, Writable, ByteBufferAccessor};
-
