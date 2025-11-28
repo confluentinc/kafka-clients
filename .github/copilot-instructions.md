@@ -96,8 +96,21 @@ All core components transpiled + build infrastructure + wire protocol serializat
   * Matches on tag ID to dispatch to correct field reader
   * Supports: Bool, Int8/16/32/64, Uuid, String, Array, Struct types
   * For Struct: reads bytes into buffer, creates ByteBufferAccessor, calls Struct::read()
+  * For Array: reads varint length, then elements (UUID, primitives, or structs)
   * For unknown tags: skips size bytes for forward compatibility
 - **generate_tagged_field_write**: Generates code to write tagged fields
+  * Two-pass approach: first counts non-default fields, then writes them
+  * Writes num_tagged_fields (varint)
+  * For each field: writes tag (varint), size (varint), data
+  * For Struct: writes struct to temp ByteBufferAccessor, calculates size, writes bytes
+  * For Array: writes array to temp ByteBufferAccessor (varint length + elements), calculates size, writes bytes
+    - Array elements handled by type: UUID (write_uuid), primitives (write_*), structs (element.write())
+  * For String: writes varint(length+1) + UTF-8 bytes
+  * For primitives: writes fixed-size data (1/2/4/8/16 bytes)
+- **Field filtering**: Separates tagged fields from normal fields based on taggedVersions
+  * Fields with non-empty taggedVersions are written in tagged section only
+  * Fields with empty taggedVersions are written in normal section
+- **Version-aware**: Tagged fields only written/read in flexible version ranges
   * Two-pass approach: first counts non-default fields, then writes them
   * Writes num_tagged_fields (varint)
   * For each field: writes tag (varint), size (varint), data

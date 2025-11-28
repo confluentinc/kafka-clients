@@ -1,12 +1,11 @@
 /*
- * Licensed to the Apache Software Foundation (ASF) under one or more
- * contributor license agreements. See the NOTICE file distributed with
- * this work for additional information regarding copyright ownership.
- * The ASF licenses this file to You under the Apache License, Version 2.0
- * (the "License"); you may not use this file except in compliance with
- * the License. You may obtain a copy of the License at
+ * Copyright 2025 Confluent Inc.
  *
- *    http://www.apache.org/licenses/LICENSE-2.0
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
  *
  * Unless required by applicable law or agreed to in writing, software
  * distributed under the License is distributed on an "AS IS" BASIS,
@@ -17,6 +16,7 @@
 
 //! Message generator library - can be used from both build.rs and CLI binary
 
+#![deny(warnings)]
 #![allow(dead_code)]
 
 mod message;
@@ -744,14 +744,139 @@ fn generate_tagged_field_write(
                         )?;
                         writeln!(file, "{}                writable.write_uuid(&self.{})?;", indent, field_name)?;
                     },
-                    FieldType::Array(_) => {
-                        writeln!(file, "{}                // TODO: calculate actual size for array", indent)?;
-                        writeln!(file, "{}                // For now, write a placeholder", indent)?;
+                    FieldType::Array(element_type) => {
+                        // For arrays, we need to calculate the size first by writing to a temp buffer
+                        writeln!(file, "{}                // Calculate array size", indent)?;
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(0)?; // size placeholder",
+                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(1024);",
                             indent
                         )?;
+                        writeln!(
+                            file,
+                            "{}                // Write array length",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                size_accessor.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
+                            indent, field_name
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                // Write array elements",
+                            indent
+                        )?;
+                        
+                        // Different handling based on element type
+                        match element_type.as_ref() {
+                            FieldType::Uuid => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_uuid(element)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            FieldType::Int8 => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_byte(*element)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            FieldType::Int16 => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_short(*element)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            FieldType::Int32 => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_int(*element)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            FieldType::Int64 => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_long(*element)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            FieldType::String => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    let bytes = element.as_bytes();",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_unsigned_varint((bytes.len() as u32) + 1)?;",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_bytes(bytes)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            _ => {
+                                // For structs and other complex types, assume they have a write method
+                                writeln!(
+                                    file,
+                                    "{}                for element in &self.{} {{",
+                                    indent, field_name
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    element.write(&mut size_accessor, version)?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                        }
+                        
+                        writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                        writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                        writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
                     },
                     FieldType::Struct(_) => {
                         // For structs, we need to calculate the size first by writing to a temp buffer
@@ -1693,20 +1818,13 @@ fn generate_mod_file(spec_files: &[PathBuf], output_dir: &Path) -> Result<(), Bo
 
 fn write_license_header(file: &mut fs::File) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(file, "/*")?;
-    writeln!(file, " * Licensed to the Apache Software Foundation (ASF) under one or more")?;
-    writeln!(file, " * contributor license agreements. See the NOTICE file distributed with")?;
-    writeln!(file, " * this work for additional information regarding copyright ownership.")?;
-    writeln!(
-        file,
-        " * The ASF licenses this file to You under the Apache License, Version 2.0"
-    )?;
-    writeln!(
-        file,
-        " * (the \"License\"); you may not use this file except in compliance with"
-    )?;
-    writeln!(file, " * the License. You may obtain a copy of the License at")?;
+    writeln!(file, " * Copyright 2025 Confluent Inc.")?;
     writeln!(file, " *")?;
-    writeln!(file, " *    http://www.apache.org/licenses/LICENSE-2.0")?;
+    writeln!(file, " * Licensed under the Apache License, Version 2.0 (the \"License\");")?;
+    writeln!(file, " * you may not use this file except in compliance with the License.")?;
+    writeln!(file, " * You may obtain a copy of the License at")?;
+    writeln!(file, " *")?;
+    writeln!(file, " *     http://www.apache.org/licenses/LICENSE-2.0")?;
     writeln!(file, " *")?;
     writeln!(file, " * Unless required by applicable law or agreed to in writing, software")?;
     writeln!(file, " * distributed under the License is distributed on an \"AS IS\" BASIS,")?;
