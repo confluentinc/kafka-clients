@@ -23,11 +23,11 @@
 
 use confluent_kafka_rust::common::Uuid;
 use confluent_kafka_rust::common::protocol::ByteBufferAccessor;
-use confluent_kafka_rust::metadata_request::{MetadataRequestData, MetadataRequestTopic};
-use confluent_kafka_rust::metadata_response::{
+use confluent_kafka_rust::metadata_request_data::{MetadataRequestData, MetadataRequestTopic};
+use confluent_kafka_rust::metadata_response_data::{
     MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
 };
-use confluent_kafka_rust::produce_response::{
+use confluent_kafka_rust::produce_response_data::{
     LeaderIdAndEpoch, NodeEndpoint, PartitionProduceResponse, ProduceResponseData, TopicProduceResponse,
 };
 

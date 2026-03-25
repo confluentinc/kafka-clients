@@ -21,30 +21,30 @@ mod tests {
     #[test]
     fn test_generated_messages_accessible() {
         // Test that generated message types are accessible
-        let _produce_req = produce_request::ProduceRequestData::new();
-        let _fetch_req = fetch_request::FetchRequestData::new();
-        let _metadata_req = metadata_request::MetadataRequestData::new();
+        let _produce_req = produce_request_data::ProduceRequestData::new();
+        let _fetch_req = fetch_request_data::FetchRequestData::new();
+        let _metadata_req = metadata_request_data::MetadataRequestData::new();
     }
 
     #[test]
     fn test_produce_request_instantiation() {
-        let req = produce_request::ProduceRequestData::new();
+        let req = produce_request_data::ProduceRequestData::new();
         // Verify the struct can be created
         assert!(format!("{:?}", req).contains("ProduceRequestData"));
-        assert_eq!(produce_request::ProduceRequestData::API_KEY, 0);
+        assert_eq!(produce_request_data::ProduceRequestData::API_KEY, 0);
     }
 
     #[test]
     fn test_fetch_request_instantiation() {
-        let req = fetch_request::FetchRequestData::new();
+        let req = fetch_request_data::FetchRequestData::new();
         assert!(format!("{:?}", req).contains("FetchRequestData"));
-        assert_eq!(fetch_request::FetchRequestData::API_KEY, 1);
+        assert_eq!(fetch_request_data::FetchRequestData::API_KEY, 1);
     }
 
     #[test]
     fn test_nested_struct_generation() {
         // Test that nested structs are properly generated
-        use offset_for_leader_epoch_request::*;
+        use offset_for_leader_epoch_request_data::*;
 
         // Create nested struct instances
         let partition = OffsetForLeaderPartition::new();
@@ -74,7 +74,7 @@ mod tests {
     #[test]
     fn test_common_structs_generation() {
         // Test that commonStructs are properly generated
-        use add_partitions_to_txn_request::*;
+        use add_partitions_to_txn_request_data::*;
 
         let topic = AddPartitionsToTxnTopic::new();
         assert_eq!(topic.name, "");
@@ -92,7 +92,7 @@ mod tests {
     fn test_uuid_type_generation() {
         // Test that UUID fields are properly generated
         use confluent_kafka_rust::common::Uuid;
-        use share_group_describe_response::*;
+        use share_group_describe_response_data::*;
 
         // Create a TopicPartitions with UUID
         let mut topic_partitions = TopicPartitions::new();

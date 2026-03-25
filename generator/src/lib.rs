@@ -101,8 +101,8 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
 
     // Note: Validation happens automatically during deserialization via MessageSpec::new()
 
-    // Write generated code to file
-    let module_name = to_snake_case(file_name);
+    // Write generated code to file (append _data to match the generated struct name)
+    let module_name = format!("{}_data", to_snake_case(file_name));
     let output_file = output_dir.join(format!("{}.rs", module_name));
 
     let mut file = fs::File::create(&output_file)?;
@@ -1809,7 +1809,7 @@ fn generate_mod_file(spec_files: &[PathBuf], output_dir: &Path) -> Result<(), Bo
 
     for spec_file in spec_files {
         let file_name = spec_file.file_stem().and_then(|s| s.to_str()).ok_or("Invalid file name")?;
-        let module_name = to_snake_case(file_name);
+        let module_name = format!("{}_data", to_snake_case(file_name));
         writeln!(file, "pub mod {};", module_name)?;
     }
 
@@ -1840,7 +1840,7 @@ fn write_license_header(file: &mut fs::File) -> Result<(), Box<dyn std::error::E
 }
 
 fn generate_stub_file(file_name: &str, output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let module_name = to_snake_case(file_name);
+    let module_name = format!("{}_data", to_snake_case(file_name));
     let output_file = output_dir.join(format!("{}.rs", module_name));
 
     let mut file = fs::File::create(&output_file)?;

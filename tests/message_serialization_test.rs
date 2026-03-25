@@ -27,7 +27,7 @@ mod tests {
     #[test]
     fn test_produce_request_round_trip() -> io::Result<()> {
         // Create a ProduceRequestData with some test data
-        let mut request = produce_request::ProduceRequestData::new();
+        let mut request = produce_request_data::ProduceRequestData::new();
         request.timeout_ms = 5000;
         request.acks = 1;
 
@@ -39,7 +39,7 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deserialized = produce_request::ProduceRequestData::read(&mut read_buffer, 3)?;
+        let deserialized = produce_request_data::ProduceRequestData::read(&mut read_buffer, 3)?;
 
         // Verify fields match
         assert_eq!(request.timeout_ms, deserialized.timeout_ms);
@@ -51,7 +51,7 @@ mod tests {
     /// Test round-trip serialization for FetchRequest with arrays
     #[test]
     fn test_fetch_request_with_arrays() -> io::Result<()> {
-        let mut request = fetch_request::FetchRequestData::new();
+        let mut request = fetch_request_data::FetchRequestData::new();
         request.max_wait_ms = 500;
         request.min_bytes = 1024;
         request.max_bytes = 1048576;
@@ -63,7 +63,7 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deserialized = fetch_request::FetchRequestData::read(&mut read_buffer, 4)?;
+        let deserialized = fetch_request_data::FetchRequestData::read(&mut read_buffer, 4)?;
 
         assert_eq!(request.max_wait_ms, deserialized.max_wait_ms);
         assert_eq!(request.min_bytes, deserialized.min_bytes);
@@ -75,7 +75,7 @@ mod tests {
     /// Test string serialization with AddOffsetsToTxnRequest
     #[test]
     fn test_string_serialization() -> io::Result<()> {
-        let mut request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+        let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
         request.transactional_id = "test-txn-id".to_string();
         request.group_id = "test-group".to_string();
         request.producer_id = 12345;
@@ -88,7 +88,7 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
+        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
 
         assert_eq!(request.transactional_id, deserialized.transactional_id);
         assert_eq!(request.group_id, deserialized.group_id);
@@ -101,7 +101,7 @@ mod tests {
     /// Test empty string serialization
     #[test]
     fn test_empty_string_serialization() -> io::Result<()> {
-        let mut request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+        let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
         request.transactional_id = String::new();
         request.group_id = String::new();
 
@@ -111,7 +111,7 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
+        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
 
         assert_eq!(request.transactional_id, deserialized.transactional_id);
         assert_eq!(request.group_id, deserialized.group_id);
@@ -124,7 +124,7 @@ mod tests {
     /// Test bytes field serialization
     #[test]
     fn test_bytes_serialization() -> io::Result<()> {
-        let mut request = add_partitions_to_txn_request::AddPartitionsToTxnRequestData::new();
+        let mut request = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::new();
         request.v3_and_below_transactional_id = "test-txn".to_string();
         request.v3_and_below_producer_id = 98765;
         request.v3_and_below_producer_epoch = 2;
@@ -135,7 +135,7 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deserialized = add_partitions_to_txn_request::AddPartitionsToTxnRequestData::read(&mut read_buffer, 3)?;
+        let deserialized = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::read(&mut read_buffer, 3)?;
 
         assert_eq!(
             request.v3_and_below_transactional_id,
@@ -151,7 +151,7 @@ mod tests {
     #[test]
     fn test_boolean_serialization() -> io::Result<()> {
         // Create a request with boolean fields (if available)
-        let mut request = produce_request::ProduceRequestData::new();
+        let mut request = produce_request_data::ProduceRequestData::new();
         request.acks = 1;
         request.timeout_ms = 1000;
 
@@ -165,7 +165,7 @@ mod tests {
             let bytes = write_buffer.buffer().to_vec();
             let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-            let deserialized = produce_request::ProduceRequestData::read(&mut read_buffer, 3)?;
+            let deserialized = produce_request_data::ProduceRequestData::read(&mut read_buffer, 3)?;
 
             assert_eq!(request.acks, deserialized.acks);
         }
@@ -177,7 +177,7 @@ mod tests {
     #[test]
     fn test_version_validation() {
         // Test that invalid versions are rejected
-        let request = produce_request::ProduceRequestData::new();
+        let request = produce_request_data::ProduceRequestData::new();
 
         // Try to write with an invalid version (assuming version 0 is valid)
         let mut write_buffer = ByteBufferAccessor::new(1024);
@@ -200,12 +200,12 @@ mod tests {
         // Write multiple messages to the same buffer
         let mut write_buffer = ByteBufferAccessor::new(4096);
 
-        let mut req1 = produce_request::ProduceRequestData::new();
+        let mut req1 = produce_request_data::ProduceRequestData::new();
         req1.timeout_ms = 1000;
         req1.acks = 1;
         req1.write(&mut write_buffer, 3)?;
 
-        let mut req2 = fetch_request::FetchRequestData::new();
+        let mut req2 = fetch_request_data::FetchRequestData::new();
         req2.max_wait_ms = 500;
         req2.min_bytes = 1;
         req2.write(&mut write_buffer, 4)?;
@@ -214,11 +214,11 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deser1 = produce_request::ProduceRequestData::read(&mut read_buffer, 3)?;
+        let deser1 = produce_request_data::ProduceRequestData::read(&mut read_buffer, 3)?;
         assert_eq!(req1.timeout_ms, deser1.timeout_ms);
         assert_eq!(req1.acks, deser1.acks);
 
-        let deser2 = fetch_request::FetchRequestData::read(&mut read_buffer, 4)?;
+        let deser2 = fetch_request_data::FetchRequestData::read(&mut read_buffer, 4)?;
         assert_eq!(req2.max_wait_ms, deser2.max_wait_ms);
         assert_eq!(req2.min_bytes, deser2.min_bytes);
 
@@ -228,7 +228,7 @@ mod tests {
     /// Test large strings don't cause buffer overflows
     #[test]
     fn test_large_string_serialization() -> io::Result<()> {
-        let mut request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+        let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
 
         // Create a moderately large string (not too large to avoid memory issues in tests)
         let large_string = "x".repeat(1000);
@@ -240,7 +240,7 @@ mod tests {
 
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
+        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, 3)?;
 
         assert_eq!(request.transactional_id, deserialized.transactional_id);
         assert_eq!(large_string, deserialized.transactional_id);

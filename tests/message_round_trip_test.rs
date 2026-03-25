@@ -45,7 +45,7 @@ where
 fn test_add_offsets_to_txn_request_all_versions() -> io::Result<()> {
     // AddOffsetsToTxnRequest: versions 0-3
     for version in 0..=3 {
-        let mut request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+        let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
         request.transactional_id = "foobar".to_string();
         request.producer_id = 0xbadcafebadcafe_i64;
         request.producer_epoch = 123;
@@ -58,7 +58,7 @@ fn test_add_offsets_to_txn_request_all_versions() -> io::Result<()> {
         // Deserialize
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes.clone());
-        let deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
+        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
 
         // Verify
         assert_eq!(
@@ -99,7 +99,7 @@ fn test_add_offsets_to_txn_request_all_versions() -> io::Result<()> {
 fn test_add_offsets_to_txn_response_all_versions() -> io::Result<()> {
     // AddOffsetsToTxnResponse: versions 0-3
     for version in 0..=3 {
-        let mut response = add_offsets_to_txn_response::AddOffsetsToTxnResponseData::new();
+        let mut response = add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData::new();
         response.throttle_time_ms = 42;
         response.error_code = 0;
 
@@ -110,7 +110,7 @@ fn test_add_offsets_to_txn_response_all_versions() -> io::Result<()> {
         // Deserialize
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let deserialized = add_offsets_to_txn_response::AddOffsetsToTxnResponseData::read(&mut read_buffer, version)?;
+        let deserialized = add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData::read(&mut read_buffer, version)?;
 
         // Verify
         assert_eq!(
@@ -133,7 +133,7 @@ fn test_add_offsets_to_txn_response_all_versions() -> io::Result<()> {
 fn test_produce_request_multiple_versions() -> io::Result<()> {
     // ProduceRequest: versions 3-13 (we test a subset)
     for version in [3, 5, 7, 9, 11, 13] {
-        let mut request = produce_request::ProduceRequestData::new();
+        let mut request = produce_request_data::ProduceRequestData::new();
         request.timeout_ms = 5000;
         request.acks = 1;
         request.transactional_id = if version >= 3 {
@@ -149,7 +149,7 @@ fn test_produce_request_multiple_versions() -> io::Result<()> {
         // Deserialize
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let deserialized = produce_request::ProduceRequestData::read(&mut read_buffer, version)?;
+        let deserialized = produce_request_data::ProduceRequestData::read(&mut read_buffer, version)?;
 
         // Verify
         assert_eq!(
@@ -175,7 +175,7 @@ fn test_produce_request_multiple_versions() -> io::Result<()> {
 fn test_fetch_request_multiple_versions() -> io::Result<()> {
     // FetchRequest: versions 4-18 (we test a subset)
     for version in [4, 7, 11, 15] {
-        let mut request = fetch_request::FetchRequestData::new();
+        let mut request = fetch_request_data::FetchRequestData::new();
         request.max_wait_ms = 500;
         request.min_bytes = 1024;
         request.max_bytes = 1048576;
@@ -188,7 +188,7 @@ fn test_fetch_request_multiple_versions() -> io::Result<()> {
         // Deserialize
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let deserialized = fetch_request::FetchRequestData::read(&mut read_buffer, version)?;
+        let deserialized = fetch_request_data::FetchRequestData::read(&mut read_buffer, version)?;
 
         // Verify
         assert_eq!(
@@ -225,7 +225,7 @@ fn test_string_serialization_various_lengths() -> io::Result<()> {
     ];
 
     for test_str in test_strings {
-        let mut request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+        let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
         request.transactional_id = test_str.to_string();
         request.group_id = "group".to_string();
         request.producer_id = 123;
@@ -237,7 +237,7 @@ fn test_string_serialization_various_lengths() -> io::Result<()> {
 
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, 0)?;
+        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, 0)?;
 
         assert_eq!(
             request.transactional_id, deserialized.transactional_id,
@@ -252,7 +252,7 @@ fn test_string_serialization_various_lengths() -> io::Result<()> {
 /// Test bytes serialization
 #[test]
 fn test_bytes_serialization() -> io::Result<()> {
-    let request = add_partitions_to_txn_request::AddPartitionsToTxnRequestData::new();
+    let request = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::new();
     // Note: Our current implementation may not have all fields properly typed
     // This test demonstrates the pattern
 
@@ -261,7 +261,7 @@ fn test_bytes_serialization() -> io::Result<()> {
 
     let bytes = write_buffer.buffer().to_vec();
     let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-    let _deserialized = add_partitions_to_txn_request::AddPartitionsToTxnRequestData::read(&mut read_buffer, 0)?;
+    let _deserialized = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::read(&mut read_buffer, 0)?;
 
     Ok(())
 }
@@ -270,7 +270,7 @@ fn test_bytes_serialization() -> io::Result<()> {
 #[test]
 fn test_version_validation() {
     // Test that invalid versions are rejected
-    let request = produce_request::ProduceRequestData::new();
+    let request = produce_request_data::ProduceRequestData::new();
 
     // Version too low (ProduceRequest starts at version 3)
     let mut write_buffer = ByteBufferAccessor::new(1024);
@@ -287,7 +287,7 @@ fn test_version_validation() {
 #[test]
 fn test_empty_message_serialization() -> io::Result<()> {
     // Test that default/empty messages serialize correctly
-    let request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+    let request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
 
     for version in 0..=3 {
         let mut write_buffer = ByteBufferAccessor::new(1024);
@@ -295,7 +295,7 @@ fn test_empty_message_serialization() -> io::Result<()> {
 
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let _deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
+        let _deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
     }
 
     Ok(())
@@ -304,7 +304,7 @@ fn test_empty_message_serialization() -> io::Result<()> {
 /// Test primitive types serialization
 #[test]
 fn test_primitive_types() -> io::Result<()> {
-    let mut request = produce_request::ProduceRequestData::new();
+    let mut request = produce_request_data::ProduceRequestData::new();
 
     // Test various primitive values
     request.timeout_ms = 0;
@@ -322,13 +322,13 @@ fn test_primitive_types() -> io::Result<()> {
     Ok(())
 }
 
-fn test_produce_write_read(request: &produce_request::ProduceRequestData, version: i16) -> io::Result<()> {
+fn test_produce_write_read(request: &produce_request_data::ProduceRequestData, version: i16) -> io::Result<()> {
     let mut write_buffer = ByteBufferAccessor::new(2048);
     request.write(&mut write_buffer, version)?;
 
     let bytes = write_buffer.buffer().to_vec();
     let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-    let deserialized = produce_request::ProduceRequestData::read(&mut read_buffer, version)?;
+    let deserialized = produce_request_data::ProduceRequestData::read(&mut read_buffer, version)?;
 
     assert_eq!(request.timeout_ms, deserialized.timeout_ms);
     assert_eq!(request.acks, deserialized.acks);
@@ -342,7 +342,7 @@ fn test_multiple_messages_in_sequence() -> io::Result<()> {
 
     // Write multiple requests to the same buffer
     for i in 0..5 {
-        let mut request = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::new();
+        let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
         request.transactional_id = format!("txn-{}", i);
         request.group_id = format!("group-{}", i);
         request.producer_id = i as i64;
@@ -356,7 +356,7 @@ fn test_multiple_messages_in_sequence() -> io::Result<()> {
     let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
     for i in 0..5 {
-        let deserialized = add_offsets_to_txn_request::AddOffsetsToTxnRequestData::read(&mut read_buffer, 0)?;
+        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, 0)?;
         assert_eq!(format!("txn-{}", i), deserialized.transactional_id);
         assert_eq!(format!("group-{}", i), deserialized.group_id);
         assert_eq!(i as i64, deserialized.producer_id);
