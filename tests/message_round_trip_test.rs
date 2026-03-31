@@ -58,7 +58,8 @@ fn test_add_offsets_to_txn_request_all_versions() -> io::Result<()> {
         // Deserialize
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes.clone());
-        let deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
+        let deserialized =
+            add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
 
         // Verify
         assert_eq!(
@@ -110,7 +111,8 @@ fn test_add_offsets_to_txn_response_all_versions() -> io::Result<()> {
         // Deserialize
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let deserialized = add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData::read(&mut read_buffer, version)?;
+        let deserialized =
+            add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData::read(&mut read_buffer, version)?;
 
         // Verify
         assert_eq!(
@@ -295,7 +297,8 @@ fn test_empty_message_serialization() -> io::Result<()> {
 
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
-        let _deserialized = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
+        let _deserialized =
+            add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::read(&mut read_buffer, version)?;
     }
 
     Ok(())

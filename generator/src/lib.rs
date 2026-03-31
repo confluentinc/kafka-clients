@@ -752,119 +752,55 @@ fn generate_tagged_field_write(
                             "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(1024);",
                             indent
                         )?;
-                        writeln!(
-                            file,
-                            "{}                // Write array length",
-                            indent
-                        )?;
+                        writeln!(file, "{}                // Write array length", indent)?;
                         writeln!(
                             file,
                             "{}                size_accessor.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
                             indent, field_name
                         )?;
-                        writeln!(
-                            file,
-                            "{}                // Write array elements",
-                            indent
-                        )?;
-                        
+                        writeln!(file, "{}                // Write array elements", indent)?;
+
                         // Different handling based on element type
                         match element_type.as_ref() {
                             FieldType::Uuid => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_uuid(element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_uuid(element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int8 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_byte(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_byte(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int16 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_short(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_short(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int32 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_int(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_int(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int64 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_long(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_long(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::String => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    let bytes = element.as_bytes();",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    let bytes = element.as_bytes();", indent)?;
                                 writeln!(
                                     file,
                                     "{}                    size_accessor.write_unsigned_varint((bytes.len() as u32) + 1)?;",
                                     indent
                                 )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_bytes(bytes)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                    size_accessor.write_bytes(bytes)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             _ => {
                                 // For structs and other complex types, assume they have a write method
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
                                 writeln!(
                                     file,
                                     "{}                    element.write(&mut size_accessor, version)?;",
@@ -873,7 +809,7 @@ fn generate_tagged_field_write(
                                 writeln!(file, "{}                }}", indent)?;
                             },
                         }
-                        
+
                         writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
                         writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
                         writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;

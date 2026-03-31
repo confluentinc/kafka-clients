@@ -140,7 +140,7 @@ fn main() {
     // Create ProduceResponse with tagged fields
     let mut produce_resp = ProduceResponseData::new();
     produce_resp.throttle_time_ms = 100;
-    
+
     // Add topic responses
     produce_resp.responses = vec![{
         let mut topic = TopicProduceResponse::new();
@@ -156,10 +156,7 @@ fn main() {
                 partition.log_start_offset = 0;
                 partition.error_message = String::new();
                 // Tagged field: CurrentLeader (tag 0 in PartitionProduceResponse)
-                partition.current_leader = LeaderIdAndEpoch {
-                    leader_id: 1,
-                    leader_epoch: 5,
-                };
+                partition.current_leader = LeaderIdAndEpoch { leader_id: 1, leader_epoch: 5 };
                 partition
             },
             {
@@ -170,16 +167,13 @@ fn main() {
                 partition.log_append_time_ms = 1234567891;
                 partition.log_start_offset = 0;
                 partition.error_message = String::new();
-                partition.current_leader = LeaderIdAndEpoch {
-                    leader_id: 2,
-                    leader_epoch: 3,
-                };
+                partition.current_leader = LeaderIdAndEpoch { leader_id: 2, leader_epoch: 3 };
                 partition
             },
         ];
         topic
     }];
-    
+
     // Tagged field: NodeEndpoints (tag 0 in ProduceResponseData)
     produce_resp.node_endpoints = vec![
         NodeEndpoint {
@@ -200,12 +194,15 @@ fn main() {
 
     // Serialize ProduceResponse
     let mut accessor = ByteBufferAccessor::new(2048);
-    produce_resp.write(&mut accessor, produce_version).expect("serialize produce response");
+    produce_resp
+        .write(&mut accessor, produce_version)
+        .expect("serialize produce response");
     let buffer = accessor.buffer();
     println!("Serialized ProduceResponseData ({} bytes): {:x?}", buffer.len(), buffer);
 
     // Deserialize ProduceResponse
     let mut accessor = ByteBufferAccessor::from_bytes(buffer.to_vec());
-    let produce_resp2 = ProduceResponseData::read(&mut accessor, produce_version).expect("deserialize produce response");
+    let produce_resp2 =
+        ProduceResponseData::read(&mut accessor, produce_version).expect("deserialize produce response");
     println!("\nDeserialized ProduceResponseData: {:#?}", produce_resp2);
 }

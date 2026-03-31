@@ -135,7 +135,8 @@ mod tests {
         let bytes = write_buffer.buffer().to_vec();
         let mut read_buffer = ByteBufferAccessor::from_bytes(bytes);
 
-        let deserialized = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::read(&mut read_buffer, 3)?;
+        let deserialized =
+            add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::read(&mut read_buffer, 3)?;
 
         assert_eq!(
             request.v3_and_below_transactional_id,
