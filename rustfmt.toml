@@ -1,0 +1,38 @@
+# Rustfmt configuration for Kafka Rust client
+# Ensures consistent formatting across all Rust files
+# Only includes stable features compatible with stable Rust
+
+# Edition
+edition = "2021"
+
+# Indentation
+max_width = 120
+hard_tabs = false
+tab_spaces = 4
+
+# Code style
+fn_call_width = 80
+struct_lit_width = 80
+chain_width = 80
+use_small_heuristics = "Default"
+
+# Match statements
+match_block_trailing_comma = true
+
+# Unstable features (commented out - require nightly Rust):
+# imports_granularity = "Crate"
+# group_imports = "StdExternalCrate"
+# wrap_comments = true
+# comment_width = 100
+# normalize_comments = true
+# normalize_doc_attributes = true
+# format_code_in_doc_comments = true
+# format_strings = true
+# format_macro_matchers = true
+# format_macro_bodies = true
+# blank_lines_upper_bound = 2
+# blank_lines_lower_bound = 0
+# control_brace_style = "AlwaysSameLine"
+# brace_style = "SameLineWhere"
+# enum_discrim_align_threshold = 20
+# struct_field_align_threshold = 20
