@@ -282,12 +282,12 @@ mod tests {
     #[test]
     fn test_read_write_double() {
         let mut buf = ByteBufferAccessor::new(20);
-        buf.write_double(3.14159).unwrap();
-        buf.write_double(-2.71828).unwrap();
+        buf.write_double(std::f64::consts::PI).unwrap();
+        buf.write_double(-std::f64::consts::E).unwrap();
 
         buf.flip();
-        assert!((buf.read_double().unwrap() - 3.14159).abs() < 0.00001);
-        assert!((buf.read_double().unwrap() - (-2.71828)).abs() < 0.00001);
+        assert!((buf.read_double().unwrap() - std::f64::consts::PI).abs() < 0.00001);
+        assert!((buf.read_double().unwrap() - (-std::f64::consts::E)).abs() < 0.00001);
     }
 
     #[test]

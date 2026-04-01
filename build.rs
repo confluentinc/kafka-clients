@@ -44,7 +44,7 @@ fn main() {
     if let Ok(entries) = fs::read_dir(&generated_dir) {
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "rs") {
+            if path.extension().is_some_and(|ext| ext == "rs") {
                 let _ = Command::new("rustfmt").arg("--edition").arg("2021").arg(&path).status();
             }
         }

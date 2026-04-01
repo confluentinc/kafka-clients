@@ -604,7 +604,7 @@ fn generate_tagged_field_write(
 
         // Check if this tagged field should be written for this version
         if !tagged_versions.empty() {
-            if tagged_versions.highest() >= i16::MAX {
+            if tagged_versions.highest() == i16::MAX {
                 writeln!(file, "{}        if version >= {} {{", indent, tagged_versions.lowest())?;
             } else {
                 writeln!(
@@ -648,7 +648,7 @@ fn generate_tagged_field_write(
             let tagged_versions = field.tagged_versions();
 
             if !tagged_versions.empty() {
-                if tagged_versions.highest() >= i16::MAX {
+                if tagged_versions.highest() == i16::MAX {
                     writeln!(file, "{}        if version >= {} {{", indent, tagged_versions.lowest())?;
                 } else {
                     writeln!(
@@ -752,119 +752,55 @@ fn generate_tagged_field_write(
                             "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(1024);",
                             indent
                         )?;
-                        writeln!(
-                            file,
-                            "{}                // Write array length",
-                            indent
-                        )?;
+                        writeln!(file, "{}                // Write array length", indent)?;
                         writeln!(
                             file,
                             "{}                size_accessor.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
                             indent, field_name
                         )?;
-                        writeln!(
-                            file,
-                            "{}                // Write array elements",
-                            indent
-                        )?;
-                        
+                        writeln!(file, "{}                // Write array elements", indent)?;
+
                         // Different handling based on element type
                         match element_type.as_ref() {
                             FieldType::Uuid => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_uuid(element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_uuid(element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int8 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_byte(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_byte(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int16 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_short(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_short(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int32 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_int(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_int(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int64 => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_long(*element)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    size_accessor.write_long(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::String => {
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
-                                writeln!(
-                                    file,
-                                    "{}                    let bytes = element.as_bytes();",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(file, "{}                    let bytes = element.as_bytes();", indent)?;
                                 writeln!(
                                     file,
                                     "{}                    size_accessor.write_unsigned_varint((bytes.len() as u32) + 1)?;",
                                     indent
                                 )?;
-                                writeln!(
-                                    file,
-                                    "{}                    size_accessor.write_bytes(bytes)?;",
-                                    indent
-                                )?;
+                                writeln!(file, "{}                    size_accessor.write_bytes(bytes)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             _ => {
                                 // For structs and other complex types, assume they have a write method
-                                writeln!(
-                                    file,
-                                    "{}                for element in &self.{} {{",
-                                    indent, field_name
-                                )?;
+                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
                                 writeln!(
                                     file,
                                     "{}                    element.write(&mut size_accessor, version)?;",
@@ -873,7 +809,7 @@ fn generate_tagged_field_write(
                                 writeln!(file, "{}                }}", indent)?;
                             },
                         }
-                        
+
                         writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
                         writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
                         writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
@@ -929,7 +865,7 @@ fn generate_read_method(
     let highest = struct_spec.versions().highest();
 
     // Generate version check - avoid useless comparison when highest is i16::MAX
-    if highest >= i16::MAX {
+    if highest == i16::MAX {
         writeln!(file, "        if version < {} {{", lowest)?;
     } else {
         writeln!(file, "        if version < {} || version > {} {{", lowest, highest)?;
@@ -966,7 +902,7 @@ fn generate_read_method(
             generate_tagged_field_read(file, &tagged_fields, flexible_versions, false)?;
         } else {
             // Only some versions are flexible
-            if flexible_versions.highest() >= i16::MAX {
+            if flexible_versions.highest() == i16::MAX {
                 writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
             } else {
                 writeln!(
@@ -992,7 +928,7 @@ fn generate_read_method(
             writeln!(file, "            readable.read_array(size as usize)?;")?;
             writeln!(file, "        }}")?;
         } else {
-            if flexible_versions.highest() >= i16::MAX {
+            if flexible_versions.highest() == i16::MAX {
                 writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
             } else {
                 writeln!(
@@ -1034,7 +970,7 @@ fn generate_write_method(
     let highest = struct_spec.versions().highest();
 
     // Generate version check - avoid useless comparison when highest is i16::MAX
-    if highest >= i16::MAX {
+    if highest == i16::MAX {
         writeln!(file, "        if version < {} {{", lowest)?;
     } else {
         writeln!(file, "        if version < {} || version > {} {{", lowest, highest)?;
@@ -1068,7 +1004,7 @@ fn generate_write_method(
             generate_tagged_field_write(file, &tagged_fields, flexible_versions, false)?;
         } else {
             // Only some versions are flexible
-            if flexible_versions.highest() >= i16::MAX {
+            if flexible_versions.highest() == i16::MAX {
                 writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
             } else {
                 writeln!(
@@ -1088,7 +1024,7 @@ fn generate_write_method(
             writeln!(file, "        // Write tagged fields (flexible version)")?;
             writeln!(file, "        writable.write_unsigned_varint(0)?; // No tagged fields")?;
         } else {
-            if flexible_versions.highest() >= i16::MAX {
+            if flexible_versions.highest() == i16::MAX {
                 writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
             } else {
                 writeln!(
@@ -1125,7 +1061,7 @@ fn generate_field_read(
 
     // Version check - avoid useless comparison when highest is i16::MAX
     if has_version_check {
-        if versions.highest() >= i16::MAX {
+        if versions.highest() == i16::MAX {
             writeln!(file, "        if version >= {} {{", versions.lowest())?;
         } else {
             writeln!(
@@ -1181,7 +1117,7 @@ fn generate_field_read(
                     writeln!(file, "{}}}", indent)?;
                     writeln!(file, "{}let length = len - 1;", indent)?;
                 } else {
-                    if flexible_versions.highest() >= i16::MAX {
+                    if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}let length = if version >= {} {{", indent, flexible_versions.lowest())?;
                     } else {
                         writeln!(
@@ -1241,7 +1177,7 @@ fn generate_field_read(
         FieldType::Bytes | FieldType::Records => {
             // Check if this version uses flexible encoding
             if !flexible_versions.empty() {
-                if flexible_versions.highest() >= i16::MAX {
+                if flexible_versions.highest() == i16::MAX {
                     writeln!(file, "            let length = if version >= {} {{", flexible_versions.lowest())?;
                 } else {
                     writeln!(
@@ -1289,7 +1225,7 @@ fn generate_field_read(
                     writeln!(file, "            }}")?;
                     writeln!(file, "            let length = len - 1;")?;
                 } else {
-                    if flexible_versions.highest() >= i16::MAX {
+                    if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "            let length = if version >= {} {{", flexible_versions.lowest())?;
                     } else {
                         writeln!(
@@ -1453,7 +1389,7 @@ fn generate_field_write(
 
     // Version check - avoid useless comparison when highest is i16::MAX
     if has_version_check {
-        if versions.highest() >= i16::MAX {
+        if versions.highest() == i16::MAX {
             writeln!(file, "        if version >= {} {{", versions.lowest())?;
         } else {
             writeln!(
@@ -1506,7 +1442,7 @@ fn generate_field_write(
                     writeln!(file, "{}// Flexible version: write_unsigned_varint(length + 1)", indent)?;
                     writeln!(file, "{}writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", indent)?;
                 } else {
-                    if flexible_versions.highest() >= i16::MAX {
+                    if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
                     } else {
                         writeln!(
@@ -1542,7 +1478,7 @@ fn generate_field_write(
                         field_name
                     )?;
                 } else {
-                    if flexible_versions.highest() >= i16::MAX {
+                    if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "            if version >= {} {{", flexible_versions.lowest())?;
                     } else {
                         writeln!(
@@ -1581,7 +1517,7 @@ fn generate_field_write(
                         field_name
                     )?;
                 } else {
-                    if flexible_versions.highest() >= i16::MAX {
+                    if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "            if version >= {} {{", flexible_versions.lowest())?;
                     } else {
                         writeln!(
@@ -1726,21 +1662,21 @@ fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>
                     | FieldType::Uint16
                     | FieldType::Uint32 => {
                         // Handle hex notation like "0x7fffffff"
-                        if s.starts_with("0x") {
-                            if let Ok(num) = i64::from_str_radix(&s[2..], 16) {
+                        if let Some(hex) = s.strip_prefix("0x") {
+                            if let Ok(num) = i64::from_str_radix(hex, 16) {
                                 return num.to_string();
                             }
-                        } else if s.starts_with("-0x") {
-                            if let Ok(num) = i64::from_str_radix(&s[3..], 16) {
+                        } else if let Some(hex) = s.strip_prefix("-0x") {
+                            if let Ok(num) = i64::from_str_radix(hex, 16) {
                                 return format!("-{}", num);
                             }
-                        } else if let Ok(_) = s.parse::<i64>() {
+                        } else if s.parse::<i64>().is_ok() {
                             // It's a valid number string, return it as-is (no quotes)
                             return s.to_string();
                         }
                     },
                     FieldType::Float64 => {
-                        if let Ok(_) = s.parse::<f64>() {
+                        if s.parse::<f64>().is_ok() {
                             return s.to_string();
                         }
                     },
@@ -1890,12 +1826,12 @@ fn strip_json_comments(json: &str) -> String {
             continue;
         }
 
-        if !in_string && c == '/' {
-            if let Some(&next_c) = chars.peek() {
-                if next_c == '/' {
+        if !in_string && c == '/'
+            && let Some(&next_c) = chars.peek()
+                && next_c == '/' {
                     // Line comment - skip until newline
                     chars.next();
-                    while let Some(c) = chars.next() {
+                    for c in chars.by_ref() {
                         if c == '\n' {
                             result.push('\n');
                             break;
@@ -1903,8 +1839,6 @@ fn strip_json_comments(json: &str) -> String {
                     }
                     continue;
                 }
-            }
-        }
 
         result.push(c);
     }

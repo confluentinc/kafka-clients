@@ -103,13 +103,18 @@ impl StructRegistry {
                     if !field.fields().is_empty() {
                         return Err(format!("Can't re-specify the common struct {} as an inline struct.", type_name));
                     }
-                } else if self.structs.contains_key(&type_name) {
-                    return Err(format!("Struct {} was specified twice.", type_name));
                 } else {
-                    // Synthesize a StructSpec from the fields
-                    let versions_str = field.versions().to_string();
-                    let spec = StructSpec::new(type_name.clone(), Some(&versions_str), None, field.fields().to_vec())?;
-                    self.structs.insert(type_name, StructInfo { spec, parent_versions });
+                    match self.structs.entry(type_name) {
+                        std::collections::hash_map::Entry::Occupied(entry) => {
+                            return Err(format!("Struct {} was specified twice.", entry.key()));
+                        },
+                        std::collections::hash_map::Entry::Vacant(entry) => {
+                            // Synthesize a StructSpec from the fields
+                            let versions_str = field.versions().to_string();
+                            let spec = StructSpec::new(entry.key().clone(), Some(&versions_str), None, field.fields().to_vec())?;
+                            entry.insert(StructInfo { spec, parent_versions });
+                        },
+                    }
                 }
 
                 self.add_struct_specs(parent_versions.intersect(field.versions()), field.fields())?;
@@ -144,7 +149,7 @@ impl StructRegistry {
     }
 
     fn first_is_capitalized(s: &str) -> bool {
-        s.chars().next().map_or(false, |c| c.is_uppercase())
+        s.chars().next().is_some_and(|c| c.is_uppercase())
     }
 }
 

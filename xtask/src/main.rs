@@ -24,6 +24,8 @@ fn main() -> anyhow::Result<()> {
         Some("format") => format()?,
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
+        Some("lint") => lint()?,
+        Some("lint-fix") => lint_fix()?,
         _ => print_help(),
     }
 
@@ -148,6 +150,52 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
     Ok(files)
 }
 
+fn lint() -> anyhow::Result<()> {
+    println!("🔍 Running clippy lints...");
+
+    // Lint main crate
+    run_command("cargo", &["clippy", "--all-targets", "--", "-D", "warnings"])?;
+
+    // Lint generator crate
+    run_command(
+        "cargo",
+        &["clippy", "--manifest-path", "generator/Cargo.toml", "--all-targets", "--", "-D", "warnings"],
+    )?;
+
+    println!("✅ No lint issues found!");
+    Ok(())
+}
+
+fn lint_fix() -> anyhow::Result<()> {
+    println!("🔧 Running clippy with automatic fixes...");
+
+    // Fix main crate
+    run_command(
+        "cargo",
+        &["clippy", "--all-targets", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"],
+    )?;
+
+    // Fix generator crate
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            "generator/Cargo.toml",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+
+    println!("✅ Lint fixes applied!");
+    Ok(())
+}
+
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
     let status = Command::new(program).args(args).status()?;
 
@@ -164,10 +212,14 @@ fn print_help() {
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
   check-generated Check generated code formatting only (no changes)
+  lint            Run clippy lints (warnings are errors)
+  lint-fix        Run clippy and automatically fix what it can
 
 Usage:
   cargo xtask format
   cargo xtask format-check
-  cargo xtask check-generated"
+  cargo xtask check-generated
+  cargo xtask lint
+  cargo xtask lint-fix"
     );
 }

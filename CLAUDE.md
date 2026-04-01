@@ -53,4 +53,9 @@ Java source in `kafka/` directory (Apache Kafka 4.2)
 - **Test**: `cargo test`
 - **Format**: `cargo xtask format`
 - **Format Check**: `cargo xtask format-check` (CI-friendly)
+- **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)
+- **Lint Fix**: `cargo xtask lint-fix` (automatically fix clippy warnings)
 - **Check Generated**: `cargo xtask check-generated` (validates generated code formatting only)
+
+## Definition of Done
+Follow the DoD described in [definition-of-done.md](.claude/rules/definition-of-done.md).

@@ -113,7 +113,7 @@ impl Uuid {
 
     /// Returns a base64 URL encoded string (without padding) of the UUID.
     /// This matches the Java implementation's toString() method.
-    pub fn to_string(&self) -> String {
+    pub fn to_base64_string(&self) -> String {
         let bytes = self.to_bytes();
         base64_url_encode(&bytes)
     }
@@ -207,7 +207,7 @@ impl Default for Uuid {
 
 impl std::fmt::Display for Uuid {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.to_string())
+        write!(f, "{}", self.to_base64_string())
     }
 }
 
