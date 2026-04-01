@@ -56,8 +56,8 @@ impl StructSpec {
 
         for field in &fields {
             // Check for duplicate tag IDs
-            if let Some(tag) = field.tag() {
-                if !tags.insert(tag) {
+            if let Some(tag) = field.tag()
+                && !tags.insert(tag) {
                     return Err(format!(
                         "In {}, field {} has a duplicate tag ID {}. All tag IDs must be unique.",
                         name,
@@ -65,7 +65,6 @@ impl StructSpec {
                         tag
                     ));
                 }
-            }
 
             // Check for duplicate names
             if !names.insert(field.name()) {

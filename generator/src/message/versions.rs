@@ -71,7 +71,7 @@ impl Versions {
             let lowest = version_str
                 .parse::<i16>()
                 .map_err(|e| format!("Failed to parse version: {}", e))?;
-            return Ok(Versions::new(lowest, i16::MAX)?);
+            return Versions::new(lowest, i16::MAX);
         }
 
         if let Some(dash_index) = input.find('-') {
@@ -81,11 +81,11 @@ impl Versions {
             let highest = input[dash_index + 1..]
                 .parse::<i16>()
                 .map_err(|e| format!("Failed to parse highest version: {}", e))?;
-            return Ok(Versions::new(lowest, highest)?);
+            return Versions::new(lowest, highest);
         }
 
         let version = input.parse::<i16>().map_err(|e| format!("Failed to parse version: {}", e))?;
-        Ok(Versions::new(version, version)?)
+        Versions::new(version, version)
     }
 
     /// Creates a new version range.

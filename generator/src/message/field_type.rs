@@ -68,7 +68,7 @@ impl FieldType {
                         );
                     }
                     Ok(FieldType::Array(Box::new(element_type)))
-                } else if trimmed.chars().next().map_or(false, |c| c.is_uppercase()) {
+                } else if trimmed.chars().next().is_some_and(|c| c.is_uppercase()) {
                     Ok(FieldType::Struct(trimmed.to_string()))
                 } else {
                     Err(format!("Can't parse type {}", trimmed))

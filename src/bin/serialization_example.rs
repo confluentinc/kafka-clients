@@ -38,7 +38,7 @@ fn main() {
     let mut req = MetadataRequestData::new();
     req.topics = vec![{
         let mut topic = MetadataRequestTopic::new();
-        topic.topic_id = Uuid::new(0x12345678_9abc_def0, 0x1234_567890abcdef);
+        topic.topic_id = Uuid::new(0x1234_5678_9abc_def0, 0x1234_5678_90ab_cdef);
         topic.name = "test-topic".to_string();
         topic
     }];
@@ -92,7 +92,7 @@ fn main() {
         let mut topic = MetadataResponseTopic::new();
         topic.error_code = 0;
         topic.name = "test-topic".to_string();
-        topic.topic_id = Uuid::new(0xabcdef12_3456_7890, 0xabcd_ef1234567890);
+        topic.topic_id = Uuid::new(0xabcd_ef12_3456_7890, 0xabcd_ef12_3456_7890);
         topic.is_internal = false;
         topic.partitions = vec![
             {
@@ -145,7 +145,7 @@ fn main() {
     produce_resp.responses = vec![{
         let mut topic = TopicProduceResponse::new();
         topic.name = String::new(); // Empty string for flexible version
-        topic.topic_id = Uuid::new(0xfedcba98_7654_3210, 0xfedc_ba9876543210);
+        topic.topic_id = Uuid::new(0xfedc_ba98_7654_3210, 0xfedc_ba98_7654_3210);
         topic.partition_responses = vec![
             {
                 let mut partition = PartitionProduceResponse::new();
