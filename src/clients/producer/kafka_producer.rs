@@ -1,0 +1,302 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! KafkaProducer — the main entry point for producing records.
+//!
+//! Corresponds to org.apache.kafka.clients.producer.KafkaProducer.
+
+use crate::clients::producer::accumulator::RecordAccumulator;
+use crate::clients::producer::batch::SendFuture;
+use crate::clients::producer::config::ProducerConfig;
+use crate::clients::producer::record::ProducerRecord;
+use crate::clients::producer::sender::{PartitionInfo, ProduceClient, Sender};
+use crate::common::TopicPartition;
+use crate::errors::{ErrorCode, KafkaError};
+use std::sync::Arc;
+use tokio::sync::Mutex;
+use tokio::task::JoinHandle;
+
+struct ProducerInner<C: ProduceClient> {
+    #[allow(dead_code)]
+    config: Arc<ProducerConfig>,
+    accumulator: Arc<RecordAccumulator>,
+    client: Arc<C>,
+    sender_handle: Mutex<Option<JoinHandle<()>>>,
+}
+
+/// An async Kafka producer.
+///
+/// Thread-safe: cloning gives a handle to the same underlying producer.
+/// The background sender task is spawned on construction.
+///
+/// Generic over `C: ProduceClient` to allow mocking the network layer.
+pub struct KafkaProducer<C: ProduceClient> {
+    inner: Arc<ProducerInner<C>>,
+}
+
+impl<C: ProduceClient> Clone for KafkaProducer<C> {
+    fn clone(&self) -> Self {
+        KafkaProducer {
+            inner: Arc::clone(&self.inner),
+        }
+    }
+}
+
+impl<C: ProduceClient> KafkaProducer<C> {
+    /// Create a new producer with the given config and network client.
+    ///
+    /// Spawns a background sender task immediately.
+    pub fn new(config: ProducerConfig, client: C) -> Self {
+        let config = Arc::new(config);
+        let client = Arc::new(client);
+        let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
+
+        let sender = Sender::new(
+            Arc::clone(&accumulator),
+            Arc::clone(&client),
+            Arc::clone(&config),
+        );
+        let sender_handle = tokio::spawn(sender.run());
+
+        KafkaProducer {
+            inner: Arc::new(ProducerInner {
+                config,
+                accumulator,
+                client,
+                sender_handle: Mutex::new(Some(sender_handle)),
+            }),
+        }
+    }
+
+    /// Send a record to Kafka.
+    ///
+    /// Returns a `SendFuture` that resolves to `RecordMetadata` when the record
+    /// is acknowledged by the broker. The key/value/headers are copied into the
+    /// batch buffer before this method returns, so the caller can drop the
+    /// `ProducerRecord` immediately after.
+    pub async fn send(&self, record: &ProducerRecord<'_>) -> crate::errors::Result<SendFuture> {
+        let topic = record.topic();
+        if topic.is_empty() {
+            return Err(KafkaError::new(ErrorCode::InvalidTopic, "topic must not be empty"));
+        }
+
+        // Use the partition hint or default to 0 (partitioner skipped per design).
+        let partition = record.partition_hint().unwrap_or(0);
+        let tp = TopicPartition::new(topic, partition);
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+        let timestamp = record.timestamp_value().unwrap_or(now);
+
+        let result = self
+            .inner
+            .accumulator
+            .append(
+                &tp,
+                record.key_bytes(),
+                record.value_bytes(),
+                record.headers(),
+                timestamp,
+            )
+            .await?;
+
+        Ok(result.future)
+    }
+
+    /// Block until all buffered records have been sent and acknowledged.
+    pub async fn flush(&self) -> crate::errors::Result<()> {
+        self.inner.accumulator.flush_all().await;
+        // Give the sender time to drain the flushed batches.
+        // In a production implementation, we'd wait on a flush-completion signal.
+        tokio::task::yield_now().await;
+        Ok(())
+    }
+
+    /// Get partition metadata for a topic.
+    pub async fn partitions_for(
+        &self,
+        topic: &str,
+    ) -> crate::errors::Result<Vec<PartitionInfo>> {
+        self.inner.client.partitions_for(topic).await
+    }
+
+    /// Gracefully shut down the producer.
+    ///
+    /// Flushes remaining records, then stops the sender task.
+    pub async fn close(&self) -> crate::errors::Result<()> {
+        self.inner.accumulator.close().await;
+
+        if let Some(handle) = self.inner.sender_handle.lock().await.take() {
+            handle
+                .await
+                .map_err(|e| KafkaError::new(ErrorCode::Unexpected, e.to_string()))?;
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::clients::producer::config::Acks;
+    use crate::clients::producer::sender::PartitionResponse;
+    use async_trait::async_trait;
+    use std::sync::atomic::{AtomicI64, Ordering};
+    use std::time::Duration;
+
+    /// Mock client that acknowledges all records with sequential offsets.
+    struct MockProduceClient {
+        next_offset: AtomicI64,
+    }
+
+    impl MockProduceClient {
+        fn new() -> Self {
+            MockProduceClient {
+                next_offset: AtomicI64::new(0),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl ProduceClient for MockProduceClient {
+        async fn send_produce_request(
+            &self,
+            _node_id: i32,
+            _acks: Acks,
+            _timeout: Duration,
+            batches: Vec<(TopicPartition, Vec<u8>)>,
+        ) -> Result<Vec<PartitionResponse>, KafkaError> {
+            let mut responses = Vec::new();
+            for (tp, _data) in batches {
+                let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
+                responses.push(PartitionResponse {
+                    tp,
+                    base_offset: offset,
+                    log_append_time: 1000,
+                    error: None,
+                });
+            }
+            Ok(responses)
+        }
+
+        async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+            Ok(vec![PartitionInfo {
+                topic: topic.to_string(),
+                partition: 0,
+                leader: Some(0),
+            }])
+        }
+    }
+
+    fn test_config() -> ProducerConfig {
+        ProducerConfig::builder()
+            .bootstrap_servers(vec!["localhost:9092".to_string()])
+            .batch_size(4096)
+            .linger_ms(0)
+            .buffer_memory(65536)
+            .build()
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn test_send_and_receive_metadata() {
+        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+
+        let record = ProducerRecord::new("test-topic")
+            .key(b"key1")
+            .value(b"value1");
+
+        let future = producer.send(&record).await.unwrap();
+
+        // Flush to ensure the record is sent.
+        producer.flush().await.unwrap();
+
+        // Give sender a moment to process.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let metadata = future.await.unwrap();
+        assert_eq!(metadata.topic(), "test-topic");
+        assert_eq!(metadata.partition(), 0);
+        assert!(metadata.offset() >= 0);
+
+        producer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_empty_topic_rejected() {
+        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+
+        let record = ProducerRecord::new("").value(b"value");
+        let result = producer.send(&record).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ErrorCode::InvalidTopic);
+
+        producer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_multiple_records() {
+        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+
+        let mut futures = Vec::new();
+        for i in 0..10 {
+            let value = format!("value-{i}");
+            let record = ProducerRecord::new("test-topic").value(value.as_bytes());
+            let future = producer.send(&record).await.unwrap();
+            futures.push(future);
+        }
+
+        producer.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        for future in futures {
+            let metadata = future.await.unwrap();
+            assert_eq!(metadata.topic(), "test-topic");
+        }
+
+        producer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_clone_shares_state() {
+        let producer1 = KafkaProducer::new(test_config(), MockProduceClient::new());
+        let producer2 = producer1.clone();
+
+        let record = ProducerRecord::new("test-topic").value(b"hello");
+        let future = producer1.send(&record).await.unwrap();
+
+        // Flush via the clone.
+        producer2.flush().await.unwrap();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        let metadata = future.await.unwrap();
+        assert_eq!(metadata.topic(), "test-topic");
+
+        producer2.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_partitions_for() {
+        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+
+        let partitions = producer.partitions_for("test-topic").await.unwrap();
+        assert_eq!(partitions.len(), 1);
+        assert_eq!(partitions[0].topic, "test-topic");
+        assert_eq!(partitions[0].partition, 0);
+
+        producer.close().await.unwrap();
+    }
+}

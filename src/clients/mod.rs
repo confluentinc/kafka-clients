@@ -12,19 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fail on warnings in development
-#![deny(warnings)]
+//! Kafka client implementations (org.apache.kafka.clients).
 
-pub mod clients;
-pub mod common;
-pub mod errors;
-
-// Include generated message definitions
-#[cfg(not(feature = "skip-generated"))]
-#[allow(dead_code)]
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
-}
-
-#[cfg(not(feature = "skip-generated"))]
-pub use generated::*;
+pub mod producer;

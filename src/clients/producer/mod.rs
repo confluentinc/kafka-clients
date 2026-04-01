@@ -12,19 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fail on warnings in development
-#![deny(warnings)]
+//! Kafka producer client (org.apache.kafka.clients.producer).
 
-pub mod clients;
-pub mod common;
-pub mod errors;
+pub mod accumulator;
+pub mod batch;
+pub mod config;
+pub mod kafka_producer;
+pub mod record;
+pub mod sender;
 
-// Include generated message definitions
-#[cfg(not(feature = "skip-generated"))]
-#[allow(dead_code)]
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
-}
-
-#[cfg(not(feature = "skip-generated"))]
-pub use generated::*;
+pub use batch::SendFuture;
+pub use config::{Acks, ProducerConfig, ProducerConfigBuilder};
+pub use kafka_producer::KafkaProducer;
+pub use record::{Header, ProducerRecord, RecordMetadata};
+pub use sender::{PartitionInfo, PartitionResponse, ProduceClient};
