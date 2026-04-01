@@ -16,6 +16,8 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{exit, Command};
+use std::thread;
+use std::time::Duration;
 
 fn main() -> anyhow::Result<()> {
     let task = env::args().nth(1);
@@ -26,6 +28,7 @@ fn main() -> anyhow::Result<()> {
         Some("check-generated") => check_generated()?,
         Some("lint") => lint()?,
         Some("lint-fix") => lint_fix()?,
+        Some("await-commit") => await_commit()?,
         _ => print_help(),
     }
 
@@ -159,7 +162,15 @@ fn lint() -> anyhow::Result<()> {
     // Lint generator crate
     run_command(
         "cargo",
-        &["clippy", "--manifest-path", "generator/Cargo.toml", "--all-targets", "--", "-D", "warnings"],
+        &[
+            "clippy",
+            "--manifest-path",
+            "generator/Cargo.toml",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
     )?;
 
     println!("✅ No lint issues found!");
@@ -172,7 +183,16 @@ fn lint_fix() -> anyhow::Result<()> {
     // Fix main crate
     run_command(
         "cargo",
-        &["clippy", "--all-targets", "--fix", "--allow-dirty", "--allow-staged", "--", "-D", "warnings"],
+        &[
+            "clippy",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
     )?;
 
     // Fix generator crate
@@ -196,6 +216,36 @@ fn lint_fix() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn await_commit() -> anyhow::Result<()> {
+    let initial_head = git_head()?;
+    eprintln!(
+        "Waiting for a new commit (current HEAD: {})...",
+        &initial_head[..8.min(initial_head.len())]
+    );
+
+    loop {
+        thread::sleep(Duration::from_secs(5));
+        let current_head = git_head()?;
+        if current_head != initial_head {
+            // Print new commits as JSON-ish for easy consumption
+            let output = Command::new("git")
+                .args(["log", "--oneline", &format!("{}..{}", initial_head, current_head)])
+                .output()?;
+            let commits = String::from_utf8_lossy(&output.stdout);
+            println!("{commits}");
+            return Ok(());
+        }
+    }
+}
+
+fn git_head() -> anyhow::Result<String> {
+    let output = Command::new("git").args(["rev-parse", "HEAD"]).output()?;
+    if !output.status.success() {
+        anyhow::bail!("git rev-parse HEAD failed");
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
+}
+
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
     let status = Command::new(program).args(args).status()?;
 
@@ -214,12 +264,14 @@ fn print_help() {
   check-generated Check generated code formatting only (no changes)
   lint            Run clippy lints (warnings are errors)
   lint-fix        Run clippy and automatically fix what it can
+  await-commit    Block until a new commit appears on HEAD, then print the new commits
 
 Usage:
   cargo xtask format
   cargo xtask format-check
   cargo xtask check-generated
   cargo xtask lint
-  cargo xtask lint-fix"
+  cargo xtask lint-fix
+  cargo xtask await-commit"
     );
 }

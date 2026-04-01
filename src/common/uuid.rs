@@ -51,6 +51,25 @@ impl Uuid {
         Self::ZERO_UUID
     }
 
+    /// Static factory to retrieve a type 4 (pseudo randomly generated) UUID.
+    ///
+    /// This will not generate a UUID equal to `ZERO_UUID`, `ONE_UUID`, or one whose
+    /// string representation starts with a dash ("-").
+    pub fn random_uuid() -> Self {
+        loop {
+            let ju = uuid::Uuid::new_v4();
+            let (most, least) = ju.as_u64_pair();
+            let uuid = Self::new(most, least);
+            if uuid == Self::ZERO_UUID || uuid == Self::ONE_UUID {
+                continue;
+            }
+            if uuid.to_base64_string().starts_with('-') {
+                continue;
+            }
+            return uuid;
+        }
+    }
+
     /// Returns the most significant 64 bits of this UUID.
     pub const fn most_sig_bits(&self) -> u64 {
         self.most_sig_bits

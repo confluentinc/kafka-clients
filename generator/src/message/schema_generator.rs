@@ -111,7 +111,12 @@ impl StructRegistry {
                         std::collections::hash_map::Entry::Vacant(entry) => {
                             // Synthesize a StructSpec from the fields
                             let versions_str = field.versions().to_string();
-                            let spec = StructSpec::new(entry.key().clone(), Some(&versions_str), None, field.fields().to_vec())?;
+                            let spec = StructSpec::new(
+                                entry.key().clone(),
+                                Some(&versions_str),
+                                None,
+                                field.fields().to_vec(),
+                            )?;
                             entry.insert(StructInfo { spec, parent_versions });
                         },
                     }

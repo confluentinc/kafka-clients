@@ -22,7 +22,8 @@
    You have to avoid any changes to the codebase with this role but only give feedback
    in Markdown files.
 
-   Monitor the git repository file system and when you see a new commit from the Actor, start reviewing it.
+   To wait for the Actor's next commit, run `cargo xtask await-commit` (it blocks until HEAD changes,
+   then prints the new commit lines). Use this in a loop: await, review, report, repeat.
 
    You have to avoid false positives and only report something if it's a real issue,
    like a bug or missing a requirement or a behavior different than the Java client.

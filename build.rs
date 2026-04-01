@@ -39,6 +39,18 @@ fn main() {
         },
     }
 
+    // Generate api_message_type.rs (Rust equivalent of Java's generated ApiMessageType)
+    eprintln!("Generating ApiMessageType...");
+    match generator::generate_api_message_type(Path::new("generator/messages"), &generated_dir) {
+        Ok(()) => {
+            eprintln!("ApiMessageType generation complete.");
+        },
+        Err(e) => {
+            eprintln!("Error: ApiMessageType generation failed: {}", e);
+            panic!("Failed to generate ApiMessageType: {}", e);
+        },
+    }
+
     // Format generated files
     eprintln!("Formatting generated files...");
     if let Ok(entries) = fs::read_dir(&generated_dir) {

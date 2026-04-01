@@ -17,11 +17,15 @@
 //! This module provides traits and implementations for reading and writing
 //! Kafka protocol messages to/from byte streams.
 
+pub mod api_keys;
 pub mod byte_buffer_accessor;
+pub mod errors;
 pub mod readable;
 pub mod varint;
 pub mod writable;
 
+pub use api_keys::ApiKeys;
 pub use byte_buffer_accessor::ByteBufferAccessor;
+pub use errors::Errors;
 pub use readable::{RawTaggedField, Readable};
 pub use writable::Writable;

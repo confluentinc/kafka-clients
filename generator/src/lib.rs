@@ -21,7 +21,8 @@
 
 mod message;
 
-use message::{FieldSpec, FieldType, MessageSpec, StructSpec, Versions};
+use message::{FieldSpec, FieldType, MessageSpec, MessageSpecType, RequestListenerType, StructSpec, Versions};
+use std::collections::BTreeMap;
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -62,6 +63,395 @@ pub fn generate_messages(input_dir: &Path, output_dir: &Path) -> Result<(), Box<
         spec_files.len()
     );
     eprintln!("Generated code at: {}", output_dir.display());
+
+    Ok(())
+}
+
+/// Intermediate structure to collect request/response specs for one API key.
+struct ApiData {
+    api_key: i16,
+    request_spec: Option<MessageSpec>,
+    response_spec: Option<MessageSpec>,
+}
+
+impl ApiData {
+    fn name(&self, fallback_names: &BTreeMap<i16, String>) -> String {
+        if let Some(ref spec) = self.request_spec {
+            spec.name().strip_suffix("Request").unwrap_or(spec.name()).to_string()
+        } else if let Some(ref spec) = self.response_spec {
+            spec.name().strip_suffix("Response").unwrap_or(spec.name()).to_string()
+        } else if let Some(name) = fallback_names.get(&self.api_key) {
+            name.clone()
+        } else {
+            panic!("Neither requestSpec nor responseSpec is defined for API key {}", self.api_key);
+        }
+    }
+
+    fn has_valid_versions(&self) -> bool {
+        self.request_spec
+            .as_ref()
+            .is_some_and(|s| s.valid_versions().highest() >= s.valid_versions().lowest())
+    }
+}
+
+/// Generate an `api_message_type.rs` file — the Rust equivalent of Java's generated
+/// `ApiMessageType` enum.
+///
+/// Reads all JSON message specifications from `input_dir`, collects per-API-key metadata
+/// (version ranges, flexible version thresholds, listener types, deprecation info),
+/// and writes a Rust source file to `output_dir/api_message_type.rs`.
+pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    let spec_files = find_json_files(input_dir)?;
+
+    let mut apis: BTreeMap<i16, ApiData> = BTreeMap::new();
+
+    for spec_file in &spec_files {
+        let json_content = fs::read_to_string(spec_file)?;
+        let json_content = strip_json_comments(&json_content);
+
+        // Try full MessageSpec parsing first
+        match serde_json::from_str::<MessageSpec>(&json_content) {
+            Ok(spec) => {
+                let api_key = match spec.api_key() {
+                    Some(k) => k,
+                    None => continue,
+                };
+                let entry =
+                    apis.entry(api_key)
+                        .or_insert_with(|| ApiData { api_key, request_spec: None, response_spec: None });
+                match spec.msg_type() {
+                    MessageSpecType::Request => entry.request_spec = Some(spec),
+                    MessageSpecType::Response => entry.response_spec = Some(spec),
+                    _ => {},
+                }
+            },
+            Err(_) => {
+                // Fallback: specs with validVersions="none" may fail full parsing.
+                // Extract just apiKey, name, type to register the API key.
+                let parsed: serde_json::Value = match serde_json::from_str(&json_content) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let api_key = match parsed.get("apiKey").and_then(|v| v.as_i64()) {
+                    Some(k) => k as i16,
+                    None => continue,
+                };
+                let msg_type = parsed.get("type").and_then(|v| v.as_str()).unwrap_or("");
+                let name = parsed.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                let base_name = name
+                    .strip_suffix("Request")
+                    .or_else(|| name.strip_suffix("Response"))
+                    .unwrap_or(&name)
+                    .to_string();
+
+                // Only register the entry with a name if it doesn't exist yet
+                let entry =
+                    apis.entry(api_key)
+                        .or_insert_with(|| ApiData { api_key, request_spec: None, response_spec: None });
+
+                // Create a minimal stub MessageSpec for the removed API
+                if (msg_type == "request" && entry.request_spec.is_none())
+                    || (msg_type == "response" && entry.response_spec.is_none())
+                {
+                    // We need at least the name for display. We'll generate a stub
+                    // with valid_versions="none" (lowest > highest).
+                    // Use the fallback name stored in the ApiData::name() via the
+                    // existing request_spec or response_spec if available.
+                    // For removed APIs, we simply leave the specs as None and handle
+                    // them in code generation.
+                    let _ = base_name; // name is captured via the entry
+                }
+            },
+        }
+    }
+
+    // For entries that have no specs at all (fully removed APIs), we need to
+    // provide a name. Collect names from the JSON as a fallback.
+    let mut api_names: BTreeMap<i16, String> = BTreeMap::new();
+    for spec_file in &spec_files {
+        let json_content = fs::read_to_string(spec_file)?;
+        let json_content = strip_json_comments(&json_content);
+        let parsed: serde_json::Value = match serde_json::from_str(&json_content) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        if let (Some(api_key), Some(name)) = (
+            parsed.get("apiKey").and_then(|v| v.as_i64()),
+            parsed.get("name").and_then(|v| v.as_str()),
+        ) {
+            let base = name
+                .strip_suffix("Request")
+                .or_else(|| name.strip_suffix("Response"))
+                .unwrap_or(name);
+            api_names.entry(api_key as i16).or_insert_with(|| base.to_string());
+        }
+    }
+
+    fs::create_dir_all(output_dir)?;
+    let output_file = output_dir.join("api_message_type.rs");
+    let mut file = fs::File::create(&output_file)?;
+
+    write_license_header(&mut file)?;
+    writeln!(file, "//! Generated from JSON message specifications.")?;
+    writeln!(file, "//!")?;
+    writeln!(file, "//! Rust equivalent of Java's generated `ApiMessageType` enum.")?;
+    writeln!(
+        file,
+        "//! Provides version ranges, header version logic, and listener information"
+    )?;
+    writeln!(file, "//! for each Kafka API key.")?;
+    writeln!(file)?;
+
+    // --- ListenerType enum ---
+    writeln!(file, "/// Kafka listener types.")?;
+    writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
+    writeln!(file, "pub enum ListenerType {{")?;
+    writeln!(file, "    Broker,")?;
+    writeln!(file, "    Controller,")?;
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    // --- ApiMessageType enum ---
+    writeln!(file, "/// Identifiers and metadata for every Kafka API.")?;
+    writeln!(file, "#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]")?;
+    writeln!(file, "#[allow(non_camel_case_types)]")?;
+    writeln!(file, "pub enum ApiMessageType {{")?;
+
+    for data in apis.values() {
+        let name = to_snake_case(&data.name(&api_names)).to_uppercase();
+        writeln!(file, "    /// {} (key {})", data.name(&api_names), data.api_key)?;
+        writeln!(file, "    {},", name)?;
+    }
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    // --- impl block ---
+    writeln!(file, "impl ApiMessageType {{")?;
+
+    // api_key()
+    writeln!(file, "    /// The permanent and immutable numeric id of this API.")?;
+    writeln!(file, "    pub fn api_key(self) -> i16 {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        writeln!(file, "            Self::{} => {},", variant, data.api_key)?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // name()
+    writeln!(file, "    /// The human-readable name of this API.")?;
+    writeln!(file, "    pub fn name(self) -> &'static str {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        writeln!(file, "            Self::{} => \"{}\",", variant, data.name(&api_names))?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // lowest_supported_version()
+    writeln!(file, "    /// The lowest supported version of this API.")?;
+    writeln!(file, "    pub fn lowest_supported_version(self) -> i16 {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        let low = data.request_spec.as_ref().map(|s| s.valid_versions().lowest()).unwrap_or(0);
+        writeln!(file, "            Self::{} => {},", variant, low)?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // highest_supported_version()
+    writeln!(file, "    /// The highest supported version of this API.")?;
+    writeln!(
+        file,
+        "    pub fn highest_supported_version(self, enable_unstable_last_version: bool) -> i16 {{"
+    )?;
+    writeln!(file, "        let highest = match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        let high = data.request_spec.as_ref().map(|s| s.valid_versions().highest()).unwrap_or(-1);
+        writeln!(file, "            Self::{} => {},", variant, high)?;
+    }
+    writeln!(file, "        }};")?;
+    writeln!(
+        file,
+        "        if !self.latest_version_unstable() || enable_unstable_last_version {{"
+    )?;
+    writeln!(file, "            highest")?;
+    writeln!(file, "        }} else {{")?;
+    writeln!(file, "            highest - 1")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // lowest_deprecated_version()
+    writeln!(file, "    /// The lowest deprecated version of this API.")?;
+    writeln!(file, "    pub fn lowest_deprecated_version(self) -> i16 {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        let low = data
+            .request_spec
+            .as_ref()
+            .map(|s| s.struct_spec().deprecated_versions().lowest())
+            .unwrap_or(0);
+        writeln!(file, "            Self::{} => {},", variant, low)?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // highest_deprecated_version()
+    writeln!(file, "    /// The highest deprecated version of this API.")?;
+    writeln!(file, "    pub fn highest_deprecated_version(self) -> i16 {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        let high = data
+            .request_spec
+            .as_ref()
+            .map(|s| s.struct_spec().deprecated_versions().highest())
+            .unwrap_or(-1);
+        writeln!(file, "            Self::{} => {},", variant, high)?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // latest_version_unstable()
+    writeln!(file, "    /// Whether the latest version is unstable.")?;
+    writeln!(file, "    pub fn latest_version_unstable(self) -> bool {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        let unstable = data.request_spec.as_ref().map(|s| s.latest_version_unstable()).unwrap_or(false);
+        writeln!(file, "            Self::{} => {},", variant, unstable)?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // listeners()
+    writeln!(file, "    /// The listener types this API is available on.")?;
+    writeln!(file, "    pub fn listeners(self) -> &'static [ListenerType] {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        let listeners: Vec<String> = data
+            .request_spec
+            .as_ref()
+            .map(|s| {
+                s.listeners()
+                    .iter()
+                    .map(|l| match l {
+                        RequestListenerType::Broker => "ListenerType::Broker".to_string(),
+                        RequestListenerType::Controller => "ListenerType::Controller".to_string(),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default();
+        writeln!(file, "            Self::{} => &[{}],", variant, listeners.join(", "))?;
+    }
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // request_header_version()
+    writeln!(file, "    /// The request header version to use for a given API version.")?;
+    writeln!(file, "    pub fn request_header_version(self, version: i16) -> i16 {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        if let Some(ref spec) = data.request_spec {
+            let valid = spec.valid_versions();
+            if valid.highest() < valid.lowest() {
+                // No valid versions
+                continue;
+            }
+            let flex = spec.flexible_versions();
+            if flex == Versions::NONE {
+                // No flexible versions — always header v1
+                writeln!(file, "            Self::{} => 1,", variant)?;
+            } else if flex.lowest() <= valid.lowest() {
+                // All valid versions are flexible — always header v2
+                writeln!(file, "            Self::{} => 2,", variant)?;
+            } else {
+                writeln!(
+                    file,
+                    "            Self::{} => if version >= {} {{ 2 }} else {{ 1 }},",
+                    variant,
+                    flex.lowest()
+                )?;
+            }
+        }
+    }
+    writeln!(file, "            #[allow(unreachable_patterns)]")?;
+    writeln!(file, "            _ => 1,")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // response_header_version()
+    writeln!(file, "    /// The response header version to use for a given API version.")?;
+    writeln!(file, "    ///")?;
+    writeln!(file, "    /// ApiVersionsResponse always uses header version 0 (KIP-511).")?;
+    writeln!(file, "    pub fn response_header_version(self, version: i16) -> i16 {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        // ApiVersionsResponse always returns header v0 (KIP-511)
+        if data.api_key == 18 {
+            writeln!(
+                file,
+                "            Self::{} => 0, // ApiVersionsResponse always uses v0 header (KIP-511)",
+                variant
+            )?;
+            continue;
+        }
+        if let Some(ref spec) = data.response_spec {
+            let valid = spec.valid_versions();
+            if valid.highest() < valid.lowest() {
+                continue;
+            }
+            let flex = spec.flexible_versions();
+            if flex == Versions::NONE {
+                writeln!(file, "            Self::{} => 0,", variant)?;
+            } else if flex.lowest() <= valid.lowest() {
+                writeln!(file, "            Self::{} => 1,", variant)?;
+            } else {
+                writeln!(
+                    file,
+                    "            Self::{} => if version >= {} {{ 1 }} else {{ 0 }},",
+                    variant,
+                    flex.lowest()
+                )?;
+            }
+        }
+    }
+    writeln!(file, "            #[allow(unreachable_patterns)]")?;
+    writeln!(file, "            _ => 0,")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // from_api_key()
+    writeln!(file, "    /// Look up an `ApiMessageType` by its numeric API key.")?;
+    writeln!(file, "    pub fn from_api_key(api_key: i16) -> Option<Self> {{")?;
+    writeln!(file, "        match api_key {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        writeln!(file, "            {} => Some(Self::{}),", data.api_key, variant)?;
+    }
+    writeln!(file, "            _ => None,")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+
+    writeln!(file, "}}")?;
 
     Ok(())
 }
@@ -1743,6 +2133,10 @@ fn generate_mod_file(spec_files: &[PathBuf], output_dir: &Path) -> Result<(), Bo
     writeln!(file, "// Generated message modules")?;
     writeln!(file)?;
 
+    // Include api_message_type module (generated separately)
+    writeln!(file, "pub mod api_message_type;")?;
+    writeln!(file)?;
+
     for spec_file in spec_files {
         let file_name = spec_file.file_stem().and_then(|s| s.to_str()).ok_or("Invalid file name")?;
         let module_name = format!("{}_data", to_snake_case(file_name));
@@ -1826,19 +2220,21 @@ fn strip_json_comments(json: &str) -> String {
             continue;
         }
 
-        if !in_string && c == '/'
+        if !in_string
+            && c == '/'
             && let Some(&next_c) = chars.peek()
-                && next_c == '/' {
-                    // Line comment - skip until newline
-                    chars.next();
-                    for c in chars.by_ref() {
-                        if c == '\n' {
-                            result.push('\n');
-                            break;
-                        }
-                    }
-                    continue;
+            && next_c == '/'
+        {
+            // Line comment - skip until newline
+            chars.next();
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    result.push('\n');
+                    break;
                 }
+            }
+            continue;
+        }
 
         result.push(c);
     }

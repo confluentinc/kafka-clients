@@ -63,17 +63,17 @@ impl EntityType {
         };
 
         if let Some(base_type) = self.base_type()
-            && type_to_check != &base_type {
-                return Err(format!(
-                    "Field {} has entity type {:?}, but field type {}, which does not match.",
-                    field_name, self, field_type
-                ));
-            }
+            && type_to_check != &base_type
+        {
+            return Err(format!(
+                "Field {} has entity type {:?}, but field type {}, which does not match.",
+                field_name, self, field_type
+            ));
+        }
 
         Ok(())
     }
 }
-
 
 #[cfg(test)]
 mod tests {
