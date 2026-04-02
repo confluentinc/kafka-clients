@@ -139,9 +139,9 @@ fn test_produce_request_multiple_versions() -> io::Result<()> {
         request.timeout_ms = 5000;
         request.acks = 1;
         request.transactional_id = if version >= 3 {
-            "txn-123".to_string()
+            Some("txn-123".to_string())
         } else {
-            String::new()
+            None
         };
 
         // Serialize

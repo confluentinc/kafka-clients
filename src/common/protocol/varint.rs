@@ -208,6 +208,16 @@ pub fn write_varlong<W: Write>(value: i64, writer: &mut W) -> io::Result<()> {
     write_unsigned_varlong(encoded, writer)
 }
 
+/// Returns the number of bytes needed to encode a value as an unsigned varint.
+///
+/// Corresponds to Java's `ByteUtils.sizeOfUnsignedVarint()`.
+pub fn size_of_unsigned_varint(value: u32) -> i32 {
+    let leading_zeros = value.leading_zeros() as i32;
+    // Equivalent to: ceil((32 - leading_zeros) / 7.0), min 1
+    // Uses the same bit trick as the Java implementation
+    (((38 - leading_zeros) * 0b10010010010010011i32) >> 19) + (leading_zeros >> 5)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -306,6 +316,21 @@ mod tests {
 
         let (decoded, _) = read_unsigned_varlong(&buf).unwrap();
         assert_eq!(decoded, value);
+    }
+
+    #[test]
+    fn test_size_of_unsigned_varint() {
+        assert_eq!(size_of_unsigned_varint(0), 1);
+        assert_eq!(size_of_unsigned_varint(1), 1);
+        assert_eq!(size_of_unsigned_varint(127), 1);
+        assert_eq!(size_of_unsigned_varint(128), 2);
+        assert_eq!(size_of_unsigned_varint(16383), 2);
+        assert_eq!(size_of_unsigned_varint(16384), 3);
+        assert_eq!(size_of_unsigned_varint(2097151), 3);
+        assert_eq!(size_of_unsigned_varint(2097152), 4);
+        assert_eq!(size_of_unsigned_varint(268435455), 4);
+        assert_eq!(size_of_unsigned_varint(268435456), 5);
+        assert_eq!(size_of_unsigned_varint(u32::MAX), 5);
     }
 
     #[test]

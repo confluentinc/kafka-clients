@@ -601,7 +601,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     for field in struct_spec.fields() {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let rust_type = field_type_to_rust(field.field_type());
+        let rust_type = field_type_to_rust_for_field(field);
 
         if !field.about().is_empty() {
             writeln!(file, "    /// {}", field.about())?;
@@ -624,7 +624,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     for field in struct_spec.fields() {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let default_val = get_default_value(field.field_type(), field.field_default());
+        let default_val = get_default_value_for_field(field);
         writeln!(file, "            {}: {},", field_name, default_val)?;
     }
     writeln!(file, "            unknown_tagged_fields: Vec::new(),")?;
@@ -667,7 +667,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     writeln!(file)?;
 
     // Generate impl Message
-    generate_message_impl(file, &data_class_name, struct_spec)?;
+    generate_message_impl(file, &data_class_name, struct_spec, flexible_versions)?;
 
     // Generate impl ApiMessage (only for top-level message structs)
     let api_key = spec.api_key().unwrap_or(-1);
@@ -726,7 +726,7 @@ fn generate_nested_struct(
     for nested_field in field.fields() {
         let field_name = to_snake_case(nested_field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let rust_type = field_type_to_rust(nested_field.field_type());
+        let rust_type = field_type_to_rust_for_field(nested_field);
 
         if !nested_field.about().is_empty() {
             writeln!(file, "    /// {}", nested_field.about())?;
@@ -747,7 +747,7 @@ fn generate_nested_struct(
     for nested_field in field.fields() {
         let field_name = to_snake_case(nested_field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let default_val = get_default_value(nested_field.field_type(), nested_field.field_default());
+        let default_val = get_default_value_for_field(nested_field);
         writeln!(file, "            {}: {},", field_name, default_val)?;
     }
     writeln!(file, "            unknown_tagged_fields: Vec::new(),")?;
@@ -773,7 +773,7 @@ fn generate_nested_struct(
     writeln!(file)?;
 
     // Generate impl Message
-    generate_message_impl(file, &struct_name, &struct_spec)?;
+    generate_message_impl(file, &struct_name, &struct_spec, flexible_versions)?;
 
     // Generate Display impl
     generate_display_impl(file, &struct_name)?;
@@ -811,7 +811,7 @@ fn generate_common_struct(
     for field in struct_spec.fields() {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let rust_type = field_type_to_rust(field.field_type());
+        let rust_type = field_type_to_rust_for_field(field);
 
         if !field.about().is_empty() {
             writeln!(file, "    /// {}", field.about())?;
@@ -832,7 +832,7 @@ fn generate_common_struct(
     for field in struct_spec.fields() {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let default_val = get_default_value(field.field_type(), field.field_default());
+        let default_val = get_default_value_for_field(field);
         writeln!(file, "            {}: {},", field_name, default_val)?;
     }
     writeln!(file, "            unknown_tagged_fields: Vec::new(),")?;
@@ -854,7 +854,7 @@ fn generate_common_struct(
     writeln!(file)?;
 
     // Generate impl Message
-    generate_message_impl(file, struct_name, struct_spec)?;
+    generate_message_impl(file, struct_name, struct_spec, flexible_versions)?;
 
     // Generate Display impl
     generate_display_impl(file, struct_name)?;
@@ -913,8 +913,14 @@ fn generate_manual_eq_hash(
     for field in fields {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
-        if contains_float64(field.field_type()) {
+        if matches!(field.field_type(), FieldType::Float64) {
             writeln!(file, "        self.{}.to_bits().hash(state);", field_name)?;
+        } else if matches!(field.field_type(), FieldType::Array(e) if matches!(e.as_ref(), FieldType::Float64)) {
+            writeln!(
+                file,
+                "        for elem in &self.{} {{ elem.to_bits().hash(state); }}",
+                field_name
+            )?;
         } else {
             writeln!(file, "        self.{}.hash(state);", field_name)?;
         }
@@ -932,7 +938,7 @@ fn generate_builder_setters(file: &mut fs::File, struct_spec: &StructSpec) -> Re
     for field in struct_spec.fields() {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
-        let rust_type = field_type_to_rust(field.field_type());
+        let rust_type = field_type_to_rust_for_field(field);
         // Strip r# prefix for setter function names (r#type -> set_type)
         let setter_name = field_name.strip_prefix("r#").unwrap_or(&field_name);
 
@@ -962,6 +968,7 @@ fn generate_message_impl(
     file: &mut fs::File,
     struct_name: &str,
     struct_spec: &StructSpec,
+    flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let lowest = struct_spec.versions().lowest();
     let highest = struct_spec.versions().highest();
@@ -970,15 +977,10 @@ fn generate_message_impl(
     writeln!(file, "    fn lowest_supported_version(&self) -> i16 {{ {} }}", lowest)?;
     writeln!(file, "    fn highest_supported_version(&self) -> i16 {{ {} }}", highest)?;
     writeln!(file)?;
-    writeln!(
-        file,
-        "    fn add_size(&self, size: &mut MessageSizeAccumulator, _cache: &mut ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
-    )?;
-    writeln!(file, "        let mut acc = ByteBufferAccessor::new(4096);")?;
-    writeln!(file, "        self.write(&mut acc, version)?;")?;
-    writeln!(file, "        size.add_bytes(acc.len() as i32);")?;
-    writeln!(file, "        Ok(())")?;
-    writeln!(file, "    }}")?;
+
+    // Generate proper add_size that computes sizes arithmetically
+    generate_add_size_body(file, struct_spec, flexible_versions)?;
+
     writeln!(file)?;
     writeln!(
         file,
@@ -1000,6 +1002,783 @@ fn generate_message_impl(
     writeln!(file, "    }}")?;
     writeln!(file, "}}")?;
     writeln!(file)?;
+
+    Ok(())
+}
+
+/// Generate the body of the `add_size` method that calculates serialized size arithmetically.
+///
+/// This mirrors Java's generated `addSize()` method which:
+/// 1. Adds fixed sizes for primitive fields
+/// 2. Caches UTF-8 byte lengths for strings in ObjectSerializationCache
+/// 3. Handles flexible vs non-flexible version differences (varint vs fixed-length prefixes)
+/// 4. Tracks tagged field count and adds tag/size overhead
+/// 5. Adds sizes for unknown tagged fields
+fn generate_add_size_body(
+    file: &mut fs::File,
+    struct_spec: &StructSpec,
+    flexible_versions: Versions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(
+        file,
+        "    fn add_size(&self, size: &mut MessageSizeAccumulator, cache: &mut ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
+    )?;
+    // Suppress unused variable warnings — these may or may not be used depending on fields
+    writeln!(file, "        let _ = cache;")?;
+    writeln!(file, "        let _ = version;")?;
+
+    // Check if we have any tagged fields
+    let tagged_fields: Vec<&FieldSpec> = struct_spec.fields().iter().filter(|f| !f.tagged_versions().empty()).collect();
+    let has_flexible = !flexible_versions.empty();
+
+    if has_flexible {
+        writeln!(file, "        let mut num_tagged_fields: u32 = 0;")?;
+    }
+
+    // Non-tagged fields
+    for field in struct_spec.fields() {
+        if field.tagged_versions().empty() {
+            generate_field_add_size(file, field, flexible_versions)?;
+        }
+    }
+
+    // Tagged fields — only present in flexible versions
+    if has_flexible && !tagged_fields.is_empty() {
+        writeln!(file)?;
+        let needs_version_check = flexible_versions.lowest() > 0;
+        if needs_version_check {
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "        if version >= {} && version <= {} {{",
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+        }
+        for field in &tagged_fields {
+            generate_tagged_field_add_size(file, field, flexible_versions, needs_version_check)?;
+        }
+        if needs_version_check {
+            writeln!(file, "        }}")?;
+        }
+    }
+
+    // Unknown tagged fields and tagged field count
+    if has_flexible {
+        writeln!(file)?;
+        // Wrap in version check if not all versions are flexible
+        let needs_version_check = flexible_versions.lowest() > 0;
+        if needs_version_check {
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "        if version >= {} && version <= {} {{",
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            let indent = "            ";
+            writeln!(file, "{}num_tagged_fields += self.unknown_tagged_fields.len() as u32;", indent)?;
+            writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.tag()));",
+                indent
+            )?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.size() as u32));",
+                indent
+            )?;
+            writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
+            writeln!(file, "{}}}", indent)?;
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(num_tagged_fields));",
+                indent
+            )?;
+            writeln!(file, "        }}")?;
+        } else {
+            let indent = "        ";
+            writeln!(file, "{}num_tagged_fields += self.unknown_tagged_fields.len() as u32;", indent)?;
+            writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.tag()));",
+                indent
+            )?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.size() as u32));",
+                indent
+            )?;
+            writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
+            writeln!(file, "{}}}", indent)?;
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(num_tagged_fields));",
+                indent
+            )?;
+        }
+    }
+
+    writeln!(file, "        Ok(())")?;
+    writeln!(file, "    }}")?;
+
+    Ok(())
+}
+
+/// Generate size calculation for a single non-tagged field.
+fn generate_field_add_size(
+    file: &mut fs::File,
+    field: &FieldSpec,
+    flexible_versions: Versions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let field_name = to_snake_case(field.name());
+    let field_name = escape_rust_keyword(&field_name);
+    let versions = field.versions();
+    let nullable = is_nullable_field(field);
+
+    let has_version_check = versions != Versions::ALL;
+    let indent = if has_version_check { "            " } else { "        " };
+
+    if has_version_check {
+        if versions.highest() == i16::MAX {
+            writeln!(file, "        if version >= {} {{", versions.lowest())?;
+        } else {
+            writeln!(
+                file,
+                "        if version >= {} && version <= {} {{",
+                versions.lowest(),
+                versions.highest()
+            )?;
+        }
+    }
+
+    // For nullable fields, wrap in if let Some/None
+    let (inner_indent, accessor) = if nullable {
+        writeln!(file, "{}if let Some(ref _nv) = self.{} {{", indent, field_name)?;
+        let extra = format!("{}    ", indent);
+        (extra, "_nv".to_string())
+    } else {
+        (indent.to_string(), format!("self.{}", field_name))
+    };
+    let ind = &inner_indent;
+
+    match field.field_type() {
+        FieldType::Bool | FieldType::Int8 => {
+            writeln!(file, "{}size.add_bytes(1);", ind)?;
+        },
+        FieldType::Int16 | FieldType::Uint16 => {
+            writeln!(file, "{}size.add_bytes(2);", ind)?;
+        },
+        FieldType::Int32 | FieldType::Uint32 | FieldType::Float64 => {
+            let sz = match field.field_type() {
+                FieldType::Int32 | FieldType::Uint32 => 4,
+                FieldType::Float64 => 8,
+                _ => unreachable!(),
+            };
+            writeln!(file, "{}size.add_bytes({});", ind, sz)?;
+        },
+        FieldType::Int64 => {
+            writeln!(file, "{}size.add_bytes(8);", ind)?;
+        },
+        FieldType::Uuid => {
+            writeln!(file, "{}size.add_bytes(16);", ind)?;
+        },
+        FieldType::String => {
+            generate_string_add_size(file, &accessor, flexible_versions, ind, false)?;
+        },
+        FieldType::Bytes | FieldType::Records => {
+            generate_bytes_add_size(file, &accessor, flexible_versions, ind)?;
+        },
+        FieldType::Array(element_type) => {
+            generate_array_add_size(file, &accessor, element_type, flexible_versions, ind)?;
+        },
+        FieldType::Struct(_) => {
+            writeln!(file, "{}{}.add_size(size, cache, version)?;", ind, accessor)?;
+        },
+    }
+
+    // Close nullable wrapper with null marker size in else branch
+    if nullable {
+        writeln!(file, "{}}} else {{", indent)?;
+        generate_null_add_size(file, field.field_type(), flexible_versions, indent)?;
+        writeln!(file, "{}}}", indent)?;
+    }
+
+    if has_version_check {
+        writeln!(file, "        }}")?;
+    }
+
+    Ok(())
+}
+
+/// Generate null marker size for a nullable field.
+fn generate_null_add_size(
+    file: &mut fs::File,
+    field_type: &FieldType,
+    flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inner = format!("{}    ", indent);
+    // Null marker: varint(0) for flexible (1 byte), or -1 for standard (i16=2 bytes for String, i32=4 bytes for Bytes/Array)
+    match field_type {
+        FieldType::String => {
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(file, "{}size.add_bytes(1); // null varint(0)", inner)?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}if version >= {} && version <= {} {{",
+                            inner,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(file, "{}    size.add_bytes(1); // null varint(0)", inner)?;
+                    writeln!(file, "{}}} else {{", inner)?;
+                    writeln!(file, "{}    size.add_bytes(2); // null i16(-1)", inner)?;
+                    writeln!(file, "{}}}", inner)?;
+                }
+            } else {
+                writeln!(file, "{}size.add_bytes(2); // null i16(-1)", inner)?;
+            }
+        },
+        FieldType::Bytes | FieldType::Records | FieldType::Array(_) => {
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(file, "{}size.add_bytes(1); // null varint(0)", inner)?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}if version >= {} && version <= {} {{",
+                            inner,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(file, "{}    size.add_bytes(1); // null varint(0)", inner)?;
+                    writeln!(file, "{}}} else {{", inner)?;
+                    writeln!(file, "{}    size.add_bytes(4); // null i32(-1)", inner)?;
+                    writeln!(file, "{}}}", inner)?;
+                }
+            } else {
+                writeln!(file, "{}size.add_bytes(4); // null i32(-1)", inner)?;
+            }
+        },
+        _ => {},
+    }
+    Ok(())
+}
+
+/// Generate size calculation for a string field.
+fn generate_string_add_size(
+    file: &mut fs::File,
+    accessor: &str,
+    flexible_versions: Versions,
+    indent: &str,
+    _is_tagged: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{}{{", indent)?;
+    writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
+    if !flexible_versions.empty() {
+        if flexible_versions.lowest() == 0 {
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                indent
+            )?;
+        } else {
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "{}    if version >= {} {{", indent, flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "{}    if version >= {} && version <= {} {{",
+                    indent,
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            writeln!(
+                file,
+                "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                indent
+            )?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        size.add_bytes(2); // i16 length prefix", indent)?;
+            writeln!(file, "{}    }}", indent)?;
+        }
+    } else {
+        writeln!(file, "{}    size.add_bytes(2); // i16 length prefix", indent)?;
+    }
+    writeln!(file, "{}    size.add_bytes(bytes_len as i32);", indent)?;
+    writeln!(file, "{}}}", indent)?;
+    Ok(())
+}
+
+/// Generate size calculation for a bytes/records field.
+fn generate_bytes_add_size(
+    file: &mut fs::File,
+    accessor: &str,
+    flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "{}{{", indent)?;
+    writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
+    if !flexible_versions.empty() {
+        if flexible_versions.lowest() == 0 {
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                indent
+            )?;
+        } else {
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "{}    if version >= {} {{", indent, flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "{}    if version >= {} && version <= {} {{",
+                    indent,
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            writeln!(
+                file,
+                "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                indent
+            )?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        size.add_bytes(4); // i32 length prefix", indent)?;
+            writeln!(file, "{}    }}", indent)?;
+        }
+    } else {
+        writeln!(file, "{}    size.add_bytes(4); // i32 length prefix", indent)?;
+    }
+    writeln!(file, "{}    size.add_bytes(bytes_len as i32);", indent)?;
+    writeln!(file, "{}}}", indent)?;
+    Ok(())
+}
+
+/// Generate size calculation for an array field.
+fn generate_array_add_size(
+    file: &mut fs::File,
+    accessor: &str,
+    element_type: &FieldType,
+    flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Length prefix
+    if !flexible_versions.empty() {
+        if flexible_versions.lowest() == 0 {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1));",
+                indent, accessor
+            )?;
+        } else {
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "{}if version >= {} && version <= {} {{",
+                    indent,
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1));",
+                indent, accessor
+            )?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    size.add_bytes(4); // i32 length prefix", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        }
+    } else {
+        writeln!(file, "{}size.add_bytes(4); // i32 length prefix", indent)?;
+    }
+
+    // Element sizes
+    let fixed_element_size = fixed_size_of(element_type);
+    if let Some(elem_size) = fixed_element_size {
+        writeln!(file, "{}size.add_bytes({}.len() as i32 * {});", indent, accessor, elem_size)?;
+    } else {
+        writeln!(file, "{}for element in {}.iter() {{", indent, accessor)?;
+        generate_array_element_add_size(file, element_type, flexible_versions, indent)?;
+        writeln!(file, "{}}}", indent)?;
+    }
+
+    Ok(())
+}
+
+/// Returns the fixed wire size for a field type, or None if variable-length.
+fn fixed_size_of(field_type: &FieldType) -> Option<i32> {
+    match field_type {
+        FieldType::Bool | FieldType::Int8 => Some(1),
+        FieldType::Int16 | FieldType::Uint16 => Some(2),
+        FieldType::Int32 | FieldType::Uint32 => Some(4),
+        FieldType::Int64 | FieldType::Float64 => Some(8),
+        FieldType::Uuid => Some(16),
+        _ => None,
+    }
+}
+
+/// Generate size calculation for a single array element.
+fn generate_array_element_add_size(
+    file: &mut fs::File,
+    element_type: &FieldType,
+    flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match element_type {
+        FieldType::String => {
+            writeln!(file, "{}    let bytes_len = element.len() as u32;", indent)?;
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(
+                        file,
+                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        indent
+                    )?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}    if version >= {} {{", indent, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}    if version >= {} && version <= {} {{",
+                            indent,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(
+                        file,
+                        "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        indent
+                    )?;
+                    writeln!(file, "{}    }} else {{", indent)?;
+                    writeln!(file, "{}        size.add_bytes(2);", indent)?;
+                    writeln!(file, "{}    }}", indent)?;
+                }
+            } else {
+                writeln!(file, "{}    size.add_bytes(2);", indent)?;
+            }
+            writeln!(file, "{}    size.add_bytes(bytes_len as i32);", indent)?;
+        },
+        FieldType::Bytes | FieldType::Records => {
+            writeln!(file, "{}    let bytes_len = element.len() as u32;", indent)?;
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(
+                        file,
+                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        indent
+                    )?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}    if version >= {} {{", indent, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}    if version >= {} && version <= {} {{",
+                            indent,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(
+                        file,
+                        "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        indent
+                    )?;
+                    writeln!(file, "{}    }} else {{", indent)?;
+                    writeln!(file, "{}        size.add_bytes(4);", indent)?;
+                    writeln!(file, "{}    }}", indent)?;
+                }
+            } else {
+                writeln!(file, "{}    size.add_bytes(4);", indent)?;
+            }
+            writeln!(file, "{}    size.add_bytes(bytes_len as i32);", indent)?;
+        },
+        FieldType::Struct(_) => {
+            writeln!(file, "{}    element.add_size(size, cache, version)?;", indent)?;
+        },
+        _ => {
+            // Fixed-size elements handled by caller
+        },
+    }
+    Ok(())
+}
+
+/// Generate size calculation for a tagged field.
+fn generate_tagged_field_add_size(
+    file: &mut fs::File,
+    field: &FieldSpec,
+    flexible_versions: Versions,
+    extra_indent: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let field_name = to_snake_case(field.name());
+    let field_name = escape_rust_keyword(&field_name);
+    let tag = field.tag().unwrap();
+    let tagged_versions = field.tagged_versions();
+
+    let base_indent = if extra_indent { "            " } else { "        " };
+
+    // Check if this tagged field needs its own version guard
+    // (e.g., taggedVersions: "2+" when flexible versions start at "1+")
+    let needs_field_version_check = tagged_versions.lowest() > flexible_versions.lowest()
+        || (tagged_versions.highest() != i16::MAX && tagged_versions.highest() < flexible_versions.highest());
+
+    let indent = if needs_field_version_check {
+        if tagged_versions.highest() == i16::MAX {
+            writeln!(file, "{}if version >= {} {{", base_indent, tagged_versions.lowest())?;
+        } else {
+            writeln!(
+                file,
+                "{}if version >= {} && version <= {} {{",
+                base_indent,
+                tagged_versions.lowest(),
+                tagged_versions.highest()
+            )?;
+        }
+        format!("{}    ", base_indent)
+    } else {
+        base_indent.to_string()
+    };
+
+    // For tagged fields, we need to check if the field is at its default value.
+    // If not, we count it and add its size.
+    let default_check = get_default_check(field, &field_name);
+
+    if let Some(check) = &default_check {
+        writeln!(file, "{}if {} {{", indent, check)?;
+        let inner = format!("{}    ", indent);
+        writeln!(file, "{}num_tagged_fields += 1;", inner)?;
+        writeln!(
+            file,
+            "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
+            inner, tag
+        )?;
+        generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
+        writeln!(file, "{}}}", indent)?;
+    } else {
+        // Always include (no meaningful default to compare against)
+        writeln!(file, "{}num_tagged_fields += 1;", indent)?;
+        writeln!(
+            file,
+            "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
+            indent, tag
+        )?;
+        generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &indent)?;
+    }
+
+    if needs_field_version_check {
+        writeln!(file, "{}}}", base_indent)?;
+    }
+
+    Ok(())
+}
+
+/// Get the default check expression for a tagged field (returns None if field should always be included).
+///
+/// Must match the behavior of `generate_tagged_field_write` which only checks is_empty()
+/// for String and Array types. All other types are always written.
+fn get_default_check(field: &FieldSpec, field_name: &str) -> Option<String> {
+    let nullable = is_nullable_field(field);
+    if nullable {
+        // For nullable fields, check if the value is Some (non-null means non-default)
+        return Some(format!("self.{}.is_some()", field_name));
+    }
+    match field.field_type() {
+        FieldType::String => Some(format!("!self.{}.is_empty()", field_name)),
+        FieldType::Array(_) => Some(format!("!self.{}.is_empty()", field_name)),
+        _ => {
+            // For all other types, always include (matches write method behavior)
+            None
+        },
+    }
+}
+
+/// Generate the content size for a tagged field (the data portion, plus the size varint wrapper).
+fn generate_tagged_field_content_size(
+    file: &mut fs::File,
+    field: &FieldSpec,
+    field_name: &str,
+    _flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let nullable = is_nullable_field(field);
+    // For nullable tagged fields, we know self.field is Some() because the caller checked.
+    // We need to use the unwrapped value for accessing .len() etc.
+    let accessor = if nullable {
+        format!("self.{}.as_ref().unwrap()", field_name)
+    } else {
+        format!("self.{}", field_name)
+    };
+
+    // Tagged fields always use flexible encoding (varint).
+    // We need to calculate the inner size and then add varint(inner_size) as the size prefix.
+    match field.field_type() {
+        FieldType::Bool | FieldType::Int8 => {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}size.add_bytes(1);", indent)?;
+        },
+        FieldType::Int16 | FieldType::Uint16 => {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(2)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}size.add_bytes(2);", indent)?;
+        },
+        FieldType::Int32 | FieldType::Uint32 => {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(4)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}size.add_bytes(4);", indent)?;
+        },
+        FieldType::Int64 => {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(8)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}size.add_bytes(8);", indent)?;
+        },
+        FieldType::Float64 => {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(8)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}size.add_bytes(8);", indent)?;
+        },
+        FieldType::Uuid => {
+            writeln!(
+                file,
+                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(16)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}size.add_bytes(16);", indent)?;
+        },
+        FieldType::String => {
+            // String in tagged field: varint(inner_size) where inner_size = varint(len+1) + len
+            writeln!(file, "{}{{", indent)?;
+            writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
+            writeln!(
+                file,
+                "{}    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                indent
+            )?;
+            writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        },
+        FieldType::Bytes | FieldType::Records => {
+            writeln!(file, "{}{{", indent)?;
+            writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
+            writeln!(
+                file,
+                "{}    let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                indent
+            )?;
+            writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        },
+        FieldType::Array(element_type) => {
+            // For tagged arrays, we need to compute the total array serialized size
+            writeln!(file, "{}{{", indent)?;
+            writeln!(file, "{}    let mut array_size: i32 = 0;", indent)?;
+            // Array length prefix (varint(len+1))
+            writeln!(
+                file,
+                "{}    array_size += crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1);",
+                indent, accessor
+            )?;
+            // Element sizes
+            let fixed_elem = fixed_size_of(element_type);
+            if let Some(elem_size) = fixed_elem {
+                writeln!(file, "{}    array_size += {}.len() as i32 * {};", indent, accessor, elem_size)?;
+            } else {
+                writeln!(file, "{}    for element in &*{} {{", indent, accessor)?;
+                match element_type.as_ref() {
+                    FieldType::String => {
+                        writeln!(file, "{}        let elem_len = element.len() as u32;", indent)?;
+                        writeln!(
+                            file,
+                            "{}        array_size += crate::common::protocol::varint::size_of_unsigned_varint(elem_len + 1);",
+                            indent
+                        )?;
+                        writeln!(file, "{}        array_size += elem_len as i32;", indent)?;
+                    },
+                    FieldType::Struct(_) => {
+                        writeln!(file, "{}        let mut elem_acc = MessageSizeAccumulator::new();", indent)?;
+                        writeln!(file, "{}        element.add_size(&mut elem_acc, cache, version)?;", indent)?;
+                        writeln!(file, "{}        array_size += elem_acc.total_size();", indent)?;
+                    },
+                    _ => {},
+                }
+                writeln!(file, "{}    }}", indent)?;
+            }
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(array_size as u32)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}    size.add_bytes(array_size);", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        },
+        FieldType::Struct(_) => {
+            // For tagged structs, compute struct size in a sub-accumulator
+            writeln!(file, "{}{{", indent)?;
+            writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
+            writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version)?;", indent, accessor)?;
+            writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
+            writeln!(
+                file,
+                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(struct_size as u32)); // size prefix",
+                indent
+            )?;
+            writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        },
+    }
 
     Ok(())
 }
@@ -1041,6 +1820,7 @@ fn generate_tagged_field_read(
             writeln!(file, "{}                {} => {{", indent, tag)?;
             writeln!(file, "{}                    // Tagged field: {}", indent, field.name())?;
 
+            let nullable = is_nullable_field(field);
             // Generate the read code for this tagged field
             match field.field_type() {
                 FieldType::String => {
@@ -1049,67 +1829,102 @@ fn generate_tagged_field_read(
                         "{}                    let length = readable.read_unsigned_varint()?;",
                         indent
                     )?;
-                    writeln!(file, "{}                    if length == 0 {{", indent)?;
-                    writeln!(file, "{}                        result.{} = String::new();", indent, field_name)?;
-                    writeln!(file, "{}                    }} else {{", indent)?;
-                    writeln!(
-                        file,
-                        "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
-                        indent
-                    )?;
-                    writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
-                    writeln!(
-                        file,
-                        "{}                        result.{} = String::from_utf8(bytes)",
-                        indent, field_name
-                    )?;
-                    writeln!(
-                        file,
-                        "{}                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;",
-                        indent
-                    )?;
-                    writeln!(file, "{}                    }}", indent)?;
+                    if nullable {
+                        writeln!(file, "{}                    if length == 0 {{", indent)?;
+                        writeln!(file, "{}                        result.{} = None;", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        result.{} = Some(String::from_utf8(bytes)",
+                            indent, field_name
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                            indent
+                        )?;
+                        writeln!(file, "{}                    }}", indent)?;
+                    } else {
+                        writeln!(file, "{}                    if length == 0 {{", indent)?;
+                        writeln!(file, "{}                        result.{} = String::new();", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        result.{} = String::from_utf8(bytes)",
+                            indent, field_name
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;",
+                            indent
+                        )?;
+                        writeln!(file, "{}                    }}", indent)?;
+                    }
                 },
                 FieldType::Bool => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_byte()? != 0;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_byte()? != 0{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Int8 => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_byte()? as i8;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_byte()? as i8{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Int16 => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_short()?;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_short()?{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Int32 => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_int()?;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_int()?{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Int64 => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_long()?;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_long()?{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Uuid => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_uuid()?;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_uuid()?{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Array(element_type) => {
@@ -1118,16 +1933,36 @@ fn generate_tagged_field_read(
                         "{}                    let length = readable.read_unsigned_varint()?;",
                         indent
                     )?;
-                    writeln!(file, "{}                    if length == 0 {{", indent)?;
-                    writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
-                    writeln!(file, "{}                    }} else {{", indent)?;
-                    writeln!(file, "{}                        let length = length - 1;", indent)?;
-                    writeln!(
-                        file,
-                        "{}                        result.{} = Vec::with_capacity(length as usize);",
-                        indent, field_name
-                    )?;
-                    writeln!(file, "{}                        for _ in 0..length {{", indent)?;
+                    if nullable {
+                        writeln!(file, "{}                    if length == 0 {{", indent)?;
+                        writeln!(file, "{}                        result.{} = None;", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(file, "{}                        let length = length - 1;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        let mut _arr = Vec::with_capacity(length as usize);",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        for _ in 0..length {{", indent)?;
+                    } else {
+                        writeln!(file, "{}                    if length == 0 {{", indent)?;
+                        writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(file, "{}                        let length = length - 1;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        result.{} = Vec::with_capacity(length as usize);",
+                            indent, field_name
+                        )?;
+                        writeln!(file, "{}                        for _ in 0..length {{", indent)?;
+                    }
+
+                    // For nullable arrays, push to _arr; for non-nullable, push to result.field
+                    let push_target = if nullable {
+                        "_arr"
+                    } else {
+                        &format!("result.{}", field_name)
+                    };
 
                     match element_type.as_ref() {
                         FieldType::String => {
@@ -1139,8 +1974,8 @@ fn generate_tagged_field_read(
                             writeln!(file, "{}                            if len == 0 {{", indent)?;
                             writeln!(
                                 file,
-                                "{}                                result.{}.push(String::new());",
-                                indent, field_name
+                                "{}                                {}.push(String::new());",
+                                indent, push_target
                             )?;
                             writeln!(file, "{}                            }} else {{", indent)?;
                             writeln!(
@@ -1155,8 +1990,8 @@ fn generate_tagged_field_read(
                             )?;
                             writeln!(
                                 file,
-                                "{}                                result.{}.push(String::from_utf8(bytes)",
-                                indent, field_name
+                                "{}                                {}.push(String::from_utf8(bytes)",
+                                indent, push_target
                             )?;
                             writeln!(
                                 file,
@@ -1168,57 +2003,57 @@ fn generate_tagged_field_read(
                         FieldType::Struct(struct_name) => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push({}::read(readable, version)?);",
-                                indent, field_name, struct_name
+                                "{}                            {}.push({}::read(readable, version)?);",
+                                indent, push_target, struct_name
                             )?;
                         },
                         FieldType::Uuid => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_uuid()?);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_uuid()?);",
+                                indent, push_target
                             )?;
                         },
                         FieldType::Bool => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_byte()? != 0);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_byte()? != 0);",
+                                indent, push_target
                             )?;
                         },
                         FieldType::Int8 => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_byte()? as i8);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_byte()? as i8);",
+                                indent, push_target
                             )?;
                         },
                         FieldType::Int16 => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_short()?);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_short()?);",
+                                indent, push_target
                             )?;
                         },
                         FieldType::Int32 => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_int()?);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_int()?);",
+                                indent, push_target
                             )?;
                         },
                         FieldType::Int64 => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_long()?);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_long()?);",
+                                indent, push_target
                             )?;
                         },
                         FieldType::Float64 => {
                             writeln!(
                                 file,
-                                "{}                            result.{}.push(readable.read_double()?);",
-                                indent, field_name
+                                "{}                            {}.push(readable.read_double()?);",
+                                indent, push_target
                             )?;
                         },
                         _ => {
@@ -1232,6 +2067,9 @@ fn generate_tagged_field_read(
                     }
 
                     writeln!(file, "{}                        }}", indent)?;
+                    if nullable {
+                        writeln!(file, "{}                        result.{} = Some(_arr);", indent, field_name)?;
+                    }
                     writeln!(file, "{}                    }}", indent)?;
                 },
                 FieldType::Struct(struct_name) => {
@@ -1247,17 +2085,27 @@ fn generate_tagged_field_read(
                         "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::from_bytes(struct_bytes);",
                         indent
                     )?;
-                    writeln!(
-                        file,
-                        "{}                    result.{} = {}::read(&mut struct_accessor, version)?;",
-                        indent, field_name, struct_name
-                    )?;
+                    if nullable {
+                        writeln!(
+                            file,
+                            "{}                    result.{} = Some({}::read(&mut struct_accessor, version)?);",
+                            indent, field_name, struct_name
+                        )?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}                    result.{} = {}::read(&mut struct_accessor, version)?;",
+                            indent, field_name, struct_name
+                        )?;
+                    }
                 },
                 FieldType::Float64 => {
+                    let wrap = if nullable { "Some(" } else { "" };
+                    let close = if nullable { ")" } else { "" };
                     writeln!(
                         file,
-                        "{}                    result.{} = readable.read_double()?;",
-                        indent, field_name
+                        "{}                    result.{} = {}readable.read_double()?{};",
+                        indent, field_name, wrap, close
                     )?;
                 },
                 FieldType::Bytes | FieldType::Records => {
@@ -1266,17 +2114,31 @@ fn generate_tagged_field_read(
                         "{}                    let len = readable.read_unsigned_varint()?;",
                         indent
                     )?;
-                    writeln!(file, "{}                    if len > 0 {{", indent)?;
-                    writeln!(
-                        file,
-                        "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
-                        indent
-                    )?;
-                    writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
-                    writeln!(file, "{}                        result.{} = bytes;", indent, field_name)?;
-                    writeln!(file, "{}                    }} else {{", indent)?;
-                    writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
-                    writeln!(file, "{}                    }}", indent)?;
+                    if nullable {
+                        writeln!(file, "{}                    if len == 0 {{", indent)?;
+                        writeln!(file, "{}                        result.{} = None;", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(file, "{}                        result.{} = Some(bytes);", indent, field_name)?;
+                        writeln!(file, "{}                    }}", indent)?;
+                    } else {
+                        writeln!(file, "{}                    if len > 0 {{", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(file, "{}                        result.{} = bytes;", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
+                        writeln!(file, "{}                    }}", indent)?;
+                    }
                 },
                 _ => {
                     // Skip unknown/unhandled types
@@ -1348,21 +2210,28 @@ fn generate_tagged_field_write(
             }
 
             // Check if field has non-default value (for optional fields)
-            match field.field_type() {
-                FieldType::String => {
-                    writeln!(file, "{}            if !self.{}.is_empty() {{", indent, field_name)?;
-                    writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
-                    writeln!(file, "{}            }}", indent)?;
-                },
-                FieldType::Array(_) => {
-                    writeln!(file, "{}            if !self.{}.is_empty() {{", indent, field_name)?;
-                    writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
-                    writeln!(file, "{}            }}", indent)?;
-                },
-                _ => {
-                    // For non-optional types, always write
-                    writeln!(file, "{}            num_tagged_fields += 1;", indent)?;
-                },
+            let nullable = is_nullable_field(field);
+            if nullable {
+                writeln!(file, "{}            if self.{}.is_some() {{", indent, field_name)?;
+                writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
+                writeln!(file, "{}            }}", indent)?;
+            } else {
+                match field.field_type() {
+                    FieldType::String => {
+                        writeln!(file, "{}            if !self.{}.is_empty() {{", indent, field_name)?;
+                        writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
+                        writeln!(file, "{}            }}", indent)?;
+                    },
+                    FieldType::Array(_) => {
+                        writeln!(file, "{}            if !self.{}.is_empty() {{", indent, field_name)?;
+                        writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
+                        writeln!(file, "{}            }}", indent)?;
+                    },
+                    _ => {
+                        // For non-optional types, always write
+                        writeln!(file, "{}            num_tagged_fields += 1;", indent)?;
+                    },
+                }
             }
 
             writeln!(file, "{}        }}", indent)?;
@@ -1397,11 +2266,30 @@ fn generate_tagged_field_write(
                 }
 
                 // Check if we should write this field
-                let should_write = match field.field_type() {
-                    FieldType::String | FieldType::Array(_) => {
-                        format!("!self.{}.is_empty()", field_name)
-                    },
-                    _ => "true".to_string(),
+                let nullable = is_nullable_field(field);
+                let should_write = if nullable {
+                    format!("self.{}.is_some()", field_name)
+                } else {
+                    match field.field_type() {
+                        FieldType::String | FieldType::Array(_) => {
+                            format!("!self.{}.is_empty()", field_name)
+                        },
+                        _ => "true".to_string(),
+                    }
+                };
+
+                // For nullable tagged fields, accessor is the unwrapped ref value
+                // For non-nullable, accessor is the field directly
+                let tagged_accessor = if nullable {
+                    format!("self.{}.as_ref().unwrap()", field_name)
+                } else {
+                    format!("self.{}", field_name)
+                };
+                // For Copy types (bool, int, float), nullable needs * deref, non-nullable doesn't
+                let tagged_copy_accessor = if nullable {
+                    format!("*self.{}.as_ref().unwrap()", field_name)
+                } else {
+                    format!("self.{}", field_name)
                 };
 
                 writeln!(file, "{}            if {} {{", indent, should_write)?;
@@ -1414,10 +2302,15 @@ fn generate_tagged_field_write(
                 // Calculate and write size, then write the field data
                 match field.field_type() {
                     FieldType::String => {
-                        writeln!(file, "{}                let bytes = self.{}.as_bytes();", indent, field_name)?;
+                        writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
                         writeln!(
                             file,
-                            "{}                let size = (bytes.len() as u32) + 1; // +1 for varint length",
+                            "{}                let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                let size = (string_prefix_size + bytes.len() as i32) as u32;",
                             indent
                         )?;
                         writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
@@ -1436,8 +2329,8 @@ fn generate_tagged_field_write(
                         )?;
                         writeln!(
                             file,
-                            "{}                writable.write_byte(if self.{} {{ 1 }} else {{ 0 }})?;",
-                            indent, field_name
+                            "{}                writable.write_byte(if {} {{ 1 }} else {{ 0 }})?;",
+                            indent, tagged_copy_accessor
                         )?;
                     },
                     FieldType::Int8 => {
@@ -1446,7 +2339,11 @@ fn generate_tagged_field_write(
                             "{}                writable.write_unsigned_varint(1)?; // size = 1 byte",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_byte(self.{})?;", indent, field_name)?;
+                        writeln!(
+                            file,
+                            "{}                writable.write_byte({})?;",
+                            indent, tagged_copy_accessor
+                        )?;
                     },
                     FieldType::Int16 => {
                         writeln!(
@@ -1454,7 +2351,11 @@ fn generate_tagged_field_write(
                             "{}                writable.write_unsigned_varint(2)?; // size = 2 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_short(self.{})?;", indent, field_name)?;
+                        writeln!(
+                            file,
+                            "{}                writable.write_short({})?;",
+                            indent, tagged_copy_accessor
+                        )?;
                     },
                     FieldType::Int32 => {
                         writeln!(
@@ -1462,7 +2363,7 @@ fn generate_tagged_field_write(
                             "{}                writable.write_unsigned_varint(4)?; // size = 4 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_int(self.{})?;", indent, field_name)?;
+                        writeln!(file, "{}                writable.write_int({})?;", indent, tagged_copy_accessor)?;
                     },
                     FieldType::Int64 => {
                         writeln!(
@@ -1470,7 +2371,11 @@ fn generate_tagged_field_write(
                             "{}                writable.write_unsigned_varint(8)?; // size = 8 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_long(self.{})?;", indent, field_name)?;
+                        writeln!(
+                            file,
+                            "{}                writable.write_long({})?;",
+                            indent, tagged_copy_accessor
+                        )?;
                     },
                     FieldType::Uuid => {
                         writeln!(
@@ -1478,7 +2383,7 @@ fn generate_tagged_field_write(
                             "{}                writable.write_unsigned_varint(16)?; // size = 16 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_uuid(&self.{})?;", indent, field_name)?;
+                        writeln!(file, "{}                writable.write_uuid(&{})?;", indent, tagged_accessor)?;
                     },
                     FieldType::Array(element_type) => {
                         // For arrays, we need to calculate the size first by writing to a temp buffer
@@ -1491,40 +2396,64 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                // Write array length", indent)?;
                         writeln!(
                             file,
-                            "{}                size_accessor.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
-                            indent, field_name
+                            "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                            indent, tagged_accessor
                         )?;
                         writeln!(file, "{}                // Write array elements", indent)?;
 
                         // Different handling based on element type
                         match element_type.as_ref() {
                             FieldType::Uuid => {
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(file, "{}                    size_accessor.write_uuid(element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int8 => {
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(file, "{}                    size_accessor.write_byte(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int16 => {
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(file, "{}                    size_accessor.write_short(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int32 => {
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(file, "{}                    size_accessor.write_int(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int64 => {
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(file, "{}                    size_accessor.write_long(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::String => {
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(file, "{}                    let bytes = element.as_bytes();", indent)?;
                                 writeln!(
                                     file,
@@ -1536,7 +2465,11 @@ fn generate_tagged_field_write(
                             },
                             _ => {
                                 // For structs and other complex types, assume they have a write method
-                                writeln!(file, "{}                for element in &self.{} {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
                                 writeln!(
                                     file,
                                     "{}                    element.write(&mut size_accessor, version)?;",
@@ -1556,7 +2489,11 @@ fn generate_tagged_field_write(
                             "{}                writable.write_unsigned_varint(8)?; // size = 8 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_double(self.{})?;", indent, field_name)?;
+                        writeln!(
+                            file,
+                            "{}                writable.write_double({})?;",
+                            indent, tagged_copy_accessor
+                        )?;
                     },
                     FieldType::Bytes | FieldType::Records => {
                         writeln!(file, "{}                // Calculate bytes size", indent)?;
@@ -1567,13 +2504,13 @@ fn generate_tagged_field_write(
                         )?;
                         writeln!(
                             file,
-                            "{}                size_accessor.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
-                            indent, field_name
+                            "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                            indent, tagged_accessor
                         )?;
                         writeln!(
                             file,
-                            "{}                size_accessor.write_bytes(&self.{})?;",
-                            indent, field_name
+                            "{}                size_accessor.write_bytes(&*{})?;",
+                            indent, tagged_accessor
                         )?;
                         writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
                         writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
@@ -1589,8 +2526,8 @@ fn generate_tagged_field_write(
                         )?;
                         writeln!(
                             file,
-                            "{}                self.{}.write(&mut size_accessor, version)?;",
-                            indent, field_name
+                            "{}                {}.write(&mut size_accessor, version)?;",
+                            indent, tagged_accessor
                         )?;
                         writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
                         writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
@@ -1800,6 +2737,14 @@ fn generate_write_method(
                 )?;
             }
             generate_tagged_field_write(file, &tagged_fields, flexible_versions, true)?;
+            writeln!(file, "        }} else if !self.unknown_tagged_fields.is_empty() {{")?;
+            writeln!(file, "            return Err(std::io::Error::new(")?;
+            writeln!(file, "                std::io::ErrorKind::InvalidData,")?;
+            writeln!(
+                file,
+                "                format!(\"Tagged fields were set, but version {{}} of this message does not support them.\", version),"
+            )?;
+            writeln!(file, "            ));")?;
             writeln!(file, "        }}")?;
         }
     } else if !flexible_versions.empty() {
@@ -1837,6 +2782,14 @@ fn generate_write_method(
             writeln!(file, "                writable.write_unsigned_varint(field.size() as u32)?;")?;
             writeln!(file, "                writable.write_bytes(field.data())?;")?;
             writeln!(file, "            }}")?;
+            writeln!(file, "        }} else if !self.unknown_tagged_fields.is_empty() {{")?;
+            writeln!(file, "            return Err(std::io::Error::new(")?;
+            writeln!(file, "                std::io::ErrorKind::InvalidData,")?;
+            writeln!(
+                file,
+                "                format!(\"Tagged fields were set, but version {{}} of this message does not support them.\", version),"
+            )?;
+            writeln!(file, "            ));")?;
             writeln!(file, "        }}")?;
         }
     }
@@ -1855,6 +2808,7 @@ fn generate_field_read(
     let field_name = to_snake_case(field.name());
     let field_name = escape_rust_keyword(&field_name);
     let versions = field.versions();
+    let nullable = is_nullable_field(field);
 
     // Determine indentation based on whether we have a version check
     let has_version_check = versions != Versions::ALL;
@@ -1903,184 +2857,28 @@ fn generate_field_read(
             writeln!(file, "{}result.{} = readable.read_double()?;", indent, field_name)?;
         },
         FieldType::String => {
-            // Check if this version uses flexible encoding
-            if !flexible_versions.empty() {
-                if flexible_versions.lowest() == 0 {
-                    // All versions are flexible
-                    writeln!(file, "{}// Flexible version: read_unsigned_varint length + 1", indent)?;
-                    writeln!(file, "{}let len = readable.read_unsigned_varint()?;", indent)?;
-                    writeln!(file, "{}if len == 0 {{", indent)?;
-                    writeln!(
-                        file,
-                        "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null string not allowed\"));",
-                        indent
-                    )?;
-                    writeln!(file, "{}}}", indent)?;
-                    writeln!(file, "{}let length = len - 1;", indent)?;
-                } else {
-                    if flexible_versions.highest() == i16::MAX {
-                        writeln!(file, "{}let length = if version >= {} {{", indent, flexible_versions.lowest())?;
-                    } else {
-                        writeln!(
-                            file,
-                            "{}let length = if version >= {} && version <= {} {{",
-                            indent,
-                            flexible_versions.lowest(),
-                            flexible_versions.highest()
-                        )?;
-                    }
-                    writeln!(file, "{}    // Flexible version: read_unsigned_varint length + 1", indent)?;
-                    writeln!(file, "{}    let len = readable.read_unsigned_varint()?;", indent)?;
-                    writeln!(file, "{}    if len == 0 {{", indent)?;
-                    writeln!(
-                        file,
-                        "{}        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null string not allowed\"));",
-                        indent
-                    )?;
-                    writeln!(file, "{}    }}", indent)?;
-                    writeln!(file, "{}    len - 1", indent)?;
-                    writeln!(file, "{}}} else {{", indent)?;
-                    writeln!(file, "{}    // Standard version: read_short length", indent)?;
-                    writeln!(file, "{}    let len = readable.read_short()?;", indent)?;
-                    writeln!(file, "{}    if len < 0 {{", indent)?;
-                    writeln!(
-                        file,
-                        "{}        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative string length\"));",
-                        indent
-                    )?;
-                    writeln!(file, "{}    }}", indent)?;
-                    writeln!(file, "{}    len as u32", indent)?;
-                    writeln!(file, "{}}};", indent)?
-                }
-            } else {
-                writeln!(file, "{}// Standard version: read_short length", indent)?;
-                writeln!(file, "{}let length = {{", indent)?;
-                writeln!(file, "{}    let len = readable.read_short()?;", indent)?;
-                writeln!(file, "{}    if len < 0 {{", indent)?;
-                writeln!(
-                    file,
-                    "{}        return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative string length\"));",
-                    indent
-                )?;
-                writeln!(file, "{}    }}", indent)?;
-                writeln!(file, "{}    len as u32", indent)?;
-                writeln!(file, "{}}};", indent)?;
-            }
-            writeln!(file, "{}let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}readable.read_bytes(&mut bytes)?;", indent)?;
-            writeln!(file, "{}result.{} = String::from_utf8(bytes)", indent, field_name)?;
-            writeln!(
-                file,
-                "{}    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;",
-                indent
-            )?
+            generate_string_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
         FieldType::Bytes | FieldType::Records => {
-            // Check if this version uses flexible encoding
-            if !flexible_versions.empty() {
-                if flexible_versions.highest() == i16::MAX {
-                    writeln!(file, "            let length = if version >= {} {{", flexible_versions.lowest())?;
-                } else {
-                    writeln!(
-                        file,
-                        "            let length = if version >= {} && version <= {} {{",
-                        flexible_versions.lowest(),
-                        flexible_versions.highest()
-                    )?;
-                }
-                writeln!(file, "                // Flexible version: read_unsigned_varint length + 1")?;
-                writeln!(file, "                let len = readable.read_unsigned_varint()?;")?;
-                writeln!(file, "                if len == 0 {{ 0 }} else {{ len - 1 }}")?;
-                writeln!(file, "            }} else {{")?;
-                writeln!(file, "                // Standard version: read_int length")?;
-                writeln!(file, "                let len = readable.read_int()?;")?;
-                writeln!(file, "                if len < 0 {{ 0 }} else {{ len as u32 }}")?;
-                writeln!(file, "            }};")?;
-            } else {
-                writeln!(file, "            // Standard version: read_int length")?;
-                writeln!(file, "            let length = {{")?;
-                writeln!(file, "                let len = readable.read_int()?;")?;
-                writeln!(file, "                if len < 0 {{ 0 }} else {{ len as u32 }}")?;
-                writeln!(file, "            }};")?;
-            }
-            writeln!(file, "            if length == 0 {{")?;
-            writeln!(file, "                result.{} = Vec::new();", field_name)?;
-            writeln!(file, "            }} else {{")?;
-            writeln!(file, "                let mut bytes = vec![0u8; length as usize];")?;
-            writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
-            writeln!(file, "                result.{} = bytes;", field_name)?;
-            writeln!(file, "            }}")?;
+            generate_bytes_read(file, &field_name, flexible_versions, indent, nullable)?;
         },
         FieldType::Array(element_type) => {
-            // Check if this version uses flexible encoding
-            if !flexible_versions.empty() {
-                if flexible_versions.lowest() == 0 {
-                    // All versions are flexible
-                    writeln!(file, "            // Flexible version: read_unsigned_varint length + 1")?;
-                    writeln!(file, "            let len = readable.read_unsigned_varint()?;")?;
-                    writeln!(file, "            if len == 0 {{")?;
-                    writeln!(
-                        file,
-                        "                return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null array not allowed\"));"
-                    )?;
-                    writeln!(file, "            }}")?;
-                    writeln!(file, "            let length = len - 1;")?;
-                } else {
-                    if flexible_versions.highest() == i16::MAX {
-                        writeln!(file, "            let length = if version >= {} {{", flexible_versions.lowest())?;
-                    } else {
-                        writeln!(
-                            file,
-                            "            let length = if version >= {} && version <= {} {{",
-                            flexible_versions.lowest(),
-                            flexible_versions.highest()
-                        )?;
-                    }
-                    writeln!(file, "                // Flexible version: read_unsigned_varint length + 1")?;
-                    writeln!(file, "                let len = readable.read_unsigned_varint()?;")?;
-                    writeln!(file, "                if len == 0 {{")?;
-                    writeln!(
-                        file,
-                        "                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null array not allowed\"));"
-                    )?;
-                    writeln!(file, "                }}")?;
-                    writeln!(file, "                len - 1")?;
-                    writeln!(file, "            }} else {{")?;
-                    writeln!(file, "                // Standard version: read_int length")?;
-                    writeln!(file, "                let len = readable.read_int()?;")?;
-                    writeln!(file, "                if len < 0 {{")?;
-                    writeln!(
-                        file,
-                        "                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative array length\"));"
-                    )?;
-                    writeln!(file, "                }}")?;
-                    writeln!(file, "                len as u32")?;
-                    writeln!(file, "            }};")?;
-                }
-            } else {
-                writeln!(file, "            // Standard version: read_int length")?;
-                writeln!(file, "            let length = {{")?;
-                writeln!(file, "                let len = readable.read_int()?;")?;
-                writeln!(file, "                if len < 0 {{")?;
-                writeln!(
-                    file,
-                    "                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative array length\"));"
-                )?;
-                writeln!(file, "                }}")?;
-                writeln!(file, "                len as u32")?;
-                writeln!(file, "            }};")?;
-            }
-            writeln!(file, "            result.{} = Vec::with_capacity(length as usize);", field_name)?;
-            writeln!(file, "            for _ in 0..length {{")?;
-            generate_array_element_read(file, element_type.as_ref(), &field_name)?;
-            writeln!(file, "            }}")?;
+            generate_array_read(file, &field_name, element_type, flexible_versions, indent, nullable)?;
         },
         FieldType::Struct(struct_name) => {
-            writeln!(
-                file,
-                "{}result.{} = {}::read(readable, version)?;",
-                indent, field_name, struct_name
-            )?;
+            if nullable {
+                writeln!(
+                    file,
+                    "{}result.{} = Some({}::read(readable, version)?);",
+                    indent, field_name, struct_name
+                )?;
+            } else {
+                writeln!(
+                    file,
+                    "{}result.{} = {}::read(readable, version)?;",
+                    indent, field_name, struct_name
+                )?;
+            }
         },
     }
 
@@ -2092,87 +2890,423 @@ fn generate_field_read(
     Ok(())
 }
 
-fn generate_array_element_read(
+/// Generate string field read code, handling nullable fields.
+fn generate_string_read(
+    file: &mut fs::File,
+    field_name: &str,
+    flexible_versions: Versions,
+    indent: &str,
+    nullable: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let some_wrap = if nullable { "Some(" } else { "" };
+    let some_close = if nullable { ")" } else { "" };
+    let null_action = if nullable {
+        format!("result.{} = None;", field_name)
+    } else {
+        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null string not allowed\"));".to_string()
+    };
+    let neg_action = if nullable {
+        format!("result.{} = None;", field_name)
+    } else {
+        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative string length\"));".to_string()
+    };
+
+    if !flexible_versions.empty() {
+        if flexible_versions.lowest() == 0 {
+            // All versions are flexible
+            writeln!(file, "{}let len = readable.read_unsigned_varint()?;", indent)?;
+            writeln!(file, "{}if len == 0 {{", indent)?;
+            writeln!(file, "{}    {}", indent, null_action)?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    let length = len - 1;", indent)?;
+            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
+            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(
+                file,
+                "{}    result.{} = {}String::from_utf8(bytes)",
+                indent, field_name, some_wrap
+            )?;
+            writeln!(
+                file,
+                "{}        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+                indent, some_close
+            )?;
+            writeln!(file, "{}}}", indent)?;
+        } else {
+            // Mixed flexible/standard
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "{}if version >= {} && version <= {} {{",
+                    indent,
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            writeln!(file, "{}    let len = readable.read_unsigned_varint()?;", indent)?;
+            writeln!(file, "{}    if len == 0 {{", indent)?;
+            writeln!(file, "{}        {}", indent, null_action)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let length = len - 1;", indent)?;
+            writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
+            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(
+                file,
+                "{}        result.{} = {}String::from_utf8(bytes)",
+                indent, field_name, some_wrap
+            )?;
+            writeln!(
+                file,
+                "{}            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+                indent, some_close
+            )?;
+            writeln!(file, "{}    }}", indent)?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    let len = readable.read_short()?;", indent)?;
+            writeln!(file, "{}    if len < 0 {{", indent)?;
+            writeln!(file, "{}        {}", indent, neg_action)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
+            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(
+                file,
+                "{}        result.{} = {}String::from_utf8(bytes)",
+                indent, field_name, some_wrap
+            )?;
+            writeln!(
+                file,
+                "{}            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+                indent, some_close
+            )?;
+            writeln!(file, "{}    }}", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        }
+    } else {
+        // Standard only
+        writeln!(file, "{}let len = readable.read_short()?;", indent)?;
+        writeln!(file, "{}if len < 0 {{", indent)?;
+        writeln!(file, "{}    {}", indent, neg_action)?;
+        writeln!(file, "{}}} else {{", indent)?;
+        writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
+        writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+        writeln!(
+            file,
+            "{}    result.{} = {}String::from_utf8(bytes)",
+            indent, field_name, some_wrap
+        )?;
+        writeln!(
+            file,
+            "{}        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+            indent, some_close
+        )?;
+        writeln!(file, "{}}}", indent)?;
+    }
+    Ok(())
+}
+
+/// Generate bytes/records field read code, handling nullable fields.
+fn generate_bytes_read(
+    file: &mut fs::File,
+    field_name: &str,
+    flexible_versions: Versions,
+    indent: &str,
+    nullable: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let some_wrap = if nullable { "Some(" } else { "" };
+    let some_close = if nullable { ")" } else { "" };
+
+    if !flexible_versions.empty() {
+        if flexible_versions.highest() == i16::MAX {
+            writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+        } else {
+            writeln!(
+                file,
+                "{}if version >= {} && version <= {} {{",
+                indent,
+                flexible_versions.lowest(),
+                flexible_versions.highest()
+            )?;
+        }
+        writeln!(file, "{}    let len = readable.read_unsigned_varint()?;", indent)?;
+        if nullable {
+            writeln!(file, "{}    if len == 0 {{", indent)?;
+            writeln!(file, "{}        result.{} = None;", indent, field_name)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let length = len - 1;", indent)?;
+            writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
+            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
+            writeln!(file, "{}    }}", indent)?;
+        } else {
+            writeln!(file, "{}    let length = if len == 0 {{ 0 }} else {{ len - 1 }};", indent)?;
+            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
+            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
+        }
+        writeln!(file, "{}}} else {{", indent)?;
+        writeln!(file, "{}    let len = readable.read_int()?;", indent)?;
+        if nullable {
+            writeln!(file, "{}    if len < 0 {{", indent)?;
+            writeln!(file, "{}        result.{} = None;", indent, field_name)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
+            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
+            writeln!(file, "{}    }}", indent)?;
+        } else {
+            writeln!(file, "{}    let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
+            writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
+            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
+        }
+        writeln!(file, "{}}}", indent)?;
+    } else {
+        writeln!(file, "{}let len = readable.read_int()?;", indent)?;
+        if nullable {
+            writeln!(file, "{}if len < 0 {{", indent)?;
+            writeln!(file, "{}    result.{} = None;", indent, field_name)?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
+            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    result.{} = Some(bytes);", indent, field_name)?;
+            writeln!(file, "{}}}", indent)?;
+        } else {
+            writeln!(file, "{}let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
+            writeln!(file, "{}let mut bytes = vec![0u8; length as usize];", indent)?;
+            writeln!(file, "{}readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}result.{} = {}bytes{};", indent, field_name, some_wrap, some_close)?;
+        }
+    }
+    Ok(())
+}
+
+/// Generate array field read code, handling nullable fields.
+fn generate_array_read(
+    file: &mut fs::File,
+    field_name: &str,
+    element_type: &FieldType,
+    flexible_versions: Versions,
+    indent: &str,
+    nullable: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let null_action = if nullable {
+        format!("result.{} = None;", field_name)
+    } else {
+        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null array not allowed\"));".to_string()
+    };
+    let neg_action = if nullable {
+        format!("result.{} = None;", field_name)
+    } else {
+        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative array length\"));".to_string()
+    };
+
+    // Helper to generate the read loop that populates the array
+    let gen_read_loop = |file: &mut fs::File, ind: &str, fn_name: &str| -> Result<(), Box<dyn std::error::Error>> {
+        if nullable {
+            writeln!(file, "{}let mut _arr = Vec::with_capacity(length as usize);", ind)?;
+            // We need a temporary field_name for element reads
+            writeln!(file, "{}for _ in 0..length {{", ind)?;
+            generate_array_element_read_to_vec(file, element_type, "_arr", flexible_versions)?;
+            writeln!(file, "{}}}", ind)?;
+            writeln!(file, "{}result.{} = Some(_arr);", ind, fn_name)?;
+        } else {
+            writeln!(file, "{}result.{} = Vec::with_capacity(length as usize);", ind, fn_name)?;
+            writeln!(file, "{}for _ in 0..length {{", ind)?;
+            generate_array_element_read(file, element_type, fn_name, flexible_versions)?;
+            writeln!(file, "{}}}", ind)?;
+        }
+        Ok(())
+    };
+
+    if !flexible_versions.empty() {
+        if flexible_versions.lowest() == 0 {
+            // All versions are flexible
+            writeln!(file, "{}let len = readable.read_unsigned_varint()?;", indent)?;
+            writeln!(file, "{}if len == 0 {{", indent)?;
+            writeln!(file, "{}    {}", indent, null_action)?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    let length = len - 1;", indent)?;
+            gen_read_loop(file, &format!("{}    ", indent), field_name)?;
+            writeln!(file, "{}}}", indent)?;
+        } else {
+            // Mixed flexible/standard
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "{}if version >= {} && version <= {} {{",
+                    indent,
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            writeln!(file, "{}    let len = readable.read_unsigned_varint()?;", indent)?;
+            writeln!(file, "{}    if len == 0 {{", indent)?;
+            writeln!(file, "{}        {}", indent, null_action)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let length = len - 1;", indent)?;
+            gen_read_loop(file, &format!("{}        ", indent), field_name)?;
+            writeln!(file, "{}    }}", indent)?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    let len = readable.read_int()?;", indent)?;
+            writeln!(file, "{}    if len < 0 {{", indent)?;
+            writeln!(file, "{}        {}", indent, neg_action)?;
+            writeln!(file, "{}    }} else {{", indent)?;
+            writeln!(file, "{}        let length = len as u32;", indent)?;
+            gen_read_loop(file, &format!("{}        ", indent), field_name)?;
+            writeln!(file, "{}    }}", indent)?;
+            writeln!(file, "{}}}", indent)?;
+        }
+    } else {
+        // Standard only
+        writeln!(file, "{}let len = readable.read_int()?;", indent)?;
+        writeln!(file, "{}if len < 0 {{", indent)?;
+        writeln!(file, "{}    {}", indent, neg_action)?;
+        writeln!(file, "{}}} else {{", indent)?;
+        writeln!(file, "{}    let length = len as u32;", indent)?;
+        gen_read_loop(file, &format!("{}    ", indent), field_name)?;
+        writeln!(file, "{}}}", indent)?;
+    }
+    Ok(())
+}
+
+/// Like generate_array_element_read but pushes to a local vec variable instead of result.field.
+fn generate_array_element_read_to_vec(
+    file: &mut fs::File,
+    element_type: &FieldType,
+    vec_name: &str,
+    flexible_versions: Versions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    // Reuse the same logic but with a different prefix (no "result." prefix)
+    generate_array_element_read_with_prefix(file, element_type, vec_name, "", flexible_versions)
+}
+
+fn generate_array_element_read_with_prefix(
     file: &mut fs::File,
     element_type: &FieldType,
     array_name: &str,
+    prefix: &str,
+    flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let target = format!("{}{}", prefix, array_name);
     match element_type {
         FieldType::Bool => {
-            writeln!(file, "                result.{}.push(readable.read_byte()? != 0);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_byte()? != 0);", target)?;
         },
         FieldType::Int8 => {
-            writeln!(file, "                result.{}.push(readable.read_byte()? as i8);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_byte()? as i8);", target)?;
         },
         FieldType::Int16 => {
-            writeln!(file, "                result.{}.push(readable.read_short()?);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_short()?);", target)?;
         },
         FieldType::Int32 => {
-            writeln!(file, "                result.{}.push(readable.read_int()?);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_int()?);", target)?;
         },
         FieldType::Int64 => {
-            writeln!(file, "                result.{}.push(readable.read_long()?);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_long()?);", target)?;
         },
         FieldType::Uint16 => {
-            writeln!(
-                file,
-                "                result.{}.push(readable.read_unsigned_short()?);",
-                array_name
-            )?;
+            writeln!(file, "                {}.push(readable.read_unsigned_short()?);", target)?;
         },
         FieldType::Uint32 => {
-            writeln!(
-                file,
-                "                result.{}.push(readable.read_unsigned_int()?);",
-                array_name
-            )?;
+            writeln!(file, "                {}.push(readable.read_unsigned_int()?);", target)?;
         },
         FieldType::Uuid => {
-            writeln!(file, "                result.{}.push(readable.read_uuid()?);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_uuid()?);", target)?;
         },
         FieldType::Float64 => {
-            writeln!(file, "                result.{}.push(readable.read_double()?);", array_name)?;
+            writeln!(file, "                {}.push(readable.read_double()?);", target)?;
         },
         FieldType::String => {
-            writeln!(file, "                let length = readable.read_short()?;")?;
-            writeln!(file, "                if length < 0 {{")?;
-            writeln!(
-                file,
-                "                    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative string length\"));"
-            )?;
-            writeln!(file, "                }}")?;
-            writeln!(file, "                let mut bytes = vec![0u8; length as usize];")?;
-            writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
-            writeln!(file, "                result.{}.push(String::from_utf8(bytes)", array_name)?;
-            writeln!(
-                file,
-                "                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);"
-            )?;
-        },
-        FieldType::Bytes | FieldType::Records => {
-            writeln!(file, "                let length = readable.read_int()?;")?;
-            writeln!(file, "                if length < 0 {{")?;
-            writeln!(file, "                    result.{}.push(Vec::new());", array_name)?;
-            writeln!(file, "                }} else {{")?;
-            writeln!(file, "                    let mut bytes = vec![0u8; length as usize];")?;
-            writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
-            writeln!(file, "                    result.{}.push(bytes);", array_name)?;
-            writeln!(file, "                }}")?;
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    // All versions flexible: use compact encoding
+                    writeln!(file, "                let str_len = readable.read_unsigned_varint()?;")?;
+                    writeln!(file, "                if str_len == 0 {{")?;
+                    writeln!(file, "                    {}.push(String::new());", target)?;
+                    writeln!(file, "                }} else {{")?;
+                    writeln!(file, "                    let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
+                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(
+                        file,
+                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        target
+                    )?;
+                    writeln!(file, "                }}")?;
+                } else {
+                    // Mixed versions: check at runtime
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "                if version >= {} {{", flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "                if version >= {} && version <= {} {{",
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(file, "                    let str_len = readable.read_unsigned_varint()?;")?;
+                    writeln!(file, "                    if str_len == 0 {{")?;
+                    writeln!(file, "                        {}.push(String::new());", target)?;
+                    writeln!(file, "                    }} else {{")?;
+                    writeln!(
+                        file,
+                        "                        let mut bytes = vec![0u8; (str_len - 1) as usize];"
+                    )?;
+                    writeln!(file, "                        readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(
+                        file,
+                        "                        {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        target
+                    )?;
+                    writeln!(file, "                    }}")?;
+                    writeln!(file, "                }} else {{")?;
+                    writeln!(file, "                    let str_len = readable.read_short()? as usize;")?;
+                    writeln!(file, "                    let mut bytes = vec![0u8; str_len];")?;
+                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(
+                        file,
+                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        target
+                    )?;
+                    writeln!(file, "                }}")?;
+                }
+            } else {
+                // No flexible versions: always use standard encoding
+                writeln!(file, "                let str_len = readable.read_short()? as usize;")?;
+                writeln!(file, "                let mut bytes = vec![0u8; str_len];")?;
+                writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
+                writeln!(
+                    file,
+                    "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                    target
+                )?;
+            }
         },
         FieldType::Struct(struct_name) => {
             writeln!(
                 file,
-                "                result.{}.push({}::read(readable, version)?);",
-                array_name, struct_name
+                "                {}.push({}::read(readable, version)?);",
+                target, struct_name
             )?;
         },
-        FieldType::Array(_) => {
-            // Nested arrays not common in Kafka protocol
-            writeln!(file, "                // TODO: Nested array not implemented")?;
+        _ => {
+            writeln!(file, "                // TODO: read array element {:?}", element_type)?;
         },
     }
-
     Ok(())
+}
+
+fn generate_array_element_read(
+    file: &mut fs::File,
+    element_type: &FieldType,
+    array_name: &str,
+    flexible_versions: Versions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    generate_array_element_read_with_prefix(file, element_type, array_name, "result.", flexible_versions)
 }
 
 fn generate_field_write(
@@ -2183,6 +3317,7 @@ fn generate_field_write(
     let field_name = to_snake_case(field.name());
     let field_name = escape_rust_keyword(&field_name);
     let versions = field.versions();
+    let nullable = is_nullable_field(field);
 
     // Determine if version check is needed
     let has_version_check = versions != Versions::ALL;
@@ -2202,154 +3337,144 @@ fn generate_field_write(
         }
     }
 
+    // For nullable fields, wrap in if let Some/None
+    let (inner_indent, accessor) = if nullable {
+        writeln!(file, "{}if let Some(ref _nv) = self.{} {{", indent, field_name)?;
+        let extra = format!("{}    ", indent);
+        (extra, "_nv".to_string())
+    } else {
+        (indent.to_string(), format!("self.{}", field_name))
+    };
+    let ind = &inner_indent;
+
     match field.field_type() {
         FieldType::Bool => {
-            writeln!(
-                file,
-                "{}writable.write_byte(if self.{} {{ 1 }} else {{ 0 }})?;",
-                indent, field_name
-            )?;
+            writeln!(file, "{}writable.write_byte(if {} {{ 1 }} else {{ 0 }})?;", ind, accessor)?;
         },
         FieldType::Int8 => {
-            writeln!(file, "{}writable.write_byte(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_byte({})?;", ind, accessor)?;
         },
         FieldType::Int16 => {
-            writeln!(file, "{}writable.write_short(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_short({})?;", ind, accessor)?;
         },
         FieldType::Int32 => {
-            writeln!(file, "{}writable.write_int(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_int({})?;", ind, accessor)?;
         },
         FieldType::Int64 => {
-            writeln!(file, "{}writable.write_long(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_long({})?;", ind, accessor)?;
         },
         FieldType::Uint16 => {
-            writeln!(file, "{}writable.write_unsigned_short(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_unsigned_short({})?;", ind, accessor)?;
         },
         FieldType::Uint32 => {
-            writeln!(file, "{}writable.write_unsigned_int(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_unsigned_int({})?;", ind, accessor)?;
         },
         FieldType::Uuid => {
-            writeln!(file, "{}writable.write_uuid(&self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_uuid(&{})?;", ind, accessor)?;
         },
         FieldType::Float64 => {
-            writeln!(file, "{}writable.write_double(self.{})?;", indent, field_name)?;
+            writeln!(file, "{}writable.write_double({})?;", ind, accessor)?;
         },
         FieldType::String => {
-            writeln!(file, "{}let bytes = self.{}.as_bytes();", indent, field_name)?;
+            writeln!(file, "{}let bytes = {}.as_bytes();", ind, accessor)?;
             // Check if this version uses flexible encoding
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    // All versions are flexible
-                    writeln!(file, "{}// Flexible version: write_unsigned_varint(length + 1)", indent)?;
-                    writeln!(file, "{}writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", indent)?;
+                    writeln!(file, "{}writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", ind)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
-                        writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+                        writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
                     } else {
                         writeln!(
                             file,
                             "{}if version >= {} && version <= {} {{",
-                            indent,
+                            ind,
                             flexible_versions.lowest(),
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "{}    // Flexible version: write_unsigned_varint(length + 1)", indent)?;
-                    writeln!(file, "{}    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", indent)?;
-                    writeln!(file, "{}}} else {{", indent)?;
-                    writeln!(file, "{}    // Standard version: write_short(length)", indent)?;
-                    writeln!(file, "{}    writable.write_short(bytes.len() as i16)?;", indent)?;
-                    writeln!(file, "{}}}", indent)?;
+                    writeln!(file, "{}    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", ind)?;
+                    writeln!(file, "{}}} else {{", ind)?;
+                    writeln!(file, "{}    writable.write_short(bytes.len() as i16)?;", ind)?;
+                    writeln!(file, "{}}}", ind)?;
                 }
             } else {
-                writeln!(file, "{}// Standard version: write_short(length)", indent)?;
-                writeln!(file, "{}writable.write_short(bytes.len() as i16)?;", indent)?;
+                writeln!(file, "{}writable.write_short(bytes.len() as i16)?;", ind)?;
             }
-            writeln!(file, "{}writable.write_bytes(bytes)?;", indent)?;
+            writeln!(file, "{}writable.write_bytes(bytes)?;", ind)?;
         },
         FieldType::Bytes | FieldType::Records => {
-            // Check if this version uses flexible encoding
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    // All versions are flexible
-                    writeln!(file, "            // Flexible version: write_unsigned_varint(length + 1)")?;
-                    writeln!(
-                        file,
-                        "            writable.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
-                        field_name
-                    )?;
+                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", ind, accessor)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
-                        writeln!(file, "            if version >= {} {{", flexible_versions.lowest())?;
+                        writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
                     } else {
                         writeln!(
                             file,
-                            "            if version >= {} && version <= {} {{",
+                            "{}if version >= {} && version <= {} {{",
+                            ind,
                             flexible_versions.lowest(),
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "                // Flexible version: write_unsigned_varint(length + 1)")?;
                     writeln!(
                         file,
-                        "                writable.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
-                        field_name
+                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                        ind, accessor
                     )?;
-                    writeln!(file, "            }} else {{")?;
-                    writeln!(file, "                // Standard version: write_int(length)")?;
-                    writeln!(file, "                writable.write_int(self.{}.len() as i32)?;", field_name)?;
-                    writeln!(file, "            }}")?;
+                    writeln!(file, "{}}} else {{", ind)?;
+                    writeln!(file, "{}    writable.write_int({}.len() as i32)?;", ind, accessor)?;
+                    writeln!(file, "{}}}", ind)?;
                 }
             } else {
-                writeln!(file, "            // Standard version: write_int(length)")?;
-                writeln!(file, "            writable.write_int(self.{}.len() as i32)?;", field_name)?;
+                writeln!(file, "{}writable.write_int({}.len() as i32)?;", ind, accessor)?;
             }
-            writeln!(file, "            writable.write_bytes(&self.{})?;", field_name)?;
+            writeln!(file, "{}writable.write_bytes(&{})?;", ind, accessor)?;
         },
         FieldType::Array(element_type) => {
-            // Check if this version uses flexible encoding
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    // All versions are flexible
-                    writeln!(file, "            // Flexible version: write_unsigned_varint(length + 1)")?;
-                    writeln!(
-                        file,
-                        "            writable.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
-                        field_name
-                    )?;
+                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", ind, accessor)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
-                        writeln!(file, "            if version >= {} {{", flexible_versions.lowest())?;
+                        writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
                     } else {
                         writeln!(
                             file,
-                            "            if version >= {} && version <= {} {{",
+                            "{}if version >= {} && version <= {} {{",
+                            ind,
                             flexible_versions.lowest(),
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "                // Flexible version: write_unsigned_varint(length + 1)")?;
                     writeln!(
                         file,
-                        "                writable.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
-                        field_name
+                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                        ind, accessor
                     )?;
-                    writeln!(file, "            }} else {{")?;
-                    writeln!(file, "                // Standard version: write_int(length)")?;
-                    writeln!(file, "                writable.write_int(self.{}.len() as i32)?;", field_name)?;
-                    writeln!(file, "            }}")?;
+                    writeln!(file, "{}}} else {{", ind)?;
+                    writeln!(file, "{}    writable.write_int({}.len() as i32)?;", ind, accessor)?;
+                    writeln!(file, "{}}}", ind)?;
                 }
             } else {
-                writeln!(file, "            // Standard version: write_int(length)")?;
-                writeln!(file, "            writable.write_int(self.{}.len() as i32)?;", field_name)?;
+                writeln!(file, "{}writable.write_int({}.len() as i32)?;", ind, accessor)?;
             }
-            writeln!(file, "{}for element in &self.{} {{", indent, field_name)?;
-            generate_array_element_write(file, element_type.as_ref())?;
-            writeln!(file, "{}}}", indent)?;
+            writeln!(file, "{}for element in {}.iter() {{", ind, accessor)?;
+            generate_array_element_write(file, element_type.as_ref(), flexible_versions)?;
+            writeln!(file, "{}}}", ind)?;
         },
         FieldType::Struct(_) => {
-            writeln!(file, "{}self.{}.write(writable, version)?;", indent, field_name)?;
+            writeln!(file, "{}{}.write(writable, version)?;", ind, accessor)?;
         },
+    }
+
+    // Close nullable wrapper with null marker in else branch
+    if nullable {
+        writeln!(file, "{}}} else {{", indent)?;
+        generate_null_write(file, field.field_type(), flexible_versions, indent)?;
+        writeln!(file, "{}}}", indent)?;
     }
 
     if has_version_check {
@@ -2360,9 +3485,101 @@ fn generate_field_write(
     Ok(())
 }
 
+/// Generate null marker write for a nullable field.
+fn generate_null_write(
+    file: &mut fs::File,
+    field_type: &FieldType,
+    flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inner = format!("{}    ", indent);
+    match field_type {
+        FieldType::String => {
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(file, "{}writable.write_unsigned_varint(0)?;", inner)?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}if version >= {} && version <= {} {{",
+                            inner,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(file, "{}    writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}}} else {{", inner)?;
+                    writeln!(file, "{}    writable.write_short(-1)?;", inner)?;
+                    writeln!(file, "{}}}", inner)?;
+                }
+            } else {
+                writeln!(file, "{}writable.write_short(-1)?;", inner)?;
+            }
+        },
+        FieldType::Bytes | FieldType::Records => {
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(file, "{}writable.write_unsigned_varint(0)?;", inner)?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}if version >= {} && version <= {} {{",
+                            inner,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(file, "{}    writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}}} else {{", inner)?;
+                    writeln!(file, "{}    writable.write_int(-1)?;", inner)?;
+                    writeln!(file, "{}}}", inner)?;
+                }
+            } else {
+                writeln!(file, "{}writable.write_int(-1)?;", inner)?;
+            }
+        },
+        FieldType::Array(_) => {
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(file, "{}writable.write_unsigned_varint(0)?;", inner)?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "{}if version >= {} && version <= {} {{",
+                            inner,
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(file, "{}    writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}}} else {{", inner)?;
+                    writeln!(file, "{}    writable.write_int(-1)?;", inner)?;
+                    writeln!(file, "{}}}", inner)?;
+                }
+            } else {
+                writeln!(file, "{}writable.write_int(-1)?;", inner)?;
+            }
+        },
+        _ => {
+            // Primitive types cannot be nullable per can_be_nullable()
+        },
+    }
+    Ok(())
+}
+
 fn generate_array_element_write(
     file: &mut fs::File,
     element_type: &FieldType,
+    flexible_versions: Versions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match element_type {
         FieldType::Bool => {
@@ -2394,11 +3611,65 @@ fn generate_array_element_write(
         },
         FieldType::String => {
             writeln!(file, "                let bytes = element.as_bytes();")?;
-            writeln!(file, "                writable.write_short(bytes.len() as i16)?;")?;
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(
+                        file,
+                        "                writable.write_unsigned_varint((bytes.len() as u32) + 1)?;"
+                    )?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "                if version >= {} {{", flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "                if version >= {} && version <= {} {{",
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(
+                        file,
+                        "                    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;"
+                    )?;
+                    writeln!(file, "                }} else {{")?;
+                    writeln!(file, "                    writable.write_short(bytes.len() as i16)?;")?;
+                    writeln!(file, "                }}")?;
+                }
+            } else {
+                writeln!(file, "                writable.write_short(bytes.len() as i16)?;")?;
+            }
             writeln!(file, "                writable.write_bytes(bytes)?;")?;
         },
         FieldType::Bytes | FieldType::Records => {
-            writeln!(file, "                writable.write_int(element.len() as i32)?;")?;
+            if !flexible_versions.empty() {
+                if flexible_versions.lowest() == 0 {
+                    writeln!(
+                        file,
+                        "                writable.write_unsigned_varint((element.len() as u32) + 1)?;"
+                    )?;
+                } else {
+                    if flexible_versions.highest() == i16::MAX {
+                        writeln!(file, "                if version >= {} {{", flexible_versions.lowest())?;
+                    } else {
+                        writeln!(
+                            file,
+                            "                if version >= {} && version <= {} {{",
+                            flexible_versions.lowest(),
+                            flexible_versions.highest()
+                        )?;
+                    }
+                    writeln!(
+                        file,
+                        "                    writable.write_unsigned_varint((element.len() as u32) + 1)?;"
+                    )?;
+                    writeln!(file, "                }} else {{")?;
+                    writeln!(file, "                    writable.write_int(element.len() as i32)?;")?;
+                    writeln!(file, "                }}")?;
+                }
+            } else {
+                writeln!(file, "                writable.write_int(element.len() as i32)?;")?;
+            }
             writeln!(file, "                writable.write_bytes(element)?;")?;
         },
         FieldType::Struct(_) => {
@@ -2544,6 +3815,21 @@ fn schema_type_for_version_expr(field_type: &FieldType, flexible_versions: Versi
     }
 }
 
+/// Returns true if the field should use Option<T> in Rust (has nullable versions).
+fn is_nullable_field(field: &FieldSpec) -> bool {
+    !field.nullable_versions().empty()
+}
+
+/// Returns the Rust type for a field, wrapping in Option<> if nullable.
+fn field_type_to_rust_for_field(field: &FieldSpec) -> String {
+    let base_type = field_type_to_rust(field.field_type());
+    if is_nullable_field(field) {
+        format!("Option<{}>", base_type)
+    } else {
+        base_type
+    }
+}
+
 fn field_type_to_rust(field_type: &FieldType) -> String {
     match field_type {
         FieldType::Bool => "bool".to_string(),
@@ -2563,6 +3849,30 @@ fn field_type_to_rust(field_type: &FieldType) -> String {
         },
         FieldType::Struct(name) => name.clone(),
     }
+}
+
+/// Get the default value for a field, considering nullable.
+fn get_default_value_for_field(field: &FieldSpec) -> String {
+    let nullable = is_nullable_field(field);
+    let default = field.field_default();
+
+    // If nullable and default is "null", return None
+    if nullable {
+        if let Some(serde_json::Value::String(s)) = default
+            && s == "null"
+        {
+            return "None".to_string();
+        }
+        // Nullable with no explicit default or non-null default
+        if default.is_none() {
+            return "None".to_string();
+        }
+        // Nullable with a non-null default: wrap in Some()
+        let base_default = get_default_value(field.field_type(), default);
+        return format!("Some({})", base_default);
+    }
+
+    get_default_value(field.field_type(), default)
 }
 
 fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>) -> String {
