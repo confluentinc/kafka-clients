@@ -554,9 +554,11 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
     writeln!(file)?;
     writeln!(
         file,
-        "use crate::common::protocol::{{Field, Readable, Schema, SchemaType, Writable, RawTaggedField}};"
+        "use crate::common::protocol::{{Field, Readable, Schema, SchemaType, Writable, RawTaggedField, Message, ApiMessage, ObjectSerializationCache, MessageSizeAccumulator, ByteBufferAccessor}};"
     )?;
     writeln!(file, "use crate::common::Uuid;")?;
+    writeln!(file, "use std::fmt;")?;
+    writeln!(file, "use std::hash::{{Hash, Hasher}};")?;
     writeln!(file)?;
 
     // Generate the message struct
@@ -592,7 +594,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
         struct_spec.versions().lowest(),
         struct_spec.versions().highest()
     )?;
-    writeln!(file, "#[derive(Debug, Clone, PartialEq)]")?;
+    generate_struct_derives_and_impls(file, &data_class_name, struct_spec.fields())?;
     writeln!(file, "pub struct {} {{", data_class_name)?;
 
     // Generate fields
@@ -606,6 +608,9 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
         }
         writeln!(file, "    pub {}: {},", field_name, rust_type)?;
     }
+
+    writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
+    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -622,6 +627,7 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
         let default_val = get_default_value(field.field_type(), field.field_default());
         writeln!(file, "            {}: {},", field_name, default_val)?;
     }
+    writeln!(file, "            unknown_tagged_fields: Vec::new(),")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
     writeln!(file)?;
@@ -654,8 +660,27 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     // schema() method
     generate_schema_method(file, struct_spec, flexible_versions)?;
 
+    // Builder setters
+    generate_builder_setters(file, struct_spec)?;
+
     writeln!(file, "}}")?;
     writeln!(file)?;
+
+    // Generate impl Message
+    generate_message_impl(file, &data_class_name, struct_spec)?;
+
+    // Generate impl ApiMessage (only for top-level message structs)
+    let api_key = spec.api_key().unwrap_or(-1);
+    writeln!(file, "impl ApiMessage for {} {{", data_class_name)?;
+    writeln!(file, "    fn api_key(&self) -> i16 {{ {} }}", api_key)?;
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    // Generate Display impl
+    generate_display_impl(file, &data_class_name)?;
+
+    // Generate manual Eq/Hash for structs with f64 fields
+    generate_manual_eq_hash(file, &data_class_name, struct_spec.fields())?;
 
     Ok(())
 }
@@ -695,7 +720,7 @@ fn generate_nested_struct(
     }
 
     writeln!(file, "/// Nested struct for {}", struct_name)?;
-    writeln!(file, "#[derive(Debug, Clone, PartialEq)]")?;
+    generate_struct_derives_and_impls(file, &struct_name, field.fields())?;
     writeln!(file, "pub struct {} {{", struct_name)?;
 
     for nested_field in field.fields() {
@@ -708,6 +733,9 @@ fn generate_nested_struct(
         }
         writeln!(file, "    pub {}: {},", field_name, rust_type)?;
     }
+
+    writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
+    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -722,6 +750,7 @@ fn generate_nested_struct(
         let default_val = get_default_value(nested_field.field_type(), nested_field.field_default());
         writeln!(file, "            {}: {},", field_name, default_val)?;
     }
+    writeln!(file, "            unknown_tagged_fields: Vec::new(),")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
     writeln!(file)?;
@@ -737,8 +766,20 @@ fn generate_nested_struct(
     // Generate write method
     generate_write_method(file, &struct_name, &struct_spec, flexible_versions)?;
 
+    // Builder setters
+    generate_builder_setters(file, &struct_spec)?;
+
     writeln!(file, "}}")?;
     writeln!(file)?;
+
+    // Generate impl Message
+    generate_message_impl(file, &struct_name, &struct_spec)?;
+
+    // Generate Display impl
+    generate_display_impl(file, &struct_name)?;
+
+    // Generate manual Eq/Hash for structs with f64 fields
+    generate_manual_eq_hash(file, &struct_name, field.fields())?;
 
     Ok(())
 }
@@ -764,7 +805,7 @@ fn generate_common_struct(
         struct_spec.versions().lowest(),
         struct_spec.versions().highest()
     )?;
-    writeln!(file, "#[derive(Debug, Clone, PartialEq)]")?;
+    generate_struct_derives_and_impls(file, struct_name, struct_spec.fields())?;
     writeln!(file, "pub struct {} {{", struct_name)?;
 
     for field in struct_spec.fields() {
@@ -777,6 +818,9 @@ fn generate_common_struct(
         }
         writeln!(file, "    pub {}: {},", field_name, rust_type)?;
     }
+
+    writeln!(file, "    /// Unknown tagged fields for forward compatibility.")?;
+    writeln!(file, "    pub unknown_tagged_fields: Vec<RawTaggedField>,")?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -791,6 +835,7 @@ fn generate_common_struct(
         let default_val = get_default_value(field.field_type(), field.field_default());
         writeln!(file, "            {}: {},", field_name, default_val)?;
     }
+    writeln!(file, "            unknown_tagged_fields: Vec::new(),")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
     writeln!(file)?;
@@ -802,6 +847,168 @@ fn generate_common_struct(
     // Generate write method for common struct
     generate_write_method(file, struct_name, struct_spec, flexible_versions)?;
 
+    // Builder setters
+    generate_builder_setters(file, struct_spec)?;
+
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    // Generate impl Message
+    generate_message_impl(file, struct_name, struct_spec)?;
+
+    // Generate Display impl
+    generate_display_impl(file, struct_name)?;
+
+    // Generate manual Eq/Hash for structs with f64 fields
+    generate_manual_eq_hash(file, struct_name, struct_spec.fields())?;
+
+    Ok(())
+}
+
+/// Check if any field in this struct spec contains Float64 type.
+fn has_float64_field(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| contains_float64(f.field_type()))
+}
+
+/// Recursively check if a field type contains Float64.
+fn contains_float64(field_type: &FieldType) -> bool {
+    match field_type {
+        FieldType::Float64 => true,
+        FieldType::Array(element_type) => contains_float64(element_type),
+        _ => false,
+    }
+}
+
+/// Generate the derive macro and optional manual Hash/Eq impls for a struct.
+fn generate_struct_derives_and_impls(
+    file: &mut fs::File,
+    _struct_name: &str,
+    fields: &[FieldSpec],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if has_float64_field(fields) {
+        writeln!(file, "#[derive(Debug, Clone, PartialEq)]")?;
+    } else {
+        writeln!(file, "#[derive(Debug, Clone, PartialEq, Eq, Hash)]")?;
+    }
+    Ok(())
+}
+
+/// Generate manual Eq and Hash impls for structs with f64 fields.
+fn generate_manual_eq_hash(
+    file: &mut fs::File,
+    struct_name: &str,
+    fields: &[FieldSpec],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !has_float64_field(fields) {
+        return Ok(());
+    }
+
+    // Manual Eq impl
+    writeln!(file, "impl Eq for {} {{}}", struct_name)?;
+    writeln!(file)?;
+
+    // Manual Hash impl
+    writeln!(file, "impl Hash for {} {{", struct_name)?;
+    writeln!(file, "    fn hash<H: Hasher>(&self, state: &mut H) {{")?;
+    for field in fields {
+        let field_name = to_snake_case(field.name());
+        let field_name = escape_rust_keyword(&field_name);
+        if contains_float64(field.field_type()) {
+            writeln!(file, "        self.{}.to_bits().hash(state);", field_name)?;
+        } else {
+            writeln!(file, "        self.{}.hash(state);", field_name)?;
+        }
+    }
+    writeln!(file, "        self.unknown_tagged_fields.hash(state);")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    Ok(())
+}
+
+fn generate_builder_setters(file: &mut fs::File, struct_spec: &StructSpec) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file)?;
+    for field in struct_spec.fields() {
+        let field_name = to_snake_case(field.name());
+        let field_name = escape_rust_keyword(&field_name);
+        let rust_type = field_type_to_rust(field.field_type());
+        // Strip r# prefix for setter function names (r#type -> set_type)
+        let setter_name = field_name.strip_prefix("r#").unwrap_or(&field_name);
+
+        writeln!(
+            file,
+            "    pub fn set_{}(&mut self, val: {}) -> &mut Self {{",
+            setter_name, rust_type
+        )?;
+        writeln!(file, "        self.{} = val;", field_name)?;
+        writeln!(file, "        self")?;
+        writeln!(file, "    }}")?;
+        writeln!(file)?;
+    }
+
+    // Accessor for unknown_tagged_fields
+    writeln!(
+        file,
+        "    pub fn unknown_tagged_fields_mut(&mut self) -> &mut Vec<RawTaggedField> {{"
+    )?;
+    writeln!(file, "        &mut self.unknown_tagged_fields")?;
+    writeln!(file, "    }}")?;
+
+    Ok(())
+}
+
+fn generate_message_impl(
+    file: &mut fs::File,
+    struct_name: &str,
+    struct_spec: &StructSpec,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lowest = struct_spec.versions().lowest();
+    let highest = struct_spec.versions().highest();
+
+    writeln!(file, "impl Message for {} {{", struct_name)?;
+    writeln!(file, "    fn lowest_supported_version(&self) -> i16 {{ {} }}", lowest)?;
+    writeln!(file, "    fn highest_supported_version(&self) -> i16 {{ {} }}", highest)?;
+    writeln!(file)?;
+    writeln!(
+        file,
+        "    fn add_size(&self, size: &mut MessageSizeAccumulator, _cache: &mut ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
+    )?;
+    writeln!(file, "        let mut acc = ByteBufferAccessor::new(4096);")?;
+    writeln!(file, "        self.write(&mut acc, version)?;")?;
+    writeln!(file, "        size.add_bytes(acc.len() as i32);")?;
+    writeln!(file, "        Ok(())")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+    writeln!(
+        file,
+        "    fn write(&self, writable: &mut dyn Writable, _cache: &ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
+    )?;
+    writeln!(file, "        {}::write(self, writable, version)", struct_name)?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+    writeln!(
+        file,
+        "    fn read(&mut self, readable: &mut dyn Readable, version: i16) -> std::io::Result<()> {{"
+    )?;
+    writeln!(file, "        *self = {}::read(readable, version)?;", struct_name)?;
+    writeln!(file, "        Ok(())")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+    writeln!(file, "    fn unknown_tagged_fields(&self) -> &[RawTaggedField] {{")?;
+    writeln!(file, "        &self.unknown_tagged_fields")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "}}")?;
+    writeln!(file)?;
+
+    Ok(())
+}
+
+fn generate_display_impl(file: &mut fs::File, struct_name: &str) -> Result<(), Box<dyn std::error::Error>> {
+    writeln!(file, "impl fmt::Display for {} {{", struct_name)?;
+    writeln!(file, "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{")?;
+    writeln!(file, "        write!(f, \"{{:?}}\", self)")?;
+    writeln!(file, "    }}")?;
     writeln!(file, "}}")?;
     writeln!(file)?;
 
@@ -972,11 +1179,53 @@ fn generate_tagged_field_read(
                                 indent, field_name
                             )?;
                         },
-                        _ => {
-                            // Other primitive types
+                        FieldType::Bool => {
                             writeln!(
                                 file,
-                                "{}                            // TODO: implement for {:?}",
+                                "{}                            result.{}.push(readable.read_byte()? != 0);",
+                                indent, field_name
+                            )?;
+                        },
+                        FieldType::Int8 => {
+                            writeln!(
+                                file,
+                                "{}                            result.{}.push(readable.read_byte()? as i8);",
+                                indent, field_name
+                            )?;
+                        },
+                        FieldType::Int16 => {
+                            writeln!(
+                                file,
+                                "{}                            result.{}.push(readable.read_short()?);",
+                                indent, field_name
+                            )?;
+                        },
+                        FieldType::Int32 => {
+                            writeln!(
+                                file,
+                                "{}                            result.{}.push(readable.read_int()?);",
+                                indent, field_name
+                            )?;
+                        },
+                        FieldType::Int64 => {
+                            writeln!(
+                                file,
+                                "{}                            result.{}.push(readable.read_long()?);",
+                                indent, field_name
+                            )?;
+                        },
+                        FieldType::Float64 => {
+                            writeln!(
+                                file,
+                                "{}                            result.{}.push(readable.read_double()?);",
+                                indent, field_name
+                            )?;
+                        },
+                        _ => {
+                            // Skip unknown element types
+                            writeln!(
+                                file,
+                                "{}                            // Unsupported array element type {:?} in tagged field",
                                 indent, element_type
                             )?;
                         },
@@ -1004,13 +1253,39 @@ fn generate_tagged_field_read(
                         indent, field_name, struct_name
                     )?;
                 },
-                _ => {
+                FieldType::Float64 => {
                     writeln!(
                         file,
-                        "{}                    // TODO: implement for {:?}",
-                        indent,
-                        field.field_type()
+                        "{}                    result.{} = readable.read_double()?;",
+                        indent, field_name
                     )?;
+                },
+                FieldType::Bytes | FieldType::Records => {
+                    writeln!(
+                        file,
+                        "{}                    let len = readable.read_unsigned_varint()?;",
+                        indent
+                    )?;
+                    writeln!(file, "{}                    if len > 0 {{", indent)?;
+                    writeln!(
+                        file,
+                        "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
+                        indent
+                    )?;
+                    writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                    writeln!(file, "{}                        result.{} = bytes;", indent, field_name)?;
+                    writeln!(file, "{}                    }} else {{", indent)?;
+                    writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
+                    writeln!(file, "{}                    }}", indent)?;
+                },
+                _ => {
+                    // Skip unknown/unhandled types
+                    writeln!(
+                        file,
+                        "{}                    let mut skip_bytes = vec![0u8; size as usize];",
+                        indent
+                    )?;
+                    writeln!(file, "{}                    readable.read_bytes(&mut skip_bytes)?;", indent)?;
                 },
             }
 
@@ -1019,8 +1294,21 @@ fn generate_tagged_field_read(
     }
 
     writeln!(file, "{}                _ => {{", indent)?;
-    writeln!(file, "{}                    // Unknown tagged field, skip it", indent)?;
-    writeln!(file, "{}                    readable.read_array(size as usize)?;", indent)?;
+    writeln!(
+        file,
+        "{}                    // Unknown tagged field, store for forward compatibility",
+        indent
+    )?;
+    writeln!(
+        file,
+        "{}                    let data = readable.read_array(size as usize)?;",
+        indent
+    )?;
+    writeln!(
+        file,
+        "{}                    result.unknown_tagged_fields.push(RawTaggedField::new(tag, data));",
+        indent
+    )?;
     writeln!(file, "{}                }}", indent)?;
     writeln!(file, "{}            }}", indent)?;
     writeln!(file, "{}        }}", indent)?;
@@ -1081,6 +1369,11 @@ fn generate_tagged_field_write(
         }
     }
 
+    writeln!(
+        file,
+        "{}        num_tagged_fields += self.unknown_tagged_fields.len() as u32;",
+        indent
+    )?;
     writeln!(file, "{}        writable.write_unsigned_varint(num_tagged_fields)?;", indent)?;
 
     // Now write each tagged field
@@ -1257,6 +1550,35 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
                         writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
                     },
+                    FieldType::Float64 => {
+                        writeln!(
+                            file,
+                            "{}                writable.write_unsigned_varint(8)?; // size = 8 bytes",
+                            indent
+                        )?;
+                        writeln!(file, "{}                writable.write_double(self.{})?;", indent, field_name)?;
+                    },
+                    FieldType::Bytes | FieldType::Records => {
+                        writeln!(file, "{}                // Calculate bytes size", indent)?;
+                        writeln!(
+                            file,
+                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                size_accessor.write_unsigned_varint((self.{}.len() as u32) + 1)?;",
+                            indent, field_name
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                size_accessor.write_bytes(&self.{})?;",
+                            indent, field_name
+                        )?;
+                        writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                        writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                        writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                    },
                     FieldType::Struct(_) => {
                         // For structs, we need to calculate the size first by writing to a temp buffer
                         writeln!(file, "{}                // Calculate struct size", indent)?;
@@ -1289,6 +1611,18 @@ fn generate_tagged_field_write(
             }
         }
     }
+
+    // Write unknown tagged fields
+    writeln!(file, "{}        // Write unknown tagged fields", indent)?;
+    writeln!(file, "{}        for field in &self.unknown_tagged_fields {{", indent)?;
+    writeln!(file, "{}            writable.write_unsigned_varint(field.tag())?;", indent)?;
+    writeln!(
+        file,
+        "{}            writable.write_unsigned_varint(field.size() as u32)?;",
+        indent
+    )?;
+    writeln!(file, "{}            writable.write_bytes(field.data())?;", indent)?;
+    writeln!(file, "{}        }}", indent)?;
 
     Ok(())
 }
@@ -1360,15 +1694,19 @@ fn generate_read_method(
             writeln!(file, "        }}")?;
         }
     } else if !flexible_versions.empty() {
-        // No tagged fields defined, just skip unknown ones
+        // No tagged fields defined, store unknown ones for forward compatibility
         writeln!(file)?;
         if flexible_versions.lowest() == 0 {
             writeln!(file, "        // Read tagged fields (flexible version)")?;
             writeln!(file, "        let num_tagged_fields = readable.read_unsigned_varint()?;")?;
             writeln!(file, "        for _ in 0..num_tagged_fields {{")?;
-            writeln!(file, "            let _tag = readable.read_unsigned_varint()?;")?;
+            writeln!(file, "            let tag = readable.read_unsigned_varint()?;")?;
             writeln!(file, "            let size = readable.read_unsigned_varint()?;")?;
-            writeln!(file, "            readable.read_array(size as usize)?;")?;
+            writeln!(file, "            let data = readable.read_array(size as usize)?;")?;
+            writeln!(
+                file,
+                "            result.unknown_tagged_fields.push(RawTaggedField::new(tag, data));"
+            )?;
             writeln!(file, "        }}")?;
         } else {
             if flexible_versions.highest() == i16::MAX {
@@ -1384,9 +1722,13 @@ fn generate_read_method(
             writeln!(file, "            // Read tagged fields (flexible version)")?;
             writeln!(file, "            let num_tagged_fields = readable.read_unsigned_varint()?;")?;
             writeln!(file, "            for _ in 0..num_tagged_fields {{")?;
-            writeln!(file, "                let _tag = readable.read_unsigned_varint()?;")?;
+            writeln!(file, "                let tag = readable.read_unsigned_varint()?;")?;
             writeln!(file, "                let size = readable.read_unsigned_varint()?;")?;
-            writeln!(file, "                readable.read_array(size as usize)?;")?;
+            writeln!(file, "                let data = readable.read_array(size as usize)?;")?;
+            writeln!(
+                file,
+                "                result.unknown_tagged_fields.push(RawTaggedField::new(tag, data));"
+            )?;
             writeln!(file, "            }}")?;
             writeln!(file, "        }}")?;
         }
@@ -1461,11 +1803,19 @@ fn generate_write_method(
             writeln!(file, "        }}")?;
         }
     } else if !flexible_versions.empty() {
-        // No tagged fields defined, just write 0
+        // No known tagged fields, but write stored unknown tagged fields
         writeln!(file)?;
         if flexible_versions.lowest() == 0 {
             writeln!(file, "        // Write tagged fields (flexible version)")?;
-            writeln!(file, "        writable.write_unsigned_varint(0)?; // No tagged fields")?;
+            writeln!(
+                file,
+                "        writable.write_unsigned_varint(self.unknown_tagged_fields.len() as u32)?;"
+            )?;
+            writeln!(file, "        for field in &self.unknown_tagged_fields {{")?;
+            writeln!(file, "            writable.write_unsigned_varint(field.tag())?;")?;
+            writeln!(file, "            writable.write_unsigned_varint(field.size() as u32)?;")?;
+            writeln!(file, "            writable.write_bytes(field.data())?;")?;
+            writeln!(file, "        }}")?;
         } else {
             if flexible_versions.highest() == i16::MAX {
                 writeln!(file, "        if version >= {} {{", flexible_versions.lowest())?;
@@ -1478,7 +1828,15 @@ fn generate_write_method(
                 )?;
             }
             writeln!(file, "            // Write tagged fields (flexible version)")?;
-            writeln!(file, "            writable.write_unsigned_varint(0)?; // No tagged fields")?;
+            writeln!(
+                file,
+                "            writable.write_unsigned_varint(self.unknown_tagged_fields.len() as u32)?;"
+            )?;
+            writeln!(file, "            for field in &self.unknown_tagged_fields {{")?;
+            writeln!(file, "                writable.write_unsigned_varint(field.tag())?;")?;
+            writeln!(file, "                writable.write_unsigned_varint(field.size() as u32)?;")?;
+            writeln!(file, "                writable.write_bytes(field.data())?;")?;
+            writeln!(file, "            }}")?;
             writeln!(file, "        }}")?;
         }
     }

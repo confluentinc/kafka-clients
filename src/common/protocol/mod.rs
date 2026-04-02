@@ -22,6 +22,7 @@ pub mod byte_buffer_accessor;
 pub mod errors;
 pub mod message;
 pub mod message_size_accumulator;
+pub mod message_util;
 pub mod object_serialization_cache;
 pub mod readable;
 pub mod types;

@@ -156,7 +156,8 @@ fn main() {
                 partition.log_start_offset = 0;
                 partition.error_message = String::new();
                 // Tagged field: CurrentLeader (tag 0 in PartitionProduceResponse)
-                partition.current_leader = LeaderIdAndEpoch { leader_id: 1, leader_epoch: 5 };
+                partition.current_leader =
+                    LeaderIdAndEpoch { leader_id: 1, leader_epoch: 5, unknown_tagged_fields: Vec::new() };
                 partition
             },
             {
@@ -167,7 +168,8 @@ fn main() {
                 partition.log_append_time_ms = 1234567891;
                 partition.log_start_offset = 0;
                 partition.error_message = String::new();
-                partition.current_leader = LeaderIdAndEpoch { leader_id: 2, leader_epoch: 3 };
+                partition.current_leader =
+                    LeaderIdAndEpoch { leader_id: 2, leader_epoch: 3, unknown_tagged_fields: Vec::new() };
                 partition
             },
         ];
@@ -181,12 +183,14 @@ fn main() {
             host: "broker1.example.com".to_string(),
             port: 9092,
             rack: "rack1".to_string(),
+            unknown_tagged_fields: Vec::new(),
         },
         NodeEndpoint {
             node_id: 2,
             host: "broker2.example.com".to_string(),
             port: 9092,
             rack: "rack2".to_string(),
+            unknown_tagged_fields: Vec::new(),
         },
     ];
 

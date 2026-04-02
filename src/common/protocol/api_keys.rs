@@ -368,6 +368,7 @@ impl ApiKeys {
                 api_key: self.message_type.api_key(),
                 min_version: oldest_version,
                 max_version: latest_version,
+                unknown_tagged_fields: Vec::new(),
             })
         } else {
             None

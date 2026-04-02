@@ -140,3 +140,15 @@ This is used by the Java client for:
 - Generic protocol handling across message types
 
 **Fix**: The SchemaGenerator needs to generate Schema metadata alongside the existing structs. This could be a Rust equivalent of the Java Schema/BoundField types, or a simpler approach using const arrays of field descriptors. The generated ApiMessageType should expose request_schemas()/response_schemas() indexed by version, matching the Java ApiMessageType.
+
+## Issue from COMMENTS.0.md - Issue 1: MessageTest.java tests translated and Message trait implemented
+
+**Original Issue**: MessageTest.java tests not translated (DoD #3 and #4 violation) - Generated message types did not implement the Message trait, and none of the 22 MessageTest.java tests were translated.
+
+**Resolution**: 
+1. Generated message structs now implement the `Message` trait with `read()`, `write()`, `size()`, `add_size()`, `unknown_tagged_fields()`, and `duplicate()`.
+2. Generated structs implement `PartialEq`, `Eq`, `Hash`, and `Display`.
+3. Builder setters (`set_*`) and `unknown_tagged_fields_mut()` added to all generated types.
+4. `MessageUtil::to_byte_buffer_accessor` helper implemented.
+5. 14 tests from MessageTest.java translated and passing, covering: round-trip serialization, duplication, version handling, unknown tagged fields, default values, builder patterns.
+6. Tagged field read/write support for all primitive types (Float64, Bytes, Records, arrays of primitives).
