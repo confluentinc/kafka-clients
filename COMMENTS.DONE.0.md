@@ -152,3 +152,41 @@ This is used by the Java client for:
 4. `MessageUtil::to_byte_buffer_accessor` helper implemented.
 5. 14 tests from MessageTest.java translated and passing, covering: round-trip serialization, duplication, version handling, unknown tagged fields, default values, builder patterns.
 6. Tagged field read/write support for all primitive types (Float64, Bytes, Records, arrays of primitives).
+
+## Issue from COMMENTS.0.md - Issue 1: add_size performs full write instead of arithmetic
+
+**Original Issue**: Generated `add_size` allocated a 4096-byte buffer and performed a full `write()` to measure size.
+
+**Resolution**: Generator now emits proper arithmetic size computation matching Java `addSize()`, summing field sizes without allocating buffers.
+
+## Issue from COMMENTS.0.md - Issue 2: 22 of 36 MessageTest.java tests not translated
+
+**Original Issue**: Only 14 of 36 MessageTest.java tests were translated.
+
+**Resolution**: Translated 19 additional tests (33 total). 3 tests explained as not translatable:
+- testDefaultValues / testNonIgnorableFieldWithDefaultNull: require per-field version validation (UVE for non-default values at unsupported versions) which generator validates at entry instead
+- testWriteNullForNonNullableFieldRaisesException: prevented at compile time in Rust via Option<T> types
+
+## Issue from COMMENTS.0.md - Issue 3: test_message_versions is a no-op
+
+**Original Issue**: Rust test only checked `latest >= oldest` on ApiKeys (trivially true).
+
+**Resolution**: Added spot-check assertions verifying generated message HIGHEST_SUPPORTED_VERSION covers ApiKeys latest_version for specific message types (Produce, Fetch, Metadata, etc.). Added comment explaining full test requires ApiMessageType with new_request()/new_response().
+
+## Issue from COMMENTS.0.md - Issue 4: Nullable fields as String instead of Option<String>
+
+**Original Issue**: Fields with `nullableVersions` in JSON specs were generated as `String` instead of `Option<String>`, losing null/empty distinction.
+
+**Resolution**: Generator now checks `nullableVersions` field spec and emits `Option<String>` / `Option<Vec<u8>>` for nullable fields. Read/write code handles null encoding (varint 0 for flexible, -1 length for non-flexible).
+
+## Issue from COMMENTS.0.md - Issue 5: Latent compile error for Array(Float64) Hash
+
+**Original Issue**: Hash generation for float64 used `self.field.to_bits().hash(state)` which fails for `Vec<f64>`.
+
+**Resolution**: Array(Float64) case now iterates elements: `for elem in &self.field { elem.to_bits().hash(state); }`.
+
+## Issue from COMMENTS.0.md - Issue 6: test_unknown_tagged_fields missing non-flexible version error test
+
+**Original Issue**: Test only verified writing succeeds on flexible version 6, missing negative test for non-flexible versions.
+
+**Resolution**: Added `verify_write_raises_uve` helper and assertion that writing CreateTopicsRequestData with unknown tagged fields at version 2 (non-flexible) returns an error containing "Tagged fields were set".
