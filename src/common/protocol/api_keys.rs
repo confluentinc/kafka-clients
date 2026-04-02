@@ -16,6 +16,8 @@
 
 #[cfg(not(feature = "skip-generated"))]
 use crate::api_message_type::{ApiMessageType, ListenerType};
+#[cfg(not(feature = "skip-generated"))]
+use crate::api_versions_response_data::ApiVersion;
 
 /// Identifiers for all the Kafka APIs.
 ///
@@ -327,6 +329,61 @@ impl ApiKeys {
         (self.oldest_version()..=self.latest_version()).collect()
     }
 
+    /// Converts this API key to an `ApiVersion` with its version range for API versions responses.
+    ///
+    /// To workaround a critical bug in librdkafka, the api versions response is inconsistent with
+    /// the actual versions supported by `produce` — this method handles that when a listener type
+    /// is provided and equals `Broker`.
+    pub fn to_api_version_for_api_response(
+        &self,
+        enable_unstable_last_version: bool,
+        listener_type: ListenerType,
+    ) -> Option<ApiVersion> {
+        self.to_api_version_internal(enable_unstable_last_version, Some(listener_type))
+    }
+
+    /// Converts this API key to an `ApiVersion` with its version range.
+    ///
+    /// Returns `None` if the API is entirely disabled (latest version < oldest version).
+    pub fn to_api_version(&self, enable_unstable_last_version: bool) -> Option<ApiVersion> {
+        self.to_api_version_internal(enable_unstable_last_version, None)
+    }
+
+    fn to_api_version_internal(
+        self,
+        enable_unstable_last_version: bool,
+        listener_type: Option<ListenerType>,
+    ) -> Option<ApiVersion> {
+        // See `PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION` for details on why we do this
+        let oldest_version = if self == Self::PRODUCE && (listener_type == Some(ListenerType::Broker)) {
+            PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
+        } else {
+            self.oldest_version()
+        };
+        let latest_version = self.latest_version_with_unstable(enable_unstable_last_version);
+
+        // API is entirely disabled if latestStableVersion is smaller than oldestVersion.
+        if latest_version >= oldest_version {
+            Some(ApiVersion {
+                api_key: self.message_type.api_key(),
+                min_version: oldest_version,
+                max_version: latest_version,
+            })
+        } else {
+            None
+        }
+    }
+
+    /// Returns the response schema for this API at the given version.
+    pub fn response_schema(&self, api_version: i16) -> crate::common::protocol::Schema {
+        self.message_type.response_schema(api_version)
+    }
+
+    /// Returns the request schema for this API at the given version.
+    pub fn request_schema(&self, api_version: i16) -> crate::common::protocol::Schema {
+        self.message_type.request_schema(api_version)
+    }
+
     /// Whether this API is in scope for the given listener type.
     pub fn in_scope(&self, listener: ListenerType) -> bool {
         self.message_type.listeners().contains(&listener)
@@ -516,5 +573,42 @@ mod tests {
             "Found some APIs missing scope definition: {:?}",
             apis_missing_scope
         );
+    }
+
+    /// All valid client responses which may be throttled should have a field named
+    /// 'throttle_time_ms' to return the throttle time to the client. Exclusions are:
+    /// - Cluster actions used only for inter-broker are throttled only if unauthorized
+    /// - SASL_HANDSHAKE and SASL_AUTHENTICATE are not throttled when used for authentication
+    #[test]
+    fn test_response_throttle_time() {
+        use std::collections::HashSet;
+        let authentication_keys: HashSet<i16> = [ApiKeys::SASL_HANDSHAKE.id(), ApiKeys::SASL_AUTHENTICATE.id()]
+            .into_iter()
+            .collect();
+        // Newer protocol apis include throttle time ms even for cluster actions
+        let cluster_actions_with_throttle: HashSet<i16> = [
+            ApiKeys::ALTER_PARTITION.id(),
+            ApiKeys::ALLOCATE_PRODUCER_IDS.id(),
+            ApiKeys::UPDATE_FEATURES.id(),
+        ]
+        .into_iter()
+        .collect();
+
+        for api_key in ApiKeys::client_apis() {
+            let response_schema = api_key.response_schema(api_key.latest_version());
+            let throttle_time_field = response_schema.get("throttle_time_ms");
+
+            if (api_key.is_cluster_action() && !cluster_actions_with_throttle.contains(&api_key.id()))
+                || authentication_keys.contains(&api_key.id())
+            {
+                assert!(
+                    throttle_time_field.is_none(),
+                    "Unexpected throttle time field: {}",
+                    api_key.name()
+                );
+            } else {
+                assert!(throttle_time_field.is_some(), "Throttle time field missing: {}", api_key.name());
+            }
+        }
     }
 }

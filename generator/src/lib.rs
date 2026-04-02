@@ -201,6 +201,10 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     )?;
     writeln!(file, "//! for each Kafka API key.")?;
     writeln!(file)?;
+    writeln!(file, "#![allow(unused_imports)]")?;
+    writeln!(file)?;
+    writeln!(file, "use crate::common::protocol::Schema;")?;
+    writeln!(file)?;
 
     // --- ListenerType enum ---
     writeln!(file, "/// Kafka listener types.")?;
@@ -450,6 +454,48 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     writeln!(file, "            _ => None,")?;
     writeln!(file, "        }}")?;
     writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // request_schema()
+    writeln!(file, "    /// Returns the request schema for this API at the given version.")?;
+    writeln!(file, "    pub fn request_schema(self, version: i16) -> Schema {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        if data.request_spec.is_some() && data.has_valid_versions() {
+            let module = format!("{}_data", to_snake_case(&format!("{}Request", data.name(&api_names))));
+            let struct_name = format!("{}RequestData", data.name(&api_names));
+            writeln!(
+                file,
+                "            Self::{} => crate::{}::{}::schema(version),",
+                variant, module, struct_name
+            )?;
+        }
+    }
+    writeln!(file, "            _ => Schema::new(Vec::new()),")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
+    writeln!(file)?;
+
+    // response_schema()
+    writeln!(file, "    /// Returns the response schema for this API at the given version.")?;
+    writeln!(file, "    pub fn response_schema(self, version: i16) -> Schema {{")?;
+    writeln!(file, "        match self {{")?;
+    for data in apis.values() {
+        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
+        if data.response_spec.is_some() {
+            let module = format!("{}_data", to_snake_case(&format!("{}Response", data.name(&api_names))));
+            let struct_name = format!("{}ResponseData", data.name(&api_names));
+            writeln!(
+                file,
+                "            Self::{} => crate::{}::{}::schema(version),",
+                variant, module, struct_name
+            )?;
+        }
+    }
+    writeln!(file, "            _ => Schema::new(Vec::new()),")?;
+    writeln!(file, "        }}")?;
+    writeln!(file, "    }}")?;
 
     writeln!(file, "}}")?;
 
@@ -506,7 +552,10 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
     writeln!(file, "#![allow(unused_imports)]")?;
     writeln!(file, "#![allow(dead_code)]")?;
     writeln!(file)?;
-    writeln!(file, "use crate::common::protocol::{{Readable, Writable, RawTaggedField}};")?;
+    writeln!(
+        file,
+        "use crate::common::protocol::{{Field, Readable, Schema, SchemaType, Writable, RawTaggedField}};"
+    )?;
     writeln!(file, "use crate::common::Uuid;")?;
     writeln!(file)?;
 
@@ -600,6 +649,10 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
 
     // write() method
     generate_write_method(file, &data_class_name, struct_spec, flexible_versions)?;
+    writeln!(file)?;
+
+    // schema() method
+    generate_schema_method(file, struct_spec, flexible_versions)?;
 
     writeln!(file, "}}")?;
     writeln!(file)?;
@@ -2000,6 +2053,137 @@ fn generate_array_element_write(
     }
 
     Ok(())
+}
+
+/// Generate a `schema(version) -> Schema` method that returns the schema for each version.
+fn generate_schema_method(
+    file: &mut fs::File,
+    struct_spec: &StructSpec,
+    flexible_versions: Versions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let lowest = struct_spec.versions().lowest();
+    let highest = struct_spec.versions().highest();
+
+    // Check if any non-tagged field has a version range that doesn't cover all versions
+    let needs_version_param = struct_spec.fields().iter().any(|f| {
+        if f.tagged_versions() != Versions::NONE && f.tagged_versions() == f.versions() {
+            return false; // entirely tagged, skip
+        }
+        let v_low = f.versions().lowest();
+        let v_high = f.versions().highest();
+        !(v_low <= lowest && v_high >= highest)
+    });
+
+    let version_param = if needs_version_param { "version" } else { "_version" };
+
+    writeln!(file, "    /// Returns the schema for this message at the given version.")?;
+    writeln!(file, "    pub fn schema({}: i16) -> Schema {{", version_param)?;
+    writeln!(file, "        let mut fields = Vec::new();")?;
+
+    // For each field, emit conditional push based on version
+    for field in struct_spec.fields() {
+        let field_name = to_snake_case(field.name());
+        let field_name = escape_rust_keyword(&field_name);
+
+        // Skip tagged fields from the main field list
+        if field.tagged_versions() != Versions::NONE {
+            // For fields that have tagged versions in some range and regular in another,
+            // only include them in the schema when they're NOT in their tagged range
+            let tagged = field.tagged_versions();
+            let versions = field.versions();
+
+            if tagged == versions {
+                // Entirely tagged — skip from regular schema fields
+                continue;
+            }
+        }
+
+        let v_low = field.versions().lowest();
+        let v_high = field.versions().highest();
+        let schema_type_expr = schema_type_for_version_expr(field.field_type(), flexible_versions);
+        let about_escaped = field.about().replace('"', "\\\"");
+        let push_stmt = format!(
+            "fields.push(Field {{ name: \"{}\", field_type: {}, about: \"{}\" }});",
+            field_name, schema_type_expr, about_escaped,
+        );
+
+        let covers_all = v_low <= lowest && v_high >= highest;
+        if covers_all {
+            // Field present in all versions
+            writeln!(file, "        {}", push_stmt)?;
+        } else {
+            // Build version condition avoiding useless comparisons
+            let lower_check = if v_low > 0 {
+                Some(format!("version >= {}", v_low))
+            } else {
+                None
+            };
+            let upper_check = if v_high < i16::MAX {
+                Some(format!("version <= {}", v_high))
+            } else {
+                None
+            };
+            let condition = match (lower_check, upper_check) {
+                (Some(l), Some(u)) => format!("{} && {}", l, u),
+                (Some(l), None) => l,
+                (None, Some(u)) => u,
+                (None, None) => "true".to_string(),
+            };
+            writeln!(file, "        if {} {{", condition)?;
+            writeln!(file, "            {}", push_stmt)?;
+            writeln!(file, "        }}")?;
+        }
+    }
+
+    writeln!(file, "        Schema::new(fields)")?;
+    writeln!(file, "    }}")?;
+
+    Ok(())
+}
+
+/// Map a FieldType to a SchemaType expression string for use in generated code.
+fn schema_type_for_version_expr(field_type: &FieldType, flexible_versions: Versions) -> String {
+    // For schema metadata we use a simplified type mapping.
+    // The flexible/non-flexible distinction is version-dependent, but for field
+    // introspection (the primary use case) we use the latest encoding style.
+    let flexible = flexible_versions != Versions::NONE;
+    match field_type {
+        FieldType::Bool => "SchemaType::Boolean".to_string(),
+        FieldType::Int8 => "SchemaType::Int8".to_string(),
+        FieldType::Int16 => "SchemaType::Int16".to_string(),
+        FieldType::Uint16 => "SchemaType::Uint16".to_string(),
+        FieldType::Uint32 => "SchemaType::Uint32".to_string(),
+        FieldType::Int32 => "SchemaType::Int32".to_string(),
+        FieldType::Int64 => "SchemaType::Int64".to_string(),
+        FieldType::Uuid => "SchemaType::Uuid".to_string(),
+        FieldType::Float64 => "SchemaType::Float64".to_string(),
+        FieldType::String => {
+            if flexible {
+                "SchemaType::CompactString".to_string()
+            } else {
+                "SchemaType::String".to_string()
+            }
+        },
+        FieldType::Bytes | FieldType::Records => {
+            if flexible {
+                "SchemaType::CompactBytes".to_string()
+            } else {
+                "SchemaType::Bytes".to_string()
+            }
+        },
+        FieldType::Array(_) => {
+            // Arrays are represented as Bytes in the schema type for introspection
+            if flexible {
+                "SchemaType::CompactBytes".to_string()
+            } else {
+                "SchemaType::Bytes".to_string()
+            }
+        },
+        FieldType::Struct(_) => {
+            // Structs are composite - use Bytes as placeholder for introspection
+            "SchemaType::Bytes".to_string()
+        },
+    }
 }
 
 fn field_type_to_rust(field_type: &FieldType) -> String {
