@@ -217,7 +217,9 @@ impl Errors {
             },
             Self::InvalidGroupId => "The group id is invalid.",
             Self::UnknownMemberId => "The coordinator is not aware of this member.",
-            Self::InvalidSessionTimeout => "The session timeout is not within the range allowed by the broker.",
+            Self::InvalidSessionTimeout => {
+                "The session timeout is not within the range allowed by the broker (as configured by group.min.session.timeout.ms and group.max.session.timeout.ms)."
+            },
             Self::RebalanceInProgress => "The group is rebalancing, so a rejoin is needed.",
             Self::InvalidCommitOffsetSize => "The committing offset data size is not valid.",
             Self::TopicAuthorizationFailed => "Topic authorization failed.",
@@ -236,7 +238,7 @@ impl Errors {
             Self::InvalidConfig => "Configuration is invalid.",
             Self::NotController => "This is not the correct controller for this cluster.",
             Self::InvalidRequest => {
-                "This most likely occurs because of a request being malformed by the client library or the message was sent to an incompatible broker."
+                "This most likely occurs because of a request being malformed by the client library or the message was sent to an incompatible broker. See the broker logs for more details."
             },
             Self::UnsupportedForMessageFormat => {
                 "The message format version on the broker does not support the request."
@@ -250,7 +252,7 @@ impl Errors {
                 "The producer attempted to use a producer id which is not currently assigned to its transactional id."
             },
             Self::InvalidTransactionTimeout => {
-                "The transaction timeout is larger than the maximum value allowed by the broker."
+                "The transaction timeout is larger than the maximum value allowed by the broker (as configured by transaction.max.timeout.ms)."
             },
             Self::ConcurrentTransactions => {
                 "The producer attempted to update a transaction while another concurrent operation on the same transaction was ongoing."
@@ -260,12 +262,14 @@ impl Errors {
             },
             Self::TransactionalIdAuthorizationFailed => "Transactional Id authorization failed.",
             Self::SecurityDisabled => "Security features are disabled.",
-            Self::OperationNotAttempted => "The broker did not attempt to execute this operation.",
+            Self::OperationNotAttempted => {
+                "The broker did not attempt to execute this operation. This may happen for batched RPCs where some operations in the batch failed, causing the broker to respond without trying the rest."
+            },
             Self::KafkaStorageError => "Disk error when trying to access log file on the disk.",
             Self::LogDirNotFound => "The user-specified log directory is not found in the broker config.",
             Self::SaslAuthenticationFailed => "SASL Authentication failed.",
             Self::UnknownProducerId => {
-                "This exception is raised by the broker if it could not locate the producer metadata associated with the producerId in question."
+                "This exception is raised by the broker if it could not locate the producer metadata associated with the producerId in question. This could happen if, for instance, the producer's records were deleted because their retention time had elapsed. Once the last records of the producerId are removed, the producer's metadata is removed from the broker, and future appends by the producer will return this exception."
             },
             Self::ReassignmentInProgress => "A partition reassignment is in progress.",
             Self::DelegationTokenAuthDisabled => "Delegation Token feature is not enabled.",
@@ -339,10 +343,14 @@ impl Errors {
                 "The AlterPartition request successfully updated the partition state but the leader has changed."
             },
             Self::OffsetMovedToTieredStorage => "The requested offset is moved to tiered storage.",
-            Self::FencedMemberEpoch => "The member epoch is fenced by the group coordinator.",
+            Self::FencedMemberEpoch => {
+                "The member epoch is fenced by the group coordinator. The member must abandon all its partitions and rejoin."
+            },
             Self::UnreleasedInstanceId => "The instance ID is still used by another member in the consumer group.",
             Self::UnsupportedAssignor => "The assignor or its version range is not supported by the consumer group.",
-            Self::StaleMemberEpoch => "The member epoch is stale.",
+            Self::StaleMemberEpoch => {
+                "The member epoch is stale. The member must retry after receiving its updated member epoch via the ConsumerGroupHeartbeat API."
+            },
             Self::MismatchedEndpointType => "The request was sent to an endpoint of the wrong type.",
             Self::UnsupportedEndpointType => "This endpoint type is not supported yet.",
             Self::UnknownControllerId => "This controller ID is not known.",

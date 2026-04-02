@@ -15,7 +15,7 @@
 //! Identifiers for all the Kafka APIs.
 
 #[cfg(not(feature = "skip-generated"))]
-use crate::api_message_type::ApiMessageType;
+use crate::api_message_type::{ApiMessageType, ListenerType};
 
 /// Identifiers for all the Kafka APIs.
 ///
@@ -322,6 +322,16 @@ impl ApiKeys {
         self.message_type.response_header_version(api_version)
     }
 
+    /// Returns a list of all supported versions for this API.
+    pub fn all_versions(&self) -> Vec<i16> {
+        (self.oldest_version()..=self.latest_version()).collect()
+    }
+
+    /// Whether this API is in scope for the given listener type.
+    pub fn in_scope(&self, listener: ListenerType) -> bool {
+        self.message_type.listeners().contains(&listener)
+    }
+
     /// Look up an `ApiKeys` by its numeric API key id.
     pub fn for_id(id: i16) -> Option<&'static ApiKeys> {
         Self::ALL.iter().find(|k| k.id() == id)
@@ -330,6 +340,26 @@ impl ApiKeys {
     /// Check if the given id corresponds to a known API key.
     pub fn has_id(id: i16) -> bool {
         Self::ALL.iter().any(|k| k.id() == id)
+    }
+
+    /// Returns all API keys that are in scope for the broker listener.
+    pub fn broker_apis() -> Vec<&'static ApiKeys> {
+        Self::apis_for_listener(ListenerType::Broker)
+    }
+
+    /// Returns all API keys that are in scope for the controller listener.
+    pub fn controller_apis() -> Vec<&'static ApiKeys> {
+        Self::apis_for_listener(ListenerType::Controller)
+    }
+
+    /// Returns all API keys available to clients (same as broker APIs).
+    pub fn client_apis() -> Vec<&'static ApiKeys> {
+        Self::broker_apis()
+    }
+
+    /// Returns all API keys that are in scope for the given listener type.
+    pub fn apis_for_listener(listener: ListenerType) -> Vec<&'static ApiKeys> {
+        Self::ALL.iter().filter(|k| k.in_scope(listener)).collect()
     }
 }
 
@@ -438,5 +468,53 @@ mod tests {
         for key in ApiKeys::ALL {
             assert!(seen.insert(key.id()), "Duplicate API key id: {}", key.id());
         }
+    }
+
+    #[test]
+    fn test_for_id_with_invalid_id_low() {
+        assert!(ApiKeys::for_id(-1).is_none());
+    }
+
+    #[test]
+    fn test_for_id_with_invalid_id_high() {
+        assert!(ApiKeys::for_id(10000).is_none());
+    }
+
+    #[test]
+    fn test_alter_partition_is_cluster_action() {
+        assert!(ApiKeys::ALTER_PARTITION.is_cluster_action());
+    }
+
+    #[test]
+    fn test_has_valid_versions() {
+        let no_valid_versions = [
+            ApiKeys::LEADER_AND_ISR,
+            ApiKeys::STOP_REPLICA,
+            ApiKeys::UPDATE_METADATA,
+            ApiKeys::CONTROLLED_SHUTDOWN,
+        ];
+        for key in ApiKeys::ALL {
+            if no_valid_versions.contains(key) {
+                assert!(!key.has_valid_version(), "{} should have no valid versions", key.name());
+            } else {
+                assert!(key.has_valid_version(), "{} should have valid versions", key.name());
+            }
+        }
+    }
+
+    #[test]
+    fn test_api_scope() {
+        use std::collections::HashSet;
+        let mut apis_missing_scope = HashSet::new();
+        for key in ApiKeys::ALL {
+            if key.message_type.listeners().is_empty() && key.has_valid_version() {
+                apis_missing_scope.insert(key.id());
+            }
+        }
+        assert!(
+            apis_missing_scope.is_empty(),
+            "Found some APIs missing scope definition: {:?}",
+            apis_missing_scope
+        );
     }
 }

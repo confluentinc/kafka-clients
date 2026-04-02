@@ -16,7 +16,10 @@
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
+use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
+
+use rand::seq::SliceRandom;
 
 use super::cluster_resource::ClusterResource;
 use super::node::Node;
@@ -83,6 +86,10 @@ impl Cluster {
         topic_ids: HashMap<String, Uuid>,
     ) -> Self {
         let cluster_resource = ClusterResource::new(cluster_id);
+
+        // Make a randomized copy of the nodes for load balancing across brokers
+        let mut nodes = nodes;
+        nodes.shuffle(&mut rand::rng());
 
         // Index the nodes for quick lookup
         let mut nodes_by_id = HashMap::with_capacity(nodes.len());
@@ -304,6 +311,57 @@ impl Cluster {
     }
 }
 
+impl PartialEq for Cluster {
+    fn eq(&self, other: &Self) -> bool {
+        self.is_bootstrap_configured == other.is_bootstrap_configured
+            && self.nodes == other.nodes
+            && self.unauthorized_topics == other.unauthorized_topics
+            && self.invalid_topics == other.invalid_topics
+            && self.internal_topics == other.internal_topics
+            && self.controller == other.controller
+            && self.partitions_by_topic_partition == other.partitions_by_topic_partition
+            && self.cluster_resource == other.cluster_resource
+            && self.topic_ids == other.topic_ids
+    }
+}
+
+impl Eq for Cluster {}
+
+impl Hash for Cluster {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        self.is_bootstrap_configured.hash(state);
+        // Hash nodes in a order-dependent way (matching Java's List.hashCode)
+        self.nodes.hash(state);
+        // HashSet doesn't implement Hash, so we hash the sorted elements
+        let mut unauthorized: Vec<&String> = self.unauthorized_topics.iter().collect();
+        unauthorized.sort();
+        unauthorized.hash(state);
+        let mut invalid: Vec<&String> = self.invalid_topics.iter().collect();
+        invalid.sort();
+        invalid.hash(state);
+        let mut internal: Vec<&String> = self.internal_topics.iter().collect();
+        internal.sort();
+        internal.hash(state);
+        self.controller.hash(state);
+        // Hash partitions_by_topic_partition sorted by key
+        let mut partitions: Vec<(&TopicPartition, &PartitionInfo)> =
+            self.partitions_by_topic_partition.iter().collect();
+        partitions.sort_by_key(|(k, _)| (k.topic(), k.partition()));
+        for (k, v) in &partitions {
+            k.hash(state);
+            v.hash(state);
+        }
+        self.cluster_resource.hash(state);
+        // Hash topic_ids sorted by key
+        let mut ids: Vec<(&String, &Uuid)> = self.topic_ids.iter().collect();
+        ids.sort_by_key(|(k, _)| k.as_str());
+        for (k, v) in &ids {
+            k.hash(state);
+            v.hash(state);
+        }
+    }
+}
+
 impl fmt::Display for Cluster {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(
@@ -345,8 +403,9 @@ mod tests {
         let cluster = Cluster::bootstrap(&addrs);
         assert!(cluster.is_bootstrap_configured());
         assert_eq!(cluster.nodes().len(), 2);
-        assert_eq!(cluster.nodes()[0].id(), -1);
-        assert_eq!(cluster.nodes()[1].id(), -2);
+        // Nodes are shuffled so we check by id lookup instead of order
+        assert!(cluster.node_by_id(-1).is_some());
+        assert!(cluster.node_by_id(-2).is_some());
     }
 
     #[test]
@@ -473,5 +532,190 @@ mod tests {
         assert_eq!(cluster.partitions_for_node(0).len(), 2);
         assert_eq!(cluster.partitions_for_node(1).len(), 1);
         assert_eq!(cluster.partitions_for_node(99).len(), 0);
+    }
+
+    #[test]
+    fn test_not_equals() {
+        let cluster_id1 = "clusterId1";
+        let cluster_id2 = "clusterId2";
+        let node0 = Node::new(0, "host0".to_string(), 100);
+        let node1 = Node::new(1, "host1".to_string(), 100);
+        let partitions1 = vec![PartitionInfo::new(
+            "topic1".to_string(),
+            0,
+            Some(node0.clone()),
+            vec![node0.clone(), node1.clone()],
+            vec![node0.clone()],
+        )];
+        let partitions2 = vec![PartitionInfo::new(
+            "topic2".to_string(),
+            0,
+            Some(node0.clone()),
+            vec![node1.clone(), node0.clone()],
+            vec![node1.clone()],
+        )];
+        let unauthorized1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let unauthorized2: HashSet<String> = ["topic2".to_string()].into_iter().collect();
+        let invalid1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let invalid2: HashSet<String> = ["topic2".to_string()].into_iter().collect();
+        let internal1: HashSet<String> = ["topic3".to_string()].into_iter().collect();
+        let internal2: HashSet<String> = ["topic4".to_string()].into_iter().collect();
+        let controller1 = Node::new(2, "host2".to_string(), 100);
+        let controller2 = Node::new(3, "host3".to_string(), 100);
+        let topic_id1 = Uuid::random_uuid();
+        let topic_id2 = Uuid::random_uuid();
+        let topic_ids1: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
+        let topic_ids2: HashMap<String, Uuid> = [("topic2".to_string(), topic_id2)].into_iter().collect();
+
+        let cluster1 = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions1.clone(),
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller1.clone()),
+            topic_ids1.clone(),
+        );
+        let different_topic_ids = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions1.clone(),
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller1.clone()),
+            topic_ids2,
+        );
+        let different_controller = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions1.clone(),
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller2),
+            topic_ids1.clone(),
+        );
+        let different_internal_topics = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions1.clone(),
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal2,
+            Some(controller1.clone()),
+            topic_ids1.clone(),
+        );
+        let different_invalid_topics = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions1.clone(),
+            unauthorized1.clone(),
+            invalid2,
+            internal1.clone(),
+            Some(controller1.clone()),
+            topic_ids1.clone(),
+        );
+        let different_unauthorized_topics = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions1.clone(),
+            unauthorized2,
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller1.clone()),
+            topic_ids1.clone(),
+        );
+        let different_partitions = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone()],
+            partitions2,
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller1.clone()),
+            topic_ids1.clone(),
+        );
+        let different_nodes = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node0.clone(), node1],
+            partitions1.clone(),
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller1.clone()),
+            topic_ids1.clone(),
+        );
+        let different_cluster_id = Cluster::new(
+            Some(cluster_id2.to_string()),
+            vec![node0],
+            partitions1,
+            unauthorized1,
+            invalid1,
+            internal1,
+            Some(controller1),
+            topic_ids1,
+        );
+
+        assert_ne!(cluster1, different_topic_ids);
+        assert_ne!(cluster1, different_controller);
+        assert_ne!(cluster1, different_internal_topics);
+        assert_ne!(cluster1, different_invalid_topics);
+        assert_ne!(cluster1, different_unauthorized_topics);
+        assert_ne!(cluster1, different_partitions);
+        assert_ne!(cluster1, different_nodes);
+        assert_ne!(cluster1, different_cluster_id);
+    }
+
+    #[test]
+    fn test_equals() {
+        let cluster_id1 = "clusterId1";
+        let node1 = Node::new(1, "host0".to_string(), 100);
+        let node1_duplicate = Node::new(1, "host0".to_string(), 100);
+        let partitions1 = vec![PartitionInfo::new(
+            "topic1".to_string(),
+            0,
+            Some(node1.clone()),
+            vec![node1.clone()],
+            vec![node1.clone()],
+        )];
+        let partitions1_duplicate = vec![PartitionInfo::new(
+            "topic1".to_string(),
+            0,
+            Some(node1_duplicate.clone()),
+            vec![node1_duplicate.clone()],
+            vec![node1_duplicate.clone()],
+        )];
+        let unauthorized1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let invalid1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let internal1: HashSet<String> = ["topic3".to_string()].into_iter().collect();
+        let controller1 = Node::new(2, "host0".to_string(), 100);
+        let controller1_duplicate = Node::new(2, "host0".to_string(), 100);
+        let topic_id1 = Uuid::random_uuid();
+        let topic_ids1: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
+        let topic_ids1_duplicate: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
+
+        let cluster1 = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node1],
+            partitions1,
+            unauthorized1.clone(),
+            invalid1.clone(),
+            internal1.clone(),
+            Some(controller1),
+            topic_ids1,
+        );
+        let cluster1_duplicate = Cluster::new(
+            Some(cluster_id1.to_string()),
+            vec![node1_duplicate],
+            partitions1_duplicate,
+            unauthorized1,
+            invalid1,
+            internal1,
+            Some(controller1_duplicate),
+            topic_ids1_duplicate,
+        );
+        assert_eq!(cluster1, cluster1_duplicate);
     }
 }
