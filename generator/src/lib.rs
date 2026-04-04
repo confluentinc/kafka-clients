@@ -1201,6 +1201,18 @@ fn generate_field_add_size(
             generate_array_add_size(file, &accessor, element_type, flexible_versions, ind)?;
         },
         FieldType::Struct(_) => {
+            if nullable {
+                // For nullable struct fields, add 1 byte for the presence indicator
+                // in versions where the field is nullable.
+                let nullable_versions = field.nullable_versions();
+                if nullable_versions.lowest() == 0 {
+                    writeln!(file, "{}size.add_bytes(1); // non-null presence byte", ind)?;
+                } else {
+                    writeln!(file, "{}if version >= {} {{", ind, nullable_versions.lowest())?;
+                    writeln!(file, "{}    size.add_bytes(1); // non-null presence byte", ind)?;
+                    writeln!(file, "{}}}", ind)?;
+                }
+            }
             writeln!(file, "{}{}.add_size(size, cache, version)?;", ind, accessor)?;
         },
     }
@@ -1208,7 +1220,13 @@ fn generate_field_add_size(
     // Close nullable wrapper with null marker size in else branch
     if nullable {
         writeln!(file, "{}}} else {{", indent)?;
-        generate_null_add_size(file, field.field_type(), flexible_versions, indent)?;
+        if matches!(field.field_type(), FieldType::Struct(_)) {
+            // For nullable struct fields, null marker is a single byte (presence byte = -1)
+            let inner = format!("{}    ", indent);
+            writeln!(file, "{}size.add_bytes(1); // null struct presence byte", inner)?;
+        } else {
+            generate_null_add_size(file, field.field_type(), flexible_versions, indent)?;
+        }
         writeln!(file, "{}}}", indent)?;
     }
 
@@ -1595,7 +1613,22 @@ fn generate_tagged_field_add_size(
 fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
     let nullable = is_nullable_field(field);
     if nullable {
-        // For nullable fields, check if the value is Some (non-null means non-default)
+        // Check if this is a nullable field with default "null"
+        let has_null_default = matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null");
+        if has_null_default {
+            // For fields defaulting to null, only write when non-null
+            return format!("self.{}.is_some()", field_name);
+        }
+        // For nullable fields with non-null default (e.g., struct fields without "default": "null"),
+        // write when the value is null (to encode the null state) OR when the value differs from default.
+        // This matches Java: `field == null || !field.equals(new StructName())`
+        if let FieldType::Struct(struct_name) = field.field_type() {
+            return format!(
+                "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}::new()",
+                field_name, field_name, struct_name
+            );
+        }
+        // For other nullable fields with non-null default, just check is_some
         return format!("self.{}.is_some()", field_name);
     }
     match field.field_type() {
@@ -1779,17 +1812,73 @@ fn generate_tagged_field_content_size(
         },
         FieldType::Struct(_) => {
             // For tagged structs, compute struct size in a sub-accumulator
-            writeln!(file, "{}{{", indent)?;
-            writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
-            writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version)?;", indent, accessor)?;
-            writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
-            writeln!(
-                file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(struct_size as u32)); // size prefix",
-                indent
-            )?;
-            writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
-            writeln!(file, "{}}}", indent)?;
+            if nullable {
+                let has_null_default =
+                    matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null");
+                if has_null_default {
+                    // Default is null, so we only enter here when Some.
+                    // Tagged field data = presence indicator varint(1) + struct content.
+                    // Size prefix encodes the total data size (1 + struct_size).
+                    writeln!(file, "{}{{", indent)?;
+                    writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
+                    writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version)?;", indent, accessor)?;
+                    writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
+                    writeln!(
+                        file,
+                        "{}    let content_size = 1 + struct_size; // presence indicator + struct",
+                        indent
+                    )?;
+                    writeln!(
+                        file,
+                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        indent
+                    )?;
+                    writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
+                    writeln!(file, "{}}}", indent)?;
+                } else {
+                    // Default is non-null. The field can be None (encoding null) or Some (encoding the struct).
+                    writeln!(file, "{}if let Some(ref val) = self.{} {{", indent, field_name)?;
+                    writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
+                    writeln!(file, "{}    val.add_size(&mut struct_acc, cache, version)?;", indent)?;
+                    writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
+                    writeln!(
+                        file,
+                        "{}    let content_size = 1 + struct_size; // presence indicator + struct",
+                        indent
+                    )?;
+                    writeln!(
+                        file,
+                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        indent
+                    )?;
+                    writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
+                    writeln!(file, "{}}} else {{", indent)?;
+                    writeln!(
+                        file,
+                        "{}    // Null: just the null presence indicator varint(0) = 1 byte",
+                        indent
+                    )?;
+                    writeln!(
+                        file,
+                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for 1 byte",
+                        indent
+                    )?;
+                    writeln!(file, "{}    size.add_bytes(1); // varint(0) null indicator", indent)?;
+                    writeln!(file, "{}}}", indent)?;
+                }
+            } else {
+                writeln!(file, "{}{{", indent)?;
+                writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
+                writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version)?;", indent, accessor)?;
+                writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
+                writeln!(
+                    file,
+                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(struct_size as u32)); // size prefix",
+                    indent
+                )?;
+                writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
+                writeln!(file, "{}}}", indent)?;
+            }
         },
     }
 
@@ -2086,25 +2175,35 @@ fn generate_tagged_field_read(
                     writeln!(file, "{}                    }}", indent)?;
                 },
                 FieldType::Struct(struct_name) => {
-                    // For structs, we read the bytes and then parse the struct from them
-                    writeln!(
-                        file,
-                        "{}                    let mut struct_bytes = vec![0u8; size as usize];",
-                        indent
-                    )?;
-                    writeln!(file, "{}                    readable.read_bytes(&mut struct_bytes)?;", indent)?;
-                    writeln!(
-                        file,
-                        "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::from_bytes(struct_bytes);",
-                        indent
-                    )?;
                     if nullable {
+                        // For nullable tagged structs, read a varint presence indicator first.
+                        // If <= 0, the struct is null. If > 0, read the struct.
                         writeln!(
                             file,
-                            "{}                    result.{} = Some({}::read(&mut struct_accessor, version)?);",
+                            "{}                    if readable.read_unsigned_varint()? <= 0 {{",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        result.{} = None;", indent, field_name)?;
+                        writeln!(file, "{}                    }} else {{", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        result.{} = Some({}::read(readable, version)?);",
                             indent, field_name, struct_name
                         )?;
+                        writeln!(file, "{}                    }}", indent)?;
                     } else {
+                        // For non-nullable structs, read the bytes and parse the struct
+                        writeln!(
+                            file,
+                            "{}                    let mut struct_bytes = vec![0u8; size as usize];",
+                            indent
+                        )?;
+                        writeln!(file, "{}                    readable.read_bytes(&mut struct_bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::from_bytes(struct_bytes);",
+                            indent
+                        )?;
                         writeln!(
                             file,
                             "{}                    result.{} = {}::read(&mut struct_accessor, version)?;",
@@ -2502,21 +2601,100 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
                     },
                     FieldType::Struct(_) => {
-                        // For structs, we need to calculate the size first by writing to a temp buffer
-                        writeln!(file, "{}                // Calculate struct size", indent)?;
-                        writeln!(
-                            file,
-                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
-                            indent
-                        )?;
-                        writeln!(
-                            file,
-                            "{}                {}.write(&mut size_accessor, version)?;",
-                            indent, tagged_accessor
-                        )?;
-                        writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
-                        writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
-                        writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                        if nullable {
+                            let has_null_default =
+                                matches!(field.field_default(), Some(serde_json::Value::String(s)) if s == "null");
+                            if !has_null_default {
+                                // Nullable struct with non-null default: need to handle both null and non-null cases.
+                                // When null: write tag + size(1) + varint(0)
+                                // When non-null: write tag + size(struct_size+1) + varint(1) + struct_data
+                                writeln!(file, "{}                if self.{}.is_none() {{", indent, field_name)?;
+                                writeln!(
+                                    file,
+                                    "{}                    writable.write_unsigned_varint(1)?; // size = 1 byte",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    writable.write_unsigned_varint(0)?; // null presence indicator",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }} else {{", indent)?;
+                                writeln!(
+                                    file,
+                                    "{}                    // Calculate struct size (with presence indicator)",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_accessor.write_unsigned_varint(1)?; // non-null presence indicator",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    {}.write(&mut size_accessor, version)?;",
+                                    indent, tagged_accessor
+                                )?;
+                                writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
+                                writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
+                                writeln!(
+                                    file,
+                                    "{}                    writable.write_bytes(size_accessor.buffer())?;",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            } else {
+                                // Nullable struct with null default: only written when non-null
+                                writeln!(
+                                    file,
+                                    "{}                // Calculate struct size (with presence indicator)",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                size_accessor.write_unsigned_varint(1)?; // non-null presence indicator",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                {}.write(&mut size_accessor, version)?;",
+                                    indent, tagged_accessor
+                                )?;
+                                writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                                writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                                writeln!(
+                                    file,
+                                    "{}                writable.write_bytes(size_accessor.buffer())?;",
+                                    indent
+                                )?;
+                            }
+                        } else {
+                            // Non-nullable struct
+                            writeln!(file, "{}                // Calculate struct size", indent)?;
+                            writeln!(
+                                file,
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                {}.write(&mut size_accessor, version)?;",
+                                indent, tagged_accessor
+                            )?;
+                            writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                            writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                        }
                     },
                     _ => {
                         writeln!(
@@ -2852,11 +3030,41 @@ fn generate_field_read(
         },
         FieldType::Struct(struct_name) => {
             if nullable {
-                writeln!(
-                    file,
-                    "{}result.{} = Some({}::read(readable, version)?);",
-                    indent, field_name, struct_name
-                )?;
+                // For nullable struct fields, Java uses a presence byte:
+                // byte < 0 means null, byte >= 0 means struct data follows.
+                // The nullable_versions determine when the presence byte is used.
+                let nullable_versions = field.nullable_versions();
+                if nullable_versions.lowest() == 0 {
+                    // All versions are nullable: always read presence byte
+                    writeln!(file, "{}if readable.read_byte()? < 0 {{", indent)?;
+                    writeln!(file, "{}    result.{} = None;", indent, field_name)?;
+                    writeln!(file, "{}}} else {{", indent)?;
+                    writeln!(
+                        file,
+                        "{}    result.{} = Some({}::read(readable, version)?);",
+                        indent, field_name, struct_name
+                    )?;
+                    writeln!(file, "{}}}", indent)?;
+                } else {
+                    // Version-specific nullability: only read presence byte in nullable versions
+                    writeln!(file, "{}if version >= {} {{", indent, nullable_versions.lowest())?;
+                    writeln!(file, "{}    if readable.read_byte()? < 0 {{", indent)?;
+                    writeln!(file, "{}        result.{} = None;", indent, field_name)?;
+                    writeln!(file, "{}    }} else {{", indent)?;
+                    writeln!(
+                        file,
+                        "{}        result.{} = Some({}::read(readable, version)?);",
+                        indent, field_name, struct_name
+                    )?;
+                    writeln!(file, "{}    }}", indent)?;
+                    writeln!(file, "{}}} else {{", indent)?;
+                    writeln!(
+                        file,
+                        "{}    result.{} = Some({}::read(readable, version)?);",
+                        indent, field_name, struct_name
+                    )?;
+                    writeln!(file, "{}}}", indent)?;
+                }
             } else {
                 writeln!(
                     file,
@@ -3451,6 +3659,20 @@ fn generate_field_write(
             writeln!(file, "{}}}", ind)?;
         },
         FieldType::Struct(_) => {
+            if nullable {
+                // For nullable struct fields, write a presence byte before the struct.
+                // In nullable versions: write byte(1) for non-null, byte(-1) for null.
+                // In non-nullable versions: write struct directly (no presence byte).
+                let nullable_versions = field.nullable_versions();
+                if nullable_versions.lowest() == 0 {
+                    // All versions are nullable: always write presence byte
+                    writeln!(file, "{}writable.write_byte(1)?; // non-null presence byte", ind)?;
+                } else {
+                    writeln!(file, "{}if version >= {} {{", ind, nullable_versions.lowest())?;
+                    writeln!(file, "{}    writable.write_byte(1)?; // non-null presence byte", ind)?;
+                    writeln!(file, "{}}}", ind)?;
+                }
+            }
             writeln!(file, "{}{}.write(writable, version)?;", ind, accessor)?;
         },
     }
@@ -3458,7 +3680,28 @@ fn generate_field_write(
     // Close nullable wrapper with null marker in else branch
     if nullable {
         writeln!(file, "{}}} else {{", indent)?;
-        generate_null_write(file, field.field_type(), flexible_versions, indent)?;
+        if matches!(field.field_type(), FieldType::Struct(_)) {
+            // For nullable struct fields, write presence byte in nullable versions,
+            // and error in non-nullable versions (matching Java's NullPointerException).
+            let nullable_versions = field.nullable_versions();
+            let inner = format!("{}    ", indent);
+            if nullable_versions.lowest() == 0 {
+                // All versions are nullable: always write null presence byte
+                writeln!(file, "{}writable.write_byte(-1)?; // null struct presence byte", inner)?;
+            } else {
+                writeln!(file, "{}if version >= {} {{", inner, nullable_versions.lowest())?;
+                writeln!(file, "{}    writable.write_byte(-1)?; // null struct presence byte", inner)?;
+                writeln!(file, "{}}} else {{", inner)?;
+                writeln!(
+                    file,
+                    "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null value for non-nullable struct field\"));",
+                    inner
+                )?;
+                writeln!(file, "{}}}", inner)?;
+            }
+        } else {
+            generate_null_write(file, field.field_type(), flexible_versions, indent)?;
+        }
         writeln!(file, "{}}}", indent)?;
     }
 
@@ -3553,6 +3796,14 @@ fn generate_null_write(
             } else {
                 writeln!(file, "{}writable.write_int(-1)?;", inner)?;
             }
+        },
+        FieldType::Struct(_) => {
+            // For nullable struct fields, write a null presence byte.
+            // In nullable versions: write byte(-1) to indicate null.
+            // In non-nullable versions: this is an error (Java throws NullPointerException).
+            // Since we can't easily access nullable_versions here, we write byte(-1)
+            // unconditionally. The version check is handled by the caller's nullable wrapper.
+            writeln!(file, "{}writable.write_byte(-1)?; // null struct presence byte", inner)?;
         },
         _ => {
             // Primitive types cannot be nullable per can_be_nullable()
@@ -3848,8 +4099,14 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
         {
             return "None".to_string();
         }
-        // Nullable with no explicit default or non-null default
+        // Nullable with no explicit default
         if default.is_none() {
+            // For struct types, Java defaults to a new instance (non-null) when there's
+            // no explicit "default": "null". Only fields with explicit "default": "null"
+            // default to null in Java.
+            if let FieldType::Struct(struct_name) = field.field_type() {
+                return format!("Some({}::new())", struct_name);
+            }
             return "None".to_string();
         }
         // Nullable with a non-null default: wrap in Some()

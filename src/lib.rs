@@ -26,3 +26,15 @@ mod generated {
 
 #[cfg(not(feature = "skip-generated"))]
 pub use generated::*;
+
+// Include test-only generated message definitions (test struct specs like
+// SimpleExampleMessage, NullableStructMessage). Enabled via "test-messages"
+// feature, auto-activated for dev/test builds via [dev-dependencies].
+#[cfg(feature = "test-messages")]
+#[allow(dead_code, clippy::all)]
+mod test_generated {
+    include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
+}
+
+#[cfg(feature = "test-messages")]
+pub use test_generated::*;
