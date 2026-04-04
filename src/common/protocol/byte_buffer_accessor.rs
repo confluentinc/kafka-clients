@@ -81,12 +81,18 @@ impl ByteBufferAccessor {
     }
 
     /// Ensure we have at least `size` bytes available to read.
+    ///
+    /// The error message matches Java's ByteBufferAccessor.readArray format:
+    /// "Error reading byte array of X byte(s): only Y byte(s) available"
     fn check_remaining(&self, size: usize) -> io::Result<()> {
         let remaining = self.buffer.len() - self.position;
         if size > remaining {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("Error reading {} byte(s): only {} byte(s) available", size, remaining),
+                format!(
+                    "Error reading byte array of {} byte(s): only {} byte(s) available",
+                    size, remaining
+                ),
             ));
         }
         Ok(())
@@ -407,5 +413,47 @@ mod tests {
     fn test_insufficient_data() {
         let mut buf = ByteBufferAccessor::from_bytes(vec![1, 2, 3]);
         assert!(buf.read_int().is_err());
+    }
+
+    /// Translated from Java ByteBufferAccessorTest.testReadArray.
+    /// Writes an array and an int, reads them back, then verifies error
+    /// message when reading beyond available bytes.
+    #[test]
+    fn test_read_array_error_message() {
+        let mut accessor = ByteBufferAccessor::new(1024);
+        let test_array: Vec<u8> = vec![0x4b, 0x61, 0x46];
+        accessor.write_byte_array(&test_array).unwrap();
+        accessor.write_int(12345).unwrap();
+        accessor.flip();
+
+        let test_array2 = accessor.read_array(3).unwrap();
+        assert_eq!(test_array, test_array2);
+        assert_eq!(12345, accessor.read_int().unwrap());
+
+        let err = accessor.read_array(3).unwrap_err();
+        assert_eq!(
+            "Error reading byte array of 3 byte(s): only 0 byte(s) available",
+            err.to_string()
+        );
+    }
+
+    /// Translated from Java ByteBufferAccessorTest.testReadString.
+    /// Writes a string's bytes, reads it back, then verifies error
+    /// message when reading beyond available bytes.
+    #[test]
+    fn test_read_string_error_message() {
+        let mut accessor = ByteBufferAccessor::new(1024);
+        let test_string = "ABC";
+        let test_array = test_string.as_bytes();
+        accessor.write_byte_array(test_array).unwrap();
+        accessor.flip();
+
+        assert_eq!("ABC", accessor.read_string(3).unwrap());
+
+        let err = accessor.read_string(2).unwrap_err();
+        assert_eq!(
+            "Error reading byte array of 2 byte(s): only 0 byte(s) available",
+            err.to_string()
+        );
     }
 }
