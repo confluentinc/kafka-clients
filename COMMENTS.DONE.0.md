@@ -70,3 +70,57 @@ Both generate_tagged_field_write and add_size now use the same get_default_check
 **Original Issue**: get_default_value did not handle FieldType::Uuid with string defaults, falling through to Uuid::zero().
 
 **Resolution**: Added FieldType::Uuid branch in the string-parsing section of get_default_value that generates `Uuid::from_string("...").expect("invalid UUID default")`.
+
+## Issue from COMMENTS.0.md - Issue 4: Uuid::cmp uses unsigned comparison but Java uses signed
+
+**Original Issue**: Uuid::cmp used unsigned u64 comparison but Java Uuid.compareTo() uses signed long comparison, producing wrong ordering for ~50% of random UUIDs.
+
+**Resolution**: Changed Ord implementation to cast u64 to i64 before comparison, matching Java signed ordering. Added test_compare_uuids_signed to verify correct behavior for UUIDs with high bits set.
+
+## Issue from COMMENTS.0.md - Issue 5: Missing UuidTest.testHashCode test
+
+**Original Issue**: Java testHashCode test was completely absent from Rust translation.
+
+**Resolution**: Added test_hash_code verifying hash consistency (equal UUIDs produce equal hashes, different UUIDs produce different hashes). Adapted since Rust uses derive(Hash) instead of Java custom hashCode.
+
+## Issue from COMMENTS.0.md - Issue 6: Missing UuidTest.testRandomUuid test
+
+**Original Issue**: Java testRandomUuid (100 iterations) was completely missing.
+
+**Resolution**: Added test_random_uuid with 100 iterations verifying random UUIDs are not ZERO_UUID, not METADATA_TOPIC_ID, and dont
+
+## Issue from COMMENTS.0.md - Issue 4: Uuid::cmp uses unsigned comparison but Java uses signed
+
+**Original Issue**: Uuid::cmp used unsigned u64 comparison but Java Uuid.compareTo uses signed long comparison, producing wrong ordering for about 50% of random UUIDs.
+
+**Resolution**: Changed Ord implementation to cast u64 to i64 before comparison, matching Java signed ordering. Added test_compare_uuids_signed to verify correct behavior for UUIDs with high bits set.
+
+## Issue from COMMENTS.0.md - Issue 5: Missing UuidTest.testHashCode test
+
+**Original Issue**: Java testHashCode test was completely absent from Rust translation.
+
+**Resolution**: Added test_hash_code verifying hash consistency (equal UUIDs produce equal hashes, different UUIDs produce different hashes). Adapted since Rust uses derive(Hash) instead of Java custom hashCode.
+
+## Issue from COMMENTS.0.md - Issue 6: Missing UuidTest.testRandomUuid test
+
+**Original Issue**: Java testRandomUuid (100 iterations) was completely missing.
+
+**Resolution**: Added test_random_uuid with 100 iterations verifying random UUIDs are not ZERO_UUID, not METADATA_TOPIC_ID, and do not start with a dash.
+
+## Issue from COMMENTS.0.md - Issue 7: Missing UuidTest.testCompareUuids test
+
+**Original Issue**: Java testCompareUuids testing all 9 comparison combinations was missing.
+
+**Resolution**: Added test_compare_uuids verifying all 9 comparison combinations of UUIDs with exact Ordering assertions.
+
+## Issue from COMMENTS.0.md - Issue 8: Missing ByteBufferAccessorTest error message assertions
+
+**Original Issue**: Rust tests only checked is_err(), not the error message content.
+
+**Resolution**: Updated error message format to match Java. Added test_read_array_error_message and test_read_string_error_message translated from Java ByteBufferAccessorTest.
+
+## Issue from COMMENTS.0.md - Issue 9: Missing MessageUtilTest tests
+
+**Original Issue**: Only 1 of 6 Java MessageUtilTest methods was translated.
+
+**Resolution**: Added compare_raw_tagged_fields function and UNSIGNED_SHORT_MAX/UNSIGNED_INT_MAX constants. Added test_compare_raw_tagged_fields and test_constants. Remaining Java tests (testDeepToString, testByteBufferToArray, testDuplicate, testBinaryNode, testInvalidBinaryNode) not translated as the corresponding utility functions are not yet implemented and depend on Java-specific APIs.
