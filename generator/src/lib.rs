@@ -1619,17 +1619,30 @@ fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
             // For fields defaulting to null, only write when non-null
             return format!("self.{}.is_some()", field_name);
         }
-        // For nullable fields with non-null default (e.g., struct fields without "default": "null"),
-        // write when the value is null (to encode the null state) OR when the value differs from default.
-        // This matches Java: `field == null || !field.equals(new StructName())`
-        if let FieldType::Struct(struct_name) = field.field_type() {
-            return format!(
-                "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}::new()",
-                field_name, field_name, struct_name
-            );
+        // For nullable fields with non-null default, write when the value differs from default.
+        // Java defaults nullable string/bytes to "" / Bytes.EMPTY (not null).
+        // Write when null (to encode the null state) OR when the value differs from default.
+        match field.field_type() {
+            FieldType::Struct(struct_name) => {
+                // Java: field == null || !field.equals(new StructName())
+                return format!(
+                    "self.{}.is_none() || self.{}.as_ref().unwrap() != &{}::new()",
+                    field_name, field_name, struct_name
+                );
+            },
+            FieldType::String => {
+                // Java: field == null || !field.isEmpty()
+                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
+            },
+            FieldType::Bytes | FieldType::Records => {
+                // Java: field == null || field.length != 0
+                return format!("self.{}.as_ref().map_or(true, |v| !v.is_empty())", field_name);
+            },
+            _ => {
+                // For other nullable fields with non-null default, just check is_some
+                return format!("self.{}.is_some()", field_name);
+            },
         }
-        // For other nullable fields with non-null default, just check is_some
-        return format!("self.{}.is_some()", field_name);
     }
     match field.field_type() {
         FieldType::String => format!("!self.{}.is_empty()", field_name),
@@ -1673,8 +1686,9 @@ fn generate_tagged_field_content_size(
     indent: &str,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let nullable = is_nullable_field(field);
-    // For nullable tagged fields, we know self.field is Some() because the caller checked.
-    // We need to use the unwrapped value for accessing .len() etc.
+    // For nullable tagged fields that pass the default check, the value may be None
+    // (null, which differs from the default empty value) or Some(non-default).
+    // For types that need .len() (String, Bytes, Array), we must handle None separately.
     let accessor = if nullable {
         format!("self.{}.as_ref().unwrap()", field_name)
     } else {
@@ -1734,37 +1748,94 @@ fn generate_tagged_field_content_size(
         },
         FieldType::String => {
             // String in tagged field: varint(inner_size) where inner_size = varint(len+1) + len
+            // For nullable: None encodes as varint(0), inner_size = 1
             writeln!(file, "{}{{", indent)?;
-            writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
-            writeln!(
-                file,
-                "{}    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
-                indent
-            )?;
-            writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
-            writeln!(
-                file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
-                indent
-            )?;
-            writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
+            if nullable {
+                writeln!(file, "{}    if let Some(ref val) = self.{} {{", indent, field_name)?;
+                writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
+                writeln!(
+                    file,
+                    "{}        let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    indent
+                )?;
+                writeln!(
+                    file,
+                    "{}        let inner_size = string_prefix_size + bytes_len as i32;",
+                    indent
+                )?;
+                writeln!(
+                    file,
+                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32));",
+                    indent
+                )?;
+                writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
+                writeln!(file, "{}    }} else {{", indent)?;
+                // null encoding: varint(0) = 1 byte, so inner_size = 1
+                writeln!(
+                    file,
+                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for null",
+                    indent
+                )?;
+                writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
+                writeln!(file, "{}    }}", indent)?;
+            } else {
+                writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
+                writeln!(
+                    file,
+                    "{}    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    indent
+                )?;
+                writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
+                writeln!(
+                    file,
+                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    indent
+                )?;
+                writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
+            }
             writeln!(file, "{}}}", indent)?;
         },
         FieldType::Bytes | FieldType::Records => {
             writeln!(file, "{}{{", indent)?;
-            writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
-            writeln!(
-                file,
-                "{}    let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
-                indent
-            )?;
-            writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
-            writeln!(
-                file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
-                indent
-            )?;
-            writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
+            if nullable {
+                writeln!(file, "{}    if let Some(ref val) = self.{} {{", indent, field_name)?;
+                writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
+                writeln!(
+                    file,
+                    "{}        let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    indent
+                )?;
+                writeln!(file, "{}        let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
+                writeln!(
+                    file,
+                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32));",
+                    indent
+                )?;
+                writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
+                writeln!(file, "{}    }} else {{", indent)?;
+                // null encoding: varint(0) = 1 byte, so inner_size = 1
+                writeln!(
+                    file,
+                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for null",
+                    indent
+                )?;
+                writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
+                writeln!(file, "{}    }}", indent)?;
+            } else {
+                writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
+                writeln!(
+                    file,
+                    "{}    let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    indent
+                )?;
+                writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
+                writeln!(
+                    file,
+                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    indent
+                )?;
+                writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
+            }
             writeln!(file, "{}}}", indent)?;
         },
         FieldType::Array(element_type) => {
@@ -2042,6 +2113,22 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                        let length = length - 1;", indent)?;
                         writeln!(
                             file,
+                            "{}                        if length as usize > readable.remaining() {{",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                                format!(\"Tried to allocate a collection of size {{}}, but there are only {{}} bytes remaining.\", length, readable.remaining())));",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        }}", indent)?;
+                        writeln!(
+                            file,
                             "{}                        let mut _arr = Vec::with_capacity(length as usize);",
                             indent
                         )?;
@@ -2051,6 +2138,22 @@ fn generate_tagged_field_read(
                         writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
                         writeln!(file, "{}                        let length = length - 1;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        if length as usize > readable.remaining() {{",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                                format!(\"Tried to allocate a collection of size {{}}, but there are only {{}} bytes remaining.\", length, readable.remaining())));",
+                            indent
+                        )?;
+                        writeln!(file, "{}                        }}", indent)?;
                         writeln!(
                             file,
                             "{}                        result.{} = Vec::with_capacity(length as usize);",
@@ -2386,24 +2489,59 @@ fn generate_tagged_field_write(
                 // Calculate and write size, then write the field data
                 match field.field_type() {
                     FieldType::String => {
-                        writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
-                        writeln!(
-                            file,
-                            "{}                let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
-                            indent
-                        )?;
-                        writeln!(
-                            file,
-                            "{}                let size = (string_prefix_size + bytes.len() as i32) as u32;",
-                            indent
-                        )?;
-                        writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
-                        writeln!(
-                            file,
-                            "{}                writable.write_unsigned_varint((bytes.len() as u32) + 1)?;",
-                            indent
-                        )?;
-                        writeln!(file, "{}                writable.write_bytes(bytes)?;", indent)?;
+                        if nullable {
+                            writeln!(file, "{}                if let Some(ref val) = self.{} {{", indent, field_name)?;
+                            writeln!(file, "{}                    let bytes = val.as_bytes();", indent)?;
+                            writeln!(
+                                file,
+                                "{}                    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                    let size = (string_prefix_size + bytes.len() as i32) as u32;",
+                                indent
+                            )?;
+                            writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(
+                                file,
+                                "{}                    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;",
+                                indent
+                            )?;
+                            writeln!(file, "{}                    writable.write_bytes(bytes)?;", indent)?;
+                            writeln!(file, "{}                }} else {{", indent)?;
+                            // null encoding: size = 1 (varint(0))
+                            writeln!(
+                                file,
+                                "{}                    writable.write_unsigned_varint(1)?; // size for null",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                    writable.write_unsigned_varint(0)?; // null",
+                                indent
+                            )?;
+                            writeln!(file, "{}                }}", indent)?;
+                        } else {
+                            writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
+                            writeln!(
+                                file,
+                                "{}                let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                let size = (string_prefix_size + bytes.len() as i32) as u32;",
+                                indent
+                            )?;
+                            writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(
+                                file,
+                                "{}                writable.write_unsigned_varint((bytes.len() as u32) + 1)?;",
+                                indent
+                            )?;
+                            writeln!(file, "{}                writable.write_bytes(bytes)?;", indent)?;
+                        }
                     },
                     FieldType::Bool => {
                         writeln!(
@@ -2580,25 +2718,61 @@ fn generate_tagged_field_write(
                         )?;
                     },
                     FieldType::Bytes | FieldType::Records => {
-                        writeln!(file, "{}                // Calculate bytes size", indent)?;
-                        writeln!(
-                            file,
-                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
-                            indent
-                        )?;
-                        writeln!(
-                            file,
-                            "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1)?;",
-                            indent, tagged_accessor
-                        )?;
-                        writeln!(
-                            file,
-                            "{}                size_accessor.write_bytes(&*{})?;",
-                            indent, tagged_accessor
-                        )?;
-                        writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
-                        writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
-                        writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                        if nullable {
+                            writeln!(file, "{}                if let Some(ref val) = self.{} {{", indent, field_name)?;
+                            writeln!(file, "{}                    // Calculate bytes size", indent)?;
+                            writeln!(
+                                file,
+                                "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                    size_accessor.write_unsigned_varint((val.len() as u32) + 1)?;",
+                                indent
+                            )?;
+                            writeln!(file, "{}                    size_accessor.write_bytes(val)?;", indent)?;
+                            writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
+                            writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(
+                                file,
+                                "{}                    writable.write_bytes(size_accessor.buffer())?;",
+                                indent
+                            )?;
+                            writeln!(file, "{}                }} else {{", indent)?;
+                            // null encoding: size = 1 (varint(0))
+                            writeln!(
+                                file,
+                                "{}                    writable.write_unsigned_varint(1)?; // size for null",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                    writable.write_unsigned_varint(0)?; // null",
+                                indent
+                            )?;
+                            writeln!(file, "{}                }}", indent)?;
+                        } else {
+                            writeln!(file, "{}                // Calculate bytes size", indent)?;
+                            writeln!(
+                                file,
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                                indent, tagged_accessor
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                size_accessor.write_bytes(&*{})?;",
+                                indent, tagged_accessor
+                            )?;
+                            writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                            writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                        }
                     },
                     FieldType::Struct(_) => {
                         if nullable {
@@ -3297,6 +3471,20 @@ fn generate_array_read(
 
     // Helper to generate the read loop that populates the array
     let gen_read_loop = |file: &mut fs::File, ind: &str, fn_name: &str| -> Result<(), Box<dyn std::error::Error>> {
+        // Bounds check: validate array length against remaining bytes before allocating,
+        // to prevent OOM from malicious messages with huge array lengths.
+        writeln!(file, "{}if length as usize > readable.remaining() {{", ind)?;
+        writeln!(
+            file,
+            "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
+            ind
+        )?;
+        writeln!(
+            file,
+            "{}        format!(\"Tried to allocate a collection of size {{}}, but there are only {{}} bytes remaining.\", length, readable.remaining())));",
+            ind
+        )?;
+        writeln!(file, "{}}}", ind)?;
         if nullable {
             writeln!(file, "{}let mut _arr = Vec::with_capacity(length as usize);", ind)?;
             // We need a temporary field_name for element reads
@@ -4099,15 +4287,18 @@ fn get_default_value_for_field(field: &FieldSpec) -> String {
         {
             return "None".to_string();
         }
-        // Nullable with no explicit default
+        // Nullable with no explicit default: Java defaults to non-null empty values
+        // for String, Bytes, Records, and Struct. Only fields with explicit
+        // "default": "null" in the JSON spec default to null/None.
         if default.is_none() {
-            // For struct types, Java defaults to a new instance (non-null) when there's
-            // no explicit "default": "null". Only fields with explicit "default": "null"
-            // default to null in Java.
-            if let FieldType::Struct(struct_name) = field.field_type() {
-                return format!("Some({}::new())", struct_name);
+            match field.field_type() {
+                FieldType::String => return "Some(String::new())".to_string(),
+                FieldType::Bytes | FieldType::Records => return "Some(Vec::new())".to_string(),
+                FieldType::Struct(struct_name) => {
+                    return format!("Some({}::new())", struct_name);
+                },
+                _ => return "None".to_string(),
             }
-            return "None".to_string();
         }
         // Nullable with a non-null default: wrap in Some()
         let base_default = get_default_value(field.field_type(), default);

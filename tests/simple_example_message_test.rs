@@ -137,10 +137,9 @@ fn test_should_default_field() {
     // In Rust: zeroCopyByteBuffer defaults to empty Vec
     assert!(out.zero_copy_byte_buffer.is_empty());
     // In Java: nullableZeroCopyByteBuffer defaults to ByteUtils.EMPTY_BUF (not null)
-    // In Rust: nullable fields default to None. This is a type system difference --
-    // Java uses null vs non-null ByteBuffer, Rust uses Option<Vec<u8>>.
-    // The generated Rust code uses None as the default for nullable bytes fields.
-    assert!(out.nullable_zero_copy_byte_buffer.is_none());
+    // In Rust: nullable bytes without "default": "null" default to Some(Vec::new())
+    // matching Java's empty-bytes default.
+    assert_eq!(Some(Vec::new()), out.nullable_zero_copy_byte_buffer);
 }
 
 /// Translated from: shouldRoundTripFieldThroughBuffer
@@ -160,8 +159,9 @@ fn test_should_round_trip_field_through_buffer() {
     assert_eq!(uuid, read_in.process_id);
     assert_eq!(buf, read_in.zero_copy_byte_buffer);
     // In Java: nullableZeroCopyByteBuffer defaults to EMPTY_BUF after round-trip
-    // In Rust: nullable bytes round-trips as None when not set
-    assert!(read_in.nullable_zero_copy_byte_buffer.is_none());
+    // In Rust: nullable bytes without "default": "null" defaults to Some(Vec::new()),
+    // matching Java's empty-bytes default. Round-trip preserves empty bytes.
+    assert_eq!(Some(Vec::new()), read_in.nullable_zero_copy_byte_buffer);
 }
 
 /// Translated from: shouldRoundTripFieldThroughBufferWithNullable
@@ -342,12 +342,12 @@ fn test_my_bytes() {
     //   assertThrows(RuntimeException.class, () -> new SimpleExampleMessageData().setMyUint32(UNSIGNED_INT_MAX + 1));
     // Not translated: Rust's u16/u32 types prevent these values at compile time.
 
-    // Verify that the tagged field reads as None (null) when not set.
-    // In Java, myBytes defaults to empty byte[] (new byte[0]).
-    // In Rust, myBytes is Option<Vec<u8>> with default None because it has nullableVersions.
-    // The tagged field with default null means it won't be written, so on read it stays None.
+    // Verify that the tagged field reads as Some(empty) when not set.
+    // In Java, myBytes defaults to Bytes.EMPTY (empty byte[]).
+    // In Rust, myBytes is Option<Vec<u8>> with default Some(Vec::new()) matching Java.
+    // The tagged field at its default value won't be written, so on read it stays at the default.
     test_round_trip_default_version(&SimpleExampleMessageData::new(), &|message| {
-        assert!(message.my_bytes.is_none());
+        assert_eq!(Some(Vec::new()), message.my_bytes);
     });
 
     let mut msg = SimpleExampleMessageData::new();
