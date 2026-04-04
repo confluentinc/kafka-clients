@@ -1569,27 +1569,16 @@ fn generate_tagged_field_add_size(
     // If not, we count it and add its size.
     let default_check = get_default_check(field, &field_name);
 
-    if let Some(check) = &default_check {
-        writeln!(file, "{}if {} {{", indent, check)?;
-        let inner = format!("{}    ", indent);
-        writeln!(file, "{}num_tagged_fields += 1;", inner)?;
-        writeln!(
-            file,
-            "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
-            inner, tag
-        )?;
-        generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
-        writeln!(file, "{}}}", indent)?;
-    } else {
-        // Always include (no meaningful default to compare against)
-        writeln!(file, "{}num_tagged_fields += 1;", indent)?;
-        writeln!(
-            file,
-            "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
-            indent, tag
-        )?;
-        generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &indent)?;
-    }
+    writeln!(file, "{}if {} {{", indent, default_check)?;
+    let inner = format!("{}    ", indent);
+    writeln!(file, "{}num_tagged_fields += 1;", inner)?;
+    writeln!(
+        file,
+        "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
+        inner, tag
+    )?;
+    generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
+    writeln!(file, "{}}}", indent)?;
 
     if needs_field_version_check {
         writeln!(file, "{}}}", base_indent)?;
@@ -1598,22 +1587,46 @@ fn generate_tagged_field_add_size(
     Ok(())
 }
 
-/// Get the default check expression for a tagged field (returns None if field should always be included).
+/// Get the default check expression for a tagged field.
 ///
-/// Must match the behavior of `generate_tagged_field_write` which only checks is_empty()
-/// for String and Array types. All other types are always written.
-fn get_default_check(field: &FieldSpec, field_name: &str) -> Option<String> {
+/// Returns a condition string that is true when the field has a non-default value
+/// and should be written to the wire. Tagged fields at their default value are NOT
+/// written, matching Java behavior.
+fn get_default_check(field: &FieldSpec, field_name: &str) -> String {
     let nullable = is_nullable_field(field);
     if nullable {
         // For nullable fields, check if the value is Some (non-null means non-default)
-        return Some(format!("self.{}.is_some()", field_name));
+        return format!("self.{}.is_some()", field_name);
     }
     match field.field_type() {
-        FieldType::String => Some(format!("!self.{}.is_empty()", field_name)),
-        FieldType::Array(_) => Some(format!("!self.{}.is_empty()", field_name)),
-        _ => {
-            // For all other types, always include (matches write method behavior)
-            None
+        FieldType::String => format!("!self.{}.is_empty()", field_name),
+        FieldType::Array(_) => format!("!self.{}.is_empty()", field_name),
+        FieldType::Bytes | FieldType::Records => format!("!self.{}.is_empty()", field_name),
+        FieldType::Bool => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            format!("self.{} != {}", field_name, default_val)
+        },
+        FieldType::Int8
+        | FieldType::Int16
+        | FieldType::Int32
+        | FieldType::Int64
+        | FieldType::Uint16
+        | FieldType::Uint32 => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            format!("self.{} != {}", field_name, default_val)
+        },
+        FieldType::Float64 => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            // Float comparison: use to_bits() for exact comparison like Java's Double.compare
+            format!("self.{}.to_bits() != {}f64.to_bits()", field_name, default_val)
+        },
+        FieldType::Uuid => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            format!("self.{} != {}", field_name, default_val)
+        },
+        FieldType::Struct(_) => {
+            let default_val = get_default_value(field.field_type(), field.field_default());
+            format!("self.{} != {}", field_name, default_val)
         },
     }
 }
@@ -2209,30 +2222,11 @@ fn generate_tagged_field_write(
                 )?;
             }
 
-            // Check if field has non-default value (for optional fields)
-            let nullable = is_nullable_field(field);
-            if nullable {
-                writeln!(file, "{}            if self.{}.is_some() {{", indent, field_name)?;
-                writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
-                writeln!(file, "{}            }}", indent)?;
-            } else {
-                match field.field_type() {
-                    FieldType::String => {
-                        writeln!(file, "{}            if !self.{}.is_empty() {{", indent, field_name)?;
-                        writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
-                        writeln!(file, "{}            }}", indent)?;
-                    },
-                    FieldType::Array(_) => {
-                        writeln!(file, "{}            if !self.{}.is_empty() {{", indent, field_name)?;
-                        writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
-                        writeln!(file, "{}            }}", indent)?;
-                    },
-                    _ => {
-                        // For non-optional types, always write
-                        writeln!(file, "{}            num_tagged_fields += 1;", indent)?;
-                    },
-                }
-            }
+            // Check if field has non-default value
+            let default_check = get_default_check(field, &field_name);
+            writeln!(file, "{}            if {} {{", indent, default_check)?;
+            writeln!(file, "{}                num_tagged_fields += 1;", indent)?;
+            writeln!(file, "{}            }}", indent)?;
 
             writeln!(file, "{}        }}", indent)?;
         }
@@ -2265,18 +2259,9 @@ fn generate_tagged_field_write(
                     )?;
                 }
 
-                // Check if we should write this field
+                // Check if we should write this field (only if non-default value)
+                let should_write = get_default_check(field, &field_name);
                 let nullable = is_nullable_field(field);
-                let should_write = if nullable {
-                    format!("self.{}.is_some()", field_name)
-                } else {
-                    match field.field_type() {
-                        FieldType::String | FieldType::Array(_) => {
-                            format!("!self.{}.is_empty()", field_name)
-                        },
-                        _ => "true".to_string(),
-                    }
-                };
 
                 // For nullable tagged fields, accessor is the unwrapped ref value
                 // For non-nullable, accessor is the field directly
@@ -3935,6 +3920,10 @@ fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>
                             return "String::new()".to_string();
                         }
                         return format!("\"{}\".to_string()", s);
+                    },
+                    FieldType::Uuid => {
+                        // UUID default is a base64 URL encoded string
+                        return format!("Uuid::from_string(\"{}\").expect(\"invalid UUID default\")", s);
                     },
                     _ => {},
                 }
