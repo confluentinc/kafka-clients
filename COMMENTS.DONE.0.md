@@ -163,3 +163,17 @@ Both generate_tagged_field_write and add_size now use the same get_default_check
 **Original Issue**: Only round-trip test existed for UUID serialization; exact byte layout untested.
 
 **Resolution**: Added test_uuid_wire_protocol_byte_representation that writes a known UUID via ByteBufferAccessor write_uuid, verifies exact 16-byte big-endian MSB-first layout, verifies zero UUID produces 16 zero bytes, and verifies round-trip read back.
+
+# Round 5
+
+## Issue from COMMENTS.0.md - Issue 15: SimpleExampleMessageTest.java (21 tests) not translated
+
+**Original Issue**: All 21 tests from SimpleExampleMessageTest.java were completely absent from Rust test suite.
+
+**Resolution**: Translated all 21 tests to `tests/simple_example_message_test.rs`. Test JSON spec moved to `generator/test-messages/SimpleExampleMessage.json` (gated behind `test-messages` feature, auto-enabled for test builds via dev-dependencies). Generator fixed for nullable struct serialization (presence byte protocol, tagged field varint presence, size prefix calculation, non-null defaults).
+
+## Issue from COMMENTS.0.md - Issue 16: NullableStructMessageTest.java (6 tests) not translated
+
+**Original Issue**: All 6 tests from NullableStructMessageTest.java were missing.
+
+**Resolution**: Translated all 6 tests to `tests/nullable_struct_message_test.rs`. Test JSON spec at `generator/test-messages/NullableStructMessage.json`. Tests cover: default values, round-trip serialization, null for all fields, version-specific nullable validation, Display with null structs, and tagged struct size calculation.
