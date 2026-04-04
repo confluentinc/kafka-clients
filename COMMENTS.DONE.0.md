@@ -51,6 +51,7 @@
 **Original Issue**: Test only verified writing succeeds on flexible version 6, missing negative test for non-flexible versions.
 
 **Resolution**: Added `verify_write_raises_uve` helper and assertion that writing CreateTopicsRequestData with unknown tagged fields at version 2 (non-flexible) returns an error containing "Tagged fields were set".
+
 # Round 3
 
 ## Issue from COMMENTS.0.md - Issue 2: Tagged primitive/struct/UUID fields always written regardless of default
@@ -124,3 +125,41 @@ Both generate_tagged_field_write and add_size now use the same get_default_check
 **Original Issue**: Only 1 of 6 Java MessageUtilTest methods was translated.
 
 **Resolution**: Added compare_raw_tagged_fields function and UNSIGNED_SHORT_MAX/UNSIGNED_INT_MAX constants. Added test_compare_raw_tagged_fields and test_constants. Remaining Java tests (testDeepToString, testByteBufferToArray, testDuplicate, testBinaryNode, testInvalidBinaryNode) not translated as the corresponding utility functions are not yet implemented and depend on Java-specific APIs.
+
+# Round 4
+
+## Issue from COMMENTS.0.md - Issue 10: FALSE POSITIVE -- testDefaultValues, testNonIgnorableFieldWithDefaultNull, testWriteNullForNonNullableFieldRaisesException
+
+**Original Issue**: Critic reported 3 missing tests as "Missing Requirement".
+
+**Resolution**: FALSE POSITIVE. These tests were already documented as not translatable in COMMENTS.DONE.0.md Round 2. Added to COMMENTS.FP.md. See Round 2, Issue 2 for rationale.
+
+## Issue from COMMENTS.0.md - Issue 11: Missing byte-level encoding verification tests for varint/varlong
+
+**Original Issue**: Rust varint tests only verified round-trip correctness. Missing byte-level encoding tests from ByteUtilsTest.java.
+
+**Resolution**: Added comprehensive byte-level encoding tests translated from ByteUtilsTest.java:
+- test_unsigned_varint_serde_byte_level: 14 values with exact expected byte arrays
+- test_varint_serde_byte_level: 21 values with exact zig-zag encoded byte arrays
+- test_varlong_serde_byte_level: 42 values with exact byte arrays including i32/i64 boundaries
+- test_invalid_varint: 6-byte varint overflow detection
+- test_invalid_varlong: 11-byte varlong overflow detection
+- test_double_encoding: 13 double values with exact bit patterns including NaN, infinities, subnormals
+
+## Issue from COMMENTS.0.md - Issue 12: verify_write_raises_uve behavioral mismatch with Java
+
+**Original Issue**: verify_write_raises_uve called message.size unwrap, panicking if UVE occurs during size instead of catching it.
+
+**Resolution**: Changed to handle size errors: if size returns Err, check the error message contains problem_text and return early. This matches Java assertThrows which wraps both size and write.
+
+## Issue from COMMENTS.0.md - Issue 13: test_message_versions only spot-checks 5 of 70+ API keys
+
+**Original Issue**: Only 5 API keys checked against generated message type versions.
+
+**Resolution**: Expanded to exhaustively verify ALL 86 API keys with valid versions using assert_message_version macro. Each check verifies that both RequestData and ResponseData HIGHEST_SUPPORTED_VERSION >= ApiKeys latest_version. Only LEADER_AND_ISR, STOP_REPLICA, UPDATE_METADATA, CONTROLLED_SHUTDOWN are excluded as they were removed in Kafka 4.0 and have no valid versions.
+
+## Issue from COMMENTS.0.md - Issue 14: No test verifying UUID wire protocol byte representation
+
+**Original Issue**: Only round-trip test existed for UUID serialization; exact byte layout untested.
+
+**Resolution**: Added test_uuid_wire_protocol_byte_representation that writes a known UUID via ByteBufferAccessor write_uuid, verifies exact 16-byte big-endian MSB-first layout, verifies zero UUID produces 16 zero bytes, and verifies round-trip read back.

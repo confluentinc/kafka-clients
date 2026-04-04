@@ -369,6 +369,44 @@ mod tests {
         assert_eq!(read_uuid, uuid);
     }
 
+    /// Verify exact byte representation of UUID on the wire.
+    ///
+    /// UUID must be serialized as MSB (big-endian i64) followed by LSB (big-endian i64).
+    /// This test catches bugs where MSB/LSB order or endianness is wrong, which a
+    /// round-trip test alone would not detect.
+    #[test]
+    fn test_uuid_wire_protocol_byte_representation() {
+        // Test a known UUID with distinct bytes in each position
+        let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
+        let mut buf = ByteBufferAccessor::new(16);
+        buf.write_uuid(&uuid).unwrap();
+
+        let expected_bytes: [u8; 16] = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // MSB big-endian
+            0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, // LSB big-endian
+        ];
+        assert_eq!(
+            buf.buffer(),
+            &expected_bytes,
+            "UUID wire bytes do not match expected big-endian MSB-first layout"
+        );
+
+        // Verify zero UUID serializes to 16 zero bytes
+        let zero_uuid = Uuid::ZERO_UUID;
+        let mut buf2 = ByteBufferAccessor::new(16);
+        buf2.write_uuid(&zero_uuid).unwrap();
+        assert_eq!(buf2.buffer(), &[0u8; 16], "Zero UUID should serialize to 16 zero bytes");
+
+        // Read back and verify round-trip
+        buf.flip();
+        let read_uuid = buf.read_uuid().unwrap();
+        assert_eq!(read_uuid, uuid);
+
+        buf2.flip();
+        let read_zero = buf2.read_uuid().unwrap();
+        assert_eq!(read_zero, zero_uuid);
+    }
+
     #[test]
     fn test_read_write_string() {
         let mut buf = ByteBufferAccessor::new(20);
