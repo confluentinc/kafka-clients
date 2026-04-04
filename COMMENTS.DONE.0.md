@@ -177,3 +177,17 @@ Both generate_tagged_field_write and add_size now use the same get_default_check
 **Original Issue**: All 6 tests from NullableStructMessageTest.java were missing.
 
 **Resolution**: Translated all 6 tests to `tests/nullable_struct_message_test.rs`. Test JSON spec at `generator/test-messages/NullableStructMessage.json`. Tests cover: default values, round-trip serialization, null for all fields, version-specific nullable validation, Display with null structs, and tagged struct size calculation.
+
+# Round 6
+
+## Issue from COMMENTS.0.md - Issue 17: Nullable bytes/string fields default to None instead of Some(empty)
+
+**Original Issue**: The Rust generator assigned None as the default for nullable string/bytes fields without explicit "default": "null" in JSON spec. Java assigns Bytes.EMPTY / "" (empty) for these. This caused wire protocol incompatibility.
+
+**Resolution**: Updated get_default_value_for_field to return Some(String::new()) for nullable string and Some(Vec::new()) for nullable bytes/records when no explicit "default": "null" is present. Fixed get_default_check for nullable bytes/string to use map_or(true, |v| !v.is_empty()) pattern. Fixed tagged field size and write code to handle None (null encoding: varint 0) for nullable string/bytes. Updated 3 existing tests that expected None to assert Some(Vec::new()) matching Java behavior.
+
+## Issue from COMMENTS.0.md - Issue 18: SimpleArraysMessageTest.java (2 tests) not translated
+
+**Original Issue**: Missing test file and array bounds check in generated read code. Without validation, malicious messages with huge array lengths could trigger OOM.
+
+**Resolution**: Added array bounds checking to generated array read code (validates length against readable.remaining() before Vec::with_capacity). Added SimpleArraysMessage.json to generator/test-messages/. Translated both tests: test_array_bounds_checking and test_array_bounds_checking_other_array. Both verify the exact error message matches Java format.
