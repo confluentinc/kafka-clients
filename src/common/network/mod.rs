@@ -19,6 +19,7 @@
 
 pub mod authenticator;
 pub mod byte_buffer_send;
+pub mod channel_builder;
 pub mod channel_metadata_registry;
 pub mod channel_state;
 pub mod cipher_information;
@@ -29,6 +30,7 @@ pub mod kafka_channel;
 pub mod listener_name;
 pub mod network_receive;
 pub mod network_send;
+pub mod plaintext_channel_builder;
 pub mod plaintext_transport_layer;
 pub mod receive;
 pub mod send;
@@ -36,6 +38,7 @@ pub mod transport_layer;
 
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
+pub use channel_builder::ChannelBuilder;
 pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
 pub use channel_state::ChannelState;
 pub use cipher_information::CipherInformation;
@@ -46,6 +49,7 @@ pub use kafka_channel::KafkaChannel;
 pub use listener_name::ListenerName;
 pub use network_receive::NetworkReceive;
 pub use network_send::NetworkSend;
+pub use plaintext_channel_builder::PlaintextChannelBuilder;
 pub use plaintext_transport_layer::PlaintextTransportLayer;
 pub use receive::Receive;
 pub use send::KafkaSend;
