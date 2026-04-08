@@ -1,0 +1,4 @@
+- [Generator tagged field patterns](review_patterns.md) — Default-value checks missing for primitives/structs/UUIDs in tagged field write/size
+- [Uuid signed/unsigned mismatch](uuid_signed_unsigned.md) — Java Uuid.compareTo uses signed long but Rust uses unsigned u64
+- [Test coverage gap patterns](test_coverage_gaps.md) — Error messages, iteration tests, and utility tests commonly under-translated
+- [Nullable default mismatch](nullable_default_mismatch.md) — Nullable string/bytes defaults to None but Java defaults to empty — 66 fields affected

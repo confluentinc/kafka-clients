@@ -2,3 +2,6 @@
 *.png
 *.svg
 *.json
+*.md.lock
+COMMENTS\.[0-9]*\.md
+COMMENTS\.TBR\.[0-9]*\.md
