@@ -63,7 +63,7 @@ impl ListenerName {
     ///
     /// Format: `listener.name.<value>.`
     pub fn config_prefix(&self) -> String {
-        format!("{CONFIG_STATIC_PREFIX}.{}.\"", self.value.to_lowercase())
+        format!("{CONFIG_STATIC_PREFIX}.{}.", self.value.to_lowercase())
     }
 
     /// Returns the SASL mechanism configuration prefix for this listener.
