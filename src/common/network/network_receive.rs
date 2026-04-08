@@ -165,15 +165,23 @@ impl Receive for NetworkReceive {
 
             // Phase 1: Read the 4-byte size header
             if self.size_bytes_read < SIZE_LENGTH {
-                let bytes_read = channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await?;
-                // In Rust async, Ok(0) means EOF (remote closed).
-                // In Java NIO, -1 means EOF (throws EOFException), 0 means no data.
-                // If we haven't read anything yet and get Ok(0), it's a true EOF.
-                if bytes_read == 0 {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during size header read"));
+                match channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await {
+                    Ok(0) => {
+                        // Ok(0) means EOF (remote closed connection).
+                        // Matches Java: bytesRead < 0 → EOFException.
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during size header read"));
+                    },
+                    Ok(bytes_read) => {
+                        total_read += bytes_read;
+                        self.size_bytes_read += bytes_read;
+                    },
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // No data available right now. Matches Java NIO
+                        // non-blocking returning 0: try again later.
+                        return Ok(total_read);
+                    },
+                    Err(e) => return Err(e),
                 }
-                total_read += bytes_read;
-                self.size_bytes_read += bytes_read;
 
                 if self.size_bytes_read == SIZE_LENGTH {
                     let receive_size = i32::from_be_bytes(self.size_buf);
@@ -211,20 +219,25 @@ impl Receive for NetworkReceive {
             if let Some(ref mut buf) = self.buffer
                 && self.buffer_bytes_read < buf.len()
             {
-                let bytes_read = channel.read(&mut buf[self.buffer_bytes_read..]).await?;
-                // Ok(0) means EOF. If we already read some bytes in this call
-                // (e.g., the size header), treat it as "no more data available
-                // right now" — equivalent to Java NIO returning 0 on a
-                // non-blocking channel. If total_read == 0, it's a genuine EOF
-                // while we still need payload data.
-                if bytes_read == 0 {
-                    if total_read == 0 {
+                match channel.read(&mut buf[self.buffer_bytes_read..]).await {
+                    Ok(0) => {
+                        // Ok(0) means EOF (remote closed). In Java,
+                        // `bytesRead < 0` during the payload phase always
+                        // throws `EOFException`, regardless of what was
+                        // read earlier in the same call.
                         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
-                    }
-                    return Ok(total_read);
+                    },
+                    Ok(bytes_read) => {
+                        total_read += bytes_read;
+                        self.buffer_bytes_read += bytes_read;
+                    },
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // No data available right now. Matches Java NIO
+                        // non-blocking returning 0: return bytes read so far.
+                        return Ok(total_read);
+                    },
+                    Err(e) => return Err(e),
                 }
-                total_read += bytes_read;
-                self.buffer_bytes_read += bytes_read;
             }
 
             Ok(total_read)
@@ -249,16 +262,31 @@ mod tests {
 
     /// A mock transport layer backed by a byte buffer for testing.
     ///
-    /// Reads return data from the internal buffer. Once the buffer is exhausted,
-    /// reads return `Ok(0)` (EOF), matching `tokio::net::TcpStream` behavior.
+    /// When `eof_on_exhaustion` is `true` (default), reads return `Ok(0)` once
+    /// the buffer is exhausted — matching a closed TCP connection.
+    ///
+    /// When `eof_on_exhaustion` is `false`, reads return `WouldBlock` once
+    /// the buffer is exhausted — matching a still-open non-blocking channel
+    /// that has no more data right now. This models the Java NIO behavior
+    /// where `ScatteringByteChannel.read()` returns 0 (not -1) on a
+    /// non-blocking channel with no available data.
     struct MockTransportLayer {
         data: Vec<u8>,
         pos: usize,
+        eof_on_exhaustion: bool,
     }
 
     impl MockTransportLayer {
+        /// Creates a mock that returns `Ok(0)` (EOF) when the buffer is exhausted.
         fn new(data: Vec<u8>) -> Self {
-            Self { data, pos: 0 }
+            Self { data, pos: 0, eof_on_exhaustion: true }
+        }
+
+        /// Creates a mock that returns `WouldBlock` when the buffer is exhausted,
+        /// simulating a still-open channel with no data available. This matches
+        /// Java NIO non-blocking behavior where `channel.read()` returns 0.
+        fn new_open(data: Vec<u8>) -> Self {
+            Self { data, pos: 0, eof_on_exhaustion: false }
         }
     }
 
@@ -307,6 +335,13 @@ mod tests {
         fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
             let remaining = self.data.len() - self.pos;
             let to_read = remaining.min(dst.len());
+            if to_read == 0 && !self.eof_on_exhaustion {
+                // Simulate a still-open non-blocking channel with no data
+                // available. In Java NIO, this returns 0 (not -1). In Rust
+                // async, we return WouldBlock so that the caller knows the
+                // connection is still alive but has no data right now.
+                return Box::pin(async { Err(io::Error::from(io::ErrorKind::WouldBlock)) });
+            }
             dst[..to_read].copy_from_slice(&self.data[self.pos..self.pos + to_read]);
             self.pos += to_read;
             Box::pin(async move { Ok(to_read) })
@@ -331,8 +366,11 @@ mod tests {
         let mut receive = NetworkReceive::with_max_size(128, "0");
         assert_eq!(0, receive.bytes_read());
 
-        // Simulate channel that returns a 4-byte size header indicating 128 bytes of payload
-        let mut channel = MockTransportLayer::new(128_i32.to_be_bytes().to_vec());
+        // Simulate channel that returns a 4-byte size header indicating 128 bytes of payload.
+        // Uses new_open because the connection is still alive — the channel just has no
+        // more data for this call. Matches Java NIO mock returning 0 (not -1) on the
+        // subsequent payload read.
+        let mut channel = MockTransportLayer::new_open(128_i32.to_be_bytes().to_vec());
 
         let read = receive.read_from(&mut channel).await.unwrap();
         assert_eq!(4, read);
@@ -373,8 +411,10 @@ mod tests {
     async fn test_required_memory_amount_known_when_set() {
         let mut receive = NetworkReceive::with_max_size(128, "0");
 
-        // Channel provides size header indicating 64 bytes
-        let mut channel = MockTransportLayer::new(64_i32.to_be_bytes().to_vec());
+        // Channel provides size header indicating 64 bytes. Uses new_open because the
+        // connection is still alive — the Java mock returns 0 (not -1) on the
+        // subsequent payload read.
+        let mut channel = MockTransportLayer::new_open(64_i32.to_be_bytes().to_vec());
 
         receive.read_from(&mut channel).await.unwrap();
         assert!(
@@ -409,8 +449,9 @@ mod tests {
         let expected_total_size = 4 + payload_size as usize; // 4 bytes for size buffer + payload size
         let mut receive = NetworkReceive::with_max_size(128, "0");
 
-        // Channel provides size header
-        let mut channel = MockTransportLayer::new(payload_size.to_be_bytes().to_vec());
+        // Channel provides size header. Uses new_open because the connection is still
+        // alive — the Java mock returns 0 (not -1) on the subsequent payload read.
+        let mut channel = MockTransportLayer::new_open(payload_size.to_be_bytes().to_vec());
 
         receive.read_from(&mut channel).await.unwrap();
         assert_eq!(
@@ -482,7 +523,7 @@ mod tests {
         assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
     }
 
-    /// Test that EOF during payload read is detected.
+    /// Test that EOF during payload read is detected (separate calls).
     ///
     /// Matches Java behavior: `NetworkReceive.readFrom()` throws `EOFException`
     /// when `channel.read(buffer)` returns -1 during the payload phase.
@@ -490,14 +531,40 @@ mod tests {
     async fn test_eof_during_payload_read() {
         let mut receive = NetworkReceive::with_max_size(128, "0");
 
-        // First, provide the size header indicating 64 bytes of payload
-        let mut size_channel = MockTransportLayer::new(64_i32.to_be_bytes().to_vec());
+        // First, provide the size header indicating 64 bytes of payload.
+        // Uses new_open because the connection is still alive during header read.
+        let mut size_channel = MockTransportLayer::new_open(64_i32.to_be_bytes().to_vec());
         receive.read_from(&mut size_channel).await.unwrap();
 
         // Then, provide an empty channel (EOF) when payload is expected
         let mut eof_channel = MockTransportLayer::new(Vec::new());
         let result = receive.read_from(&mut eof_channel).await;
         assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
+    }
+
+    /// Test that EOF during payload read is detected even when the size header
+    /// was read in the same call.
+    ///
+    /// Verifies that `read_from` returns `Err(UnexpectedEof)` when the channel
+    /// provides exactly the 4-byte size header but then returns EOF for the
+    /// payload — matching Java's `NetworkReceive.readFrom()` which always throws
+    /// `EOFException` on `bytesRead < 0` during the payload phase, regardless
+    /// of whether the size header was read in the same invocation.
+    #[tokio::test]
+    async fn test_eof_during_payload_read_same_call_as_header() {
+        let mut receive = NetworkReceive::with_max_size(128, "0");
+
+        // Channel provides only the 4-byte size header (indicating 64 bytes of
+        // payload), then EOF. Both phases happen in the same read_from call.
+        let mut channel = MockTransportLayer::new(64_i32.to_be_bytes().to_vec());
+
+        let result = receive.read_from(&mut channel).await;
+        assert!(
+            result.is_err(),
+            "EOF during payload phase must always be an error, even when size header was read in the same call"
+        );
         let err = result.unwrap_err();
         assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
     }
