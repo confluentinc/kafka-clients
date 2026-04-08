@@ -12,22 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common types and utilities for Kafka (org.apache.kafka.common)
+//! Memory pool for Kafka network I/O (org.apache.kafka.common.memory).
 
-pub mod cluster;
-pub mod cluster_resource;
-pub mod memory;
-pub mod network;
-pub mod node;
-pub mod partition_info;
-pub mod protocol;
-pub mod topic_partition;
-pub mod uuid;
+pub mod memory_pool;
 
-pub use cluster::Cluster;
-pub use cluster_resource::ClusterResource;
-pub use node::Node;
-pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
-pub use topic_partition::TopicPartition;
-pub use uuid::Uuid;
+pub use memory_pool::{MemoryPool, NoopMemoryPool};

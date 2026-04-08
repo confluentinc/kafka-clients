@@ -18,7 +18,13 @@
 //! It sits between the wire protocol and the higher-level channel abstraction.
 
 pub mod byte_buffer_send;
+pub mod channel_metadata_registry;
+pub mod channel_state;
+pub mod cipher_information;
+pub mod client_information;
+pub mod connection_mode;
 pub mod invalid_receive_exception;
+pub mod listener_name;
 pub mod network_receive;
 pub mod network_send;
 pub mod plaintext_transport_layer;
@@ -27,7 +33,13 @@ pub mod send;
 pub mod transport_layer;
 
 pub use byte_buffer_send::ByteBufferSend;
+pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
+pub use channel_state::ChannelState;
+pub use cipher_information::CipherInformation;
+pub use client_information::ClientInformation;
+pub use connection_mode::ConnectionMode;
 pub use invalid_receive_exception::InvalidReceiveException;
+pub use listener_name::ListenerName;
 pub use network_receive::NetworkReceive;
 pub use network_send::NetworkSend;
 pub use plaintext_transport_layer::PlaintextTransportLayer;

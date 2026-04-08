@@ -12,22 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common types and utilities for Kafka (org.apache.kafka.common)
+//! Connection mode for SSL and SASL connections.
+//!
+//! Translated from `org.apache.kafka.common.network.ConnectionMode`.
 
-pub mod cluster;
-pub mod cluster_resource;
-pub mod memory;
-pub mod network;
-pub mod node;
-pub mod partition_info;
-pub mod protocol;
-pub mod topic_partition;
-pub mod uuid;
-
-pub use cluster::Cluster;
-pub use cluster_resource::ClusterResource;
-pub use node::Node;
-pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
-pub use topic_partition::TopicPartition;
-pub use uuid::Uuid;
+/// Connection mode for SSL and SASL connections.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionMode {
+    /// Client-side connection.
+    Client,
+    /// Server-side connection.
+    Server,
+}
