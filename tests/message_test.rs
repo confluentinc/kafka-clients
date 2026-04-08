@@ -26,7 +26,10 @@ use confluent_kafka_rust::common::protocol::{
     ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache, RawTaggedField,
 };
 
+mod common;
+
 // Re-export generated types
+use common::simple_example_message_data::{MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct};
 use confluent_kafka_rust::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
 use confluent_kafka_rust::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
 use confluent_kafka_rust::add_partitions_to_txn_request_data::{
@@ -68,9 +71,6 @@ use confluent_kafka_rust::offset_for_leader_epoch_request_data::{
 };
 use confluent_kafka_rust::produce_response_data::{
     BatchIndexAndErrorMessage, PartitionProduceResponse, ProduceResponseData, TopicProduceResponse,
-};
-use confluent_kafka_rust::simple_example_message_data::{
-    MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct,
 };
 use confluent_kafka_rust::sync_group_request_data::SyncGroupRequestData;
 use confluent_kafka_rust::txn_offset_commit_request_data::{

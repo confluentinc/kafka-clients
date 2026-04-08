@@ -18,8 +18,10 @@
 //!
 //! Translated from org.apache.kafka.common.message.SimpleArraysMessageTest
 
+mod common;
+
+use common::simple_arrays_message_data::SimpleArraysMessageData;
 use confluent_kafka_rust::common::protocol::ByteBufferAccessor;
-use confluent_kafka_rust::simple_arrays_message_data::SimpleArraysMessageData;
 
 #[test]
 fn test_array_bounds_checking() {
