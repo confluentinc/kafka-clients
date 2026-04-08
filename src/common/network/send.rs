@@ -20,13 +20,17 @@
 
 use super::transport_layer::TransportLayer;
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 
 /// Models the in-progress sending of data.
 ///
 /// This trait represents a send operation that may require multiple calls to
 /// [`write_to`](KafkaSend::write_to) before all data is fully written.
-pub trait KafkaSend: std::marker::Send {
+///
+/// All I/O is async per CLAUDE.md rule 8.
+pub trait KafkaSend: Send {
     /// Returns `true` if this send is complete.
     fn completed(&self) -> bool;
 
@@ -45,7 +49,10 @@ pub trait KafkaSend: std::marker::Send {
     /// # Errors
     ///
     /// Returns an error if the write fails.
-    fn write_to(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize>;
+    fn write_to<'a>(
+        &'a mut self,
+        channel: &'a mut dyn TransportLayer,
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
     /// Returns the total size of this send in bytes.
     fn size(&self) -> usize;

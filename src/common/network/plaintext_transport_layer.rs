@@ -17,25 +17,26 @@
 //! Translated from `org.apache.kafka.common.network.PlaintextTransportLayer`.
 //!
 //! In Java, this wraps a `SocketChannel` obtained from a `SelectionKey`.
-//! In Rust, this wraps a `std::net::TcpStream` set to non-blocking mode.
-//! For async usage, the caller is expected to integrate with a reactor/selector
-//! (e.g., `mio` or `tokio`) that drives readiness notifications.
+//! In Rust, this wraps a `tokio::net::TcpStream` for async non-blocking I/O,
+//! per CLAUDE.md rule 8.
 
 use super::transport_layer::{InterestOps, TransportLayer};
 
+use std::future::Future;
 use std::io;
-use std::io::{Read, Write};
-use std::net::TcpStream;
+use std::pin::Pin;
+
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::TcpStream;
 
 /// Transport layer for PLAINTEXT (unencrypted) communication.
 ///
-/// This is a wrapper around a [`TcpStream`] with interest ops tracking.
+/// This is a wrapper around a Tokio [`TcpStream`] with interest ops tracking.
 /// It provides no encryption — data is sent and received as plaintext.
 ///
-/// The stream should be set to non-blocking mode. The caller is responsible
-/// for driving I/O readiness via a selector/reactor pattern.
+/// All I/O operations are async and driven by the Tokio runtime.
 pub struct PlaintextTransportLayer {
-    /// The underlying TCP stream.
+    /// The underlying async TCP stream.
     stream: TcpStream,
     /// Whether the connection has been established.
     connected: bool,
@@ -44,30 +45,20 @@ pub struct PlaintextTransportLayer {
 }
 
 impl PlaintextTransportLayer {
-    /// Creates a new `PlaintextTransportLayer` wrapping the given TCP stream.
+    /// Creates a new `PlaintextTransportLayer` wrapping the given Tokio TCP stream.
     ///
-    /// The stream is set to non-blocking mode. The initial interest ops are set to
-    /// `OP_CONNECT` to indicate that the connection is being established.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the stream cannot be set to non-blocking mode.
-    pub fn new(stream: TcpStream) -> io::Result<Self> {
-        stream.set_nonblocking(true)?;
-        Ok(Self { stream, connected: false, interest_ops: InterestOps::OP_CONNECT })
+    /// The initial interest ops are set to `OP_CONNECT` to indicate that the
+    /// connection is being established.
+    pub fn new(stream: TcpStream) -> Self {
+        Self { stream, connected: false, interest_ops: InterestOps::OP_CONNECT }
     }
 
-    /// Creates a new `PlaintextTransportLayer` from an already-connected TCP stream.
+    /// Creates a new `PlaintextTransportLayer` from an already-connected Tokio TCP stream.
     ///
-    /// The stream is set to non-blocking mode. The initial interest ops are set to
-    /// `OP_READ` since the connection is already established.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the stream cannot be set to non-blocking mode.
-    pub fn connected(stream: TcpStream) -> io::Result<Self> {
-        stream.set_nonblocking(true)?;
-        Ok(Self { stream, connected: true, interest_ops: InterestOps::OP_READ })
+    /// The initial interest ops are set to `OP_READ` since the connection is
+    /// already established.
+    pub fn connected(stream: TcpStream) -> Self {
+        Self { stream, connected: true, interest_ops: InterestOps::OP_READ }
     }
 }
 
@@ -79,26 +70,31 @@ impl TransportLayer for PlaintextTransportLayer {
 
     /// Finishes the process of connecting a socket channel.
     ///
-    /// On success, updates the interest ops from `OP_CONNECT` to `OP_READ`.
-    fn finish_connect(&mut self) -> io::Result<bool> {
-        // For non-blocking TCP, we check if the connection is established
-        // by attempting to get the peer address
-        match self.stream.peer_addr() {
-            Ok(_) => {
-                self.connected = true;
-                self.interest_ops = self.interest_ops.remove(InterestOps::OP_CONNECT) | InterestOps::OP_READ;
-                Ok(true)
-            },
-            Err(e) if e.kind() == io::ErrorKind::NotConnected => Ok(false),
-            Err(e) => Err(e),
-        }
+    /// For a Tokio `TcpStream`, the connection is established when the stream
+    /// becomes writable. On success, updates the interest ops from `OP_CONNECT`
+    /// to `OP_READ`.
+    fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+        Box::pin(async {
+            // For tokio TcpStream, wait for the stream to be writable which
+            // indicates the connection has completed.
+            self.stream.writable().await?;
+
+            // Check if the connection succeeded by checking for socket errors
+            match self.stream.peer_addr() {
+                Ok(_) => {
+                    self.connected = true;
+                    self.interest_ops = self.interest_ops.remove(InterestOps::OP_CONNECT) | InterestOps::OP_READ;
+                    Ok(true)
+                },
+                Err(e) if e.kind() == io::ErrorKind::NotConnected => Ok(false),
+                Err(e) => Err(e),
+            }
+        })
     }
 
     /// Disconnects the underlying socket channel.
     fn disconnect(&mut self) {
         self.connected = false;
-        // Shutdown the stream to signal disconnect; ignore errors
-        let _ = self.stream.shutdown(std::net::Shutdown::Both);
     }
 
     /// Returns `true` if this channel's network socket is connected.
@@ -107,8 +103,8 @@ impl TransportLayer for PlaintextTransportLayer {
     }
 
     /// Performs SSL handshake — this is a no-op for the non-secure PLAINTEXT implementation.
-    fn handshake(&mut self) -> io::Result<()> {
-        Ok(())
+    fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async { Ok(()) })
     }
 
     /// Adds the given interest operations.
@@ -145,24 +141,29 @@ impl TransportLayer for PlaintextTransportLayer {
     }
 
     /// Closes the transport layer.
-    fn close(&mut self) -> io::Result<()> {
-        self.stream.shutdown(std::net::Shutdown::Both)?;
-        self.connected = false;
-        Ok(())
+    fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            self.stream.shutdown().await?;
+            self.connected = false;
+            Ok(())
+        })
     }
 
     /// Reads data from this channel into the given buffer.
-    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
-        self.stream.read(dst)
+    fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async { self.stream.read(dst).await })
     }
 
     /// Writes data to this channel from the given buffer.
-    fn write(&mut self, src: &[u8]) -> io::Result<usize> {
-        self.stream.write(src)
+    fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async { self.stream.write(src).await })
     }
 
     /// Writes data from multiple buffers to this channel (scatter-gather write).
-    fn write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
-        self.stream.write_vectored(srcs)
+    fn write_vectored<'a>(
+        &'a mut self,
+        srcs: &'a [io::IoSlice<'a>],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async { self.stream.write_vectored(srcs).await })
     }
 }

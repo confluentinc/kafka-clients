@@ -19,10 +19,13 @@
 
 use super::invalid_receive_exception::InvalidReceiveException;
 use super::receive::Receive;
+use super::transport_layer::TransportLayer;
 
 use log::trace;
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 
 /// Source identifier used when the source is unknown.
 pub const UNKNOWN_SOURCE: &str = "";
@@ -45,6 +48,10 @@ const SIZE_LENGTH: usize = 4;
 /// The receive proceeds in two phases:
 /// 1. Read the 4-byte size header
 /// 2. Allocate and read N bytes of payload
+///
+/// EOF detection: when the remote end closes the connection, `read()` returns
+/// `Ok(0)`. This is translated to an `UnexpectedEof` error to match Java's
+/// `EOFException` behavior in `NetworkReceive.readFrom()`.
 pub struct NetworkReceive {
     /// The source identifier for this receive.
     source: String,
@@ -149,64 +156,79 @@ impl Receive for NetworkReceive {
             && self.buffer_bytes_read == self.buffer.as_ref().map_or(0, |b| b.len())
     }
 
-    fn read_from(&mut self, channel: &mut dyn io::Read) -> io::Result<usize> {
-        let mut total_read = 0;
+    fn read_from<'a>(
+        &'a mut self,
+        channel: &'a mut dyn TransportLayer,
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async {
+            let mut total_read = 0;
 
-        // Phase 1: Read the 4-byte size header
-        if self.size_bytes_read < SIZE_LENGTH {
-            let bytes_read = channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH])?;
-            if bytes_read == 0 {
-                // No data available — return the total bytes read so far.
-                // The caller will call read_from again when more data is available.
-                return Ok(total_read);
+            // Phase 1: Read the 4-byte size header
+            if self.size_bytes_read < SIZE_LENGTH {
+                let bytes_read = channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await?;
+                // In Rust async, Ok(0) means EOF (remote closed).
+                // In Java NIO, -1 means EOF (throws EOFException), 0 means no data.
+                // If we haven't read anything yet and get Ok(0), it's a true EOF.
+                if bytes_read == 0 {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during size header read"));
+                }
+                total_read += bytes_read;
+                self.size_bytes_read += bytes_read;
+
+                if self.size_bytes_read == SIZE_LENGTH {
+                    let receive_size = i32::from_be_bytes(self.size_buf);
+                    if receive_size < 0 {
+                        return Err(
+                            InvalidReceiveException::new(format!("Invalid receive (size = {receive_size})")).into()
+                        );
+                    }
+                    if self.max_size != UNLIMITED && receive_size > self.max_size {
+                        return Err(InvalidReceiveException::new(format!(
+                            "Invalid receive (size = {receive_size} larger than {max_size})",
+                            max_size = self.max_size,
+                        ))
+                        .into());
+                    }
+                    self.requested_buffer_size = receive_size;
+                    if receive_size == 0 {
+                        self.buffer = Some(Vec::new());
+                    }
+                }
             }
-            total_read += bytes_read;
-            self.size_bytes_read += bytes_read;
 
-            if self.size_bytes_read == SIZE_LENGTH {
-                let receive_size = i32::from_be_bytes(self.size_buf);
-                if receive_size < 0 {
-                    return Err(InvalidReceiveException::new(format!("Invalid receive (size = {receive_size})")).into());
-                }
-                if self.max_size != UNLIMITED && receive_size > self.max_size {
-                    return Err(InvalidReceiveException::new(format!(
-                        "Invalid receive (size = {receive_size} larger than {max_size})",
-                        max_size = self.max_size,
-                    ))
-                    .into());
-                }
-                self.requested_buffer_size = receive_size;
-                if receive_size == 0 {
-                    self.buffer = Some(Vec::new());
-                }
+            // Phase 2: Allocate buffer if size is known but not yet allocated
+            if self.buffer.is_none() && self.requested_buffer_size != -1 {
+                // Simple allocation (no memory pool for now)
+                self.buffer = Some(vec![0u8; self.requested_buffer_size as usize]);
+                self.buffer_bytes_read = 0;
+                trace!(
+                    "Allocated buffer of size {} for source {}",
+                    self.requested_buffer_size, self.source
+                );
             }
-        }
 
-        // Phase 2: Allocate buffer if size is known but not yet allocated
-        if self.buffer.is_none() && self.requested_buffer_size != -1 {
-            // Simple allocation (no memory pool for now)
-            self.buffer = Some(vec![0u8; self.requested_buffer_size as usize]);
-            self.buffer_bytes_read = 0;
-            trace!(
-                "Allocated buffer of size {} for source {}",
-                self.requested_buffer_size, self.source
-            );
-        }
+            // Phase 3: Read payload data
+            if let Some(ref mut buf) = self.buffer
+                && self.buffer_bytes_read < buf.len()
+            {
+                let bytes_read = channel.read(&mut buf[self.buffer_bytes_read..]).await?;
+                // Ok(0) means EOF. If we already read some bytes in this call
+                // (e.g., the size header), treat it as "no more data available
+                // right now" — equivalent to Java NIO returning 0 on a
+                // non-blocking channel. If total_read == 0, it's a genuine EOF
+                // while we still need payload data.
+                if bytes_read == 0 {
+                    if total_read == 0 {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                    }
+                    return Ok(total_read);
+                }
+                total_read += bytes_read;
+                self.buffer_bytes_read += bytes_read;
+            }
 
-        // Phase 3: Read payload data
-        if let Some(ref mut buf) = self.buffer
-            && self.buffer_bytes_read < buf.len()
-        {
-            let bytes_read = channel.read(&mut buf[self.buffer_bytes_read..])?;
-            // In Java NIO, read returning 0 on a non-blocking channel does not mean EOF.
-            // We mirror that behavior: if no bytes are available, we simply return
-            // the total bytes read so far. The caller will call read_from again when
-            // more data is available.
-            total_read += bytes_read;
-            self.buffer_bytes_read += bytes_read;
-        }
-
-        Ok(total_read)
+            Ok(total_read)
+        })
     }
 
     fn required_memory_amount_known(&self) -> bool {
@@ -221,38 +243,114 @@ impl Receive for NetworkReceive {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::network::transport_layer::InterestOps;
 
-    use std::io::Cursor;
+    use std::io;
+
+    /// A mock transport layer backed by a byte buffer for testing.
+    ///
+    /// Reads return data from the internal buffer. Once the buffer is exhausted,
+    /// reads return `Ok(0)` (EOF), matching `tokio::net::TcpStream` behavior.
+    struct MockTransportLayer {
+        data: Vec<u8>,
+        pos: usize,
+    }
+
+    impl MockTransportLayer {
+        fn new(data: Vec<u8>) -> Self {
+            Self { data, pos: 0 }
+        }
+    }
+
+    impl TransportLayer for MockTransportLayer {
+        fn ready(&self) -> bool {
+            true
+        }
+
+        fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+            Box::pin(async { Ok(true) })
+        }
+
+        fn disconnect(&mut self) {}
+
+        fn is_connected(&self) -> bool {
+            true
+        }
+
+        fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn add_interest_ops(&mut self, _ops: InterestOps) {}
+        fn remove_interest_ops(&mut self, _ops: InterestOps) {}
+
+        fn is_mute(&self) -> bool {
+            false
+        }
+
+        fn has_bytes_buffered(&self) -> bool {
+            false
+        }
+
+        fn has_pending_writes(&self) -> bool {
+            false
+        }
+
+        fn is_open(&self) -> bool {
+            true
+        }
+
+        fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            let remaining = self.data.len() - self.pos;
+            let to_read = remaining.min(dst.len());
+            dst[..to_read].copy_from_slice(&self.data[self.pos..self.pos + to_read]);
+            self.pos += to_read;
+            Box::pin(async move { Ok(to_read) })
+        }
+
+        fn write<'a>(&'a mut self, _src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { Ok(0) })
+        }
+
+        fn write_vectored<'a>(
+            &'a mut self,
+            _srcs: &'a [io::IoSlice<'a>],
+        ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { Ok(0) })
+        }
+    }
 
     /// Translated from `NetworkReceiveTest.testBytesRead` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
-    #[test]
-    fn test_bytes_read() {
+    #[tokio::test]
+    async fn test_bytes_read() {
         let mut receive = NetworkReceive::with_max_size(128, "0");
         assert_eq!(0, receive.bytes_read());
 
         // Simulate channel that returns a 4-byte size header indicating 128 bytes of payload
-        let mut size_data = Cursor::new(128_i32.to_be_bytes().to_vec());
+        let mut channel = MockTransportLayer::new(128_i32.to_be_bytes().to_vec());
 
-        let read = receive.read_from(&mut size_data).unwrap();
+        let read = receive.read_from(&mut channel).await.unwrap();
         assert_eq!(4, read);
         assert_eq!(4, receive.bytes_read());
         assert!(!receive.complete());
 
         // Simulate reading 64 bytes of payload
-        let payload_part1 = vec![0xABu8; 64];
-        let mut channel1 = Cursor::new(payload_part1);
+        let mut channel1 = MockTransportLayer::new(vec![0xABu8; 64]);
 
-        let read = receive.read_from(&mut channel1).unwrap();
+        let read = receive.read_from(&mut channel1).await.unwrap();
         assert_eq!(64, read);
         assert_eq!(68, receive.bytes_read());
         assert!(!receive.complete());
 
         // Simulate reading the remaining 64 bytes of payload
-        let payload_part2 = vec![0xCDu8; 64];
-        let mut channel2 = Cursor::new(payload_part2);
+        let mut channel2 = MockTransportLayer::new(vec![0xCDu8; 64]);
 
-        let read = receive.read_from(&mut channel2).unwrap();
+        let read = receive.read_from(&mut channel2).await.unwrap();
         assert_eq!(64, read);
         assert_eq!(132, receive.bytes_read());
         assert!(receive.complete());
@@ -271,14 +369,14 @@ mod tests {
 
     /// Translated from `NetworkReceiveTest.testRequiredMemoryAmountKnownWhenSet` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
-    #[test]
-    fn test_required_memory_amount_known_when_set() {
+    #[tokio::test]
+    async fn test_required_memory_amount_known_when_set() {
         let mut receive = NetworkReceive::with_max_size(128, "0");
 
         // Channel provides size header indicating 64 bytes
-        let mut channel = Cursor::new(64_i32.to_be_bytes().to_vec());
+        let mut channel = MockTransportLayer::new(64_i32.to_be_bytes().to_vec());
 
-        receive.read_from(&mut channel).unwrap();
+        receive.read_from(&mut channel).await.unwrap();
         assert!(
             receive.required_memory_amount_known(),
             "Memory amount should be known after read."
@@ -305,16 +403,16 @@ mod tests {
 
     /// Translated from `NetworkReceiveTest.testSizeAfterRead` in
     /// `org.apache.kafka.common.network.NetworkReceiveTest`.
-    #[test]
-    fn test_size_after_read() {
+    #[tokio::test]
+    async fn test_size_after_read() {
         let payload_size: i32 = 32;
         let expected_total_size = 4 + payload_size as usize; // 4 bytes for size buffer + payload size
         let mut receive = NetworkReceive::with_max_size(128, "0");
 
         // Channel provides size header
-        let mut channel = Cursor::new(payload_size.to_be_bytes().to_vec());
+        let mut channel = MockTransportLayer::new(payload_size.to_be_bytes().to_vec());
 
-        receive.read_from(&mut channel).unwrap();
+        receive.read_from(&mut channel).await.unwrap();
         assert_eq!(
             expected_total_size,
             receive.size(),
@@ -323,36 +421,36 @@ mod tests {
     }
 
     /// Test that negative size in header is rejected.
-    #[test]
-    fn test_invalid_negative_size() {
+    #[tokio::test]
+    async fn test_invalid_negative_size() {
         let mut receive = NetworkReceive::with_max_size(128, "0");
-        let mut channel = Cursor::new((-1_i32).to_be_bytes().to_vec());
+        let mut channel = MockTransportLayer::new((-1_i32).to_be_bytes().to_vec());
 
-        let result = receive.read_from(&mut channel);
+        let result = receive.read_from(&mut channel).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(io::ErrorKind::InvalidData, err.kind());
     }
 
     /// Test that size exceeding max is rejected.
-    #[test]
-    fn test_invalid_size_exceeding_max() {
+    #[tokio::test]
+    async fn test_invalid_size_exceeding_max() {
         let mut receive = NetworkReceive::with_max_size(64, "0");
-        let mut channel = Cursor::new(128_i32.to_be_bytes().to_vec());
+        let mut channel = MockTransportLayer::new(128_i32.to_be_bytes().to_vec());
 
-        let result = receive.read_from(&mut channel);
+        let result = receive.read_from(&mut channel).await;
         assert!(result.is_err());
         let err = result.unwrap_err();
         assert_eq!(io::ErrorKind::InvalidData, err.kind());
     }
 
     /// Test zero-size payload (used by SASL).
-    #[test]
-    fn test_zero_size_payload() {
+    #[tokio::test]
+    async fn test_zero_size_payload() {
         let mut receive = NetworkReceive::with_max_size(128, "0");
-        let mut channel = Cursor::new(0_i32.to_be_bytes().to_vec());
+        let mut channel = MockTransportLayer::new(0_i32.to_be_bytes().to_vec());
 
-        let read = receive.read_from(&mut channel).unwrap();
+        let read = receive.read_from(&mut channel).await.unwrap();
         assert_eq!(4, read);
         assert!(receive.complete());
         assert_eq!(Some(&[][..]), receive.payload());
@@ -366,5 +464,41 @@ mod tests {
         assert!(!receive.complete());
         assert!(!receive.required_memory_amount_known());
         assert!(!receive.memory_allocated());
+    }
+
+    /// Test that EOF during size header read is detected.
+    ///
+    /// Matches Java behavior: `NetworkReceive.readFrom()` throws `EOFException`
+    /// when `channel.read(size)` returns -1 (which in Rust is `Ok(0)`).
+    #[tokio::test]
+    async fn test_eof_during_size_read() {
+        let mut receive = NetworkReceive::with_max_size(128, "0");
+        // Empty channel simulates a closed connection
+        let mut channel = MockTransportLayer::new(Vec::new());
+
+        let result = receive.read_from(&mut channel).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
+    }
+
+    /// Test that EOF during payload read is detected.
+    ///
+    /// Matches Java behavior: `NetworkReceive.readFrom()` throws `EOFException`
+    /// when `channel.read(buffer)` returns -1 during the payload phase.
+    #[tokio::test]
+    async fn test_eof_during_payload_read() {
+        let mut receive = NetworkReceive::with_max_size(128, "0");
+
+        // First, provide the size header indicating 64 bytes of payload
+        let mut size_channel = MockTransportLayer::new(64_i32.to_be_bytes().to_vec());
+        receive.read_from(&mut size_channel).await.unwrap();
+
+        // Then, provide an empty channel (EOF) when payload is expected
+        let mut eof_channel = MockTransportLayer::new(Vec::new());
+        let result = receive.read_from(&mut eof_channel).await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
     }
 }

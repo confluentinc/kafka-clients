@@ -20,7 +20,9 @@ use super::send::KafkaSend;
 use super::transport_layer::TransportLayer;
 
 use std::fmt;
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 
 /// A send backed by an array of byte buffers.
 ///
@@ -76,41 +78,46 @@ impl KafkaSend for ByteBufferSend {
         self.remaining == 0 && !self.pending
     }
 
-    fn write_to(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize> {
-        // Build IoSlice views of unwritten portions of each buffer
-        let slices: Vec<io::IoSlice<'_>> = self
-            .buffers
-            .iter()
-            .filter(|(data, offset)| *offset < data.len())
-            .map(|(data, offset)| io::IoSlice::new(&data[*offset..]))
-            .collect();
+    fn write_to<'a>(
+        &'a mut self,
+        channel: &'a mut dyn TransportLayer,
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async {
+            // Build IoSlice views of unwritten portions of each buffer
+            let slices: Vec<io::IoSlice<'_>> = self
+                .buffers
+                .iter()
+                .filter(|(data, offset)| *offset < data.len())
+                .map(|(data, offset)| io::IoSlice::new(&data[*offset..]))
+                .collect();
 
-        let written = if slices.is_empty() {
-            0
-        } else {
-            channel.write_vectored(&slices)?
-        };
+            let written = if slices.is_empty() {
+                0
+            } else {
+                channel.write_vectored(&slices).await?
+            };
 
-        if written == 0 {
-            self.pending = channel.has_pending_writes();
-            return Ok(0);
-        }
-
-        // Advance buffer offsets based on bytes written
-        let mut to_consume = written;
-        for (data, offset) in &mut self.buffers {
-            if to_consume == 0 {
-                break;
+            if written == 0 {
+                self.pending = channel.has_pending_writes();
+                return Ok(0);
             }
-            let available = data.len() - *offset;
-            let consumed = to_consume.min(available);
-            *offset += consumed;
-            to_consume -= consumed;
-        }
 
-        self.remaining -= written;
-        self.pending = channel.has_pending_writes();
-        Ok(written)
+            // Advance buffer offsets based on bytes written
+            let mut to_consume = written;
+            for (data, offset) in &mut self.buffers {
+                if to_consume == 0 {
+                    break;
+                }
+                let available = data.len() - *offset;
+                let consumed = to_consume.min(available);
+                *offset += consumed;
+                to_consume -= consumed;
+            }
+
+            self.remaining -= written;
+            self.pending = channel.has_pending_writes();
+            Ok(written)
+        })
     }
 
     fn size(&self) -> usize {

@@ -19,7 +19,9 @@
 use super::send::KafkaSend;
 use super::transport_layer::TransportLayer;
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 
 /// A network send that wraps an inner [`KafkaSend`] with a destination identifier.
 ///
@@ -54,8 +56,11 @@ impl KafkaSend for NetworkSend {
         self.send.completed()
     }
 
-    fn write_to(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize> {
-        self.send.write_to(channel)
+    fn write_to<'a>(
+        &'a mut self,
+        channel: &'a mut dyn TransportLayer,
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+        Box::pin(async { self.send.write_to(channel).await })
     }
 
     fn size(&self) -> usize {

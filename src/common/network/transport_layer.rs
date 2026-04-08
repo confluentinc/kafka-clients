@@ -20,10 +20,13 @@
 //! substitute for socket channel and other network channel implementations.
 //!
 //! In Java this extends `ScatteringByteChannel` and `TransferableChannel`.
-//! In Rust we combine read/write methods with Kafka-specific methods in a single trait.
+//! In Rust, the async read/write capabilities and the Kafka-specific methods are
+//! combined into this single trait, backed by `tokio::net::TcpStream`.
 
+use std::future::Future;
 use std::io;
 use std::ops;
+use std::pin::Pin;
 
 /// Interest operations for the transport layer, analogous to Java `SelectionKey` ops.
 ///
@@ -83,13 +86,15 @@ impl ops::BitAnd for InterestOps {
 
 /// Transport layer for underlying network communication.
 ///
-/// Provides read/write operations on a TCP connection along with
+/// Provides async read/write operations on a TCP connection along with
 /// Kafka-specific connection management (handshake, interest ops, muting).
 ///
 /// In Java, `TransportLayer` extends `ScatteringByteChannel` and `TransferableChannel`.
-/// In Rust, the read/write capabilities and the Kafka-specific methods are combined
-/// into this single trait.
-pub trait TransportLayer: std::marker::Send {
+/// In Rust, the async I/O capabilities and the Kafka-specific methods are combined
+/// into this single trait. I/O methods return boxed futures for object safety (`dyn TransportLayer`).
+///
+/// Per CLAUDE.md rule 8, all I/O is async using Tokio.
+pub trait TransportLayer: Send {
     /// Returns `true` if the channel has completed handshake and authentication.
     fn ready(&self) -> bool;
 
@@ -98,7 +103,7 @@ pub trait TransportLayer: std::marker::Send {
     /// # Errors
     ///
     /// Returns an error if the connection cannot be completed.
-    fn finish_connect(&mut self) -> io::Result<bool>;
+    fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
 
     /// Disconnects the underlying socket channel.
     fn disconnect(&mut self);
@@ -114,7 +119,7 @@ pub trait TransportLayer: std::marker::Send {
     /// # Errors
     ///
     /// Returns an error if the handshake fails.
-    fn handshake(&mut self) -> io::Result<()>;
+    fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
 
     /// Adds the given interest operations.
     fn add_interest_ops(&mut self, ops: InterestOps);
@@ -141,7 +146,7 @@ pub trait TransportLayer: std::marker::Send {
     /// # Errors
     ///
     /// Returns an error if the close operation fails.
-    fn close(&mut self) -> io::Result<()>;
+    fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
 
     /// Reads data from this channel into the given buffer.
     ///
@@ -151,12 +156,13 @@ pub trait TransportLayer: std::marker::Send {
     ///
     /// # Returns
     ///
-    /// The number of bytes read, possibly zero.
+    /// The number of bytes read, possibly zero. Returns `Ok(0)` only to indicate
+    /// EOF (remote closed the connection), consistent with Tokio's `AsyncRead`.
     ///
     /// # Errors
     ///
     /// Returns an error if the read fails.
-    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize>;
+    fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
     /// Writes data to this channel from the given buffer.
     ///
@@ -171,7 +177,7 @@ pub trait TransportLayer: std::marker::Send {
     /// # Errors
     ///
     /// Returns an error if the write fails.
-    fn write(&mut self, src: &[u8]) -> io::Result<usize>;
+    fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
     /// Writes data from multiple buffers to this channel (scatter-gather write).
     ///
@@ -186,5 +192,8 @@ pub trait TransportLayer: std::marker::Send {
     /// # Errors
     ///
     /// Returns an error if the write fails.
-    fn write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize>;
+    fn write_vectored<'a>(
+        &'a mut self,
+        srcs: &'a [io::IoSlice<'a>],
+    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 }
