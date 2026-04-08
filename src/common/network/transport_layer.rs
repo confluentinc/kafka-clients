@@ -25,6 +25,7 @@
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::ops;
 use std::pin::Pin;
 
@@ -95,6 +96,16 @@ impl ops::BitAnd for InterestOps {
 ///
 /// Per CLAUDE.md rule 8, all I/O is async using Tokio.
 pub trait TransportLayer: Send {
+    /// Returns the remote address of the connected peer, if available.
+    ///
+    /// This replaces Java's `transportLayer.socketChannel().getRemoteAddress()`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the socket is not connected or the address cannot
+    /// be determined.
+    fn peer_addr(&self) -> io::Result<SocketAddr>;
+
     /// Returns `true` if the channel has completed handshake and authentication.
     fn ready(&self) -> bool;
 

@@ -259,6 +259,7 @@ mod tests {
     use crate::common::network::transport_layer::InterestOps;
 
     use std::io;
+    use std::net::SocketAddr;
 
     /// A mock transport layer backed by a byte buffer for testing.
     ///
@@ -291,6 +292,10 @@ mod tests {
     }
 
     impl TransportLayer for MockTransportLayer {
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:9092".parse().unwrap())
+        }
+
         fn ready(&self) -> bool {
             true
         }

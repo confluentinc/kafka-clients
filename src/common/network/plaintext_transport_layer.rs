@@ -24,6 +24,7 @@ use super::transport_layer::{InterestOps, TransportLayer};
 
 use std::future::Future;
 use std::io;
+use std::net::SocketAddr;
 use std::pin::Pin;
 
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -77,6 +78,14 @@ impl PlaintextTransportLayer {
 }
 
 impl TransportLayer for PlaintextTransportLayer {
+    /// Returns the remote address of the connected peer.
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        match &self.stream {
+            Some(stream) => stream.peer_addr(),
+            None => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+        }
+    }
+
     /// Always returns `true` for plaintext — no handshake/authentication required.
     fn ready(&self) -> bool {
         true
