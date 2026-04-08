@@ -34,10 +34,14 @@ use tokio::net::TcpStream;
 /// This is a wrapper around a Tokio [`TcpStream`] with interest ops tracking.
 /// It provides no encryption — data is sent and received as plaintext.
 ///
+/// The stream is wrapped in `Option` so that `close()` can drop it (via `take()`),
+/// releasing the OS socket resource. This matches Java's `socketChannel.close()`
+/// semantics where the channel is actually closed and `isOpen()` returns `false`.
+///
 /// All I/O operations are async and driven by the Tokio runtime.
 pub struct PlaintextTransportLayer {
-    /// The underlying async TCP stream.
-    stream: TcpStream,
+    /// The underlying async TCP stream, or `None` if the transport has been closed.
+    stream: Option<TcpStream>,
     /// Whether the connection has been established.
     connected: bool,
     /// Current interest operations for selector registration.
@@ -50,7 +54,7 @@ impl PlaintextTransportLayer {
     /// The initial interest ops are set to `OP_CONNECT` to indicate that the
     /// connection is being established.
     pub fn new(stream: TcpStream) -> Self {
-        Self { stream, connected: false, interest_ops: InterestOps::OP_CONNECT }
+        Self { stream: Some(stream), connected: false, interest_ops: InterestOps::OP_CONNECT }
     }
 
     /// Creates a new `PlaintextTransportLayer` from an already-connected Tokio TCP stream.
@@ -58,7 +62,17 @@ impl PlaintextTransportLayer {
     /// The initial interest ops are set to `OP_READ` since the connection is
     /// already established.
     pub fn connected(stream: TcpStream) -> Self {
-        Self { stream, connected: true, interest_ops: InterestOps::OP_READ }
+        Self { stream: Some(stream), connected: true, interest_ops: InterestOps::OP_READ }
+    }
+
+    /// Returns a mutable reference to the underlying stream, or an error if closed.
+    ///
+    /// Returns `ErrorKind::NotConnected` after `close()` has been called,
+    /// matching Java's `ClosedChannelException` on I/O after `socketChannel.close()`.
+    fn stream_mut(&mut self) -> io::Result<&mut TcpStream> {
+        self.stream
+            .as_mut()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed"))
     }
 }
 
@@ -75,12 +89,14 @@ impl TransportLayer for PlaintextTransportLayer {
     /// to `OP_READ`.
     fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
         Box::pin(async {
+            let stream = self.stream_mut()?;
+
             // For tokio TcpStream, wait for the stream to be writable which
             // indicates the connection has completed.
-            self.stream.writable().await?;
+            stream.writable().await?;
 
             // Check if the connection succeeded by checking for socket errors
-            match self.stream.peer_addr() {
+            match stream.peer_addr() {
                 Ok(_) => {
                     self.connected = true;
                     self.interest_ops = self.interest_ops.remove(InterestOps::OP_CONNECT) | InterestOps::OP_READ;
@@ -134,16 +150,26 @@ impl TransportLayer for PlaintextTransportLayer {
 
     /// Returns `true` if the underlying stream is open.
     ///
-    /// We check by attempting to get the local address; if the socket is closed
-    /// this will fail.
+    /// After `close()` has been called, the stream is dropped and this returns `false`.
+    /// This matches Java's `socketChannel.isOpen()` which returns `false` after
+    /// `socketChannel.close()`.
     fn is_open(&self) -> bool {
-        self.stream.local_addr().is_ok()
+        self.stream.is_some()
     }
 
-    /// Closes the transport layer.
+    /// Closes the transport layer by dropping the underlying TCP stream.
+    ///
+    /// This releases the OS socket resource, matching Java's `socketChannel.close()`
+    /// semantics. After this call, `is_open()` returns `false` and any subsequent
+    /// I/O operations return an error with `ErrorKind::NotConnected`.
     fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async {
-            self.stream.shutdown().await?;
+            if let Some(mut stream) = self.stream.take() {
+                // Shut down the write half gracefully before dropping.
+                // Ignore shutdown errors — the important thing is that the stream
+                // is dropped and the socket resource is released.
+                let _ = stream.shutdown().await;
+            }
             self.connected = false;
             Ok(())
         })
@@ -151,12 +177,18 @@ impl TransportLayer for PlaintextTransportLayer {
 
     /// Reads data from this channel into the given buffer.
     fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-        Box::pin(async { self.stream.read(dst).await })
+        Box::pin(async {
+            let stream = self.stream_mut()?;
+            stream.read(dst).await
+        })
     }
 
     /// Writes data to this channel from the given buffer.
     fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-        Box::pin(async { self.stream.write(src).await })
+        Box::pin(async {
+            let stream = self.stream_mut()?;
+            stream.write(src).await
+        })
     }
 
     /// Writes data from multiple buffers to this channel (scatter-gather write).
@@ -164,6 +196,9 @@ impl TransportLayer for PlaintextTransportLayer {
         &'a mut self,
         srcs: &'a [io::IoSlice<'a>],
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-        Box::pin(async { self.stream.write_vectored(srcs).await })
+        Box::pin(async {
+            let stream = self.stream_mut()?;
+            stream.write_vectored(srcs).await
+        })
     }
 }
