@@ -11,3 +11,7 @@
 ## Issue 21: PlaintextTransportLayer uses std::net::TcpStream instead of tokio::net::TcpStream — RESOLVED
 - **Fix commit**: 9369f7f (fixup\! Implement Layer 4)
 - **Resolution**: Rewrote PlaintextTransportLayer to use tokio::net::TcpStream. Made all I/O methods async using boxed futures for dyn-safety. Updated all dependent traits and implementations.
+
+## Issue 22: EOF during payload read is swallowed when size header was read in same call — RESOLVED
+- **Fix commit**: 5b87f7a (fixup\\! Implement Layer 4)
+- **Resolution**: Removed the `total_read == 0` guard so that `Ok(0)` during payload phase always returns `Err(UnexpectedEof)`, matching Java behavior where `bytesRead < 0` always throws `EOFException`. Added `WouldBlock` handling to distinguish between "no data available" (Java NIO returning 0) and "connection closed" (Java NIO returning -1). Updated MockTransportLayer with `new_open()` constructor for tests that need a still-open channel. Added test_eof_during_payload_read_same_call_as_header test covering the exact scenario.
