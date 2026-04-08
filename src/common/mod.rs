@@ -16,6 +16,7 @@
 
 pub mod cluster;
 pub mod cluster_resource;
+pub mod network;
 pub mod node;
 pub mod partition_info;
 pub mod protocol;
