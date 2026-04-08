@@ -27,7 +27,7 @@ use std::io;
 use std::net::SocketAddr;
 use std::pin::Pin;
 
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::AsyncWriteExt;
 use tokio::net::TcpStream;
 
 /// Transport layer for PLAINTEXT (unencrypted) communication.
@@ -185,18 +185,28 @@ impl TransportLayer for PlaintextTransportLayer {
     }
 
     /// Reads data from this channel into the given buffer.
+    ///
+    /// Waits for the socket to become readable, then reads available data.
+    /// Matches Java NIO's `SocketChannel.read()` on a non-blocking channel:
+    /// the caller is expected to register read interest and wait for readiness
+    /// before calling read. Returns `WouldBlock` if data is not yet available
+    /// after a spurious readiness notification.
     fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async {
             let stream = self.stream_mut()?;
-            stream.read(dst).await
+            stream.readable().await?;
+            stream.try_read(dst)
         })
     }
 
     /// Writes data to this channel from the given buffer.
+    ///
+    /// Waits for the socket to become writable, then writes data.
     fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async {
             let stream = self.stream_mut()?;
-            stream.write(src).await
+            stream.writable().await?;
+            stream.try_write(src)
         })
     }
 
@@ -207,7 +217,8 @@ impl TransportLayer for PlaintextTransportLayer {
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async {
             let stream = self.stream_mut()?;
-            stream.write_vectored(srcs).await
+            stream.writable().await?;
+            stream.try_write_vectored(srcs)
         })
     }
 }

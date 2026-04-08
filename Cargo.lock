@@ -46,6 +46,7 @@ name = "confluent-kafka-rust"
 version = "0.1.0"
 dependencies = [
  "generator",
+ "indexmap",
  "log",
  "rand",
  "regex",

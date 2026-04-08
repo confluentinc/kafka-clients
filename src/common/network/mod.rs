@@ -33,6 +33,8 @@ pub mod network_send;
 pub mod plaintext_channel_builder;
 pub mod plaintext_transport_layer;
 pub mod receive;
+pub mod selectable;
+pub mod selector;
 pub mod send;
 pub mod transport_layer;
 
@@ -52,5 +54,7 @@ pub use network_send::NetworkSend;
 pub use plaintext_channel_builder::PlaintextChannelBuilder;
 pub use plaintext_transport_layer::PlaintextTransportLayer;
 pub use receive::Receive;
+pub use selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+pub use selector::Selector;
 pub use send::KafkaSend;
 pub use transport_layer::TransportLayer;

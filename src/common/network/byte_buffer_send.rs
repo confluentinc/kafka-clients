@@ -94,7 +94,15 @@ impl KafkaSend for ByteBufferSend {
             let written = if slices.is_empty() {
                 0
             } else {
-                channel.write_vectored(&slices).await?
+                match channel.write_vectored(&slices).await {
+                    Ok(n) => n,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // No space in the socket buffer right now. Matches Java NIO
+                        // non-blocking write returning 0: try again later.
+                        0
+                    },
+                    Err(e) => return Err(e),
+                }
             };
 
             if written == 0 {
