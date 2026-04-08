@@ -15,3 +15,11 @@
 ## Issue 22: EOF during payload read is swallowed when size header was read in same call — RESOLVED
 - **Fix commit**: 5b87f7a (fixup\\! Implement Layer 4)
 - **Resolution**: Removed the `total_read == 0` guard so that `Ok(0)` during payload phase always returns `Err(UnexpectedEof)`, matching Java behavior where `bytesRead < 0` always throws `EOFException`. Added `WouldBlock` handling to distinguish between "no data available" (Java NIO returning 0) and "connection closed" (Java NIO returning -1). Updated MockTransportLayer with `new_open()` constructor for tests that need a still-open channel. Added test_eof_during_payload_read_same_call_as_header test covering the exact scenario.
+
+## Issue 23: PlaintextTransportLayer::is_open returns true after close — RESOLVED
+- **Fix commit**: c7ad3a4 (fixup! Implement Layer 4)
+- **Resolution**: Wrapped TcpStream in Option<TcpStream>. is_open() now checks self.stream.is_some(), returning false after close() calls self.stream.take(). This matches Java socketChannel.isOpen() returning false after socketChannel.close().
+
+## Issue 24: PlaintextTransportLayer::close does not close the socket, only shuts it down — RESOLVED
+- **Fix commit**: c7ad3a4 (fixup! Implement Layer 4)
+- **Resolution**: close() now calls self.stream.take() which drops the TcpStream and releases the OS socket FD, matching Java socketChannel.close() semantics. A graceful shutdown() is attempted first (errors ignored), then the stream is dropped. All I/O methods (read, write, write_vectored, finish_connect) return ErrorKind::NotConnected when stream is None, matching Java ClosedChannelException behavior.
