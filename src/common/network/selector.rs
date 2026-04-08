@@ -275,16 +275,17 @@ impl Selector {
     /// Uses non-blocking try_read/try_write via the transport layer.
     /// Channels with no data available return WouldBlock and are skipped.
     ///
-    /// The idle expiry LRU is only updated when the channel actually had I/O
-    /// activity (connection, read, write, or state change), matching Java's
-    /// behavior where only channels with ready NIO selection keys get their
-    /// LRU refreshed during `pollSelectionKeys`.
+    /// The idle expiry LRU is updated when the channel actually had I/O
+    /// activity, matching Java's behavior where `idleExpiryManager.update`
+    /// is called unconditionally for every channel whose NIO selection key
+    /// was selected (i.e., has ready I/O) in `pollSelectionKeys`. This
+    /// includes partial reads/writes where bytes were transferred but a
+    /// full `NetworkReceive`/`NetworkSend` was not yet completed.
     async fn poll_channel(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: u64) {
         let mut send_failed = false;
+        let mut had_bytes_transferred = false;
 
         // Track pre-poll state to detect if any I/O activity occurred
-        let pre_sends = self.completed_sends.len();
-        let pre_receives = self.completed_receives.len();
         let pre_connected = self.connected.len();
 
         let result: io::Result<()> = async {
@@ -317,7 +318,9 @@ impl Selector {
             }
 
             // Read if ready and not muted and no completed receive yet
-            self.attempt_read(channel_id).await?;
+            if self.attempt_read(channel_id).await? {
+                had_bytes_transferred = true;
+            }
 
             // Track buffered read state
             let channel = self.channels.get(channel_id).unwrap();
@@ -332,7 +335,11 @@ impl Selector {
                 let should_write = !channel.maybe_begin_client_reauthentication(|| now_nanos)?;
                 if should_write {
                     match self.write_channel(channel_id).await {
-                        Ok(()) => {},
+                        Ok(bytes_written) => {
+                            if bytes_written {
+                                had_bytes_transferred = true;
+                            }
+                        },
                         Err(e) => {
                             send_failed = true;
                             return Err(e);
@@ -345,15 +352,14 @@ impl Selector {
         }
         .await;
 
-        // Only update idle expiry if actual I/O activity occurred on this
-        // channel. This matches Java's behavior where `idleExpiryManager.update`
-        // is called only for channels with ready NIO selection keys inside
-        // `pollSelectionKeys`. Without this, all channels get their LRU
-        // refreshed on every poll, preventing idle expiry from firing when
-        // a channel has no data to read.
-        let had_activity = self.completed_sends.len() > pre_sends
-            || self.completed_receives.len() > pre_receives
-            || self.connected.len() > pre_connected;
+        // Update idle expiry if actual I/O activity occurred on this channel.
+        // This matches Java's behavior where `idleExpiryManager.update` is
+        // called unconditionally for every channel with a ready NIO selection
+        // key in `pollSelectionKeys` (line 525-526). In Java, NIO naturally
+        // filters to only channels with ready I/O. In Rust, we poll all
+        // channels, so we track whether bytes were actually transferred
+        // (including partial reads/writes) or a connection was established.
+        let had_activity = had_bytes_transferred || self.connected.len() > pre_connected;
         if had_activity && let Some(ref mut mgr) = self.idle_expiry_manager {
             mgr.update(channel_id, current_time_nanos);
         }
@@ -383,10 +389,13 @@ impl Selector {
 
     /// Attempt to read from a channel.
     ///
+    /// Returns `true` if bytes were actually read from the channel (including
+    /// partial reads where a full `NetworkReceive` has not yet completed).
+    ///
     /// Translated from `Selector.attemptRead` in Java.
     /// Uses a zero-duration timeout to make the read non-blocking from the
     /// selector's perspective, matching Java NIO's non-blocking channel reads.
-    async fn attempt_read(&mut self, channel_id: &str) -> io::Result<()> {
+    async fn attempt_read(&mut self, channel_id: &str) -> io::Result<bool> {
         // Check conditions with immutable borrows first
         let should_read = {
             let channel = self.channels.get(channel_id).unwrap();
@@ -419,11 +428,16 @@ impl Selector {
             } else {
                 self.made_read_progress_last_poll = true;
             }
+            return Ok(bytes != 0);
         }
-        Ok(())
+        Ok(false)
     }
 
-    async fn write_channel(&mut self, channel_id: &str) -> io::Result<()> {
+    /// Write to a channel.
+    ///
+    /// Returns `true` if bytes were actually written to the channel (including
+    /// partial writes where a full `NetworkSend` has not yet completed).
+    async fn write_channel(&mut self, channel_id: &str) -> io::Result<bool> {
         let channel = self.channels.get_mut(channel_id).unwrap();
         // Use timeout to avoid blocking on this channel's writability.
         let write_result = tokio::time::timeout(std::time::Duration::ZERO, channel.write()).await;
@@ -439,7 +453,7 @@ impl Selector {
         {
             self.completed_sends.push(send);
         }
-        Ok(())
+        Ok(bytes_sent > 0)
     }
 
     /// Begin closing a channel.
