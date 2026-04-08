@@ -17,6 +17,7 @@
 //! This module provides the low-level TCP I/O and Kafka protocol framing.
 //! It sits between the wire protocol and the higher-level channel abstraction.
 
+pub mod authenticator;
 pub mod byte_buffer_send;
 pub mod channel_metadata_registry;
 pub mod channel_state;
@@ -32,6 +33,7 @@ pub mod receive;
 pub mod send;
 pub mod transport_layer;
 
+pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
 pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
 pub use channel_state::ChannelState;
