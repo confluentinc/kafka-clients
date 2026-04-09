@@ -12,25 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common types and utilities for Kafka (org.apache.kafka.common)
+//! Client implementations (org.apache.kafka.clients)
 
-pub mod cluster;
-pub mod cluster_resource;
-pub mod feature;
-pub mod memory;
-pub mod network;
-pub mod node;
-pub mod partition_info;
-pub mod protocol;
-pub mod requests;
-pub mod topic_partition;
-pub mod utils;
-pub mod uuid;
+pub mod connection_state;
+pub mod host_resolver;
+pub mod least_loaded_node;
+pub mod metadata_recovery_strategy;
 
-pub use cluster::Cluster;
-pub use cluster_resource::ClusterResource;
-pub use node::Node;
-pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
-pub use topic_partition::TopicPartition;
-pub use uuid::Uuid;
+pub use connection_state::ConnectionState;
+pub use host_resolver::{DefaultHostResolver, HostResolver};
+pub use least_loaded_node::LeastLoadedNode;
+pub use metadata_recovery_strategy::MetadataRecoveryStrategy;
