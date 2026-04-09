@@ -13,7 +13,8 @@
 // limitations under the License.
 
 //! Shared test helper module providing access to test-only generated message types
-//! (SimpleExampleMessage, NullableStructMessage, SimpleArraysMessage).
+//! (SimpleExampleMessage, NullableStructMessage, SimpleArraysMessage) and
+//! integration test infrastructure (cluster config, pool, context).
 //!
 //! The generated code uses `crate::common::protocol::*` and `crate::common::Uuid`.
 //! When included from integration tests, `crate` refers to the test binary crate,
@@ -30,3 +31,13 @@ mod test_generated {
     include!(concat!(env!("OUT_DIR"), "/test_generated/mod.rs"));
 }
 pub use test_generated::*;
+
+// Integration test infrastructure — only compiled when the feature is enabled.
+#[cfg(feature = "integration-tests")]
+pub mod cluster_config;
+#[cfg(feature = "integration-tests")]
+pub mod cluster_pool;
+#[cfg(feature = "integration-tests")]
+pub mod kafka_cluster;
+#[cfg(feature = "integration-tests")]
+pub mod test_context;

@@ -8,6 +8,7 @@ edition = "2024"
 
 [features]
 skip-generated = []
+integration-tests = []
 
 [dependencies]
 regex = "1.0"
@@ -19,6 +20,10 @@ rand = "0.9"
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time", "sync"] }
 indexmap = "2"
 log = "0.4"
+
+[dev-dependencies]
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["kafka"] }
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
