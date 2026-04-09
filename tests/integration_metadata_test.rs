@@ -86,8 +86,9 @@ async fn send_and_receive(
     correlation_id: i32,
 ) -> (Vec<u8>, RequestHeader) {
     let api_key = builder.api_key();
-    let version = builder.latest_allowed_version();
-    let request = builder.build().expect("Failed to build request");
+    // Use oldest allowed version for maximum broker compatibility.
+    let version = builder.oldest_allowed_version();
+    let request = builder.build_version(version).expect("Failed to build request");
 
     let header =
         RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");

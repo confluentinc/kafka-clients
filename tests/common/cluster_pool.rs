@@ -32,10 +32,13 @@ use super::kafka_cluster::KafkaCluster;
 
 use tokio::sync::OnceCell;
 
+/// Type alias for the cluster pool's inner value: a once-cell holding a shared cluster.
+type ClusterCell = Arc<OnceCell<Arc<KafkaCluster>>>;
+
 /// Process-global pool of shared Kafka cluster instances.
 ///
 /// Each unique `ClusterConfig` gets at most one running container.
-static CLUSTER_POOL: std::sync::LazyLock<Mutex<HashMap<ClusterConfig, Arc<OnceCell<Arc<KafkaCluster>>>>>> =
+static CLUSTER_POOL: std::sync::LazyLock<Mutex<HashMap<ClusterConfig, ClusterCell>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 /// Get or create a shared [`KafkaCluster`] for the given config.

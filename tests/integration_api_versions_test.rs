@@ -60,11 +60,16 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
 }
 
 /// Helper: send an ApiVersionsRequest and return the parsed response.
+///
+/// Uses version 0 for the initial handshake — the standard Kafka client behavior.
+/// The broker always supports ApiVersions v0; higher versions may be unsupported
+/// if our client's message spec is newer than the broker.
 async fn send_api_versions_request(selector: &mut Selector) -> ApiVersionsResponse {
     let builder = ApiVersionsRequestBuilder::new();
     let api_key = builder.api_key();
-    let version = builder.latest_allowed_version();
-    let request = builder.build().expect("Failed to build request");
+    // Use oldest allowed version for the initial handshake — maximum broker compatibility.
+    let version = builder.oldest_allowed_version();
+    let request = builder.build_version(version).expect("Failed to build request");
 
     let header = RequestHeader::new(api_key, version, "api-versions-test", 1).expect("Failed to create request header");
 

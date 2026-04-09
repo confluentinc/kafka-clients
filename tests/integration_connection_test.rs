@@ -93,6 +93,9 @@ async fn poll_until_connected(selector: &mut Selector) {
 }
 
 /// Helper: build a NetworkSend for a request.
+///
+/// Uses version 0 for maximum broker compatibility. Real clients would negotiate
+/// versions via ApiVersions first, then use the broker-supported version.
 fn build_request_send(
     builder: &dyn RequestBuilder,
     client_id: &str,
@@ -100,8 +103,9 @@ fn build_request_send(
     destination: &str,
 ) -> (NetworkSend, RequestHeader) {
     let api_key = builder.api_key();
-    let version = builder.latest_allowed_version();
-    let request = builder.build().expect("Failed to build request");
+    // Use oldest allowed version for maximum broker compatibility.
+    let version = builder.oldest_allowed_version();
+    let request = builder.build_version(version).expect("Failed to build request");
 
     let header =
         RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
