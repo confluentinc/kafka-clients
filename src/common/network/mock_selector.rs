@@ -50,23 +50,24 @@ impl DelayedReceive {
 ///
 /// # Poll cycle
 ///
-/// Like the real [`Selector`](super::selector::Selector), each `poll()` call
-/// clears the previous cycle's results and produces new ones:
+/// Each `poll()` call clears the previous cycle's `completed_sends`,
+/// `completed_receives`, `disconnected`, and `connected`. Then it processes
+/// pending connections, initiated sends, and delayed receives.
 ///
-/// 1. All `connected`, `disconnected`, `completed_sends`, and `completed_receives`
-///    are cleared at the start of `poll()`.
-/// 2. Newly-connected nodes (from `connect()` since the last poll) are moved
-///    into `connected`.
-/// 3. Initiated sends are completed (moved to `completed_sends`).
-/// 4. Delayed receives matching completed sends are delivered.
+/// This matches the Java `MockSelector` semantics:
+/// - In Java, `connect()` adds to `connected` directly and `connected()`
+///   returns a snapshot-and-clear. Since our `Selectable` trait returns
+///   `&[String]`, we use a staging area (`pending_connected`) and clear +
+///   move in `poll()` to achieve the same one-shot consumption behavior.
 pub struct MockSelector {
     initiated_sends: Vec<NetworkSend>,
     completed_sends: Vec<NetworkSend>,
     completed_receives: Vec<NetworkReceive>,
     disconnected: HashMap<String, ChannelState>,
-    /// Nodes that completed connection during the last poll cycle.
+    /// Nodes that completed connection and will be visible via `connected()`.
     connected: Vec<String>,
-    /// Nodes that have connected but not yet been reported in a poll cycle.
+    /// Staging area: nodes from `connect()` calls waiting to be promoted to
+    /// `connected` on the next `poll()`.
     pending_connected: Vec<String>,
     delayed_receives: Vec<DelayedReceive>,
     ready: HashSet<String>,
@@ -220,13 +221,12 @@ impl super::selectable::Selectable for MockSelector {
     }
 
     fn poll(&mut self, _timeout_ms: i64) -> impl std::future::Future<Output = io::Result<()>> + Send {
-        // Clear previous cycle's results
-        self.completed_sends.clear();
-        self.completed_receives.clear();
-        self.disconnected.clear();
+        // In Java, `connected()` returns a snapshot-and-clear (each call
+        // only returns connections accumulated since the last read). Since
+        // our `Selectable` trait's `connected()` returns `&[String]`, we
+        // replicate one-shot semantics by clearing `connected` at the start
+        // of each poll and moving in the pending set.
         self.connected.clear();
-
-        // Move pending connections to connected
         self.connected.append(&mut self.pending_connected);
 
         // Complete initiated sends and any delayed receives

@@ -48,7 +48,7 @@ use super::host_resolver::HostResolver;
 use super::in_flight_requests::{InFlightRequest, InFlightRequests};
 use super::kafka_client::KafkaClient;
 use super::least_loaded_node::LeastLoadedNode;
-use super::metadata::Metadata;
+use super::metadata::{Metadata, MetadataError};
 use super::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use super::metadata_updater::MetadataUpdater;
 use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
@@ -138,6 +138,11 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     state: Arc<AtomicU8>,
     /// Random offset for round-robin node selection.
     rand_offset: rand::rngs::ThreadRng,
+    /// The `now` timestamp from the most recent `poll()` call, used in methods
+    /// like `disconnect()` that need a timestamp but don't receive one as a
+    /// parameter. In Java, the `Time` instance provides this; here we store it
+    /// explicitly.
+    last_poll_time_ms: i64,
 
     // --- DefaultMetadataUpdater state (inlined from inner class) ---
     /// The metadata instance, or `None` if using an external MetadataUpdater.
@@ -214,6 +219,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: rand::rng(),
+            last_poll_time_ms: 0,
             metadata: Some(metadata),
             external_metadata_updater: None,
             in_progress: None,
@@ -282,6 +288,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: rand::rng(),
+            last_poll_time_ms: 0,
             metadata: None,
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
@@ -425,7 +432,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     } else if *client_request.api_key() == ApiKeys::METADATA {
                         self.handle_failed_request(
                             now,
-                            Some(super::metadata::MetadataError::Fatal("UnsupportedVersionException".to_string())),
+                            Some(MetadataError::Fatal("UnsupportedVersionException".to_string())),
                         );
                     }
                     return;
@@ -476,7 +483,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 } else if *client_request.api_key() == ApiKeys::METADATA {
                     self.handle_failed_request(
                         now,
-                        Some(super::metadata::MetadataError::Fatal("UnsupportedVersionException".to_string())),
+                        Some(MetadataError::Fatal("UnsupportedVersionException".to_string())),
                     );
                 }
             },
@@ -537,8 +544,21 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// Handle any completed request sends. If no response is expected, consider the request complete.
     fn handle_completed_sends(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
-        for send in self.selector.completed_sends() {
-            let destination = send.destination_id().to_string();
+        // Collect destination IDs first to avoid borrow conflicts.
+        let destinations: Vec<String> = self
+            .selector
+            .completed_sends()
+            .iter()
+            .map(|s| s.destination_id().to_string())
+            .collect();
+
+        for destination in destinations {
+            // Mark the in-flight request's send as completed so that
+            // `can_send_more` unblocks further sends on this connection.
+            // In Java the same Send object is shared, so this happens
+            // automatically; in Rust we use separate copies.
+            self.in_flight_requests.mark_last_sent_completed(&destination);
+
             let request = self.in_flight_requests.last_sent(&destination);
             if !request.expect_response {
                 let mut req = self.in_flight_requests.complete_last_sent(&destination);
@@ -834,9 +854,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.handle_server_disconnect(
             now,
             node_id,
-            disconnect_state
-                .exception()
-                .map(|e| super::metadata::MetadataError::Fatal(e.to_string())),
+            disconnect_state.exception().map(|e| MetadataError::Fatal(e.to_string())),
         );
     }
 
@@ -1050,7 +1068,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle a failed metadata request (DefaultMetadataUpdater).
-    fn handle_failed_request(&mut self, now: i64, maybe_fatal_exception: Option<super::metadata::MetadataError>) {
+    fn handle_failed_request(&mut self, now: i64, maybe_fatal_exception: Option<MetadataError>) {
         if let Some(ref metadata) = self.metadata {
             if let Some(exception) = maybe_fatal_exception {
                 metadata.fatal_error(exception);
@@ -1063,12 +1081,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle server disconnect (DefaultMetadataUpdater).
-    fn handle_server_disconnect(
-        &mut self,
-        now: i64,
-        node_id: &str,
-        maybe_auth_exception: Option<super::metadata::MetadataError>,
-    ) {
+    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_exception: Option<MetadataError>) {
         if let Some(metadata) = self.metadata.clone() {
             let cluster = metadata.fetch();
             if cluster.is_bootstrap_configured()
@@ -1127,14 +1140,14 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             panic!("Cannot connect to empty node {}", node);
         }
 
+        self.last_poll_time_ms = now;
+
         if self.is_ready(node, now) {
             return true;
         }
 
         if self.connection_states.can_connect(node.id_string(), now) {
-            // Initiate connection synchronously for the mock selector case.
-            // For real async, this would need to be called from an async context.
-            self.connection_states.connecting(node.id_string(), now, node.host());
+            block_on(self.initiate_connect(node, now));
         }
 
         false
@@ -1164,6 +1177,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse> {
         self.ensure_active();
+        self.last_poll_time_ms = now;
 
         if !self.aborted_sends.is_empty() {
             let mut responses = Vec::new();
@@ -1203,10 +1217,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
         info!("Client requested disconnect from node {}", node_id);
         block_on(self.selector.close_channel(node_id));
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = self.last_poll_time_ms;
         let mut aborted = Vec::new();
         self.cancel_in_flight_requests(node_id, now, Some(&mut aborted), false);
         self.aborted_sends.extend(aborted);
@@ -1216,10 +1227,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     fn close_connection(&mut self, node_id: &str) {
         info!("Client requested connection close from node {}", node_id);
         block_on(self.selector.close_channel(node_id));
-        let now = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64;
+        let now = self.last_poll_time_ms;
         self.cancel_in_flight_requests(node_id, now, None, false);
         self.connection_states.remove(node_id);
         self.api_versions.remove(node_id);
@@ -1385,5 +1393,1111 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         } else {
             warn!("Attempting to close NetworkClient that has already been closed.");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::api_message_type::ListenerType;
+    use crate::api_versions_response_data::ApiVersionsResponseData;
+    use crate::clients::host_resolver::HostResolver;
+    use crate::clients::kafka_client::KafkaClient;
+    use crate::clients::metadata::MetadataError;
+    use crate::clients::metadata_updater::MetadataUpdater;
+    use crate::common::Node;
+    use crate::common::network::mock_selector::{DelayedReceive, MockSelector};
+    use crate::common::network::network_receive::NetworkReceive;
+    use crate::common::protocol::message::Message;
+    use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+    use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
+    use crate::common::requests::api_versions_response::ApiVersionsResponse;
+    use crate::common::requests::metadata_request::MetadataRequestBuilder;
+    use crate::common::requests::response_header::ResponseHeader;
+    use crate::metadata_response_data::MetadataResponseData;
+
+    // ---------------------------------------------------------------------------
+    // TestHostResolver — a host resolver that returns 127.0.0.1 without DNS.
+    // ---------------------------------------------------------------------------
+
+    #[derive(Debug, Default, Clone)]
+    struct TestHostResolver;
+
+    impl TestHostResolver {
+        fn new() -> Self {
+            Self
+        }
+    }
+
+    impl HostResolver for TestHostResolver {
+        async fn resolve(&self, _host: &str) -> std::io::Result<Vec<std::net::IpAddr>> {
+            Ok(vec![std::net::IpAddr::V4(std::net::Ipv4Addr::LOCALHOST)])
+        }
+    }
+
+    const DEFAULT_REQUEST_TIMEOUT_MS: i32 = 1000;
+    const RECONNECT_BACKOFF_MS_TEST: i64 = 10 * 1000;
+    const RECONNECT_BACKOFF_MAX_MS_TEST: i64 = 10 * 10000;
+    const CONNECTION_SETUP_TIMEOUT_MS_TEST: i64 = 5 * 1000;
+    const CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST: i64 = 127 * 1000;
+
+    // ---------------------------------------------------------------------------
+    // ManualMetadataUpdater — a simple implementation of `MetadataUpdater` that
+    // returns the cluster nodes set via the constructor.
+    //
+    // Translated from `org.apache.kafka.clients.ManualMetadataUpdater`.
+    // ---------------------------------------------------------------------------
+
+    #[allow(dead_code)]
+    struct ManualMetadataUpdater {
+        nodes: Vec<Node>,
+    }
+
+    #[allow(dead_code)]
+    impl ManualMetadataUpdater {
+        fn new(nodes: Vec<Node>) -> Self {
+            Self { nodes }
+        }
+    }
+
+    impl MetadataUpdater for ManualMetadataUpdater {
+        fn fetch_nodes(&self) -> Vec<Node> {
+            self.nodes.clone()
+        }
+
+        fn is_update_due(&self, _now: i64) -> bool {
+            false
+        }
+
+        fn maybe_update(&mut self, _now: i64) -> i64 {
+            i64::MAX
+        }
+
+        fn handle_server_disconnect(
+            &mut self,
+            _now: i64,
+            _node_id: &str,
+            _maybe_auth_exception: Option<MetadataError>,
+        ) {
+        }
+
+        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_exception: Option<MetadataError>) {}
+
+        fn handle_successful_response(
+            &mut self,
+            _request_header: &crate::common::requests::RequestHeader,
+            _now: i64,
+            _metadata_response: &crate::common::requests::metadata_response::MetadataResponse,
+        ) {
+        }
+
+        fn close(&mut self) {}
+    }
+
+    // ---------------------------------------------------------------------------
+    // TestMetadataUpdater — extends ManualMetadataUpdater with failure tracking,
+    // like the Java test inner class.
+    // ---------------------------------------------------------------------------
+
+    struct TestMetadataUpdater {
+        nodes: Vec<Node>,
+        #[allow(dead_code)]
+        failure: Option<MetadataError>,
+    }
+
+    impl TestMetadataUpdater {
+        fn new(nodes: Vec<Node>) -> Self {
+            Self { nodes, failure: None }
+        }
+
+        /// Returns and clears the last failure.
+        #[allow(dead_code)]
+        fn get_and_clear_failure(&mut self) -> Option<MetadataError> {
+            self.failure.take()
+        }
+    }
+
+    impl MetadataUpdater for TestMetadataUpdater {
+        fn fetch_nodes(&self) -> Vec<Node> {
+            self.nodes.clone()
+        }
+
+        fn is_update_due(&self, _now: i64) -> bool {
+            false
+        }
+
+        fn maybe_update(&mut self, _now: i64) -> i64 {
+            i64::MAX
+        }
+
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_exception: Option<MetadataError>) {
+            if let Some(exception) = maybe_auth_exception {
+                self.failure = Some(exception);
+            }
+        }
+
+        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_exception: Option<MetadataError>) {
+            if let Some(exception) = maybe_fatal_exception {
+                self.failure = Some(exception);
+            }
+        }
+
+        fn handle_successful_response(
+            &mut self,
+            _request_header: &crate::common::requests::RequestHeader,
+            _now: i64,
+            _metadata_response: &crate::common::requests::metadata_response::MetadataResponse,
+        ) {
+        }
+
+        fn close(&mut self) {}
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helper: create a `NetworkClient` with version discovery enabled.
+    // ---------------------------------------------------------------------------
+
+    fn create_network_client(reconnect_backoff_max_ms: i64) -> NetworkClient<MockSelector, TestHostResolver> {
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let updater = TestMetadataUpdater::new(vec![node]);
+        NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            reconnect_backoff_max_ms,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true, // discover_broker_versions
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+        )
+    }
+
+    /// Creates a `NetworkClient` with static nodes (0 backoff).
+    fn create_network_client_with_static_nodes() -> NetworkClient<MockSelector, TestHostResolver> {
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let updater = TestMetadataUpdater::new(vec![node]);
+        NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(updater),
+            "mock-static",
+            usize::MAX,
+            0,
+            0,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true, // discover_broker_versions
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+        )
+    }
+
+    /// Creates a `NetworkClient` with no version discovery.
+    fn create_network_client_with_no_version_discovery() -> NetworkClient<MockSelector, TestHostResolver> {
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let updater = TestMetadataUpdater::new(vec![node]);
+        NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            RECONNECT_BACKOFF_MAX_MS_TEST,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            false, // discover_broker_versions
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+        )
+    }
+
+    /// Creates a `NetworkClient` with a specific max in-flight requests per connection.
+    fn create_network_client_with_max_in_flight(
+        max_in_flight: usize,
+        reconnect_backoff_max_ms: i64,
+    ) -> NetworkClient<MockSelector, TestHostResolver> {
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let updater = TestMetadataUpdater::new(vec![node]);
+        NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(updater),
+            "mock",
+            max_in_flight,
+            RECONNECT_BACKOFF_MS_TEST,
+            reconnect_backoff_max_ms,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            CONNECTION_SETUP_TIMEOUT_MS_TEST,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+        )
+    }
+
+    /// Creates a `NetworkClient` with multiple nodes.
+    fn create_network_client_with_multiple_nodes(
+        reconnect_backoff_max_ms: i64,
+        connection_setup_timeout_ms: i64,
+        node_number: usize,
+    ) -> NetworkClient<MockSelector, TestHostResolver> {
+        let nodes: Vec<Node> = (0..node_number)
+            .map(|i| Node::new(i as i32, "localhost".to_string(), 9092 + i as i32))
+            .collect();
+        let updater = TestMetadataUpdater::new(nodes);
+        NetworkClient::with_metadata_updater(
+            MockSelector::new(),
+            Box::new(updater),
+            "mock",
+            usize::MAX,
+            RECONNECT_BACKOFF_MS_TEST,
+            reconnect_backoff_max_ms,
+            64 * 1024,
+            64 * 1024,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            connection_setup_timeout_ms,
+            CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST,
+            true,
+            Arc::new(ApiVersions::new()),
+            TestHostResolver::new(),
+            MetadataRecoveryStrategy::None,
+        )
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helper: create the default ApiVersions response used for version discovery.
+    // ---------------------------------------------------------------------------
+
+    fn default_api_versions_response() -> ApiVersionsResponse {
+        ApiVersionsResponse::default_api_versions_response(ListenerType::Broker)
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helper: serialize a response with its response header into bytes that can
+    // be used as a NetworkReceive payload.
+    //
+    // Corresponds to Java's `RequestTestUtils.serializeResponseWithHeader`.
+    // ---------------------------------------------------------------------------
+
+    fn serialize_response_with_header(
+        api_key: &ApiKeys,
+        api_version: i16,
+        response_data: &impl Message,
+        correlation_id: i32,
+    ) -> Vec<u8> {
+        let header_version = api_key.response_header_version(api_version);
+        let header = ResponseHeader::new(correlation_id, header_version);
+
+        let mut cache = ObjectSerializationCache::new();
+        let header_size = Message::size(header.data(), &mut cache, header_version).expect("header size");
+        let body_size = Message::size(response_data, &mut cache, api_version).expect("body size");
+        let total = (header_size + body_size) as usize;
+
+        let mut buf = ByteBufferAccessor::new(total);
+        Message::write(header.data(), &mut buf, &cache, header_version).expect("write header");
+        Message::write(response_data, &mut buf, &cache, api_version).expect("write body");
+        buf.flip();
+        buf.buffer().to_vec()
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helper: prepare a delayed ApiVersions response for version discovery.
+    // ---------------------------------------------------------------------------
+
+    fn delayed_api_versions_response(
+        selector: &mut MockSelector,
+        node: &Node,
+        correlation_id: i32,
+        version: i16,
+        response: &ApiVersionsResponse,
+    ) {
+        let bytes = serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data(), correlation_id);
+        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        selector.delayed_receive(DelayedReceive::new(node.id_string(), receive));
+    }
+
+    fn set_expected_api_versions_response(selector: &mut MockSelector, node: &Node) {
+        let response = default_api_versions_response();
+        let api_versions_response_version = response
+            .api_version(ApiKeys::API_VERSIONS.id())
+            .map(|v| v.max_version)
+            .unwrap_or(ApiKeys::API_VERSIONS.latest_version());
+        delayed_api_versions_response(selector, node, 0, api_versions_response_version, &response);
+    }
+
+    // ---------------------------------------------------------------------------
+    // Helper: bring a node to the READY state.
+    //
+    // Translated from Java `awaitReady()`.
+    // ---------------------------------------------------------------------------
+
+    fn await_ready(client: &mut NetworkClient<MockSelector, TestHostResolver>, node: &Node) {
+        if client.discover_broker_versions() {
+            set_expected_api_versions_response(client.selector_mut(), node);
+        }
+        let now = 0_i64; // Use fixed time for tests
+        let mut tries = 0;
+        while !client.ready(node, now) {
+            client.poll(1, now);
+            tries += 1;
+            if tries > 100 {
+                panic!("Could not make node {} ready after 100 tries", node);
+            }
+        }
+        client.selector_mut().clear();
+    }
+
+    // =========================================================================
+    // Tests translated from Java NetworkClientTest
+    // =========================================================================
+
+    /// Translated from `NetworkClientTest.testClose`.
+    #[test]
+    fn test_close() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        client.ready(&node, now);
+        await_ready(&mut client, &node);
+        client.poll(1, now);
+        assert!(client.is_ready(&node, now), "The client should be ready");
+
+        // Send a metadata request
+        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        let correlation_id = request.correlation_id();
+        client.send(request, now);
+        assert_eq!(
+            1,
+            client.in_flight_request_count_for_node(node.id_string()),
+            "There should be 1 in-flight request after send"
+        );
+        assert!(client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(client.has_in_flight_requests());
+
+        // Provide a metadata response so the in-flight request can complete
+        let response_data = MetadataResponseData::new();
+        let bytes = serialize_response_with_header(
+            &ApiKeys::METADATA,
+            ApiKeys::METADATA.latest_version(),
+            &response_data,
+            correlation_id,
+        );
+        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        client.selector_mut().complete_receive(receive);
+        client.poll(1, now);
+
+        // Now close
+        client.close();
+        assert!(!client.active(), "Client should not be active after close");
+    }
+
+    /// Translated from `NetworkClientTest.testLeastLoadedNode`.
+    #[test]
+    fn test_least_loaded_node() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        client.ready(&node, now);
+        assert!(!client.is_ready(&node, now), "Node should not be ready before awaitReady");
+        let least_loaded_node = client.least_loaded_node(now);
+        assert_eq!(least_loaded_node.node().map(|n| n.id()), Some(node.id()));
+        assert!(least_loaded_node.has_node_available_or_connection_ready());
+
+        await_ready(&mut client, &node);
+        client.poll(1, now);
+        assert!(client.is_ready(&node, now), "The client should be ready");
+
+        // leastloadednode should be our single node
+        let least_loaded_node = client.least_loaded_node(now);
+        assert!(least_loaded_node.has_node_available_or_connection_ready());
+        let least_node = least_loaded_node.node().unwrap();
+        assert_eq!(least_node.id(), node.id(), "There should be one leastloadednode");
+
+        // Disconnect the node
+        client.selector_mut().server_disconnect(node.id_string());
+
+        client.poll(1, now);
+        assert!(
+            !client.ready(&node, now),
+            "After we forced the disconnection the client is no longer ready."
+        );
+        let least_loaded_node = client.least_loaded_node(now);
+        assert!(!least_loaded_node.has_node_available_or_connection_ready());
+        assert!(least_loaded_node.node().is_none(), "There should be NO leastloadednode");
+    }
+
+    /// Translated from `NetworkClientTest.testConnectionDelay`.
+    #[test]
+    fn test_connection_delay() {
+        let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        let delay = client.connection_delay(&node, now);
+        assert_eq!(0, delay, "Delay should be 0 for unconnected node");
+    }
+
+    /// Translated from `NetworkClientTest.testConnectionDelayConnected`.
+    #[test]
+    fn test_connection_delay_connected() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+
+        let delay = client.connection_delay(&node, now);
+        assert_eq!(i64::MAX, delay, "Delay should be i64::MAX for connected node");
+    }
+
+    /// Translated from `NetworkClientTest.testConnectionDelayDisconnected`.
+    #[test]
+    fn test_connection_delay_disconnected() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+
+        // First disconnection
+        client.selector_mut().server_disconnect(node.id_string());
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        let delay = client.connection_delay(&node, now);
+        let expected_delay = RECONNECT_BACKOFF_MS_TEST;
+        let jitter = 0.3;
+
+        // Assert with jitter tolerance
+        assert!(
+            (delay as f64 - expected_delay as f64).abs() <= expected_delay as f64 * jitter,
+            "Expected delay around {} (jitter {}), got {}",
+            expected_delay,
+            jitter,
+            delay
+        );
+    }
+
+    /// Translated from `NetworkClientTest.testConnectionDelayWithNoExponentialBackoff`.
+    #[test]
+    fn test_connection_delay_with_no_exponential_backoff() {
+        // Create client where backoff max = backoff (no exponential growth)
+        let client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        let delay = client.connection_delay(&node, now);
+        assert_eq!(0, delay);
+    }
+
+    /// Translated from `NetworkClientTest.testConnectionDelayConnectedWithNoExponentialBackoff`.
+    #[test]
+    fn test_connection_delay_connected_with_no_exponential_backoff() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+
+        let delay = client.connection_delay(&node, now);
+        assert_eq!(i64::MAX, delay);
+    }
+
+    /// Translated from `NetworkClientTest.testSendToUnreadyNode`.
+    #[test]
+    #[should_panic(expected = "Attempt to send a request to node")]
+    fn test_send_to_unready_node() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let now = 0_i64;
+        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let request = client.new_client_request("5", Box::new(builder), now, false);
+        client.send(request, now);
+    }
+
+    /// Translated from `NetworkClientTest.testInFlightRequestCount` (part of testClose).
+    #[test]
+    fn test_in_flight_request_count() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+
+        assert_eq!(0, client.in_flight_request_count());
+        assert!(!client.has_in_flight_requests());
+        assert_eq!(0, client.in_flight_request_count_for_node(node.id_string()));
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+
+        // Send a request
+        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+
+        assert_eq!(1, client.in_flight_request_count());
+        assert!(client.has_in_flight_requests());
+        assert_eq!(1, client.in_flight_request_count_for_node(node.id_string()));
+        assert!(client.has_in_flight_requests_for_node(node.id_string()));
+    }
+
+    /// Translated from `NetworkClientTest.testReadyAndDisconnect` / `testCallDisconnect`.
+    #[test]
+    fn test_ready_and_disconnect() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+        assert!(
+            client.is_ready(&node, now),
+            "Expected NetworkClient to be ready to send to node"
+        );
+        assert!(
+            !client.connection_failed(&node),
+            "Did not expect connection to node to be failed"
+        );
+
+        client.disconnect(node.id_string());
+        assert!(!client.is_ready(&node, now), "Expected node to be disconnected");
+        assert!(
+            client.connection_failed(&node),
+            "Expected connection to node to be failed after disconnect"
+        );
+        assert!(!client.can_connect(node.id_string(), now));
+    }
+
+    /// Translated from `NetworkClientTest.testApiVersionsRequest`.
+    ///
+    /// Tests the full ApiVersions flow: initiate connection, send ApiVersionsRequest,
+    /// receive response, become ready.
+    #[test]
+    fn test_api_versions_request() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        // Initiate the connection
+        client.ready(&node, now);
+
+        // Handle the connection, send the ApiVersionsRequest
+        client.poll(0, now);
+
+        // Check that the ApiVersionsRequest has been initiated
+        assert!(client.has_in_flight_requests_for_node(node.id_string()));
+
+        // Prepare response
+        let response = default_api_versions_response();
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node,
+            0,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &response,
+        );
+
+        // Handle completed receives
+        client.poll(0, now);
+
+        // The ApiVersionsRequest is gone
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+
+        // The client is ready
+        assert!(client.is_ready(&node, now));
+    }
+
+    /// Translated from `NetworkClientTest.testInvalidApiVersionsRequest`.
+    ///
+    /// Tests that an INVALID_REQUEST error in ApiVersions response causes the
+    /// node to become not ready.
+    #[test]
+    fn test_invalid_api_versions_request() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        // Initiate the connection
+        client.ready(&node, now);
+
+        // Handle the connection, send the ApiVersionsRequest
+        client.poll(0, now);
+
+        // Check that the ApiVersionsRequest has been initiated
+        assert!(client.has_in_flight_requests_for_node(node.id_string()));
+
+        // Prepare an error response
+        let mut error_data = ApiVersionsResponseData::new();
+        error_data.set_error_code(Errors::InvalidRequest.code());
+        error_data.set_throttle_time_ms(0);
+        let error_response = ApiVersionsResponse::new(error_data);
+
+        delayed_api_versions_response(
+            client.selector_mut(),
+            &node,
+            0,
+            ApiKeys::API_VERSIONS.latest_version(),
+            &error_response,
+        );
+
+        // Handle completed receives
+        client.poll(0, now);
+
+        // The ApiVersionsRequest is gone
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+
+        // Various assertions
+        assert!(!client.is_ready(&node, now));
+    }
+
+    /// Translated from `NetworkClientTest.testSimpleRequestResponse`.
+    ///
+    /// Tests that version discovery followed by a metadata request/response works.
+    #[test]
+    fn test_simple_request_response() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        check_simple_metadata_request_response(&mut client, &node);
+    }
+
+    /// Translated from `NetworkClientTest.testSimpleRequestResponseWithStaticNodes`.
+    #[test]
+    fn test_simple_request_response_with_static_nodes() {
+        let mut client = create_network_client_with_static_nodes();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        check_simple_metadata_request_response(&mut client, &node);
+    }
+
+    /// Translated from `NetworkClientTest.testSimpleRequestResponseWithNoBrokerDiscovery`.
+    #[test]
+    fn test_simple_request_response_with_no_broker_discovery() {
+        let mut client = create_network_client_with_no_version_discovery();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        check_simple_metadata_request_response(&mut client, &node);
+    }
+
+    /// Common logic for testSimpleRequestResponse variants.
+    ///
+    /// Since our ConcreteRequest only supports METADATA and API_VERSIONS (not PRODUCE),
+    /// we send a MetadataRequest instead of a ProduceRequest.
+    fn check_simple_metadata_request_response(client: &mut NetworkClient<MockSelector, TestHostResolver>, node: &Node) {
+        let now = 0_i64;
+        // Must call before creating any request, as it may send ApiVersionsRequest
+        await_ready(client, node);
+
+        let builder = MetadataRequestBuilder::new(Some(&["test_topic"]), true);
+        let callback_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let callback_flag = callback_executed.clone();
+        let callback: super::super::RequestCompletionHandler =
+            Box::new(move |_response: &mut super::super::client_response::ClientResponse| {
+                callback_flag.store(true, std::sync::atomic::Ordering::SeqCst);
+            });
+
+        let request = client.new_client_request_with_timeout(
+            node.id_string(),
+            Box::new(builder),
+            now,
+            true,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            Some(callback),
+        );
+        let correlation_id = request.correlation_id();
+
+        client.send(request, now);
+        client.poll(1, now);
+        assert_eq!(1, client.in_flight_request_count());
+
+        // Prepare a metadata response
+        let response_data = MetadataResponseData::new();
+        let response_version = ApiKeys::METADATA.latest_version();
+        let bytes =
+            serialize_response_with_header(&ApiKeys::METADATA, response_version, &response_data, correlation_id);
+        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        client.selector_mut().complete_receive(receive);
+
+        let responses = client.poll(1, now);
+        assert_eq!(1, responses.len());
+        assert!(
+            callback_executed.load(std::sync::atomic::Ordering::SeqCst),
+            "The handler should have executed."
+        );
+        assert!(responses[0].has_response(), "Should have a response body.");
+        assert_eq!(
+            correlation_id,
+            responses[0].request_header().correlation_id(),
+            "Should be correlated to the original request"
+        );
+    }
+
+    /// Translated from `NetworkClientTest.testUnsupportedVersionDuringInternalMetadataRequest`.
+    #[test]
+    fn test_unsupported_version_during_internal_metadata_request() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        // Disabling auto topic creation for versions less than 4 is not supported.
+        // Build a MetadataRequestBuilder that targets version 3 only, with
+        // allow_auto_topic_creation=false, which should fail.
+        let builder = MetadataRequestBuilder::new_with_version(Some(&["topic_1"]), false, 3);
+        client.send_internal_metadata_request(builder, node.id_string(), now);
+
+        // The MetadataUpdater should have recorded a failure.
+        // We can't easily access the TestMetadataUpdater through the Box<dyn MetadataUpdater>,
+        // but the send_internal_metadata_request will have triggered handle_failed_request.
+        // The best we can verify here is that no in-flight requests remain.
+        assert_eq!(0, client.in_flight_request_count());
+    }
+
+    /// Translated from `NetworkClientTest.testHasNodeAvailableOrConnectionReady`.
+    ///
+    /// With max 1 in-flight request per connection, after sending a request,
+    /// `least_loaded_node` should report no node but still have connection ready.
+    #[test]
+    fn test_has_node_available_or_connection_ready() {
+        let mut client = create_network_client_with_max_in_flight(1, RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+
+        let least_loaded = client.least_loaded_node(now);
+        assert_eq!(least_loaded.node().map(|n| n.id()), Some(node.id()));
+        assert!(least_loaded.has_node_available_or_connection_ready());
+
+        // Send a metadata request to saturate the connection
+        let builder = MetadataRequestBuilder::new(Some(&[]), true);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+
+        // With max 1 in-flight, no node should be available but connection is still ready
+        let least_loaded = client.least_loaded_node(now);
+        assert!(least_loaded.node().is_none());
+        assert!(least_loaded.has_node_available_or_connection_ready());
+    }
+
+    /// Translated from `NetworkClientTest.testLeastLoadedNodeConsidersThrottledConnections`.
+    #[test]
+    fn test_least_loaded_node_considers_throttled_connections() {
+        let mut client = create_network_client_with_no_version_discovery();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+        client.poll(1, now);
+        assert!(client.is_ready(&node, now), "The client should be ready");
+
+        // Send a metadata request
+        let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        let correlation_id = request.correlation_id();
+        client.send(request, now);
+        client.poll(1, now);
+
+        // Send a throttled metadata response (100ms throttle)
+        let mut response_data = MetadataResponseData::new();
+        response_data.set_throttle_time_ms(100);
+        let bytes = serialize_response_with_header(
+            &ApiKeys::METADATA,
+            ApiKeys::METADATA.latest_version(),
+            &response_data,
+            correlation_id,
+        );
+        let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
+        client.selector_mut().complete_receive(receive);
+        client.poll(1, now);
+
+        // leastloadednode should return None since the node is throttled
+        let least_loaded = client.least_loaded_node(now);
+        assert!(
+            least_loaded.node().is_none(),
+            "Throttled node should not be returned as least loaded"
+        );
+    }
+
+    /// Translated from `NetworkClientTest.testDisconnectDuringUserMetadataRequest`.
+    ///
+    /// Ensures that the default metadata updater does not intercept a user-initiated
+    /// metadata request when the remote node disconnects with the request in-flight.
+    #[test]
+    fn test_disconnect_during_user_metadata_request() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+
+        let builder = MetadataRequestBuilder::new(Some(&[]), true);
+        let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
+        client.send(request, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        assert_eq!(1, client.in_flight_request_count_for_node(node.id_string()));
+        assert!(client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(client.has_in_flight_requests());
+
+        // Disconnect
+        client.disconnect(node.id_string());
+
+        // The disconnected request should be returned as an aborted send
+        let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        assert_eq!(1, responses.len());
+        assert!(responses[0].was_disconnected());
+    }
+
+    /// Translated from `NetworkClientTest.testDisconnectWithMultipleInFlights`.
+    #[test]
+    fn test_disconnect_with_multiple_in_flights() {
+        let mut client = create_network_client_with_no_version_discovery();
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        await_ready(&mut client, &node);
+        assert!(
+            client.is_ready(&node, now),
+            "Expected NetworkClient to be ready to send to node"
+        );
+
+        let callback_responses: Arc<std::sync::Mutex<Vec<i32>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+
+        // Send first request
+        let builder1 = MetadataRequestBuilder::new(Some(&[]), true);
+        let cb_responses1 = callback_responses.clone();
+        let callback1: super::super::RequestCompletionHandler =
+            Box::new(move |resp: &mut super::super::client_response::ClientResponse| {
+                cb_responses1.lock().unwrap().push(resp.request_header().correlation_id());
+            });
+        let request1 = client.new_client_request_with_timeout(
+            node.id_string(),
+            Box::new(builder1),
+            now,
+            true,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            Some(callback1),
+        );
+        let correlation_id1 = request1.correlation_id();
+        client.send(request1, now);
+        client.poll(0, now);
+
+        // Send second request
+        let builder2 = MetadataRequestBuilder::new(Some(&[]), true);
+        let cb_responses2 = callback_responses.clone();
+        let callback2: super::super::RequestCompletionHandler =
+            Box::new(move |resp: &mut super::super::client_response::ClientResponse| {
+                cb_responses2.lock().unwrap().push(resp.request_header().correlation_id());
+            });
+        let request2 = client.new_client_request_with_timeout(
+            node.id_string(),
+            Box::new(builder2),
+            now,
+            true,
+            DEFAULT_REQUEST_TIMEOUT_MS,
+            Some(callback2),
+        );
+        let correlation_id2 = request2.correlation_id();
+        client.send(request2, now);
+        client.poll(0, now);
+
+        assert_ne!(correlation_id1, correlation_id2);
+        assert_eq!(2, client.in_flight_request_count());
+        assert_eq!(2, client.in_flight_request_count_for_node(node.id_string()));
+
+        client.disconnect(node.id_string());
+
+        let responses = client.poll(0, now);
+        assert_eq!(2, responses.len());
+
+        // Verify callbacks were called
+        let cb = callback_responses.lock().unwrap();
+        assert_eq!(2, cb.len());
+
+        assert_eq!(0, client.in_flight_request_count());
+        assert_eq!(0, client.in_flight_request_count_for_node(node.id_string()));
+
+        // Ensure that the responses are returned in the order they were sent
+        assert!(responses[0].was_disconnected());
+        assert_eq!(correlation_id1, responses[0].request_header().correlation_id());
+
+        assert!(responses[1].was_disconnected());
+        assert_eq!(correlation_id2, responses[1].request_header().correlation_id());
+    }
+
+    /// Translated from `NetworkClientTest.testCorrelationId`.
+    #[test]
+    fn test_correlation_id() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let count = 100;
+        let mut ids = std::collections::HashSet::new();
+        for _ in 0..count {
+            ids.insert(client.next_correlation_id());
+        }
+        assert_eq!(count, ids.len(), "All correlation IDs should be unique");
+    }
+
+    /// Translated from `NetworkClientTest.testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp`.
+    #[test]
+    fn test_least_loaded_node_provide_disconnected_nodes_prioritized_by_last_connection_timestamp() {
+        let node_number = 3;
+        let mut client = create_network_client_with_multiple_nodes(0, CONNECTION_SETUP_TIMEOUT_MS_TEST, node_number);
+        // Start at a non-zero time, matching Java's MockTime which initializes to
+        // System.currentTimeMillis(). This ensures that the first disconnected
+        // node's last_connect_attempt_ms is distinguishable from the default
+        // value of 0 used for never-connected nodes.
+        let mut now = 1000_i64;
+
+        let mut provided_node_ids = std::collections::HashSet::new();
+        for i in 0..(node_number * 10) {
+            let node = client.least_loaded_node(now).node().cloned();
+            assert!(node.is_some(), "Should provide a node");
+            let node = node.unwrap();
+            provided_node_ids.insert(node.id());
+
+            client.ready(&node, now);
+            client.disconnect(node.id_string());
+            now += CONNECTION_SETUP_TIMEOUT_MS_TEST + 1;
+            client.poll(0, now);
+
+            // Define a round as nodeNumber of nodes have been provided.
+            // In each round every node should be provided exactly once.
+            if (i + 1) % node_number == 0 {
+                assert_eq!(node_number, provided_node_ids.len(), "All the nodes should be provided");
+                provided_node_ids.clear();
+            }
+        }
+    }
+
+    /// Translated from `NetworkClientTest.testClientDisconnectAfterInternalApiVersionRequest`.
+    #[test]
+    fn test_client_disconnect_after_internal_api_version_request() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        // Initiate connection and wait for the ApiVersionsRequest to be in-flight
+        client.ready(&node, now);
+        let mut tries = 0;
+        loop {
+            client.poll(0, now);
+            if client.has_in_flight_requests_for_node(node.id_string()) {
+                break;
+            }
+            tries += 1;
+            if tries > 100 {
+                panic!("ApiVersionsRequest never became in-flight");
+            }
+        }
+
+        assert!(!client.is_ready(&node, now));
+
+        client.disconnect(node.id_string());
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+
+        // The failed ApiVersion request should not be forwarded to upper layers
+        let responses = client.poll(0, now);
+        assert!(responses.is_empty());
+    }
+
+    /// Translated from `NetworkClientTest.testServerDisconnectAfterInternalApiVersionRequest`.
+    #[test]
+    fn test_server_disconnect_after_internal_api_version_request() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        let node = Node::new(0, "localhost".to_string(), 9092);
+        let now = 0_i64;
+
+        // Initiate connection and wait for the ApiVersionsRequest to be in-flight
+        client.ready(&node, now);
+        let mut tries = 0;
+        loop {
+            client.poll(0, now);
+            if client.has_in_flight_requests_for_node(node.id_string()) {
+                break;
+            }
+            tries += 1;
+            if tries > 100 {
+                panic!("ApiVersionsRequest never became in-flight");
+            }
+        }
+
+        assert!(!client.is_ready(&node, now));
+
+        // Server disconnect
+        client.selector_mut().server_disconnect(node.id_string());
+
+        // The failed ApiVersion request should not be forwarded to upper layers
+        let responses = client.poll(0, now);
+        assert!(!client.has_in_flight_requests_for_node(node.id_string()));
+        assert!(responses.is_empty());
+
+        // Check that connection delay has backoff
+        let delay = client.connection_delay(&node, now);
+        let expected_delay = RECONNECT_BACKOFF_MS_TEST;
+        let jitter = 0.3;
+        assert!(
+            (delay as f64 - expected_delay as f64).abs() <= expected_delay as f64 * jitter,
+            "Expected delay around {} (jitter {}), got {}",
+            expected_delay,
+            jitter,
+            delay
+        );
+    }
+
+    /// Verifies that initiating close transitions the client state.
+    #[test]
+    fn test_initiate_close() {
+        let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        assert!(client.active());
+        client.initiate_close();
+        assert!(!client.active());
+    }
+
+    /// Verifies that closing a closed client does not panic.
+    #[test]
+    fn test_close_idempotent() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        assert!(client.active());
+        client.close();
+        assert!(!client.active());
+        // Second close should not panic
+        client.close();
+        assert!(!client.active());
+    }
+
+    /// Verifies that `active()` returns false after close.
+    #[test]
+    fn test_active_after_close() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        assert!(client.active(), "Client should be active after creation");
+        client.close();
+        assert!(!client.active(), "Client should not be active after close");
+    }
+
+    /// Verifies that poll panics after close.
+    #[test]
+    #[should_panic(expected = "NetworkClient is no longer active")]
+    fn test_poll_after_close() {
+        let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        client.close();
+        client.poll(0, 0);
+    }
+
+    /// Verifies the wakeup method does not panic.
+    #[test]
+    fn test_wakeup() {
+        let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
+        client.wakeup(); // Should not panic
     }
 }

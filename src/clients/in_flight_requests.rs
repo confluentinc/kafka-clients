@@ -21,7 +21,7 @@ use std::collections::{HashMap, VecDeque};
 use std::fmt;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::common::network::{KafkaSend, NetworkSend};
+use crate::common::network::NetworkSend;
 use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader};
 
 use super::RequestCompletionHandler;
@@ -50,6 +50,13 @@ pub struct InFlightRequest {
     pub request: Option<ConcreteRequest>,
     /// The network send associated with this request.
     pub send: NetworkSend,
+    /// Whether the network send has been completed (confirmed by the selector).
+    ///
+    /// In Java, the same `Send` object is shared between `InFlightRequest` and
+    /// the selector, so `send.completed()` reflects the actual I/O state. In
+    /// Rust we use separate copies, so this flag is set by `NetworkClient` when
+    /// the selector reports a completed send for this destination.
+    send_completed: bool,
     /// The unix timestamp when this request was sent.
     pub send_time_ms: i64,
     /// Accumulated throttle time in milliseconds.
@@ -78,6 +85,7 @@ impl InFlightRequest {
             is_internal_request,
             request,
             send,
+            send_completed: false,
             send_time_ms,
             throttle_time_ms: 0,
         }
@@ -109,6 +117,7 @@ impl InFlightRequest {
             is_internal_request,
             request,
             send,
+            send_completed: false,
             send_time_ms,
             throttle_time_ms: 0,
         }
@@ -292,6 +301,20 @@ impl InFlightRequests {
         reqs.front().expect("Queue should not be empty")
     }
 
+    /// Marks the last request sent to the given node as send-completed.
+    ///
+    /// In Java, the same `Send` object is shared between `InFlightRequest` and
+    /// the selector, so `send.completed()` reflects the actual I/O state
+    /// automatically. In Rust we use separate copies, so this method must be
+    /// called when the selector reports a completed send.
+    pub fn mark_last_sent_completed(&mut self, node: &str) {
+        if let Some(queue) = self.requests.get_mut(node)
+            && let Some(req) = queue.front_mut()
+        {
+            req.send_completed = true;
+        }
+    }
+
     /// Removes and returns the last request that was sent to a particular node.
     ///
     /// # Panics
@@ -315,7 +338,7 @@ impl InFlightRequests {
             None => true,
             Some(queue) => {
                 queue.is_empty()
-                    || (queue.front().is_some_and(|r| r.send.completed())
+                    || (queue.front().is_some_and(|r| r.send_completed)
                         && queue.len() < self.max_in_flight_requests_per_connection)
             },
         }
