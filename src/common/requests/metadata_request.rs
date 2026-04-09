@@ -315,26 +315,36 @@ impl RequestBuilder for MetadataRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> ConcreteRequest {
-        // MetadataRequest versions older than 1 are not supported.
-        assert!(version >= 1, "MetadataRequest versions older than 1 are not supported.");
-        assert!(
-            self.data.allow_auto_topic_creation || version >= 4,
-            "MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field"
-        );
+    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+        if version < 1 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "MetadataRequest versions older than 1 are not supported.",
+            ));
+        }
+        if !self.data.allow_auto_topic_creation && version < 4 {
+            return Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                "MetadataRequest versions older than 4 don't support the allowAutoTopicCreation field",
+            ));
+        }
         if let Some(topics) = &self.data.topics {
             for topic in topics {
-                assert!(
-                    topic.name.is_some() || version >= 12,
-                    "MetadataRequest version {version} does not support null topic names."
-                );
-                assert!(
-                    Uuid::zero() == topic.topic_id || version >= 12,
-                    "MetadataRequest version {version} does not support non-zero topic IDs."
-                );
+                if topic.name.is_none() && version < 12 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("MetadataRequest version {version} does not support null topic names."),
+                    ));
+                }
+                if Uuid::zero() != topic.topic_id && version < 12 {
+                    return Err(io::Error::new(
+                        io::ErrorKind::Unsupported,
+                        format!("MetadataRequest version {version} does not support non-zero topic IDs."),
+                    ));
+                }
             }
         }
-        ConcreteRequest::Metadata(MetadataRequest::new(self.data.clone(), version))
+        Ok(ConcreteRequest::Metadata(MetadataRequest::new(self.data.clone(), version)))
     }
 }
 
@@ -420,15 +430,15 @@ mod tests {
             },
         ];
 
-        // if version is 10 or 11, the invalid topic metadata should return an error (panic in Rust)
+        // if version is 10 or 11, the invalid topic metadata should return an error
         let invalid_versions: Vec<i16> = vec![10, 11];
         for version in &invalid_versions {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
                 let builder = MetadataRequestBuilder::from_data(data);
-                let result = std::panic::catch_unwind(|| builder.build_version(*version));
-                assert!(result.is_err(), "Expected panic for version {version} with topic {:?}", topic);
+                let result = builder.build_version(*version);
+                assert!(result.is_err(), "Expected error for version {version} with topic {:?}", topic);
             }
         }
     }
@@ -462,9 +472,9 @@ mod tests {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
                 let builder = MetadataRequestBuilder::from_data(data);
-                // Should NOT panic since topic_id is zero UUID
-                let result = std::panic::catch_unwind(|| builder.build_version(*version));
-                assert!(result.is_ok(), "Should not panic for version {version} with topic {:?}", topic);
+                // Should succeed since topic_id is zero UUID
+                let result = builder.build_version(*version);
+                assert!(result.is_ok(), "Should not fail for version {version} with topic {:?}", topic);
             }
         }
     }

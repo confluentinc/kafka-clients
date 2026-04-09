@@ -52,12 +52,20 @@ pub trait RequestBuilder {
     fn latest_allowed_version(&self) -> i16;
 
     /// Builds the request at the latest allowed version.
-    fn build(&self) -> ConcreteRequest {
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the version is unsupported or preconditions are violated.
+    fn build(&self) -> io::Result<ConcreteRequest> {
         self.build_version(self.latest_allowed_version())
     }
 
     /// Builds the request at the specified version.
-    fn build_version(&self, version: i16) -> ConcreteRequest;
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the version is unsupported or preconditions are violated.
+    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest>;
 }
 
 /// Enum dispatch for all supported Kafka request types.
@@ -114,6 +122,26 @@ impl ConcreteRequest {
     /// Returns an error if the header API key or version does not match this request,
     /// or if serialization fails.
     pub fn serialize_with_header(&self, header: &RequestHeader) -> io::Result<ByteBufferAccessor> {
+        if header.api_key() != self.api_key() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Could not build request {:?} with header api key {:?}",
+                    self.api_key().name(),
+                    header.api_key().name()
+                ),
+            ));
+        }
+        if header.api_version() != self.version() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                format!(
+                    "Could not build request version {} with header version {}",
+                    self.version(),
+                    header.api_version()
+                ),
+            ));
+        }
         match self {
             Self::ApiVersions(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())

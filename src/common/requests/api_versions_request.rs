@@ -198,8 +198,11 @@ impl RequestBuilder for ApiVersionsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> ConcreteRequest {
-        ConcreteRequest::ApiVersions(ApiVersionsRequest::new(self.data.clone(), version))
+    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+        Ok(ConcreteRequest::ApiVersions(ApiVersionsRequest::new(
+            self.data.clone(),
+            version,
+        )))
     }
 }
 
