@@ -1,33 +1,22 @@
-# Resolved Issues from Critic 0 — Layer 5: Channel & Selection (commit e31229d)
 
-## Issue 25: ListenerName config_prefix() produces wrong trailing character — RESOLVED
-- **Fix commit**: 9460433 (fixup! Implement Layer 5 Step 5)
-- **Resolution**: Fixed format string in `config_prefix()` from `format!("{CONFIG_STATIC_PREFIX}.{}.\"", ...)` to `format!("{CONFIG_STATIC_PREFIX}.{}.", ...)`. The escaped double-quote `\"` was producing a literal `"` character instead of the intended trailing `.`. Output now correctly produces `listener.name.<value>.`.
+# Resolved Issues -- Critic 0 Review
 
-## Issue 26: Multiple non-metrics SelectorTest tests not translated — RESOLVED
-- **Fix commit**: 9460433 (fixup! Implement Layer 5 Step 5)
-- **Resolution**: Translated 6 of the 7 requested tests:
-  1. testLargeMessageSequence — tests sequential large message send/receive
-  2. testClearCompletedSendsAndReceives — tests clear_completed_sends/receives API
-  3. testLowestPriorityChannel — tests LRU ordering of idle expiry manager
-  4. testGracefulClose — tests graceful close processes remaining buffered receives
-  5. testExpireConnectionWithPendingReceives — tests muted connections expire on idle timeout
-  6. testCloseOldestConnectionWithMultiplePendingReceives — tests pending receives processed before idle expiry
-  Also added helper functions (send_and_receive, send_no_receive, create_connection_with_pending_receives).
-  Fixed idle expiry LRU update to only refresh when I/O activity occurred, matching Java semantics.
-  Fixed maybe_close_oldest_connection to use graceful close matching Java implementation.
-  testWriteCompletesSendWithNoBytesWritten not translated: requires Mockito mocking of KafkaChannel (write()=0, maybeCompleteSend()=send), which cannot be done without trait abstraction. Edge case is specific to SSL buffering.
+## Issue 30: default_maybe_update_with_node never calls selector.connect() [RESOLVED]
+- **File**: `src/clients/network_client.rs`
+- **Fix**: Replaced inline sync-only state change with `block_on(self.initiate_connect(node, now))` call, matching Java's `initiateConnect()`.
+- **Commit**: 9a0f588
 
-## Issue 27: Idle expiry LRU only refreshed on completed I/O, not partial reads/writes — RESOLVED
-- **Fix commit**: ba0b9dd (fixup! Implement Layer 5 Step 5)
-- **Resolution**: Changed `attempt_read` and `write_channel` to return `bool` indicating whether bytes were actually transferred. The `had_activity` check in `poll_channel` now includes partial reads/writes (bytes transferred but message not yet complete) in addition to connection establishment. Removed pre/post comparison of `completed_sends`/`completed_receives` lengths since partial I/O now covers those cases too. This matches Java where `idleExpiryManager.update` is called unconditionally for every channel with a ready NIO selection key in `pollSelectionKeys`.
+## Issue 31: poll() uses pre-poll timestamp instead of post-poll timestamp [RESOLVED]
+- **File**: `src/clients/network_client.rs`
+- **Fix**: Added `time_provider` field (mirrors Java's `Time time`) and `poll_time_store` for mock time support. After `selector.poll()`, calls `(self.time_provider)()` to get `updated_now`. Tests use mock time via `set_mock_time()`.
+- **Commit**: 9a0f588
 
-# Resolved Issues from Critic 0 — Layer 3: Request/Response Framework (commits ae12bb1, 5e1db7c)
+## Issue 32: is_invalid_metadata_error includes wrong errors and misses others [RESOLVED]
+- **File**: `src/clients/metadata.rs`
+- **Fix**: Updated match to include exactly the error codes whose Java exceptions extend `InvalidMetadataException`. Removed `InvalidTopicException` and `TopicAuthorizationFailed`, added `ListenerNotFound`, `FencedLeaderEpoch`, `UnknownTopicId`, `NetworkException`, `KafkaStorageError`, `InconsistentTopicId`, `PreferredLeaderNotAvailable`, `EligibleLeadersNotAvailable`, `ElectionNotNeeded`.
+- **Commit**: 9a0f588
 
-## Issue 28: Missing header validation in ConcreteRequest::serialize_with_header — RESOLVED
-- **Fix commit**: 08dd0b6 (fixup! Implement Layer 3 Phase 3 Steps 0-2 and Step 4)
-- **Resolution**: Added API key and version validation at the start of `ConcreteRequest::serialize_with_header`, matching Java's `AbstractRequest.serializeWithHeader` which throws `IllegalArgumentException` on mismatch. Returns `io::Error` with `InvalidInput` kind when header API key or version does not match the request.
-
-## Issue 29: MetadataRequestBuilder::build_version panics instead of returning Result — RESOLVED
-- **Fix commit**: 08dd0b6 (fixup! Implement Layer 3 Phase 3 Steps 0-2 and Step 4)
-- **Resolution**: Changed `RequestBuilder::build_version` and `RequestBuilder::build` trait signatures to return `io::Result<ConcreteRequest>`. Replaced `assert!` panics in `MetadataRequestBuilder::build_version` with proper `io::Error` returns using `ErrorKind::Unsupported`, matching Java's `UnsupportedVersionException`. Updated `ApiVersionsRequestBuilder::build_version` to wrap its return in `Ok(...)`. Updated tests to check `is_err()` instead of `catch_unwind`.
+## Issue 33: least_loaded_node returns None instead of panicking when nodes is empty [RESOLVED]
+- **File**: `src/clients/network_client.rs`
+- **Fix**: Changed to `panic!("There are no nodes in the Kafka cluster")` matching Java's `IllegalStateException`. No existing tests depend on the previous behavior.
+- **Commit**: 9a0f588
