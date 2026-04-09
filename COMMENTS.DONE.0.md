@@ -1,31 +1,34 @@
 
-# Resolved Issues -- Critic 0 Review
+## Resolved in prior fixup commits
 
-## Issue 30: default_maybe_update_with_node never calls selector.connect() [RESOLVED]
-- **File**: `src/clients/network_client.rs`
-- **Fix**: Replaced inline sync-only state change with `block_on(self.initiate_connect(node, now))` call, matching Java's `initiateConnect()`.
-- **Commit**: 9a0f588
 
-## Issue 31: poll() uses pre-poll timestamp instead of post-poll timestamp [RESOLVED]
-- **File**: `src/clients/network_client.rs`
-- **Fix**: Added `time_provider` field (mirrors Java's `Time time`) and `poll_time_store` for mock time support. After `selector.poll()`, calls `(self.time_provider)()` to get `updated_now`. Tests use mock time via `set_mock_time()`.
-- **Commit**: 9a0f588
+# Critic 0 Review -- Layer 6 (commits 5884a10..096643f)
 
-## Issue 32: is_invalid_metadata_error includes wrong errors and misses others [RESOLVED]
+## Issue 35: MetadataTest missing 9 test translations
 - **File**: `src/clients/metadata.rs`
-- **Fix**: Updated match to include exactly the error codes whose Java exceptions extend `InvalidMetadataException`. Removed `InvalidTopicException` and `TopicAuthorizationFailed`, added `ListenerNotFound`, `FencedLeaderEpoch`, `UnknownTopicId`, `NetworkException`, `KafkaStorageError`, `InconsistentTopicId`, `PreferredLeaderNotAvailable`, `EligibleLeadersNotAvailable`, `ElectionNotNeeded`.
-- **Commit**: 9a0f588
+- **Severity**: Missing Requirement
+- **Java Reference**: `MetadataTest.java`
+- **Description**: Java MetadataTest has 29 test methods but only 20 are translated to Rust. Missing tests:
 
-## Issue 33: least_loaded_node returns None instead of panicking when nodes is empty [RESOLVED]
-- **File**: `src/clients/network_client.rs`
-- **Fix**: Changed to `panic!("There are no nodes in the Kafka cluster")` matching Java's `IllegalStateException`. No existing tests depend on the previous behavior.
-- **Commit**: 9a0f588
+  1. testIgnoreLeaderEpochInOlderMetadataResponse
+  2. testStaleMetadata
+  3. testPartialMetadataUpdate
+  4. testNodeIfOnlineWhenNotInReplicaSet
+  5. testNodeIfOnlineNonExistentTopicPartition
+  6. testLeaderMetadataInconsistentWithBrokerMetadata
+  7. testMetadataMerge
+  8. testMetadataMergeOnIdDowngrade
+  9. testConcurrentUpdateAndFetchForSnapshotAndCluster
 
-## Issue 34: NetworkClientTest missing 17 test translations [RESOLVED]
-- **Resolution**: Translated all 17 missing tests. 46 NetworkClient tests now pass (up from 29).
+  Notable: testPartialMetadataUpdate (3) tests an important code path, and testMetadataMerge/testMetadataMergeOnIdDowngrade (7-8) test the merge_with logic.
 
-## Issue 35: MetadataTest missing 9 test translations [RESOLVED]
-- **Resolution**: Translated all 9 missing tests. 29 Metadata tests now pass (up from 20).
+- **Expected**: All Java tests should be translated per Definition of Done.
+- **Actual**: 9 tests are not translated.
 
-## Issue 36: ClusterConnectionStatesTest missing 5 test translations [RESOLVED]
-- **Resolution**: All 15 ClusterConnectionStates tests pass. The missing tests were identified and translated.
+## Issue 36: ClusterConnectionStatesTest missing 5 test translations
+- **File**: `src/clients/cluster_connection_states.rs`
+- **Severity**: Missing Requirement
+- **Java Reference**: `ClusterConnectionStatesTest.java`
+- **Description**: Java ClusterConnectionStatesTest has 15 test methods but only 10 are translated to Rust. The 5 missing tests need to be identified and translated.
+- **Expected**: All Java tests should be translated per Definition of Done.
+- **Actual**: 5 tests are not translated.
