@@ -870,16 +870,25 @@ impl Metadata {
     }
 
     /// Checks if the error is an invalid metadata error that should trigger a re-fetch.
+    ///
+    /// Returns `true` for error codes whose Java exceptions extend
+    /// `InvalidMetadataException`.
     fn is_invalid_metadata_error(error: Errors) -> bool {
-        // InvalidMetadataException in Java covers several error codes
         matches!(
             error,
             Errors::UnknownTopicOrPartition
                 | Errors::LeaderNotAvailable
-                | Errors::InvalidTopicException
-                | Errors::TopicAuthorizationFailed
                 | Errors::NotLeaderOrFollower
                 | Errors::ReplicaNotAvailable
+                | Errors::ListenerNotFound
+                | Errors::FencedLeaderEpoch
+                | Errors::UnknownTopicId
+                | Errors::NetworkException
+                | Errors::KafkaStorageError
+                | Errors::InconsistentTopicId
+                | Errors::PreferredLeaderNotAvailable
+                | Errors::EligibleLeadersNotAvailable
+                | Errors::ElectionNotNeeded
         )
     }
 

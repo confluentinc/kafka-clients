@@ -24,7 +24,8 @@
 use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU8, Ordering};
+use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
@@ -81,6 +82,15 @@ fn noop_waker() -> std::task::Waker {
     }
     static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
     unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
+}
+
+/// Returns current wall-clock time in milliseconds since the Unix epoch.
+/// This is the default time provider, equivalent to Java's `SystemTime`.
+fn system_time_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("system clock before Unix epoch")
+        .as_millis() as i64
 }
 
 /// Internal state enum for the client lifecycle.
@@ -143,6 +153,14 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// parameter. In Java, the `Time` instance provides this; here we store it
     /// explicitly.
     last_poll_time_ms: i64,
+    /// Provider of current wall-clock time in milliseconds (epoch).
+    /// Mirrors Java's `Time time` field — defaults to system clock,
+    /// tests supply a mock via `set_time_provider`.
+    time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Shared storage for mock time support. When `set_mock_time()` is used,
+    /// `time_provider` reads from this; `poll()` writes `now` into it at entry.
+    /// For the default (system clock) provider this is unused.
+    poll_time_store: Arc<AtomicI64>,
 
     // --- DefaultMetadataUpdater state (inlined from inner class) ---
     /// The metadata instance, or `None` if using an external MetadataUpdater.
@@ -220,6 +238,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: rand::rng(),
             last_poll_time_ms: 0,
+            time_provider: Arc::new(system_time_ms),
+            poll_time_store: Arc::new(AtomicI64::new(0)),
             metadata: Some(metadata),
             external_metadata_updater: None,
             in_progress: None,
@@ -289,11 +309,32 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: rand::rng(),
             last_poll_time_ms: 0,
+            time_provider: Arc::new(system_time_ms),
+            poll_time_store: Arc::new(AtomicI64::new(0)),
             metadata: None,
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
             metadata_attempt_start_ms: None,
         }
+    }
+
+    /// Sets a custom time provider, replacing the default system clock.
+    /// This mirrors Java's ability to inject a `Time` instance (e.g. `MockTime`
+    /// in tests).
+    pub fn set_time_provider(&mut self, provider: Arc<dyn Fn() -> i64 + Send + Sync>) {
+        self.time_provider = provider;
+    }
+
+    /// Replaces the time provider with a mock that returns the `now` value
+    /// passed to each `poll()` call. Equivalent to Java's `MockTime` in tests.
+    ///
+    /// This is needed because `poll()` computes a fresh timestamp after
+    /// `selector.poll()` using `(self.time_provider)()`. For tests with mock
+    /// selectors (instant poll), the fresh timestamp should equal `now`.
+    #[cfg(test)]
+    fn set_mock_time(&mut self) {
+        let store = Arc::clone(&self.poll_time_store);
+        self.time_provider = Arc::new(move || store.load(Ordering::Relaxed));
     }
 
     /// Returns whether broker version discovery is enabled.
@@ -1025,10 +1066,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         if self.connection_states.can_connect(node_connection_id, now) {
             debug!("Initialize connection to node {} for sending metadata request", node);
-            // We can't call async initiate_connect here, so we inline the sync parts
-            self.connection_states.connecting(node_connection_id, now, node.host());
-            // The actual TCP connection will be made in the next poll cycle
-            // For the mock selector, connect() is synchronous so this works
+            block_on(self.initiate_connect(node, now));
             return self.reconnect_backoff_ms;
         }
 
@@ -1141,6 +1179,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         }
 
         self.last_poll_time_ms = now;
+        self.poll_time_store.store(now, Ordering::Relaxed);
 
         if self.is_ready(node, now) {
             return true;
@@ -1178,6 +1217,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse> {
         self.ensure_active();
         self.last_poll_time_ms = now;
+        self.poll_time_store.store(now, Ordering::Relaxed);
 
         if !self.aborted_sends.is_empty() {
             let mut responses = Vec::new();
@@ -1191,16 +1231,21 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
         let _poll_result = block_on(self.selector.poll(effective_timeout));
 
+        // Compute a fresh timestamp after the (potentially blocking) poll,
+        // matching Java's `long updatedNow = this.time.milliseconds()`.
+        let updated_now = (self.time_provider)();
+        self.last_poll_time_ms = updated_now;
+
         // Process completed actions
         let mut responses = Vec::new();
-        self.handle_completed_sends(&mut responses, now);
-        self.handle_completed_receives(&mut responses, now);
-        self.handle_disconnections(&mut responses, now);
+        self.handle_completed_sends(&mut responses, updated_now);
+        self.handle_completed_receives(&mut responses, updated_now);
+        self.handle_disconnections(&mut responses, updated_now);
         self.handle_connections();
-        self.handle_initiate_api_version_requests(now);
-        self.handle_timed_out_connections(&mut responses, now);
-        self.handle_timed_out_requests(&mut responses, now);
-        self.handle_rebootstrap(&mut responses, now);
+        self.handle_initiate_api_version_requests(updated_now);
+        self.handle_timed_out_connections(&mut responses, updated_now);
+        self.handle_timed_out_requests(&mut responses, updated_now);
+        self.handle_rebootstrap(&mut responses, updated_now);
         Self::complete_responses(&mut responses);
 
         responses
@@ -1237,7 +1282,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     fn least_loaded_node(&self, now: i64) -> LeastLoadedNode {
         let nodes = self.fetch_nodes();
         if nodes.is_empty() {
-            return LeastLoadedNode::new(None, false);
+            panic!("There are no nodes in the Kafka cluster");
         }
 
         let mut inflight = usize::MAX;
@@ -1399,6 +1444,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
     use crate::api_message_type::ListenerType;
     use crate::api_versions_response_data::ApiVersionsResponseData;
     use crate::clients::host_resolver::HostResolver;
@@ -1560,7 +1606,7 @@ mod tests {
     fn create_network_client(reconnect_backoff_max_ms: i64) -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1576,14 +1622,16 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
-        )
+        );
+        client.set_mock_time();
+        client
     }
 
     /// Creates a `NetworkClient` with static nodes (0 backoff).
     fn create_network_client_with_static_nodes() -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock-static",
@@ -1599,14 +1647,16 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
-        )
+        );
+        client.set_mock_time();
+        client
     }
 
     /// Creates a `NetworkClient` with no version discovery.
     fn create_network_client_with_no_version_discovery() -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1622,7 +1672,9 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
-        )
+        );
+        client.set_mock_time();
+        client
     }
 
     /// Creates a `NetworkClient` with a specific max in-flight requests per connection.
@@ -1632,7 +1684,7 @@ mod tests {
     ) -> NetworkClient<MockSelector, TestHostResolver> {
         let node = Node::new(0, "localhost".to_string(), 9092);
         let updater = TestMetadataUpdater::new(vec![node]);
-        NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1648,7 +1700,9 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
-        )
+        );
+        client.set_mock_time();
+        client
     }
 
     /// Creates a `NetworkClient` with multiple nodes.
@@ -1661,7 +1715,7 @@ mod tests {
             .map(|i| Node::new(i as i32, "localhost".to_string(), 9092 + i as i32))
             .collect();
         let updater = TestMetadataUpdater::new(nodes);
-        NetworkClient::with_metadata_updater(
+        let mut client = NetworkClient::with_metadata_updater(
             MockSelector::new(),
             Box::new(updater),
             "mock",
@@ -1677,7 +1731,9 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
-        )
+        );
+        client.set_mock_time();
+        client
     }
 
     // ---------------------------------------------------------------------------
