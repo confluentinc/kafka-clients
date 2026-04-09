@@ -25,10 +25,13 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::common::network::ByteBufferSend;
+use crate::common::protocol::message::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
+use super::api_versions_response::ApiVersionsResponse;
 use super::request_header::RequestHeader;
 use super::response_header::ResponseHeader;
+use super::send_builder::SendBuilder;
 
 /// Default throttle time in milliseconds.
 pub const DEFAULT_THROTTLE_TIME: i32 = 0;
@@ -38,18 +41,18 @@ pub const DEFAULT_THROTTLE_TIME: i32 = 0;
 /// Each variant wraps a concrete response struct. Common methods are dispatched
 /// via `match` on the variant.
 ///
-/// Currently only ApiVersions and Metadata are supported — variants will be
-/// added in Steps 3 and 4.
+/// Variants will be added as response types are translated.
 #[derive(Debug, Clone)]
 pub enum ConcreteResponse {
-    // Variants will be added in Step 3 and Step 4 (ApiVersions, Metadata).
+    /// An ApiVersions response.
+    ApiVersions(ApiVersionsResponse),
 }
 
 impl ConcreteResponse {
     /// Returns the API key for this response.
     pub fn api_key(&self) -> &'static ApiKeys {
-        match *self {
-            // Will be populated when concrete response types are added.
+        match self {
+            Self::ApiVersions(r) => r.api_key(),
         }
     }
 
@@ -60,9 +63,9 @@ impl ConcreteResponse {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn to_send(&self, _header: &ResponseHeader, _version: i16) -> io::Result<ByteBufferSend> {
-        match *self {
-            // Will be populated when concrete response types are added.
+    pub fn to_send(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferSend> {
+        match self {
+            Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -73,9 +76,11 @@ impl ConcreteResponse {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn serialize_with_header(&self, _header: &ResponseHeader, _version: i16) -> io::Result<ByteBufferAccessor> {
-        match *self {
-            // Will be populated when concrete response types are added.
+    pub fn serialize_with_header(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferAccessor> {
+        match self {
+            Self::ApiVersions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -86,16 +91,23 @@ impl ConcreteResponse {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn serialize(&self, _version: i16) -> io::Result<ByteBufferAccessor> {
-        match *self {
-            // Will be populated when concrete response types are added.
+    pub fn serialize(&self, version: i16) -> io::Result<ByteBufferAccessor> {
+        match self {
+            Self::ApiVersions(r) => {
+                let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
+                let size = Message::size(r.data(), &mut cache, version)?;
+                let mut buf = ByteBufferAccessor::new(size as usize);
+                Message::write(r.data(), &mut buf, &cache, version)?;
+                buf.flip();
+                Ok(buf)
+            },
         }
     }
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        match *self {
-            // Will be populated when concrete response types are added.
+        match self {
+            Self::ApiVersions(r) => r.error_counts(),
         }
     }
 
@@ -103,23 +115,23 @@ impl ConcreteResponse {
     ///
     /// Returns 0 if the response schema does not support this field.
     pub fn throttle_time_ms(&self) -> i32 {
-        match *self {
-            // Will be populated when concrete response types are added.
+        match self {
+            Self::ApiVersions(r) => r.throttle_time_ms(),
         }
     }
 
     /// Sets the throttle time in the response if the schema supports it.
     /// Otherwise, this is a no-op.
-    pub fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {
-        match *self {
-            // Will be populated when concrete response types are added.
+    pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
+        match self {
+            Self::ApiVersions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
     /// Returns whether the client should throttle upon receiving this response.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        match *self {
-            // Will be populated when concrete response types are added.
+    pub fn should_client_throttle(&self, version: i16) -> bool {
+        match self {
+            Self::ApiVersions(r) => r.should_client_throttle(version),
         }
     }
 
@@ -158,22 +170,35 @@ impl ConcreteResponse {
 
     /// Parses a response body from the buffer for the given API key and version.
     ///
+    /// For ApiVersions, the readable must be a `ByteBufferAccessor` to support
+    /// the fallback-to-v0 parsing logic.
+    ///
     /// # Errors
     ///
     /// Returns an error if the API key is not supported or parsing fails.
-    pub fn parse(api_key: &ApiKeys, _readable: &mut dyn Readable, _version: i16) -> io::Result<Self> {
-        // Only ApiVersions and Metadata will be supported — added in Steps 3-4.
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
-        ))
+    pub fn parse(api_key: &ApiKeys, readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
+        match *api_key {
+            ApiKeys::API_VERSIONS => {
+                // ApiVersionsResponse.parse requires a ByteBufferAccessor for snapshot_remaining
+                // Since we receive &mut dyn Readable, we read remaining bytes and construct one.
+                let remaining = readable.remaining();
+                let bytes = readable.read_array(remaining)?;
+                let mut buf = ByteBufferAccessor::from_bytes(bytes);
+                let response = ApiVersionsResponse::parse(&mut buf, version)?;
+                Ok(Self::ApiVersions(response))
+            },
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
+            )),
+        }
     }
 }
 
 impl std::fmt::Display for ConcreteResponse {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            // Will be populated when concrete response types are added.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiVersions(r) => write!(f, "{r}"),
         }
     }
 }

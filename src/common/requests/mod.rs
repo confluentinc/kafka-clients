@@ -20,6 +20,8 @@
 
 pub mod abstract_request;
 pub mod abstract_response;
+pub mod api_versions_request;
+pub mod api_versions_response;
 pub mod request_and_size;
 pub mod request_header;
 pub mod request_utils;
@@ -28,6 +30,8 @@ pub mod send_builder;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
+pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
+pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
 pub use request_and_size::RequestAndSize;
 pub use request_header::RequestHeader;
 pub use request_utils::serialize;

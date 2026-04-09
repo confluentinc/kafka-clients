@@ -23,12 +23,16 @@
 
 use std::io;
 
+use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
+use crate::common::protocol::message::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 
 use super::abstract_response::ConcreteResponse;
+use super::api_versions_request::ApiVersionsRequest;
 use super::request_and_size::RequestAndSize;
 use super::request_header::RequestHeader;
+use super::send_builder::SendBuilder;
 
 /// Trait for building requests at a specific version.
 ///
@@ -59,25 +63,25 @@ pub trait RequestBuilder {
 /// Each variant wraps a concrete request struct. Common methods are dispatched
 /// via `match` on the variant.
 ///
-/// Currently only ApiVersions and Metadata are supported — variants will be
-/// added in Steps 3 and 4.
+/// Variants will be added as request types are translated.
 #[derive(Debug, Clone)]
 pub enum ConcreteRequest {
-    // Variants will be added in Step 3 and Step 4 (ApiVersions, Metadata).
+    /// An ApiVersions request.
+    ApiVersions(ApiVersionsRequest),
 }
 
 impl ConcreteRequest {
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
-        match *self {
-            // Will be populated when concrete request types are added.
+        match self {
+            Self::ApiVersions(r) => r.version(),
         }
     }
 
     /// Returns the API key of this request.
     pub fn api_key(&self) -> &'static ApiKeys {
-        match *self {
-            // Will be populated when concrete request types are added.
+        match self {
+            Self::ApiVersions(r) => r.api_key(),
         }
     }
 
@@ -88,9 +92,9 @@ impl ConcreteRequest {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn to_send(&self, _header: &RequestHeader) -> io::Result<ByteBufferSend> {
-        match *self {
-            // Will be populated when concrete request types are added.
+    pub fn to_send(&self, header: &RequestHeader) -> io::Result<ByteBufferSend> {
+        match self {
+            Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -102,9 +106,11 @@ impl ConcreteRequest {
     ///
     /// Returns an error if the header API key or version does not match this request,
     /// or if serialization fails.
-    pub fn serialize_with_header(&self, _header: &RequestHeader) -> io::Result<ByteBufferAccessor> {
-        match *self {
-            // Will be populated when concrete request types are added.
+    pub fn serialize_with_header(&self, header: &RequestHeader) -> io::Result<ByteBufferAccessor> {
+        match self {
+            Self::ApiVersions(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -116,23 +122,26 @@ impl ConcreteRequest {
     ///
     /// Returns an error if serialization fails.
     pub fn serialize(&self) -> io::Result<ByteBufferAccessor> {
-        match *self {
-            // Will be populated when concrete request types are added.
+        match self {
+            Self::ApiVersions(r) => {
+                let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
+                let size = Message::size(r.data(), &mut cache, r.version())?;
+                let mut buf = ByteBufferAccessor::new(size as usize);
+                Message::write(r.data(), &mut buf, &cache, r.version())?;
+                buf.flip();
+                Ok(buf)
+            },
         }
     }
 
     /// Returns an error response for this request.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the response cannot be constructed.
     pub fn get_error_response(
         &self,
-        _throttle_time_ms: i32,
-        _error: &crate::common::protocol::Errors,
-    ) -> io::Result<ConcreteResponse> {
-        match *self {
-            // Will be populated when concrete request types are added.
+        throttle_time_ms: i32,
+        error: &crate::common::protocol::Errors,
+    ) -> ConcreteResponse {
+        match self {
+            Self::ApiVersions(r) => r.get_error_response(throttle_time_ms, error),
         }
     }
 
@@ -151,19 +160,24 @@ impl ConcreteRequest {
         Ok(RequestAndSize::new(request, buffer_size))
     }
 
-    fn do_parse_request(api_key: &ApiKeys, _api_version: i16, _readable: &mut dyn Readable) -> io::Result<Self> {
-        // Only ApiVersions and Metadata will be supported — added in Steps 3-4.
-        Err(io::Error::new(
-            io::ErrorKind::Unsupported,
-            format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
-        ))
+    fn do_parse_request(api_key: &ApiKeys, api_version: i16, readable: &mut dyn Readable) -> io::Result<Self> {
+        match *api_key {
+            ApiKeys::API_VERSIONS => {
+                let data = ApiVersionsRequestData::read(readable, api_version)?;
+                Ok(Self::ApiVersions(ApiVersionsRequest::new(data, api_version)))
+            },
+            _ => Err(io::Error::new(
+                io::ErrorKind::Unsupported,
+                format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
+            )),
+        }
     }
 }
 
 impl std::fmt::Display for ConcreteRequest {
-    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match *self {
-            // Will be populated when concrete request types are added.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::ApiVersions(r) => write!(f, "{r}"),
         }
     }
 }
