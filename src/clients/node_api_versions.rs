@@ -182,7 +182,9 @@ impl NodeApiVersions {
         // Also handle the case where some apiKey types are not specified at all in the given
         // ApiVersions, which may happen when the remote is too old.
         for api_key in ApiKeys::client_apis() {
-            api_keys_text.entry(api_key.id()).or_insert_with(|| format!("{}({}): UNSUPPORTED", api_key.name(), api_key.id()));
+            api_keys_text
+                .entry(api_key.id())
+                .or_insert_with(|| format!("{}({}): UNSUPPORTED", api_key.name(), api_key.id()));
         }
 
         let separator = if line_breaks { ",\n\t" } else { ", " };
