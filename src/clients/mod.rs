@@ -27,6 +27,8 @@ pub mod connection_state;
 pub mod host_resolver;
 #[cfg(not(feature = "skip-generated"))]
 pub mod in_flight_requests;
+#[cfg(not(feature = "skip-generated"))]
+pub mod kafka_client;
 pub mod least_loaded_node;
 #[cfg(not(feature = "skip-generated"))]
 pub mod metadata;
@@ -35,6 +37,10 @@ pub mod metadata_recovery_strategy;
 pub mod metadata_snapshot;
 #[cfg(not(feature = "skip-generated"))]
 pub mod metadata_updater;
+#[cfg(not(feature = "skip-generated"))]
+pub mod network_client;
+#[cfg(not(feature = "skip-generated"))]
+pub mod network_client_utils;
 #[cfg(not(feature = "skip-generated"))]
 pub mod node_api_versions;
 

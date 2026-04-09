@@ -1,0 +1,266 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! A fake selector for testing purposes.
+//!
+//! Translated from `org.apache.kafka.test.MockSelector`.
+
+use std::collections::{HashMap, HashSet};
+use std::io;
+use std::net::SocketAddr;
+
+use super::channel_state::ChannelState;
+use super::network_receive::NetworkReceive;
+use super::network_send::NetworkSend;
+
+/// A delayed receive that is delivered when a matching send completes.
+///
+/// Translated from `org.apache.kafka.test.DelayedReceive`.
+pub struct DelayedReceive {
+    source: String,
+    receive: NetworkReceive,
+}
+
+impl DelayedReceive {
+    /// Creates a new `DelayedReceive`.
+    pub fn new(source: &str, receive: NetworkReceive) -> Self {
+        Self { source: source.to_string(), receive }
+    }
+
+    /// Returns the source identifier for this delayed receive.
+    pub fn source(&self) -> &str {
+        &self.source
+    }
+}
+
+/// A fake selector to use for testing.
+///
+/// Translated from `org.apache.kafka.test.MockSelector`.
+///
+/// # Poll cycle
+///
+/// Like the real [`Selector`](super::selector::Selector), each `poll()` call
+/// clears the previous cycle's results and produces new ones:
+///
+/// 1. All `connected`, `disconnected`, `completed_sends`, and `completed_receives`
+///    are cleared at the start of `poll()`.
+/// 2. Newly-connected nodes (from `connect()` since the last poll) are moved
+///    into `connected`.
+/// 3. Initiated sends are completed (moved to `completed_sends`).
+/// 4. Delayed receives matching completed sends are delivered.
+pub struct MockSelector {
+    initiated_sends: Vec<NetworkSend>,
+    completed_sends: Vec<NetworkSend>,
+    completed_receives: Vec<NetworkReceive>,
+    disconnected: HashMap<String, ChannelState>,
+    /// Nodes that completed connection during the last poll cycle.
+    connected: Vec<String>,
+    /// Nodes that have connected but not yet been reported in a poll cycle.
+    pending_connected: Vec<String>,
+    delayed_receives: Vec<DelayedReceive>,
+    ready: HashSet<String>,
+}
+
+impl Default for MockSelector {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MockSelector {
+    /// Creates a new `MockSelector`.
+    pub fn new() -> Self {
+        Self {
+            initiated_sends: Vec::new(),
+            completed_sends: Vec::new(),
+            completed_receives: Vec::new(),
+            disconnected: HashMap::new(),
+            connected: Vec::new(),
+            pending_connected: Vec::new(),
+            delayed_receives: Vec::new(),
+            ready: HashSet::new(),
+        }
+    }
+
+    /// Clears all completed sends, receives, disconnections, and connections.
+    pub fn clear(&mut self) {
+        self.completed_sends.clear();
+        self.completed_receives.clear();
+        self.disconnected.clear();
+        self.connected.clear();
+    }
+
+    /// Resets all state including initiated sends and delayed receives.
+    pub fn reset(&mut self) {
+        self.clear();
+        self.initiated_sends.clear();
+        self.delayed_receives.clear();
+    }
+
+    /// Simulate a server disconnect. This id will be present in `disconnected()`
+    /// on the next `poll()`.
+    pub fn server_disconnect(&mut self, id: &str) {
+        self.disconnected
+            .insert(id.to_string(), ChannelState::new(super::channel_state::State::Ready));
+        self.close_channel_sync(id);
+    }
+
+    /// Simulate a server authentication failure.
+    pub fn server_authentication_failed(&mut self, id: &str) {
+        let auth_failed = ChannelState::with_exception(
+            super::channel_state::State::AuthenticationFailed,
+            "Authentication failed",
+            None,
+        );
+        self.disconnected.insert(id.to_string(), auth_failed);
+        self.close_channel_sync(id);
+    }
+
+    /// Since `MockSelector::connect` will always succeed and add the connection id
+    /// to the connected set, we can only simulate that the connection is still
+    /// pending by removing the connection id from the connected set.
+    pub fn server_connection_blocked(&mut self, id: &str) {
+        self.pending_connected.retain(|c| c != id);
+        self.connected.retain(|c| c != id);
+    }
+
+    /// Queue a completed receive directly.
+    pub fn complete_receive(&mut self, receive: NetworkReceive) {
+        self.completed_receives.push(receive);
+    }
+
+    /// Queue a delayed receive that will be delivered when a matching send completes.
+    pub fn delayed_receive(&mut self, receive: DelayedReceive) {
+        self.delayed_receives.push(receive);
+    }
+
+    /// Mark a channel as not ready.
+    pub fn channel_not_ready(&mut self, id: &str) {
+        self.ready.remove(id);
+    }
+
+    /// Synchronous close implementation used internally.
+    fn close_channel_sync(&mut self, id: &str) {
+        // Note that there are no notifications for client-side disconnects
+        self.completed_sends.retain(|s| s.destination_id() != id);
+        self.initiated_sends.retain(|s| s.destination_id() != id);
+        self.ready.remove(id);
+
+        if let Some(pos) = self.connected.iter().position(|c| c == id) {
+            self.connected.remove(pos);
+        }
+        self.pending_connected.retain(|c| c != id);
+    }
+
+    /// Completes all initiated sends by consuming them.
+    fn complete_initiated_sends(&mut self) {
+        let initiated: Vec<NetworkSend> = self.initiated_sends.drain(..).collect();
+        for send in initiated {
+            self.completed_sends.push(send);
+        }
+    }
+
+    /// Completes any delayed receives whose source matches a completed send.
+    fn complete_delayed_receives(&mut self) {
+        let mut to_deliver = Vec::new();
+
+        for completed_send in &self.completed_sends {
+            let mut i = 0;
+            while i < self.delayed_receives.len() {
+                if self.delayed_receives[i].source() == completed_send.destination_id() {
+                    let delayed = self.delayed_receives.remove(i);
+                    to_deliver.push(delayed.receive);
+                } else {
+                    i += 1;
+                }
+            }
+        }
+
+        self.completed_receives.extend(to_deliver);
+    }
+}
+
+/// Implementation of `Selectable` for `MockSelector`.
+impl super::selectable::Selectable for MockSelector {
+    fn connect(
+        &mut self,
+        id: &str,
+        _address: SocketAddr,
+        _send_buffer_size: i32,
+        _receive_buffer_size: i32,
+    ) -> impl std::future::Future<Output = io::Result<()>> + Send {
+        self.pending_connected.push(id.to_string());
+        self.ready.insert(id.to_string());
+        async { Ok(()) }
+    }
+
+    fn wakeup(&self) {}
+
+    async fn close(&mut self) {}
+
+    fn close_channel(&mut self, id: &str) -> impl std::future::Future<Output = ()> + Send {
+        self.close_channel_sync(id);
+        async {}
+    }
+
+    fn send(&mut self, send: NetworkSend) -> Result<(), String> {
+        self.initiated_sends.push(send);
+        Ok(())
+    }
+
+    fn poll(&mut self, _timeout_ms: i64) -> impl std::future::Future<Output = io::Result<()>> + Send {
+        // Clear previous cycle's results
+        self.completed_sends.clear();
+        self.completed_receives.clear();
+        self.disconnected.clear();
+        self.connected.clear();
+
+        // Move pending connections to connected
+        self.connected.append(&mut self.pending_connected);
+
+        // Complete initiated sends and any delayed receives
+        self.complete_initiated_sends();
+        self.complete_delayed_receives();
+
+        async { Ok(()) }
+    }
+
+    fn completed_sends(&self) -> &[NetworkSend] {
+        &self.completed_sends
+    }
+
+    fn completed_receives(&self) -> Vec<&NetworkReceive> {
+        self.completed_receives.iter().collect()
+    }
+
+    fn disconnected(&self) -> &HashMap<String, ChannelState> {
+        &self.disconnected
+    }
+
+    fn connected(&self) -> &[String] {
+        &self.connected
+    }
+
+    fn mute(&mut self, _id: &str) {}
+
+    fn unmute(&mut self, _id: &str) {}
+
+    fn mute_all(&mut self) {}
+
+    fn unmute_all(&mut self) {}
+
+    fn is_channel_ready(&self, id: &str) -> bool {
+        self.ready.contains(id)
+    }
+}
