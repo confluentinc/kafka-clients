@@ -14,6 +14,8 @@
 
 //! Client implementations (org.apache.kafka.clients)
 
+#[cfg(not(feature = "skip-generated"))]
+pub mod api_versions;
 pub mod connection_state;
 pub mod host_resolver;
 pub mod least_loaded_node;
@@ -21,6 +23,8 @@ pub mod metadata_recovery_strategy;
 #[cfg(not(feature = "skip-generated"))]
 pub mod node_api_versions;
 
+#[cfg(not(feature = "skip-generated"))]
+pub use api_versions::ApiVersions;
 pub use connection_state::ConnectionState;
 pub use host_resolver::{DefaultHostResolver, HostResolver};
 pub use least_loaded_node::LeastLoadedNode;
