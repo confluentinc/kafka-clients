@@ -4135,6 +4135,139 @@ fn generate_array_element_write(
     Ok(())
 }
 
+/// Map a FieldType to a SchemaType expression string for a specific (flexible, nullable) combination.
+fn schema_type_for(field_type: &FieldType, flexible: bool, nullable: bool) -> String {
+    match field_type {
+        FieldType::Bool => "SchemaType::Boolean".to_string(),
+        FieldType::Int8 => "SchemaType::Int8".to_string(),
+        FieldType::Int16 => "SchemaType::Int16".to_string(),
+        FieldType::Uint16 => "SchemaType::Uint16".to_string(),
+        FieldType::Uint32 => "SchemaType::Uint32".to_string(),
+        FieldType::Int32 => "SchemaType::Int32".to_string(),
+        FieldType::Int64 => "SchemaType::Int64".to_string(),
+        FieldType::Uuid => "SchemaType::Uuid".to_string(),
+        FieldType::Float64 => "SchemaType::Float64".to_string(),
+        FieldType::String => match (flexible, nullable) {
+            (true, true) => "SchemaType::CompactNullableString",
+            (true, false) => "SchemaType::CompactString",
+            (false, true) => "SchemaType::NullableString",
+            (false, false) => "SchemaType::String",
+        }
+        .to_string(),
+        FieldType::Bytes => match (flexible, nullable) {
+            (true, true) => "SchemaType::CompactNullableBytes",
+            (true, false) => "SchemaType::CompactBytes",
+            (false, true) => "SchemaType::NullableBytes",
+            (false, false) => "SchemaType::Bytes",
+        }
+        .to_string(),
+        FieldType::Records => {
+            if flexible {
+                "SchemaType::CompactRecords".to_string()
+            } else {
+                "SchemaType::Records".to_string()
+            }
+        },
+        FieldType::Array(_) => {
+            // Arrays are represented as Bytes in the schema type for introspection
+            if flexible {
+                "SchemaType::CompactBytes".to_string()
+            } else {
+                "SchemaType::Bytes".to_string()
+            }
+        },
+        FieldType::Struct(_) => {
+            // Structs are composite - use Bytes as placeholder for introspection
+            "SchemaType::Bytes".to_string()
+        },
+    }
+}
+
+/// Compute the schema type expression for a field. The result may be version-dependent
+/// when flexibility or nullability boundaries fall within the field's version range,
+/// producing an inline if/else expression.
+fn schema_type_expr_for_field(field: &FieldSpec, flexible_versions: Versions) -> String {
+    let field_type = field.field_type();
+    let nullable_versions = field.nullable_versions();
+    let v_low = field.versions().lowest();
+    let v_high = field.versions().highest();
+
+    // Collect version boundaries where (flexible, nullable) may change
+    let mut breakpoints = vec![v_low];
+    if !flexible_versions.empty() {
+        let fl = flexible_versions.lowest();
+        if fl > v_low && fl <= v_high {
+            breakpoints.push(fl);
+        }
+    }
+    if !nullable_versions.empty() {
+        let nl = nullable_versions.lowest();
+        if nl > v_low && nl <= v_high {
+            breakpoints.push(nl);
+        }
+        let nh = nullable_versions.highest();
+        if nh < v_high {
+            breakpoints.push(nh + 1);
+        }
+    }
+    breakpoints.sort();
+    breakpoints.dedup();
+
+    // Compute (start_version, schema_type) for each region, deduplicating adjacent identical types
+    let mut regions: Vec<(i16, String)> = Vec::new();
+    for &bp in &breakpoints {
+        let flexible = !flexible_versions.empty() && flexible_versions.contains(bp);
+        let nullable = !nullable_versions.empty() && nullable_versions.contains(bp);
+        let st = schema_type_for(field_type, flexible, nullable);
+        if regions.last().is_none_or(|(_, last_st)| *last_st != st) {
+            regions.push((bp, st));
+        }
+    }
+
+    if regions.len() == 1 {
+        regions.into_iter().next().unwrap().1
+    } else {
+        // Build nested if/else: last region becomes outermost if, first becomes else
+        let mut expr = regions[0].1.clone();
+        for (start, st) in regions.iter().skip(1) {
+            expr = format!("if version >= {} {{ {} }} else {{ {} }}", start, st, expr);
+        }
+        expr
+    }
+}
+
+/// Returns true if the schema type for this field varies by version.
+fn field_has_version_dependent_schema_type(field: &FieldSpec, flexible_versions: Versions) -> bool {
+    let v_low = field.versions().lowest();
+    let v_high = field.versions().highest();
+
+    // Check if flexibility boundary falls within field's version range
+    if !flexible_versions.empty() {
+        let fl = flexible_versions.lowest();
+        if fl > v_low && fl <= v_high {
+            match field.field_type() {
+                FieldType::String | FieldType::Bytes | FieldType::Records | FieldType::Array(_) => return true,
+                _ => {},
+            }
+        }
+    }
+
+    // Check if nullability boundary falls within field's version range
+    let nullable_versions = field.nullable_versions();
+    if !nullable_versions.empty() {
+        let nl = nullable_versions.lowest();
+        let nh = nullable_versions.highest();
+        if (nl > v_low && nl <= v_high) || (nh < v_high) {
+            match field.field_type() {
+                FieldType::String | FieldType::Bytes => return true,
+                _ => {},
+            }
+        }
+    }
+
+    false
+}
+
 /// Generate a `schema(version) -> Schema` method that returns the schema for each version.
 fn generate_schema_method(
     file: &mut fs::File,
@@ -4144,14 +4277,18 @@ fn generate_schema_method(
     let lowest = struct_spec.versions().lowest();
     let highest = struct_spec.versions().highest();
 
-    // Check if any non-tagged field has a version range that doesn't cover all versions
+    // The version parameter is needed if any non-tagged field has a version range
+    // that doesn't cover all versions, or if any field's schema type varies by version
     let needs_version_param = struct_spec.fields().iter().any(|f| {
         if f.tagged_versions() != Versions::NONE && f.tagged_versions() == f.versions() {
             return false; // entirely tagged, skip
         }
         let v_low = f.versions().lowest();
         let v_high = f.versions().highest();
-        !(v_low <= lowest && v_high >= highest)
+        if !(v_low <= lowest && v_high >= highest) {
+            return true;
+        }
+        field_has_version_dependent_schema_type(f, flexible_versions)
     });
 
     let version_param = if needs_version_param { "version" } else { "_version" };
@@ -4167,8 +4304,6 @@ fn generate_schema_method(
 
         // Skip tagged fields from the main field list
         if field.tagged_versions() != Versions::NONE {
-            // For fields that have tagged versions in some range and regular in another,
-            // only include them in the schema when they're NOT in their tagged range
             let tagged = field.tagged_versions();
             let versions = field.versions();
 
@@ -4180,7 +4315,7 @@ fn generate_schema_method(
 
         let v_low = field.versions().lowest();
         let v_high = field.versions().highest();
-        let schema_type_expr = schema_type_for_version_expr(field.field_type(), flexible_versions);
+        let schema_type_expr = schema_type_expr_for_field(field, flexible_versions);
         let about_escaped = field.about().replace('"', "\\\"");
         let push_stmt = format!(
             "fields.push(Field {{ name: \"{}\", field_type: {}, about: \"{}\" }});",
@@ -4219,51 +4354,6 @@ fn generate_schema_method(
     writeln!(file, "    }}")?;
 
     Ok(())
-}
-
-/// Map a FieldType to a SchemaType expression string for use in generated code.
-fn schema_type_for_version_expr(field_type: &FieldType, flexible_versions: Versions) -> String {
-    // For schema metadata we use a simplified type mapping.
-    // The flexible/non-flexible distinction is version-dependent, but for field
-    // introspection (the primary use case) we use the latest encoding style.
-    let flexible = flexible_versions != Versions::NONE;
-    match field_type {
-        FieldType::Bool => "SchemaType::Boolean".to_string(),
-        FieldType::Int8 => "SchemaType::Int8".to_string(),
-        FieldType::Int16 => "SchemaType::Int16".to_string(),
-        FieldType::Uint16 => "SchemaType::Uint16".to_string(),
-        FieldType::Uint32 => "SchemaType::Uint32".to_string(),
-        FieldType::Int32 => "SchemaType::Int32".to_string(),
-        FieldType::Int64 => "SchemaType::Int64".to_string(),
-        FieldType::Uuid => "SchemaType::Uuid".to_string(),
-        FieldType::Float64 => "SchemaType::Float64".to_string(),
-        FieldType::String => {
-            if flexible {
-                "SchemaType::CompactString".to_string()
-            } else {
-                "SchemaType::String".to_string()
-            }
-        },
-        FieldType::Bytes | FieldType::Records => {
-            if flexible {
-                "SchemaType::CompactBytes".to_string()
-            } else {
-                "SchemaType::Bytes".to_string()
-            }
-        },
-        FieldType::Array(_) => {
-            // Arrays are represented as Bytes in the schema type for introspection
-            if flexible {
-                "SchemaType::CompactBytes".to_string()
-            } else {
-                "SchemaType::Bytes".to_string()
-            }
-        },
-        FieldType::Struct(_) => {
-            // Structs are composite - use Bytes as placeholder for introspection
-            "SchemaType::Bytes".to_string()
-        },
-    }
 }
 
 /// Returns true if the field should use Option<T> in Rust (has nullable versions).

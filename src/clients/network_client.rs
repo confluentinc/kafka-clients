@@ -2602,6 +2602,7 @@ mod tests {
             self.use_new_addresses.store(true, std::sync::atomic::Ordering::SeqCst);
         }
 
+        #[allow(dead_code)]
         fn use_new_addresses(&self) -> bool {
             self.use_new_addresses.load(std::sync::atomic::Ordering::SeqCst)
         }

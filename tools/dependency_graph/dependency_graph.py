@@ -15,7 +15,8 @@ import json
 import os
 import re
 import sys
-from collections import defaultdict
+import heapq
+from collections import defaultdict, deque
 
 import graphviz
 import javalang
@@ -169,10 +170,10 @@ def build_dependency_graph(root_fqcn, fqcn_files, simple_to_fqcns):
     """Build dependency graph starting from root_fqcn via BFS."""
     graph = defaultdict(set)  # fqcn -> set of fqcns it depends on
     visited = set()
-    queue = [root_fqcn]
+    queue = deque([root_fqcn])
 
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         if current in visited:
             continue
         visited.add(current)
@@ -268,16 +269,16 @@ def topological_sort(graph, all_nodes):
             scc_in_degree[scc_id] += 1
 
     queue = sorted([i for i in range(len(sccs)) if scc_in_degree[i] == 0])
+    heapq.heapify(queue)
     scc_order = []
     while queue:
-        scc_id = queue.pop(0)
+        scc_id = heapq.heappop(queue)
         scc_order.append(scc_id)
         for other_id in range(len(sccs)):
             if scc_id in scc_graph.get(other_id, set()):
                 scc_in_degree[other_id] -= 1
                 if scc_in_degree[other_id] == 0:
-                    queue.append(other_id)
-                    queue.sort()
+                    heapq.heappush(queue, other_id)
 
     # Expand: within each SCC, sort alphabetically
     result = []
@@ -326,11 +327,11 @@ def build_tree(graph, root_fqcn, all_nodes):
     """Build a spanning tree from root via BFS."""
     tree_edges = []
     visited = set()
-    queue = [root_fqcn]
+    queue = deque([root_fqcn])
     visited.add(root_fqcn)
 
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         for dep in sorted(graph.get(node, set())):
             if dep in all_nodes and dep not in visited:
                 visited.add(dep)
@@ -424,11 +425,11 @@ def generate_json_tree(graph, root_fqcn, all_nodes, marked_fqcns, output):
     # Build spanning tree via BFS (same as the graph visualization)
     tree_structure = {}  # fqcn -> list of child fqcns
     visited = set()
-    queue = [root_fqcn]
+    queue = deque([root_fqcn])
     visited.add(root_fqcn)
 
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         tree_structure[node] = []
         for dep in sorted(graph.get(node, set()) & all_nodes):
             if dep not in visited:

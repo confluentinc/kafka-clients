@@ -50,7 +50,7 @@ Java source in `kafka/` directory (Apache Kafka 4.2)
 
 ## Development Workflow
 - **Build**: `cargo build`
-- **Test**: `cargo test`
+- **Test**: `cargo test`, run the timeout tool with timeout 10s by default when checking if single tests are timing out.
 - **Format**: `cargo xtask format`
 - **Format Check**: `cargo xtask format-check` (CI-friendly)
 - **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)

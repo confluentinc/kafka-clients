@@ -25,14 +25,17 @@ use testcontainers::{ContainerAsync, ImageExt};
 use testcontainers_modules::kafka::apache;
 use testcontainers_modules::kafka::apache::Kafka;
 
+/// Kafka image tag to use for integration tests.
+const KAFKA_TAG: &str = "4.2.0";
+
 /// Manages a real Kafka broker in Docker for integration tests.
 ///
 /// Shared across tests with the same [`ClusterConfig`].
-/// The container is cleaned up automatically when this struct is dropped
-/// (testcontainers default behavior).
 pub struct KafkaCluster {
     /// The running container handle. Kept alive for the duration of the pool entry.
     _container: ContainerAsync<Kafka>,
+    /// The Docker container ID, used for cleanup at process exit.
+    container_id: String,
     /// The `host:port` connection string for this cluster.
     bootstrap_servers: String,
     /// The config this cluster was started with.
@@ -48,17 +51,17 @@ impl KafkaCluster {
     ///
     /// Panics if the container fails to start or ports cannot be retrieved.
     pub async fn start_with_config(config: &ClusterConfig) -> Self {
-        // Build the container request, applying any custom server properties
-        // as environment variables. `ImageExt::with_env_var` consumes the image
-        // and returns a `ContainerRequest<Kafka>`, so we must convert first.
+        // Build the container request with Kafka 4.2.0, applying any custom
+        // server properties as environment variables.
         let mut request: testcontainers::ContainerRequest<Kafka> =
-            testcontainers::ContainerRequest::from(Kafka::default());
+            testcontainers::ContainerRequest::from(Kafka::default()).with_tag(KAFKA_TAG);
 
         for (key, value) in &config.server_properties {
             request = request.with_env_var(key, value);
         }
 
         let container = request.start().await.expect("Failed to start Kafka container");
+        let container_id = container.id().to_string();
 
         let host_port = container
             .get_host_port_ipv4(apache::KAFKA_PORT)
@@ -67,7 +70,7 @@ impl KafkaCluster {
 
         let bootstrap_servers = format!("127.0.0.1:{host_port}");
 
-        Self { _container: container, bootstrap_servers, config: config.clone() }
+        Self { _container: container, container_id, bootstrap_servers, config: config.clone() }
     }
 
     /// Bootstrap servers connection string (e.g., `"127.0.0.1:32781"`).
@@ -79,5 +82,10 @@ impl KafkaCluster {
     #[allow(dead_code)]
     pub fn config(&self) -> &ClusterConfig {
         &self.config
+    }
+
+    /// The Docker container ID.
+    pub fn container_id(&self) -> &str {
+        &self.container_id
     }
 }

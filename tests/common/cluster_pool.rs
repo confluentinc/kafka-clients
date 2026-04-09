@@ -25,7 +25,7 @@
 //!   all other callers await its completion.
 
 use std::collections::HashMap;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, Once};
 
 use super::cluster_config::ClusterConfig;
 use super::kafka_cluster::KafkaCluster;
@@ -41,12 +41,45 @@ type ClusterCell = Arc<OnceCell<Arc<KafkaCluster>>>;
 static CLUSTER_POOL: std::sync::LazyLock<Mutex<HashMap<ClusterConfig, ClusterCell>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Ensures the atexit cleanup hook is registered exactly once.
+static CLEANUP_REGISTERED: Once = Once::new();
+
+/// Registers an `atexit` handler that forcibly removes all Docker containers
+/// in the pool when the process exits.
+///
+/// Rust does not run destructors for `LazyLock` statics at process exit,
+/// so `ContainerAsync`'s `Drop` never fires. This hook uses `docker rm -f`
+/// as a synchronous fallback that works even after the tokio runtime is gone.
+fn register_cleanup_hook() {
+    CLEANUP_REGISTERED.call_once(|| {
+        unsafe extern "C" {
+            safe fn atexit(callback: extern "C" fn()) -> std::os::raw::c_int;
+        }
+
+        extern "C" fn cleanup_containers() {
+            let container_ids: Vec<String> = {
+                let pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
+                pool.values()
+                    .filter_map(|cell| cell.get().map(|c| c.container_id().to_string()))
+                    .collect()
+            };
+            for id in &container_ids {
+                let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
+            }
+        }
+
+        atexit(cleanup_containers);
+    });
+}
+
 /// Get or create a shared [`KafkaCluster`] for the given config.
 ///
 /// The first caller with a given config triggers container startup;
 /// subsequent callers await the same `OnceCell` and receive a reference
 /// to the already-running cluster.
 pub async fn get_or_create(config: &ClusterConfig) -> Arc<KafkaCluster> {
+    register_cleanup_hook();
+
     let cell = {
         let mut pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
         pool.entry(config.clone()).or_insert_with(|| Arc::new(OnceCell::new())).clone()
