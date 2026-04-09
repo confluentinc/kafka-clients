@@ -1038,7 +1038,8 @@ fn generate_add_size_body(
     // Non-tagged fields
     for field in struct_spec.fields() {
         if field.tagged_versions().empty() {
-            generate_field_add_size(file, field, flexible_versions)?;
+            let effective_flex = field_flexible_versions(field, flexible_versions);
+            generate_field_add_size(file, field, effective_flex)?;
         }
     }
 
@@ -1131,6 +1132,30 @@ fn generate_add_size_body(
     writeln!(file, "    }}")?;
 
     Ok(())
+}
+
+/// Returns the effective flexible versions for a field, taking into account
+/// the per-field `flexibleVersions` override.
+///
+/// Corresponds to `MessageDataGenerator.fieldFlexibleVersions` in the Java generator.
+/// When a field specifies `"flexibleVersions": "none"`, the field always uses
+/// non-flexible encoding regardless of the message-level flexible versions.
+fn field_flexible_versions(field: &FieldSpec, message_flexible_versions: Versions) -> Versions {
+    if let Some(field_flex) = field.flexible_versions() {
+        // Validate that the field's flexible versions are a subset of the message's
+        if message_flexible_versions.intersect(field_flex) != field_flex {
+            panic!(
+                "The flexible versions for field {} are {:?}, which are not a subset of the \
+                 flexible versions for the message as a whole, which are {:?}",
+                field.name(),
+                field_flex,
+                message_flexible_versions
+            );
+        }
+        field_flex
+    } else {
+        message_flexible_versions
+    }
 }
 
 /// Generate size calculation for a single non-tagged field.
@@ -2938,7 +2963,8 @@ fn generate_read_method(
     // Generate read for each non-tagged field
     for field in struct_spec.fields() {
         if field.tagged_versions().empty() {
-            generate_field_read(file, field, flexible_versions)?;
+            let effective_flex = field_flexible_versions(field, flexible_versions);
+            generate_field_read(file, field, effective_flex)?;
         }
     }
 
@@ -3049,7 +3075,8 @@ fn generate_write_method(
     // Generate write for each non-tagged field
     for field in struct_spec.fields() {
         if field.tagged_versions().empty() {
-            generate_field_write(file, field, flexible_versions)?;
+            let effective_flex = field_flexible_versions(field, flexible_versions);
+            generate_field_write(file, field, effective_flex)?;
         }
     }
 

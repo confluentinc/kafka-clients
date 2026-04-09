@@ -80,6 +80,15 @@ impl ByteBufferAccessor {
         self.position = 0;
     }
 
+    /// Returns a new `ByteBufferAccessor` containing a copy of the remaining bytes
+    /// from the current position to the end of the buffer.
+    ///
+    /// The new accessor's position is set to 0. The original accessor is unchanged.
+    pub fn snapshot_remaining(&self) -> Self {
+        let remaining = self.buffer[self.position..].to_vec();
+        ByteBufferAccessor::from_bytes(remaining)
+    }
+
     /// Ensure we have at least `size` bytes available to read.
     ///
     /// The error message matches Java's ByteBufferAccessor.readArray format:
@@ -445,6 +454,41 @@ mod tests {
 
         buf.set_position(0).unwrap();
         assert_eq!(buf.position(), 0);
+    }
+
+    #[test]
+    fn test_snapshot_remaining() {
+        let mut buf = ByteBufferAccessor::new(20);
+        buf.write_int(1).unwrap();
+        buf.write_int(2).unwrap();
+        buf.write_int(3).unwrap();
+
+        buf.flip();
+        // Read the first int to advance position
+        assert_eq!(buf.read_int().unwrap(), 1);
+
+        // Snapshot remaining should have ints 2 and 3
+        let mut snapshot = buf.snapshot_remaining();
+        assert_eq!(snapshot.remaining(), 8);
+        assert_eq!(snapshot.position(), 0);
+        assert_eq!(snapshot.read_int().unwrap(), 2);
+        assert_eq!(snapshot.read_int().unwrap(), 3);
+        assert_eq!(snapshot.remaining(), 0);
+
+        // Original buffer should be unchanged
+        assert_eq!(buf.remaining(), 8);
+        assert_eq!(buf.read_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_snapshot_remaining_empty() {
+        let mut buf = ByteBufferAccessor::from_bytes(vec![1, 2]);
+        buf.read_byte().unwrap();
+        buf.read_byte().unwrap();
+
+        let snapshot = buf.snapshot_remaining();
+        assert_eq!(snapshot.remaining(), 0);
+        assert!(snapshot.is_empty());
     }
 
     #[test]

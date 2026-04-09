@@ -1,0 +1,169 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Abstract request framework for Kafka protocol requests.
+//!
+//! Corresponds to `org.apache.kafka.common.requests.AbstractRequest`.
+//!
+//! Java uses an abstract class with per-type subclasses and an inner `Builder`
+//! abstract class. In Rust we use:
+//! - `ConcreteRequest` enum with a variant for each supported request type
+//! - `RequestBuilder` trait for constructing requests at a specific version
+
+use std::io;
+
+use crate::common::network::ByteBufferSend;
+use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+
+use super::abstract_response::ConcreteResponse;
+use super::request_and_size::RequestAndSize;
+use super::request_header::RequestHeader;
+
+/// Trait for building requests at a specific version.
+///
+/// Corresponds to the `AbstractRequest.Builder` inner class in Java.
+///
+/// Each concrete request type provides its own builder that implements this trait.
+pub trait RequestBuilder {
+    /// Returns the API key for this builder's request type.
+    fn api_key(&self) -> &'static ApiKeys;
+
+    /// Returns the oldest allowed version for this builder.
+    fn oldest_allowed_version(&self) -> i16;
+
+    /// Returns the latest allowed version for this builder.
+    fn latest_allowed_version(&self) -> i16;
+
+    /// Builds the request at the latest allowed version.
+    fn build(&self) -> ConcreteRequest {
+        self.build_version(self.latest_allowed_version())
+    }
+
+    /// Builds the request at the specified version.
+    fn build_version(&self, version: i16) -> ConcreteRequest;
+}
+
+/// Enum dispatch for all supported Kafka request types.
+///
+/// Each variant wraps a concrete request struct. Common methods are dispatched
+/// via `match` on the variant.
+///
+/// Currently only ApiVersions and Metadata are supported — variants will be
+/// added in Steps 3 and 4.
+#[derive(Debug, Clone)]
+pub enum ConcreteRequest {
+    // Variants will be added in Step 3 and Step 4 (ApiVersions, Metadata).
+}
+
+impl ConcreteRequest {
+    /// Returns the API version of this request.
+    pub fn version(&self) -> i16 {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+
+    /// Returns the API key of this request.
+    pub fn api_key(&self) -> &'static ApiKeys {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+
+    /// Builds a size-prefixed [`ByteBufferSend`] for network transmission.
+    ///
+    /// Corresponds to `AbstractRequest.toSend` in Java.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails.
+    pub fn to_send(&self, _header: &RequestHeader) -> io::Result<ByteBufferSend> {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+
+    /// Serializes header and body without a size prefix.
+    ///
+    /// Corresponds to `AbstractRequest.serializeWithHeader` in Java.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the header API key or version does not match this request,
+    /// or if serialization fails.
+    pub fn serialize_with_header(&self, _header: &RequestHeader) -> io::Result<ByteBufferAccessor> {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+
+    /// Serializes just the request body (no header, no size prefix).
+    ///
+    /// Corresponds to `AbstractRequest.serialize` in Java (visible for testing).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if serialization fails.
+    pub fn serialize(&self) -> io::Result<ByteBufferAccessor> {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+
+    /// Returns an error response for this request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the response cannot be constructed.
+    pub fn get_error_response(
+        &self,
+        _throttle_time_ms: i32,
+        _error: &crate::common::protocol::Errors,
+    ) -> io::Result<ConcreteResponse> {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+
+    /// Factory method for parsing a request object based on API key, version, and readable.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the API key is not supported or parsing fails.
+    pub fn parse_request(
+        api_key: &ApiKeys,
+        api_version: i16,
+        readable: &mut dyn Readable,
+    ) -> io::Result<RequestAndSize> {
+        let buffer_size = readable.remaining();
+        let request = Self::do_parse_request(api_key, api_version, readable)?;
+        Ok(RequestAndSize::new(request, buffer_size))
+    }
+
+    fn do_parse_request(api_key: &ApiKeys, _api_version: i16, _readable: &mut dyn Readable) -> io::Result<Self> {
+        // Only ApiVersions and Metadata will be supported — added in Steps 3-4.
+        Err(io::Error::new(
+            io::ErrorKind::Unsupported,
+            format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
+        ))
+    }
+}
+
+impl std::fmt::Display for ConcreteRequest {
+    fn fmt(&self, _f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match *self {
+            // Will be populated when concrete request types are added.
+        }
+    }
+}

@@ -1,0 +1,40 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! Request/response framework for Kafka RPCs (org.apache.kafka.common.requests)
+//!
+//! This module provides the request and response header types, the abstract
+//! request/response framework, and concrete implementations for ApiVersions
+//! and Metadata RPCs.
+
+pub mod abstract_request;
+pub mod abstract_response;
+pub mod request_and_size;
+pub mod request_header;
+pub mod request_utils;
+pub mod response_header;
+pub mod send_builder;
+
+pub use abstract_request::{ConcreteRequest, RequestBuilder};
+pub use abstract_response::ConcreteResponse;
+pub use request_and_size::RequestAndSize;
+pub use request_header::RequestHeader;
+pub use request_utils::serialize;
+pub use response_header::ResponseHeader;
+pub use send_builder::SendBuilder;
+
+/// Sentinel value indicating that the partition leader epoch is unknown or not set.
+///
+/// Corresponds to `RecordBatch.NO_PARTITION_LEADER_EPOCH` in Java.
+pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
