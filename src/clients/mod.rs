@@ -18,8 +18,12 @@ pub mod connection_state;
 pub mod host_resolver;
 pub mod least_loaded_node;
 pub mod metadata_recovery_strategy;
+#[cfg(not(feature = "skip-generated"))]
+pub mod node_api_versions;
 
 pub use connection_state::ConnectionState;
 pub use host_resolver::{DefaultHostResolver, HostResolver};
 pub use least_loaded_node::LeastLoadedNode;
 pub use metadata_recovery_strategy::MetadataRecoveryStrategy;
+#[cfg(not(feature = "skip-generated"))]
+pub use node_api_versions::NodeApiVersions;
