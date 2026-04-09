@@ -20,3 +20,12 @@
 - **File**: `src/clients/network_client.rs`
 - **Fix**: Changed to `panic!("There are no nodes in the Kafka cluster")` matching Java's `IllegalStateException`. No existing tests depend on the previous behavior.
 - **Commit**: 9a0f588
+
+## Issue 34: NetworkClientTest missing 17 test translations [RESOLVED]
+- **Resolution**: Translated all 17 missing tests. 46 NetworkClient tests now pass (up from 29).
+
+## Issue 35: MetadataTest missing 9 test translations [RESOLVED]
+- **Resolution**: Translated all 9 missing tests. 29 Metadata tests now pass (up from 20).
+
+## Issue 36: ClusterConnectionStatesTest missing 5 test translations [RESOLVED]
+- **Resolution**: All 15 ClusterConnectionStates tests pass. The missing tests were identified and translated.
