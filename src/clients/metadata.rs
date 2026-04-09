@@ -45,6 +45,12 @@ use crate::common::uuid::Uuid;
 use super::common_client_configs;
 use super::metadata_snapshot::MetadataSnapshot;
 
+/// Type alias for the retain topic function used to override topic retention behavior.
+///
+/// Corresponds to Java's `Metadata.retainTopic()` override pattern used by subclasses.
+/// Parameters: `(topic_name, is_internal, now_ms) -> should_retain`.
+type RetainTopicFn = dyn Fn(&str, bool, i64) -> bool + Send + Sync;
+
 /// A class encapsulating some of the logic around metadata.
 ///
 /// This class is shared by the client thread (for partitioning) and the background
@@ -56,6 +62,18 @@ pub struct Metadata {
     // Java uses `volatile` for this field; in Rust we protect all mutable state
     // behind the mutex for correctness.
     inner: Mutex<MetadataInner>,
+    /// Optional custom retain topic function. When set, this overrides
+    /// the default `retain_topic_default` behavior.
+    ///
+    /// Corresponds to Java's `Metadata.retainTopic()` override pattern used by
+    /// subclasses (e.g., `ConsumerMetadata`). Lives outside the mutex because
+    /// it is set once at construction and never mutated.
+    retain_topic_fn: Option<Box<RetainTopicFn>>,
+    /// When true, `new_metadata_request_builder_for_new_topics` returns a builder
+    /// instead of `None`, enabling partial update requests.
+    ///
+    /// Corresponds to Java's override of `newMetadataRequestBuilderForNewTopics()`.
+    enable_partial_updates: bool,
 }
 
 /// Inner mutable state of `Metadata`, protected by a mutex.
@@ -232,6 +250,62 @@ impl Metadata {
                 fatal_exception: None,
                 bootstrap_addresses: Vec::new(),
             }),
+            retain_topic_fn: None,
+            enable_partial_updates: false,
+        }
+    }
+
+    /// Creates a new `Metadata` instance with custom retain topic behavior and
+    /// optional partial update support.
+    ///
+    /// This corresponds to the Java pattern of subclassing `Metadata` to override
+    /// `retainTopic()` and `newMetadataRequestBuilderForNewTopics()`.
+    ///
+    /// # Arguments
+    /// * `retain_topic_fn` - Optional function to override topic retention behavior.
+    ///   When `None`, the default (retain all topics) is used.
+    /// * `enable_partial_updates` - When `true`, `newMetadataRequestBuilderForNewTopics()`
+    ///   returns a builder, enabling partial metadata requests.
+    #[cfg(test)]
+    pub fn with_overrides(
+        refresh_backoff_ms: i64,
+        refresh_backoff_max_ms: i64,
+        metadata_expire_ms: i64,
+        cluster_resource_listeners: ClusterResourceListeners,
+        retain_topic_fn: Option<Box<RetainTopicFn>>,
+        enable_partial_updates: bool,
+    ) -> Self {
+        let refresh_backoff = ExponentialBackoff::new(
+            refresh_backoff_ms,
+            common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            refresh_backoff_max_ms,
+            common_client_configs::RETRY_BACKOFF_JITTER,
+        )
+        .expect("Invalid backoff parameters");
+
+        Self {
+            inner: Mutex::new(MetadataInner {
+                refresh_backoff,
+                metadata_expire_ms,
+                last_refresh_ms: 0,
+                last_successful_refresh_ms: 0,
+                attempts: 0,
+                request_version: 0,
+                update_version: 0,
+                need_full_update: false,
+                need_partial_update: false,
+                equivalent_response_count: 0,
+                cluster_resource_listeners,
+                is_closed: false,
+                last_seen_leader_epochs: HashMap::new(),
+                invalid_topics: HashSet::new(),
+                unauthorized_topics: HashSet::new(),
+                metadata_snapshot: MetadataSnapshot::empty(),
+                fatal_exception: None,
+                bootstrap_addresses: Vec::new(),
+            }),
+            retain_topic_fn,
+            enable_partial_updates,
         }
     }
 
@@ -508,6 +582,7 @@ impl Metadata {
     /// Panics if metadata is closed or response is `None` (since response is a reference,
     /// this can't actually happen).
     pub fn update(&self, request_version: i32, response: &MetadataResponse, is_partial_update: bool, now_ms: i64) {
+        let retain_fn = &self.retain_topic_fn;
         let mut inner = self.inner.lock().unwrap();
         assert!(!inner.is_closed, "Update requested after metadata close");
 
@@ -525,15 +600,22 @@ impl Metadata {
 
         let previous_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
 
-        inner.metadata_snapshot = Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms);
+        let retain = |topic: &str, is_internal: bool, now: i64| -> bool {
+            if let Some(f) = retain_fn {
+                f(topic, is_internal, now)
+            } else {
+                Self::retain_topic_default(topic, is_internal, now)
+            }
+        };
+
+        inner.metadata_snapshot =
+            Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms, &retain);
 
         let cluster = inner.metadata_snapshot.cluster().clone();
         Self::maybe_set_metadata_error(&mut inner, &cluster);
 
         // Remove epochs for topics we no longer retain
-        inner
-            .last_seen_leader_epochs
-            .retain(|tp, _| Self::retain_topic_default(tp.topic(), false, now_ms));
+        inner.last_seen_leader_epochs.retain(|tp, _| retain(tp.topic(), false, now_ms));
 
         let new_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
         if previous_cluster_id != new_cluster_id {
@@ -696,6 +778,7 @@ impl Metadata {
         metadata_response: &MetadataResponse,
         is_partial_update: bool,
         now_ms: i64,
+        retain_topic: &dyn Fn(&str, bool, i64) -> bool,
     ) -> MetadataSnapshot {
         // All encountered topics
         let mut topics = HashSet::new();
@@ -725,7 +808,7 @@ impl Metadata {
                 effective_topic_id = None;
             }
 
-            if !Self::retain_topic_with_id(&topic_name, effective_topic_id, metadata.is_internal(), now_ms) {
+            if !retain_topic(&topic_name, metadata.is_internal(), now_ms) {
                 continue;
             }
 
@@ -789,9 +872,7 @@ impl Metadata {
                 internal_topics,
                 metadata_response.controller().cloned(),
                 topic_ids,
-                |topic, is_internal| {
-                    !topics_ref.contains(topic) && Self::retain_topic_default(topic, is_internal, now_ms)
-                },
+                |topic, is_internal| !topics_ref.contains(topic) && retain_topic(topic, is_internal, now_ms),
             )
         } else {
             MetadataSnapshot::new(
@@ -1004,7 +1085,7 @@ impl Metadata {
         // Perform a partial update only if a full update hasn't been requested,
         // and the last successful hasn't exceeded the metadata refresh time.
         if !inner.need_full_update && inner.last_successful_refresh_ms + inner.metadata_expire_ms > now_ms {
-            request = Self::new_metadata_request_builder_for_new_topics();
+            request = self.new_metadata_request_builder_for_new_topics();
             is_partial_update = true;
         }
         if request.is_none() {
@@ -1028,20 +1109,21 @@ impl Metadata {
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and any uncached topics, otherwise `None` if the functionality is not supported.
     ///
-    /// The base implementation returns `None`. Subclasses (consumers) override this.
-    fn new_metadata_request_builder_for_new_topics() -> Option<MetadataRequestBuilder> {
-        None
+    /// The base implementation returns `None`. When `enable_partial_updates` is set,
+    /// returns a full metadata request builder instead (simulating the Java subclass
+    /// override pattern used by `ConsumerMetadata`).
+    fn new_metadata_request_builder_for_new_topics(&self) -> Option<MetadataRequestBuilder> {
+        if self.enable_partial_updates {
+            Some(Self::new_metadata_request_builder())
+        } else {
+            None
+        }
     }
 
     /// Based on the topic name, check if the topic metadata should be kept when received
     /// in a metadata response. The default implementation returns `true` for all topics.
     fn retain_topic_default(_topic: &str, _is_internal: bool, _now_ms: i64) -> bool {
         true
-    }
-
-    /// Based on the topic name and topic ID, check if the topic metadata should be kept.
-    fn retain_topic_with_id(topic_name: &str, _topic_id: Option<Uuid>, is_internal: bool, now_ms: i64) -> bool {
-        Self::retain_topic_default(topic_name, is_internal, now_ms)
     }
 
     /// Returns the cluster resource for the current metadata snapshot.
@@ -2029,5 +2111,796 @@ mod tests {
         assert_eq!(2, metadata.fetch().partitions_for_topic(topic).len());
         assert_eq!(1, metadata.fetch().partition(&tp0).unwrap().leader().unwrap().id());
         assert_eq!(2, metadata.fetch().partition(&tp1).unwrap().leader().unwrap().id());
+    }
+
+    /// Translated from `MetadataTest.testIgnoreLeaderEpochInOlderMetadataResponse`.
+    ///
+    /// Prior to Kafka version 2.4 (which coincides with Metadata version 9), the broker
+    /// does not propagate leader epoch information accurately while a reassignment is in
+    /// progress, so we cannot rely on it.
+    #[test]
+    fn test_ignore_leader_epoch_in_older_metadata_response() {
+        use crate::common::protocol::Readable;
+        use crate::common::protocol::message_util;
+        use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+
+        let metadata = new_metadata();
+        let tp = TopicPartition::new("topic".to_string(), 0);
+
+        let mut partition_metadata = MetadataResponsePartition::new();
+        partition_metadata.set_partition_index(tp.partition());
+        partition_metadata.set_leader_id(5);
+        partition_metadata.set_leader_epoch(10);
+        partition_metadata.set_replica_nodes(vec![1, 2, 3]);
+        partition_metadata.set_isr_nodes(vec![1, 2, 3]);
+        partition_metadata.set_offline_replicas(Vec::new());
+        partition_metadata.set_error_code(Errors::None.code());
+
+        let mut topic_metadata = MetadataResponseTopic::new();
+        topic_metadata.set_name(Some(tp.topic().to_string()));
+        topic_metadata.set_error_code(Errors::None.code());
+        topic_metadata.set_partitions(vec![partition_metadata]);
+        topic_metadata.set_is_internal(false);
+
+        let mut data = MetadataResponseData::new();
+        data.set_cluster_id(Some("clusterId".to_string()));
+        data.set_controller_id(0);
+        data.set_topics(vec![topic_metadata]);
+        data.set_brokers(Vec::new());
+
+        // For versions < 9, leader epochs should not be reliable
+        for version in ApiKeys::METADATA.oldest_version()..9 {
+            let mut readable = message_util::to_byte_buffer_accessor(&data, version).unwrap();
+            let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
+            assert!(
+                !response.has_reliable_leader_epochs(),
+                "Version {} should not have reliable leader epochs",
+                version
+            );
+            metadata.update_with_current_request_version(&response, false, 100);
+            let pm = metadata.partition_metadata_if_current(&tp);
+            assert!(pm.is_some(), "Partition metadata should be present for version {}", version);
+            assert_eq!(
+                None,
+                pm.unwrap().leader_epoch,
+                "Leader epoch should be None for version {}",
+                version
+            );
+        }
+
+        // For versions >= 9, leader epochs should be reliable
+        for version in 9..=ApiKeys::METADATA.latest_version() {
+            let mut readable = message_util::to_byte_buffer_accessor(&data, version).unwrap();
+            let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
+            assert!(
+                response.has_reliable_leader_epochs(),
+                "Version {} should have reliable leader epochs",
+                version
+            );
+            metadata.update_with_current_request_version(&response, false, 100);
+            let pm = metadata.partition_metadata_if_current(&tp);
+            assert!(pm.is_some(), "Partition metadata should be present for version {}", version);
+            assert_eq!(
+                Some(10),
+                pm.unwrap().leader_epoch,
+                "Leader epoch should be Some(10) for version {}",
+                version
+            );
+        }
+    }
+
+    /// Translated from `MetadataTest.testStaleMetadata`.
+    #[test]
+    fn test_stale_metadata() {
+        use crate::metadata_response_data::{MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic};
+
+        let metadata = new_metadata();
+        let tp = TopicPartition::new("topic".to_string(), 0);
+
+        let mut partition_metadata = MetadataResponsePartition::new();
+        partition_metadata.set_partition_index(tp.partition());
+        partition_metadata.set_leader_id(1);
+        partition_metadata.set_leader_epoch(10);
+        partition_metadata.set_replica_nodes(vec![1, 2, 3]);
+        partition_metadata.set_isr_nodes(vec![1, 2, 3]);
+        partition_metadata.set_offline_replicas(Vec::new());
+        partition_metadata.set_error_code(Errors::None.code());
+
+        let mut topic_metadata = MetadataResponseTopic::new();
+        topic_metadata.set_name(Some(tp.topic().to_string()));
+        topic_metadata.set_error_code(Errors::None.code());
+        topic_metadata.set_partitions(vec![partition_metadata.clone()]);
+        topic_metadata.set_is_internal(false);
+
+        let mut data = MetadataResponseData::new();
+        data.set_cluster_id(Some("clusterId".to_string()));
+        data.set_controller_id(0);
+        data.set_topics(vec![topic_metadata.clone()]);
+        data.set_brokers(Vec::new());
+
+        metadata.update_with_current_request_version(
+            &MetadataResponse::new(data.clone(), ApiKeys::METADATA.latest_version()),
+            false,
+            100,
+        );
+
+        // Older epoch with changed ISR should be ignored
+        partition_metadata.set_partition_index(tp.partition());
+        partition_metadata.set_leader_id(1);
+        partition_metadata.set_leader_epoch(9);
+        partition_metadata.set_replica_nodes(vec![1, 2, 3]);
+        partition_metadata.set_isr_nodes(vec![1, 2]);
+        partition_metadata.set_offline_replicas(Vec::new());
+        partition_metadata.set_error_code(Errors::None.code());
+
+        topic_metadata.set_partitions(vec![partition_metadata]);
+        data.set_topics(vec![topic_metadata]);
+
+        metadata.update_with_current_request_version(
+            &MetadataResponse::new(data, ApiKeys::METADATA.latest_version()),
+            false,
+            101,
+        );
+        assert_eq!(Some(10), metadata.last_seen_leader_epoch(&tp));
+
+        let pm = metadata.partition_metadata_if_current(&tp);
+        assert!(pm.is_some());
+        let pm = pm.unwrap();
+
+        assert_eq!(vec![1, 2, 3], pm.in_sync_replica_ids);
+        assert_eq!(Some(10), pm.leader_epoch);
+    }
+
+    /// Translated from `MetadataTest.testPartialMetadataUpdate`.
+    #[test]
+    fn test_partial_metadata_update() {
+        let now: i64 = 10000;
+
+        let metadata = Metadata::with_overrides(
+            REFRESH_BACKOFF_MS,
+            REFRESH_BACKOFF_MAX_MS,
+            METADATA_EXPIRE_MS,
+            ClusterResourceListeners::new(),
+            None,
+            true, // enable partial updates
+        );
+
+        assert!(!metadata.update_requested());
+
+        // Request a metadata update. This must force a full metadata update request.
+        metadata.request_update(true);
+        let v_and_b = metadata.new_metadata_request_and_version(now);
+        assert!(!v_and_b.is_partial_update);
+        metadata.update(
+            v_and_b.request_version,
+            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            false,
+            now,
+        );
+        assert!(!metadata.update_requested());
+
+        // Request a metadata update for a new topic. This should perform a partial metadata update.
+        metadata.request_update_for_new_topics();
+        let v_and_b = metadata.new_metadata_request_and_version(now);
+        assert!(v_and_b.is_partial_update);
+        metadata.update(
+            v_and_b.request_version,
+            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            true,
+            now,
+        );
+        assert!(!metadata.update_requested());
+
+        // Request both types of metadata updates. This should always perform a full update.
+        metadata.request_update(true);
+        metadata.request_update_for_new_topics();
+        let v_and_b = metadata.new_metadata_request_and_version(now);
+        assert!(!v_and_b.is_partial_update);
+        metadata.update(
+            v_and_b.request_version,
+            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            false,
+            now,
+        );
+        assert!(!metadata.update_requested());
+
+        // Request only a partial metadata update, but elapse enough time such that a full refresh is needed.
+        metadata.request_update_for_new_topics();
+        let refresh_time_ms = now + metadata.metadata_expire_ms();
+        let v_and_b = metadata.new_metadata_request_and_version(refresh_time_ms);
+        assert!(!v_and_b.is_partial_update);
+        metadata.update(
+            v_and_b.request_version,
+            &request_test_utils::metadata_update_with(1, &[("topic".to_string(), 1)].into_iter().collect()),
+            true,
+            refresh_time_ms,
+        );
+        assert!(!metadata.update_requested());
+
+        // Request two partial metadata updates that are overlapping.
+        metadata.request_update_for_new_topics();
+        let v_and_b = metadata.new_metadata_request_and_version(now);
+        assert!(v_and_b.is_partial_update);
+        metadata.request_update_for_new_topics();
+        let overlapping_v_and_b = metadata.new_metadata_request_and_version(now);
+        assert!(overlapping_v_and_b.is_partial_update);
+        assert!(metadata.update_requested());
+        metadata.update(
+            v_and_b.request_version,
+            &request_test_utils::metadata_update_with(1, &[("topic-1".to_string(), 1)].into_iter().collect()),
+            true,
+            now,
+        );
+        assert!(metadata.update_requested());
+        metadata.update(
+            overlapping_v_and_b.request_version,
+            &request_test_utils::metadata_update_with(1, &[("topic-2".to_string(), 1)].into_iter().collect()),
+            true,
+            now,
+        );
+        assert!(!metadata.update_requested());
+    }
+
+    /// Translated from `MetadataTest.testNodeIfOnlineWhenNotInReplicaSet`.
+    #[test]
+    fn test_node_if_online_when_not_in_replica_set() {
+        let metadata = new_metadata();
+        let mut partition_counts = HashMap::new();
+        partition_counts.insert("topic-1".to_string(), 1);
+        let node0 = Node::new(0, "localhost".to_string(), 9092);
+
+        let response = request_test_utils::metadata_update_with_full(
+            "dummy",
+            2,
+            &HashMap::new(),
+            &partition_counts,
+            &|_tp| Some(99),
+            &move |error, partition, _leader, leader_epoch, _replicas, _isr, _offline_replicas| PartitionMetadata {
+                error,
+                topic_partition: partition.clone(),
+                leader_id: Some(node0.id()),
+                leader_epoch,
+                replica_ids: vec![node0.id()],
+                in_sync_replica_ids: Vec::new(),
+                offline_replica_ids: Vec::new(),
+            },
+            ApiKeys::METADATA.latest_version(),
+            &HashMap::new(),
+        );
+        metadata.update_with_current_request_version(&empty_metadata_response(), false, 0);
+        metadata.update_with_current_request_version(&response, false, 10);
+
+        let tp = TopicPartition::new("topic-1".to_string(), 0);
+
+        assert_eq!(1, metadata.fetch().node_by_id(1).unwrap().id());
+        assert!(metadata.fetch().node_if_online(&tp, 1).is_none());
+    }
+
+    /// Translated from `MetadataTest.testNodeIfOnlineNonExistentTopicPartition`.
+    #[test]
+    fn test_node_if_online_non_existent_topic_partition() {
+        let metadata = new_metadata();
+        let metadata_response = request_test_utils::metadata_update_with(2, &HashMap::new());
+        metadata.update_with_current_request_version(&metadata_response, false, 0);
+
+        let tp = TopicPartition::new("topic-1".to_string(), 0);
+
+        assert_eq!(0, metadata.fetch().node_by_id(0).unwrap().id());
+        assert!(metadata.fetch().partition(&tp).is_none());
+        assert!(metadata.fetch().node_if_online(&tp, 0).is_none());
+    }
+
+    /// Translated from `MetadataTest.testLeaderMetadataInconsistentWithBrokerMetadata`.
+    ///
+    /// Tests a reordering scenario which can lead to inconsistent leader state.
+    /// A partition initially has one broker offline. That broker comes online and
+    /// is elected leader. The client sees these two events in the opposite order.
+    #[test]
+    fn test_leader_metadata_inconsistent_with_broker_metadata() {
+        use crate::metadata_response_data::{
+            MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+        };
+
+        let metadata = new_metadata();
+        let tp = TopicPartition::new("topic".to_string(), 0);
+
+        let node0 = Node::new(0, "localhost".to_string(), 9092);
+        let node1 = Node::new(1, "localhost".to_string(), 9093);
+        let node2 = Node::new(2, "localhost".to_string(), 9094);
+
+        // The first metadata received by broker (epoch=10)
+        let mut first_partition_metadata = MetadataResponsePartition::new();
+        first_partition_metadata.set_partition_index(tp.partition());
+        first_partition_metadata.set_error_code(Errors::None.code());
+        first_partition_metadata.set_leader_epoch(10);
+        first_partition_metadata.set_leader_id(0);
+        first_partition_metadata.set_replica_nodes(vec![0, 1, 2]);
+        first_partition_metadata.set_isr_nodes(vec![0, 1, 2]);
+        first_partition_metadata.set_offline_replicas(Vec::new());
+
+        // The second metadata received has stale metadata (epoch=8)
+        let mut second_partition_metadata = MetadataResponsePartition::new();
+        second_partition_metadata.set_partition_index(tp.partition());
+        second_partition_metadata.set_error_code(Errors::None.code());
+        second_partition_metadata.set_leader_epoch(8);
+        second_partition_metadata.set_leader_id(1);
+        second_partition_metadata.set_replica_nodes(vec![0, 1, 2]);
+        second_partition_metadata.set_isr_nodes(vec![1, 2]);
+        second_partition_metadata.set_offline_replicas(vec![0]);
+
+        let build_topic_collection =
+            |topic: &str, partition_metadata: MetadataResponsePartition| -> Vec<MetadataResponseTopic> {
+                let mut topic_metadata = MetadataResponseTopic::new();
+                topic_metadata.set_error_code(Errors::None.code());
+                topic_metadata.set_name(Some(topic.to_string()));
+                topic_metadata.set_is_internal(false);
+                topic_metadata.set_partitions(vec![partition_metadata]);
+                vec![topic_metadata]
+            };
+
+        let build_broker_collection = |nodes: &[&Node]| -> Vec<MetadataResponseBroker> {
+            nodes
+                .iter()
+                .map(|node| {
+                    let mut broker = MetadataResponseBroker::new();
+                    broker.set_node_id(node.id());
+                    broker.set_host(node.host().to_string());
+                    broker.set_port(node.port());
+                    broker.set_rack(node.rack().map(|r| r.to_string()));
+                    broker
+                })
+                .collect()
+        };
+
+        let mut data1 = MetadataResponseData::new();
+        data1.set_topics(build_topic_collection(tp.topic(), first_partition_metadata));
+        data1.set_brokers(build_broker_collection(&[&node0, &node1, &node2]));
+        metadata.update_with_current_request_version(
+            &MetadataResponse::new(data1, ApiKeys::METADATA.latest_version()),
+            false,
+            10,
+        );
+
+        let mut data2 = MetadataResponseData::new();
+        data2.set_topics(build_topic_collection(tp.topic(), second_partition_metadata));
+        data2.set_brokers(build_broker_collection(&[&node1, &node2]));
+        metadata.update_with_current_request_version(
+            &MetadataResponse::new(data2, ApiKeys::METADATA.latest_version()),
+            false,
+            20,
+        );
+
+        assert!(metadata.fetch().leader_for(&tp).is_none());
+        assert_eq!(Some(10), metadata.last_seen_leader_epoch(&tp));
+        assert!(metadata.current_leader(&tp).leader.is_none());
+    }
+
+    /// Translated from `MetadataTest.testMetadataMerge`.
+    #[test]
+    fn test_metadata_merge() {
+        let now: i64 = 10000;
+        let mut topic_ids = HashMap::new();
+
+        let retain_topics: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let retain_topics_clone = retain_topics.clone();
+
+        let metadata = Metadata::with_overrides(
+            REFRESH_BACKOFF_MS,
+            REFRESH_BACKOFF_MAX_MS,
+            METADATA_EXPIRE_MS,
+            ClusterResourceListeners::new(),
+            Some(Box::new(move |topic: &str, _is_internal: bool, _now_ms: i64| -> bool {
+                retain_topics_clone.lock().unwrap().contains(topic)
+            })),
+            false,
+        );
+
+        // Initialize a metadata instance with two topic variants "old" and "keep". Both will be retained.
+        let old_cluster_id = "oldClusterId";
+        let old_nodes = 2;
+        let mut old_topic_errors = HashMap::new();
+        old_topic_errors.insert("oldInvalidTopic".to_string(), Errors::InvalidTopicException);
+        old_topic_errors.insert("keepInvalidTopic".to_string(), Errors::InvalidTopicException);
+        old_topic_errors.insert("oldUnauthorizedTopic".to_string(), Errors::TopicAuthorizationFailed);
+        old_topic_errors.insert("keepUnauthorizedTopic".to_string(), Errors::TopicAuthorizationFailed);
+        let mut old_topic_partition_counts = HashMap::new();
+        old_topic_partition_counts.insert("oldValidTopic".to_string(), 2);
+        old_topic_partition_counts.insert("keepValidTopic".to_string(), 3);
+
+        *retain_topics.lock().unwrap() = [
+            "oldInvalidTopic",
+            "keepInvalidTopic",
+            "oldUnauthorizedTopic",
+            "keepUnauthorizedTopic",
+            "oldValidTopic",
+            "keepValidTopic",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        topic_ids.insert("oldValidTopic".to_string(), Uuid::random_uuid());
+        topic_ids.insert("keepValidTopic".to_string(), Uuid::random_uuid());
+        let metadata_response = request_test_utils::metadata_update_with_ids(
+            old_cluster_id,
+            old_nodes,
+            &old_topic_errors,
+            &old_topic_partition_counts,
+            &|_tp| Some(100),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&metadata_response, true, now);
+        let metadata_topic_ids1 = metadata.topic_ids();
+        for topic in retain_topics.lock().unwrap().iter() {
+            assert_eq!(
+                metadata_topic_ids1.get(topic).copied(),
+                topic_ids.get(topic).copied(),
+                "Topic ID mismatch for {}",
+                topic
+            );
+        }
+
+        // Update the metadata to add a new topic variant, "new", which will be retained with "keep".
+        // Note this means that all of the "old" topics should be dropped.
+        let cluster = metadata.fetch();
+        assert_eq!(Some(old_cluster_id), cluster.cluster_resource().cluster_id());
+        assert_eq!(old_nodes as usize, cluster.nodes().len());
+        assert_eq!(
+            &["oldInvalidTopic", "keepInvalidTopic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.invalid_topics()
+        );
+        assert_eq!(
+            &["oldUnauthorizedTopic", "keepUnauthorizedTopic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.unauthorized_topics()
+        );
+        assert_eq!(
+            ["oldValidTopic", "keepValidTopic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.topics().map(|s| s.to_string()).collect::<HashSet<_>>()
+        );
+        assert_eq!(2, cluster.partitions_for_topic("oldValidTopic").len());
+        assert_eq!(3, cluster.partitions_for_topic("keepValidTopic").len());
+        let cluster_topic_ids: HashSet<Uuid> = cluster.topic_ids().cloned().collect();
+        let expected_topic_ids: HashSet<Uuid> = topic_ids.values().copied().collect();
+        assert_eq!(expected_topic_ids, cluster_topic_ids);
+
+        let new_cluster_id = "newClusterId";
+        let new_nodes = old_nodes + 1;
+        let mut new_topic_errors = HashMap::new();
+        new_topic_errors.insert("newInvalidTopic".to_string(), Errors::InvalidTopicException);
+        new_topic_errors.insert("newUnauthorizedTopic".to_string(), Errors::TopicAuthorizationFailed);
+        let mut new_topic_partition_counts = HashMap::new();
+        new_topic_partition_counts.insert("keepValidTopic".to_string(), 2);
+        new_topic_partition_counts.insert("newValidTopic".to_string(), 4);
+
+        *retain_topics.lock().unwrap() = [
+            "keepInvalidTopic",
+            "newInvalidTopic",
+            "keepUnauthorizedTopic",
+            "newUnauthorizedTopic",
+            "keepValidTopic",
+            "newValidTopic",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+
+        topic_ids.insert("newValidTopic".to_string(), Uuid::random_uuid());
+        let metadata_response = request_test_utils::metadata_update_with_ids(
+            new_cluster_id,
+            new_nodes,
+            &new_topic_errors,
+            &new_topic_partition_counts,
+            &|_tp| Some(200),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&metadata_response, true, now);
+        topic_ids.remove("oldValidTopic");
+        let metadata_topic_ids2 = metadata.topic_ids();
+        for topic in retain_topics.lock().unwrap().iter() {
+            assert_eq!(
+                metadata_topic_ids2.get(topic).copied(),
+                topic_ids.get(topic).copied(),
+                "Topic ID mismatch for {}",
+                topic
+            );
+        }
+        assert!(!metadata_topic_ids2.contains_key("oldValidTopic"));
+
+        let cluster = metadata.fetch();
+        assert_eq!(Some(new_cluster_id), cluster.cluster_resource().cluster_id());
+        assert_eq!(new_nodes as usize, cluster.nodes().len());
+        assert_eq!(
+            &["keepInvalidTopic", "newInvalidTopic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.invalid_topics()
+        );
+        assert_eq!(
+            &["keepUnauthorizedTopic", "newUnauthorizedTopic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.unauthorized_topics()
+        );
+        assert_eq!(
+            ["keepValidTopic", "newValidTopic"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.topics().map(|s| s.to_string()).collect::<HashSet<_>>()
+        );
+        assert_eq!(2, cluster.partitions_for_topic("keepValidTopic").len());
+        assert_eq!(4, cluster.partitions_for_topic("newValidTopic").len());
+        let cluster_topic_ids: HashSet<Uuid> = cluster.topic_ids().cloned().collect();
+        let expected_topic_ids: HashSet<Uuid> = topic_ids.values().copied().collect();
+        assert_eq!(expected_topic_ids, cluster_topic_ids);
+
+        // Perform another metadata update, but this time all topic metadata should be cleared.
+        *retain_topics.lock().unwrap() = HashSet::new();
+
+        let metadata_response = request_test_utils::metadata_update_with_ids(
+            new_cluster_id,
+            new_nodes,
+            &new_topic_errors,
+            &new_topic_partition_counts,
+            &|_tp| Some(300),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&metadata_response, true, now);
+        let metadata_topic_ids3 = metadata.topic_ids();
+        for topic_name in topic_ids.keys() {
+            assert!(
+                !metadata_topic_ids3.contains_key(topic_name),
+                "Topic {} should not have an ID",
+                topic_name
+            );
+        }
+
+        let cluster = metadata.fetch();
+        assert_eq!(Some(new_cluster_id), cluster.cluster_resource().cluster_id());
+        assert_eq!(new_nodes as usize, cluster.nodes().len());
+        assert!(cluster.invalid_topics().is_empty());
+        assert!(cluster.unauthorized_topics().is_empty());
+        assert_eq!(0, cluster.topics().count());
+        assert_eq!(0, cluster.topic_ids().count());
+    }
+
+    /// Translated from `MetadataTest.testMetadataMergeOnIdDowngrade`.
+    #[test]
+    fn test_metadata_merge_on_id_downgrade() {
+        let now: i64 = 10000;
+        let mut topic_ids = HashMap::new();
+
+        let retain_topics: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let retain_topics_clone = retain_topics.clone();
+
+        let metadata = Metadata::with_overrides(
+            REFRESH_BACKOFF_MS,
+            REFRESH_BACKOFF_MAX_MS,
+            METADATA_EXPIRE_MS,
+            ClusterResourceListeners::new(),
+            Some(Box::new(move |topic: &str, _is_internal: bool, _now_ms: i64| -> bool {
+                retain_topics_clone.lock().unwrap().contains(topic)
+            })),
+            false,
+        );
+
+        // Initialize a metadata instance with two topics. Both will be retained.
+        let cluster_id = "clusterId";
+        let nodes = 2;
+        let mut topic_partition_counts = HashMap::new();
+        topic_partition_counts.insert("validTopic1".to_string(), 2);
+        topic_partition_counts.insert("validTopic2".to_string(), 3);
+
+        *retain_topics.lock().unwrap() = ["validTopic1", "validTopic2"].iter().map(|s| s.to_string()).collect();
+
+        topic_ids.insert("validTopic1".to_string(), Uuid::random_uuid());
+        topic_ids.insert("validTopic2".to_string(), Uuid::random_uuid());
+        let metadata_response = request_test_utils::metadata_update_with_ids(
+            cluster_id,
+            nodes,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_tp| Some(100),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&metadata_response, true, now);
+        let metadata_topic_ids1 = metadata.topic_ids();
+        for topic in retain_topics.lock().unwrap().iter() {
+            assert_eq!(
+                metadata_topic_ids1.get(topic).copied(),
+                topic_ids.get(topic).copied(),
+                "Topic ID mismatch for {}",
+                topic
+            );
+        }
+
+        // Try removing the topic ID from validTopic1 (simulating receiving a request
+        // from a controller with an older IBP)
+        topic_ids.remove("validTopic1");
+        let metadata_response = request_test_utils::metadata_update_with_ids(
+            cluster_id,
+            nodes,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_tp| Some(200),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&metadata_response, true, now);
+        let metadata_topic_ids2 = metadata.topic_ids();
+        for topic in retain_topics.lock().unwrap().iter() {
+            assert_eq!(
+                metadata_topic_ids2.get(topic).copied(),
+                topic_ids.get(topic).copied(),
+                "Topic ID mismatch for {}",
+                topic
+            );
+        }
+
+        let cluster = metadata.fetch();
+        // We still have the topic, but it just doesn't have an ID.
+        assert_eq!(
+            ["validTopic1", "validTopic2"]
+                .iter()
+                .map(|s| s.to_string())
+                .collect::<HashSet<_>>(),
+            cluster.topics().map(|s| s.to_string()).collect::<HashSet<_>>()
+        );
+        assert_eq!(2, cluster.partitions_for_topic("validTopic1").len());
+        let cluster_topic_ids: HashSet<Uuid> = cluster.topic_ids().cloned().collect();
+        let expected_topic_ids: HashSet<Uuid> = topic_ids.values().copied().collect();
+        assert_eq!(expected_topic_ids, cluster_topic_ids);
+        assert_eq!(Uuid::zero(), cluster.topic_id("validTopic1"));
+    }
+
+    /// Translated from `MetadataTest.testConcurrentUpdateAndFetchForSnapshotAndCluster`.
+    ///
+    /// Tests that concurrently updating Metadata, and fetching the corresponding
+    /// MetadataSnapshot and Cluster work as expected, i.e. snapshot and cluster contain
+    /// the relevant updates.
+    #[test]
+    fn test_concurrent_update_and_fetch_for_snapshot_and_cluster() {
+        let now: i64 = 10000;
+        let metadata = Arc::new(Metadata::new(
+            REFRESH_BACKOFF_MS,
+            REFRESH_BACKOFF_MAX_MS,
+            METADATA_EXPIRE_MS,
+            ClusterResourceListeners::new(),
+        ));
+
+        // Setup metadata with 10 nodes, 2 topics, topic1 & 2, both to be retained in the update.
+        // Both will have leader-epoch 100.
+        let old_node_count = 10;
+        let topic1 = "test_topic1";
+        let topic2 = "test_topic2";
+        let topic1_part0 = TopicPartition::new(topic1.to_string(), 0);
+        let mut topic_partition_counts = HashMap::new();
+        let old_partition_count = 1usize;
+        topic_partition_counts.insert(topic1.to_string(), old_partition_count as i32);
+        topic_partition_counts.insert(topic2.to_string(), old_partition_count as i32);
+        let mut topic_ids = HashMap::new();
+        topic_ids.insert(topic1.to_string(), Uuid::random_uuid());
+        topic_ids.insert(topic2.to_string(), Uuid::random_uuid());
+        let old_leader_epoch = 100;
+        let metadata_response = request_test_utils::metadata_update_with_ids(
+            "cluster",
+            old_node_count,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_tp| Some(old_leader_epoch),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&metadata_response, true, now);
+        let snapshot = metadata.fetch_metadata_snapshot();
+        let cluster = metadata.fetch();
+        // Validate metadata snapshot & cluster are setup as expected.
+        assert_eq!(&cluster, snapshot.cluster());
+        assert_eq!(old_node_count as usize, snapshot.cluster().nodes().len());
+        assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic1));
+        assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic2));
+        assert_eq!(Some(old_leader_epoch), snapshot.leader_epoch_for(&topic1_part0));
+
+        // Setup 6 threads, where 3 are updating metadata & 3 are reading snapshot/cluster.
+        // Metadata will be updated with higher # of nodes, partition-counts, leader-epoch.
+        let num_threads = 6;
+        let barrier = Arc::new(std::sync::Barrier::new(num_threads));
+        let at_least_updated = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let new_snapshot: Arc<Mutex<Option<MetadataSnapshot>>> = Arc::new(Mutex::new(None));
+        let new_cluster: Arc<Mutex<Option<Cluster>>> = Arc::new(Mutex::new(None));
+
+        let mut handles = Vec::new();
+        for i in 0..num_threads {
+            let id = i + 1;
+            let metadata_clone = metadata.clone();
+            let barrier_clone = barrier.clone();
+            let at_least_updated_clone = at_least_updated.clone();
+            let new_snapshot_clone = new_snapshot.clone();
+            let new_cluster_clone = new_cluster.clone();
+            let topic_ids_clone = topic_ids.clone();
+
+            handles.push(std::thread::spawn(move || {
+                barrier_clone.wait();
+                if id % 2 == 0 {
+                    // Thread to update metadata
+                    let n_nodes = old_node_count + id as i32;
+                    let mut new_topic_partition_counts = HashMap::new();
+                    new_topic_partition_counts.insert(topic1.to_string(), old_partition_count as i32 + id as i32);
+                    new_topic_partition_counts.insert(topic2.to_string(), old_partition_count as i32 + id as i32);
+                    let new_metadata_response = request_test_utils::metadata_update_with_ids(
+                        "clusterId",
+                        n_nodes,
+                        &HashMap::new(),
+                        &new_topic_partition_counts,
+                        &|_tp| Some(old_leader_epoch + id as i32),
+                        &topic_ids_clone,
+                    );
+                    metadata_clone.update_with_current_request_version(&new_metadata_response, true, now);
+                    at_least_updated_clone.store(true, Ordering::SeqCst);
+                } else {
+                    // Thread to read metadata snapshot, once it's updated
+                    while !at_least_updated_clone.load(Ordering::SeqCst) {
+                        std::thread::yield_now();
+                    }
+                    *new_snapshot_clone.lock().unwrap() = Some(metadata_clone.fetch_metadata_snapshot());
+                    *new_cluster_clone.lock().unwrap() = Some(metadata_clone.fetch());
+                }
+            }));
+        }
+
+        for handle in handles {
+            handle.join().expect("Thread panicked");
+        }
+
+        // Validate new snapshot is up-to-date. And has higher partition counts, nodes & leader epoch than earlier.
+        {
+            let snap = new_snapshot.lock().unwrap();
+            let snap = snap.as_ref().unwrap();
+            let new_node_count = snap.cluster().nodes().len();
+            assert!(old_node_count as usize <= new_node_count, "Unexpected value {}", new_node_count);
+            let new_partition_count_topic1 = snap.cluster().partition_count_for_topic(topic1).unwrap();
+            assert!(
+                old_partition_count <= new_partition_count_topic1,
+                "Unexpected value {}",
+                new_partition_count_topic1
+            );
+            let new_partition_count_topic2 = snap.cluster().partition_count_for_topic(topic2).unwrap();
+            assert!(
+                old_partition_count <= new_partition_count_topic2,
+                "Unexpected value {}",
+                new_partition_count_topic2
+            );
+            let new_leader_epoch = snap.leader_epoch_for(&topic1_part0).unwrap();
+            assert!(old_leader_epoch <= new_leader_epoch, "Unexpected value {}", new_leader_epoch);
+        }
+
+        // Validate new cluster is up-to-date. And has higher partition counts, nodes than earlier.
+        {
+            let clust = new_cluster.lock().unwrap();
+            let clust = clust.as_ref().unwrap();
+            let new_node_count = clust.nodes().len();
+            assert!(old_node_count as usize <= new_node_count, "Unexpected value {}", new_node_count);
+            let new_partition_count_topic1 = clust.partition_count_for_topic(topic1).unwrap();
+            assert!(
+                old_partition_count <= new_partition_count_topic1,
+                "Unexpected value {}",
+                new_partition_count_topic1
+            );
+            let new_partition_count_topic2 = clust.partition_count_for_topic(topic2).unwrap();
+            assert!(
+                old_partition_count <= new_partition_count_topic2,
+                "Unexpected value {}",
+                new_partition_count_topic2
+            );
+        }
     }
 }

@@ -146,6 +146,16 @@ impl MockSelector {
         self.delayed_receives.push(receive);
     }
 
+    /// Clears just the completed sends list.
+    pub fn clear_completed_sends(&mut self) {
+        self.completed_sends.clear();
+    }
+
+    /// Clears just the completed receives list.
+    pub fn clear_completed_receives(&mut self) {
+        self.completed_receives.clear();
+    }
+
     /// Mark a channel as not ready.
     pub fn channel_not_ready(&mut self, id: &str) {
         self.ready.remove(id);

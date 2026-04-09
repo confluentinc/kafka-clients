@@ -166,15 +166,8 @@ pub fn metadata_update_with_ids(
 }
 
 /// Type alias for partition supplier callback to avoid overly complex type signatures.
-pub type PartitionSupplier = dyn Fn(
-    Errors,
-    &TopicPartition,
-    Option<i32>,
-    Option<i32>,
-    Vec<i32>,
-    Vec<i32>,
-    Vec<i32>,
-) -> PartitionMetadata;
+pub type PartitionSupplier =
+    dyn Fn(Errors, &TopicPartition, Option<i32>, Option<i32>, Vec<i32>, Vec<i32>, Vec<i32>) -> PartitionMetadata;
 
 /// The most general metadata update builder used by tests.
 #[allow(clippy::too_many_arguments)]
