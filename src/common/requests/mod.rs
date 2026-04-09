@@ -26,6 +26,7 @@ pub mod metadata_request;
 pub mod metadata_response;
 pub mod request_and_size;
 pub mod request_header;
+pub mod request_test_utils;
 pub mod request_utils;
 pub mod response_header;
 pub mod send_builder;

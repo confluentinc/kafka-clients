@@ -22,12 +22,19 @@ pub mod client_request;
 pub mod client_response;
 pub mod client_utils;
 pub mod cluster_connection_states;
+pub mod common_client_configs;
 pub mod connection_state;
 pub mod host_resolver;
 #[cfg(not(feature = "skip-generated"))]
 pub mod in_flight_requests;
 pub mod least_loaded_node;
+#[cfg(not(feature = "skip-generated"))]
+pub mod metadata;
 pub mod metadata_recovery_strategy;
+#[cfg(not(feature = "skip-generated"))]
+pub mod metadata_snapshot;
+#[cfg(not(feature = "skip-generated"))]
+pub mod metadata_updater;
 #[cfg(not(feature = "skip-generated"))]
 pub mod node_api_versions;
 

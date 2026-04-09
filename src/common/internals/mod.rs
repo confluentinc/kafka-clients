@@ -12,26 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common types and utilities for Kafka (org.apache.kafka.common)
+//! Internal types (org.apache.kafka.common.internals)
 
-pub mod cluster;
-pub mod cluster_resource;
-pub mod feature;
-pub mod internals;
-pub mod memory;
-pub mod network;
-pub mod node;
-pub mod partition_info;
-pub mod protocol;
-pub mod requests;
-pub mod topic_partition;
-pub mod utils;
-pub mod uuid;
+pub mod cluster_resource_listeners;
+pub mod topic;
 
-pub use cluster::Cluster;
-pub use cluster_resource::ClusterResource;
-pub use node::Node;
-pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
-pub use topic_partition::TopicPartition;
-pub use uuid::Uuid;
+pub use cluster_resource_listeners::{ClusterResourceListener, ClusterResourceListeners};
+pub use topic::Topic;
