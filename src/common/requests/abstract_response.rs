@@ -29,6 +29,7 @@ use crate::common::protocol::message::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
 use super::api_versions_response::ApiVersionsResponse;
+use super::metadata_response::MetadataResponse;
 use super::request_header::RequestHeader;
 use super::response_header::ResponseHeader;
 use super::send_builder::SendBuilder;
@@ -46,6 +47,8 @@ pub const DEFAULT_THROTTLE_TIME: i32 = 0;
 pub enum ConcreteResponse {
     /// An ApiVersions response.
     ApiVersions(ApiVersionsResponse),
+    /// A Metadata response.
+    Metadata(MetadataResponse),
 }
 
 impl ConcreteResponse {
@@ -53,6 +56,7 @@ impl ConcreteResponse {
     pub fn api_key(&self) -> &'static ApiKeys {
         match self {
             Self::ApiVersions(r) => r.api_key(),
+            Self::Metadata(r) => r.api_key(),
         }
     }
 
@@ -66,6 +70,7 @@ impl ConcreteResponse {
     pub fn to_send(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferSend> {
         match self {
             Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::Metadata(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -81,6 +86,9 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
             },
+            Self::Metadata(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -93,21 +101,26 @@ impl ConcreteResponse {
     /// Returns an error if serialization fails.
     pub fn serialize(&self, version: i16) -> io::Result<ByteBufferAccessor> {
         match self {
-            Self::ApiVersions(r) => {
-                let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
-                let size = Message::size(r.data(), &mut cache, version)?;
-                let mut buf = ByteBufferAccessor::new(size as usize);
-                Message::write(r.data(), &mut buf, &cache, version)?;
-                buf.flip();
-                Ok(buf)
-            },
+            Self::ApiVersions(r) => Self::serialize_body(r.data(), version),
+            Self::Metadata(r) => Self::serialize_body(r.data(), version),
         }
+    }
+
+    /// Serializes a message body at a given version.
+    fn serialize_body(msg: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
+        let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
+        let size = Message::size(msg, &mut cache, version)?;
+        let mut buf = ByteBufferAccessor::new(size as usize);
+        Message::write(msg, &mut buf, &cache, version)?;
+        buf.flip();
+        Ok(buf)
     }
 
     /// Returns the error counts for this response.
     pub fn error_counts(&self) -> HashMap<Errors, i32> {
         match self {
             Self::ApiVersions(r) => r.error_counts(),
+            Self::Metadata(r) => r.error_counts(),
         }
     }
 
@@ -117,6 +130,7 @@ impl ConcreteResponse {
     pub fn throttle_time_ms(&self) -> i32 {
         match self {
             Self::ApiVersions(r) => r.throttle_time_ms(),
+            Self::Metadata(r) => r.throttle_time_ms(),
         }
     }
 
@@ -125,6 +139,7 @@ impl ConcreteResponse {
     pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         match self {
             Self::ApiVersions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::Metadata(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -132,6 +147,7 @@ impl ConcreteResponse {
     pub fn should_client_throttle(&self, version: i16) -> bool {
         match self {
             Self::ApiVersions(r) => r.should_client_throttle(version),
+            Self::Metadata(r) => r.should_client_throttle(version),
         }
     }
 
@@ -187,6 +203,10 @@ impl ConcreteResponse {
                 let response = ApiVersionsResponse::parse(&mut buf, version)?;
                 Ok(Self::ApiVersions(response))
             },
+            ApiKeys::METADATA => {
+                let response = MetadataResponse::parse(readable, version)?;
+                Ok(Self::Metadata(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -199,6 +219,7 @@ impl std::fmt::Display for ConcreteResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiVersions(r) => write!(f, "{r}"),
+            Self::Metadata(r) => write!(f, "{r}"),
         }
     }
 }

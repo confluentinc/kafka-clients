@@ -27,9 +27,11 @@ use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::message::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+use crate::metadata_request_data::MetadataRequestData;
 
 use super::abstract_response::ConcreteResponse;
 use super::api_versions_request::ApiVersionsRequest;
+use super::metadata_request::MetadataRequest;
 use super::request_and_size::RequestAndSize;
 use super::request_header::RequestHeader;
 use super::send_builder::SendBuilder;
@@ -68,6 +70,8 @@ pub trait RequestBuilder {
 pub enum ConcreteRequest {
     /// An ApiVersions request.
     ApiVersions(ApiVersionsRequest),
+    /// A Metadata request.
+    Metadata(MetadataRequest),
 }
 
 impl ConcreteRequest {
@@ -75,6 +79,7 @@ impl ConcreteRequest {
     pub fn version(&self) -> i16 {
         match self {
             Self::ApiVersions(r) => r.version(),
+            Self::Metadata(r) => r.version(),
         }
     }
 
@@ -82,6 +87,7 @@ impl ConcreteRequest {
     pub fn api_key(&self) -> &'static ApiKeys {
         match self {
             Self::ApiVersions(r) => r.api_key(),
+            Self::Metadata(r) => r.api_key(),
         }
     }
 
@@ -95,6 +101,7 @@ impl ConcreteRequest {
     pub fn to_send(&self, header: &RequestHeader) -> io::Result<ByteBufferSend> {
         match self {
             Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::Metadata(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -111,6 +118,9 @@ impl ConcreteRequest {
             Self::ApiVersions(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::Metadata(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -123,15 +133,19 @@ impl ConcreteRequest {
     /// Returns an error if serialization fails.
     pub fn serialize(&self) -> io::Result<ByteBufferAccessor> {
         match self {
-            Self::ApiVersions(r) => {
-                let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
-                let size = Message::size(r.data(), &mut cache, r.version())?;
-                let mut buf = ByteBufferAccessor::new(size as usize);
-                Message::write(r.data(), &mut buf, &cache, r.version())?;
-                buf.flip();
-                Ok(buf)
-            },
+            Self::ApiVersions(r) => Self::serialize_body(r.data(), r.version()),
+            Self::Metadata(r) => Self::serialize_body(r.data(), r.version()),
         }
+    }
+
+    /// Serializes a message body at a given version.
+    fn serialize_body(msg: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
+        let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
+        let size = Message::size(msg, &mut cache, version)?;
+        let mut buf = ByteBufferAccessor::new(size as usize);
+        Message::write(msg, &mut buf, &cache, version)?;
+        buf.flip();
+        Ok(buf)
     }
 
     /// Returns an error response for this request.
@@ -142,6 +156,7 @@ impl ConcreteRequest {
     ) -> ConcreteResponse {
         match self {
             Self::ApiVersions(r) => r.get_error_response(throttle_time_ms, error),
+            Self::Metadata(r) => r.get_error_response(throttle_time_ms, error),
         }
     }
 
@@ -166,6 +181,10 @@ impl ConcreteRequest {
                 let data = ApiVersionsRequestData::read(readable, api_version)?;
                 Ok(Self::ApiVersions(ApiVersionsRequest::new(data, api_version)))
             },
+            ApiKeys::METADATA => {
+                let data = MetadataRequestData::read(readable, api_version)?;
+                Ok(Self::Metadata(MetadataRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -178,6 +197,7 @@ impl std::fmt::Display for ConcreteRequest {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::ApiVersions(r) => write!(f, "{r}"),
+            Self::Metadata(r) => write!(f, "{r}"),
         }
     }
 }

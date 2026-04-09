@@ -271,7 +271,9 @@ mod tests {
         let data = ApiVersionsRequestData::new();
         let request = ApiVersionsRequest::new(data, 1);
         let response = request.get_error_response(100, &Errors::UnsupportedVersion);
-        let ConcreteResponse::ApiVersions(r) = &response;
+        let ConcreteResponse::ApiVersions(r) = &response else {
+            panic!("Expected ApiVersions response");
+        };
         assert_eq!(r.data().error_code, Errors::UnsupportedVersion.code());
         assert_eq!(r.data().throttle_time_ms, 100);
         // Should have the API_VERSIONS api key in the response
