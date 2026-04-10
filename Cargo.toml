@@ -21,6 +21,7 @@ uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 indexmap = "2"
 log = "0.4"
+crc32c = "0.6"
 
 [dev-dependencies]
 testcontainers = "0.27"

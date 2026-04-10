@@ -218,6 +218,31 @@ pub fn size_of_unsigned_varint(value: u32) -> i32 {
     (((38 - leading_zeros) * 0b10010010010010011i32) >> 19) + (leading_zeros >> 5)
 }
 
+/// Returns the number of bytes needed to encode a signed value as a zig-zag varint.
+///
+/// Corresponds to Java's `ByteUtils.sizeOfVarint()`.
+pub fn size_of_varint(value: i32) -> i32 {
+    size_of_unsigned_varint(((value << 1) ^ (value >> 31)) as u32)
+}
+
+/// Returns the number of bytes needed to encode a signed value as a zig-zag varlong.
+///
+/// Corresponds to Java's `ByteUtils.sizeOfVarlong()`.
+pub fn size_of_varlong(value: i64) -> i32 {
+    let encoded = ((value << 1) ^ (value >> 63)) as u64;
+    size_of_unsigned_varlong_value(encoded)
+}
+
+/// Returns the number of bytes needed to encode an unsigned varlong value.
+fn size_of_unsigned_varlong_value(mut value: u64) -> i32 {
+    let mut bytes = 1;
+    while (value & 0xFFFFFFFFFFFFFF80) != 0 {
+        bytes += 1;
+        value >>= 7;
+    }
+    bytes
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

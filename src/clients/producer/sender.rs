@@ -83,16 +83,8 @@ pub struct Sender<C: ProduceClient> {
 
 impl<C: ProduceClient> Sender<C> {
     /// Create a new Sender.
-    pub fn new(
-        accumulator: Arc<RecordAccumulator>,
-        client: Arc<C>,
-        config: Arc<ProducerConfig>,
-    ) -> Self {
-        Sender {
-            accumulator,
-            client,
-            config,
-        }
+    pub fn new(accumulator: Arc<RecordAccumulator>, client: Arc<C>, config: Arc<ProducerConfig>) -> Self {
+        Sender { accumulator, client, config }
     }
 
     /// Main loop: runs until the accumulator is closed and fully drained.
@@ -134,12 +126,7 @@ impl<C: ProduceClient> Sender<C> {
 
             let result = self
                 .client
-                .send_produce_request(
-                    node_id,
-                    self.config.acks(),
-                    self.config.request_timeout(),
-                    request_batches,
-                )
+                .send_produce_request(node_id, self.config.acks(), self.config.request_timeout(), request_batches)
                 .await;
 
             match result {
@@ -152,16 +139,16 @@ impl<C: ProduceClient> Sender<C> {
                                 let bytes = batch.written_bytes();
                                 batch.complete(r.base_offset, r.log_append_time, r.error.as_ref());
                                 self.accumulator.release_memory(bytes);
-                            }
+                            },
                             None => {
                                 // No response for this partition — treat as success with offset 0.
                                 let bytes = batch.written_bytes();
                                 batch.complete(0, 0, None);
                                 self.accumulator.release_memory(bytes);
-                            }
+                            },
                         }
                     }
-                }
+                },
                 Err(e) => {
                     // Network-level failure — fail all batches in this request.
                     for batch in pending_batches {
@@ -169,7 +156,7 @@ impl<C: ProduceClient> Sender<C> {
                         batch.complete(0, 0, Some(&e));
                         self.accumulator.release_memory(bytes);
                     }
-                }
+                },
             }
         }
     }

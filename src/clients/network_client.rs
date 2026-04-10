@@ -1080,9 +1080,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         now: i64,
         response: &MetadataResponse,
     ) {
-        if self.metadata.is_some() {
-            let metadata = self.metadata.as_ref().unwrap().clone();
-
+        if let Some(metadata) = self.metadata.as_ref().cloned() {
             if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
                 && response.top_level_error() == Errors::RebootstrapRequired
             {

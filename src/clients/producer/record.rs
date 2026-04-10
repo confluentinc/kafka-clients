@@ -132,11 +132,7 @@ impl<'a> ProducerRecord<'a> {
     pub fn estimated_size(&self) -> usize {
         let key_size = self.key.map_or(0, |k| k.len());
         let value_size = self.value.map_or(0, |v| v.len());
-        let headers_size: usize = self
-            .headers
-            .iter()
-            .map(|h| h.key.len() + h.value.map_or(0, |v| v.len()))
-            .sum();
+        let headers_size: usize = self.headers.iter().map(|h| h.key.len() + h.value.map_or(0, |v| v.len())).sum();
         // 64 bytes overhead for record framing, timestamps, offsets, etc.
         key_size + value_size + headers_size + self.topic.len() + 64
     }
@@ -163,14 +159,7 @@ impl RecordMetadata {
         serialized_key_size: i32,
         serialized_value_size: i32,
     ) -> Self {
-        RecordMetadata {
-            topic,
-            partition,
-            offset,
-            timestamp,
-            serialized_key_size,
-            serialized_value_size,
-        }
+        RecordMetadata { topic, partition, offset, timestamp, serialized_key_size, serialized_value_size }
     }
 
     /// Returns the topic name.
@@ -239,9 +228,7 @@ mod tests {
 
     #[test]
     fn test_estimated_size() {
-        let record = ProducerRecord::new("topic")
-            .key(b"key")
-            .value(b"value");
+        let record = ProducerRecord::new("topic").key(b"key").value(b"value");
         let size = record.estimated_size();
         // 3 (key) + 5 (value) + 5 (topic) + 64 (overhead)
         assert_eq!(size, 77);

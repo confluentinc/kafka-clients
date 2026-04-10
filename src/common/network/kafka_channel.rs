@@ -208,10 +208,11 @@ impl KafkaChannel {
     /// Disconnects the channel.
     pub fn disconnect(&mut self) {
         self.disconnected = true;
-        if self.state == channel_state::NOT_CONNECTED && self.remote_address.is_some() {
+        if self.state == channel_state::NOT_CONNECTED
+            && let Some(ref addr) = self.remote_address
+        {
             // If we captured the remote address we can provide more information
-            self.state =
-                ChannelState::with_remote_address(State::NotConnected, &self.remote_address.unwrap().to_string());
+            self.state = ChannelState::with_remote_address(State::NotConnected, &addr.to_string());
         }
         self.transport_layer.disconnect();
     }

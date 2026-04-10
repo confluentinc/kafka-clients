@@ -125,8 +125,7 @@ impl ProducerBatch {
         self.buffer.extend_from_slice(&header_count.to_be_bytes());
         for h in headers {
             let hk = h.key().as_bytes();
-            self.buffer
-                .extend_from_slice(&(hk.len() as i32).to_be_bytes());
+            self.buffer.extend_from_slice(&(hk.len() as i32).to_be_bytes());
             self.buffer.extend_from_slice(hk);
             let hv_size = h.value().map_or(-1i32, |v| v.len() as i32);
             self.buffer.extend_from_slice(&hv_size.to_be_bytes());
@@ -137,12 +136,7 @@ impl ProducerBatch {
 
         let (tx, rx) = oneshot::channel();
         let offset_delta = self.record_count;
-        self.pending.push(BatchedRecord {
-            tx,
-            offset_delta,
-            key_size,
-            value_size,
-        });
+        self.pending.push(BatchedRecord { tx, offset_delta, key_size, value_size });
         self.record_count += 1;
 
         Some(SendFuture { rx })
@@ -209,11 +203,7 @@ impl ProducerBatch {
     }
 
     /// Estimate the serialized size of a single record.
-    fn estimate_record_size(
-        key: Option<&[u8]>,
-        value: Option<&[u8]>,
-        headers: &[Header<'_>],
-    ) -> usize {
+    fn estimate_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
         let key_bytes = key.map_or(0, |k| k.len());
         let value_bytes = value.map_or(0, |v| v.len());
         let header_bytes: usize = headers
@@ -305,10 +295,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        let headers = vec![
-            Header::new("trace-id", Some(b"abc")),
-            Header::new("source", None),
-        ];
+        let headers = vec![Header::new("trace-id", Some(b"abc")), Header::new("source", None)];
         let future = batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000);
         assert!(future.is_some());
         assert_eq!(batch.record_count(), 1);

@@ -103,13 +103,10 @@ impl RecordAccumulator {
             Ok(Ok(permit)) => {
                 // Forget the permit — we'll release it manually when the batch completes.
                 permit.forget();
-            }
+            },
             Ok(Err(_closed)) => {
-                return Err(KafkaError::new(
-                    ErrorCode::Unexpected,
-                    "producer is shutting down",
-                ));
-            }
+                return Err(KafkaError::new(ErrorCode::Unexpected, "producer is shutting down"));
+            },
             Err(_timeout) => {
                 return Err(KafkaError::new(
                     ErrorCode::BufferExhausted,
@@ -119,7 +116,7 @@ impl RecordAccumulator {
                         self.config.max_block()
                     ),
                 ));
-            }
+            },
         }
 
         let mut inner = self.inner.lock().await;
@@ -127,14 +124,10 @@ impl RecordAccumulator {
         if inner.closed {
             // Release the memory we just acquired.
             self.memory_semaphore.add_permits(estimated_size);
-            return Err(KafkaError::new(
-                ErrorCode::Unexpected,
-                "accumulator is closed",
-            ));
+            return Err(KafkaError::new(ErrorCode::Unexpected, "accumulator is closed"));
         }
 
         // Try to append to existing batch.
-        let new_batch_created;
         if let Some(batch) = inner.current_batches.get_mut(tp) {
             if let Some(future) = batch.try_append(key, value, headers, timestamp) {
                 let batch_is_full = batch.is_full();
@@ -143,11 +136,7 @@ impl RecordAccumulator {
                     inner.ready_batches.push(full_batch);
                     self.batch_ready_notify.notify_one();
                 }
-                return Ok(AppendResult {
-                    future,
-                    batch_is_full,
-                    new_batch_created: false,
-                });
+                return Ok(AppendResult { future, batch_is_full, new_batch_created: false });
             }
             // Current batch is full — move it to ready and create a new one.
             let full_batch = inner.current_batches.remove(tp).unwrap();
@@ -160,7 +149,7 @@ impl RecordAccumulator {
         let future = batch
             .try_append(key, value, headers, timestamp)
             .expect("new batch must accept first record");
-        new_batch_created = true;
+        let new_batch_created = true;
         let batch_is_full = batch.is_full();
 
         if batch_is_full {
@@ -170,11 +159,7 @@ impl RecordAccumulator {
             inner.current_batches.insert(tp.clone(), batch);
         }
 
-        Ok(AppendResult {
-            future,
-            batch_is_full,
-            new_batch_created,
-        })
+        Ok(AppendResult { future, batch_is_full, new_batch_created })
     }
 
     /// Drain all ready batches. Called by the Sender task.
@@ -292,16 +277,10 @@ mod tests {
         let acc = RecordAccumulator::new(test_config());
         let tp = TopicPartition::new("test".to_string(), 0);
 
-        let r1 = acc
-            .append(&tp, Some(b"k1"), Some(b"v1"), &[], 1000)
-            .await
-            .unwrap();
+        let r1 = acc.append(&tp, Some(b"k1"), Some(b"v1"), &[], 1000).await.unwrap();
         assert!(r1.new_batch_created);
 
-        let r2 = acc
-            .append(&tp, Some(b"k2"), Some(b"v2"), &[], 1001)
-            .await
-            .unwrap();
+        let r2 = acc.append(&tp, Some(b"k2"), Some(b"v2"), &[], 1001).await.unwrap();
         assert!(!r2.new_batch_created);
     }
 
@@ -319,9 +298,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
 
         // Fill the batch to trigger it becoming ready.
-        acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000)
-            .await
-            .unwrap();
+        acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000).await.unwrap();
 
         // The batch should be full and moved to ready.
         let batches = acc.drain().await;
@@ -334,12 +311,8 @@ mod tests {
         let tp1 = TopicPartition::new("topic1".to_string(), 0);
         let tp2 = TopicPartition::new("topic2".to_string(), 0);
 
-        acc.append(&tp1, Some(b"k1"), Some(b"v1"), &[], 1000)
-            .await
-            .unwrap();
-        acc.append(&tp2, Some(b"k2"), Some(b"v2"), &[], 1001)
-            .await
-            .unwrap();
+        acc.append(&tp1, Some(b"k1"), Some(b"v1"), &[], 1000).await.unwrap();
+        acc.append(&tp2, Some(b"k2"), Some(b"v2"), &[], 1001).await.unwrap();
 
         acc.flush_all().await;
         let batches = acc.drain().await;

@@ -897,8 +897,7 @@ impl Metadata {
         old_topic_id: Option<Uuid>,
     ) -> Option<PartitionMetadata> {
         let tp = &partition_metadata.topic_partition;
-        if has_reliable_leader_epoch && partition_metadata.leader_epoch.is_some() {
-            let new_epoch = partition_metadata.leader_epoch.unwrap();
+        if has_reliable_leader_epoch && let Some(new_epoch) = partition_metadata.leader_epoch {
             let current_epoch = inner.last_seen_leader_epochs.get(tp).copied();
 
             match current_epoch {

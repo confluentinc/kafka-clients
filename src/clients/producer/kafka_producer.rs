@@ -47,9 +47,7 @@ pub struct KafkaProducer<C: ProduceClient> {
 
 impl<C: ProduceClient> Clone for KafkaProducer<C> {
     fn clone(&self) -> Self {
-        KafkaProducer {
-            inner: Arc::clone(&self.inner),
-        }
+        KafkaProducer { inner: Arc::clone(&self.inner) }
     }
 }
 
@@ -62,11 +60,7 @@ impl<C: ProduceClient> KafkaProducer<C> {
         let client = Arc::new(client);
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
 
-        let sender = Sender::new(
-            Arc::clone(&accumulator),
-            Arc::clone(&client),
-            Arc::clone(&config),
-        );
+        let sender = Sender::new(Arc::clone(&accumulator), Arc::clone(&client), Arc::clone(&config));
         let sender_handle = tokio::spawn(sender.run());
 
         KafkaProducer {
@@ -104,13 +98,7 @@ impl<C: ProduceClient> KafkaProducer<C> {
         let result = self
             .inner
             .accumulator
-            .append(
-                &tp,
-                record.key_bytes(),
-                record.value_bytes(),
-                record.headers(),
-                timestamp,
-            )
+            .append(&tp, record.key_bytes(), record.value_bytes(), record.headers(), timestamp)
             .await?;
 
         Ok(result.future)
@@ -126,10 +114,7 @@ impl<C: ProduceClient> KafkaProducer<C> {
     }
 
     /// Get partition metadata for a topic.
-    pub async fn partitions_for(
-        &self,
-        topic: &str,
-    ) -> crate::errors::Result<Vec<PartitionInfo>> {
+    pub async fn partitions_for(&self, topic: &str) -> crate::errors::Result<Vec<PartitionInfo>> {
         self.inner.client.partitions_for(topic).await
     }
 
@@ -164,9 +149,7 @@ mod tests {
 
     impl MockProduceClient {
         fn new() -> Self {
-            MockProduceClient {
-                next_offset: AtomicI64::new(0),
-            }
+            MockProduceClient { next_offset: AtomicI64::new(0) }
         }
     }
 
@@ -182,22 +165,13 @@ mod tests {
             let mut responses = Vec::new();
             for (tp, _data) in batches {
                 let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
-                responses.push(PartitionResponse {
-                    tp,
-                    base_offset: offset,
-                    log_append_time: 1000,
-                    error: None,
-                });
+                responses.push(PartitionResponse { tp, base_offset: offset, log_append_time: 1000, error: None });
             }
             Ok(responses)
         }
 
         async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-            Ok(vec![PartitionInfo {
-                topic: topic.to_string(),
-                partition: 0,
-                leader: Some(0),
-            }])
+            Ok(vec![PartitionInfo { topic: topic.to_string(), partition: 0, leader: Some(0) }])
         }
     }
 
@@ -215,9 +189,7 @@ mod tests {
     async fn test_send_and_receive_metadata() {
         let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
 
-        let record = ProducerRecord::new("test-topic")
-            .key(b"key1")
-            .value(b"value1");
+        let record = ProducerRecord::new("test-topic").key(b"key1").value(b"value1");
 
         let future = producer.send(&record).await.unwrap();
 

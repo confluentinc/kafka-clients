@@ -193,18 +193,12 @@ impl ProducerConfigBuilder {
 
     /// Build the configuration, applying defaults for unset fields.
     pub fn build(self) -> crate::errors::Result<ProducerConfig> {
-        let bootstrap_servers = self.bootstrap_servers.ok_or_else(|| {
-            KafkaError::new(
-                ErrorCode::Unexpected,
-                "bootstrap.servers is required",
-            )
-        })?;
+        let bootstrap_servers = self
+            .bootstrap_servers
+            .ok_or_else(|| KafkaError::new(ErrorCode::Unexpected, "bootstrap.servers is required"))?;
 
         if bootstrap_servers.is_empty() {
-            return Err(KafkaError::new(
-                ErrorCode::Unexpected,
-                "bootstrap.servers must not be empty",
-            ));
+            return Err(KafkaError::new(ErrorCode::Unexpected, "bootstrap.servers must not be empty"));
         }
 
         Ok(ProducerConfig {
@@ -215,9 +209,7 @@ impl ProducerConfigBuilder {
             max_block: Duration::from_millis(self.max_block_ms.unwrap_or(60_000)),
             acks: self.acks.unwrap_or(Acks::All),
             retries: self.retries.unwrap_or(i32::MAX as u32),
-            max_in_flight_requests_per_connection: self
-                .max_in_flight_requests_per_connection
-                .unwrap_or(5),
+            max_in_flight_requests_per_connection: self.max_in_flight_requests_per_connection.unwrap_or(5),
             request_timeout: Duration::from_millis(self.request_timeout_ms.unwrap_or(30_000)),
             delivery_timeout: Duration::from_millis(self.delivery_timeout_ms.unwrap_or(120_000)),
             retry_backoff: Duration::from_millis(self.retry_backoff_ms.unwrap_or(100)),
@@ -270,9 +262,7 @@ mod tests {
 
     #[test]
     fn test_builder_empty_bootstrap_servers() {
-        let result = ProducerConfig::builder()
-            .bootstrap_servers(Vec::<String>::new())
-            .build();
+        let result = ProducerConfig::builder().bootstrap_servers(Vec::<String>::new()).build();
         assert!(result.is_err());
     }
 }
