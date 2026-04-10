@@ -40,6 +40,7 @@ pub trait Selectable: Send {
     ///
     /// * `id` - The id for this connection
     /// * `address` - The address to connect to
+    /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
     /// * `send_buffer_size` - The send buffer for the socket
     ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
     /// * `receive_buffer_size` - The receive buffer for the socket
@@ -52,6 +53,7 @@ pub trait Selectable: Send {
         &mut self,
         id: &str,
         address: SocketAddr,
+        peer_host: &str,
         send_buffer_size: i32,
         receive_buffer_size: i32,
     ) -> impl std::future::Future<Output = io::Result<()>> + Send;

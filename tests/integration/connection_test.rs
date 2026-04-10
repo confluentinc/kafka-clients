@@ -127,7 +127,7 @@ async fn test_tcp_connection() {
     let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
 
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 
@@ -148,7 +148,7 @@ async fn test_api_versions_request_response() {
 
     // Connect
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
     poll_until_connected(&mut selector).await;
@@ -205,7 +205,7 @@ async fn test_full_connection_flow() {
 
     // Step 1: Connect
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
     poll_until_connected(&mut selector).await;

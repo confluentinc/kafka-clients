@@ -17,29 +17,33 @@
 //! Translated from `org.apache.kafka.common.network.ChannelBuilder`.
 //!
 //! In Java, `ChannelBuilder` takes a `SelectionKey` to build a `KafkaChannel`.
-//! In Rust, it takes a `Box<dyn TransportLayer>` since we eliminate `SelectionKey`
-//! — the Selector creates the transport layer and passes it to the builder.
+//! In Rust, it takes a `TcpStream` and `peer_host` since we eliminate `SelectionKey`
+//! — the Selector creates the TCP connection and passes the raw stream to the builder,
+//! which wraps it in the appropriate transport layer (plaintext or SSL/TLS).
 
 use super::channel_metadata_registry::ChannelMetadataRegistry;
 use super::kafka_channel::KafkaChannel;
-use super::transport_layer::TransportLayer;
 
 use std::io;
+
+use tokio::net::TcpStream;
 
 /// A channel builder interface to build channels based on configuration.
 ///
 /// Translated from the Java `ChannelBuilder` interface.
 ///
-/// In the Rust adaptation, `build_channel` takes a `Box<dyn TransportLayer>` instead of
-/// Java's `SelectionKey`, since `SelectionKey` is eliminated in favor of HashMap-based
-/// channel lookup by ID.
+/// In the Rust adaptation, `build_channel` takes a `TcpStream` and `peer_host` instead
+/// of Java's `SelectionKey`. The builder wraps the stream in the appropriate transport
+/// layer (e.g., `PlaintextTransportLayer` or `SslTransportLayer`) and pairs it with
+/// an `Authenticator` inside a `KafkaChannel`.
 pub trait ChannelBuilder: Send {
     /// Returns a `KafkaChannel` with `TransportLayer` and `Authenticator` configured.
     ///
     /// # Arguments
     ///
     /// * `id` - Channel ID
-    /// * `transport_layer` - The transport layer for this channel
+    /// * `stream` - The raw TCP stream for this channel
+    /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
     /// * `max_receive_size` - Maximum size of a single receive buffer to allocate
     /// * `metadata_registry` - Registry which stores the metadata about the channels
     ///
@@ -49,7 +53,8 @@ pub trait ChannelBuilder: Send {
     fn build_channel(
         &self,
         id: &str,
-        transport_layer: Box<dyn TransportLayer>,
+        stream: TcpStream,
+        peer_host: &str,
         max_receive_size: i32,
         metadata_registry: Box<dyn ChannelMetadataRegistry>,
     ) -> io::Result<KafkaChannel>;
