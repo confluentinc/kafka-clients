@@ -106,8 +106,7 @@ impl FromStr for SecurityProtocol {
 
     /// Parses a security protocol from its name (case-insensitive).
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        SecurityProtocol::for_name(s)
-            .ok_or_else(|| format!("No enum constant SecurityProtocol.{}", s))
+        SecurityProtocol::for_name(s).ok_or_else(|| format!("No enum constant SecurityProtocol.{}", s))
     }
 }
 
@@ -157,18 +156,9 @@ mod tests {
 
     #[test]
     fn test_for_name_case_insensitive() {
-        assert_eq!(
-            SecurityProtocol::for_name("plaintext"),
-            Some(SecurityProtocol::Plaintext)
-        );
-        assert_eq!(
-            SecurityProtocol::for_name("Plaintext"),
-            Some(SecurityProtocol::Plaintext)
-        );
-        assert_eq!(
-            SecurityProtocol::for_name("sasl_ssl"),
-            Some(SecurityProtocol::SaslSsl)
-        );
+        assert_eq!(SecurityProtocol::for_name("plaintext"), Some(SecurityProtocol::Plaintext));
+        assert_eq!(SecurityProtocol::for_name("Plaintext"), Some(SecurityProtocol::Plaintext));
+        assert_eq!(SecurityProtocol::for_name("sasl_ssl"), Some(SecurityProtocol::SaslSsl));
         assert_eq!(
             SecurityProtocol::for_name("Sasl_Plaintext"),
             Some(SecurityProtocol::SaslPlaintext)
@@ -199,14 +189,8 @@ mod tests {
 
     #[test]
     fn test_from_str() {
-        assert_eq!(
-            "PLAINTEXT".parse::<SecurityProtocol>().unwrap(),
-            SecurityProtocol::Plaintext
-        );
-        assert_eq!(
-            "ssl".parse::<SecurityProtocol>().unwrap(),
-            SecurityProtocol::Ssl
-        );
+        assert_eq!("PLAINTEXT".parse::<SecurityProtocol>().unwrap(), SecurityProtocol::Plaintext);
+        assert_eq!("ssl".parse::<SecurityProtocol>().unwrap(), SecurityProtocol::Ssl);
         assert!("INVALID".parse::<SecurityProtocol>().is_err());
     }
 

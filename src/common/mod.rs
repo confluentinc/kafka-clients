@@ -16,6 +16,7 @@
 
 pub mod cluster;
 pub mod cluster_resource;
+pub mod config;
 pub mod feature;
 pub mod internals;
 pub mod kafka_error;
