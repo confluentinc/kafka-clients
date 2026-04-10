@@ -147,7 +147,7 @@ impl ProduceRequest {
             ppr.set_base_offset(INVALID_OFFSET);
             ppr.set_log_append_time_ms(crate::common::record::NO_TIMESTAMP);
             ppr.set_log_start_offset(INVALID_OFFSET);
-            ppr.set_error_message(Some(error.message().to_string()));
+            ppr.set_error_message(None);
             ppr.set_error_code(error.code());
 
             response_data.responses[tpr_idx].partition_responses.push(ppr);
