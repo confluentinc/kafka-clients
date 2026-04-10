@@ -77,6 +77,10 @@ struct KafkaProduceClientInner {
     correlation_counter: AtomicI32,
     /// Map from node_id (as string) to whether the connection is established.
     connected_nodes: HashMap<String, bool>,
+    /// Cached API versions per node, populated on first handshake per connection.
+    /// Cleared when a disconnection is detected so that the next request
+    /// re-negotiates versions on the fresh connection.
+    cached_api_versions: HashMap<String, ApiVersionsResponse>,
 }
 
 impl KafkaProduceClient {
@@ -97,6 +101,7 @@ impl KafkaProduceClient {
                 client_id: client_id.to_string(),
                 correlation_counter: AtomicI32::new(1),
                 connected_nodes: HashMap::new(),
+                cached_api_versions: HashMap::new(),
             }),
         }
     }
@@ -118,6 +123,7 @@ impl KafkaProduceClient {
                 client_id: client_id.to_string(),
                 correlation_counter: AtomicI32::new(1),
                 connected_nodes: HashMap::new(),
+                cached_api_versions: HashMap::new(),
             }),
         }
     }
@@ -131,12 +137,27 @@ impl KafkaProduceClientInner {
 
     /// Ensures the connection to the given node is established.
     ///
-    /// If already connected, this is a no-op. Otherwise, initiates a connection
-    /// and polls until it completes.
+    /// If already connected, this is a no-op. Otherwise, closes any stale
+    /// channel for this node before initiating a fresh connection and polling
+    /// until it completes.
     async fn ensure_connected(&mut self, node_id: &str) -> Result<(), KafkaError> {
         if self.connected_nodes.get(node_id).copied().unwrap_or(false) && self.selector.is_channel_ready(node_id) {
             return Ok(());
         }
+
+        // Close any stale channel before reconnecting so the selector slot is
+        // freed.  Without this, `Selector::connect` would fail with
+        // `AlreadyExists` if the old channel has not been cleaned up yet.
+        self.selector.close_channel(node_id).await;
+        // Process the close so the channel is fully removed from both
+        // `channels` and `closing_channels`.
+        self.selector.poll(0).await.map_err(|e| {
+            KafkaError::with_source(ErrorCode::Network, "Poll failed while cleaning up stale channel", e)
+        })?;
+
+        // Invalidate cached API versions for this node since the connection
+        // is being re-established.
+        self.cached_api_versions.remove(node_id);
 
         // Initiate connection
         self.selector
@@ -179,6 +200,20 @@ impl KafkaProduceClientInner {
             ErrorCode::TimedOut,
             format!("Timed out waiting for connection to node {}", node_id),
         ))
+    }
+
+    /// Returns cached API versions for the node, performing the handshake only
+    /// on the first call per connection.
+    ///
+    /// Java's `NetworkClient` caches `NodeApiVersions` per node — the
+    /// handshake happens once per connection, not once per request.
+    async fn get_or_fetch_api_versions(&mut self, node_id: &str) -> Result<&ApiVersionsResponse, KafkaError> {
+        if !self.cached_api_versions.contains_key(node_id) {
+            let avr = self.handshake_api_versions(node_id).await?;
+            self.cached_api_versions.insert(node_id.to_string(), avr);
+        }
+        // SAFETY: we just inserted if missing, so unwrap is fine.
+        Ok(self.cached_api_versions.get(node_id).unwrap())
     }
 
     /// Performs the ApiVersions handshake to discover broker capabilities.
@@ -245,6 +280,7 @@ impl KafkaProduceClientInner {
 
             if !self.selector.disconnected().is_empty() {
                 self.connected_nodes.insert(node_id.to_string(), false);
+                self.cached_api_versions.remove(node_id);
                 return Err(KafkaError::new(
                     ErrorCode::Network,
                     format!("Disconnected from node {} while waiting for response", node_id),
@@ -259,32 +295,32 @@ impl KafkaProduceClientInner {
     }
 
     /// Builds a `ProduceRequestData` from the raw batch data.
+    ///
+    /// Takes `batches` by value so that the byte vectors can be moved through
+    /// without any cloning.
     fn build_produce_request_data(
         acks: &Acks,
         timeout: Duration,
-        batches: &[(TopicPartition, Vec<u8>)],
+        batches: Vec<(TopicPartition, Vec<u8>)>,
     ) -> ProduceRequestData {
-        // Group batches by topic name.
+        // Group batches by topic name, moving the data rather than cloning.
         let mut topics: HashMap<String, Vec<(i32, Vec<u8>)>> = HashMap::new();
         for (tp, data) in batches {
-            topics
-                .entry(tp.topic().to_string())
-                .or_default()
-                .push((tp.partition(), data.clone()));
+            topics.entry(tp.topic().to_string()).or_default().push((tp.partition(), data));
         }
 
         let mut topic_data_list = Vec::new();
-        for (topic_name, partitions) in &topics {
+        for (topic_name, partitions) in topics {
             let mut partition_data_list = Vec::new();
             for (partition, data) in partitions {
                 let mut pd = PartitionProduceData::new();
-                pd.set_index(*partition);
-                pd.set_records(Some(data.clone()));
+                pd.set_index(partition);
+                pd.set_records(Some(data));
                 partition_data_list.push(pd);
             }
 
             let mut td = TopicProduceData::new();
-            td.set_name(topic_name.clone());
+            td.set_name(topic_name);
             td.set_partition_data(partition_data_list);
             topic_data_list.push(td);
         }
@@ -312,15 +348,22 @@ impl KafkaProduceClientInner {
         // Ensure we're connected
         self.ensure_connected(node_id).await?;
 
-        // Perform API version handshake to get the right produce version
-        let avr = self.handshake_api_versions(node_id).await?;
-        let max_produce_version = avr
+        // Look up (or fetch once per connection) the API versions for the
+        // produce API.  The handshake is performed only on the first request
+        // after each (re)connection.
+        let max_produce_version = self
+            .get_or_fetch_api_versions(node_id)
+            .await?
             .api_version(ApiKeys::PRODUCE.id())
             .ok_or_else(|| KafkaError::new(ErrorCode::Network, "Broker does not support Produce API"))?
             .max_version;
 
-        // Build the produce request data
-        let data = Self::build_produce_request_data(&acks, timeout, &batches);
+        // Save topic-partitions before moving batch data into the request,
+        // needed for acks=0 where no response carries partition info.
+        let topic_partitions: Vec<TopicPartition> = batches.iter().map(|(tp, _)| tp.clone()).collect();
+
+        // Build the produce request data, moving batch bytes without cloning.
+        let data = Self::build_produce_request_data(&acks, timeout, batches);
 
         // Build the request using the builder
         let request_builder = ProduceRequestBuilder::new(data);
@@ -356,9 +399,9 @@ impl KafkaProduceClientInner {
             })?;
 
             // Return success responses for all partitions
-            return Ok(batches
+            return Ok(topic_partitions
                 .into_iter()
-                .map(|(tp, _)| PartitionResponse { tp, base_offset: -1, log_append_time: -1, error: None })
+                .map(|tp| PartitionResponse { tp, base_offset: -1, log_append_time: -1, error: None })
                 .collect());
         }
 
@@ -408,9 +451,11 @@ impl KafkaProduceClientInner {
         let node_id = "0";
         self.ensure_connected(node_id).await?;
 
-        // Perform API version handshake and get the metadata API version
-        let avr = self.handshake_api_versions(node_id).await?;
-        let metadata_max_version = avr
+        // Look up (or fetch once per connection) the API versions for the
+        // metadata API.
+        let metadata_max_version = self
+            .get_or_fetch_api_versions(node_id)
+            .await?
             .api_version(ApiKeys::METADATA.id())
             .ok_or_else(|| KafkaError::new(ErrorCode::Network, "Broker does not support Metadata API"))?
             .max_version;

@@ -25,11 +25,13 @@
 
 mod common;
 
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::time::Duration;
 
 use confluent_kafka_rust::clients::producer::config::Acks;
 use confluent_kafka_rust::clients::producer::{KafkaProduceClient, KafkaProducer, ProducerConfig, ProducerRecord};
+use confluent_kafka_rust::errors::ErrorCode;
 
 use common::cluster_config::ClusterConfig;
 use common::test_context::TestContext;
@@ -183,6 +185,56 @@ async fn test_produce_with_key_and_headers() {
         metadata.offset() >= 0,
         "offset should be non-negative, got {}",
         metadata.offset()
+    );
+
+    producer.close().await.expect("close should succeed");
+    ctx.cleanup().await;
+}
+
+/// Test: Produce to a non-existent topic when auto-create is disabled.
+///
+/// Verifies that:
+/// - The broker returns an error (UNKNOWN_TOPIC_OR_PARTITION)
+/// - The error propagates through the full pipeline back to the `SendFuture`
+///
+/// This exercises the error path from broker error codes through
+/// `KafkaProduceClient` -> `Sender` -> `ProducerBatch::complete` ->
+/// `SendFuture`.
+#[tokio::test]
+async fn test_produce_to_nonexistent_topic() {
+    // Start a cluster with auto.create.topics.enable=false so that
+    // producing to a non-existent topic returns an error instead of
+    // silently creating the topic.
+    let mut props = BTreeMap::new();
+    props.insert("KAFKA_AUTO_CREATE_TOPICS_ENABLE".to_string(), "false".to_string());
+    let config = ClusterConfig::with_properties(props);
+
+    let mut ctx = TestContext::new(config).await;
+    // Use a topic name that definitely does not exist.
+    let topic = ctx.topic("nonexistent_topic_that_should_not_exist");
+
+    let client = create_produce_client(ctx.bootstrap_servers());
+    let config = test_producer_config(ctx.bootstrap_servers());
+    let producer = KafkaProducer::new(config, client);
+
+    let record = ProducerRecord::new(&topic).value(b"should-fail");
+    let future = producer.send(&record).await.expect("send to accumulator should succeed");
+
+    producer.flush().await.expect("flush should succeed");
+
+    // Give the sender task time to send the batch and receive the error.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    let result = future.await;
+    assert!(result.is_err(), "producing to a non-existent topic should return an error");
+
+    let err = result.unwrap_err();
+    assert_eq!(
+        err.code(),
+        ErrorCode::UnknownTopicOrPartition,
+        "error code should be UnknownTopicOrPartition, got {:?}: {}",
+        err.code(),
+        err
     );
 
     producer.close().await.expect("close should succeed");
