@@ -645,6 +645,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                                 ConcreteResponse::ApiVersions(api_versions_response) => {
                                     self.handle_api_versions_response(responses, &mut req, now, api_versions_response);
                                 },
+                                _ => {
+                                    // Other response types (e.g. SASL) are not internal requests;
+                                    // pass them through as completed responses.
+                                    responses.push(req.completed(Some(response), now));
+                                },
                             }
                         } else {
                             responses.push(req.completed(Some(response), now));
