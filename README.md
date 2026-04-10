@@ -4,11 +4,35 @@ A high-fidelity, architecture-preserving Rust transpilation of the Apache Kafka 
 
 ## Project Overview
 
-- **Source:** Transpiled from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.1)
+- **Source:** Transpiled from `org.apache.kafka.clients` and related Java packages (Apache Kafka 4.2)
 - **Architecture:** Mirrors the Java client structure, namespaces, and logic, adapted to Rust module and naming conventions
 - **Standard Library:** Java standard library features are either mapped to Rust equivalents or re-implemented from OpenJDK sources if no equivalent exists
 - **Schema:** All Kafka message schemas are generated from the official JSON definitions
 - **Wire Protocol:** Full support for Kafka's binary protocol, including flexible versions and tagged fields
+
+## Prerequisites
+
+### Clone with submodules
+
+```bash
+git clone --recurse-submodules <repo-url>
+```
+
+Or if already cloned:
+
+```bash
+git submodule update --init
+```
+
+### Install development tools
+
+```bash
+cargo install cargo-llvm-cov grcov && rustup component add llvm-tools
+```
+
+- **cargo-llvm-cov**: LLVM source-based code coverage instrumentation
+- **grcov**: HTML coverage report generator
+- **llvm-tools**: LLVM binaries required by cargo-llvm-cov
 
 ## Directory Structure
 
@@ -65,24 +89,13 @@ cargo test
 ```
 - Runs all unit and integration tests, including round-trip wire protocol and generated message tests.
 
-## Running the Serialization Example
+## Code Coverage
 
-An executable example is provided to demonstrate serialization and deserialization of Kafka messages with all fields set to example values.
-
-To run the example:
-
-```sh
-cargo run --bin serialization_example
+```bash
+cargo xtask coverage          # Unit tests, HTML report at coverage/html/index.html
+cargo xtask coverage-lcov     # Unit tests, lcov output at coverage/lcov.info
+cargo xtask coverage-all      # Unit + integration tests (requires Docker)
 ```
-
-This example demonstrates:
-- **MetadataRequest/Response**: Basic message serialization with topics, brokers, and partitions
-- **ProduceResponse**: Advanced usage with tagged fields in flexible versions (9+)
-  - Each `PartitionProduceResponse` includes a `CurrentLeader` tagged field (tag 0)
-  - `ProduceResponseData` includes a `NodeEndpoints` array tagged field (tag 0)
-  - Shows how tagged fields are automatically serialized/deserialized in flexible versions
-
-The output shows the serialized bytes and the deserialized structs for each message type, including proper handling of tagged fields.
 
 ## Regenerating Code
 

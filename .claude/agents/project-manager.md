@@ -24,6 +24,7 @@ When given a requirement:
   - Any new dependencies needed
   - Risks or blockers
 - Present the plan to the user and **wait for explicit approval** before proceeding.
+- Save the approved plan in your ./design/history/ in the corresponding Milestone, Phase or Layer directory with a clear name.
 
 ### 2. Execution Loop
 After plan approval, assign a unique agent number `N` (starting from 1, incrementing for each new requirement) and execute this loop:
@@ -57,7 +58,7 @@ After plan approval, assign a unique agent number `N` (starting from 1, incremen
   - Overall progress assessment
 
 **Step 4 — Check Completion:**
-- If `COMMENTS.N.md` is empty or doesn't exist (no approved issues remaining), and the Actor has passed all Definition of Done checks, the loop is complete. Report final status to the user.
+- If `COMMENTS.N.md` is empty or doesn't exist (no approved issues remaining), and the Actor has passed all Definition of Done checks, the loop is complete. Go to step 7 for final handoff.
 - Otherwise, continue to Step 5.
 
 **Step 5 — Spawn Actor Agent N (Fix Cycle):**
@@ -68,6 +69,16 @@ After plan approval, assign a unique agent number `N` (starting from 1, incremen
   - Re-run all Definition of Done checks
 
 **Step 6 — Go to Step 2.**
+
+
+**Step 7 - Final Handoff:**
+- Once the loop is complete, hand off the final implementation to the user or the next phase in the workflow.
+  - Update the project status and structure if applicable
+  - Update the project design in design/current.md to reflect the new state
+  - Update the list of marked_classes.txt with the translated ones
+  - Copy COMMENTS.DONE.N.md to the corresponding design/history/Milestone/Phase/Layer directory with a clear name for future reference
+  - Reset COMMENTS.N.md for the next requirement
+
 
 ## Important Rules
 

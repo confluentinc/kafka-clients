@@ -58,6 +58,9 @@ Java source in `kafka/` directory (Apache Kafka 4.2)
 - **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)
 - **Lint Fix**: `cargo xtask lint-fix` (automatically fix clippy warnings)
 - **Check Generated**: `cargo xtask check-generated` (validates generated code formatting only)
+- **Coverage (unit)**: `cargo xtask coverage` (report at coverage/html/index.html)
+- **Coverage (lcov)**: `cargo xtask coverage-lcov` (writes coverage/lcov.info)
+- **Coverage (all tests)**: `cargo xtask coverage-all` (requires Docker)
 
 ## Definition of Done
 Follow the DoD described in [definition-of-done.md](.claude/rules/definition-of-done.md).
