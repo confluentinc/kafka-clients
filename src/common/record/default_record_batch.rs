@@ -308,11 +308,14 @@ impl DefaultRecordBatch {
     }
 
     /// Set the max timestamp and timestamp type, recomputing CRC.
-    pub fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64) {
+    ///
+    /// # Errors
+    /// Returns an error if `timestamp_type` is `NoTimestampType`.
+    pub fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64) -> Result<()> {
         let current_max = self.max_timestamp();
         let current_type = self.timestamp_type();
         if current_type == timestamp_type && current_max == max_timestamp {
-            return;
+            return Ok(());
         }
 
         let attrs = compute_attributes(
@@ -321,11 +324,12 @@ impl DefaultRecordBatch {
             self.is_transactional(),
             self.is_control_batch(),
             self.has_delete_horizon_ms(),
-        );
+        )?;
         write_i16(&mut self.buffer, ATTRIBUTES_OFFSET, attrs as i16);
         write_i64(&mut self.buffer, MAX_TIMESTAMP_OFFSET, max_timestamp);
         let crc = crc32c::crc32c(&self.buffer[ATTRIBUTES_OFFSET..]);
         write_u32(&mut self.buffer, CRC_OFFSET, crc);
+        Ok(())
     }
 
     /// Set the partition leader epoch (does not affect CRC).
@@ -390,6 +394,10 @@ impl DefaultRecordBatch {
     // ========================================================================
 
     /// Write an empty batch header (used for producer state preservation after compaction).
+    ///
+    /// # Errors
+    /// Returns an error if `magic` is less than the current magic value
+    /// or if `timestamp_type` is `NoTimestampType`.
     #[allow(clippy::too_many_arguments)]
     pub fn write_empty_header(
         buffer: &mut Vec<u8>,
@@ -404,7 +412,7 @@ impl DefaultRecordBatch {
         timestamp: i64,
         is_transactional: bool,
         is_control_record: bool,
-    ) {
+    ) -> Result<()> {
         let offset_delta = (last_offset - base_offset) as i32;
         Self::write_header(
             buffer,
@@ -424,10 +432,15 @@ impl DefaultRecordBatch {
             false,
             partition_leader_epoch,
             0,
-        );
+        )
     }
 
     /// Write a full batch header.
+    ///
+    /// # Errors
+    /// Returns an error if `magic` is less than the current magic value,
+    /// if `base_timestamp` is negative (excluding `NO_TIMESTAMP`),
+    /// or if `timestamp_type` is `NoTimestampType`.
     #[allow(clippy::too_many_arguments)]
     pub fn write_header(
         buffer: &mut Vec<u8>,
@@ -447,8 +460,19 @@ impl DefaultRecordBatch {
         is_delete_horizon_set: bool,
         partition_leader_epoch: i32,
         num_records: i32,
-    ) {
-        debug_assert!(magic >= super::CURRENT_MAGIC_VALUE, "Invalid magic value {}", magic);
+    ) -> Result<()> {
+        if magic < super::CURRENT_MAGIC_VALUE {
+            return Err(crate::errors::KafkaError::new(
+                crate::errors::ErrorCode::InvalidArgument,
+                format!("Invalid magic value {}", magic),
+            ));
+        }
+        if base_timestamp < 0 && base_timestamp != NO_TIMESTAMP {
+            return Err(crate::errors::KafkaError::new(
+                crate::errors::ErrorCode::InvalidArgument,
+                format!("Invalid message timestamp {}", base_timestamp),
+            ));
+        }
 
         let attributes = compute_attributes(
             compression_type,
@@ -456,7 +480,7 @@ impl DefaultRecordBatch {
             is_transactional,
             is_control_batch,
             is_delete_horizon_set,
-        );
+        )?;
 
         let position = buffer.len();
         // Reserve space for the entire header
@@ -482,6 +506,7 @@ impl DefaultRecordBatch {
         // For now, we compute over the buffer from attributes to the end.
         let crc = crc32c::crc32c(&buf[ATTRIBUTES_OFFSET..]);
         write_u32(buf, CRC_OFFSET, crc);
+        Ok(())
     }
 }
 
@@ -493,6 +518,11 @@ impl DefaultRecordBatch {
 ///
 /// This is used by [`super::MemoryRecordsBuilder`] which pre-allocates the header
 /// space and writes records after it, then fills in the header in-place.
+///
+/// # Errors
+/// Returns an error if `magic` is less than the current magic value,
+/// if `base_timestamp` is negative (excluding `NO_TIMESTAMP`),
+/// if `timestamp_type` is `NoTimestampType`, or if the buffer is too small.
 #[allow(clippy::too_many_arguments)]
 pub fn write_header_to_slice(
     buf: &mut [u8],
@@ -512,9 +542,25 @@ pub fn write_header_to_slice(
     is_delete_horizon_set: bool,
     partition_leader_epoch: i32,
     num_records: i32,
-) {
-    debug_assert!(magic >= super::CURRENT_MAGIC_VALUE, "Invalid magic value {}", magic);
-    debug_assert!(buf.len() >= RECORD_BATCH_OVERHEAD, "Buffer too small for batch header");
+) -> Result<()> {
+    if magic < super::CURRENT_MAGIC_VALUE {
+        return Err(crate::errors::KafkaError::new(
+            crate::errors::ErrorCode::InvalidArgument,
+            format!("Invalid magic value {}", magic),
+        ));
+    }
+    if base_timestamp < 0 && base_timestamp != NO_TIMESTAMP {
+        return Err(crate::errors::KafkaError::new(
+            crate::errors::ErrorCode::InvalidArgument,
+            format!("Invalid message timestamp {}", base_timestamp),
+        ));
+    }
+    if buf.len() < RECORD_BATCH_OVERHEAD {
+        return Err(crate::errors::KafkaError::new(
+            crate::errors::ErrorCode::InvalidArgument,
+            "Buffer too small for batch header",
+        ));
+    }
 
     let attributes = compute_attributes(
         compression_type,
@@ -522,7 +568,7 @@ pub fn write_header_to_slice(
         is_transactional,
         is_control_batch,
         is_delete_horizon_set,
-    );
+    )?;
 
     write_i64(buf, BASE_OFFSET_OFFSET, base_offset);
     write_i32(buf, LENGTH_OFFSET, size_in_bytes - LOG_OVERHEAD as i32);
@@ -540,6 +586,7 @@ pub fn write_header_to_slice(
     // CRC covers from attributes to the end of the full buffer
     let crc = crc32c::crc32c(&buf[ATTRIBUTES_OFFSET..]);
     write_u32(buf, CRC_OFFSET, crc);
+    Ok(())
 }
 
 impl DefaultRecordBatch {
@@ -601,18 +648,22 @@ pub fn increment_sequence(sequence: i32, increment: i32) -> i32 {
 }
 
 /// Compute the attributes byte for a batch header.
+///
+/// # Errors
+/// Returns an error if `timestamp_type` is `NoTimestampType`.
 fn compute_attributes(
     compression_type: CompressionType,
     timestamp_type: TimestampType,
     is_transactional: bool,
     is_control: bool,
     is_delete_horizon_set: bool,
-) -> u8 {
-    assert_ne!(
-        timestamp_type,
-        TimestampType::NoTimestampType,
-        "Timestamp type must be provided to compute attributes for message format v2 and above"
-    );
+) -> Result<u8> {
+    if timestamp_type == TimestampType::NoTimestampType {
+        return Err(crate::errors::KafkaError::new(
+            crate::errors::ErrorCode::InvalidArgument,
+            "Timestamp type must be provided to compute attributes for message format v2 and above",
+        ));
+    }
 
     let mut attributes: u8 = if is_transactional { TRANSACTIONAL_FLAG_MASK } else { 0 };
     if is_control {
@@ -627,7 +678,7 @@ fn compute_attributes(
     if is_delete_horizon_set {
         attributes |= DELETE_HORIZON_FLAG_MASK;
     }
-    attributes
+    Ok(attributes)
 }
 
 // ============================================================================
@@ -702,7 +753,8 @@ mod tests {
                         timestamp,
                         *is_transactional,
                         *is_control_batch,
-                    );
+                    )
+                    .unwrap();
 
                     let batch = DefaultRecordBatch::new(buffer);
                     assert_eq!(producer_id, batch.producer_id());
@@ -1065,7 +1117,7 @@ mod tests {
 
         let log_append_time: i64 = 15;
         let mut batch = DefaultRecordBatch::new(mem_records.into_buffer());
-        batch.set_max_timestamp(TimestampType::LogAppendTime, log_append_time);
+        batch.set_max_timestamp(TimestampType::LogAppendTime, log_append_time).unwrap();
         assert_eq!(TimestampType::LogAppendTime, batch.timestamp_type());
         assert_eq!(log_append_time, batch.max_timestamp());
         assert!(batch.is_valid());
@@ -1079,7 +1131,6 @@ mod tests {
 
     /// Translated from DefaultRecordBatchTest.testSetNoTimestampTypeNotAllowed
     #[test]
-    #[should_panic(expected = "Timestamp type must be provided")]
     fn test_set_no_timestamp_type_not_allowed() {
         let simple_records = vec![SimpleRecord::with_timestamp(
             1,
@@ -1103,7 +1154,8 @@ mod tests {
         );
 
         let mut batch = DefaultRecordBatch::new(mem_records.into_buffer());
-        batch.set_max_timestamp(TimestampType::NoTimestampType, NO_TIMESTAMP);
+        let result = batch.set_max_timestamp(TimestampType::NoTimestampType, NO_TIMESTAMP);
+        assert!(result.is_err());
     }
 
     /// Translated from DefaultRecordBatchTest.testIncrementSequence

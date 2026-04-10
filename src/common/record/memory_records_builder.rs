@@ -484,15 +484,30 @@ impl MemoryRecordsBuilder {
         let size_in_bytes =
             DefaultRecord::write_to(&mut self.buffer, offset_delta, timestamp_delta, key, value, headers)?;
 
-        self.record_written(offset, timestamp, size_in_bytes as usize);
+        self.record_written(offset, timestamp, size_in_bytes as usize)?;
         Ok(())
     }
 
     /// Record that a record has been written.
-    fn record_written(&mut self, offset: i64, timestamp: i64, size: usize) {
+    ///
+    /// # Errors
+    /// Returns an error if the maximum number of records per batch is exceeded
+    /// or if the offset delta overflows i32.
+    fn record_written(&mut self, offset: i64, timestamp: i64, size: usize) -> Result<()> {
         if self.num_records == i32::MAX {
-            // This is extremely unlikely but matches Java behavior
-            return;
+            return Err(KafkaError::new(
+                ErrorCode::InvalidArgument,
+                format!("Maximum number of records per batch exceeded, max records: {}", i32::MAX),
+            ));
+        }
+        if offset - self.base_offset > i32::MAX as i64 {
+            return Err(KafkaError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "Maximum offset delta exceeded, base offset: {}, last offset: {}",
+                    self.base_offset, offset
+                ),
+            ));
         }
 
         self.num_records += 1;
@@ -503,6 +518,7 @@ impl MemoryRecordsBuilder {
             self.max_timestamp = timestamp;
             self.offset_of_max_timestamp = offset;
         }
+        Ok(())
     }
 
     /// Ensure the builder is open for record appends.
@@ -624,7 +640,7 @@ impl MemoryRecordsBuilder {
             has_delete_horizon,
             partition_leader_epoch,
             num_records,
-        );
+        )?;
 
         Ok(written_compressed)
     }
