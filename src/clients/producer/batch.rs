@@ -14,9 +14,20 @@
 
 //! ProducerBatch accumulates records destined for a single TopicPartition.
 //!
-//! Corresponds to org.apache.kafka.clients.producer.internals.ProducerBatch.
+//! Records are serialized into proper Kafka RecordBatch wire format using
+//! [`MemoryRecordsBuilder`](crate::common::record::MemoryRecordsBuilder).
+//!
+//! Corresponds to `org.apache.kafka.clients.producer.internals.ProducerBatch`.
 
 use crate::common::TopicPartition;
+use crate::common::record::compression_type::CompressionType;
+use crate::common::record::default_record::DefaultRecord;
+use crate::common::record::memory_records_builder::MemoryRecordsBuilder;
+use crate::common::record::timestamp_type::TimestampType;
+use crate::common::record::{
+    CURRENT_MAGIC_VALUE, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, RecordHeader,
+    record_batch_header_size_in_bytes,
+};
 use crate::errors::{ErrorCode, KafkaError};
 use std::future::Future;
 use std::pin::Pin;
@@ -60,79 +71,88 @@ struct BatchedRecord {
 
 /// A batch of records destined for a single TopicPartition.
 ///
-/// Records are serialized into a contiguous byte buffer. Each record's
-/// key/value/headers are copied exactly once during `try_append()`.
+/// Records are serialized in proper Kafka RecordBatch wire format via
+/// [`MemoryRecordsBuilder`]. Each record's key, value, and headers are
+/// written into the batch exactly once during `try_append()`.
 pub struct ProducerBatch {
     tp: TopicPartition,
-    buffer: Vec<u8>,
+    records_builder: MemoryRecordsBuilder,
     pending: Vec<BatchedRecord>,
     record_count: i32,
-    max_bytes: usize,
     created_at: Instant,
     closed: bool,
+    /// Cached size after finalization (set by `finalized_bytes()`).
+    finalized_size: Option<usize>,
 }
 
 impl ProducerBatch {
     /// Create a new batch for the given TopicPartition.
     pub fn new(tp: TopicPartition, max_bytes: usize) -> Self {
+        // Create a MemoryRecordsBuilder that writes records in proper RecordBatch format.
+        // base_offset=0 since the broker assigns the actual offset.
+        let records_builder = MemoryRecordsBuilder::new(
+            max_bytes.min(1024),
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0, // base_offset
+            0, // log_append_time (unused for CreateTime)
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false, // is_transactional
+            false, // is_control_batch
+            crate::common::record::NO_PARTITION_LEADER_EPOCH,
+            max_bytes,
+        )
+        .expect("MemoryRecordsBuilder::new must succeed with valid parameters");
+
         ProducerBatch {
             tp,
-            buffer: Vec::with_capacity(max_bytes.min(1024)),
+            records_builder,
             pending: Vec::new(),
             record_count: 0,
-            max_bytes,
             created_at: Instant::now(),
             closed: false,
+            finalized_size: None,
         }
     }
 
     /// Try to append a record to this batch.
     ///
     /// Returns `Some(SendFuture)` on success, `None` if the batch is full or closed.
-    /// This is the single copy point: key/value/headers are written into the buffer.
+    /// This is the single copy point: key/value/headers are written into the
+    /// RecordBatch buffer in proper Kafka wire format.
     pub fn try_append(
         &mut self,
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[Header<'_>],
-        _timestamp: i64,
+        timestamp: i64,
     ) -> Option<SendFuture> {
         if self.closed {
             return None;
         }
 
-        let record_size = Self::estimate_record_size(key, value, headers);
-        if !self.buffer.is_empty() && self.buffer.len() + record_size > self.max_bytes {
+        // Convert producer Header<'a> (borrowed) to RecordHeader (owned) for
+        // the MemoryRecordsBuilder. This is the single copy point for headers.
+        let record_headers: Vec<RecordHeader> = headers
+            .iter()
+            .map(|h| RecordHeader::new(h.key(), h.value().map(|v| v.to_vec())))
+            .collect();
+
+        if !self.records_builder.has_room_for(timestamp, key, value, &record_headers) {
             return None;
         }
 
-        // Serialize the record into the buffer (single copy of key/value/headers).
-        // Simplified format: [key_len:4][key][value_len:4][value][header_count:4][headers...]
+        // Append the record in proper RecordBatch format.
+        // If this fails, the builder is in a bad state (should not happen with valid inputs).
+        if self.records_builder.append(timestamp, key, value, &record_headers).is_err() {
+            return None;
+        }
+
         let key_size = key.map_or(-1i32, |k| k.len() as i32);
         let value_size = value.map_or(-1i32, |v| v.len() as i32);
-
-        self.buffer.extend_from_slice(&key_size.to_be_bytes());
-        if let Some(k) = key {
-            self.buffer.extend_from_slice(k);
-        }
-
-        self.buffer.extend_from_slice(&value_size.to_be_bytes());
-        if let Some(v) = value {
-            self.buffer.extend_from_slice(v);
-        }
-
-        let header_count = headers.len() as i32;
-        self.buffer.extend_from_slice(&header_count.to_be_bytes());
-        for h in headers {
-            let hk = h.key().as_bytes();
-            self.buffer.extend_from_slice(&(hk.len() as i32).to_be_bytes());
-            self.buffer.extend_from_slice(hk);
-            let hv_size = h.value().map_or(-1i32, |v| v.len() as i32);
-            self.buffer.extend_from_slice(&hv_size.to_be_bytes());
-            if let Some(hv) = h.value() {
-                self.buffer.extend_from_slice(hv);
-            }
-        }
 
         let (tx, rx) = oneshot::channel();
         let offset_delta = self.record_count;
@@ -144,12 +164,15 @@ impl ProducerBatch {
 
     /// Close this batch, preventing further appends.
     pub fn close(&mut self) {
-        self.closed = true;
+        if !self.closed {
+            self.closed = true;
+            self.records_builder.close_for_record_appends();
+        }
     }
 
     /// Returns true if the batch has reached its size limit.
     pub fn is_full(&self) -> bool {
-        self.buffer.len() >= self.max_bytes
+        self.records_builder.is_full()
     }
 
     /// Returns the number of records in this batch.
@@ -167,14 +190,64 @@ impl ProducerBatch {
         &self.tp
     }
 
-    /// Returns the current serialized size in bytes.
+    /// Returns the estimated serialized size in bytes (including batch header).
+    ///
+    /// After finalization, returns the exact finalized size.
     pub fn written_bytes(&self) -> usize {
-        self.buffer.len()
+        self.finalized_size
+            .unwrap_or_else(|| self.records_builder.estimated_size_in_bytes())
+    }
+
+    /// Finalize the batch and return the serialized RecordBatch bytes.
+    ///
+    /// This closes the builder, writes the batch header (including CRC), and
+    /// returns the complete RecordBatch bytes ready for the Kafka wire protocol.
+    pub fn finalized_bytes(&mut self) -> Vec<u8> {
+        match self.records_builder.close() {
+            Ok(()) => {},
+            Err(_) => {
+                // Already closed or aborted; return empty
+                return Vec::new();
+            },
+        }
+        // Cache the finalized size before extracting bytes (since
+        // extract_built_bytes replaces the builder with a dummy).
+        self.finalized_size = Some(self.records_builder.estimated_size_in_bytes());
+        self.extract_built_bytes()
+    }
+
+    /// Extract the built bytes by replacing the builder with a dummy one.
+    fn extract_built_bytes(&mut self) -> Vec<u8> {
+        // Create a dummy builder to swap in
+        let dummy = MemoryRecordsBuilder::new(
+            0,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            crate::common::record::NO_PARTITION_LEADER_EPOCH,
+            0,
+        )
+        .expect("dummy builder creation must succeed");
+
+        let real_builder = std::mem::replace(&mut self.records_builder, dummy);
+        match real_builder.build() {
+            Ok(memory_records) => memory_records.into_buffer(),
+            Err(_) => Vec::new(),
+        }
     }
 
     /// Returns the serialized batch data.
-    pub fn buffer(&self) -> &[u8] {
-        &self.buffer
+    ///
+    /// If the batch has not been finalized yet, this finalizes it first.
+    pub fn buffer(&mut self) -> Vec<u8> {
+        self.finalized_bytes()
     }
 
     /// Complete all pending records with the given base offset and optional error.
@@ -196,28 +269,30 @@ impl ProducerBatch {
                     rec.value_size,
                 )),
             };
-            // Ignore send failure — receiver may have been dropped if caller
+            // Ignore send failure -- receiver may have been dropped if caller
             // didn't await the SendFuture.
             let _ = rec.tx.send(result);
         }
     }
 
-    /// Estimate the serialized size of a single record.
-    fn estimate_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
-        let key_bytes = key.map_or(0, |k| k.len());
-        let value_bytes = value.map_or(0, |v| v.len());
-        let header_bytes: usize = headers
+    /// Estimate the serialized size of a single record using the proper
+    /// DefaultRecord wire format size calculation.
+    pub fn estimate_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
+        let record_headers: Vec<RecordHeader> = headers
             .iter()
-            .map(|h| 8 + h.key().len() + h.value().map_or(0, |v| v.len()))
-            .sum();
-        // 4 (key_len) + key + 4 (value_len) + value + 4 (header_count) + headers
-        12 + key_bytes + value_bytes + header_bytes
+            .map(|h| RecordHeader::new(h.key(), h.value().map(|v| v.to_vec())))
+            .collect();
+        // Use the record batch overhead for the first record, plus the record itself.
+        // For subsequent records, just the record size.
+        let record_upper_bound = DefaultRecord::record_size_upper_bound(key, value, &record_headers);
+        record_batch_header_size_in_bytes(CURRENT_MAGIC_VALUE, CompressionType::None) + record_upper_bound
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::record::default_record_batch;
 
     #[test]
     fn test_append_single_record() {
@@ -227,21 +302,26 @@ mod tests {
         let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000);
         assert!(future.is_some());
         assert_eq!(batch.record_count(), 1);
-        assert!(batch.written_bytes() > 0);
+        // written_bytes includes the RecordBatch header (61 bytes) plus the record
+        assert!(batch.written_bytes() > default_record_batch::RECORD_BATCH_OVERHEAD);
     }
 
     #[test]
     fn test_append_fills_batch() {
         let tp = TopicPartition::new("test".to_string(), 0);
-        // First record: key(1) + value(1) + overhead(12) = 14 bytes.
-        // Set max to 14 so first record fills exactly, second is rejected.
-        let mut batch = ProducerBatch::new(tp, 14);
+        // RecordBatch header is 61 bytes. A record with key="k" and value="v"
+        // needs about 8 bytes in varint format. Set max_bytes so the first record
+        // fits but the second does not.
+        // First record always fits (MemoryRecordsBuilder allows at least one record
+        // even if write_limit is exceeded). Set write_limit to 0 so the first record
+        // fits but the batch is immediately full afterward.
+        let mut batch = ProducerBatch::new(tp, 0);
 
         let f1 = batch.try_append(Some(b"k"), Some(b"v"), &[], 1000);
         assert!(f1.is_some());
         assert!(batch.is_full());
 
-        // Second record should fail — batch is full
+        // Second record should fail -- batch is full
         let f2 = batch.try_append(Some(b"k2"), Some(b"v2"), &[], 1001);
         assert!(f2.is_none());
     }
@@ -299,5 +379,62 @@ mod tests {
         let future = batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000);
         assert!(future.is_some());
         assert_eq!(batch.record_count(), 1);
+    }
+
+    #[test]
+    fn test_finalized_bytes_produces_valid_record_batch() {
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let mut batch = ProducerBatch::new(tp, 4096);
+
+        batch.try_append(Some(b"key1"), Some(b"value1"), &[], 1000).unwrap();
+        batch.try_append(Some(b"key2"), Some(b"value2"), &[], 2000).unwrap();
+
+        let bytes = batch.finalized_bytes();
+        assert!(!bytes.is_empty());
+
+        // The bytes should be a valid MemoryRecords buffer
+        let mem_records = crate::common::record::MemoryRecords::from_buffer(bytes);
+        let batches = mem_records.batches();
+        assert_eq!(1, batches.len());
+
+        let record_batch = &batches[0];
+        assert!(record_batch.is_valid());
+        assert_eq!(2, record_batch.count());
+
+        let records = record_batch.iter_records().unwrap();
+        assert_eq!(2, records.len());
+        assert_eq!(Some(b"key1".as_slice()), records[0].key());
+        assert_eq!(Some(b"value1".as_slice()), records[0].value());
+        assert_eq!(Some(b"key2".as_slice()), records[1].key());
+        assert_eq!(Some(b"value2".as_slice()), records[1].value());
+    }
+
+    #[test]
+    fn test_finalized_bytes_with_headers() {
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let mut batch = ProducerBatch::new(tp, 4096);
+
+        let headers = vec![Header::new("trace-id", Some(b"abc")), Header::new("source", None)];
+        batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000).unwrap();
+
+        let bytes = batch.finalized_bytes();
+        let mem_records = crate::common::record::MemoryRecords::from_buffer(bytes);
+        let batches = mem_records.batches();
+        assert_eq!(1, batches.len());
+
+        let records = batches[0].iter_records().unwrap();
+        assert_eq!(1, records.len());
+        assert_eq!(2, records[0].headers().len());
+        assert_eq!("trace-id", records[0].headers()[0].key);
+        assert_eq!(Some(b"abc".to_vec()), records[0].headers()[0].value);
+        assert_eq!("source", records[0].headers()[1].key);
+        assert_eq!(None, records[0].headers()[1].value);
+    }
+
+    #[test]
+    fn test_estimate_record_size_includes_batch_overhead() {
+        let size = ProducerBatch::estimate_record_size(Some(b"key"), Some(b"value"), &[]);
+        // Must include the RecordBatch header overhead (61 bytes) plus the record size
+        assert!(size > default_record_batch::RECORD_BATCH_OVERHEAD);
     }
 }

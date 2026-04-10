@@ -117,9 +117,9 @@ impl<C: ProduceClient> Sender<C> {
             let mut request_batches = Vec::new();
             let mut pending_batches = Vec::new();
 
-            for batch in ready_batches {
+            for mut batch in ready_batches {
                 let tp = batch.tp().clone();
-                let data = batch.buffer().to_vec();
+                let data = batch.buffer();
                 request_batches.push((tp, data));
                 pending_batches.push(batch);
             }

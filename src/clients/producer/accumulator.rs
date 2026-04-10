@@ -234,14 +234,9 @@ impl RecordAccumulator {
     }
 
     fn estimate_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
-        let key_bytes = key.map_or(0, |k| k.len());
-        let value_bytes = value.map_or(0, |v| v.len());
-        let header_bytes: usize = headers
-            .iter()
-            .map(|h| 8 + h.key().len() + h.value().map_or(0, |v| v.len()))
-            .sum();
-        // Minimum 1 permit to avoid zero-permit acquire.
-        (12 + key_bytes + value_bytes + header_bytes).max(1)
+        // Use the proper record size estimate, which includes the RecordBatch
+        // header overhead for the first record in a new batch.
+        ProducerBatch::estimate_record_size(key, value, headers).max(1)
     }
 }
 
