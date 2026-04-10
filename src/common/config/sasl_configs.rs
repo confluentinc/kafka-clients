@@ -61,7 +61,7 @@ pub const DEFAULT_SASL_MECHANISM: &str = GSSAPI_MECHANISM;
 /// Translated from `org.apache.kafka.common.config.SaslConfigs`.
 #[derive(Debug, Clone)]
 pub struct SaslConfig {
-    /// SASL mechanism. Default: `"PLAIN"`.
+    /// SASL mechanism. Default: `"GSSAPI"` (matches Java `DEFAULT_SASL_MECHANISM`).
     /// Corresponds to `sasl.mechanism`.
     pub mechanism: String,
 
@@ -89,7 +89,12 @@ pub struct SaslConfig {
 
 impl Default for SaslConfig {
     fn default() -> Self {
-        SaslConfig { mechanism: "PLAIN".to_owned(), jaas_config: None, username: None, password: None }
+        SaslConfig {
+            mechanism: DEFAULT_SASL_MECHANISM.to_owned(),
+            jaas_config: None,
+            username: None,
+            password: None,
+        }
     }
 }
 
@@ -184,7 +189,7 @@ mod tests {
     #[test]
     fn test_default() {
         let config = SaslConfig::default();
-        assert_eq!(config.mechanism, "PLAIN");
+        assert_eq!(config.mechanism, "GSSAPI");
         assert!(config.jaas_config.is_none());
         assert!(config.username.is_none());
         assert!(config.password.is_none());
