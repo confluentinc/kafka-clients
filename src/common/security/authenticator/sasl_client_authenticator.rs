@@ -212,7 +212,7 @@ impl SaslClientAuthenticator {
             self.correlation_id = MIN_RESERVED_CORRELATION_ID;
         }
         let id = self.correlation_id;
-        self.correlation_id += 1;
+        self.correlation_id = self.correlation_id.wrapping_add(1);
         id
     }
 
@@ -368,7 +368,14 @@ impl SaslClientAuthenticator {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
         let mut buffer = ByteBufferAccessor::from_bytes(response_bytes);
-        let response = ConcreteResponse::parse_response(&mut buffer, request_header)?;
+        let response = ConcreteResponse::parse_response(&mut buffer, request_header).map_err(|e| {
+            debug!("Invalid SASL mechanism response, server may be expecting only GSSAPI tokens");
+            self.set_sasl_state(SaslState::Failed);
+            io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!("Invalid SASL mechanism response, server may be expecting a different protocol: {e}"),
+            )
+        })?;
         self.current_request_header = None;
         Ok(Some(response))
     }
@@ -853,6 +860,30 @@ mod tests {
         assert_eq!(id2, MIN_RESERVED_CORRELATION_ID + 1);
     }
 
+    /// Test 3b: Correlation ID wraps correctly when reserved range is exhausted.
+    ///
+    /// Java's `int` wraps silently on overflow (`Integer.MAX_VALUE + 1` becomes
+    /// `Integer.MIN_VALUE`). After wrapping, `isReserved()` returns false, so
+    /// `nextCorrelationId()` resets to `MIN_RESERVED_CORRELATION_ID`. This test
+    /// ensures the Rust implementation matches this wrapping behavior in both
+    /// debug and release builds.
+    #[test]
+    fn test_correlation_id_wraps_on_overflow() {
+        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
+        // Exhaust all 8 reserved IDs
+        for i in 0..8 {
+            let id = auth.next_correlation_id();
+            assert_eq!(id, MIN_RESERVED_CORRELATION_ID + i);
+            assert!(is_reserved(id));
+        }
+        // At this point correlation_id has wrapped past i32::MAX.
+        // The 9th call should detect that the ID is no longer reserved and
+        // reset to MIN_RESERVED_CORRELATION_ID.
+        let id = auth.next_correlation_id();
+        assert_eq!(id, MIN_RESERVED_CORRELATION_ID);
+        assert!(is_reserved(id));
+    }
+
     /// Test 4: is_reserved boundary conditions.
     #[test]
     fn test_is_reserved() {
@@ -1118,5 +1149,37 @@ mod tests {
         let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
         assert!(err.to_string().contains("Unexpected handshake request"));
         assert_eq!(auth.sasl_state(), SaslState::Failed);
+    }
+
+    /// Test 11: Parse error in receive_kafka_response sets state to Failed.
+    ///
+    /// When the response body is malformed (e.g., truncated), the parse error
+    /// must transition the state to Failed before returning the error, matching
+    /// the Java try-catch in `receiveKafkaResponse()`.
+    #[tokio::test]
+    async fn test_parse_error_sets_state_to_failed() {
+        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
+        let mut transport = MockTransportLayer::new();
+
+        // Send ApiVersionsRequest to advance state and set current_request_header
+        auth.authenticate_impl(&mut transport).await.unwrap();
+        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
+
+        // Enqueue a size-prefixed but truncated/garbage response body.
+        // The 4-byte size prefix says 4 bytes follow, but the body is garbage
+        // that won't parse as a valid ApiVersionsResponse.
+        let garbage: Vec<u8> = vec![
+            0x00, 0x00, 0x00, 0x04, // size = 4
+            0xFF, 0xFF, 0xFF, 0xFF, // garbage body
+        ];
+        transport.enqueue_read_data(&garbage);
+
+        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
+        assert_eq!(auth.sasl_state(), SaslState::Failed);
+        assert!(
+            err.to_string().contains("Invalid SASL mechanism response"),
+            "Expected parse error message, got: {}",
+            err
+        );
     }
 }
