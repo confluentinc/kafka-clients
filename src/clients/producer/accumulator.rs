@@ -129,26 +129,47 @@ impl RecordAccumulator {
 
         // Try to append to existing batch.
         if let Some(batch) = inner.current_batches.get_mut(tp) {
-            if let Some(future) = batch.try_append(key, value, headers, timestamp) {
-                let batch_is_full = batch.is_full();
-                if batch_is_full {
+            match batch.try_append(key, value, headers, timestamp) {
+                Ok(Some(future)) => {
+                    batch.add_permits(estimated_size);
+                    let batch_is_full = batch.is_full();
+                    if batch_is_full {
+                        let full_batch = inner.current_batches.remove(tp).unwrap();
+                        inner.ready_batches.push(full_batch);
+                        self.batch_ready_notify.notify_one();
+                    }
+                    return Ok(AppendResult { future, batch_is_full, new_batch_created: false });
+                },
+                Ok(None) => {
+                    // Current batch is full — move it to ready and create a new one.
                     let full_batch = inner.current_batches.remove(tp).unwrap();
                     inner.ready_batches.push(full_batch);
                     self.batch_ready_notify.notify_one();
-                }
-                return Ok(AppendResult { future, batch_is_full, new_batch_created: false });
+                },
+                Err(e) => {
+                    // Input validation error (e.g. invalid timestamp) — release
+                    // memory and propagate.
+                    self.memory_semaphore.add_permits(estimated_size);
+                    return Err(e);
+                },
             }
-            // Current batch is full — move it to ready and create a new one.
-            let full_batch = inner.current_batches.remove(tp).unwrap();
-            inner.ready_batches.push(full_batch);
-            self.batch_ready_notify.notify_one();
         }
 
         // Create a new batch.
         let mut batch = ProducerBatch::new(tp.clone(), self.config.batch_size());
-        let future = batch
-            .try_append(key, value, headers, timestamp)
-            .expect("new batch must accept first record");
+        let future = match batch.try_append(key, value, headers, timestamp) {
+            Ok(Some(f)) => f,
+            Ok(None) => {
+                // Should not happen: a new batch must always accept the first record.
+                self.memory_semaphore.add_permits(estimated_size);
+                return Err(KafkaError::new(ErrorCode::Unexpected, "new batch rejected first record"));
+            },
+            Err(e) => {
+                self.memory_semaphore.add_permits(estimated_size);
+                return Err(e);
+            },
+        };
+        batch.add_permits(estimated_size);
         let new_batch_created = true;
         let batch_is_full = batch.is_full();
 
@@ -234,8 +255,11 @@ impl RecordAccumulator {
     }
 
     fn estimate_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
-        // Use the proper record size estimate, which includes the RecordBatch
-        // header overhead for the first record in a new batch.
+        // Use the record-only size estimate. The batch header overhead is shared
+        // across all records in a batch and is accounted for by the batch itself
+        // via `written_bytes()` / `estimated_size_in_bytes()`. Acquiring only the
+        // record-level permits per append prevents leaking `(N-1) * 61` bytes of
+        // semaphore permits per batch (where 61 is the batch header overhead).
         ProducerBatch::estimate_record_size(key, value, headers).max(1)
     }
 }
@@ -324,5 +348,70 @@ mod tests {
         let result = acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000).await;
         assert!(result.is_err());
         assert_eq!(result.unwrap_err().code(), ErrorCode::Unexpected);
+    }
+
+    #[tokio::test]
+    async fn test_memory_permits_balanced_after_multi_record_batch() {
+        // Verify that appending N records to one batch does NOT leak
+        // (N-1) * batch_header_overhead permits. After draining and releasing,
+        // available permits should return to the original pool size.
+        let buffer_memory = 65536usize;
+        let config = Arc::new(
+            ProducerConfig::builder()
+                .bootstrap_servers(vec!["localhost:9092".to_string()])
+                .batch_size(4096)
+                .linger_ms(0)
+                .buffer_memory(buffer_memory)
+                .build()
+                .unwrap(),
+        );
+        let acc = RecordAccumulator::new(config);
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        let initial_permits = acc.memory_semaphore.available_permits();
+        assert_eq!(initial_permits, buffer_memory);
+
+        // Append 10 records to the same batch.
+        for i in 0..10 {
+            acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000 + i).await.unwrap();
+        }
+
+        // Flush and drain the batch.
+        acc.flush_all().await;
+        let batches = acc.drain().await;
+        assert_eq!(1, batches.len());
+
+        // Release memory using the permits_acquired (what the sender does).
+        for batch in batches {
+            let permits = batch.permits_acquired();
+            assert!(permits > 0);
+            acc.release_memory(permits);
+        }
+
+        // All permits should be returned (within a small margin for rounding).
+        // With the old bug, this would lose (10-1)*61 = 549 permits.
+        let final_permits = acc.memory_semaphore.available_permits();
+        assert_eq!(
+            final_permits,
+            initial_permits,
+            "Permits leaked: acquired {}, released back to {}",
+            initial_permits - final_permits,
+            final_permits
+        );
+    }
+
+    #[tokio::test]
+    async fn test_append_invalid_timestamp_returns_error() {
+        let acc = RecordAccumulator::new(test_config());
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        // Negative timestamp (not NO_TIMESTAMP=-1) should propagate as an error.
+        let result = acc.append(&tp, Some(b"key"), Some(b"value"), &[], -5).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ErrorCode::InvalidArgument);
+
+        // Verify that the memory permits were released on error.
+        let permits = acc.memory_semaphore.available_permits();
+        assert_eq!(permits, 65536, "Permits should be fully returned after error");
     }
 }

@@ -83,6 +83,11 @@ pub struct ProducerBatch {
     closed: bool,
     /// Cached size after finalization (set by `finalized_bytes()`).
     finalized_size: Option<usize>,
+    /// Total memory semaphore permits acquired for records in this batch.
+    /// The sender must release exactly this many permits when the batch
+    /// completes, avoiding the permit leak that would occur if it released
+    /// `written_bytes()` (which includes the shared batch header overhead).
+    permits_acquired: usize,
 }
 
 impl ProducerBatch {
@@ -115,12 +120,17 @@ impl ProducerBatch {
             created_at: Instant::now(),
             closed: false,
             finalized_size: None,
+            permits_acquired: 0,
         }
     }
 
     /// Try to append a record to this batch.
     ///
-    /// Returns `Some(SendFuture)` on success, `None` if the batch is full or closed.
+    /// Returns `Ok(Some(SendFuture))` on success, `Ok(None)` if the batch is
+    /// full or closed, and `Err` if the record itself is invalid (e.g. negative
+    /// timestamp). This distinction allows callers to differentiate capacity
+    /// exhaustion from input validation errors.
+    ///
     /// This is the single copy point: key/value/headers are written into the
     /// RecordBatch buffer in proper Kafka wire format.
     pub fn try_append(
@@ -129,9 +139,9 @@ impl ProducerBatch {
         value: Option<&[u8]>,
         headers: &[Header<'_>],
         timestamp: i64,
-    ) -> Option<SendFuture> {
+    ) -> Result<Option<SendFuture>, KafkaError> {
         if self.closed {
-            return None;
+            return Ok(None);
         }
 
         // Convert producer Header<'a> (borrowed) to RecordHeader (owned) for
@@ -142,14 +152,12 @@ impl ProducerBatch {
             .collect();
 
         if !self.records_builder.has_room_for(timestamp, key, value, &record_headers) {
-            return None;
+            return Ok(None);
         }
 
         // Append the record in proper RecordBatch format.
-        // If this fails, the builder is in a bad state (should not happen with valid inputs).
-        if self.records_builder.append(timestamp, key, value, &record_headers).is_err() {
-            return None;
-        }
+        // Propagate errors (e.g. invalid timestamp) to the caller.
+        self.records_builder.append(timestamp, key, value, &record_headers)?;
 
         let key_size = key.map_or(-1i32, |k| k.len() as i32);
         let value_size = value.map_or(-1i32, |v| v.len() as i32);
@@ -159,7 +167,7 @@ impl ProducerBatch {
         self.pending.push(BatchedRecord { tx, offset_delta, key_size, value_size });
         self.record_count += 1;
 
-        Some(SendFuture { rx })
+        Ok(Some(SendFuture { rx }))
     }
 
     /// Close this batch, preventing further appends.
@@ -196,6 +204,25 @@ impl ProducerBatch {
     pub fn written_bytes(&self) -> usize {
         self.finalized_size
             .unwrap_or_else(|| self.records_builder.estimated_size_in_bytes())
+    }
+
+    /// Add to the running total of memory permits acquired for this batch.
+    ///
+    /// Called by the accumulator each time a record is appended. The sender
+    /// must call [`permits_acquired()`] when releasing memory to avoid
+    /// leaking semaphore permits.
+    pub fn add_permits(&mut self, permits: usize) {
+        self.permits_acquired += permits;
+    }
+
+    /// Returns the total memory permits acquired for records in this batch.
+    ///
+    /// The sender must release exactly this many permits (not
+    /// `written_bytes()`) to keep the memory semaphore balanced. This avoids
+    /// the asymmetry where per-record estimates exclude the shared batch
+    /// header but `written_bytes()` includes it.
+    pub fn permits_acquired(&self) -> usize {
+        self.permits_acquired
     }
 
     /// Finalize the batch and return the serialized RecordBatch bytes.
@@ -277,15 +304,24 @@ impl ProducerBatch {
 
     /// Estimate the serialized size of a single record using the proper
     /// DefaultRecord wire format size calculation.
+    ///
+    /// Returns only the record-level size (no batch header overhead). The batch
+    /// header is shared across all records in the batch and must be accounted
+    /// for separately (e.g., when creating a new batch).
     pub fn estimate_record_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
         let record_headers: Vec<RecordHeader> = headers
             .iter()
             .map(|h| RecordHeader::new(h.key(), h.value().map(|v| v.to_vec())))
             .collect();
-        // Use the record batch overhead for the first record, plus the record itself.
-        // For subsequent records, just the record size.
-        let record_upper_bound = DefaultRecord::record_size_upper_bound(key, value, &record_headers);
-        record_batch_header_size_in_bytes(CURRENT_MAGIC_VALUE, CompressionType::None) + record_upper_bound
+        DefaultRecord::record_size_upper_bound(key, value, &record_headers)
+    }
+
+    /// Returns the RecordBatch header overhead size in bytes.
+    ///
+    /// This is the fixed per-batch overhead (61 bytes for magic V2 with no
+    /// compression). Should be added once per batch, not per record.
+    pub fn batch_header_overhead() -> usize {
+        record_batch_header_size_in_bytes(CURRENT_MAGIC_VALUE, CompressionType::None)
     }
 }
 
@@ -299,7 +335,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000);
+        let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
         assert!(future.is_some());
         assert_eq!(batch.record_count(), 1);
         // written_bytes includes the RecordBatch header (61 bytes) plus the record
@@ -317,12 +353,12 @@ mod tests {
         // fits but the batch is immediately full afterward.
         let mut batch = ProducerBatch::new(tp, 0);
 
-        let f1 = batch.try_append(Some(b"k"), Some(b"v"), &[], 1000);
+        let f1 = batch.try_append(Some(b"k"), Some(b"v"), &[], 1000).unwrap();
         assert!(f1.is_some());
         assert!(batch.is_full());
 
-        // Second record should fail -- batch is full
-        let f2 = batch.try_append(Some(b"k2"), Some(b"v2"), &[], 1001);
+        // Second record should return Ok(None) -- batch is full, not an error
+        let f2 = batch.try_append(Some(b"k2"), Some(b"v2"), &[], 1001).unwrap();
         assert!(f2.is_none());
     }
 
@@ -332,8 +368,20 @@ mod tests {
         let mut batch = ProducerBatch::new(tp, 4096);
         batch.close();
 
-        let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000);
+        let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
         assert!(future.is_none());
+    }
+
+    #[test]
+    fn test_append_with_invalid_timestamp_returns_error() {
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let mut batch = ProducerBatch::new(tp, 4096);
+
+        // Negative timestamp (not NO_TIMESTAMP) should produce an error, not None.
+        let result = batch.try_append(Some(b"key"), Some(b"value"), &[], -5);
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.code(), ErrorCode::InvalidArgument);
     }
 
     #[tokio::test]
@@ -341,8 +389,8 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        let f1 = batch.try_append(Some(b"k1"), Some(b"v1"), &[], 1000).unwrap();
-        let f2 = batch.try_append(Some(b"k2"), Some(b"v2"), &[], 1001).unwrap();
+        let f1 = batch.try_append(Some(b"k1"), Some(b"v1"), &[], 1000).unwrap().unwrap();
+        let f2 = batch.try_append(Some(b"k2"), Some(b"v2"), &[], 1001).unwrap().unwrap();
 
         batch.complete(100, 2000, None);
 
@@ -360,7 +408,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
+        let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap().unwrap();
 
         let err = KafkaError::new(ErrorCode::NotLeaderOrFollower, "not leader");
         batch.complete(0, 0, Some(&err));
@@ -376,7 +424,7 @@ mod tests {
         let mut batch = ProducerBatch::new(tp, 4096);
 
         let headers = vec![Header::new("trace-id", Some(b"abc")), Header::new("source", None)];
-        let future = batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000);
+        let future = batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000).unwrap();
         assert!(future.is_some());
         assert_eq!(batch.record_count(), 1);
     }
@@ -386,8 +434,8 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        batch.try_append(Some(b"key1"), Some(b"value1"), &[], 1000).unwrap();
-        batch.try_append(Some(b"key2"), Some(b"value2"), &[], 2000).unwrap();
+        batch.try_append(Some(b"key1"), Some(b"value1"), &[], 1000).unwrap().unwrap();
+        batch.try_append(Some(b"key2"), Some(b"value2"), &[], 2000).unwrap().unwrap();
 
         let bytes = batch.finalized_bytes();
         assert!(!bytes.is_empty());
@@ -415,7 +463,7 @@ mod tests {
         let mut batch = ProducerBatch::new(tp, 4096);
 
         let headers = vec![Header::new("trace-id", Some(b"abc")), Header::new("source", None)];
-        batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000).unwrap();
+        batch.try_append(Some(b"key"), Some(b"value"), &headers, 1000).unwrap().unwrap();
 
         let bytes = batch.finalized_bytes();
         let mem_records = crate::common::record::MemoryRecords::from_buffer(bytes);
@@ -432,10 +480,18 @@ mod tests {
     }
 
     #[test]
-    fn test_estimate_record_size_includes_batch_overhead() {
+    fn test_estimate_record_size_excludes_batch_overhead() {
         let size = ProducerBatch::estimate_record_size(Some(b"key"), Some(b"value"), &[]);
-        // Must include the RecordBatch header overhead (61 bytes) plus the record size
-        assert!(size > default_record_batch::RECORD_BATCH_OVERHEAD);
+        // Record-only estimate: must NOT include the RecordBatch header overhead (61 bytes).
+        // It should be smaller than the batch overhead since it's just one small record.
+        assert!(size > 0);
+        assert!(size < default_record_batch::RECORD_BATCH_OVERHEAD);
+    }
+
+    #[test]
+    fn test_batch_header_overhead() {
+        let overhead = ProducerBatch::batch_header_overhead();
+        assert_eq!(overhead, default_record_batch::RECORD_BATCH_OVERHEAD);
     }
 
     #[test]
@@ -445,7 +501,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
+        batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap().unwrap();
 
         let bytes = batch.finalized_bytes();
         // The bytes should pass ProduceRequest validation for all supported versions
@@ -458,7 +514,7 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
-        batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
+        batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap().unwrap();
         let estimated = batch.written_bytes();
         assert!(estimated > 0);
 

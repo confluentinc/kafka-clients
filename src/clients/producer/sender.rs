@@ -134,27 +134,25 @@ impl<C: ProduceClient> Sender<C> {
                     // Match responses to batches and complete them.
                     for batch in pending_batches {
                         let response = responses.iter().find(|r| r.tp == *batch.tp());
+                        let permits = batch.permits_acquired();
                         match response {
                             Some(r) => {
-                                let bytes = batch.written_bytes();
                                 batch.complete(r.base_offset, r.log_append_time, r.error.as_ref());
-                                self.accumulator.release_memory(bytes);
                             },
                             None => {
                                 // No response for this partition — treat as success with offset 0.
-                                let bytes = batch.written_bytes();
                                 batch.complete(0, 0, None);
-                                self.accumulator.release_memory(bytes);
                             },
                         }
+                        self.accumulator.release_memory(permits);
                     }
                 },
                 Err(e) => {
                     // Network-level failure — fail all batches in this request.
                     for batch in pending_batches {
-                        let bytes = batch.written_bytes();
+                        let permits = batch.permits_acquired();
                         batch.complete(0, 0, Some(&e));
-                        self.accumulator.release_memory(bytes);
+                        self.accumulator.release_memory(permits);
                     }
                 },
             }
