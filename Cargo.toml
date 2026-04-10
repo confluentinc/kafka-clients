@@ -25,6 +25,10 @@ log = "0.4"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 
+[[test]]
+name = "common"
+path = "tests/main.rs"
+
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

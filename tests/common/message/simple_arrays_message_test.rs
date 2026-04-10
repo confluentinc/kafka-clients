@@ -18,9 +18,7 @@
 //!
 //! Translated from org.apache.kafka.common.message.SimpleArraysMessageTest
 
-mod common;
-
-use common::simple_arrays_message_data::SimpleArraysMessageData;
+use crate::common::simple_arrays_message_data::SimpleArraysMessageData;
 use confluent_kafka_rust::common::protocol::ByteBufferAccessor;
 
 #[test]

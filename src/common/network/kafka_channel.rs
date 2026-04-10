@@ -190,8 +190,7 @@ impl KafkaChannel {
 
         if let Err(e) = result {
             let remote_desc = self.remote_address.map(|a| a.to_string());
-            self.state =
-                ChannelState::with_exception(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
+            self.state = ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
             if authenticating {
                 self.delay_close_on_authentication_failure();
             }

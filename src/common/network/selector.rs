@@ -670,7 +670,7 @@ impl Selectable for Selector {
                     }
 
                     error!(
-                        "Unexpected exception during send, closing connection {} and rethrowing: {}",
+                        "Unexpected error during send, closing connection {} and returning error: {}",
                         connection_id, e
                     );
                     return Err(e);

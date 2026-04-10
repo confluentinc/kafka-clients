@@ -92,8 +92,8 @@ pub fn await_ready(
         }
 
         client.poll(poll_timeout, attempt_start_time);
-        if let Some(auth_exception) = client.authentication_exception(node) {
-            return Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_exception));
+        if let Some(auth_error) = client.authentication_error(node) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_error));
         }
         attempt_start_time = now_ms_fn();
     }
@@ -138,7 +138,7 @@ pub fn send_and_receive(
                     ));
                 }
                 if response.version_mismatch().is_some() {
-                    return Err(io::Error::new(io::ErrorKind::Unsupported, "UnsupportedVersionException"));
+                    return Err(io::Error::new(io::ErrorKind::Unsupported, "UnsupportedVersionError"));
                 }
                 return Ok(response);
             }
@@ -157,11 +157,11 @@ pub fn is_unavailable(client: &dyn KafkaClient, node: &Node, now: i64) -> bool {
     client.connection_failed(node) && client.connection_delay(node, now) > 0
 }
 
-/// Check for an authentication error on a given node and return the exception if there
+/// Check for an authentication error on a given node and return the error if there
 /// is one.
-pub fn maybe_throw_auth_failure(client: &dyn KafkaClient, node: &Node) -> io::Result<()> {
-    if let Some(exception) = client.authentication_exception(node) {
-        Err(io::Error::new(io::ErrorKind::PermissionDenied, exception))
+pub fn maybe_return_auth_failure(client: &dyn KafkaClient, node: &Node) -> io::Result<()> {
+    if let Some(err) = client.authentication_error(node) {
+        Err(io::Error::new(io::ErrorKind::PermissionDenied, err))
     } else {
         Ok(())
     }

@@ -18,11 +18,9 @@
 //!
 //! Translated from org.apache.kafka.common.message.SimpleExampleMessageTest
 
-mod common;
-
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use common::simple_example_message_data::{
+use crate::common::simple_example_message_data::{
     MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct, TestCommonStruct,
 };
 use confluent_kafka_rust::common::Uuid;
@@ -100,7 +98,7 @@ fn test_should_store_field() {
 
 /// Translated from: shouldThrowIfCannotWriteNonIgnorableField
 #[test]
-fn test_should_throw_if_cannot_write_non_ignorable_field() {
+fn test_should_return_error_if_cannot_write_non_ignorable_field() {
     // processId is not supported in v0 and is not marked as ignorable
     let mut out = SimpleExampleMessageData::new();
     out.set_process_id(Uuid::random_uuid());

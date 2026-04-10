@@ -33,6 +33,7 @@ use log::{debug, error, info, trace};
 use crate::common::cluster::Cluster;
 use crate::common::cluster_resource::ClusterResource;
 use crate::common::internals::ClusterResourceListeners;
+use crate::common::kafka_error::KafkaError;
 use crate::common::node::Node;
 use crate::common::protocol::Errors;
 use crate::common::requests::NO_PARTITION_LEADER_EPOCH;
@@ -85,7 +86,7 @@ struct MetadataInner {
     last_refresh_ms: i64,
     last_successful_refresh_ms: i64,
     attempts: i64,
-    fatal_exception: Option<MetadataError>,
+    fatal_err: Option<KafkaError>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
     metadata_snapshot: MetadataSnapshot,
@@ -97,36 +98,6 @@ struct MetadataInner {
     last_seen_leader_epochs: HashMap<TopicPartition, i32>,
     bootstrap_addresses: Vec<SocketAddr>,
 }
-
-/// Errors from metadata operations.
-///
-/// Maps to Java's `KafkaException` subtypes used in metadata context:
-/// `TopicAuthorizationException`, `InvalidTopicException`, and generic `KafkaException`.
-#[derive(Clone, Debug)]
-pub enum MetadataError {
-    /// Topics that the client is not authorized to access.
-    TopicAuthorization(HashSet<String>),
-    /// Topics with invalid names.
-    InvalidTopic(HashSet<String>),
-    /// A fatal error that prevents further metadata updates.
-    Fatal(String),
-}
-
-impl fmt::Display for MetadataError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            MetadataError::TopicAuthorization(topics) => {
-                write!(f, "TopicAuthorizationException: {:?}", topics)
-            },
-            MetadataError::InvalidTopic(topics) => {
-                write!(f, "InvalidTopicException: {:?}", topics)
-            },
-            MetadataError::Fatal(msg) => write!(f, "KafkaException: {}", msg),
-        }
-    }
-}
-
-impl std::error::Error for MetadataError {}
 
 /// Result of `new_metadata_request_and_version`.
 pub struct MetadataRequestAndVersion {
@@ -247,7 +218,7 @@ impl Metadata {
                 invalid_topics: HashSet::new(),
                 unauthorized_topics: HashSet::new(),
                 metadata_snapshot: MetadataSnapshot::empty(),
-                fatal_exception: None,
+                fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
             retain_topic_fn: None,
@@ -301,7 +272,7 @@ impl Metadata {
                 invalid_topics: HashSet::new(),
                 unauthorized_topics: HashSet::new(),
                 metadata_snapshot: MetadataSnapshot::empty(),
-                fatal_exception: None,
+                fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
             retain_topic_fn,
@@ -422,12 +393,12 @@ impl Metadata {
         &self,
         topic_partition: &TopicPartition,
         leader_epoch: i32,
-    ) -> Result<bool, MetadataError> {
+    ) -> Result<bool, KafkaError> {
         if leader_epoch < 0 {
-            return Err(MetadataError::Fatal(format!(
-                "Invalid leader epoch {} (must be non-negative)",
-                leader_epoch
-            )));
+            return Err(KafkaError::fatal(
+                Errors::UnknownServerError,
+                format!("Invalid leader epoch {} (must be non-negative)", leader_epoch),
+            ));
         }
 
         let mut inner = self.inner.lock().unwrap();
@@ -952,7 +923,7 @@ impl Metadata {
 
     /// Checks if the error is an invalid metadata error that should trigger a re-fetch.
     ///
-    /// Returns `true` for error codes whose Java exceptions extend
+    /// Returns `true` for error codes whose Java errors extend
     /// `InvalidMetadataException`.
     fn is_invalid_metadata_error(error: Errors) -> bool {
         matches!(
@@ -973,60 +944,60 @@ impl Metadata {
         )
     }
 
-    /// If any non-retriable exceptions were encountered during metadata update,
-    /// clear and return the exception.
-    pub fn maybe_throw_any_exception(&self) -> Result<(), MetadataError> {
+    /// If any non-retriable errors were encountered during metadata update,
+    /// clear and return the error.
+    pub fn maybe_return_any_error(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
-        Self::clear_errors_and_maybe_throw_exception(&mut inner, Self::recoverable_exception)
+        Self::clear_errors_and_maybe_return_error(&mut inner, Self::recoverable_error)
     }
 
-    /// If any non-retriable exceptions were encountered for the specified topic,
-    /// return the error. All exceptions from the last metadata update are cleared.
-    pub fn maybe_throw_exception_for_topic(&self, topic: &str) -> Result<(), MetadataError> {
+    /// If any non-retriable errors were encountered for the specified topic,
+    /// return the error. All errors from the last metadata update are cleared.
+    pub fn maybe_return_error_for_topic(&self, topic: &str) -> Result<(), KafkaError> {
         let topic = topic.to_string();
         let mut inner = self.inner.lock().unwrap();
-        Self::clear_errors_and_maybe_throw_exception(&mut inner, |i| Self::recoverable_exception_for_topic(i, &topic))
+        Self::clear_errors_and_maybe_return_error(&mut inner, |i| Self::recoverable_error_for_topic(i, &topic))
     }
 
-    /// If any fatal exceptions were encountered during metadata update, return the exception.
-    pub fn maybe_throw_fatal_exception(&self) -> Result<(), MetadataError> {
+    /// If any fatal errors were encountered during metadata update, return the error.
+    pub fn maybe_return_fatal_error(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
-        if let Some(exception) = inner.fatal_exception.take() {
-            return Err(exception);
+        if let Some(err) = inner.fatal_err.take() {
+            return Err(err);
         }
         Ok(())
     }
 
-    fn clear_errors_and_maybe_throw_exception<F>(
+    fn clear_errors_and_maybe_return_error<F>(
         inner: &mut MetadataInner,
         recoverable_supplier: F,
-    ) -> Result<(), MetadataError>
+    ) -> Result<(), KafkaError>
     where
-        F: FnOnce(&MetadataInner) -> Option<MetadataError>,
+        F: FnOnce(&MetadataInner) -> Option<KafkaError>,
     {
-        let metadata_exception = inner.fatal_exception.take().or_else(|| recoverable_supplier(inner));
+        let metadata_error = inner.fatal_err.take().or_else(|| recoverable_supplier(inner));
         Self::clear_recoverable_errors(inner);
-        match metadata_exception {
+        match metadata_error {
             Some(e) => Err(e),
             None => Ok(()),
         }
     }
 
-    fn recoverable_exception(inner: &MetadataInner) -> Option<MetadataError> {
+    fn recoverable_error(inner: &MetadataInner) -> Option<KafkaError> {
         if !inner.unauthorized_topics.is_empty() {
-            Some(MetadataError::TopicAuthorization(inner.unauthorized_topics.clone()))
+            Some(KafkaError::topic_authorization(inner.unauthorized_topics.clone()))
         } else if !inner.invalid_topics.is_empty() {
-            Some(MetadataError::InvalidTopic(inner.invalid_topics.clone()))
+            Some(KafkaError::invalid_topics(inner.invalid_topics.clone()))
         } else {
             None
         }
     }
 
-    fn recoverable_exception_for_topic(inner: &MetadataInner, topic: &str) -> Option<MetadataError> {
+    fn recoverable_error_for_topic(inner: &MetadataInner, topic: &str) -> Option<KafkaError> {
         if inner.unauthorized_topics.contains(topic) {
-            Some(MetadataError::TopicAuthorization([topic.to_string()].into_iter().collect()))
+            Some(KafkaError::topic_authorization([topic.to_string()].into_iter().collect()))
         } else if inner.invalid_topics.contains(topic) {
-            Some(MetadataError::InvalidTopic([topic.to_string()].into_iter().collect()))
+            Some(KafkaError::invalid_topics([topic.to_string()].into_iter().collect()))
         } else {
             None
         }
@@ -1046,9 +1017,9 @@ impl Metadata {
     }
 
     /// Propagate a fatal error which affects the ability to fetch metadata.
-    pub fn fatal_error(&self, exception: MetadataError) {
+    pub fn fatal_error(&self, error: KafkaError) {
         let mut inner = self.inner.lock().unwrap();
-        inner.fatal_exception = Some(exception);
+        inner.fatal_err = Some(error);
     }
 
     /// Returns the current metadata update version.
@@ -1805,22 +1776,26 @@ mod tests {
         );
         metadata.update_with_current_request_version(&invalid_topic_response, false, now);
 
-        let err = metadata.maybe_throw_any_exception().unwrap_err();
+        let err = metadata.maybe_return_any_error().unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidTopicException);
         match &err {
-            MetadataError::InvalidTopic(topics) => {
-                assert_eq!(&[invalid_topic.to_string()].into_iter().collect::<HashSet<_>>(), topics);
+            KafkaError::InvalidTopic(e) => {
+                assert_eq!(
+                    e.invalid_topics,
+                    [invalid_topic.to_string()].into_iter().collect::<HashSet<_>>()
+                );
             },
             _ => panic!("Expected InvalidTopic error, got {:?}", err),
         }
-        // We clear the exception once it has been raised to the user
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        // We clear the error once it has been raised to the user
+        assert!(metadata.maybe_return_any_error().is_ok());
 
         // Reset the invalid topic error
         metadata.update_with_current_request_version(&invalid_topic_response, false, now);
 
         // If we get a good update, the error should clear
         metadata.update_with_current_request_version(&empty_metadata_response(), false, now);
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        assert!(metadata.maybe_return_any_error().is_ok());
     }
 
     /// Translated from `MetadataTest.testTopicAuthorizationError`.
@@ -1841,22 +1816,26 @@ mod tests {
         );
         metadata.update_with_current_request_version(&unauthorized_response, false, now);
 
-        let err = metadata.maybe_throw_any_exception().unwrap_err();
+        let err = metadata.maybe_return_any_error().unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
         match &err {
-            MetadataError::TopicAuthorization(topics) => {
-                assert_eq!(&[unauthorized_topic.to_string()].into_iter().collect::<HashSet<_>>(), topics);
+            KafkaError::TopicAuthorization(e) => {
+                assert_eq!(
+                    e.unauthorized_topics,
+                    [unauthorized_topic.to_string()].into_iter().collect::<HashSet<_>>()
+                );
             },
             _ => panic!("Expected TopicAuthorization error, got {:?}", err),
         }
-        // We clear the exception once it has been raised
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        // We clear the error once it has been raised
+        assert!(metadata.maybe_return_any_error().is_ok());
 
         // Reset the unauthorized topic error
         metadata.update_with_current_request_version(&unauthorized_response, false, now);
 
         // If we get a good update, the error should clear
         metadata.update_with_current_request_version(&empty_metadata_response(), false, now);
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        assert!(metadata.maybe_return_any_error().is_ok());
     }
 
     /// Translated from `MetadataTest.testMetadataTopicErrors`.
@@ -1878,40 +1857,52 @@ mod tests {
         );
 
         metadata.update_with_current_request_version(&metadata_response, false, now);
-        let err = metadata.maybe_throw_exception_for_topic("sensitiveTopic1").unwrap_err();
+        let err = metadata.maybe_return_error_for_topic("sensitiveTopic1").unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
         match &err {
-            MetadataError::TopicAuthorization(topics) => {
-                assert_eq!(&["sensitiveTopic1".to_string()].into_iter().collect::<HashSet<_>>(), topics);
+            KafkaError::TopicAuthorization(e) => {
+                assert_eq!(
+                    e.unauthorized_topics,
+                    ["sensitiveTopic1".to_string()].into_iter().collect::<HashSet<_>>()
+                );
             },
             _ => panic!("Expected TopicAuthorization error"),
         }
         // Clear
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        assert!(metadata.maybe_return_any_error().is_ok());
 
         metadata.update_with_current_request_version(&metadata_response, false, now);
-        let err = metadata.maybe_throw_exception_for_topic("sensitiveTopic2").unwrap_err();
+        let err = metadata.maybe_return_error_for_topic("sensitiveTopic2").unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
         match &err {
-            MetadataError::TopicAuthorization(topics) => {
-                assert_eq!(&["sensitiveTopic2".to_string()].into_iter().collect::<HashSet<_>>(), topics);
+            KafkaError::TopicAuthorization(e) => {
+                assert_eq!(
+                    e.unauthorized_topics,
+                    ["sensitiveTopic2".to_string()].into_iter().collect::<HashSet<_>>()
+                );
             },
             _ => panic!("Expected TopicAuthorization error"),
         }
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        assert!(metadata.maybe_return_any_error().is_ok());
 
         metadata.update_with_current_request_version(&metadata_response, false, now);
-        let err = metadata.maybe_throw_exception_for_topic("invalidTopic").unwrap_err();
+        let err = metadata.maybe_return_error_for_topic("invalidTopic").unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidTopicException);
         match &err {
-            MetadataError::InvalidTopic(topics) => {
-                assert_eq!(&["invalidTopic".to_string()].into_iter().collect::<HashSet<_>>(), topics);
+            KafkaError::InvalidTopic(e) => {
+                assert_eq!(
+                    e.invalid_topics,
+                    ["invalidTopic".to_string()].into_iter().collect::<HashSet<_>>()
+                );
             },
             _ => panic!("Expected InvalidTopic error"),
         }
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        assert!(metadata.maybe_return_any_error().is_ok());
 
-        // Other topics should not throw, but should clear existing exception
+        // Other topics should not return an error, but should clear existing error
         metadata.update_with_current_request_version(&metadata_response, false, now);
-        assert!(metadata.maybe_throw_exception_for_topic("anotherTopic").is_ok());
-        assert!(metadata.maybe_throw_any_exception().is_ok());
+        assert!(metadata.maybe_return_error_for_topic("anotherTopic").is_ok());
+        assert!(metadata.maybe_return_any_error().is_ok());
     }
 
     /// Translated from `MetadataTest.testOutOfBandEpochUpdate`.

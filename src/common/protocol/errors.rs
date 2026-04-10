@@ -428,6 +428,13 @@ impl Errors {
         )
     }
 
+    /// Whether the transaction must be aborted due to this error.
+    ///
+    /// Currently only `TransactionAbortable` requires a transaction abort.
+    pub fn txn_requires_abort(&self) -> bool {
+        matches!(self, Self::TransactionAbortable)
+    }
+
     /// Look up an error by its code. Returns `UnknownServerError` for unknown codes.
     pub fn for_code(code: i16) -> Self {
         match code {

@@ -23,7 +23,7 @@ use crate::common::node::Node;
 use crate::common::requests::metadata_response::MetadataResponse;
 use crate::common::requests::request_header::RequestHeader;
 
-use super::metadata::MetadataError;
+use crate::common::kafka_error::KafkaError;
 
 /// The interface used by `NetworkClient` to request cluster metadata info to be
 /// updated and to retrieve the cluster nodes from such metadata.
@@ -53,10 +53,10 @@ pub trait MetadataUpdater {
     /// This provides a mechanism for the `MetadataUpdater` implementation to use
     /// the `NetworkClient` instance for its own requests with special handling for
     /// disconnections of such requests.
-    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_exception: Option<MetadataError>);
+    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<KafkaError>);
 
     /// Handle a metadata request failure.
-    fn handle_failed_request(&mut self, now: i64, maybe_fatal_exception: Option<MetadataError>);
+    fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<KafkaError>);
 
     /// Handle responses for metadata requests.
     ///

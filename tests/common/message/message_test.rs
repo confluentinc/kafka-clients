@@ -26,10 +26,8 @@ use confluent_kafka_rust::common::protocol::{
     ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache, RawTaggedField,
 };
 
-mod common;
-
 // Re-export generated types
-use common::simple_example_message_data::{MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct};
+use crate::common::simple_example_message_data::{MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct};
 use confluent_kafka_rust::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
 use confluent_kafka_rust::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
 use confluent_kafka_rust::add_partitions_to_txn_request_data::{

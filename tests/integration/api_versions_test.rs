@@ -18,10 +18,6 @@
 //!
 //! Maps to Java's `NodeApiVersions` integration coverage.
 
-#![cfg(feature = "integration-tests")]
-
-mod common;
-
 use std::net::SocketAddr;
 
 use confluent_kafka_rust::common::network::NetworkSend;
@@ -34,8 +30,8 @@ use confluent_kafka_rust::common::requests::{
     ApiVersionsRequestBuilder, ApiVersionsResponse, RequestBuilder, RequestHeader,
 };
 
-use common::cluster_config::ClusterConfig;
-use common::test_context::TestContext;
+use crate::common::cluster_config::ClusterConfig;
+use crate::common::test_context::TestContext;
 
 /// Maximum time to wait for a poll to make progress, in milliseconds.
 const POLL_TIMEOUT_MS: i64 = 5000;

@@ -47,11 +47,11 @@ pub struct ClientResponse {
     /// In Java this is an `UnsupportedVersionException`. We represent it as an
     /// optional error string since `KafkaError` is the primary error type.
     version_mismatch: Option<String>,
-    /// Error message if there was an authentication exception.
+    /// Error message if there was an authentication error.
     ///
     /// In Java this is an `AuthenticationException`. We represent it as an
     /// optional error string since `KafkaError` is the primary error type.
-    authentication_exception: Option<String>,
+    authentication_error: Option<String>,
     /// The response contents, or `None` if we disconnected, no response was expected,
     /// or if there was a version mismatch.
     response_body: Option<ConcreteResponse>,
@@ -69,7 +69,7 @@ impl ClientResponse {
     /// * `received_time_ms` - The unix timestamp when this response was received
     /// * `disconnected` - Whether the client disconnected before fully reading a response
     /// * `version_mismatch` - Error message if there was a version mismatch
-    /// * `authentication_exception` - Error message if there was an authentication exception
+    /// * `authentication_error` - Error message if there was an authentication error
     /// * `response_body` - The response contents (or `None`)
     #[allow(clippy::too_many_arguments)]
     pub fn new(
@@ -80,7 +80,7 @@ impl ClientResponse {
         received_time_ms: i64,
         disconnected: bool,
         version_mismatch: Option<String>,
-        authentication_exception: Option<String>,
+        authentication_error: Option<String>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
         Self::with_timeout(
@@ -92,7 +92,7 @@ impl ClientResponse {
             disconnected,
             false,
             version_mismatch,
-            authentication_exception,
+            authentication_error,
             response_body,
         )
     }
@@ -115,7 +115,7 @@ impl ClientResponse {
     /// * `timed_out` - Whether the client was disconnected because of a timeout;
     ///   when `true`, `disconnected` must also be `true`
     /// * `version_mismatch` - Error message if there was a version mismatch
-    /// * `authentication_exception` - Error message if there was an authentication exception
+    /// * `authentication_error` - Error message if there was an authentication error
     /// * `response_body` - The response contents (or `None`)
     #[allow(clippy::too_many_arguments)]
     pub fn with_timeout(
@@ -127,7 +127,7 @@ impl ClientResponse {
         disconnected: bool,
         timed_out: bool,
         version_mismatch: Option<String>,
-        authentication_exception: Option<String>,
+        authentication_error: Option<String>,
         response_body: Option<ConcreteResponse>,
     ) -> Self {
         assert!(
@@ -144,7 +144,7 @@ impl ClientResponse {
             disconnected,
             timed_out,
             version_mismatch,
-            authentication_exception,
+            authentication_error,
             response_body,
         }
     }
@@ -169,9 +169,9 @@ impl ClientResponse {
         self.version_mismatch.as_deref()
     }
 
-    /// Returns the authentication exception error message, if any.
-    pub fn authentication_exception(&self) -> Option<&str> {
-        self.authentication_exception.as_deref()
+    /// Returns the authentication error error message, if any.
+    pub fn authentication_error(&self) -> Option<&str> {
+        self.authentication_error.as_deref()
     }
 
     /// Returns a reference to the request header.
