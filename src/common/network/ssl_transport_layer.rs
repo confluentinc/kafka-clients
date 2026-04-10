@@ -221,12 +221,29 @@ impl TransportLayer for SslTransportLayer {
         !self.interest_ops.contains(InterestOps::OP_READ)
     }
 
-    /// Returns `false` — rustls handles its own internal buffering.
+    /// Returns `true` when `rustls` has buffered plaintext data that has been
+    /// decrypted but not yet consumed by the application.
     ///
-    /// The selector will retry reads on the next poll cycle if there is
-    /// additional data in the TLS record buffer.
+    /// This is critical for the selector: when a single TLS record contains more
+    /// data than one Kafka message, the selector must zero its poll timeout so it
+    /// processes the remaining buffered data immediately instead of sleeping.
+    ///
+    /// Translated from `SslTransportLayer.hasBytesBuffered()` in Java, which
+    /// checks `netReadBuffer` and `appReadBuffer`. In `rustls`, the equivalent
+    /// is checking whether the `ClientConnection` does **not** want more data
+    /// from the network — `!wants_read()` indicates there is unprocessed
+    /// plaintext in the internal receive buffer.
     fn has_bytes_buffered(&self) -> bool {
-        false
+        match &self.state {
+            SslState::Ready(tls_stream) => {
+                // ClientConnection derefs to CommonState which provides wants_read().
+                // wants_read() returns false when received_plaintext is non-empty,
+                // meaning there is buffered decrypted data waiting to be consumed.
+                let conn: &rustls::ClientConnection = tls_stream.get_ref().1;
+                !conn.wants_read()
+            },
+            _ => false,
+        }
     }
 
     /// Returns `true` if the TLS layer has pending encrypted data to flush.
@@ -445,9 +462,9 @@ mod tests {
         assert_eq!(peer.port(), addr.port());
     }
 
-    /// Test that has_bytes_buffered returns false.
+    /// Test that has_bytes_buffered returns false before handshake (not in Ready state).
     #[tokio::test]
-    async fn test_has_bytes_buffered() {
+    async fn test_has_bytes_buffered_before_handshake() {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
 
@@ -457,6 +474,7 @@ mod tests {
         let domain = SslFactory::create_server_name("localhost").unwrap();
 
         let transport = SslTransportLayer::new(stream, connector, domain);
+        // Before handshake (Handshaking state), has_bytes_buffered() returns false.
         assert!(!transport.has_bytes_buffered());
         assert!(!transport.has_pending_writes());
     }

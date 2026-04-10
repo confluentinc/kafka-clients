@@ -24,7 +24,7 @@
 //!
 //! Key differences:
 //! - Only PEM format is supported. JKS and PKCS12 return an error.
-//! - `ring` is used as the crypto backend (not `aws-lc-rs`) to avoid cmake dependency.
+//! - `aws-lc-rs` is used as the crypto backend (FIPS compliant).
 //! - Hostname verification is controlled by `endpoint_identification_algorithm`:
 //!   when empty, a custom `ServerCertVerifier` validates the cert chain but skips
 //!   hostname matching.
@@ -76,9 +76,9 @@ impl SslFactory {
     /// - The private key cannot be loaded or is missing when a client cert is provided
     /// - TLS protocol configuration is invalid
     pub fn new(ssl_config: &SslConfig) -> io::Result<Self> {
-        // Install the ring crypto provider if not already installed.
+        // Install the aws-lc-rs crypto provider if not already installed.
         // This is idempotent — subsequent calls are no-ops.
-        let _ = rustls::crypto::ring::default_provider().install_default();
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
 
         // Validate store formats
         validate_store_format(&ssl_config.truststore_type, "truststore")?;
