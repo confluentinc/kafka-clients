@@ -411,7 +411,14 @@ impl ServerCertVerifier for NoHostnameVerifier {
             .verify_server_cert(end_entity, intermediates, _server_name, ocsp_response, now)
         {
             Ok(verified) => Ok(verified),
+            // Catch both the legacy `NotValidForName` and the newer
+            // `NotValidForNameContext` variant (rustls 0.23.29+).
+            // The `WebPkiServerVerifier` produces `NotValidForNameContext`
+            // in practice, but we match both for forward/backward compat.
             Err(rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForName)) => {
+                Ok(ServerCertVerified::assertion())
+            },
+            Err(rustls::Error::InvalidCertificate(rustls::CertificateError::NotValidForNameContext { .. })) => {
                 Ok(ServerCertVerified::assertion())
             },
             Err(other) => Err(other),
@@ -685,5 +692,144 @@ B2V9lhUZNk+pRjtJw9unpXsM
             result.unwrap_err().to_string().contains("Failed to open truststore"),
             "Should report file not found"
         );
+    }
+
+    /// CA certificate for hostname verification tests.
+    /// This CA signs the server certificate below.
+    const TEST_SERVER_CA_CERT: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIDCTCCAfGgAwIBAgIUC5R8mdpVjJEz/FruPGeJ/ikTAnMwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJVGVzdCBDQSAwMB4XDTI2MDQxMDE2NDY1M1oXDTM2MDQw
+NzE2NDY1M1owFDESMBAGA1UEAwwJVGVzdCBDQSAwMIIBIjANBgkqhkiG9w0BAQEF
+AAOCAQ8AMIIBCgKCAQEAxaS+sjus9Ok0PyuFry9YzjoVRYTCgB8b4MMPS/ah+Tj6
+bfYHKRDq9bwzdhPfUCjz0bsowa6eqSesY6TE5Ab4bN+xvLQSF0n5R/D2Wm2pdDfO
+uHt4CTwLYeiicnYuROlWu1SiKXe5UvsOzvAr5xmoWcRflV8V2lTMg/he9rHbJ53Q
+Me1WcJCsLQEquXVbt4HMamiUc/L4ZBWrAmhN9OPbXbSIb4NpQTIZIB3HtNPyEnDF
+NwV6RlNdObhZl7kO8Qwir/uCk4q5q+IABF6aq7r0Iwtw46OCtOjBYlCcz+lVa+BT
+lNgxJ29xhrADL7oO8eDr4kzMjXpwlhPCmmYEN4tFgQIDAQABo1MwUTAdBgNVHQ4E
+FgQUyh9E/2sbqQE5haeyMngCy3eKBBUwHwYDVR0jBBgwFoAUyh9E/2sbqQE5haey
+MngCy3eKBBUwDwYDVR0TAQH/BAUwAwEB/zANBgkqhkiG9w0BAQsFAAOCAQEAA+Z4
+MQ4wzjGpDhMgzm3ljG6eHL8cBnf2I0JJNUcnpsGgD3WzPKf+xO8RxcE6kljk0nRf
+xBewgiXQF4/FETcpFiVmlKHpLqU2lNT/MSTq5rN8BoEhEMkh1mIAZNszS8guIOTy
+h+2dKizB9ZRPrfruSDMkEaRTEFesk8p4lqkwoT9b8eoqAo28y8p4+3fss9yw0eYw
+KqOvwXT4zRHWRvQHyJILwYimHqe8F7JzZd5o5vbjnEq7rs68wu0LHZX+zJv2jUcZ
+LdDIWI+gQteHuKRpN5lBOgmo2m2pn6e5P+4XrIEXiMtK5BJsMP7YdXqgEVFdcciK
+lgTtrJ71uAem7GmYGQ==
+-----END CERTIFICATE-----";
+
+    /// Server certificate for hostname verification tests.
+    /// SAN = DNS:server.example.com, signed by TEST_SERVER_CA_CERT.
+    /// Using this cert against server name "kafka.example.com" triggers
+    /// `CertificateError::NotValidForNameContext`.
+    const TEST_SERVER_CERT: &str = "\
+-----BEGIN CERTIFICATE-----
+MIIDQTCCAimgAwIBAgIUJV3rP+B5V0MLRhSyxxpapdVaBwAwDQYJKoZIhvcNAQEL
+BQAwFDESMBAGA1UEAwwJVGVzdCBDQSAwMB4XDTI2MDQxMDE2NDY1M1oXDTM2MDQw
+NzE2NDY1M1owHTEbMBkGA1UEAwwSc2VydmVyLmV4YW1wbGUuY29tMIIBIjANBgkq
+hkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAsJBKXkGSLj4fd1/OCaugp7x1E4rlDeGm
+aQmHcJ9O0KOrXgfL9Z0BRjEyXSAbaqC2TosPzk60MZbvtN8kD0PEjY0ErPV/Mg7t
+FVsDxX80QCdGw6ee5QylCCMJJYAJls3ZHdfN8pvRm++xipAeTLxSYsxNI56bmXsy
+JSz236JO4jx68hKJ3Yvxo8Fu68QzdzZ9ZqqMWsqkmVWPLmLPXziohkBcYc3nzzDJ
+Ahjw8wqtw7CvZyqMASumd5NVra5+wCpMsBCqzANPdX0JscUvM0vlhenfqM6Agbi9
+nC1jr1mVH1SmoxhQgQ1ttCGj39/FxMjMmWtQe9rNaMhjAcDhSnVQtQIDAQABo4GB
+MH8wHQYDVR0RBBYwFIISc2VydmVyLmV4YW1wbGUuY29tMAkGA1UdEwQCMAAwEwYD
+VR0lBAwwCgYIKwYBBQUHAwEwHQYDVR0OBBYEFOXHjrPlSM3ZHxgwJJjBk7AGaG4W
+MB8GA1UdIwQYMBaAFMofRP9rG6kBOYWnsjJ4Ast3igQVMA0GCSqGSIb3DQEBCwUA
+A4IBAQBBbckvJ3Tl+MdMeIBQSLA1CMSSPh2Hal8TOiKaSOAUzOK7GKXxGKGfOi9M
+pgnUJD+9RJsl9mV34H9hFBB45vjm7nBWnez0d4/RdOo3qBbg4YhNFDeKtdlTcuLr
+yu/PETHwchY62l/T516oAjFO5jM6LQm7C7+WGMB/MOR3tRgI0YZCrnLvYXSyT89K
+NUvILfVT3/ABSv5HCBZHI3STe2vpRma3vd24ACO3WAMbHmVFfyNEVcGL9JiNcM6j
+Tk/mn3Nd0C3DIaEo6yDUzcUuD+qqrqyOZ3g1XzpDSet+L7UPEW6s8hgqeAr5XjMw
+0reaLAXPKPyfTHTnl3fsXHIk/p9Q
+-----END CERTIFICATE-----";
+
+    /// Parses PEM-encoded certificates into `CertificateDer` values.
+    fn parse_certs(pem: &str) -> Vec<CertificateDer<'static>> {
+        let mut reader = io::BufReader::new(pem.as_bytes());
+        rustls_pemfile::certs(&mut reader).collect::<Result<Vec<_>, _>>().unwrap()
+    }
+
+    #[test]
+    fn test_no_hostname_verifier_accepts_mismatched_hostname() {
+        // Ensure the crypto provider is installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Build a NoHostnameVerifier that trusts TEST_SERVER_CA_CERT.
+        let mut root_store = RootCertStore::empty();
+        for cert in parse_certs(TEST_SERVER_CA_CERT) {
+            root_store.add(cert).unwrap();
+        }
+        let verifier = NoHostnameVerifier::new(root_store);
+
+        // Parse the server certificate (SAN = server.example.com).
+        let certs = parse_certs(TEST_SERVER_CERT);
+        let end_entity = &certs[0];
+
+        // Use a mismatched server name — "kafka.example.com" vs cert's
+        // "server.example.com". The inner WebPkiServerVerifier will
+        // return NotValidForNameContext, which NoHostnameVerifier must
+        // suppress.
+        let mismatched_name = ServerName::try_from("kafka.example.com").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+
+        let result = verifier.verify_server_cert(end_entity, &[], &mismatched_name, &[], now);
+        assert!(
+            result.is_ok(),
+            "NoHostnameVerifier should accept a cert with mismatched hostname, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_no_hostname_verifier_accepts_matching_hostname() {
+        // Ensure the crypto provider is installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Build a NoHostnameVerifier that trusts TEST_SERVER_CA_CERT.
+        let mut root_store = RootCertStore::empty();
+        for cert in parse_certs(TEST_SERVER_CA_CERT) {
+            root_store.add(cert).unwrap();
+        }
+        let verifier = NoHostnameVerifier::new(root_store);
+
+        // Parse the server certificate (SAN = server.example.com).
+        let certs = parse_certs(TEST_SERVER_CERT);
+        let end_entity = &certs[0];
+
+        // Use the matching server name — this should also succeed.
+        let matching_name = ServerName::try_from("server.example.com").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+
+        let result = verifier.verify_server_cert(end_entity, &[], &matching_name, &[], now);
+        assert!(
+            result.is_ok(),
+            "NoHostnameVerifier should accept a cert with matching hostname, got: {:?}",
+            result.err()
+        );
+    }
+
+    #[test]
+    fn test_no_hostname_verifier_rejects_untrusted_cert() {
+        // Ensure the crypto provider is installed.
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+
+        // Build a NoHostnameVerifier with a DIFFERENT CA (the original TEST_CA_CERT).
+        // The server cert is signed by TEST_SERVER_CA_CERT, so verification
+        // must fail with UnknownIssuer — NoHostnameVerifier should NOT suppress
+        // non-hostname-related errors.
+        let mut root_store = RootCertStore::empty();
+        for cert in parse_certs(TEST_CA_CERT) {
+            root_store.add(cert).unwrap();
+        }
+        let verifier = NoHostnameVerifier::new(root_store);
+
+        let certs = parse_certs(TEST_SERVER_CERT);
+        let end_entity = &certs[0];
+
+        let server_name = ServerName::try_from("server.example.com").unwrap();
+        let now = rustls::pki_types::UnixTime::now();
+
+        let result = verifier.verify_server_cert(end_entity, &[], &server_name, &[], now);
+        assert!(result.is_err(), "NoHostnameVerifier should reject a cert from an untrusted CA");
     }
 }
