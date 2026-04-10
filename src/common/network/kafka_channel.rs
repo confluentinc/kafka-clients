@@ -182,7 +182,9 @@ impl KafkaChannel {
             }
             if self.transport_layer.ready() && !self.authenticator.complete() {
                 authenticating = true;
-                self.authenticator.authenticate()?;
+                let auth = &mut *self.authenticator;
+                let transport = &mut *self.transport_layer;
+                auth.authenticate(transport).await?;
             }
             Ok(())
         }
@@ -803,8 +805,11 @@ mod tests {
     }
 
     impl Authenticator for MockAuthenticator {
-        fn authenticate(&mut self) -> io::Result<()> {
-            Ok(())
+        fn authenticate<'a>(
+            &'a mut self,
+            _transport: &'a mut (dyn TransportLayer + Send),
+        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+            Box::pin(async { Ok(()) })
         }
 
         fn complete(&self) -> bool {
