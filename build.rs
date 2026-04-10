@@ -19,8 +19,20 @@ use std::fs;
 use std::path::Path;
 use std::process::Command;
 
+fn format_generated_dir(dir: &Path) {
+    if let Ok(entries) = fs::read_dir(dir) {
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.extension().is_some_and(|ext| ext == "rs") {
+                let _ = Command::new("rustfmt").arg("--edition").arg("2021").arg(&path).status();
+            }
+        }
+    }
+}
+
 fn main() {
     println!("cargo:rerun-if-changed=generator/messages/");
+    println!("cargo:rerun-if-changed=generator/test-messages/");
     println!("cargo:rerun-if-changed=src/bin/message_generator.rs");
 
     let out_dir = env::var("OUT_DIR").unwrap();
@@ -39,15 +51,52 @@ fn main() {
         },
     }
 
+    // Generate api_message_type.rs (Rust equivalent of Java's generated ApiMessageType)
+    eprintln!("Generating ApiMessageType...");
+    match generator::generate_api_message_type(Path::new("generator/messages"), &generated_dir) {
+        Ok(()) => {
+            eprintln!("ApiMessageType generation complete.");
+        },
+        Err(e) => {
+            eprintln!("Error: ApiMessageType generation failed: {}", e);
+            panic!("Failed to generate ApiMessageType: {}", e);
+        },
+    }
+
+    // Generate test-only message types from test-messages/
+    // Always generated (build.rs can't distinguish test vs release), but only
+    // included in the crate when the "test-messages" feature is enabled.
+    let test_messages_dir = Path::new("generator/test-messages");
+    if test_messages_dir.exists() {
+        let test_generated_dir = Path::new(&out_dir).join("test_generated");
+        eprintln!("Generating test-only message code...");
+        match generator::generate_messages(test_messages_dir, &test_generated_dir) {
+            Ok(()) => {
+                // Remove api_message_type from test mod.rs — test messages don't need it
+                // and it would conflict with the main generated api_message_type.
+                let mod_file = test_generated_dir.join("mod.rs");
+                if let Ok(content) = fs::read_to_string(&mod_file) {
+                    let filtered: String = content
+                        .lines()
+                        .filter(|line| !line.contains("api_message_type"))
+                        .map(|line| format!("{}\n", line))
+                        .collect();
+                    let _ = fs::write(&mod_file, filtered);
+                }
+                // Remove the unused api_message_type.rs file
+                let _ = fs::remove_file(test_generated_dir.join("api_message_type.rs"));
+                eprintln!("Test message generation complete.");
+            },
+            Err(e) => {
+                eprintln!("Error: Test message generation failed: {}", e);
+                panic!("Failed to generate test message code: {}", e);
+            },
+        }
+        format_generated_dir(&test_generated_dir);
+    }
+
     // Format generated files
     eprintln!("Formatting generated files...");
-    if let Ok(entries) = fs::read_dir(&generated_dir) {
-        for entry in entries.flatten() {
-            let path = entry.path();
-            if path.extension().map_or(false, |ext| ext == "rs") {
-                let _ = Command::new("rustfmt").arg("--edition").arg("2021").arg(&path).status();
-            }
-        }
-        eprintln!("Generated files formatted.");
-    }
+    format_generated_dir(&generated_dir);
+    eprintln!("Generated files formatted.");
 }

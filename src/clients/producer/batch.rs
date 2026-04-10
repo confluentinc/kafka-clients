@@ -231,7 +231,7 @@ mod tests {
 
     #[test]
     fn test_append_single_record() {
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
         let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000);
@@ -242,7 +242,7 @@ mod tests {
 
     #[test]
     fn test_append_fills_batch() {
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
         // First record: key(1) + value(1) + overhead(12) = 14 bytes.
         // Set max to 14 so first record fills exactly, second is rejected.
         let mut batch = ProducerBatch::new(tp, 14);
@@ -258,7 +258,7 @@ mod tests {
 
     #[test]
     fn test_append_to_closed_batch() {
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
         batch.close();
 
@@ -268,7 +268,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_resolves_futures() {
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
         let f1 = batch.try_append(Some(b"k1"), Some(b"v1"), &[], 1000).unwrap();
@@ -287,7 +287,7 @@ mod tests {
 
     #[tokio::test]
     async fn test_complete_with_error() {
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
         let future = batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
@@ -302,7 +302,7 @@ mod tests {
 
     #[test]
     fn test_batch_with_headers() {
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
         let mut batch = ProducerBatch::new(tp, 4096);
 
         let headers = vec![

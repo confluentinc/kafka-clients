@@ -36,12 +36,12 @@ fn main() {
 
     // Create MetadataRequest with example values
     let mut req = MetadataRequestData::new();
-    req.topics = vec![{
+    req.topics = Some(vec![{
         let mut topic = MetadataRequestTopic::new();
-        topic.topic_id = Uuid::new(0x12345678_9abc_def0, 0x1234_567890abcdef);
-        topic.name = "test-topic".to_string();
+        topic.topic_id = Uuid::new(0x1234_5678_9abc_def0, 0x1234_5678_90ab_cdef);
+        topic.name = Some("test-topic".to_string());
         topic
-    }];
+    }]);
     req.allow_auto_topic_creation = true;
     req.include_cluster_authorized_operations = true;
     req.include_topic_authorized_operations = true;
@@ -71,7 +71,7 @@ fn main() {
             broker.node_id = 1;
             broker.host = "broker1.example.com".to_string();
             broker.port = 9092;
-            broker.rack = "rack1".to_string();
+            broker.rack = Some("rack1".to_string());
             broker
         },
         {
@@ -79,20 +79,20 @@ fn main() {
             broker.node_id = 2;
             broker.host = "broker2.example.com".to_string();
             broker.port = 9092;
-            broker.rack = "rack2".to_string();
+            broker.rack = Some("rack2".to_string());
             broker
         },
     ];
 
-    resp.cluster_id = "test-cluster".to_string();
+    resp.cluster_id = Some("test-cluster".to_string());
     resp.controller_id = 1;
 
     // Add topics with partitions
     resp.topics = vec![{
         let mut topic = MetadataResponseTopic::new();
         topic.error_code = 0;
-        topic.name = "test-topic".to_string();
-        topic.topic_id = Uuid::new(0xabcdef12_3456_7890, 0xabcd_ef1234567890);
+        topic.name = Some("test-topic".to_string());
+        topic.topic_id = Uuid::new(0xabcd_ef12_3456_7890, 0xabcd_ef12_3456_7890);
         topic.is_internal = false;
         topic.partitions = vec![
             {
@@ -140,12 +140,12 @@ fn main() {
     // Create ProduceResponse with tagged fields
     let mut produce_resp = ProduceResponseData::new();
     produce_resp.throttle_time_ms = 100;
-    
+
     // Add topic responses
     produce_resp.responses = vec![{
         let mut topic = TopicProduceResponse::new();
         topic.name = String::new(); // Empty string for flexible version
-        topic.topic_id = Uuid::new(0xfedcba98_7654_3210, 0xfedc_ba9876543210);
+        topic.topic_id = Uuid::new(0xfedc_ba98_7654_3210, 0xfedc_ba98_7654_3210);
         topic.partition_responses = vec![
             {
                 let mut partition = PartitionProduceResponse::new();
@@ -154,12 +154,10 @@ fn main() {
                 partition.base_offset = 1000;
                 partition.log_append_time_ms = 1234567890;
                 partition.log_start_offset = 0;
-                partition.error_message = String::new();
+                partition.error_message = None;
                 // Tagged field: CurrentLeader (tag 0 in PartitionProduceResponse)
-                partition.current_leader = LeaderIdAndEpoch {
-                    leader_id: 1,
-                    leader_epoch: 5,
-                };
+                partition.current_leader =
+                    LeaderIdAndEpoch { leader_id: 1, leader_epoch: 5, unknown_tagged_fields: Vec::new() };
                 partition
             },
             {
@@ -169,30 +167,30 @@ fn main() {
                 partition.base_offset = 2000;
                 partition.log_append_time_ms = 1234567891;
                 partition.log_start_offset = 0;
-                partition.error_message = String::new();
-                partition.current_leader = LeaderIdAndEpoch {
-                    leader_id: 2,
-                    leader_epoch: 3,
-                };
+                partition.error_message = None;
+                partition.current_leader =
+                    LeaderIdAndEpoch { leader_id: 2, leader_epoch: 3, unknown_tagged_fields: Vec::new() };
                 partition
             },
         ];
         topic
     }];
-    
+
     // Tagged field: NodeEndpoints (tag 0 in ProduceResponseData)
     produce_resp.node_endpoints = vec![
         NodeEndpoint {
             node_id: 1,
             host: "broker1.example.com".to_string(),
             port: 9092,
-            rack: "rack1".to_string(),
+            rack: Some("rack1".to_string()),
+            unknown_tagged_fields: Vec::new(),
         },
         NodeEndpoint {
             node_id: 2,
             host: "broker2.example.com".to_string(),
             port: 9092,
-            rack: "rack2".to_string(),
+            rack: Some("rack2".to_string()),
+            unknown_tagged_fields: Vec::new(),
         },
     ];
 
@@ -200,12 +198,15 @@ fn main() {
 
     // Serialize ProduceResponse
     let mut accessor = ByteBufferAccessor::new(2048);
-    produce_resp.write(&mut accessor, produce_version).expect("serialize produce response");
+    produce_resp
+        .write(&mut accessor, produce_version)
+        .expect("serialize produce response");
     let buffer = accessor.buffer();
     println!("Serialized ProduceResponseData ({} bytes): {:x?}", buffer.len(), buffer);
 
     // Deserialize ProduceResponse
     let mut accessor = ByteBufferAccessor::from_bytes(buffer.to_vec());
-    let produce_resp2 = ProduceResponseData::read(&mut accessor, produce_version).expect("deserialize produce response");
+    let produce_resp2 =
+        ProduceResponseData::read(&mut accessor, produce_version).expect("deserialize produce response");
     println!("\nDeserialized ProduceResponseData: {:#?}", produce_resp2);
 }

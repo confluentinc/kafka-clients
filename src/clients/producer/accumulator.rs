@@ -279,7 +279,7 @@ mod tests {
     #[tokio::test]
     async fn test_append_creates_batch() {
         let acc = RecordAccumulator::new(test_config());
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
 
         let result = acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000).await;
         assert!(result.is_ok());
@@ -290,7 +290,7 @@ mod tests {
     #[tokio::test]
     async fn test_append_reuses_batch() {
         let acc = RecordAccumulator::new(test_config());
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
 
         let r1 = acc
             .append(&tp, Some(b"k1"), Some(b"v1"), &[], 1000)
@@ -316,7 +316,7 @@ mod tests {
                 .unwrap(),
         );
         let acc = RecordAccumulator::new(config);
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
 
         // Fill the batch to trigger it becoming ready.
         acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000)
@@ -331,8 +331,8 @@ mod tests {
     #[tokio::test]
     async fn test_flush_moves_all_to_ready() {
         let acc = RecordAccumulator::new(test_config());
-        let tp1 = TopicPartition::new("topic1", 0);
-        let tp2 = TopicPartition::new("topic2", 0);
+        let tp1 = TopicPartition::new("topic1".to_string(), 0);
+        let tp2 = TopicPartition::new("topic2".to_string(), 0);
 
         acc.append(&tp1, Some(b"k1"), Some(b"v1"), &[], 1000)
             .await
@@ -349,7 +349,7 @@ mod tests {
     #[tokio::test]
     async fn test_close_prevents_appends() {
         let acc = RecordAccumulator::new(test_config());
-        let tp = TopicPartition::new("test", 0);
+        let tp = TopicPartition::new("test".to_string(), 0);
 
         acc.close().await;
 

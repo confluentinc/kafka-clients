@@ -20,8 +20,10 @@ use serde::{Deserialize, Serialize};
 /// Translated from org.apache.kafka.message.EntityType
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
+#[derive(Default)]
 pub enum EntityType {
     #[serde(rename = "unknown")]
+    #[default]
     Unknown,
     #[serde(rename = "transactionalId")]
     TransactionalId,
@@ -60,22 +62,16 @@ impl EntityType {
             field_type
         };
 
-        if let Some(base_type) = self.base_type() {
-            if type_to_check != &base_type {
-                return Err(format!(
-                    "Field {} has entity type {:?}, but field type {}, which does not match.",
-                    field_name, self, field_type
-                ));
-            }
+        if let Some(base_type) = self.base_type()
+            && type_to_check != &base_type
+        {
+            return Err(format!(
+                "Field {} has entity type {:?}, but field type {}, which does not match.",
+                field_name, self, field_type
+            ));
         }
 
         Ok(())
-    }
-}
-
-impl Default for EntityType {
-    fn default() -> Self {
-        EntityType::Unknown
     }
 }
 

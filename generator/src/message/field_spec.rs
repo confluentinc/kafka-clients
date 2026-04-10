@@ -133,13 +133,11 @@ impl FieldSpec {
         self.check_tag_invariants()?;
 
         // Validate zero copy flag
-        if self.zero_copy {
-            if !self.parsed_type.as_ref().unwrap().is_bytes() {
-                return Err(format!(
-                    "Invalid zeroCopy value for {}. Only fields of type bytes can use zeroCopy flag.",
-                    self.name
-                ));
-            }
+        if self.zero_copy && !self.parsed_type.as_ref().unwrap().is_bytes() {
+            return Err(format!(
+                "Invalid zeroCopy value for {}. Only fields of type bytes can use zeroCopy flag.",
+                self.name
+            ));
         }
 
         // Validate fields for arrays and structs

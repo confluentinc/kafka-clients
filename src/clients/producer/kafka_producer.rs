@@ -93,7 +93,7 @@ impl<C: ProduceClient> KafkaProducer<C> {
 
         // Use the partition hint or default to 0 (partitioner skipped per design).
         let partition = record.partition_hint().unwrap_or(0);
-        let tp = TopicPartition::new(topic, partition);
+        let tp = TopicPartition::new(topic.to_string(), partition);
 
         let now = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)

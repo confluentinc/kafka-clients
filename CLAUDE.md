@@ -50,7 +50,12 @@ Java source in `kafka/` directory (Apache Kafka 4.2)
 
 ## Development Workflow
 - **Build**: `cargo build`
-- **Test**: `cargo test`
+- **Test**: `cargo test`, run the timeout tool with timeout 10s by default when checking if single tests are timing out.
 - **Format**: `cargo xtask format`
 - **Format Check**: `cargo xtask format-check` (CI-friendly)
+- **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)
+- **Lint Fix**: `cargo xtask lint-fix` (automatically fix clippy warnings)
 - **Check Generated**: `cargo xtask check-generated` (validates generated code formatting only)
+
+## Definition of Done
+Follow the DoD described in [definition-of-done.md](.claude/rules/definition-of-done.md).

@@ -16,7 +16,6 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 use std::process::{exit, Command};
-
 fn main() -> anyhow::Result<()> {
     let task = env::args().nth(1);
 
@@ -24,6 +23,8 @@ fn main() -> anyhow::Result<()> {
         Some("format") => format()?,
         Some("format-check") => format_check()?,
         Some("check-generated") => check_generated()?,
+        Some("lint") => lint()?,
+        Some("lint-fix") => lint_fix()?,
         _ => print_help(),
     }
 
@@ -38,10 +39,6 @@ fn format() -> anyhow::Result<()> {
 
     // Format generator crate
     run_command("cargo", &["fmt", "--manifest-path", "generator/Cargo.toml"])?;
-
-    // Format generated files
-    println!("🎨 Formatting generated files...");
-    format_generated_files()?;
 
     println!("✅ Formatting complete!");
     Ok(())
@@ -79,43 +76,14 @@ fn check_generated() -> anyhow::Result<()> {
 
     println!("   Checking {} generated file(s)", generated_files.len());
 
-    let mut has_errors = false;
-    for file in &generated_files {
-        let output = Command::new("rustfmt").arg("--check").arg(file).output()?;
+    let status = Command::new("rustfmt").arg("--check").args(&generated_files).status()?;
 
-        if !output.status.success() {
-            eprintln!("❌ Formatting issues in: {}", file.display());
-            has_errors = true;
-        }
-    }
-
-    if has_errors {
+    if !status.success() {
         eprintln!("\n❌ Generated code has formatting issues. Run: cargo build && cargo xtask format");
         exit(1);
     }
 
     println!("✅ All generated code is properly formatted!");
-    Ok(())
-}
-
-fn format_generated_files() -> anyhow::Result<()> {
-    let generated_files = find_generated_files()?;
-
-    if generated_files.is_empty() {
-        println!("⚠️  No generated files found (build first with cargo build)");
-        return Ok(());
-    }
-
-    println!("   Found {} generated file(s)", generated_files.len());
-
-    for file in &generated_files {
-        let status = Command::new("rustfmt").arg(file).status()?;
-
-        if !status.success() {
-            anyhow::bail!("Failed to format: {}", file.display());
-        }
-    }
-
     Ok(())
 }
 
@@ -127,25 +95,99 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
         return Ok(files);
     }
 
-    for entry in fs::read_dir(target_dir)? {
+    // Find the most recently modified generated directory to avoid
+    // formatting stale build artifacts (there can be many).
+    let mut newest_dir: Option<(PathBuf, std::time::SystemTime)> = None;
+
+    for entry in fs::read_dir(&target_dir)? {
         let entry = entry?;
         let path = entry.path();
 
         if path.is_dir() && path.file_name().unwrap().to_str().unwrap().starts_with("confluent-kafka-rust-") {
             let generated_dir = path.join("out/generated");
             if generated_dir.exists() {
-                for file_entry in fs::read_dir(generated_dir)? {
-                    let file_entry = file_entry?;
-                    let file_path = file_entry.path();
-                    if file_path.extension().map_or(false, |ext| ext == "rs") {
-                        files.push(file_path);
-                    }
+                let modified = entry.metadata()?.modified()?;
+                if newest_dir.as_ref().is_none_or(|(_, t)| modified > *t) {
+                    newest_dir = Some((generated_dir, modified));
                 }
             }
         }
     }
 
+    if let Some((generated_dir, _)) = newest_dir {
+        for file_entry in fs::read_dir(generated_dir)? {
+            let file_entry = file_entry?;
+            let file_path = file_entry.path();
+            if file_path.extension().map_or(false, |ext| ext == "rs") {
+                files.push(file_path);
+            }
+        }
+    }
+
     Ok(files)
+}
+
+fn lint() -> anyhow::Result<()> {
+    println!("🔍 Running clippy lints...");
+
+    // Lint main crate
+    run_command("cargo", &["clippy", "--all-targets", "--", "-D", "warnings"])?;
+
+    // Lint generator crate
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            "generator/Cargo.toml",
+            "--all-targets",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+
+    println!("✅ No lint issues found!");
+    Ok(())
+}
+
+fn lint_fix() -> anyhow::Result<()> {
+    println!("🔧 Running clippy with automatic fixes...");
+
+    // Fix main crate
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+
+    // Fix generator crate
+    run_command(
+        "cargo",
+        &[
+            "clippy",
+            "--manifest-path",
+            "generator/Cargo.toml",
+            "--all-targets",
+            "--fix",
+            "--allow-dirty",
+            "--allow-staged",
+            "--",
+            "-D",
+            "warnings",
+        ],
+    )?;
+
+    println!("✅ Lint fixes applied!");
+    Ok(())
 }
 
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
@@ -164,10 +206,14 @@ fn print_help() {
   format          Format all Rust code including generated files
   format-check    Check if code is formatted correctly
   check-generated Check generated code formatting only (no changes)
+  lint            Run clippy lints (warnings are errors)
+  lint-fix        Run clippy and automatically fix what it can
 
 Usage:
   cargo xtask format
   cargo xtask format-check
-  cargo xtask check-generated"
+  cargo xtask check-generated
+  cargo xtask lint
+  cargo xtask lint-fix"
     );
 }

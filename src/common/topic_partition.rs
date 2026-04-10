@@ -12,36 +12,44 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! TopicPartition identifies a specific partition of a Kafka topic.
-//!
-//! Corresponds to org.apache.kafka.common.TopicPartition.
+//! A topic name and partition number.
 
 use std::fmt;
 
-/// Identifies a specific partition of a topic.
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+/// A topic name and partition number.
+#[derive(Clone, Debug, Eq)]
 pub struct TopicPartition {
-    topic: String,
     partition: i32,
+    topic: String,
 }
 
 impl TopicPartition {
-    /// Create a new TopicPartition.
-    pub fn new(topic: impl Into<String>, partition: i32) -> Self {
-        TopicPartition {
-            topic: topic.into(),
-            partition,
-        }
+    /// Creates a new `TopicPartition` with the given topic and partition.
+    pub fn new(topic: String, partition: i32) -> Self {
+        Self { partition, topic }
+    }
+
+    /// Returns the partition number.
+    pub fn partition(&self) -> i32 {
+        self.partition
     }
 
     /// Returns the topic name.
     pub fn topic(&self) -> &str {
         &self.topic
     }
+}
 
-    /// Returns the partition number.
-    pub fn partition(&self) -> i32 {
-        self.partition
+impl PartialEq for TopicPartition {
+    fn eq(&self, other: &Self) -> bool {
+        self.partition == other.partition && self.topic == other.topic
+    }
+}
+
+impl std::hash::Hash for TopicPartition {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.partition.hash(state);
+        self.topic.hash(state);
     }
 }
 
@@ -56,25 +64,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_topic_partition() {
-        let tp = TopicPartition::new("my-topic", 3);
-        assert_eq!(tp.topic(), "my-topic");
-        assert_eq!(tp.partition(), 3);
-        assert_eq!(format!("{tp}"), "my-topic-3");
+    fn test_topic_partition_creation() {
+        let tp = TopicPartition::new("mytopic".to_string(), 5);
+        assert_eq!(tp.partition(), 5);
+        assert_eq!(tp.topic(), "mytopic");
     }
 
     #[test]
-    fn test_equality_and_hash() {
-        use std::collections::HashSet;
-        let tp1 = TopicPartition::new("topic", 0);
-        let tp2 = TopicPartition::new("topic", 0);
-        let tp3 = TopicPartition::new("topic", 1);
+    fn test_topic_partition_equality() {
+        let tp1 = TopicPartition::new("test".to_string(), 0);
+        let tp2 = TopicPartition::new("test".to_string(), 0);
+        let tp3 = TopicPartition::new("test".to_string(), 1);
+        let tp4 = TopicPartition::new("other".to_string(), 0);
+
         assert_eq!(tp1, tp2);
         assert_ne!(tp1, tp3);
+        assert_ne!(tp1, tp4);
+    }
 
+    #[test]
+    fn test_topic_partition_hash() {
+        use std::collections::HashSet;
         let mut set = HashSet::new();
-        set.insert(tp1.clone());
-        assert!(set.contains(&tp2));
-        assert!(!set.contains(&tp3));
+        set.insert(TopicPartition::new("test".to_string(), 0));
+        set.insert(TopicPartition::new("test".to_string(), 0));
+        assert_eq!(set.len(), 1);
+
+        set.insert(TopicPartition::new("test".to_string(), 1));
+        assert_eq!(set.len(), 2);
+    }
+
+    #[test]
+    fn test_topic_partition_display() {
+        let tp = TopicPartition::new("mytopic".to_string(), 5);
+        assert_eq!(tp.to_string(), "mytopic-5");
     }
 }
