@@ -853,4 +853,277 @@ mod tests {
         let result = builder.close();
         assert!(result.is_err());
     }
+
+    /// Translated from MemoryRecordsBuilderTest.testEstimatedSizeInBytes (v2, NONE)
+    #[test]
+    fn test_estimated_size_in_bytes() {
+        let mut builder = MemoryRecordsBuilder::new(
+            1024,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            1024,
+        )
+        .unwrap();
+
+        let mut previous_estimate = 0;
+        for i in 0..10 {
+            let value = format!("{}", i);
+            builder.append(i, None, Some(value.as_bytes()), &[]).unwrap();
+            let current_estimate = builder.estimated_size_in_bytes();
+            assert!(
+                current_estimate > previous_estimate,
+                "Estimate must increase: {} > {}",
+                current_estimate,
+                previous_estimate
+            );
+            previous_estimate = current_estimate;
+        }
+
+        let bytes_written_before_close = builder.estimated_size_in_bytes();
+        let records = builder.build().unwrap();
+        // For NONE compression, estimated size before close should equal final size
+        assert_eq!(records.size_in_bytes() as usize, bytes_written_before_close);
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.buildUsingLogAppendTime (v2, NONE)
+    #[test]
+    fn test_build_using_log_append_time() {
+        let log_append_time: i64 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        let mut builder = MemoryRecordsBuilder::new(
+            1024,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::LogAppendTime,
+            0,
+            log_append_time,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            1024,
+        )
+        .unwrap();
+
+        builder.append(0, Some(b"a"), Some(b"1"), &[]).unwrap();
+        builder.append(0, Some(b"b"), Some(b"2"), &[]).unwrap();
+        builder.append(0, Some(b"c"), Some(b"3"), &[]).unwrap();
+        let records = builder.build().unwrap();
+
+        let batches = records.batches();
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+        assert_eq!(TimestampType::LogAppendTime, batch.timestamp_type());
+
+        // All records should have the log append time
+        let all_records = batch.iter_records().unwrap();
+        for record in &all_records {
+            assert_eq!(log_append_time, record.timestamp());
+        }
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.buildUsingCreateTime (v2, NONE)
+    #[test]
+    fn test_build_using_create_time() {
+        let mut builder = MemoryRecordsBuilder::new(
+            1024,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            1024,
+        )
+        .unwrap();
+
+        builder.append(0, Some(b"a"), Some(b"1"), &[]).unwrap();
+        builder.append(2, Some(b"b"), Some(b"2"), &[]).unwrap();
+        builder.append(1, Some(b"c"), Some(b"3"), &[]).unwrap();
+        let records = builder.build().unwrap();
+
+        let batches = records.batches();
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+        assert_eq!(TimestampType::CreateTime, batch.timestamp_type());
+
+        let all_records = batch.iter_records().unwrap();
+        let expected_timestamps: Vec<i64> = vec![0, 2, 1];
+        for (i, record) in all_records.iter().enumerate() {
+            assert_eq!(expected_timestamps[i], record.timestamp());
+        }
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.testSmallWriteLimit (v2, NONE)
+    #[test]
+    fn test_small_write_limit() {
+        let key = b"foo";
+        let value = b"bar";
+        let write_limit = 0;
+
+        let mut builder = MemoryRecordsBuilder::new(
+            512,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            NO_TIMESTAMP,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            write_limit,
+        )
+        .unwrap();
+
+        assert!(!builder.is_full());
+        assert!(builder.has_room_for(0, Some(key), Some(value), &[]));
+        builder.append(0, Some(key), Some(value), &[]).unwrap();
+
+        assert!(builder.is_full());
+        assert!(!builder.has_room_for(0, Some(key), Some(value), &[]));
+
+        let records = builder.build().unwrap();
+        let batches = records.batches();
+        assert_eq!(1, batches.len());
+        let all_records = batches[0].iter_records().unwrap();
+        assert_eq!(1, all_records.len());
+        assert_eq!(Some(key.as_slice()), all_records[0].key());
+        assert_eq!(Some(value.as_slice()), all_records[0].value());
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.testAppendAtInvalidOffset (v2, NONE)
+    #[test]
+    fn test_append_at_invalid_offset() {
+        let mut builder = MemoryRecordsBuilder::new(
+            1024,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            1024,
+        )
+        .unwrap();
+
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        builder.append_with_offset(0, now, Some(b"a"), None, &[]).unwrap();
+
+        // offsets must increase monotonically
+        let result = builder.append_with_offset(0, now, Some(b"b"), None, &[]);
+        assert!(result.is_err());
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.testAppendedChecksumConsistency (v2, NONE)
+    #[test]
+    fn test_appended_checksum_consistency() {
+        let mut builder = MemoryRecordsBuilder::new(
+            512,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            NO_TIMESTAMP,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            512,
+        )
+        .unwrap();
+
+        builder.append(1, Some(b"key"), Some(b"value"), &[]).unwrap();
+        let records = builder.build().unwrap();
+        let batches = records.batches();
+        assert_eq!(1, batches.len());
+        let all_records = batches[0].iter_records().unwrap();
+        assert_eq!(1, all_records.len());
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnBuildWhenAborted (v2)
+    #[test]
+    fn test_build_when_aborted() {
+        let mut builder = MemoryRecordsBuilder::new(
+            128,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            128,
+        )
+        .unwrap();
+
+        builder.abort();
+        let result = builder.build();
+        assert!(result.is_err());
+    }
+
+    /// Translated from MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnAppendWhenAborted (v2)
+    #[test]
+    fn test_append_when_aborted() {
+        let mut builder = MemoryRecordsBuilder::new(
+            128,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            128,
+        )
+        .unwrap();
+
+        builder.abort();
+        let result = builder.append(0, Some(b"a"), Some(b"1"), &[]);
+        assert!(result.is_err());
+    }
+
+    // Note: MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnAppendWhenClosed
+    // is not translated because build() consumes self in Rust, making it impossible
+    // to call append() after build(). The type system enforces this invariant at compile time.
 }

@@ -430,4 +430,78 @@ mod tests {
         assert_eq!(1, all_records.len());
         assert_eq!(&headers, all_records[0].headers());
     }
+
+    /// Translated from MemoryRecordsTest.testChecksum (v2, CompressionType::None)
+    ///
+    /// Verifies that the CRC-32C checksum matches a known value to detect unintentional
+    /// changes to the serialization format.
+    #[test]
+    fn test_checksum_v2_none() {
+        let records = vec![
+            SimpleRecord::with_timestamp(283843, Some(b"key1".to_vec()), Some(b"value1".to_vec())),
+            SimpleRecord::with_timestamp(1234, Some(b"key2".to_vec()), Some(b"value2".to_vec())),
+        ];
+        let mem_records = MemoryRecords::with_records(0, &records);
+        let batches = mem_records.batches();
+        assert!(!batches.is_empty());
+        let batch = &batches[0];
+        // v2 NONE expected checksum from the Java test
+        let expected_checksum: u32 = 3851219455;
+        assert_eq!(expected_checksum, batch.checksum());
+    }
+
+    /// Translated from MemoryRecordsTest.testWithRecords (v2, CompressionType::None)
+    #[test]
+    fn test_with_records_simple() {
+        let mem_records = MemoryRecords::with_records(
+            0,
+            &[SimpleRecord::with_timestamp(
+                10,
+                Some(b"key1".to_vec()),
+                Some(b"value1".to_vec()),
+            )],
+        );
+        let batches = mem_records.batches();
+        assert!(!batches.is_empty());
+        let batch_records = batches[0].iter_records().unwrap();
+        assert_eq!(1, batch_records.len());
+        assert_eq!(Some(b"key1".as_slice()), batch_records[0].key());
+    }
+
+    /// Translated from MemoryRecordsTest.testHasRoomForMethodWithHeaders (v2 only)
+    ///
+    /// With many headers, hasRoomFor should return false in v2 when the buffer is small.
+    #[test]
+    fn test_has_room_for_with_headers() {
+        let mut builder = MemoryRecordsBuilder::new(
+            120,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            NO_TIMESTAMP,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            120,
+        )
+        .unwrap();
+
+        builder.append(0, Some(b"key"), Some(b"value"), &[]).unwrap();
+
+        // Without headers, should still fit
+        assert!(builder.has_room_for(1, Some(b"key"), Some(b"value"), &[]));
+
+        // Build a large set of headers
+        let mut large_headers = Vec::new();
+        for _ in 0..10 {
+            large_headers.push(RecordHeader::new("hello", Some(b"world.world".to_vec())));
+        }
+
+        // v2 accounts for headers in size check; with many headers this should not fit
+        assert!(!builder.has_room_for(1, Some(b"key"), Some(b"value"), &large_headers));
+    }
 }

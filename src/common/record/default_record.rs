@@ -960,5 +960,57 @@ mod tests {
         assert!(result.is_err());
     }
 
+    /// Translated from DefaultRecordTest.testUnderflowReadingVarlong
+    ///
+    /// Tests that reading a record where the varlong timestamp is truncated (not
+    /// enough bytes in the body) returns an error.
+    #[test]
+    fn test_underflow_reading_varlong() {
+        let attributes: u8 = 0;
+        let size_of_body: i32 = 2; // one byte for attributes, one byte for partial timestamp
+        // 156 needs 2 bytes in varlong encoding but body only has 1 byte left
+        let timestamp_delta: i64 = 156;
+
+        let mut buf = Vec::new();
+        varint::write_varint(size_of_body, &mut buf).unwrap();
+        buf.push(attributes);
+        // Write the full varlong (2 bytes) for timestampDelta
+        let mut varlong_buf = Vec::new();
+        varint::write_varlong(timestamp_delta, &mut varlong_buf).unwrap();
+        assert!(varlong_buf.len() >= 2, "156 should need >= 2 bytes in varlong");
+        // Only write 1 byte of the varlong, simulating truncation
+        buf.push(varlong_buf[0]);
+
+        let mut pos = 0;
+        let result = DefaultRecord::read_from(&buf, &mut pos, 0, 0, NO_SEQUENCE, None);
+        assert!(result.is_err());
+    }
+
+    /// Translated from DefaultRecordTest.testInvalidVarlong
+    ///
+    /// Tests that a varlong with an invalid final byte (the 10th byte with high
+    /// bit set or with illegal bits in the 10th position) produces an error.
+    #[test]
+    fn test_invalid_varlong() {
+        let attributes: u8 = 0;
+        let size_of_body: i32 = 11; // one byte for attributes, 10 bytes for max timestamp
+
+        let mut buf = Vec::new();
+        varint::write_varint(size_of_body, &mut buf).unwrap();
+        let record_start = buf.len();
+
+        buf.push(attributes);
+        // Write Long.MAX_VALUE as varlong (takes 10 bytes)
+        varint::write_varlong(i64::MAX, &mut buf).unwrap();
+        // Corrupt the last byte of the varlong to make it invalid
+        // The 10th byte of the varlong is at record_start + 10
+        // Set it to i8::MIN (0x80) which is an invalid final byte
+        buf[record_start + 10] = 0x80u8;
+
+        let mut pos = 0;
+        let result = DefaultRecord::read_from(&buf, &mut pos, 0, 0, NO_SEQUENCE, None);
+        assert!(result.is_err());
+    }
+
     use crate::common::record::SimpleRecord;
 }
