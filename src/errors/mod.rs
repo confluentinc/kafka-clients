@@ -58,6 +58,10 @@ pub enum ErrorCode {
     Unexpected,
     /// IO error.
     Io,
+    /// Corresponds to IllegalArgumentException.
+    InvalidArgument,
+    /// Corresponds to IllegalStateException.
+    IllegalState,
 }
 
 /// The primary error type for the Kafka client library.
@@ -74,11 +78,7 @@ pub struct KafkaError {
 impl KafkaError {
     /// Create a new error with the given code and message.
     pub fn new(code: ErrorCode, message: impl Into<String>) -> Self {
-        KafkaError {
-            code,
-            message: message.into(),
-            source: None,
-        }
+        KafkaError { code, message: message.into(), source: None }
     }
 
     /// Create a new error with a source cause.
@@ -87,11 +87,7 @@ impl KafkaError {
         message: impl Into<String>,
         source: impl std::error::Error + Send + Sync + 'static,
     ) -> Self {
-        KafkaError {
-            code,
-            message: message.into(),
-            source: Some(Box::new(source)),
-        }
+        KafkaError { code, message: message.into(), source: Some(Box::new(source)) }
     }
 
     /// Returns the error code.
@@ -114,9 +110,7 @@ impl KafkaError {
     pub fn is_fatal(&self) -> bool {
         matches!(
             self.code,
-            ErrorCode::ProducerFenced
-                | ErrorCode::InvalidProducerEpoch
-                | ErrorCode::TransactionalIdAuthorization
+            ErrorCode::ProducerFenced | ErrorCode::InvalidProducerEpoch | ErrorCode::TransactionalIdAuthorization
         )
     }
 
@@ -124,9 +118,7 @@ impl KafkaError {
     pub fn txn_requires_abort(&self) -> bool {
         matches!(
             self.code,
-            ErrorCode::OutOfOrderSequence
-                | ErrorCode::InvalidTxnState
-                | ErrorCode::ProducerFenced
+            ErrorCode::OutOfOrderSequence | ErrorCode::InvalidTxnState | ErrorCode::ProducerFenced
         )
     }
 }
@@ -139,9 +131,7 @@ impl fmt::Display for KafkaError {
 
 impl std::error::Error for KafkaError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
-        self.source
-            .as_ref()
-            .map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
+        self.source.as_ref().map(|s| s.as_ref() as &(dyn std::error::Error + 'static))
     }
 }
 

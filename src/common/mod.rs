@@ -23,6 +23,7 @@ pub mod network;
 pub mod node;
 pub mod partition_info;
 pub mod protocol;
+pub mod record;
 pub mod requests;
 pub mod topic_partition;
 pub mod utils;
