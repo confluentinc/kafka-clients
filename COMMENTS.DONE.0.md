@@ -27,3 +27,30 @@ All four Java classes are fully translated with correct method coverage and corr
 - **Description**: The `test_display_redacted` tests check `!display.contains("secret-password")` / `!display.contains("server-secret-token")`. Since `auth_bytes` is `Vec<u8>` and the generated `Display` delegates to `Debug`, byte arrays render as numeric lists (e.g., `[115, 101, 99, ...]`), never as the ASCII string. These tests would pass even if the redaction code were removed entirely. The Java test (`testSaslAuthenticateRequestResponseToStringMasksSensitiveData`) asserts the **positive** condition `assertTrue(requestString.contains("authBytes=[]"))`, verifying the bytes are replaced with an empty array. The Rust tests should similarly assert the positive condition -- that `auth_bytes` in the Display output is empty (e.g., `display.contains("auth_bytes: []")`), not merely that an ASCII rendering of the secret is absent.
 - **Expected**: Tests that verify the redaction code is actually working by asserting the output contains empty auth_bytes, matching the Java test.
 - **Actual**: Tests that pass trivially regardless of whether redaction code is present.
+
+---
+
+## Review: Milestone 3, Phase 4 — SASL Client Authenticator
+
+**Commits reviewed:** ebe89b1, 8791295
+**Reviewer:** Critic 0
+
+---
+
+## Issue (RESOLVED): `receive_kafka_response` does not set state to Failed on parse errors
+
+- **File**: `src/common/security/authenticator/sasl_client_authenticator.rs`
+- **Severity**: Bug
+- **Java Reference**: `SaslClientAuthenticator.java:568-599`
+- **Resolution**: Added `map_err` on `ConcreteResponse::parse_response()` that sets state to `SaslState::Failed` before returning the error. Added `test_parse_error_sets_state_to_failed` test.
+- **Fixed in**: 1882a7f
+
+---
+
+## Issue (RESOLVED): `next_correlation_id` integer overflow panic in debug builds
+
+- **File**: `src/common/security/authenticator/sasl_client_authenticator.rs`
+- **Severity**: Bug
+- **Java Reference**: `SaslClientAuthenticator.java:367-371`
+- **Resolution**: Changed `self.correlation_id += 1` to `self.correlation_id = self.correlation_id.wrapping_add(1)` to match Java wrapping semantics. Added `test_correlation_id_wraps_on_overflow` test.
+- **Fixed in**: 1882a7f
