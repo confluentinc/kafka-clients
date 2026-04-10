@@ -1,20 +1,29 @@
-# Resolved Comments -- Critic 0 Review Phase 2
+## Review: Commit 0d141bd — SASL handshake and authenticate request/response types (Phase 3)
 
-## RESOLVED: has_bytes_buffered() always returns false for SSL
+All four Java classes are fully translated with correct method coverage and correct dispatch in ConcreteRequest/ConcreteResponse. Throttle behavior, error codes, and `should_client_throttle` all match Java semantics. The network_client.rs wildcard match is a reasonable defensive measure. Two issues found:
 
-- **Fix**: Changed `has_bytes_buffered()` to check `!conn.wants_read()` on the `rustls::ClientConnection`. The `wants_read()` method returns `false` when the internal `received_plaintext` buffer is non-empty, which is the correct indicator of buffered plaintext data.
-- **Commit**: fixup of 36d740b
+---
 
-## NOT AN ISSUE: aws-lc-rs + cmake pulled as transitive dependency
+## Issue: Missing Java tests from RequestResponseTest.java
 
-- **Reason**: User decision to use `aws-lc-rs` (FIPS compliant). Switched from `ring` to `aws-lc-rs` as the crypto backend intentionally.
+- **File**: `src/common/requests/sasl_handshake_request.rs`, `src/common/requests/sasl_authenticate_request.rs`
+- **Severity**: Missing Requirement
+- **Java Reference**: `kafka/clients/src/test/java/org/apache/kafka/common/requests/RequestResponseTest.java:3898-3984`
+- **Description**: Four SASL-related tests in `RequestResponseTest.java` are not translated:
+  1. `testInvalidSaslHandShakeRequest` (line 3898) -- serializes a SaslHandshakeRequest with mechanism "PLAIN", corrupts the mechanism string length to `Short.MAX_VALUE`, asserts `parse_request` fails with the expected error message about insufficient bytes.
+  2. `testInvalidSaslAuthenticateRequest` (line 3911) -- serializes a SaslAuthenticateRequest at version 1, corrupts the auth_bytes array length to `Integer.MAX_VALUE`, asserts parse fails with expected error message.
+  3. `testValidTaggedFieldsWithSaslAuthenticateRequest` (line 3933) -- manually constructs a byte buffer with a SASL_AUTHENTICATE request at the latest version including a valid tagged field, parses it, verifies authBytes and unknown_tagged_fields are preserved.
+  4. `testInvalidTaggedFieldsWithSaslAuthenticateRequest` (line 3961) -- same as above but with a corrupted tagged field size (`Short.MAX_VALUE`), verifies parse fails with expected error.
+- **Expected**: All four tests should be translated per the Definition of Done (rule 3: "Are all tests using those classes translated?")
+- **Actual**: Only basic roundtrip, builder, error response, and display tests exist. The corruption and tagged-field parse tests are missing.
 
-## RESOLVED: NoHostnameVerifier does not catch NotValidForNameContext variant
+---
 
-- **File**: `src/common/security/ssl/ssl_factory.rs`
-- **Description**: The `NoHostnameVerifier::verify_server_cert()` method only caught `CertificateError::NotValidForName`, but rustls 0.23.37 WebPkiServerVerifier produces `CertificateError::NotValidForNameContext { expected, presented }` for hostname mismatches. This meant setting `endpoint_identification_algorithm=""` did NOT actually disable hostname verification.
-- **Fix**: Added match arm for `NotValidForNameContext { .. }` alongside `NotValidForName`. Both variants are now caught and suppressed when hostname verification is disabled.
-- **Tests added**:
-  1. `test_no_hostname_verifier_accepts_mismatched_hostname` — verifies hostname mismatch is suppressed
-  2. `test_no_hostname_verifier_accepts_matching_hostname` — verifies matching hostname still works
-  3. `test_no_hostname_verifier_rejects_untrusted_cert` — verifies non-hostname errors are NOT suppressed
+## Issue: Redaction Display tests pass trivially without the redaction code
+
+- **File**: `src/common/requests/sasl_authenticate_request.rs:193-203`, `src/common/requests/sasl_authenticate_response.rs:192-202`
+- **Severity**: Missing Requirement
+- **Java Reference**: `kafka/clients/src/test/java/org/apache/kafka/common/requests/RequestResponseTest.java:3987-4006`
+- **Description**: The `test_display_redacted` tests check `!display.contains("secret-password")` / `!display.contains("server-secret-token")`. Since `auth_bytes` is `Vec<u8>` and the generated `Display` delegates to `Debug`, byte arrays render as numeric lists (e.g., `[115, 101, 99, ...]`), never as the ASCII string. These tests would pass even if the redaction code were removed entirely. The Java test (`testSaslAuthenticateRequestResponseToStringMasksSensitiveData`) asserts the **positive** condition `assertTrue(requestString.contains("authBytes=[]"))`, verifying the bytes are replaced with an empty array. The Rust tests should similarly assert the positive condition -- that `auth_bytes` in the Display output is empty (e.g., `display.contains("auth_bytes: []")`), not merely that an ASCII rendering of the secret is absent.
+- **Expected**: Tests that verify the redaction code is actually working by asserting the output contains empty auth_bytes, matching the Java test.
+- **Actual**: Tests that pass trivially regardless of whether redaction code is present.
