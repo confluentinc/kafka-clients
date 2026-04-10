@@ -188,15 +188,21 @@ mod tests {
         }
     }
 
+    /// Translated from `RequestResponseTest.testSaslAuthenticateRequestResponseToStringMasksSensitiveData`
+    /// (response portion).
+    ///
+    /// Verifies that auth_bytes field is present but empty in the Display output,
+    /// matching the Java assertion `assertTrue(responseString.contains("authBytes=[]"))`.
     #[test]
     fn test_display_redacted() {
         let mut data = SaslAuthenticateResponseData::new();
-        data.set_auth_bytes(b"server-secret-token".to_vec());
+        data.set_auth_bytes(b"sensitive-auth-token-123".to_vec());
         let response = SaslAuthenticateResponse::new(data);
         let display = format!("{}", response);
+        // Assert the positive condition: auth_bytes is present but empty in output
         assert!(
-            !display.contains("server-secret-token"),
-            "Display should not contain auth bytes, got: {}",
+            display.contains("auth_bytes: []"),
+            "auth_bytes field should be empty in Display output, got: {}",
             display
         );
     }

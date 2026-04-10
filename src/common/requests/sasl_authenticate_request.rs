@@ -189,15 +189,21 @@ mod tests {
         );
     }
 
+    /// Translated from `RequestResponseTest.testSaslAuthenticateRequestResponseToStringMasksSensitiveData`
+    /// (request portion).
+    ///
+    /// Verifies that auth_bytes field is present but empty in the Display output,
+    /// matching the Java assertion `assertTrue(requestString.contains("authBytes=[]"))`.
     #[test]
     fn test_display_redacted() {
         let mut data = SaslAuthenticateRequestData::new();
-        data.set_auth_bytes(b"secret-password".to_vec());
-        let request = SaslAuthenticateRequest::new(data, 0);
+        data.set_auth_bytes(b"sensitive-auth-token-123".to_vec());
+        let request = SaslAuthenticateRequest::new(data, 2);
         let display = format!("{}", request);
+        // Assert the positive condition: auth_bytes is present but empty in output
         assert!(
-            !display.contains("secret-password"),
-            "Display should not contain auth bytes, got: {}",
+            display.contains("auth_bytes: []"),
+            "auth_bytes field should be empty in Display output, got: {}",
             display
         );
     }
@@ -224,5 +230,115 @@ mod tests {
             assert_eq!(original.data().auth_bytes, parsed.data().auth_bytes);
             assert_eq!(original.version(), parsed.version());
         }
+    }
+
+    /// Translated from `RequestResponseTest.testInvalidSaslAuthenticateRequest`.
+    ///
+    /// Serializes a SaslAuthenticateRequest at version 1, corrupts the auth_bytes
+    /// array length (i32 at offset 0) to `i32::MAX`, and asserts that `parse_request`
+    /// fails with the expected error about insufficient bytes.
+    #[test]
+    fn test_invalid_sasl_authenticate_request() {
+        use crate::common::protocol::ByteBufferAccessor;
+
+        let version: i16 = 1; // fixed-length encoding for simplicity
+        let b: Vec<u8> = vec![
+            0x11, 0x1f, 0x15, 0x2c, 0x5e, 0x2a, 0x20, 0x26, 0x6c, 0x39, 0x45, 0x1f, 0x25, 0x1c, 0x2d, 0x25, 0x43, 0x2a,
+            0x11, 0x76,
+        ];
+        let mut data = SaslAuthenticateRequestData::new();
+        data.set_auth_bytes(b);
+        let request = SaslAuthenticateRequest::new(data, version);
+
+        let serialized = ConcreteRequest::SaslAuthenticate(request.clone()).serialize().unwrap();
+
+        // Corrupt the length of the bytes array (i32 at offset 0)
+        let mut corrupted = serialized.buffer().to_vec();
+        let corrupted_len = i32::MAX.to_be_bytes();
+        corrupted[0] = corrupted_len[0];
+        corrupted[1] = corrupted_len[1];
+        corrupted[2] = corrupted_len[2];
+        corrupted[3] = corrupted_len[3];
+
+        let mut buf = ByteBufferAccessor::from_bytes(corrupted);
+        let err = ConcreteRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Error reading byte array of 2147483647 byte(s): only 20 byte(s) available"
+        );
+    }
+
+    /// Translated from `RequestResponseTest.testValidTaggedFieldsWithSaslAuthenticateRequest`.
+    ///
+    /// Manually constructs a byte buffer with a SASL_AUTHENTICATE request at the latest
+    /// version including a valid tagged field, parses it, and verifies authBytes and
+    /// unknown_tagged_fields are preserved.
+    #[test]
+    fn test_valid_tagged_fields_with_sasl_authenticate_request() {
+        use crate::common::protocol::{ByteBufferAccessor, RawTaggedField, Writable};
+
+        let mut accessor = ByteBufferAccessor::new(11);
+
+        // Construct a SASL_AUTHENTICATE request body
+        let auth_bytes = b"test";
+        accessor.write_unsigned_varint(auth_bytes.len() as u32 + 1).unwrap();
+        accessor.write_byte_array(auth_bytes).unwrap();
+
+        // Write total number of tags
+        accessor.write_unsigned_varint(1).unwrap();
+
+        // Write first tag
+        let tagged_field = RawTaggedField::new(1, vec![0x1, 0x2, 0x3]);
+        accessor.write_unsigned_varint(tagged_field.tag()).unwrap();
+        accessor.write_unsigned_varint(tagged_field.size() as u32).unwrap();
+        accessor.write_byte_array(tagged_field.data()).unwrap();
+
+        accessor.flip();
+
+        let latest_version = SaslAuthenticateRequestData::HIGHEST_SUPPORTED_VERSION;
+        let result =
+            ConcreteRequest::parse_request(&ApiKeys::SASL_AUTHENTICATE, latest_version, &mut accessor).unwrap();
+
+        let ConcreteRequest::SaslAuthenticate(sasl_request) = &result.request else {
+            panic!("Expected SaslAuthenticate request");
+        };
+        assert_eq!(sasl_request.data().auth_bytes, auth_bytes);
+        assert_eq!(sasl_request.data().unknown_tagged_fields.len(), 1);
+        assert_eq!(sasl_request.data().unknown_tagged_fields[0], tagged_field);
+    }
+
+    /// Translated from `RequestResponseTest.testInvalidTaggedFieldsWithSaslAuthenticateRequest`.
+    ///
+    /// Same as the valid test but with a corrupted tagged field size (`i16::MAX`),
+    /// verifies that parse fails with the expected error.
+    #[test]
+    fn test_invalid_tagged_fields_with_sasl_authenticate_request() {
+        use crate::common::protocol::{ByteBufferAccessor, RawTaggedField, Writable};
+
+        let mut accessor = ByteBufferAccessor::new(13);
+
+        // Construct a SASL_AUTHENTICATE request body
+        let auth_bytes = b"test";
+        accessor.write_unsigned_varint(auth_bytes.len() as u32 + 1).unwrap();
+        accessor.write_byte_array(auth_bytes).unwrap();
+
+        // Write total number of tags
+        accessor.write_unsigned_varint(1).unwrap();
+
+        // Write first tag
+        let tagged_field = RawTaggedField::new(1, vec![0x1, 0x2, 0x3]);
+        accessor.write_unsigned_varint(tagged_field.tag()).unwrap();
+        accessor.write_unsigned_varint(i16::MAX as u32).unwrap(); // set wrong size for tagged field
+        accessor.write_byte_array(tagged_field.data()).unwrap();
+
+        accessor.flip();
+
+        let latest_version = SaslAuthenticateRequestData::HIGHEST_SUPPORTED_VERSION;
+        let err =
+            ConcreteRequest::parse_request(&ApiKeys::SASL_AUTHENTICATE, latest_version, &mut accessor).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Error reading byte array of 32767 byte(s): only 3 byte(s) available"
+        );
     }
 }

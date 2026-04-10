@@ -203,4 +203,34 @@ mod tests {
         let display = format!("{}", request);
         assert!(display.contains("PLAIN"));
     }
+
+    /// Translated from `RequestResponseTest.testInvalidSaslHandShakeRequest`.
+    ///
+    /// Serializes a SaslHandshakeRequest with mechanism "PLAIN", corrupts the mechanism
+    /// string length to `i16::MAX`, and asserts that `parse_request` fails with the
+    /// expected error about insufficient bytes.
+    #[test]
+    fn test_invalid_sasl_handshake_request() {
+        use crate::common::protocol::ByteBufferAccessor;
+        use crate::common::requests::abstract_request::ConcreteRequest;
+
+        let mut data = SaslHandshakeRequestData::new();
+        data.set_mechanism("PLAIN".to_string());
+        let builder = SaslHandshakeRequestBuilder::new(data);
+        let request = builder.build().unwrap();
+
+        let serialized = request.serialize().unwrap();
+        // Corrupt the length of the SASL mechanism string (i16 at offset 0)
+        let mut corrupted = serialized.buffer().to_vec();
+        let corrupted_len = i16::MAX.to_be_bytes();
+        corrupted[0] = corrupted_len[0];
+        corrupted[1] = corrupted_len[1];
+
+        let mut buf = ByteBufferAccessor::from_bytes(corrupted);
+        let err = ConcreteRequest::parse_request(request.api_key(), request.version(), &mut buf).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Error reading byte array of 32767 byte(s): only 5 byte(s) available"
+        );
+    }
 }
