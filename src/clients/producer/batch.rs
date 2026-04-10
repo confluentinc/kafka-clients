@@ -437,4 +437,34 @@ mod tests {
         // Must include the RecordBatch header overhead (61 bytes) plus the record size
         assert!(size > default_record_batch::RECORD_BATCH_OVERHEAD);
     }
+
+    #[test]
+    fn test_finalized_bytes_pass_produce_request_validation() {
+        use crate::common::requests::produce_request::ProduceRequest;
+
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let mut batch = ProducerBatch::new(tp, 4096);
+
+        batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
+
+        let bytes = batch.finalized_bytes();
+        // The bytes should pass ProduceRequest validation for all supported versions
+        let result = ProduceRequest::validate_records(11, &bytes);
+        assert!(result.is_ok(), "Expected valid records, got: {:?}", result.err());
+    }
+
+    #[test]
+    fn test_written_bytes_preserved_after_finalization() {
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let mut batch = ProducerBatch::new(tp, 4096);
+
+        batch.try_append(Some(b"key"), Some(b"value"), &[], 1000).unwrap();
+        let estimated = batch.written_bytes();
+        assert!(estimated > 0);
+
+        let bytes = batch.finalized_bytes();
+        // After finalization, written_bytes should return the cached finalized size
+        let finalized = batch.written_bytes();
+        assert_eq!(finalized, bytes.len());
+    }
 }
