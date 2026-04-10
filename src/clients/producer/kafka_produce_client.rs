@@ -37,6 +37,7 @@ use crate::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
 use crate::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
 use crate::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
+use crate::common::requests::ApiVersionsResponse;
 use crate::common::requests::abstract_response::ConcreteResponse;
 use crate::common::requests::produce_request::ProduceRequestBuilder;
 use crate::common::requests::{RequestBuilder, RequestHeader};
@@ -180,10 +181,11 @@ impl KafkaProduceClientInner {
         ))
     }
 
-    /// Performs the ApiVersions handshake to determine supported produce request version.
+    /// Performs the ApiVersions handshake to discover broker capabilities.
     ///
-    /// Returns the maximum supported version for the Produce API.
-    async fn handshake_api_versions(&mut self, node_id: &str) -> Result<i16, KafkaError> {
+    /// Returns the full `ApiVersionsResponse` so callers can look up
+    /// the supported version range for any API key.
+    async fn handshake_api_versions(&mut self, node_id: &str) -> Result<ApiVersionsResponse, KafkaError> {
         let builder = crate::common::requests::ApiVersionsRequestBuilder::new();
         let version = builder.oldest_allowed_version();
         let request = builder
@@ -221,11 +223,7 @@ impl KafkaProduceClientInner {
             ));
         }
 
-        let produce_version = avr
-            .api_version(ApiKeys::PRODUCE.id())
-            .ok_or_else(|| KafkaError::new(ErrorCode::Network, "Broker does not support Produce API"))?;
-
-        Ok(produce_version.max_version)
+        Ok(avr)
     }
 
     /// Polls the selector until a completed receive arrives, returning the payload.
@@ -315,7 +313,11 @@ impl KafkaProduceClientInner {
         self.ensure_connected(node_id).await?;
 
         // Perform API version handshake to get the right produce version
-        let max_produce_version = self.handshake_api_versions(node_id).await?;
+        let avr = self.handshake_api_versions(node_id).await?;
+        let max_produce_version = avr
+            .api_version(ApiKeys::PRODUCE.id())
+            .ok_or_else(|| KafkaError::new(ErrorCode::Network, "Broker does not support Produce API"))?
+            .max_version;
 
         // Build the produce request data
         let data = Self::build_produce_request_data(&acks, timeout, &batches);
@@ -406,11 +408,19 @@ impl KafkaProduceClientInner {
         let node_id = "0";
         self.ensure_connected(node_id).await?;
 
-        // Perform API version handshake
+        // Perform API version handshake and get the metadata API version
         let avr = self.handshake_api_versions(node_id).await?;
+        let metadata_max_version = avr
+            .api_version(ApiKeys::METADATA.id())
+            .ok_or_else(|| KafkaError::new(ErrorCode::Network, "Broker does not support Metadata API"))?
+            .max_version;
 
         // Build metadata request for the specific topic
-        let builder = crate::common::requests::MetadataRequestBuilder::new_with_version(Some(&[topic]), true, avr);
+        let builder = crate::common::requests::MetadataRequestBuilder::new_with_version(
+            Some(&[topic]),
+            true,
+            metadata_max_version,
+        );
 
         let version = builder.oldest_allowed_version();
         let request = builder
