@@ -12,8 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security types and utilities (org.apache.kafka.common.security).
+//! SASL authenticator implementations (org.apache.kafka.common.security.authenticator).
 
-pub mod auth;
-pub mod authenticator;
-pub mod ssl;
+pub mod sasl_client_authenticator;
+
+pub use sasl_client_authenticator::SaslClientAuthenticator;
