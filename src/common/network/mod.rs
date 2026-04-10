@@ -37,6 +37,8 @@ pub mod receive;
 pub mod selectable;
 pub mod selector;
 pub mod send;
+pub mod ssl_channel_builder;
+pub mod ssl_transport_layer;
 pub mod transport_layer;
 
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
@@ -59,4 +61,6 @@ pub use receive::Receive;
 pub use selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
 pub use selector::Selector;
 pub use send::KafkaSend;
+pub use ssl_channel_builder::SslChannelBuilder;
+pub use ssl_transport_layer::SslTransportLayer;
 pub use transport_layer::TransportLayer;
