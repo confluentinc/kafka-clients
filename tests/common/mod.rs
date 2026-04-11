@@ -47,4 +47,7 @@ pub mod cluster_pool;
 pub mod kafka_cluster;
 #[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
+pub mod test_certs;
+#[cfg(feature = "integration-tests")]
+#[allow(dead_code)]
 pub mod test_context;

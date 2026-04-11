@@ -28,6 +28,7 @@ log = "0.4"
 [dev-dependencies]
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
+rcgen = "0.13"
 
 [[test]]
 name = "common"

@@ -20,6 +20,28 @@
 
 use std::collections::BTreeMap;
 
+/// Security mode for the Kafka test cluster.
+///
+/// Determines which listeners and authentication are configured
+/// on the Docker container.
+#[derive(Clone, Debug, Hash, Eq, PartialEq)]
+pub enum SecurityMode {
+    /// Plaintext (no encryption, no authentication).
+    Plaintext,
+    /// SASL PLAIN over plaintext TCP.
+    SaslPlaintext { username: String, password: String },
+    /// SSL/TLS encryption (no SASL authentication).
+    Ssl,
+    /// SASL PLAIN over SSL/TLS.
+    SaslSsl { username: String, password: String },
+}
+
+impl Default for SecurityMode {
+    fn default() -> Self {
+        SecurityMode::Plaintext
+    }
+}
+
 /// Describes cluster requirements for a group of tests.
 ///
 /// Tests with identical `ClusterConfig` share one container.
@@ -33,18 +55,20 @@ pub struct ClusterConfig {
     ///
     /// `BTreeMap` is used instead of `HashMap` so that `Hash` is deterministic.
     pub server_properties: BTreeMap<String, String>,
+    /// Security mode for the cluster.
+    pub security_mode: SecurityMode,
 }
 
 impl ClusterConfig {
     /// Single broker with custom server properties.
     pub fn with_properties(props: BTreeMap<String, String>) -> Self {
-        Self { brokers: 1, server_properties: props }
+        Self { brokers: 1, server_properties: props, security_mode: SecurityMode::default() }
     }
 }
 
 impl Default for ClusterConfig {
     /// Default single-broker cluster with no extra properties.
     fn default() -> Self {
-        Self { brokers: 1, server_properties: BTreeMap::new() }
+        Self { brokers: 1, server_properties: BTreeMap::new(), security_mode: SecurityMode::default() }
     }
 }
