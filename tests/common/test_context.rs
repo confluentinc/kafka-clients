@@ -67,6 +67,18 @@ impl TestContext {
         self.cluster.bootstrap_servers()
     }
 
+    /// Bootstrap servers for the secure listener (SASL/SSL port).
+    /// Returns `None` for PLAINTEXT clusters.
+    pub fn secure_bootstrap_servers(&self) -> Option<&str> {
+        self.cluster.secure_bootstrap_servers()
+    }
+
+    /// CA certificate PEM for SSL tests.
+    /// Returns `None` for non-SSL clusters.
+    pub fn ca_cert_pem(&self) -> Option<&str> {
+        self.cluster.ca_cert_pem()
+    }
+
     /// Generate a unique topic name for this test.
     ///
     /// Example: `"test_api_versions_a3f9_my_topic"`.
