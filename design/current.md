@@ -4,7 +4,7 @@ This document captures the current architecture and design of the Confluent Kafk
 It is intended to be updated after each manager agent loop completes a milestone or phase.
 
 **Last updated:** 2026-04-10
-**Status:** Milestone 1 complete, Milestone 3 (SSL/SASL) in progress
+**Status:** Milestone 1 complete, Milestone 3 (SSL/SASL) complete
 
 ---
 
@@ -13,7 +13,7 @@ It is intended to be updated after each manager agent loop completes a milestone
 A Rust Kafka client translated from the Java Kafka client (Apache Kafka 4.2), preserving the same
 architecture and logical structure while adapting to Rust idioms. All I/O is async via Tokio.
 
-**Crate stats:** ~100 source files, ~13,000 lines of library code, 447 unit tests + 11 integration tests.
+**Crate stats:** ~100 source files, ~15,000 lines of library code, 579 unit tests + 16 integration tests.
 
 ---
 
@@ -99,6 +99,10 @@ Factory for creating `KafkaChannel` instances from a `TcpStream`.
 **Implementations:**
 - `PlaintextChannelBuilder` -- creates plaintext channels
 - `SslChannelBuilder` -- creates SSL/TLS channels with rustls
+- `SaslChannelBuilder` -- creates SASL-authenticated channels (SASL_PLAINTEXT, SASL_SSL)
+
+**Factory:**
+- `client_channel_builder()` (`channel_builders.rs`) -- dispatches on `SecurityProtocol` to create the appropriate builder
 
 ### Network I/O Primitives
 
@@ -222,17 +226,17 @@ PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
 - `SslChannelBuilder` -- TLS channel factory
 - Supports TLS 1.2 and 1.3
 
-### SASL (in progress)
+### SASL (complete)
 
 - `SaslConfig` (`config/sasl_configs.rs`) -- mechanism and JAAS configuration
 - `SaslHandshakeRequest/Response` -- mechanism negotiation
 - `SaslAuthenticateRequest/Response` -- authentication exchange
-- SASL authenticator implementation: **not yet implemented**
+- `SaslClientAuthenticator` (`security/authenticator/sasl_client_authenticator.rs`) -- full PLAIN mechanism state machine
 
 ### Authenticator trait (`network/authenticator.rs`)
 
-- `PlaintextAuthenticator` -- no-op for PLAINTEXT connections
-- SASL authenticator -- to be implemented
+- `PlaintextAuthenticator` -- no-op for PLAINTEXT and SSL connections
+- `SaslClientAuthenticator` -- full SASL PLAIN authentication with handshake/authenticate exchange
 
 ---
 
@@ -269,24 +273,26 @@ PLAINTEXT | SSL | SASL_PLAINTEXT | SASL_SSL
 | rand | 0.9 | Randomization |
 | serde / serde_json | 1.0 | Serialization for config and generator |
 | log | 0.4 | Logging facade |
+| rcgen | 0.13 | Self-signed certificate generation (dev-only) |
 
 ---
 
 ## Test Infrastructure
 
-### Unit Tests (447 tests)
+### Unit Tests (579 tests)
 
 - Message serialization/deserialization round-trips
 - Protocol encoding (varint, flexible versions, tagged fields)
 - Generated message type validation
 - Network client with MockSelector
 
-### Integration Tests (11 tests, feature-gated)
+### Integration Tests (16 tests, feature-gated)
 
 - Require `--features integration-tests` and Docker
 - Use `testcontainers` with Kafka 4.2.0
 - Test real TCP connections, ApiVersions, Metadata queries
-- Infrastructure: `ClusterConfig`, `ClusterPool`, `KafkaCluster`, `TestContext`
+- SSL/SASL tests: SSL, SASL_PLAINTEXT, SASL_SSL, auth failure, unsupported mechanism
+- Infrastructure: `ClusterConfig`, `ClusterPool`, `KafkaCluster`, `TestContext`, `SecureKafka` (custom image), `test_certs` (cert generation)
 
 ---
 
@@ -301,9 +307,11 @@ network transport, selector/channel, network client, integration tests.
 
 Producer that accumulates messages into batches for Produce RPC.
 
-### Milestone 3 -- SSL + SASL Authentication (in progress)
+### Milestone 3 -- SSL + SASL Authentication (complete)
 
-- Phase 1: SSL/TLS dependencies and ChannelBuilder refactoring (done)
-- Phase 2: SslTransportLayer and SslChannelBuilder (done)
-- Phase 3: SASL handshake/authenticate request/response types (done)
-- Remaining: SASL authenticator implementation, integration tests with SSL+SASL
+- Phase 1: Security & config types (SecurityProtocol, SslConfig, SaslConfig)
+- Phase 2: SSL/TLS transport (SslFactory, SslTransportLayer, SslChannelBuilder)
+- Phase 3: SASL handshake/authenticate request/response types
+- Phase 4: SASL client authenticator state machine
+- Phase 5: ChannelBuilders factory for security protocol dispatch
+- Phase 6: SSL and SASL PLAIN integration tests with custom Docker image
