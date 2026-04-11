@@ -28,10 +28,9 @@ use std::collections::HashMap;
 use super::cluster_config::{ClusterConfig, SecurityMode};
 use super::test_certs;
 
-use testcontainers::core::copy::CopyToContainer;
 use testcontainers::core::{ContainerPort, ContainerState, ExecCommand, WaitFor};
 use testcontainers::runners::AsyncRunner;
-use testcontainers::{ContainerAsync, Image, ImageExt};
+use testcontainers::{ContainerAsync, CopyToContainer, Image, ImageExt};
 use testcontainers_modules::kafka::apache;
 use testcontainers_modules::kafka::apache::Kafka;
 
@@ -80,10 +79,7 @@ impl SecureKafka {
         env_vars.insert("KAFKA_PROCESS_ROLES".to_owned(), "broker,controller".to_owned());
         env_vars.insert("KAFKA_CONTROLLER_LISTENER_NAMES".to_owned(), "CONTROLLER".to_owned());
         env_vars.insert("KAFKA_INTER_BROKER_LISTENER_NAME".to_owned(), "BROKER".to_owned());
-        env_vars.insert(
-            "KAFKA_BROKER_ID".to_owned(),
-            apache::DEFAULT_BROKER_ID.to_string(),
-        );
+        env_vars.insert("KAFKA_BROKER_ID".to_owned(), apache::DEFAULT_BROKER_ID.to_string());
         env_vars.insert(
             "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_owned(),
             apache::DEFAULT_INTERNAL_TOPIC_RF.to_string(),
@@ -105,7 +101,7 @@ impl SecureKafka {
                     "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_owned(),
                     "PLAINTEXT:PLAINTEXT,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT".to_owned(),
                 );
-            }
+            },
             SecurityMode::SaslPlaintext { username, password } => {
                 exposed_ports.push(SASL_PLAINTEXT_PORT);
                 env_vars.insert(
@@ -114,7 +110,8 @@ impl SecureKafka {
                 );
                 env_vars.insert(
                     "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_owned(),
-                    "PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT".to_owned(),
+                    "PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT"
+                        .to_owned(),
                 );
                 env_vars.insert("KAFKA_SASL_ENABLED_MECHANISMS".to_owned(), "PLAIN".to_owned());
                 env_vars.insert(
@@ -130,11 +127,8 @@ impl SecureKafka {
                      user_{username}=\"{password}\";\n\
                      }};\n"
                 );
-                copy_to_sources.push(CopyToContainer::new(
-                    jaas_content.into_bytes(),
-                    JAAS_CONFIG_PATH,
-                ));
-            }
+                copy_to_sources.push(CopyToContainer::new(jaas_content.into_bytes(), JAAS_CONFIG_PATH));
+            },
             SecurityMode::Ssl => {
                 exposed_ports.push(SSL_PORT);
                 let certs = test_certs::generate_test_certificates("localhost");
@@ -148,7 +142,7 @@ impl SecureKafka {
                     "PLAINTEXT:PLAINTEXT,SSL:SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT".to_owned(),
                 );
                 Self::add_ssl_env_vars(&mut env_vars, &certs);
-            }
+            },
             SecurityMode::SaslSsl { username, password } => {
                 exposed_ports.push(SASL_SSL_PORT);
                 let certs = test_certs::generate_test_certificates("localhost");
@@ -176,34 +170,20 @@ impl SecureKafka {
                      user_{username}=\"{password}\";\n\
                      }};\n"
                 );
-                copy_to_sources.push(CopyToContainer::new(
-                    jaas_content.into_bytes(),
-                    JAAS_CONFIG_PATH,
-                ));
-            }
+                copy_to_sources.push(CopyToContainer::new(jaas_content.into_bytes(), JAAS_CONFIG_PATH));
+            },
         }
 
-        Self {
-            env_vars,
-            copy_to_sources,
-            exposed_ports,
-            security_mode: security_mode.clone(),
-        }
+        Self { env_vars, copy_to_sources, exposed_ports, security_mode: security_mode.clone() }
     }
 
     /// Add SSL-related environment variables to the env_vars map.
     fn add_ssl_env_vars(env_vars: &mut HashMap<String, String>, certs: &test_certs::TestCertificates) {
         env_vars.insert("KAFKA_SSL_KEYSTORE_TYPE".to_owned(), "PEM".to_owned());
         env_vars.insert("KAFKA_SSL_KEYSTORE_KEY".to_owned(), certs.broker_key_pem.clone());
-        env_vars.insert(
-            "KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN".to_owned(),
-            certs.broker_cert_pem.clone(),
-        );
+        env_vars.insert("KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN".to_owned(), certs.broker_cert_pem.clone());
         env_vars.insert("KAFKA_SSL_TRUSTSTORE_TYPE".to_owned(), "PEM".to_owned());
-        env_vars.insert(
-            "KAFKA_SSL_TRUSTSTORE_CERTIFICATES".to_owned(),
-            certs.ca_cert_pem.clone(),
-        );
+        env_vars.insert("KAFKA_SSL_TRUSTSTORE_CERTIFICATES".to_owned(), certs.ca_cert_pem.clone());
     }
 
     /// Returns the container port for the secure listener.
@@ -275,8 +255,7 @@ impl Image for SecureKafka {
 
     fn exec_after_start(&self, cs: ContainerState) -> Result<Vec<ExecCommand>, testcontainers::TestcontainersError> {
         let plaintext_host_port = cs.host_port_ipv4(PLAINTEXT_PORT)?;
-        let mut advertised_listeners =
-            format!("PLAINTEXT://127.0.0.1:{plaintext_host_port},BROKER://localhost:9093");
+        let mut advertised_listeners = format!("PLAINTEXT://127.0.0.1:{plaintext_host_port},BROKER://localhost:9093");
 
         // Add secure listener if configured
         if let (Some(secure_port), Some(listener_name)) = (self.secure_port(), self.secure_listener_name()) {
@@ -288,7 +267,11 @@ impl Image for SecureKafka {
             "#!/usr/bin/env bash\nexport KAFKA_ADVERTISED_LISTENERS={advertised_listeners}\n/etc/kafka/docker/run\n"
         );
 
-        let cmd = vec!["sh".to_string(), "-c".to_string(), format!("echo '{script}' > {START_SCRIPT}")];
+        let cmd = vec![
+            "sh".to_string(),
+            "-c".to_string(),
+            format!("echo '{script}' > {START_SCRIPT}"),
+        ];
 
         let ready_conditions = vec![WaitFor::message_on_stdout("Kafka Server started")];
         let exec = ExecCommand::new(cmd).with_container_ready_conditions(ready_conditions);

@@ -69,6 +69,10 @@ impl ClusterConfig {
 impl Default for ClusterConfig {
     /// Default single-broker cluster with no extra properties.
     fn default() -> Self {
-        Self { brokers: 1, server_properties: BTreeMap::new(), security_mode: SecurityMode::default() }
+        Self {
+            brokers: 1,
+            server_properties: BTreeMap::new(),
+            security_mode: SecurityMode::default(),
+        }
     }
 }
