@@ -20,6 +20,7 @@
 pub mod authenticator;
 pub mod byte_buffer_send;
 pub mod channel_builder;
+pub mod channel_builders;
 pub mod channel_metadata_registry;
 pub mod channel_state;
 pub mod cipher_information;
@@ -45,6 +46,7 @@ pub mod transport_layer;
 pub use authenticator::{Authenticator, PlaintextAuthenticator};
 pub use byte_buffer_send::ByteBufferSend;
 pub use channel_builder::ChannelBuilder;
+pub use channel_builders::client_channel_builder;
 pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
 pub use channel_state::ChannelState;
 pub use cipher_information::CipherInformation;
