@@ -1,3 +1,5 @@
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
+- [ProducerBatch builder swap pattern](producer_batch_builder_pattern.md) — swap-with-dummy to extract bytes since MemoryRecordsBuilder::build() consumes self
+- [Metadata and topic ID architecture](metadata_and_topic_ids.md) — wait_on_metadata in KafkaProducer, topic IDs cached for v13+

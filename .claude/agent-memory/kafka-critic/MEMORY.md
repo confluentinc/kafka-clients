@@ -6,3 +6,8 @@
 - [Layer 5 Channel & Selection patterns](review_layer5_patterns.md) — Format string typos, poll loop design, test coverage gaps in Selector/KafkaChannel
 - [Layer 3 Request/Response patterns](review_layer3_patterns.md) — Validation gaps, panic vs Result in builders, per-field flexibleVersions
 - [Layer 6 NetworkClient patterns](review_layer6_patterns.md) — Async boundary gaps, exception hierarchy, time update, ISE mapping
+- [Record batch translation patterns](review_record_batch_patterns.md) — Silent truncation, debug_assert vs assert, panic vs Result in record serialization
+- [ProduceRequest/Response patterns](review_produce_request_patterns.md) — ApiError.fromThrowable message suppression lost when taking &Errors instead of Throwable
+- [ProducerBatch rewrite patterns](review_producer_batch_patterns.md) — Memory accounting asymmetry and error swallowing in MemoryRecordsBuilder integration
+- [KafkaProduceClient adapter patterns](review_produce_client_patterns.md) — Per-request handshakes, reconnection without cleanup, double clones in direct-Selector usage
+- [Metadata waitOnMetadata patterns](review_metadata_waiton_patterns.md) — Caching, partition-aware retry, error propagation, integration test compatibility
