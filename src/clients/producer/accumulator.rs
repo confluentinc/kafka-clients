@@ -53,7 +53,8 @@ struct AccumulatorInner {
 pub struct RecordAccumulator {
     inner: Mutex<AccumulatorInner>,
     /// Semaphore with permits = buffer.memory bytes.
-    /// Each append acquires permits equal to the record's estimated size.
+    /// Permits are acquired per-batch: `max(batch_size, estimated_record_size)`,
+    /// matching Java's `BufferPool.allocate()` model.
     memory_semaphore: Arc<Semaphore>,
     /// Notifies the sender task that a batch is ready.
     batch_ready_notify: Notify,
@@ -78,10 +79,20 @@ impl RecordAccumulator {
 
     /// Append a record to the accumulator.
     ///
-    /// 1. Acquires memory permits (blocks up to max.block.ms).
-    /// 2. Finds or creates a ProducerBatch for the target partition.
-    /// 3. Copies key/value/headers into the batch buffer.
-    /// 4. If the batch is full, moves it to ready_batches and notifies the sender.
+    /// Matches Java's `RecordAccumulator.append()` flow:
+    ///
+    /// 1. Try to append to an existing batch first (no new allocation needed —
+    ///    the batch was pre-allocated when it was created).
+    /// 2. If no batch exists or the current batch is full, release the lock,
+    ///    allocate `max(batch_size, estimated_record_size)` permits from the
+    ///    memory semaphore (potentially blocking up to `max.block.ms`), then
+    ///    re-acquire the lock.
+    /// 3. After re-acquiring the lock, try the existing batch again (another
+    ///    caller may have created one while we were waiting for permits).
+    /// 4. If still needed, create a new batch with the full allocation size.
+    ///
+    /// This per-batch allocation model matches Java's `BufferPool.allocate(size)`
+    /// where `size = Math.max(batchSize, estimateSizeInBytesUpperBound(...))`.
     pub async fn append(
         &self,
         tp: &TopicPartition,
@@ -90,18 +101,56 @@ impl RecordAccumulator {
         headers: &[Header<'_>],
         timestamp: i64,
     ) -> crate::errors::Result<AppendResult> {
-        let estimated_size = Self::estimate_size(key, value, headers);
+        // --- Phase 1: try existing batch under the lock (no allocation) ---
+        {
+            let mut inner = self.inner.lock().await;
 
-        // Acquire memory permits with timeout.
+            if inner.closed {
+                return Err(KafkaError::new(ErrorCode::Unexpected, "accumulator is closed"));
+            }
+
+            if let Some(batch) = inner.current_batches.get_mut(tp) {
+                match batch.try_append(key, value, headers, timestamp) {
+                    Ok(Some(future)) => {
+                        // Appended to existing batch — no permit acquisition needed.
+                        let batch_is_full = batch.is_full();
+                        if batch_is_full {
+                            let full_batch = inner.current_batches.remove(tp).unwrap();
+                            inner.ready_batches.push(full_batch);
+                            self.batch_ready_notify.notify_one();
+                        }
+                        return Ok(AppendResult { future, batch_is_full, new_batch_created: false });
+                    },
+                    Ok(None) => {
+                        // Current batch is full — move it to ready.
+                        let full_batch = inner.current_batches.remove(tp).unwrap();
+                        inner.ready_batches.push(full_batch);
+                        self.batch_ready_notify.notify_one();
+                        // Fall through to allocate a new batch.
+                    },
+                    Err(e) => {
+                        return Err(e);
+                    },
+                }
+            }
+            // Release the lock before the potentially-blocking semaphore acquire.
+        }
+
+        // --- Phase 2: allocate memory for a new batch ---
+        // Match Java: size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(...))
+        let estimated_size = Self::estimate_size(key, value, headers);
+        let batch_alloc_size = self.config.batch_size().max(estimated_size);
+
         let permit_result = tokio::time::timeout(
             self.config.max_block(),
-            self.memory_semaphore.acquire_many(estimated_size as u32),
+            self.memory_semaphore.acquire_many(batch_alloc_size as u32),
         )
         .await;
 
         match permit_result {
             Ok(Ok(permit)) => {
-                // Forget the permit — we'll release it manually when the batch completes.
+                // Forget the permit — we release manually via release_memory()
+                // when the batch completes.
                 permit.forget();
             },
             Ok(Err(_closed)) => {
@@ -112,26 +161,28 @@ impl RecordAccumulator {
                     ErrorCode::BufferExhausted,
                     format!(
                         "failed to allocate {} bytes within {:?}",
-                        estimated_size,
+                        batch_alloc_size,
                         self.config.max_block()
                     ),
                 ));
             },
         }
 
+        // --- Phase 3: re-acquire lock and double-check ---
         let mut inner = self.inner.lock().await;
 
         if inner.closed {
-            // Release the memory we just acquired.
-            self.memory_semaphore.add_permits(estimated_size);
+            self.memory_semaphore.add_permits(batch_alloc_size);
             return Err(KafkaError::new(ErrorCode::Unexpected, "accumulator is closed"));
         }
 
-        // Try to append to existing batch.
+        // Another caller may have created a batch while we were waiting for
+        // permits. Try the existing batch again before creating a new one.
         if let Some(batch) = inner.current_batches.get_mut(tp) {
             match batch.try_append(key, value, headers, timestamp) {
                 Ok(Some(future)) => {
-                    batch.add_permits(estimated_size);
+                    // Appended — release the permits we just acquired.
+                    self.memory_semaphore.add_permits(batch_alloc_size);
                     let batch_is_full = batch.is_full();
                     if batch_is_full {
                         let full_batch = inner.current_batches.remove(tp).unwrap();
@@ -141,36 +192,33 @@ impl RecordAccumulator {
                     return Ok(AppendResult { future, batch_is_full, new_batch_created: false });
                 },
                 Ok(None) => {
-                    // Current batch is full — move it to ready and create a new one.
+                    // Batch appeared but is already full — move to ready.
                     let full_batch = inner.current_batches.remove(tp).unwrap();
                     inner.ready_batches.push(full_batch);
                     self.batch_ready_notify.notify_one();
                 },
                 Err(e) => {
-                    // Input validation error (e.g. invalid timestamp) — release
-                    // memory and propagate.
-                    self.memory_semaphore.add_permits(estimated_size);
+                    self.memory_semaphore.add_permits(batch_alloc_size);
                     return Err(e);
                 },
             }
         }
 
-        // Create a new batch.
-        let mut batch = ProducerBatch::new(tp.clone(), self.config.batch_size());
+        // --- Phase 4: create new batch with full allocation size ---
+        let mut batch = ProducerBatch::new(tp.clone(), batch_alloc_size);
+        batch.set_permits_acquired(batch_alloc_size);
         let future = match batch.try_append(key, value, headers, timestamp) {
             Ok(Some(f)) => f,
             Ok(None) => {
                 // Should not happen: a new batch must always accept the first record.
-                self.memory_semaphore.add_permits(estimated_size);
+                self.memory_semaphore.add_permits(batch_alloc_size);
                 return Err(KafkaError::new(ErrorCode::Unexpected, "new batch rejected first record"));
             },
             Err(e) => {
-                self.memory_semaphore.add_permits(estimated_size);
+                self.memory_semaphore.add_permits(batch_alloc_size);
                 return Err(e);
             },
         };
-        batch.add_permits(estimated_size);
-        let new_batch_created = true;
         let batch_is_full = batch.is_full();
 
         if batch_is_full {
@@ -180,7 +228,7 @@ impl RecordAccumulator {
             inner.current_batches.insert(tp.clone(), batch);
         }
 
-        Ok(AppendResult { future, batch_is_full, new_batch_created })
+        Ok(AppendResult { future, batch_is_full, new_batch_created: true })
     }
 
     /// Drain all ready batches. Called by the Sender task.
@@ -255,11 +303,10 @@ impl RecordAccumulator {
     }
 
     fn estimate_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
-        // Use the record-only size estimate. The batch header overhead is shared
-        // across all records in a batch and is accounted for by the batch itself
-        // via `written_bytes()` / `estimated_size_in_bytes()`. Acquiring only the
-        // record-level permits per append prevents leaking `(N-1) * 61` bytes of
-        // semaphore permits per batch (where 61 is the batch header overhead).
+        // Estimate the record-level size. When creating a new batch, the
+        // allocation size is max(batch_size, estimate) matching Java's
+        // Math.max(batchSize, estimateSizeInBytesUpperBound(...)). The batch
+        // header overhead is included in batch_size already.
         ProducerBatch::estimate_record_size(key, value, headers).max(1)
     }
 }
@@ -352,14 +399,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_memory_permits_balanced_after_multi_record_batch() {
-        // Verify that appending N records to one batch does NOT leak
-        // (N-1) * batch_header_overhead permits. After draining and releasing,
-        // available permits should return to the original pool size.
+        // Verify that the per-batch allocation model correctly returns all
+        // permits after a batch is drained and released. With per-batch
+        // allocation, permits_acquired equals max(batch_size, record_estimate)
+        // — set once at batch creation, not per-record.
         let buffer_memory = 65536usize;
+        let batch_size = 4096usize;
         let config = Arc::new(
             ProducerConfig::builder()
                 .bootstrap_servers(vec!["localhost:9092".to_string()])
-                .batch_size(4096)
+                .batch_size(batch_size)
                 .linger_ms(0)
                 .buffer_memory(buffer_memory)
                 .build()
@@ -371,10 +420,20 @@ mod tests {
         let initial_permits = acc.memory_semaphore.available_permits();
         assert_eq!(initial_permits, buffer_memory);
 
-        // Append 10 records to the same batch.
+        // Append 10 records to the same batch. Only the first record triggers
+        // permit acquisition (batch_size permits). Subsequent records append
+        // to the existing batch without acquiring additional permits.
         for i in 0..10 {
             acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000 + i).await.unwrap();
         }
+
+        // After one batch is created, exactly batch_size permits should be held.
+        let permits_after_append = acc.memory_semaphore.available_permits();
+        assert_eq!(
+            permits_after_append,
+            initial_permits - batch_size,
+            "Should have acquired exactly batch_size permits"
+        );
 
         // Flush and drain the batch.
         acc.flush_all().await;
@@ -384,12 +443,11 @@ mod tests {
         // Release memory using the permits_acquired (what the sender does).
         for batch in batches {
             let permits = batch.permits_acquired();
-            assert!(permits > 0);
+            assert_eq!(permits, batch_size, "permits_acquired should equal batch_size");
             acc.release_memory(permits);
         }
 
-        // All permits should be returned (within a small margin for rounding).
-        // With the old bug, this would lose (10-1)*61 = 549 permits.
+        // All permits should be returned.
         let final_permits = acc.memory_semaphore.available_permits();
         assert_eq!(
             final_permits,
@@ -411,7 +469,137 @@ mod tests {
         assert_eq!(result.unwrap_err().code(), ErrorCode::InvalidArgument);
 
         // Verify that the memory permits were released on error.
+        // With per-batch allocation, max(batch_size, record_estimate) permits
+        // are acquired for the new batch, then released on error.
         let permits = acc.memory_semaphore.available_permits();
         assert_eq!(permits, 65536, "Permits should be fully returned after error");
+    }
+
+    #[tokio::test]
+    async fn test_large_record_allocates_more_than_batch_size() {
+        // When a record is larger than batch_size, the allocation should be
+        // max(batch_size, estimated_record_size), matching Java's
+        // Math.max(batchSize, estimateSizeInBytesUpperBound(...)).
+        let buffer_memory = 65536usize;
+        let batch_size = 64usize; // Very small batch size
+        let config = Arc::new(
+            ProducerConfig::builder()
+                .bootstrap_servers(vec!["localhost:9092".to_string()])
+                .batch_size(batch_size)
+                .buffer_memory(buffer_memory)
+                .build()
+                .unwrap(),
+        );
+        let acc = RecordAccumulator::new(config);
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        // Create a value larger than batch_size.
+        let large_value = vec![b'x'; 200];
+        let estimated = ProducerBatch::estimate_record_size(Some(b"key"), Some(&large_value), &[]);
+        assert!(
+            estimated > batch_size,
+            "record estimate ({}) should exceed batch_size ({})",
+            estimated,
+            batch_size
+        );
+
+        let initial_permits = acc.memory_semaphore.available_permits();
+
+        let result = acc.append(&tp, Some(b"key"), Some(&large_value), &[], 1000).await;
+        assert!(result.is_ok());
+
+        // The permits acquired should be the record estimate (larger than batch_size).
+        let permits_used = initial_permits - acc.memory_semaphore.available_permits();
+        assert_eq!(
+            permits_used, estimated,
+            "should allocate estimated_record_size ({}) when it exceeds batch_size ({})",
+            estimated, batch_size
+        );
+
+        // Drain and release — permits should be fully returned.
+        acc.flush_all().await;
+        let batches = acc.drain().await;
+        assert_eq!(1, batches.len());
+        for batch in batches {
+            assert_eq!(batch.permits_acquired(), estimated);
+            acc.release_memory(batch.permits_acquired());
+        }
+        assert_eq!(acc.memory_semaphore.available_permits(), initial_permits);
+    }
+
+    #[tokio::test]
+    async fn test_batch_overflow_creates_new_batch_with_separate_allocation() {
+        // When a batch is full and a new record arrives, a new batch should be
+        // created with its own per-batch allocation.
+        let buffer_memory = 65536usize;
+        let batch_size = 20usize; // Very small — first record fills the batch
+        let config = Arc::new(
+            ProducerConfig::builder()
+                .bootstrap_servers(vec!["localhost:9092".to_string()])
+                .batch_size(batch_size)
+                .buffer_memory(buffer_memory)
+                .build()
+                .unwrap(),
+        );
+        let acc = RecordAccumulator::new(config);
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        let initial_permits = acc.memory_semaphore.available_permits();
+
+        // First record creates batch 1 and fills it (batch_size=20 is tiny).
+        let r1 = acc.append(&tp, Some(b"key1"), Some(b"value1"), &[], 1000).await.unwrap();
+        assert!(r1.new_batch_created);
+        // batch_size is small so first record likely fills it
+        let permits_after_first = acc.memory_semaphore.available_permits();
+
+        // Second record should create a new batch with its own allocation.
+        let r2 = acc.append(&tp, Some(b"key2"), Some(b"value2"), &[], 1001).await.unwrap();
+        assert!(r2.new_batch_created);
+        let permits_after_second = acc.memory_semaphore.available_permits();
+
+        // Two batches should have been allocated.
+        let total_acquired = initial_permits - permits_after_second;
+        let first_acquired = initial_permits - permits_after_first;
+        let second_acquired = permits_after_first - permits_after_second;
+        assert!(
+            first_acquired > 0 && second_acquired > 0,
+            "each batch should acquire its own permits: first={}, second={}",
+            first_acquired,
+            second_acquired
+        );
+        assert_eq!(total_acquired, first_acquired + second_acquired);
+    }
+
+    #[tokio::test]
+    async fn test_no_permits_acquired_for_appending_to_existing_batch() {
+        // When appending to an existing batch that has room, no new permits
+        // should be acquired — the batch was already pre-allocated.
+        let buffer_memory = 65536usize;
+        let batch_size = 4096usize;
+        let config = Arc::new(
+            ProducerConfig::builder()
+                .bootstrap_servers(vec!["localhost:9092".to_string()])
+                .batch_size(batch_size)
+                .buffer_memory(buffer_memory)
+                .build()
+                .unwrap(),
+        );
+        let acc = RecordAccumulator::new(config);
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        // First append creates a batch, acquiring batch_size permits.
+        let r1 = acc.append(&tp, Some(b"k1"), Some(b"v1"), &[], 1000).await.unwrap();
+        assert!(r1.new_batch_created);
+        let permits_after_first = acc.memory_semaphore.available_permits();
+        assert_eq!(permits_after_first, buffer_memory - batch_size);
+
+        // Second append to the same partition — should NOT acquire any permits.
+        let r2 = acc.append(&tp, Some(b"k2"), Some(b"v2"), &[], 1001).await.unwrap();
+        assert!(!r2.new_batch_created);
+        let permits_after_second = acc.memory_semaphore.available_permits();
+        assert_eq!(
+            permits_after_second, permits_after_first,
+            "appending to existing batch should not acquire additional permits"
+        );
     }
 }

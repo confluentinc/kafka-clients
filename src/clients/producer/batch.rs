@@ -83,10 +83,10 @@ pub struct ProducerBatch {
     closed: bool,
     /// Cached size after finalization (set by `finalized_bytes()`).
     finalized_size: Option<usize>,
-    /// Total memory semaphore permits acquired for records in this batch.
-    /// The sender must release exactly this many permits when the batch
-    /// completes, avoiding the permit leak that would occur if it released
-    /// `written_bytes()` (which includes the shared batch header overhead).
+    /// Total memory semaphore permits acquired for this batch, set once at
+    /// creation time. Equals `max(batch_size, estimated_first_record_size)`,
+    /// matching Java's per-batch allocation from BufferPool. The sender must
+    /// release exactly this many permits when the batch completes.
     permits_acquired: usize,
 }
 
@@ -96,7 +96,7 @@ impl ProducerBatch {
         // Create a MemoryRecordsBuilder that writes records in proper RecordBatch format.
         // base_offset=0 since the broker assigns the actual offset.
         let records_builder = MemoryRecordsBuilder::new(
-            max_bytes.min(1024),
+            max_bytes,
             CURRENT_MAGIC_VALUE,
             CompressionType::None,
             TimestampType::CreateTime,
@@ -206,21 +206,25 @@ impl ProducerBatch {
             .unwrap_or_else(|| self.records_builder.estimated_size_in_bytes())
     }
 
-    /// Add to the running total of memory permits acquired for this batch.
+    /// Set the total memory permits acquired for this batch.
     ///
-    /// Called by the accumulator each time a record is appended. The sender
-    /// must call [`permits_acquired()`] when releasing memory to avoid
-    /// leaking semaphore permits.
-    pub fn add_permits(&mut self, permits: usize) {
-        self.permits_acquired += permits;
+    /// Called once by the accumulator when creating a new batch. The value
+    /// equals `max(batch_size, estimated_record_size)`, matching Java's
+    /// `RecordAccumulator.append()` which acquires `max(batchSize,
+    /// estimateSizeInBytesUpperBound(...))` from the `BufferPool` before
+    /// constructing the batch.
+    ///
+    /// The sender must call [`permits_acquired()`] when releasing memory.
+    pub fn set_permits_acquired(&mut self, permits: usize) {
+        self.permits_acquired = permits;
     }
 
-    /// Returns the total memory permits acquired for records in this batch.
+    /// Returns the total memory permits acquired for this batch.
     ///
-    /// The sender must release exactly this many permits (not
-    /// `written_bytes()`) to keep the memory semaphore balanced. This avoids
-    /// the asymmetry where per-record estimates exclude the shared batch
-    /// header but `written_bytes()` includes it.
+    /// This equals `max(batch_size, estimated_first_record_size)` — the
+    /// amount allocated from the buffer pool when the batch was created.
+    /// The sender must release exactly this many permits when the batch
+    /// completes to keep the memory semaphore balanced.
     pub fn permits_acquired(&self) -> usize {
         self.permits_acquired
     }
