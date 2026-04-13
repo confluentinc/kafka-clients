@@ -24,6 +24,7 @@ use crate::clients::producer::sender::{PartitionInfo, ProduceClient, Sender};
 use crate::common::TopicPartition;
 use crate::errors::{ErrorCode, KafkaError};
 use log::debug;
+use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
@@ -37,6 +38,12 @@ struct ProducerInner<C: ProduceClient> {
     accumulator: Arc<RecordAccumulator>,
     client: Arc<C>,
     sender_handle: Mutex<Option<JoinHandle<()>>>,
+    /// Cached topic metadata: topic name → partition count.
+    ///
+    /// Mirrors Java's `Metadata` cache — after the first successful metadata
+    /// fetch for a topic, subsequent `send()` calls skip the network round
+    /// trip and use the cached partition count.
+    metadata_cache: Mutex<HashMap<String, i32>>,
 }
 
 /// An async Kafka producer.
@@ -73,6 +80,7 @@ impl<C: ProduceClient> KafkaProducer<C> {
                 accumulator,
                 client,
                 sender_handle: Mutex::new(Some(sender_handle)),
+                metadata_cache: Mutex::new(HashMap::new()),
             }),
         }
     }
@@ -93,15 +101,28 @@ impl<C: ProduceClient> KafkaProducer<C> {
             return Err(KafkaError::new(ErrorCode::InvalidTopic, "topic must not be empty"));
         }
 
-        // Wait for metadata before appending to the accumulator, matching
-        // Java's KafkaProducer.doSend() -> waitOnMetadata() flow.
-        let partition_count = self.wait_on_metadata(topic).await?;
-
         // Use the partition hint or default to 0 (partitioner skipped per design).
         let partition = record.partition_hint().unwrap_or(0);
 
+        // Validate partition early (negative check).
+        if partition < 0 {
+            return Err(KafkaError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "Invalid partition {} for topic '{}': partition must not be negative",
+                    partition, topic
+                ),
+            ));
+        }
+
+        // Wait for metadata before appending to the accumulator, matching
+        // Java's KafkaProducer.doSend() -> waitOnMetadata() flow.
+        // Passes the partition so that wait_on_metadata can retry if the
+        // partition count hasn't grown to include it yet (partition expansion).
+        let partition_count = self.wait_on_metadata(topic, Some(partition)).await?;
+
         // Validate partition against known partition count.
-        if partition < 0 || partition >= partition_count {
+        if partition >= partition_count {
             return Err(KafkaError::new(
                 ErrorCode::InvalidArgument,
                 format!(
@@ -130,25 +151,77 @@ impl<C: ProduceClient> KafkaProducer<C> {
 
     /// Waits for metadata to become available for the given topic.
     ///
-    /// Corresponds to Java's `KafkaProducer.waitOnMetadata()`. On brokers with
+    /// Corresponds to Java's `KafkaProducer.waitOnMetadata(String topic,
+    /// Integer partition, long nowMs, long maxWaitMs)`. On brokers with
     /// `auto.create.topics.enable=true`, the first metadata request triggers
     /// topic creation asynchronously, so this method retries until the topic
     /// appears or `max_block` is exceeded.
     ///
+    /// When `partition` is `Some(p)`, the method also waits until the
+    /// partition count grows to include `p`, supporting online partition
+    /// expansion (matching Java's loop condition:
+    /// `while (partitionsCount == null || (partition != null && partition >=
+    /// partitionsCount))`).
+    ///
     /// Returns the partition count for the topic.
-    async fn wait_on_metadata(&self, topic: &str) -> crate::errors::Result<i32> {
+    async fn wait_on_metadata(&self, topic: &str, partition: Option<i32>) -> crate::errors::Result<i32> {
+        // Check the metadata cache first.  If the topic is already known and
+        // the requested partition (if any) falls within the cached count,
+        // return immediately without a network round trip.  This matches
+        // Java's `cluster.partitionCountForTopic(topic)` check.
+        {
+            let cache = self.inner.metadata_cache.lock().await;
+            if let Some(&count) = cache.get(topic) {
+                let partition_satisfied = match partition {
+                    Some(p) => p < count,
+                    None => true,
+                };
+                if partition_satisfied {
+                    return Ok(count);
+                }
+            }
+        }
+
         let max_wait = self.inner.config.max_block();
         let deadline = tokio::time::Instant::now() + max_wait;
 
         loop {
             match self.inner.client.partitions_for(topic).await {
                 Ok(partitions) if !partitions.is_empty() => {
-                    return Ok(partitions.len() as i32);
+                    let count = partitions.len() as i32;
+
+                    // Check if the requested partition is within range.
+                    // If not, keep retrying (supports partition expansion).
+                    let partition_satisfied = match partition {
+                        Some(p) => p < count,
+                        None => true,
+                    };
+
+                    if partition_satisfied {
+                        // Update the metadata cache.
+                        let mut cache = self.inner.metadata_cache.lock().await;
+                        cache.insert(topic.to_string(), count);
+                        return Ok(count);
+                    }
+
+                    debug!(
+                        "Metadata for topic '{}' has {} partition(s) but need partition {}, retrying",
+                        topic,
+                        count,
+                        partition.unwrap_or(-1)
+                    );
                 },
                 Ok(_) => {
                     debug!("Metadata for topic '{}' returned no partitions, retrying", topic);
                 },
                 Err(e) => {
+                    // Non-retriable errors (e.g. TopicAuthorization,
+                    // InvalidTopic) should fail immediately rather than
+                    // retrying until timeout.  This matches Java's
+                    // waitOnMetadata -> maybeThrowExceptionForTopic.
+                    if !e.is_retriable() {
+                        return Err(e);
+                    }
                     debug!("Metadata fetch for topic '{}' failed: {}, retrying", topic, e);
                 },
             }
@@ -336,13 +409,25 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_invalid_partition_rejected() {
-        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+        // Use a short max_block since wait_on_metadata now retries when the
+        // requested partition exceeds the known count (partition expansion
+        // support), matching Java's waitOnMetadata loop condition.
+        let config = ProducerConfig::builder()
+            .bootstrap_servers(vec!["localhost:9092".to_string()])
+            .batch_size(4096)
+            .linger_ms(0)
+            .buffer_memory(65536)
+            .max_block_ms(500)
+            .build()
+            .unwrap();
+        let producer = KafkaProducer::new(config, MockProduceClient::new());
 
-        // The mock returns 1 partition (partition 0), so partition 1 is invalid.
+        // The mock returns 1 partition (partition 0), so partition 1 causes
+        // wait_on_metadata to loop until timeout (Java behavior).
         let record = ProducerRecord::new("test-topic").partition(1).value(b"value");
         let result = producer.send(&record).await;
         assert!(result.is_err());
-        assert_eq!(result.unwrap_err().code(), ErrorCode::InvalidArgument);
+        assert_eq!(result.unwrap_err().code(), ErrorCode::TimedOut);
 
         producer.close().await.unwrap();
     }

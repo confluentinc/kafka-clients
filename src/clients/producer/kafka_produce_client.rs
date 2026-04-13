@@ -287,6 +287,7 @@ impl KafkaProduceClientInner {
             if !self.selector.disconnected().is_empty() {
                 self.connected_nodes.insert(node_id.to_string(), false);
                 self.cached_api_versions.remove(node_id);
+                self.topic_ids.clear();
                 return Err(KafkaError::new(
                     ErrorCode::Network,
                     format!("Disconnected from node {} while waiting for response", node_id),
@@ -541,6 +542,31 @@ impl KafkaProduceClientInner {
         for topic_metadata in &metadata_response.data().topics {
             let topic_name = topic_metadata.name.as_deref().unwrap_or("");
 
+            // Check topic-level error code from the MetadataResponse.
+            // Java's KafkaProducer.waitOnMetadata() calls
+            // metadata.maybeThrowExceptionForTopic(topic) to surface these.
+            let topic_error = Errors::for_code(topic_metadata.error_code);
+            if topic_error != Errors::None {
+                if topic_error.is_retriable() {
+                    // Retriable errors (e.g. LEADER_NOT_AVAILABLE during
+                    // topic creation): return empty so wait_on_metadata
+                    // retries.
+                    debug!(
+                        "Retriable metadata error for topic '{}': {:?}, will retry",
+                        topic_name, topic_error
+                    );
+                    continue;
+                }
+                // Non-retriable errors (e.g. TOPIC_AUTHORIZATION_FAILED,
+                // INVALID_TOPIC_EXCEPTION, UNKNOWN_TOPIC_OR_PARTITION with
+                // auto-create disabled): fail immediately so the caller
+                // gets a precise error instead of a timeout.
+                return Err(KafkaError::new(
+                    error_code_from_kafka_error(&topic_error),
+                    format!("Metadata error for topic '{}': {:?}", topic_name, topic_error),
+                ));
+            }
+
             // Cache the topic ID for this topic.  The MetadataResponse
             // includes the topic UUID assigned by the broker, which is
             // needed for ProduceRequest v13+ (KIP-516).
@@ -598,10 +624,5 @@ impl ProduceClient for KafkaProduceClient {
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
         let mut inner = self.inner.lock().await;
         inner.fetch_partitions(topic).await
-    }
-
-    async fn topic_ids(&self) -> std::collections::HashMap<String, crate::common::Uuid> {
-        let inner = self.inner.lock().await;
-        inner.topic_ids.clone()
     }
 }

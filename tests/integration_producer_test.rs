@@ -27,7 +27,6 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
-use std::time::Duration;
 
 use confluent_kafka_rust::clients::producer::config::Acks;
 use confluent_kafka_rust::clients::producer::{KafkaProduceClient, KafkaProducer, ProducerConfig, ProducerRecord};
@@ -83,9 +82,6 @@ async fn test_produce_single_record() {
 
     producer.flush().await.expect("flush should succeed");
 
-    // Give the sender task time to process the batch.
-    tokio::time::sleep(Duration::from_millis(200)).await;
-
     let metadata = future.await.expect("record should be acknowledged");
     assert_eq!(metadata.topic(), topic, "topic should match");
     assert_eq!(metadata.partition(), 0, "partition should be 0");
@@ -125,7 +121,6 @@ async fn test_produce_multiple_records() {
     }
 
     producer.flush().await.expect("flush should succeed");
-    tokio::time::sleep(Duration::from_millis(500)).await;
 
     let mut offsets = Vec::new();
     for future in futures {
@@ -176,7 +171,6 @@ async fn test_produce_with_key_and_headers() {
     let future = producer.send(&record).await.expect("send should succeed");
 
     producer.flush().await.expect("flush should succeed");
-    tokio::time::sleep(Duration::from_millis(200)).await;
 
     let metadata = future.await.expect("record should be acknowledged");
     assert_eq!(metadata.topic(), topic, "topic should match");
@@ -194,12 +188,15 @@ async fn test_produce_with_key_and_headers() {
 /// Test: Produce to a non-existent topic when auto-create is disabled.
 ///
 /// Verifies that:
-/// - The broker returns an error (UNKNOWN_TOPIC_OR_PARTITION)
-/// - The error propagates through the full pipeline back to the `SendFuture`
+/// - `send()` returns an error because `wait_on_metadata()` times out
+///   (the broker returns `UNKNOWN_TOPIC_OR_PARTITION` which is retriable,
+///   so `wait_on_metadata` keeps retrying until `max_block_ms` is exhausted)
+/// - Uses a short `max_block_ms` so the test finishes quickly
 ///
-/// This exercises the error path from broker error codes through
-/// `KafkaProduceClient` -> `Sender` -> `ProducerBatch::complete` ->
-/// `SendFuture`.
+/// This exercises the metadata error path from
+/// `KafkaProducer.send()` -> `wait_on_metadata()` -> `fetch_partitions()`.
+/// Java's `KafkaProducer.waitOnMetadata()` behaves identically: it retries
+/// on retriable errors until `max.block.ms`, then throws `TimeoutException`.
 #[tokio::test]
 async fn test_produce_to_nonexistent_topic() {
     // Start a cluster with auto.create.topics.enable=false so that
@@ -214,25 +211,30 @@ async fn test_produce_to_nonexistent_topic() {
     let topic = ctx.topic("nonexistent_topic_that_should_not_exist");
 
     let client = create_produce_client(ctx.bootstrap_servers());
-    let config = test_producer_config(ctx.bootstrap_servers());
+    // Use a short max_block_ms so the test doesn't hang for 60 seconds.
+    let config = ProducerConfig::builder()
+        .bootstrap_servers(vec![ctx.bootstrap_servers().to_string()])
+        .batch_size(16384)
+        .linger_ms(0)
+        .buffer_memory(65536)
+        .acks(Acks::All)
+        .request_timeout_ms(30000)
+        .max_block_ms(3000)
+        .build()
+        .unwrap();
     let producer = KafkaProducer::new(config, client);
 
     let record = ProducerRecord::new(&topic).value(b"should-fail");
-    let future = producer.send(&record).await.expect("send to accumulator should succeed");
-
-    producer.flush().await.expect("flush should succeed");
-
-    // Give the sender task time to send the batch and receive the error.
-    tokio::time::sleep(Duration::from_millis(500)).await;
-
-    let result = future.await;
-    assert!(result.is_err(), "producing to a non-existent topic should return an error");
+    // send() now calls wait_on_metadata() which loops until max_block_ms.
+    // Since UNKNOWN_TOPIC_OR_PARTITION is retriable, it will time out.
+    let result = producer.send(&record).await;
+    assert!(result.is_err(), "send to a non-existent topic should fail at wait_on_metadata");
 
     let err = result.unwrap_err();
     assert_eq!(
         err.code(),
-        ErrorCode::UnknownTopicOrPartition,
-        "error code should be UnknownTopicOrPartition, got {:?}: {}",
+        ErrorCode::TimedOut,
+        "error code should be TimedOut (metadata retry exhausted), got {:?}: {}",
         err.code(),
         err
     );
