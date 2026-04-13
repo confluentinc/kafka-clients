@@ -27,3 +27,9 @@ Updated `test_produce_to_nonexistent_topic` to:
 ## Issue 7: RESOLVED — fetch_partitions now checks topic-level error codes
 
 Added topic-level error code checking in `fetch_partitions()`. For retriable errors (e.g. `LEADER_NOT_AVAILABLE`), the topic is skipped and empty partitions are returned so `wait_on_metadata` retries. For non-retriable errors (e.g. `TOPIC_AUTHORIZATION_FAILED`, `INVALID_TOPIC_EXCEPTION`), an error is returned immediately. Also updated `wait_on_metadata` to propagate non-retriable errors instead of retrying.
+
+# Resolved Issues from Critic 1 Review: Commit e51b9c6
+
+## Issue 1: RESOLVED — estimate_size now includes RECORD_BATCH_OVERHEAD
+
+Changed `estimate_size()` in `RecordAccumulator` to include `ProducerBatch::batch_header_overhead()` (61 bytes), matching Java's `AbstractRecords.estimateSizeInBytesUpperBound()` which computes `RECORD_BATCH_OVERHEAD + DefaultRecord.recordSizeUpperBound(...)`. Updated tests to use `RecordAccumulator::estimate_size()` instead of `ProducerBatch::estimate_record_size()` and fixed `test_batch_overflow_creates_new_batch_with_separate_allocation` to use large records where the estimate upper bound closely matches actual written bytes.

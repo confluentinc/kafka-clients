@@ -303,11 +303,11 @@ impl RecordAccumulator {
     }
 
     fn estimate_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
-        // Estimate the record-level size. When creating a new batch, the
-        // allocation size is max(batch_size, estimate) matching Java's
-        // Math.max(batchSize, estimateSizeInBytesUpperBound(...)). The batch
-        // header overhead is included in batch_size already.
-        ProducerBatch::estimate_record_size(key, value, headers).max(1)
+        // Estimate the full batch size (record + batch header overhead),
+        // matching Java's AbstractRecords.estimateSizeInBytesUpperBound()
+        // which returns RECORD_BATCH_OVERHEAD (61) + record size.
+        // The allocation size is max(batch_size, this estimate).
+        (ProducerBatch::estimate_record_size(key, value, headers) + ProducerBatch::batch_header_overhead()).max(1)
     }
 }
 
@@ -352,21 +352,14 @@ mod tests {
 
     #[tokio::test]
     async fn test_drain_returns_ready_batches() {
-        let config = Arc::new(
-            ProducerConfig::builder()
-                .bootstrap_servers(vec!["localhost:9092".to_string()])
-                .batch_size(20) // Very small batch
-                .buffer_memory(65536)
-                .build()
-                .unwrap(),
-        );
-        let acc = RecordAccumulator::new(config);
+        let acc = RecordAccumulator::new(test_config());
         let tp = TopicPartition::new("test".to_string(), 0);
 
-        // Fill the batch to trigger it becoming ready.
         acc.append(&tp, Some(b"key"), Some(b"value"), &[], 1000).await.unwrap();
 
-        // The batch should be full and moved to ready.
+        // Flush to move the batch to ready (matching how the sender triggers drain).
+        acc.flush_all().await;
+
         let batches = acc.drain().await;
         assert_eq!(batches.len(), 1);
     }
@@ -495,10 +488,10 @@ mod tests {
 
         // Create a value larger than batch_size.
         let large_value = vec![b'x'; 200];
-        let estimated = ProducerBatch::estimate_record_size(Some(b"key"), Some(&large_value), &[]);
+        let estimated = RecordAccumulator::estimate_size(Some(b"key"), Some(&large_value), &[]);
         assert!(
             estimated > batch_size,
-            "record estimate ({}) should exceed batch_size ({})",
+            "batch estimate ({}) should exceed batch_size ({})",
             estimated,
             batch_size
         );
@@ -508,11 +501,11 @@ mod tests {
         let result = acc.append(&tp, Some(b"key"), Some(&large_value), &[], 1000).await;
         assert!(result.is_ok());
 
-        // The permits acquired should be the record estimate (larger than batch_size).
+        // The permits acquired should be the batch estimate (larger than batch_size).
         let permits_used = initial_permits - acc.memory_semaphore.available_permits();
         assert_eq!(
             permits_used, estimated,
-            "should allocate estimated_record_size ({}) when it exceeds batch_size ({})",
+            "should allocate batch estimate ({}) when it exceeds batch_size ({})",
             estimated, batch_size
         );
 
@@ -531,8 +524,15 @@ mod tests {
     async fn test_batch_overflow_creates_new_batch_with_separate_allocation() {
         // When a batch is full and a new record arrives, a new batch should be
         // created with its own per-batch allocation.
+        //
+        // Use a large record so the estimate upper-bound ≈ actual written size.
+        // With a 200-byte value, the record's varint overheads are dwarfed by
+        // the payload, so one record fills the batch.  batch_size is set to the
+        // estimate so that write_limit = estimate = batch_alloc_size.
         let buffer_memory = 65536usize;
-        let batch_size = 20usize; // Very small — first record fills the batch
+        let big_value = vec![0u8; 200];
+        let estimated_one = RecordAccumulator::estimate_size(Some(b"k"), Some(&big_value), &[]);
+        let batch_size = estimated_one; // write_limit = estimate, one big record fills it
         let config = Arc::new(
             ProducerConfig::builder()
                 .bootstrap_servers(vec!["localhost:9092".to_string()])
@@ -546,14 +546,13 @@ mod tests {
 
         let initial_permits = acc.memory_semaphore.available_permits();
 
-        // First record creates batch 1 and fills it (batch_size=20 is tiny).
-        let r1 = acc.append(&tp, Some(b"key1"), Some(b"value1"), &[], 1000).await.unwrap();
+        // First record creates batch 1 and fills it.
+        let r1 = acc.append(&tp, Some(b"k"), Some(&big_value), &[], 1000).await.unwrap();
         assert!(r1.new_batch_created);
-        // batch_size is small so first record likely fills it
         let permits_after_first = acc.memory_semaphore.available_permits();
 
         // Second record should create a new batch with its own allocation.
-        let r2 = acc.append(&tp, Some(b"key2"), Some(b"value2"), &[], 1001).await.unwrap();
+        let r2 = acc.append(&tp, Some(b"k"), Some(&big_value), &[], 1001).await.unwrap();
         assert!(r2.new_batch_created);
         let permits_after_second = acc.memory_semaphore.available_permits();
 
