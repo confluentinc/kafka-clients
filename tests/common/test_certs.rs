@@ -32,9 +32,9 @@ pub struct TestCertificates {
 
 /// Generates a self-signed CA and a broker certificate for testing.
 ///
-/// The broker certificate includes SANs for `hostname`, `localhost`,
-/// and `127.0.0.1` to cover all test connection scenarios.
-pub fn generate_test_certificates(hostname: &str) -> TestCertificates {
+/// The broker certificate includes SANs for all provided `hostnames`,
+/// plus `localhost` and `127.0.0.1` to cover all test connection scenarios.
+pub fn generate_test_certificates(hostnames: &[&str]) -> TestCertificates {
     // Create CA key pair and self-signed certificate
     let mut ca_params = CertificateParams::default();
     ca_params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
@@ -49,11 +49,21 @@ pub fn generate_test_certificates(hostname: &str) -> TestCertificates {
     let mut broker_params = CertificateParams::default();
     broker_params.is_ca = IsCa::ExplicitNoCa;
     broker_params.distinguished_name.push(rcgen::DnType::CommonName, "Test Broker");
-    broker_params.subject_alt_names = vec![
-        SanType::DnsName(hostname.try_into().expect("Invalid hostname")),
-        SanType::DnsName("localhost".try_into().expect("Invalid localhost")),
-        SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))),
-    ];
+
+    // Build SANs: all provided hostnames + localhost + 127.0.0.1
+    let mut sans = Vec::new();
+    let mut seen_localhost = false;
+    for &hostname in hostnames {
+        if hostname == "localhost" {
+            seen_localhost = true;
+        }
+        sans.push(SanType::DnsName(hostname.try_into().expect("Invalid hostname")));
+    }
+    if !seen_localhost {
+        sans.push(SanType::DnsName("localhost".try_into().expect("Invalid localhost")));
+    }
+    sans.push(SanType::IpAddress(std::net::IpAddr::V4(std::net::Ipv4Addr::new(127, 0, 0, 1))));
+    broker_params.subject_alt_names = sans;
 
     let broker_key_pair = KeyPair::generate().expect("Failed to generate broker key pair");
     let broker_cert = broker_params

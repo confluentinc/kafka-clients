@@ -14,30 +14,28 @@
 
 //! Kafka cluster container wrapper for integration tests.
 //!
-//! Wraps a single testcontainers Kafka container. Created by
-//! [`super::cluster_pool`], shared across tests with the same
-//! [`super::cluster_config::ClusterConfig`].
+//! Wraps one or more testcontainers Kafka containers on a shared Docker
+//! network. Each broker exposes all four security protocols: PLAINTEXT,
+//! SSL, SASL_PLAINTEXT, and SASL_SSL.
 //!
-//! Supports two image types:
-//! - `Kafka` (from testcontainers-modules) for PLAINTEXT
-//! - `SecureKafka` (custom) for SSL, SASL_PLAINTEXT, and SASL_SSL
+//! Created by [`super::cluster_pool`], shared across tests with the same
+//! [`super::cluster_config::ClusterConfig`].
 
 use std::borrow::Cow;
 use std::collections::HashMap;
+use std::fmt::Write as _;
 
-use super::cluster_config::{ClusterConfig, SecurityMode};
+use super::cluster_config::ClusterConfig;
 use super::test_certs;
 
-use testcontainers::core::{ContainerPort, ContainerState, ExecCommand, WaitFor};
+use testcontainers::core::{ContainerPort, WaitFor};
 use testcontainers::runners::AsyncRunner;
 use testcontainers::{ContainerAsync, CopyToContainer, Image, ImageExt};
-use testcontainers_modules::kafka::apache;
-use testcontainers_modules::kafka::apache::Kafka;
 
 /// Kafka image tag to use for integration tests.
 const KAFKA_TAG: &str = "4.2.0";
 
-/// Container port for the PLAINTEXT listener (always present).
+/// Container port for the PLAINTEXT listener.
 const PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9092);
 /// Container port for the SASL_PLAINTEXT listener.
 const SASL_PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9095);
@@ -46,175 +44,201 @@ const SSL_PORT: ContainerPort = ContainerPort::Tcp(9096);
 /// Container port for the SASL_SSL listener.
 const SASL_SSL_PORT: ContainerPort = ContainerPort::Tcp(9097);
 
-/// Path where the start script is written inside the container.
-const START_SCRIPT: &str = "/opt/kafka/testcontainers_start.sh";
 /// Path for the JAAS config file inside the container.
 const JAAS_CONFIG_PATH: &str = "/opt/kafka/config/kafka_server_jaas.conf";
+/// Directory for SSL certificates inside the container (a Docker volume).
+const SECRETS_DIR: &str = "/etc/kafka/secrets";
+/// Keystore filename inside SECRETS_DIR.
+const SSL_KEYSTORE_FILENAME: &str = "broker-keystore.pem";
+/// Truststore filename inside SECRETS_DIR.
+const SSL_TRUSTSTORE_FILENAME: &str = "broker-truststore.pem";
 
-/// Custom Kafka image for SSL/SASL integration tests.
+/// Default SASL credentials for integration tests.
+pub const SASL_USERNAME: &str = "admin";
+/// Default SASL password for integration tests.
+pub const SASL_PASSWORD: &str = "admin-secret";
+
+/// Static cluster ID for KRaft. All brokers in the same cluster share this.
+const CLUSTER_ID: &str = "5L6g3nShT-eMCtK--X86sw";
+
+/// Host-mapped ports for one broker's client-facing listeners.
+struct BrokerPorts {
+    plaintext: u16,
+    ssl: u16,
+    sasl_plaintext: u16,
+    sasl_ssl: u16,
+}
+
+impl BrokerPorts {
+    /// Reserve four free host ports for a broker by binding to port 0.
+    fn reserve() -> Self {
+        Self {
+            plaintext: find_available_port(),
+            ssl: find_available_port(),
+            sasl_plaintext: find_available_port(),
+            sasl_ssl: find_available_port(),
+        }
+    }
+}
+
+/// Finds an available TCP port on localhost by letting the OS assign one.
 ///
-/// The standard `testcontainers_modules::kafka::apache::Kafka` only supports
-/// PLAINTEXT. This custom image configures additional listeners for SSL and SASL.
+/// There is a tiny TOCTOU race window between when we release the port
+/// and when testcontainers binds to it. In practice this is the standard
+/// pattern for integration tests and extremely unlikely to fail.
+fn find_available_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("Failed to bind to port 0")
+        .local_addr()
+        .expect("Failed to get local addr")
+        .port()
+}
+
+/// Kafka image configured for one broker in a KRaft cluster.
 ///
-/// Uses the JVM-based `apache/kafka` image (not native) because SASL requires
-/// the full JVM runtime.
+/// Uses the standard `apache/kafka` Docker image entrypoint and its
+/// `/etc/kafka/docker/run` startup flow. Configuration is done entirely
+/// through environment variables — `KafkaDockerWrapper` converts every
+/// `KAFKA_*` env var into a `server.properties` entry.
+///
+/// The Docker image's `/etc/kafka/docker/configure` script has an SSL
+/// check that triggers when `KAFKA_ADVERTISED_LISTENERS` contains the
+/// literal string `SSL://`. This check enforces Confluent-style
+/// credential files that set keystore passwords, which Kafka rejects
+/// for PEM format. We bypass it by using **custom listener names**
+/// (`TLSONLY`, `SASLTLS`) that don't contain `SSL://`, and mapping
+/// them to the real protocols via `listener.security.protocol.map`.
+///
+/// Uses the JVM-based `apache/kafka` image (not native) because SASL
+/// requires the full JVM runtime.
 #[derive(Debug, Clone)]
-struct SecureKafka {
+struct KafkaAllProtocols {
     env_vars: HashMap<String, String>,
     copy_to_sources: Vec<CopyToContainer>,
-    exposed_ports: Vec<ContainerPort>,
-    /// The security mode that determines which secure listener is configured.
-    security_mode: SecurityMode,
 }
 
-impl SecureKafka {
-    /// Create a new `SecureKafka` image for the given security mode.
-    fn new(security_mode: &SecurityMode) -> Self {
+impl KafkaAllProtocols {
+    /// Create the image for one broker in a cluster.
+    ///
+    /// - `node_id`: 1-based broker/controller node ID
+    /// - `container_names`: ordered list of all broker container names
+    ///    (index 0 = node 1, index 1 = node 2, etc.)
+    /// - `ports`: pre-reserved host ports for this broker's client listeners
+    /// - `certs`: shared SSL certificates (CA + broker cert with all
+    ///    container hostnames in SANs)
+    fn new(
+        node_id: u16,
+        container_names: &[String],
+        ports: &BrokerPorts,
+        certs: &test_certs::TestCertificates,
+    ) -> Self {
+        let num_brokers = container_names.len() as u16;
+        let this_container = &container_names[(node_id - 1) as usize];
+
         let mut env_vars = HashMap::new();
+
+        // KRaft configuration
+        env_vars.insert("CLUSTER_ID".into(), CLUSTER_ID.into());
+        env_vars.insert("KAFKA_NODE_ID".into(), node_id.to_string());
+        env_vars.insert("KAFKA_PROCESS_ROLES".into(), "broker,controller".into());
+        env_vars.insert("KAFKA_CONTROLLER_LISTENER_NAMES".into(), "CONTROLLER".into());
+        env_vars.insert("KAFKA_INTER_BROKER_LISTENER_NAME".into(), "BROKER".into());
+
+        // Quorum voters: all brokers participate as controllers
+        let voters: String = container_names
+            .iter()
+            .enumerate()
+            .map(|(i, name)| format!("{}@{}:9094", i + 1, name))
+            .collect::<Vec<_>>()
+            .join(",");
+        env_vars.insert("KAFKA_CONTROLLER_QUORUM_VOTERS".into(), voters);
+        env_vars.insert("KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".into(), num_brokers.min(3).to_string());
+
+        // Listeners — custom names avoid the configure script's SSL check.
+        //
+        // The check triggers on "SSL://" in KAFKA_ADVERTISED_LISTENERS.
+        // Using TLSONLY (for SSL) and SASLTLS (for SASL_SSL) avoids the
+        // substring match. listener.security.protocol.map maps them to
+        // the actual protocols.
+        env_vars.insert(
+            "KAFKA_LISTENERS".into(),
+            "PLAINTEXT://0.0.0.0:9092,TLSONLY://0.0.0.0:9096,SASLPLAIN://0.0.0.0:9095,\
+             SASLTLS://0.0.0.0:9097,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094"
+                .into(),
+        );
+
+        // Advertised listeners use pre-reserved host ports for client
+        // listeners (so metadata responses contain correct reachable
+        // addresses) and the Docker network container name for the
+        // inter-broker listener.
+        env_vars.insert(
+            "KAFKA_ADVERTISED_LISTENERS".into(),
+            format!(
+                "PLAINTEXT://127.0.0.1:{},TLSONLY://127.0.0.1:{},SASLPLAIN://127.0.0.1:{},\
+                 SASLTLS://127.0.0.1:{},BROKER://{}:9093",
+                ports.plaintext, ports.ssl, ports.sasl_plaintext, ports.sasl_ssl, this_container
+            ),
+        );
+        env_vars.insert(
+            "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".into(),
+            "PLAINTEXT:PLAINTEXT,TLSONLY:SSL,SASLPLAIN:SASL_PLAINTEXT,\
+             SASLTLS:SASL_SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT"
+                .into(),
+        );
+
+        // SSL configuration (PEM format)
+        env_vars.insert("KAFKA_SSL_KEYSTORE_TYPE".into(), "PEM".into());
+        env_vars.insert(
+            "KAFKA_SSL_KEYSTORE_LOCATION".into(),
+            format!("{SECRETS_DIR}/{SSL_KEYSTORE_FILENAME}"),
+        );
+        env_vars.insert("KAFKA_SSL_TRUSTSTORE_TYPE".into(), "PEM".into());
+        env_vars.insert(
+            "KAFKA_SSL_TRUSTSTORE_LOCATION".into(),
+            format!("{SECRETS_DIR}/{SSL_TRUSTSTORE_FILENAME}"),
+        );
+
+        // SASL configuration
+        env_vars.insert("KAFKA_SASL_ENABLED_MECHANISMS".into(), "PLAIN".into());
+        env_vars.insert(
+            "KAFKA_OPTS".into(),
+            format!("-Djava.security.auth.login.config={JAAS_CONFIG_PATH}"),
+        );
+
+        // Files to mount into the container
         let mut copy_to_sources = Vec::new();
-        let mut exposed_ports = vec![PLAINTEXT_PORT];
 
-        // Base KRaft configuration (same as the standard Kafka image)
-        env_vars.insert("CLUSTER_ID".to_owned(), apache::DEFAULT_CLUSTER_ID.to_owned());
-        env_vars.insert("KAFKA_PROCESS_ROLES".to_owned(), "broker,controller".to_owned());
-        env_vars.insert("KAFKA_CONTROLLER_LISTENER_NAMES".to_owned(), "CONTROLLER".to_owned());
-        env_vars.insert("KAFKA_INTER_BROKER_LISTENER_NAME".to_owned(), "BROKER".to_owned());
-        env_vars.insert("KAFKA_BROKER_ID".to_owned(), apache::DEFAULT_BROKER_ID.to_string());
-        env_vars.insert(
-            "KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR".to_owned(),
-            apache::DEFAULT_INTERNAL_TOPIC_RF.to_string(),
+        // JAAS config for SASL PLAIN
+        let jaas_content = format!(
+            "KafkaServer {{\n    \
+             org.apache.kafka.common.security.plain.PlainLoginModule required\n    \
+             username=\"{SASL_USERNAME}\"\n    \
+             password=\"{SASL_PASSWORD}\"\n    \
+             user_{SASL_USERNAME}=\"{SASL_PASSWORD}\";\n\
+             }};\n"
         );
-        env_vars.insert(
-            "KAFKA_CONTROLLER_QUORUM_VOTERS".to_owned(),
-            format!("{}@localhost:9094", apache::DEFAULT_BROKER_ID),
-        );
+        copy_to_sources.push(CopyToContainer::new(jaas_content.into_bytes(), JAAS_CONFIG_PATH));
 
-        match security_mode {
-            SecurityMode::Plaintext => {
-                // Should not be used -- use the standard Kafka image for PLAINTEXT.
-                // But handle it defensively.
-                env_vars.insert(
-                    "KAFKA_LISTENERS".to_owned(),
-                    "PLAINTEXT://0.0.0.0:9092,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094".to_owned(),
-                );
-                env_vars.insert(
-                    "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_owned(),
-                    "PLAINTEXT:PLAINTEXT,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT".to_owned(),
-                );
-            },
-            SecurityMode::SaslPlaintext { username, password } => {
-                exposed_ports.push(SASL_PLAINTEXT_PORT);
-                env_vars.insert(
-                    "KAFKA_LISTENERS".to_owned(),
-                    "PLAINTEXT://0.0.0.0:9092,SASL_PLAINTEXT://0.0.0.0:9095,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094".to_owned(),
-                );
-                env_vars.insert(
-                    "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_owned(),
-                    "PLAINTEXT:PLAINTEXT,SASL_PLAINTEXT:SASL_PLAINTEXT,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT"
-                        .to_owned(),
-                );
-                env_vars.insert("KAFKA_SASL_ENABLED_MECHANISMS".to_owned(), "PLAIN".to_owned());
-                env_vars.insert(
-                    "KAFKA_OPTS".to_owned(),
-                    format!("-Djava.security.auth.login.config={JAAS_CONFIG_PATH}"),
-                );
-                // Create JAAS config file
-                let jaas_content = format!(
-                    "KafkaServer {{\n    \
-                     org.apache.kafka.common.security.plain.PlainLoginModule required\n    \
-                     username=\"{username}\"\n    \
-                     password=\"{password}\"\n    \
-                     user_{username}=\"{password}\";\n\
-                     }};\n"
-                );
-                copy_to_sources.push(CopyToContainer::new(jaas_content.into_bytes(), JAAS_CONFIG_PATH));
-            },
-            SecurityMode::Ssl => {
-                exposed_ports.push(SSL_PORT);
-                let certs = test_certs::generate_test_certificates("localhost");
-                env_vars.insert(
-                    "KAFKA_LISTENERS".to_owned(),
-                    "PLAINTEXT://0.0.0.0:9092,SSL://0.0.0.0:9096,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094"
-                        .to_owned(),
-                );
-                env_vars.insert(
-                    "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_owned(),
-                    "PLAINTEXT:PLAINTEXT,SSL:SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT".to_owned(),
-                );
-                Self::add_ssl_env_vars(&mut env_vars, &certs);
-            },
-            SecurityMode::SaslSsl { username, password } => {
-                exposed_ports.push(SASL_SSL_PORT);
-                let certs = test_certs::generate_test_certificates("localhost");
-                env_vars.insert(
-                    "KAFKA_LISTENERS".to_owned(),
-                    "PLAINTEXT://0.0.0.0:9092,SASL_SSL://0.0.0.0:9097,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094"
-                        .to_owned(),
-                );
-                env_vars.insert(
-                    "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".to_owned(),
-                    "PLAINTEXT:PLAINTEXT,SASL_SSL:SASL_SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT".to_owned(),
-                );
-                env_vars.insert("KAFKA_SASL_ENABLED_MECHANISMS".to_owned(), "PLAIN".to_owned());
-                env_vars.insert(
-                    "KAFKA_OPTS".to_owned(),
-                    format!("-Djava.security.auth.login.config={JAAS_CONFIG_PATH}"),
-                );
-                Self::add_ssl_env_vars(&mut env_vars, &certs);
-                // Create JAAS config file
-                let jaas_content = format!(
-                    "KafkaServer {{\n    \
-                     org.apache.kafka.common.security.plain.PlainLoginModule required\n    \
-                     username=\"{username}\"\n    \
-                     password=\"{password}\"\n    \
-                     user_{username}=\"{password}\";\n\
-                     }};\n"
-                );
-                copy_to_sources.push(CopyToContainer::new(jaas_content.into_bytes(), JAAS_CONFIG_PATH));
-            },
-        }
+        // SSL: broker keystore (private key + certificate chain)
+        let keystore_pem = format!("{}{}", certs.broker_key_pem, certs.broker_cert_pem);
+        copy_to_sources.push(CopyToContainer::new(
+            keystore_pem.into_bytes(),
+            format!("{SECRETS_DIR}/{SSL_KEYSTORE_FILENAME}"),
+        ));
 
-        Self { env_vars, copy_to_sources, exposed_ports, security_mode: security_mode.clone() }
-    }
+        // SSL: truststore (CA certificate)
+        copy_to_sources.push(CopyToContainer::new(
+            certs.ca_cert_pem.clone().into_bytes(),
+            format!("{SECRETS_DIR}/{SSL_TRUSTSTORE_FILENAME}"),
+        ));
 
-    /// Add SSL-related environment variables to the env_vars map.
-    fn add_ssl_env_vars(env_vars: &mut HashMap<String, String>, certs: &test_certs::TestCertificates) {
-        env_vars.insert("KAFKA_SSL_KEYSTORE_TYPE".to_owned(), "PEM".to_owned());
-        env_vars.insert("KAFKA_SSL_KEYSTORE_KEY".to_owned(), certs.broker_key_pem.clone());
-        env_vars.insert("KAFKA_SSL_KEYSTORE_CERTIFICATE_CHAIN".to_owned(), certs.broker_cert_pem.clone());
-        env_vars.insert("KAFKA_SSL_TRUSTSTORE_TYPE".to_owned(), "PEM".to_owned());
-        env_vars.insert("KAFKA_SSL_TRUSTSTORE_CERTIFICATES".to_owned(), certs.ca_cert_pem.clone());
-    }
-
-    /// Returns the container port for the secure listener.
-    fn secure_port(&self) -> Option<ContainerPort> {
-        match &self.security_mode {
-            SecurityMode::Plaintext => None,
-            SecurityMode::SaslPlaintext { .. } => Some(SASL_PLAINTEXT_PORT),
-            SecurityMode::Ssl => Some(SSL_PORT),
-            SecurityMode::SaslSsl { .. } => Some(SASL_SSL_PORT),
-        }
-    }
-
-    /// Returns the CA certificate PEM if SSL is configured.
-    fn ca_cert_pem(&self) -> Option<String> {
-        self.env_vars.get("KAFKA_SSL_TRUSTSTORE_CERTIFICATES").cloned()
-    }
-
-    /// Returns the listener name for advertised listeners configuration.
-    fn secure_listener_name(&self) -> Option<&str> {
-        match &self.security_mode {
-            SecurityMode::Plaintext => None,
-            SecurityMode::SaslPlaintext { .. } => Some("SASL_PLAINTEXT"),
-            SecurityMode::Ssl => Some("SSL"),
-            SecurityMode::SaslSsl { .. } => Some("SASL_SSL"),
-        }
+        Self { env_vars, copy_to_sources }
     }
 }
 
-impl Image for SecureKafka {
+impl Image for KafkaAllProtocols {
     fn name(&self) -> &str {
-        // Use JVM image, not native -- SASL requires full JVM runtime
+        // JVM image, not native — SASL requires full JVM runtime
         "apache/kafka"
     }
 
@@ -223,92 +247,48 @@ impl Image for SecureKafka {
     }
 
     fn ready_conditions(&self) -> Vec<WaitFor> {
-        // Same pattern as the standard Kafka image: container will be started
-        // with a custom entrypoint that waits for the start script to be created
-        // in `exec_after_start`.
-        vec![]
-    }
-
-    fn entrypoint(&self) -> Option<&str> {
-        Some("bash")
+        vec![WaitFor::message_on_stdout("Kafka Server started")]
     }
 
     fn env_vars(&self) -> impl IntoIterator<Item = (impl Into<Cow<'_, str>>, impl Into<Cow<'_, str>>)> {
         &self.env_vars
     }
 
-    fn cmd(&self) -> impl IntoIterator<Item = impl Into<Cow<'_, str>>> {
-        vec![
-            "-c".to_string(),
-            format!("while [ ! -f {START_SCRIPT} ]; do sleep 0.1; done; chmod 755 {START_SCRIPT} && {START_SCRIPT}"),
-        ]
-        .into_iter()
-    }
-
     fn expose_ports(&self) -> &[ContainerPort] {
-        &self.exposed_ports
+        // No random-mapped ports — we use with_mapped_port for fixed bindings
+        &[]
     }
 
     fn copy_to_sources(&self) -> impl IntoIterator<Item = &CopyToContainer> {
         self.copy_to_sources.iter()
     }
-
-    fn exec_after_start(&self, cs: ContainerState) -> Result<Vec<ExecCommand>, testcontainers::TestcontainersError> {
-        let plaintext_host_port = cs.host_port_ipv4(PLAINTEXT_PORT)?;
-        let mut advertised_listeners = format!("PLAINTEXT://127.0.0.1:{plaintext_host_port},BROKER://localhost:9093");
-
-        // Add secure listener if configured
-        if let (Some(secure_port), Some(listener_name)) = (self.secure_port(), self.secure_listener_name()) {
-            let secure_host_port = cs.host_port_ipv4(secure_port)?;
-            advertised_listeners.push_str(&format!(",{listener_name}://127.0.0.1:{secure_host_port}"));
-        }
-
-        let script = format!(
-            "#!/usr/bin/env bash\nexport KAFKA_ADVERTISED_LISTENERS={advertised_listeners}\n/etc/kafka/docker/run\n"
-        );
-
-        let cmd = vec![
-            "sh".to_string(),
-            "-c".to_string(),
-            format!("echo '{script}' > {START_SCRIPT}"),
-        ];
-
-        let ready_conditions = vec![WaitFor::message_on_stdout("Kafka Server started")];
-        let exec = ExecCommand::new(cmd).with_container_ready_conditions(ready_conditions);
-
-        Ok(vec![exec])
-    }
 }
 
-/// Internal enum to hold either a standard or secure Kafka container.
-enum KafkaContainer {
-    Standard(ContainerAsync<Kafka>),
-    Secure(ContainerAsync<SecureKafka>),
-}
-
-impl KafkaContainer {
-    fn id(&self) -> &str {
-        match self {
-            KafkaContainer::Standard(c) => c.id(),
-            KafkaContainer::Secure(c) => c.id(),
-        }
-    }
-}
-
-/// Manages a real Kafka broker in Docker for integration tests.
+/// Manages a real Kafka cluster in Docker for integration tests.
+///
+/// One or more containers, each running a KRaft broker+controller,
+/// connected via a shared Docker network. All brokers expose all four
+/// security protocols. Tests choose which listener to connect to via
+/// the protocol-specific bootstrap server accessors.
 ///
 /// Shared across tests with the same [`ClusterConfig`].
 pub struct KafkaCluster {
-    /// The running container handle. Kept alive for the duration of the pool entry.
-    _container: KafkaContainer,
-    /// The Docker container ID, used for cleanup at process exit.
-    container_id: String,
-    /// The `host:port` connection string for this cluster (PLAINTEXT listener).
+    /// The running container handles. Kept alive for the duration of the pool entry.
+    _containers: Vec<ContainerAsync<KafkaAllProtocols>>,
+    /// Docker container IDs for all brokers, used for cleanup.
+    container_ids: Vec<String>,
+    /// Docker network name, used for cleanup.
+    network_name: String,
+    /// Comma-separated `host:port` pairs for the PLAINTEXT listener.
     bootstrap_servers: String,
-    /// Bootstrap servers for the secure listener (SASL/SSL port).
-    secure_bootstrap_servers: Option<String>,
+    /// Comma-separated `host:port` pairs for the SSL listener.
+    ssl_bootstrap_servers: String,
+    /// Comma-separated `host:port` pairs for the SASL_PLAINTEXT listener.
+    sasl_plaintext_bootstrap_servers: String,
+    /// Comma-separated `host:port` pairs for the SASL_SSL listener.
+    sasl_ssl_bootstrap_servers: String,
     /// CA certificate PEM for SSL tests.
-    ca_cert_pem: Option<String>,
+    ca_cert_pem: String,
     /// The config this cluster was started with.
     config: ClusterConfig,
 }
@@ -316,105 +296,133 @@ pub struct KafkaCluster {
 impl KafkaCluster {
     /// Start a cluster matching the given config.
     ///
+    /// Starts `config.brokers` containers on a shared Docker network,
+    /// each with pre-reserved host ports bound via `with_mapped_port`.
+    /// Advertised listeners are set to the known host ports from the
+    /// start, so metadata responses contain correct reachable addresses.
+    ///
+    /// For multi-broker clusters, all containers start concurrently so
+    /// the KRaft quorum can form (requires a majority of voters to be up).
+    ///
     /// Called by [`super::cluster_pool`], not by tests directly.
     ///
     /// # Panics
     ///
-    /// Panics if the container fails to start or ports cannot be retrieved.
+    /// Panics if any container fails to start or ports cannot be retrieved.
     pub async fn start_with_config(config: &ClusterConfig) -> Self {
-        match &config.security_mode {
-            SecurityMode::Plaintext => Self::start_plaintext(config).await,
-            _ => Self::start_secure(config).await,
+        let num_brokers = config.brokers;
+        assert!(num_brokers >= 1, "Cluster must have at least 1 broker");
+
+        // Generate unique names to avoid collisions between concurrent test processes
+        let suffix = random_suffix(8);
+        let network_name = format!("kafka-net-{suffix}");
+        let container_names: Vec<String> = (1..=num_brokers).map(|id| format!("kafka-{id}-{suffix}")).collect();
+
+        // Reserve host ports for each broker before starting containers.
+        // This lets us set correct advertised.listeners from the start,
+        // which is required because KRaft does not allow dynamic updates
+        // to advertised.listeners.
+        let broker_ports: Vec<BrokerPorts> = (0..num_brokers).map(|_| BrokerPorts::reserve()).collect();
+
+        // Generate SSL certificates with SANs covering all broker container names
+        let hostname_refs: Vec<&str> = container_names.iter().map(String::as_str).collect();
+        let certs = test_certs::generate_test_certificates(&hostname_refs);
+        let ca_cert_pem = certs.ca_cert_pem.clone();
+
+        // Create and start all broker containers concurrently
+        let mut handles = Vec::with_capacity(num_brokers as usize);
+        for node_id in 1..=num_brokers {
+            let idx = (node_id - 1) as usize;
+            let kafka = KafkaAllProtocols::new(node_id, &container_names, &broker_ports[idx], &certs);
+            let net = network_name.clone();
+            let name = container_names[idx].clone();
+            let ports = &broker_ports[idx];
+            let server_props: Vec<(String, String)> =
+                config.server_properties.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+            // Bind pre-reserved host ports to container ports
+            let plaintext_port = ports.plaintext;
+            let ssl_port = ports.ssl;
+            let sasl_plaintext_port = ports.sasl_plaintext;
+            let sasl_ssl_port = ports.sasl_ssl;
+
+            handles.push(tokio::spawn(async move {
+                let mut request = testcontainers::ContainerRequest::from(kafka)
+                    .with_network(&net)
+                    .with_container_name(&name)
+                    .with_mapped_port(plaintext_port, PLAINTEXT_PORT)
+                    .with_mapped_port(ssl_port, SSL_PORT)
+                    .with_mapped_port(sasl_plaintext_port, SASL_PLAINTEXT_PORT)
+                    .with_mapped_port(sasl_ssl_port, SASL_SSL_PORT);
+
+                for (key, value) in &server_props {
+                    request = request.with_env_var(key, value);
+                }
+
+                request.start().await.expect("Failed to start Kafka container")
+            }));
         }
-    }
 
-    /// Start a plaintext-only cluster using the standard Kafka image.
-    async fn start_plaintext(config: &ClusterConfig) -> Self {
-        let mut request: testcontainers::ContainerRequest<Kafka> =
-            testcontainers::ContainerRequest::from(Kafka::default()).with_tag(KAFKA_TAG);
-
-        for (key, value) in &config.server_properties {
-            request = request.with_env_var(key, value);
+        // Await all container starts (quorum forms once majority is up)
+        let mut containers = Vec::with_capacity(handles.len());
+        for handle in handles {
+            containers.push(handle.await.expect("Broker start task panicked"));
         }
 
-        let container = request.start().await.expect("Failed to start Kafka container");
-        let container_id = container.id().to_string();
+        // Collect container IDs and build bootstrap strings from the known ports
+        let mut container_ids = Vec::with_capacity(containers.len());
+        let mut plaintext_addrs = Vec::with_capacity(containers.len());
+        let mut ssl_addrs = Vec::with_capacity(containers.len());
+        let mut sasl_plaintext_addrs = Vec::with_capacity(containers.len());
+        let mut sasl_ssl_addrs = Vec::with_capacity(containers.len());
 
-        let host_port = container
-            .get_host_port_ipv4(apache::KAFKA_PORT)
-            .await
-            .expect("Failed to get Kafka host port");
+        for (i, container) in containers.iter().enumerate() {
+            container_ids.push(container.id().to_string());
+            let ports = &broker_ports[i];
 
-        let bootstrap_servers = format!("127.0.0.1:{host_port}");
+            plaintext_addrs.push(format!("127.0.0.1:{}", ports.plaintext));
+            ssl_addrs.push(format!("127.0.0.1:{}", ports.ssl));
+            sasl_plaintext_addrs.push(format!("127.0.0.1:{}", ports.sasl_plaintext));
+            sasl_ssl_addrs.push(format!("127.0.0.1:{}", ports.sasl_ssl));
+        }
 
         Self {
-            _container: KafkaContainer::Standard(container),
-            container_id,
-            bootstrap_servers,
-            secure_bootstrap_servers: None,
-            ca_cert_pem: None,
-            config: config.clone(),
-        }
-    }
-
-    /// Start a secure cluster using the custom SecureKafka image.
-    async fn start_secure(config: &ClusterConfig) -> Self {
-        let secure_kafka = SecureKafka::new(&config.security_mode);
-        let secure_port = secure_kafka.secure_port();
-        let ca_cert_pem = secure_kafka.ca_cert_pem();
-
-        let mut request = testcontainers::ContainerRequest::from(secure_kafka);
-
-        for (key, value) in &config.server_properties {
-            request = request.with_env_var(key, value);
-        }
-
-        let container = request.start().await.expect("Failed to start secure Kafka container");
-        let container_id = container.id().to_string();
-
-        let plaintext_host_port = container
-            .get_host_port_ipv4(PLAINTEXT_PORT)
-            .await
-            .expect("Failed to get PLAINTEXT host port");
-
-        let bootstrap_servers = format!("127.0.0.1:{plaintext_host_port}");
-
-        let secure_bootstrap_servers = if let Some(port) = secure_port {
-            let host_port = container
-                .get_host_port_ipv4(port)
-                .await
-                .expect("Failed to get secure host port");
-            Some(format!("127.0.0.1:{host_port}"))
-        } else {
-            None
-        };
-
-        Self {
-            _container: KafkaContainer::Secure(container),
-            container_id,
-            bootstrap_servers,
-            secure_bootstrap_servers,
+            _containers: containers,
+            container_ids,
+            network_name,
+            bootstrap_servers: plaintext_addrs.join(","),
+            ssl_bootstrap_servers: ssl_addrs.join(","),
+            sasl_plaintext_bootstrap_servers: sasl_plaintext_addrs.join(","),
+            sasl_ssl_bootstrap_servers: sasl_ssl_addrs.join(","),
             ca_cert_pem,
             config: config.clone(),
         }
     }
 
-    /// Bootstrap servers connection string for the PLAINTEXT listener
-    /// (e.g., `"127.0.0.1:32781"`).
+    /// Bootstrap servers for the PLAINTEXT listener (e.g., `"127.0.0.1:32781"`
+    /// for single broker, or `"127.0.0.1:32781,127.0.0.1:32782"` for multi-broker).
     pub fn bootstrap_servers(&self) -> &str {
         &self.bootstrap_servers
     }
 
-    /// Bootstrap servers for the secure listener (SASL/SSL port).
-    /// Returns `None` for PLAINTEXT clusters.
-    pub fn secure_bootstrap_servers(&self) -> Option<&str> {
-        self.secure_bootstrap_servers.as_deref()
+    /// Bootstrap servers for the SSL listener.
+    pub fn ssl_bootstrap_servers(&self) -> &str {
+        &self.ssl_bootstrap_servers
+    }
+
+    /// Bootstrap servers for the SASL_PLAINTEXT listener.
+    pub fn sasl_plaintext_bootstrap_servers(&self) -> &str {
+        &self.sasl_plaintext_bootstrap_servers
+    }
+
+    /// Bootstrap servers for the SASL_SSL listener.
+    pub fn sasl_ssl_bootstrap_servers(&self) -> &str {
+        &self.sasl_ssl_bootstrap_servers
     }
 
     /// CA certificate PEM for SSL tests.
-    /// Returns `None` for non-SSL clusters.
-    pub fn ca_cert_pem(&self) -> Option<&str> {
-        self.ca_cert_pem.as_deref()
+    pub fn ca_cert_pem(&self) -> &str {
+        &self.ca_cert_pem
     }
 
     /// The config this cluster was started with.
@@ -423,8 +431,24 @@ impl KafkaCluster {
         &self.config
     }
 
-    /// The Docker container ID.
-    pub fn container_id(&self) -> &str {
-        &self.container_id
+    /// Docker container IDs for all brokers.
+    pub fn container_ids(&self) -> &[String] {
+        &self.container_ids
     }
+
+    /// Docker network name used by this cluster.
+    pub fn network_name(&self) -> &str {
+        &self.network_name
+    }
+}
+
+/// Generates a random hexadecimal suffix of the given byte length
+/// (producing `2 * len` hex characters).
+fn random_suffix(len: usize) -> String {
+    let mut buf = String::with_capacity(len * 2);
+    for _ in 0..len {
+        let byte: u8 = rand::random();
+        let _ = write!(buf, "{byte:02x}");
+    }
+    buf
 }

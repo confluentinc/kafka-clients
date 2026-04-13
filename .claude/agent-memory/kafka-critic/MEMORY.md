@@ -8,3 +8,4 @@
 - [Layer 6 NetworkClient patterns](review_layer6_patterns.md) — Async boundary gaps, exception hierarchy, time update, ISE mapping
 - [Milestone 3 Phase 1 patterns](review_milestone3_phase1.md) — Config default-vs-constant mismatch: Default impl may ignore its own constants
 - [SSL/TLS translation patterns](review_ssl_tls_patterns.md) — Buffered data tracking, crypto provider deps, Java SSLEngine vs rustls test scope
+- [SASL Authenticator patterns](review_sasl_authenticator_patterns.md) — try-catch scope mismatch, integer wrapping near MAX_VALUE

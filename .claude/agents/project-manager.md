@@ -73,8 +73,7 @@ After plan approval, assign a unique agent number `N` (starting from 1, incremen
 
 **Step 7 - Final Handoff:**
 - Once the loop is complete, hand off the final implementation to the user or the next phase in the workflow.
-  - Update the project status and structure if applicable
-  - Update the project design in design/current.md to reflect the new state
+  - Update the project status, structure and design in design/current to reflect the new state
   - Update the list of marked_classes.txt with the translated ones
   - Copy COMMENTS.DONE.N.md to the corresponding design/history/Milestone/Phase/Layer directory with a clear name for future reference
   - Reset COMMENTS.N.md for the next requirement

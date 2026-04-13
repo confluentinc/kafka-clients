@@ -35,7 +35,8 @@ use confluent_kafka_rust::common::requests::{ApiVersionsRequestBuilder, RequestB
 use confluent_kafka_rust::common::security::auth::SecurityProtocol;
 use confluent_kafka_rust::common::security::ssl::SslFactory;
 
-use crate::common::cluster_config::{ClusterConfig, SecurityMode};
+use crate::common::cluster_config::ClusterConfig;
+use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
 use crate::common::test_context::TestContext;
 
 /// Maximum time to wait for a poll to make progress, in milliseconds.
@@ -105,18 +106,21 @@ fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -
     Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
 }
 
-/// Helper: poll until the connection is established (channel becomes ready).
-async fn poll_until_connected(selector: &mut Selector) {
+/// Helper: poll until the channel is fully ready (transport + auth complete).
+///
+/// For SASL connections, the SASL authentication handshake completes in
+/// poll cycles after the initial TCP connect.
+async fn poll_until_ready(selector: &mut Selector, node_id: &str) {
     for _ in 0..MAX_POLL_ITERATIONS {
         selector.poll(POLL_TIMEOUT_MS).await.expect("poll failed");
-        if !selector.connected().is_empty() {
+        if selector.is_channel_ready(node_id) {
             return;
         }
         if !selector.disconnected().is_empty() {
-            panic!("Broker disconnected during connect: {:?}", selector.disconnected());
+            panic!("Broker disconnected during authentication: {:?}", selector.disconnected());
         }
     }
-    panic!("Timed out waiting for connection to the broker");
+    panic!("Timed out waiting for channel to become ready (authentication may have stalled)");
 }
 
 /// Helper: poll until a completed receive appears or timeout.
@@ -173,16 +177,17 @@ fn parse_response(payload: &[u8], request_header: &RequestHeader) -> ConcreteRes
 /// Test: SSL connection — TLS handshake and ApiVersions over TLS.
 #[tokio::test]
 async fn test_ssl_connection() {
-    let ctx = TestContext::new(ClusterConfig { security_mode: SecurityMode::Ssl, ..Default::default() }).await;
-    let ca_cert_pem = ctx.ca_cert_pem().expect("SSL cluster should have CA cert");
+    let ctx = TestContext::new(ClusterConfig::default()).await;
+    let ca_cert_pem = ctx.ca_cert_pem();
     let mut selector = create_ssl_selector(ca_cert_pem);
-    let addr = parse_bootstrap_addr(ctx.secure_bootstrap_servers().unwrap());
+    let addr = parse_bootstrap_addr(ctx.ssl_bootstrap_servers());
 
     selector
         .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
-    poll_until_connected(&mut selector).await;
+    // TLS handshake completes over multiple poll cycles after TCP connect
+    poll_until_ready(&mut selector, NODE_ID).await;
 
     // Send ApiVersions to verify data flows over TLS
     let builder = ApiVersionsRequestBuilder::new();
@@ -205,25 +210,16 @@ async fn test_ssl_connection() {
 /// Test: SASL_PLAINTEXT connection — SASL handshake, auth, metadata fetch.
 #[tokio::test]
 async fn test_sasl_plaintext_connection() {
-    let config = ClusterConfig {
-        security_mode: SecurityMode::SaslPlaintext {
-            username: "admin".to_string(),
-            password: "admin-secret".to_string(),
-        },
-        ..Default::default()
-    };
-    let ctx = TestContext::new(config).await;
-    let mut selector = create_sasl_plaintext_selector("admin", "admin-secret");
-    let addr = parse_bootstrap_addr(ctx.secure_bootstrap_servers().unwrap());
+    let ctx = TestContext::new(ClusterConfig::default()).await;
+    let mut selector = create_sasl_plaintext_selector(SASL_USERNAME, SASL_PASSWORD);
+    let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector
         .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
-    poll_until_connected(&mut selector).await;
-
-    // Channel ready means SASL auth completed successfully
-    assert!(selector.is_channel_ready(NODE_ID), "Channel should be ready after SASL auth");
+    // SASL authentication completes over multiple poll cycles after TCP connect
+    poll_until_ready(&mut selector, NODE_ID).await;
 
     // Verify with an ApiVersionsRequest
     let builder = ApiVersionsRequestBuilder::new();
@@ -245,26 +241,17 @@ async fn test_sasl_plaintext_connection() {
 /// Test: SASL_SSL connection — TLS + SASL combined.
 #[tokio::test]
 async fn test_sasl_ssl_connection() {
-    let config = ClusterConfig {
-        security_mode: SecurityMode::SaslSsl { username: "admin".to_string(), password: "admin-secret".to_string() },
-        ..Default::default()
-    };
-    let ctx = TestContext::new(config).await;
-    let ca_cert_pem = ctx.ca_cert_pem().expect("SASL_SSL cluster should have CA cert");
-    let mut selector = create_sasl_ssl_selector("admin", "admin-secret", ca_cert_pem);
-    let addr = parse_bootstrap_addr(ctx.secure_bootstrap_servers().unwrap());
+    let ctx = TestContext::new(ClusterConfig::default()).await;
+    let ca_cert_pem = ctx.ca_cert_pem();
+    let mut selector = create_sasl_ssl_selector(SASL_USERNAME, SASL_PASSWORD, ca_cert_pem);
+    let addr = parse_bootstrap_addr(ctx.sasl_ssl_bootstrap_servers());
 
     selector
         .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
-    poll_until_connected(&mut selector).await;
-
-    // Channel ready means both TLS handshake and SASL auth completed
-    assert!(
-        selector.is_channel_ready(NODE_ID),
-        "Channel should be ready after SASL_SSL auth"
-    );
+    // TLS handshake + SASL authentication completes over multiple poll cycles
+    poll_until_ready(&mut selector, NODE_ID).await;
 
     // Verify with an ApiVersionsRequest
     let builder = ApiVersionsRequestBuilder::new();
@@ -286,17 +273,10 @@ async fn test_sasl_ssl_connection() {
 /// Test: SASL authentication failure with wrong credentials.
 #[tokio::test]
 async fn test_sasl_wrong_credentials() {
-    let config = ClusterConfig {
-        security_mode: SecurityMode::SaslPlaintext {
-            username: "admin".to_string(),
-            password: "admin-secret".to_string(),
-        },
-        ..Default::default()
-    };
-    let ctx = TestContext::new(config).await;
+    let ctx = TestContext::new(ClusterConfig::default()).await;
     // Wrong password
-    let mut selector = create_sasl_plaintext_selector("admin", "wrong-password");
-    let addr = parse_bootstrap_addr(ctx.secure_bootstrap_servers().unwrap());
+    let mut selector = create_sasl_plaintext_selector(SASL_USERNAME, "wrong-password");
+    let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector
         .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
@@ -316,25 +296,18 @@ async fn test_sasl_wrong_credentials() {
 /// Test: SASL unsupported mechanism rejection.
 #[tokio::test]
 async fn test_sasl_unsupported_mechanism() {
-    let config = ClusterConfig {
-        security_mode: SecurityMode::SaslPlaintext {
-            username: "admin".to_string(),
-            password: "admin-secret".to_string(),
-        },
-        ..Default::default()
-    };
-    let ctx = TestContext::new(config).await;
+    let ctx = TestContext::new(ClusterConfig::default()).await;
     // Use SCRAM-SHA-256 mechanism which the broker doesn't have enabled
     let sasl_config = SaslConfig {
         mechanism: "SCRAM-SHA-256".to_string(),
-        username: Some("admin".to_string()),
-        password: Some("admin-secret".to_string()),
+        username: Some(SASL_USERNAME.to_string()),
+        password: Some(SASL_PASSWORD.to_string()),
         ..SaslConfig::default()
     };
     let channel_builder =
         SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "integration-test").unwrap();
     let mut selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
-    let addr = parse_bootstrap_addr(ctx.secure_bootstrap_servers().unwrap());
+    let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector
         .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)

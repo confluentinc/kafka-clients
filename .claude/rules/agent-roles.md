@@ -11,8 +11,6 @@
    issues before continuing with the next step.
 
    When you're sure the issue is solved move the comment to `COMMENTS.DONE.<N>.md`.
-   Before changing `COMMENTS.<N>.md` or `COMMENTS.DONE.<N>.md` take an exclusive
-   lock on it (flock for example) and release it after you're done.
 
    Commit the changes with a fixup message referencing the original commit that introduced the issue
    and the comments describing the issues.
