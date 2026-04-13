@@ -51,6 +51,25 @@ impl Uuid {
         Self::ZERO_UUID
     }
 
+    /// Static factory to retrieve a type 4 (pseudo randomly generated) UUID.
+    ///
+    /// This will not generate a UUID equal to `ZERO_UUID`, `ONE_UUID`, or one whose
+    /// string representation starts with a dash ("-").
+    pub fn random_uuid() -> Self {
+        loop {
+            let ju = uuid::Uuid::new_v4();
+            let (most, least) = ju.as_u64_pair();
+            let uuid = Self::new(most, least);
+            if uuid == Self::ZERO_UUID || uuid == Self::ONE_UUID {
+                continue;
+            }
+            if uuid.to_base64_string().starts_with('-') {
+                continue;
+            }
+            return uuid;
+        }
+    }
+
     /// Returns the most significant 64 bits of this UUID.
     pub const fn most_sig_bits(&self) -> u64 {
         self.most_sig_bits
@@ -218,10 +237,12 @@ impl PartialOrd for Uuid {
 }
 
 impl Ord for Uuid {
+    /// Compares two UUIDs using signed 64-bit comparison to match Java's
+    /// `Uuid.compareTo()` which compares `long` (signed) fields.
     fn cmp(&self, other: &Self) -> Ordering {
-        match self.most_sig_bits.cmp(&other.most_sig_bits) {
-            Ordering::Equal => self.least_sig_bits.cmp(&other.least_sig_bits),
-            other => other,
+        match (self.most_sig_bits as i64).cmp(&(other.most_sig_bits as i64)) {
+            Ordering::Equal => (self.least_sig_bits as i64).cmp(&(other.least_sig_bits as i64)),
+            ord => ord,
         }
     }
 }
@@ -338,6 +359,87 @@ mod tests {
         assert!(uuid1 < uuid2);
         assert!(uuid1 < uuid3);
         assert!(uuid3 < uuid2);
+    }
+
+    /// Translated from Java UuidTest.testHashCode.
+    /// Java uses a custom hashCode (msb ^ lsb), Rust uses derive(Hash).
+    /// We verify hash consistency: equal UUIDs produce equal hashes,
+    /// different UUIDs produce different hashes.
+    #[test]
+    fn test_hash_code() {
+        use std::collections::hash_map::DefaultHasher;
+        use std::hash::{Hash, Hasher};
+
+        fn hash_uuid(uuid: &Uuid) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            uuid.hash(&mut hasher);
+            hasher.finish()
+        }
+
+        let id1 = Uuid::new(16, 7);
+        let id2 = Uuid::new(1043, 20075);
+        let id3 = Uuid::new(104312423523523, 200732425676585);
+
+        // Equal UUIDs produce equal hashes
+        assert_eq!(hash_uuid(&id1), hash_uuid(&Uuid::new(16, 7)));
+        assert_eq!(hash_uuid(&id2), hash_uuid(&Uuid::new(1043, 20075)));
+        assert_eq!(hash_uuid(&id3), hash_uuid(&Uuid::new(104312423523523, 200732425676585)));
+
+        // Different UUIDs produce different hashes (not guaranteed in general,
+        // but these specific values should differ)
+        assert_ne!(hash_uuid(&id1), hash_uuid(&id2));
+        assert_ne!(hash_uuid(&id1), hash_uuid(&id3));
+        assert_ne!(hash_uuid(&id2), hash_uuid(&id3));
+    }
+
+    /// Translated from Java UuidTest.testRandomUuid (RepeatedTest(100)).
+    /// Verifies that random UUIDs are not ZERO_UUID, not METADATA_TOPIC_ID,
+    /// and do not start with a dash.
+    #[test]
+    fn test_random_uuid() {
+        for _ in 0..100 {
+            let random_id = Uuid::random_uuid();
+            assert_ne!(Uuid::ZERO_UUID, random_id);
+            assert_ne!(Uuid::METADATA_TOPIC_ID, random_id);
+            assert!(!random_id.to_string().starts_with('-'));
+        }
+    }
+
+    /// Translated from Java UuidTest.testCompareUuids.
+    /// Verifies all 9 comparison combinations of UUIDs (0,0), (0,1), (1,0).
+    #[test]
+    fn test_compare_uuids() {
+        let id00 = Uuid::new(0, 0);
+        let id01 = Uuid::new(0, 1);
+        let id10 = Uuid::new(1, 0);
+
+        assert_eq!(Ordering::Equal, id00.cmp(&id00));
+        assert_eq!(Ordering::Equal, id01.cmp(&id01));
+        assert_eq!(Ordering::Equal, id10.cmp(&id10));
+        assert_eq!(Ordering::Less, id00.cmp(&id01));
+        assert_eq!(Ordering::Less, id00.cmp(&id10));
+        assert_eq!(Ordering::Greater, id01.cmp(&id00));
+        assert_eq!(Ordering::Greater, id10.cmp(&id00));
+        assert_eq!(Ordering::Less, id01.cmp(&id10));
+        assert_eq!(Ordering::Greater, id10.cmp(&id01));
+    }
+
+    /// Verifies that signed comparison matches Java behavior for UUIDs
+    /// with high bits set (values that would be negative as Java long).
+    #[test]
+    fn test_compare_uuids_signed() {
+        // 0xFFFFFFFFFFFFFFFF as i64 is -1, which should be less than 1 (signed comparison)
+        let uuid_neg = Uuid::new(0xFFFFFFFFFFFFFFFF, 0);
+        let uuid_pos = Uuid::new(1, 0);
+        assert!(uuid_neg < uuid_pos, "UUID with high MSB bit set should compare less (signed)");
+
+        // Same for least significant bits
+        let uuid_neg_lsb = Uuid::new(0, 0xFFFFFFFFFFFFFFFF);
+        let uuid_pos_lsb = Uuid::new(0, 1);
+        assert!(
+            uuid_neg_lsb < uuid_pos_lsb,
+            "UUID with high LSB bit set should compare less (signed)"
+        );
     }
 
     #[test]

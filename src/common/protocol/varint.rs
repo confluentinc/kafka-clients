@@ -208,6 +208,16 @@ pub fn write_varlong<W: Write>(value: i64, writer: &mut W) -> io::Result<()> {
     write_unsigned_varlong(encoded, writer)
 }
 
+/// Returns the number of bytes needed to encode a value as an unsigned varint.
+///
+/// Corresponds to Java's `ByteUtils.sizeOfUnsignedVarint()`.
+pub fn size_of_unsigned_varint(value: u32) -> i32 {
+    let leading_zeros = value.leading_zeros() as i32;
+    // Equivalent to: ceil((32 - leading_zeros) / 7.0), min 1
+    // Uses the same bit trick as the Java implementation
+    (((38 - leading_zeros) * 0b10010010010010011i32) >> 19) + (leading_zeros >> 5)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -309,6 +319,21 @@ mod tests {
     }
 
     #[test]
+    fn test_size_of_unsigned_varint() {
+        assert_eq!(size_of_unsigned_varint(0), 1);
+        assert_eq!(size_of_unsigned_varint(1), 1);
+        assert_eq!(size_of_unsigned_varint(127), 1);
+        assert_eq!(size_of_unsigned_varint(128), 2);
+        assert_eq!(size_of_unsigned_varint(16383), 2);
+        assert_eq!(size_of_unsigned_varint(16384), 3);
+        assert_eq!(size_of_unsigned_varint(2097151), 3);
+        assert_eq!(size_of_unsigned_varint(2097152), 4);
+        assert_eq!(size_of_unsigned_varint(268435455), 4);
+        assert_eq!(size_of_unsigned_varint(268435456), 5);
+        assert_eq!(size_of_unsigned_varint(u32::MAX), 5);
+    }
+
+    #[test]
     fn test_varlong_zig_zag() {
         let test_values = vec![0i64, 1, -1, 100, -100, i64::MAX, i64::MIN];
 
@@ -318,5 +343,213 @@ mod tests {
             let (decoded, _) = read_varlong(&buf).unwrap();
             assert_eq!(decoded, value, "Failed for value: {}", value);
         }
+    }
+
+    // ========================================================================
+    // Byte-level encoding verification tests translated from
+    // org.apache.kafka.common.utils.ByteUtilsTest
+    // ========================================================================
+
+    /// Helper: assert that encoding an unsigned varint produces the expected bytes
+    /// and that decoding those bytes returns the original value.
+    fn assert_unsigned_varint_serde(value: i32, expected: &[u8]) {
+        let mut buf = Vec::new();
+        // Java treats the value as int (signed 32-bit) but writes as unsigned varint,
+        // so we reinterpret as u32 to match.
+        write_unsigned_varint(value as u32, &mut buf).unwrap();
+        assert_eq!(buf, expected, "Unsigned varint encoding mismatch for value {}", value);
+        let (decoded, size) = read_unsigned_varint(&buf).unwrap();
+        assert_eq!(decoded, value as u32, "Unsigned varint decode mismatch for value {}", value);
+        assert_eq!(size, expected.len());
+    }
+
+    /// Helper: assert that zig-zag varint encoding produces the expected bytes
+    /// and that decoding returns the original value.
+    fn assert_varint_serde(value: i32, expected: &[u8]) {
+        let mut buf = Vec::new();
+        write_varint(value, &mut buf).unwrap();
+        assert_eq!(buf, expected, "Varint encoding mismatch for value {}", value);
+        let (decoded, size) = read_varint(&buf).unwrap();
+        assert_eq!(decoded, value, "Varint decode mismatch for value {}", value);
+        assert_eq!(size, expected.len());
+    }
+
+    /// Helper: assert that zig-zag varlong encoding produces the expected bytes
+    /// and that decoding returns the original value.
+    fn assert_varlong_serde(value: i64, expected: &[u8]) {
+        let mut buf = Vec::new();
+        write_varlong(value, &mut buf).unwrap();
+        assert_eq!(buf, expected, "Varlong encoding mismatch for value {}", value);
+        let (decoded, size) = read_varlong(&buf).unwrap();
+        assert_eq!(decoded, value, "Varlong decode mismatch for value {}", value);
+        assert_eq!(size, expected.len());
+    }
+
+    /// Translated from ByteUtilsTest.testUnsignedVarintSerde.
+    /// Verifies exact byte encodings for 14 unsigned varint values.
+    #[test]
+    fn test_unsigned_varint_serde_byte_level() {
+        assert_unsigned_varint_serde(0, &[0x00]);
+        assert_unsigned_varint_serde(-1, &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]); // -1 as u32 = 0xFFFFFFFF
+        assert_unsigned_varint_serde(1, &[0x01]);
+        assert_unsigned_varint_serde(63, &[0x3F]);
+        assert_unsigned_varint_serde(-64, &[0xC0, 0xFF, 0xFF, 0xFF, 0x0F]);
+        assert_unsigned_varint_serde(64, &[0x40]);
+        assert_unsigned_varint_serde(8191, &[0xFF, 0x3F]);
+        assert_unsigned_varint_serde(-8192, &[0x80, 0xC0, 0xFF, 0xFF, 0x0F]);
+        assert_unsigned_varint_serde(8192, &[0x80, 0x40]);
+        assert_unsigned_varint_serde(-8193, &[0xFF, 0xBF, 0xFF, 0xFF, 0x0F]);
+        assert_unsigned_varint_serde(1048575, &[0xFF, 0xFF, 0x3F]);
+        assert_unsigned_varint_serde(1048576, &[0x80, 0x80, 0x40]);
+        assert_unsigned_varint_serde(i32::MAX, &[0xFF, 0xFF, 0xFF, 0xFF, 0x07]);
+        assert_unsigned_varint_serde(i32::MIN, &[0x80, 0x80, 0x80, 0x80, 0x08]);
+    }
+
+    /// Translated from ByteUtilsTest.testVarintSerde.
+    /// Verifies exact byte encodings for 20 signed varint values with zig-zag encoding.
+    #[test]
+    fn test_varint_serde_byte_level() {
+        assert_varint_serde(0, &[0x00]);
+        assert_varint_serde(-1, &[0x01]);
+        assert_varint_serde(1, &[0x02]);
+        assert_varint_serde(63, &[0x7E]);
+        assert_varint_serde(-64, &[0x7F]);
+        assert_varint_serde(64, &[0x80, 0x01]);
+        assert_varint_serde(-65, &[0x81, 0x01]);
+        assert_varint_serde(8191, &[0xFE, 0x7F]);
+        assert_varint_serde(-8192, &[0xFF, 0x7F]);
+        assert_varint_serde(8192, &[0x80, 0x80, 0x01]);
+        assert_varint_serde(-8193, &[0x81, 0x80, 0x01]);
+        assert_varint_serde(1048575, &[0xFE, 0xFF, 0x7F]);
+        assert_varint_serde(-1048576, &[0xFF, 0xFF, 0x7F]);
+        assert_varint_serde(1048576, &[0x80, 0x80, 0x80, 0x01]);
+        assert_varint_serde(-1048577, &[0x81, 0x80, 0x80, 0x01]);
+        assert_varint_serde(134217727, &[0xFE, 0xFF, 0xFF, 0x7F]);
+        assert_varint_serde(-134217728, &[0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varint_serde(134217728, &[0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varint_serde(-134217729, &[0x81, 0x80, 0x80, 0x80, 0x01]);
+        assert_varint_serde(i32::MAX, &[0xFE, 0xFF, 0xFF, 0xFF, 0x0F]);
+        assert_varint_serde(i32::MIN, &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+    }
+
+    /// Translated from ByteUtilsTest.testVarlongSerde.
+    /// Verifies exact byte encodings for 42 signed varlong values with zig-zag encoding.
+    #[test]
+    fn test_varlong_serde_byte_level() {
+        assert_varlong_serde(0, &[0x00]);
+        assert_varlong_serde(-1, &[0x01]);
+        assert_varlong_serde(1, &[0x02]);
+        assert_varlong_serde(63, &[0x7E]);
+        assert_varlong_serde(-64, &[0x7F]);
+        assert_varlong_serde(64, &[0x80, 0x01]);
+        assert_varlong_serde(-65, &[0x81, 0x01]);
+        assert_varlong_serde(8191, &[0xFE, 0x7F]);
+        assert_varlong_serde(-8192, &[0xFF, 0x7F]);
+        assert_varlong_serde(8192, &[0x80, 0x80, 0x01]);
+        assert_varlong_serde(-8193, &[0x81, 0x80, 0x01]);
+        assert_varlong_serde(1048575, &[0xFE, 0xFF, 0x7F]);
+        assert_varlong_serde(-1048576, &[0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(1048576, &[0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(-1048577, &[0x81, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(134217727, &[0xFE, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(-134217728, &[0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(134217728, &[0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(-134217729, &[0x81, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(i32::MAX as i64, &[0xFE, 0xFF, 0xFF, 0xFF, 0x0F]);
+        assert_varlong_serde(i32::MIN as i64, &[0xFF, 0xFF, 0xFF, 0xFF, 0x0F]);
+        assert_varlong_serde(17179869183, &[0xFE, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(-17179869184, &[0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(17179869184, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(-17179869185, &[0x81, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(2199023255551, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(-2199023255552, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(2199023255552, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(-2199023255553, &[0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(281474976710655, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(-281474976710656, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(281474976710656, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(-281474976710657, &[0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(36028797018963967, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(-36028797018963968, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(36028797018963968, &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(-36028797018963969, &[0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01]);
+        assert_varlong_serde(4611686018427387903, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(-4611686018427387904, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x7F]);
+        assert_varlong_serde(
+            4611686018427387904,
+            &[0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+        );
+        assert_varlong_serde(
+            -4611686018427387905,
+            &[0x81, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x80, 0x01],
+        );
+        assert_varlong_serde(i64::MAX, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+        assert_varlong_serde(i64::MIN, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+    }
+
+    /// Translated from ByteUtilsTest.testInvalidVarint.
+    /// A 6-byte varint (overflow) must be rejected.
+    #[test]
+    fn test_invalid_varint() {
+        let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let result = read_unsigned_varint(&buf);
+        assert!(result.is_err(), "Expected error for overlong varint");
+    }
+
+    /// Translated from ByteUtilsTest.testInvalidVarlong.
+    /// An 11-byte varlong (overflow) must be rejected.
+    #[test]
+    fn test_invalid_varlong() {
+        let buf = [0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01];
+        let result = read_unsigned_varlong(&buf);
+        assert!(result.is_err(), "Expected error for overlong varlong");
+    }
+
+    /// Translated from ByteUtilsTest.testDouble.
+    /// Verifies double-to-bits encoding for 13 values including NaN, infinities, and edge cases.
+    #[test]
+    fn test_double_encoding() {
+        fn assert_double_serde(value: f64, expected_bits: u64) {
+            // Verify that Rust's f64::to_bits matches expected Java Double.doubleToLongBits
+            let actual_bits = value.to_bits();
+            assert_eq!(
+                actual_bits, expected_bits,
+                "Double to bits mismatch for value {}: expected 0x{:016X}, got 0x{:016X}",
+                value, expected_bits, actual_bits
+            );
+
+            // Verify big-endian byte encoding matches
+            let expected_bytes = expected_bits.to_be_bytes();
+            let actual_bytes = value.to_be_bytes();
+            assert_eq!(
+                actual_bytes, expected_bytes,
+                "Double byte encoding mismatch for value {}",
+                value
+            );
+
+            // Verify round-trip through f64::from_bits
+            let reconstructed = f64::from_bits(expected_bits);
+            if value.is_nan() {
+                assert!(reconstructed.is_nan());
+            } else {
+                assert_eq!(reconstructed, value);
+            }
+        }
+
+        assert_double_serde(0.0, 0x0);
+        assert_double_serde(-0.0, 0x8000000000000000);
+        assert_double_serde(1.0, 0x3FF0000000000000);
+        assert_double_serde(-1.0, 0xBFF0000000000000);
+        assert_double_serde(123e45, 0x49B58B82C0E0BB00);
+        assert_double_serde(-123e45, 0xC9B58B82C0E0BB00);
+        // Java's Double.MIN_VALUE is the smallest positive subnormal, not Rust's f64::MIN_POSITIVE
+        let double_min_value: f64 = f64::from_bits(0x1); // 4.9e-324
+        assert_double_serde(double_min_value, 0x1);
+        assert_double_serde(-double_min_value, 0x8000000000000001);
+        assert_double_serde(f64::MAX, 0x7FEFFFFFFFFFFFFF);
+        assert_double_serde(-f64::MAX, 0xFFEFFFFFFFFFFFFF);
+        assert_double_serde(f64::NAN, 0x7FF8000000000000);
+        assert_double_serde(f64::INFINITY, 0x7FF0000000000000);
+        assert_double_serde(f64::NEG_INFINITY, 0xFFF0000000000000);
     }
 }

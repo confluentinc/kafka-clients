@@ -11,10 +11,12 @@ The graph displays simple class names for readability.
 """
 
 import argparse
+import json
 import os
 import re
 import sys
-from collections import defaultdict
+import heapq
+from collections import defaultdict, deque
 
 import graphviz
 import javalang
@@ -168,10 +170,10 @@ def build_dependency_graph(root_fqcn, fqcn_files, simple_to_fqcns):
     """Build dependency graph starting from root_fqcn via BFS."""
     graph = defaultdict(set)  # fqcn -> set of fqcns it depends on
     visited = set()
-    queue = [root_fqcn]
+    queue = deque([root_fqcn])
 
     while queue:
-        current = queue.pop(0)
+        current = queue.popleft()
         if current in visited:
             continue
         visited.add(current)
@@ -267,16 +269,16 @@ def topological_sort(graph, all_nodes):
             scc_in_degree[scc_id] += 1
 
     queue = sorted([i for i in range(len(sccs)) if scc_in_degree[i] == 0])
+    heapq.heapify(queue)
     scc_order = []
     while queue:
-        scc_id = queue.pop(0)
+        scc_id = heapq.heappop(queue)
         scc_order.append(scc_id)
         for other_id in range(len(sccs)):
             if scc_id in scc_graph.get(other_id, set()):
                 scc_in_degree[other_id] -= 1
                 if scc_in_degree[other_id] == 0:
-                    queue.append(other_id)
-                    queue.sort()
+                    heapq.heappush(queue, other_id)
 
     # Expand: within each SCC, sort alphabetically
     result = []
@@ -325,11 +327,11 @@ def build_tree(graph, root_fqcn, all_nodes):
     """Build a spanning tree from root via BFS."""
     tree_edges = []
     visited = set()
-    queue = [root_fqcn]
+    queue = deque([root_fqcn])
     visited.add(root_fqcn)
 
     while queue:
-        node = queue.pop(0)
+        node = queue.popleft()
         for dep in sorted(graph.get(node, set())):
             if dep in all_nodes and dep not in visited:
                 visited.add(dep)
@@ -408,13 +410,104 @@ def generate_graph(graph, all_nodes, sorted_classes, marked_fqcns, output, outpu
     print(f"Completion: {marked_in_graph}/{total} classes done ({pct:.1f}%)", file=sys.stderr)
 
 
+def generate_json_tree(graph, root_fqcn, all_nodes, marked_fqcns, output):
+    """Generate a JSON tree structure with root_fqcn at the root.
+
+    The JSON structure represents the dependency spanning tree where each node has:
+    - fqcn: Fully qualified class name
+    - name: Simple class name
+    - marked: Whether the class is marked as complete
+    - children: Array of dependency nodes (each node appears once in the tree)
+
+    Uses BFS to build a spanning tree, avoiding exponential explosion from
+    shared dependencies appearing multiple times.
+    """
+    # Build spanning tree via BFS (same as the graph visualization)
+    tree_structure = {}  # fqcn -> list of child fqcns
+    visited = set()
+    queue = deque([root_fqcn])
+    visited.add(root_fqcn)
+
+    while queue:
+        node = queue.popleft()
+        tree_structure[node] = []
+        for dep in sorted(graph.get(node, set()) & all_nodes):
+            if dep not in visited:
+                visited.add(dep)
+                tree_structure[node].append(dep)
+                queue.append(dep)
+
+    def build_node(fqcn):
+        """Build a node from the pre-computed spanning tree."""
+        return {
+            "fqcn": fqcn,
+            "name": simple_name(fqcn),
+            "marked": fqcn in marked_fqcns,
+            "children": [build_node(child) for child in tree_structure.get(fqcn, [])]
+        }
+
+    # Build the tree starting from root
+    tree = build_node(root_fqcn)
+
+    # Add metadata
+    result = {
+        "root": root_fqcn,
+        "total_classes": len(all_nodes),
+        "marked_classes": len(marked_fqcns & all_nodes),
+        "tree_nodes": len(visited),
+        "tree": tree
+    }
+
+    # Write to file
+    json_file = f"{output}.json"
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"JSON tree written to {json_file}", file=sys.stderr)
+    return result
+
+
+def generate_flat_json(graph, all_nodes, sorted_classes, marked_fqcns, output, root_fqcn):
+    """Generate a flat JSON with all classes and their direct dependencies.
+
+    This is useful for tools that need the full dependency information
+    without the tree structure deduplication.
+    """
+    classes = []
+    for fqcn in sorted_classes:
+        deps = sorted(graph.get(fqcn, set()) & all_nodes)
+        classes.append({
+            "fqcn": fqcn,
+            "name": simple_name(fqcn),
+            "marked": fqcn in marked_fqcns,
+            "dependencies": deps
+        })
+
+    result = {
+        "root": root_fqcn,
+        "total_classes": len(all_nodes),
+        "marked_classes": len(marked_fqcns & all_nodes),
+        "completion_percent": round(len(marked_fqcns & all_nodes) / len(all_nodes) * 100, 1) if all_nodes else 0,
+        "classes": classes
+    }
+
+    json_file = f"{output}_flat.json"
+    with open(json_file, "w", encoding="utf-8") as f:
+        json.dump(result, f, indent=2)
+
+    print(f"Flat JSON written to {json_file}", file=sys.stderr)
+    return result
+
+
 def main():
     parser = argparse.ArgumentParser(description="Generate a dependency graph for a Java class.")
     parser.add_argument("--kafka-dir", default="kafka/", help="Root directory of Kafka Java source")
     parser.add_argument("--root-class", default="KafkaProducer", help="Root class to analyze")
     parser.add_argument("--mark-file", default=None, help="Text file with class names to mark (one per line)")
-    parser.add_argument("--output-format", default="png", choices=["png", "svg", "pdf"], help="Output format")
+    parser.add_argument("--output-format", default="png", choices=["png", "svg", "pdf"], help="Output format for graph")
     parser.add_argument("--output", default="dependency_graph", help="Output filename (without extension)")
+    parser.add_argument("--json", action="store_true", help="Generate JSON output (tree and flat formats)")
+    parser.add_argument("--json-only", action="store_true", help="Generate only JSON output, skip graph generation")
 
     args = parser.parse_args()
 
@@ -454,16 +547,22 @@ def main():
     if marked_fqcns:
         print(f"Marking {len(marked_fqcns)} classes.", file=sys.stderr)
 
-    # Step 5: Generate graph
-    generate_graph(graph, reachable, sorted_classes, marked_fqcns, args.output, args.output_format, root_fqcn)
+    # Step 5: Generate JSON output if requested
+    if args.json or args.json_only:
+        generate_json_tree(graph, root_fqcn, reachable, marked_fqcns, args.output)
+        generate_flat_json(graph, reachable, sorted_classes, marked_fqcns, args.output, root_fqcn)
 
-    # Step 6: Print topologically sorted list
+    # Step 6: Generate graph (unless --json-only)
+    if not args.json_only:
+        generate_graph(graph, reachable, sorted_classes, marked_fqcns, args.output, args.output_format, root_fqcn)
+
+    # Step 7: Print topologically sorted list
     print("\n=== Topologically Sorted Classes (no dependencies first) ===")
     for i, fqcn in enumerate(sorted_classes, 1):
         marker = " [✓]" if fqcn in marked_fqcns else ""
         print(f"  {i:3d}. {fqcn}{marker}")
 
-    # Step 7: Write remaining classes (excluding marked) to file
+    # Step 8: Write remaining classes (excluding marked) to file
     remaining = [fqcn for fqcn in sorted_classes if fqcn not in marked_fqcns]
     remaining_file = os.path.join(os.path.dirname(args.output) or ".", "remaining_classes.txt")
     with open(remaining_file, "w") as f:

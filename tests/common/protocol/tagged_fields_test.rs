@@ -23,7 +23,7 @@ fn test_fetch_request_with_cluster_id() {
     let version = 12i16;
 
     let mut request = FetchRequestData::new();
-    request.cluster_id = "test-cluster-123".to_string();
+    request.cluster_id = Some("test-cluster-123".to_string());
     request.max_wait_ms = 500;
     request.min_bytes = 1;
     request.max_bytes = 1024000;
@@ -40,7 +40,7 @@ fn test_fetch_request_with_cluster_id() {
     let decoded = FetchRequestData::read(&mut buffer, version).expect("Read failed");
 
     // Verify
-    assert_eq!(decoded.cluster_id, "test-cluster-123");
+    assert_eq!(decoded.cluster_id, Some("test-cluster-123".to_string()));
     assert_eq!(decoded.max_wait_ms, 500);
     assert_eq!(decoded.min_bytes, 1);
     assert_eq!(decoded.max_bytes, 1024000);
@@ -85,7 +85,7 @@ fn test_fetch_request_with_both_tagged_fields() {
     let version = 15i16;
 
     let mut request = FetchRequestData::new();
-    request.cluster_id = "production-cluster".to_string();
+    request.cluster_id = Some("production-cluster".to_string());
     request.max_wait_ms = 1000;
     request.min_bytes = 10;
     request.max_bytes = 2048000;
@@ -108,7 +108,7 @@ fn test_fetch_request_with_both_tagged_fields() {
     let decoded = FetchRequestData::read(&mut buffer, version).expect("Read failed");
 
     // Verify all fields
-    assert_eq!(decoded.cluster_id, "production-cluster");
+    assert_eq!(decoded.cluster_id, Some("production-cluster".to_string()));
     assert_eq!(decoded.replica_state.replica_id, 99);
     assert_eq!(decoded.replica_state.replica_epoch, 200);
     assert_eq!(decoded.max_wait_ms, 1000);
@@ -141,7 +141,7 @@ fn test_fetch_request_empty_tagged_fields() {
     let decoded = FetchRequestData::read(&mut buffer, version).expect("Read failed");
 
     // Verify
-    assert_eq!(decoded.cluster_id, "");
+    assert_eq!(decoded.cluster_id, None);
     assert_eq!(decoded.replica_state.replica_id, -1);
     assert_eq!(decoded.replica_state.replica_epoch, -1);
     assert_eq!(decoded.max_wait_ms, 300);

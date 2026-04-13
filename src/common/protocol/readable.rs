@@ -104,7 +104,7 @@ pub trait Readable {
 /// Stores unknown tagged fields that can be passed through.
 ///
 /// Corresponds to org.apache.kafka.common.protocol.types.RawTaggedField
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawTaggedField {
     tag: u32,
     data: Vec<u8>,

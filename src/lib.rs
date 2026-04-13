@@ -15,6 +15,7 @@
 // Fail on warnings in development
 #![deny(warnings)]
 
+pub mod clients;
 pub mod common;
 
 // Include generated message definitions

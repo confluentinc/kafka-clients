@@ -8,12 +8,26 @@ edition = "2024"
 
 [features]
 skip-generated = []
+integration-tests = []
 
 [dependencies]
 regex = "1.0"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
 generator = { path = "generator" }
+uuid = { version = "1", features = ["v4"] }
+rand = "0.9"
+tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time", "sync"] }
+indexmap = "2"
+log = "0.4"
+
+[dev-dependencies]
+testcontainers = "0.27"
+testcontainers-modules = { version = "0.15", features = ["kafka"] }
+
+[[test]]
+name = "common"
+path = "tests/main.rs"
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

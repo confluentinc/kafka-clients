@@ -1,0 +1,8 @@
+- [Generator tagged field patterns](review_patterns.md) — Default-value checks missing for primitives/structs/UUIDs in tagged field write/size
+- [Uuid signed/unsigned mismatch](uuid_signed_unsigned.md) — Java Uuid.compareTo uses signed long but Rust uses unsigned u64
+- [Test coverage gap patterns](test_coverage_gaps.md) — Error messages, iteration tests, and utility tests commonly under-translated
+- [Nullable default mismatch](nullable_default_mismatch.md) — Nullable string/bytes defaults to None but Java defaults to empty — 66 fields affected
+- [Layer 4 Network Transport patterns](review_layer4_patterns.md) — EOF semantics, trait composability, sync vs async pitfalls in Java NIO to Rust translation
+- [Layer 5 Channel & Selection patterns](review_layer5_patterns.md) — Format string typos, poll loop design, test coverage gaps in Selector/KafkaChannel
+- [Layer 3 Request/Response patterns](review_layer3_patterns.md) — Validation gaps, panic vs Result in builders, per-field flexibleVersions
+- [Layer 6 NetworkClient patterns](review_layer6_patterns.md) — Async boundary gaps, exception hierarchy, time update, ISE mapping

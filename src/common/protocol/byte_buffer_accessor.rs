@@ -80,13 +80,28 @@ impl ByteBufferAccessor {
         self.position = 0;
     }
 
+    /// Returns a new `ByteBufferAccessor` containing a copy of the remaining bytes
+    /// from the current position to the end of the buffer.
+    ///
+    /// The new accessor's position is set to 0. The original accessor is unchanged.
+    pub fn snapshot_remaining(&self) -> Self {
+        let remaining = self.buffer[self.position..].to_vec();
+        ByteBufferAccessor::from_bytes(remaining)
+    }
+
     /// Ensure we have at least `size` bytes available to read.
+    ///
+    /// The error message matches Java's ByteBufferAccessor.readArray format:
+    /// "Error reading byte array of X byte(s): only Y byte(s) available"
     fn check_remaining(&self, size: usize) -> io::Result<()> {
         let remaining = self.buffer.len() - self.position;
         if size > remaining {
             return Err(io::Error::new(
                 io::ErrorKind::UnexpectedEof,
-                format!("Error reading {} byte(s): only {} byte(s) available", size, remaining),
+                format!(
+                    "Error reading byte array of {} byte(s): only {} byte(s) available",
+                    size, remaining
+                ),
             ));
         }
         Ok(())
@@ -363,6 +378,44 @@ mod tests {
         assert_eq!(read_uuid, uuid);
     }
 
+    /// Verify exact byte representation of UUID on the wire.
+    ///
+    /// UUID must be serialized as MSB (big-endian i64) followed by LSB (big-endian i64).
+    /// This test catches bugs where MSB/LSB order or endianness is wrong, which a
+    /// round-trip test alone would not detect.
+    #[test]
+    fn test_uuid_wire_protocol_byte_representation() {
+        // Test a known UUID with distinct bytes in each position
+        let uuid = Uuid::new(0x0123456789ABCDEF, 0xFEDCBA9876543210);
+        let mut buf = ByteBufferAccessor::new(16);
+        buf.write_uuid(&uuid).unwrap();
+
+        let expected_bytes: [u8; 16] = [
+            0x01, 0x23, 0x45, 0x67, 0x89, 0xAB, 0xCD, 0xEF, // MSB big-endian
+            0xFE, 0xDC, 0xBA, 0x98, 0x76, 0x54, 0x32, 0x10, // LSB big-endian
+        ];
+        assert_eq!(
+            buf.buffer(),
+            &expected_bytes,
+            "UUID wire bytes do not match expected big-endian MSB-first layout"
+        );
+
+        // Verify zero UUID serializes to 16 zero bytes
+        let zero_uuid = Uuid::ZERO_UUID;
+        let mut buf2 = ByteBufferAccessor::new(16);
+        buf2.write_uuid(&zero_uuid).unwrap();
+        assert_eq!(buf2.buffer(), &[0u8; 16], "Zero UUID should serialize to 16 zero bytes");
+
+        // Read back and verify round-trip
+        buf.flip();
+        let read_uuid = buf.read_uuid().unwrap();
+        assert_eq!(read_uuid, uuid);
+
+        buf2.flip();
+        let read_zero = buf2.read_uuid().unwrap();
+        assert_eq!(read_zero, zero_uuid);
+    }
+
     #[test]
     fn test_read_write_string() {
         let mut buf = ByteBufferAccessor::new(20);
@@ -404,8 +457,85 @@ mod tests {
     }
 
     #[test]
+    fn test_snapshot_remaining() {
+        let mut buf = ByteBufferAccessor::new(20);
+        buf.write_int(1).unwrap();
+        buf.write_int(2).unwrap();
+        buf.write_int(3).unwrap();
+
+        buf.flip();
+        // Read the first int to advance position
+        assert_eq!(buf.read_int().unwrap(), 1);
+
+        // Snapshot remaining should have ints 2 and 3
+        let mut snapshot = buf.snapshot_remaining();
+        assert_eq!(snapshot.remaining(), 8);
+        assert_eq!(snapshot.position(), 0);
+        assert_eq!(snapshot.read_int().unwrap(), 2);
+        assert_eq!(snapshot.read_int().unwrap(), 3);
+        assert_eq!(snapshot.remaining(), 0);
+
+        // Original buffer should be unchanged
+        assert_eq!(buf.remaining(), 8);
+        assert_eq!(buf.read_int().unwrap(), 2);
+    }
+
+    #[test]
+    fn test_snapshot_remaining_empty() {
+        let mut buf = ByteBufferAccessor::from_bytes(vec![1, 2]);
+        buf.read_byte().unwrap();
+        buf.read_byte().unwrap();
+
+        let snapshot = buf.snapshot_remaining();
+        assert_eq!(snapshot.remaining(), 0);
+        assert!(snapshot.is_empty());
+    }
+
+    #[test]
     fn test_insufficient_data() {
         let mut buf = ByteBufferAccessor::from_bytes(vec![1, 2, 3]);
         assert!(buf.read_int().is_err());
+    }
+
+    /// Translated from Java ByteBufferAccessorTest.testReadArray.
+    /// Writes an array and an int, reads them back, then verifies error
+    /// message when reading beyond available bytes.
+    #[test]
+    fn test_read_array_error_message() {
+        let mut accessor = ByteBufferAccessor::new(1024);
+        let test_array: Vec<u8> = vec![0x4b, 0x61, 0x46];
+        accessor.write_byte_array(&test_array).unwrap();
+        accessor.write_int(12345).unwrap();
+        accessor.flip();
+
+        let test_array2 = accessor.read_array(3).unwrap();
+        assert_eq!(test_array, test_array2);
+        assert_eq!(12345, accessor.read_int().unwrap());
+
+        let err = accessor.read_array(3).unwrap_err();
+        assert_eq!(
+            "Error reading byte array of 3 byte(s): only 0 byte(s) available",
+            err.to_string()
+        );
+    }
+
+    /// Translated from Java ByteBufferAccessorTest.testReadString.
+    /// Writes a string's bytes, reads it back, then verifies error
+    /// message when reading beyond available bytes.
+    #[test]
+    fn test_read_string_error_message() {
+        let mut accessor = ByteBufferAccessor::new(1024);
+        let test_string = "ABC";
+        let test_array = test_string.as_bytes();
+        accessor.write_byte_array(test_array).unwrap();
+        accessor.flip();
+
+        assert_eq!("ABC", accessor.read_string(3).unwrap());
+
+        let err = accessor.read_string(2).unwrap_err();
+        assert_eq!(
+            "Error reading byte array of 2 byte(s): only 0 byte(s) available",
+            err.to_string()
+        );
     }
 }

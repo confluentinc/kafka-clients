@@ -16,6 +16,8 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Java package `org.apache.kafka.clients.consumer` → Rust module `clients::consumer`
    - Java class names (PascalCase) → Rust struct/enum names (PascalCase)
    - Java method names (camelCase) → Rust function names (snake_case)
+   - Java `Exception` → Rust `Error` (e.g. `TopicAuthorizationException` → `TopicAuthorizationError`)
+   - Java `throws` / `throw` → Rust `return Err(...)` (e.g. `maybeThrowAnyException` → `maybe_return_any_error`)
    - Preserve original architecture and logical structure
 3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
 4. **Comments and documentation**: Keep similar comments as the Java source,
@@ -50,7 +52,7 @@ Java source in `kafka/` directory (Apache Kafka 4.2)
 
 ## Development Workflow
 - **Build**: `cargo build`
-- **Test**: `cargo test`
+- **Test**: `cargo test`, run the timeout tool with timeout 10s by default when checking if single tests are timing out.
 - **Format**: `cargo xtask format`
 - **Format Check**: `cargo xtask format-check` (CI-friendly)
 - **Lint**: `cargo xtask lint` (runs clippy with warnings as errors)
