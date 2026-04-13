@@ -119,11 +119,8 @@ impl MockSelector {
 
     /// Simulate a server authentication failure.
     pub fn server_authentication_failed(&mut self, id: &str) {
-        let auth_failed = ChannelState::with_exception(
-            super::channel_state::State::AuthenticationFailed,
-            "Authentication failed",
-            None,
-        );
+        let auth_failed =
+            ChannelState::with_error(super::channel_state::State::AuthenticationFailed, "Authentication failed", None);
         self.disconnected.insert(id.to_string(), auth_failed);
         self.close_channel_sync(id);
     }

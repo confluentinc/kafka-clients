@@ -28,5 +28,28 @@ src/
 message-specs/          # 197 Kafka JSON RPC definitions copied from Apache Kafka 4.1
 build.rs                # Build script that generates Rust code before compilation
 tests/
-└── generated_messages_test.rs  # Integration tests for generated messages
+├── common/             # Mirrors org.apache.kafka.common
+│   ├── mod.rs          # Shared infra: re-exports library types for test-generated messages
+│   ├── cluster_config.rs   # ClusterConfig for integration tests
+│   ├── cluster_pool.rs     # Process-global pool of shared Kafka containers
+│   ├── kafka_cluster.rs    # Docker Kafka wrapper
+│   ├── test_context.rs     # Per-test isolation context
+│   ├── message/        # Tests for org.apache.kafka.common.message
+│   │   ├── main.rs
+│   │   ├── message_test.rs             # MessageTest.java
+│   │   ├── simple_example_message_test.rs
+│   │   ├── nullable_struct_message_test.rs
+│   │   ├── simple_arrays_message_test.rs
+│   │   ├── generated_messages_test.rs
+│   │   ├── message_round_trip_test.rs
+│   │   └── message_serialization_test.rs
+│   └── protocol/      # Tests for org.apache.kafka.common.protocol
+│       ├── main.rs
+│       ├── flexible_version_test.rs
+│       └── tagged_fields_test.rs
+└── integration/        # Integration tests (--features integration-tests)
+    ├── main.rs
+    ├── connection_test.rs
+    ├── api_versions_test.rs
+    └── metadata_test.rs
 ```

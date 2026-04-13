@@ -44,8 +44,20 @@ impl TestContext {
     pub async fn new(config: ClusterConfig) -> Self {
         let cluster = cluster_pool::get_or_create(&config).await;
         let thread_name = std::thread::current().name().unwrap_or("test").to_string();
+        // Sanitize thread name: Kafka topic names only allow [a-zA-Z0-9._-].
+        // Replace invalid characters (e.g. '::' from module paths) with '_'.
+        let sanitized: String = thread_name
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || c == '.' || c == '-' {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect();
         let suffix = random_suffix(4);
-        let prefix = format!("{thread_name}_{suffix}");
+        let prefix = format!("{sanitized}_{suffix}");
 
         Self { cluster, prefix, created_topics: Vec::new() }
     }

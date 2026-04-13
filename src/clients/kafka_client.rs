@@ -95,7 +95,7 @@ pub trait KafkaClient {
     /// * `node` - The node to check
     ///
     /// Returns an authentication error message if authentication has failed, `None` otherwise.
-    fn authentication_exception(&self, node: &Node) -> Option<String>;
+    fn authentication_error(&self, node: &Node) -> Option<String>;
 
     /// Queue up the given request for sending. Requests can only be sent on ready connections.
     ///

@@ -553,7 +553,7 @@ mod tests {
     /// Translated from Java `InFlightRequestsTest.testCompleteNextThrowsIfNoInFlights`.
     #[test]
     #[should_panic(expected = "There are no in-flight requests for node dest")]
-    fn test_complete_next_throws_if_no_in_flights() {
+    fn test_complete_next_panics_if_no_in_flights() {
         let mut in_flight = InFlightRequests::new(12);
         in_flight.complete_next("dest");
     }
@@ -561,7 +561,7 @@ mod tests {
     /// Translated from Java `InFlightRequestsTest.testCompleteLastSentThrowsIfNoInFlights`.
     #[test]
     #[should_panic(expected = "There are no in-flight requests for node dest")]
-    fn test_complete_last_sent_throws_if_no_in_flights() {
+    fn test_complete_last_sent_panics_if_no_in_flights() {
         let mut in_flight = InFlightRequests::new(12);
         in_flight.complete_last_sent("dest");
     }

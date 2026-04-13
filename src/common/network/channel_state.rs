@@ -73,35 +73,35 @@ impl fmt::Display for State {
     }
 }
 
-/// Channel state with optional exception and remote address information.
+/// Channel state with optional error and remote address information.
 ///
-/// For `AuthenticationFailed`, the exception message describes the failure reason.
+/// For `AuthenticationFailed`, the error message describes the failure reason.
 /// For other states, reusable constants are provided.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelState {
     state: State,
-    /// The exception message, if any (used for authentication failures).
-    exception: Option<String>,
+    /// The error message, if any (used for authentication failures).
+    error: Option<String>,
     /// The remote address string, if known.
     remote_address: Option<String>,
 }
 
 impl ChannelState {
-    /// Creates a new `ChannelState` with the given state, no exception, and no remote address.
+    /// Creates a new `ChannelState` with the given state, no error, and no remote address.
     pub fn new(state: State) -> Self {
-        Self { state, exception: None, remote_address: None }
+        Self { state, error: None, remote_address: None }
     }
 
     /// Creates a new `ChannelState` with the given state and remote address.
     pub fn with_remote_address(state: State, remote_address: &str) -> Self {
-        Self { state, exception: None, remote_address: Some(remote_address.to_string()) }
+        Self { state, error: None, remote_address: Some(remote_address.to_string()) }
     }
 
-    /// Creates a new `ChannelState` with the given state, exception message, and remote address.
-    pub fn with_exception(state: State, exception: &str, remote_address: Option<&str>) -> Self {
+    /// Creates a new `ChannelState` with the given state, error message, and remote address.
+    pub fn with_error(state: State, error: &str, remote_address: Option<&str>) -> Self {
         Self {
             state,
-            exception: Some(exception.to_string()),
+            error: Some(error.to_string()),
             remote_address: remote_address.map(|s| s.to_string()),
         }
     }
@@ -111,9 +111,9 @@ impl ChannelState {
         self.state
     }
 
-    /// Returns the exception message, if any.
-    pub fn exception(&self) -> Option<&str> {
-        self.exception.as_deref()
+    /// Returns the error message, if any.
+    pub fn error(&self) -> Option<&str> {
+        self.error.as_deref()
     }
 
     /// Returns the remote address, if known.
@@ -125,25 +125,23 @@ impl ChannelState {
 // Reusable constants for common states (matching Java's static final fields)
 
 /// Not connected state.
-pub const NOT_CONNECTED: ChannelState =
-    ChannelState { state: State::NotConnected, exception: None, remote_address: None };
+pub const NOT_CONNECTED: ChannelState = ChannelState { state: State::NotConnected, error: None, remote_address: None };
 /// Authenticate state.
-pub const AUTHENTICATE: ChannelState =
-    ChannelState { state: State::Authenticate, exception: None, remote_address: None };
+pub const AUTHENTICATE: ChannelState = ChannelState { state: State::Authenticate, error: None, remote_address: None };
 /// Ready state.
-pub const READY: ChannelState = ChannelState { state: State::Ready, exception: None, remote_address: None };
+pub const READY: ChannelState = ChannelState { state: State::Ready, error: None, remote_address: None };
 /// Expired state.
-pub const EXPIRED: ChannelState = ChannelState { state: State::Expired, exception: None, remote_address: None };
+pub const EXPIRED: ChannelState = ChannelState { state: State::Expired, error: None, remote_address: None };
 /// Failed send state.
-pub const FAILED_SEND: ChannelState = ChannelState { state: State::FailedSend, exception: None, remote_address: None };
+pub const FAILED_SEND: ChannelState = ChannelState { state: State::FailedSend, error: None, remote_address: None };
 /// Local close state.
-pub const LOCAL_CLOSE: ChannelState = ChannelState { state: State::LocalClose, exception: None, remote_address: None };
+pub const LOCAL_CLOSE: ChannelState = ChannelState { state: State::LocalClose, error: None, remote_address: None };
 
 impl fmt::Display for ChannelState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "ChannelState(state={}", self.state)?;
-        if let Some(ref exc) = self.exception {
-            write!(f, ", exception={exc}")?;
+        if let Some(ref err) = self.error {
+            write!(f, ", error={err}")?;
         }
         if let Some(ref addr) = self.remote_address {
             write!(f, ", remoteAddress={addr}")?;

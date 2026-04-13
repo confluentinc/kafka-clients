@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Invalid receive exception for Kafka network protocol.
+//! Invalid receive error for Kafka network protocol.
 //!
 //! Translated from `org.apache.kafka.common.network.InvalidReceiveException`.
 
@@ -24,12 +24,12 @@ use std::io;
 /// This occurs when the size header in a network receive is negative
 /// or exceeds the maximum allowed size.
 #[derive(Debug)]
-pub struct InvalidReceiveException {
+pub struct InvalidReceiveError {
     message: String,
 }
 
-impl InvalidReceiveException {
-    /// Creates a new `InvalidReceiveException` with the given message.
+impl InvalidReceiveError {
+    /// Creates a new `InvalidReceiveError` with the given message.
     pub fn new(message: impl Into<String>) -> Self {
         Self { message: message.into() }
     }
@@ -40,16 +40,16 @@ impl InvalidReceiveException {
     }
 }
 
-impl fmt::Display for InvalidReceiveException {
+impl fmt::Display for InvalidReceiveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}", self.message)
     }
 }
 
-impl std::error::Error for InvalidReceiveException {}
+impl std::error::Error for InvalidReceiveError {}
 
-impl From<InvalidReceiveException> for io::Error {
-    fn from(e: InvalidReceiveException) -> Self {
+impl From<InvalidReceiveError> for io::Error {
+    fn from(e: InvalidReceiveError) -> Self {
         io::Error::new(io::ErrorKind::InvalidData, e)
     }
 }

@@ -49,10 +49,11 @@ use super::host_resolver::HostResolver;
 use super::in_flight_requests::{InFlightRequest, InFlightRequests};
 use super::kafka_client::KafkaClient;
 use super::least_loaded_node::LeastLoadedNode;
-use super::metadata::{Metadata, MetadataError};
+use super::metadata::Metadata;
 use super::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use super::metadata_updater::MetadataUpdater;
 use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
+use crate::common::kafka_error::KafkaError;
 
 /// Polls a future to completion synchronously.
 ///
@@ -464,7 +465,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         now,
                         now,
                         false,
-                        Some("UnsupportedVersionException".to_string()),
+                        Some("UnsupportedVersionError".to_string()),
                         None,
                         None,
                     );
@@ -473,7 +474,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     } else if *client_request.api_key() == ApiKeys::METADATA {
                         self.handle_failed_request(
                             now,
-                            Some(MetadataError::Fatal("UnsupportedVersionException".to_string())),
+                            Some(KafkaError::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
                         );
                     }
                     return;
@@ -515,7 +516,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     now,
                     now,
                     false,
-                    Some("UnsupportedVersionException".to_string()),
+                    Some("UnsupportedVersionError".to_string()),
                     None,
                     None,
                 );
@@ -524,7 +525,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 } else if *client_request.api_key() == ApiKeys::METADATA {
                     self.handle_failed_request(
                         now,
-                        Some(MetadataError::Fatal("UnsupportedVersionException".to_string())),
+                        Some(KafkaError::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
                     );
                 }
             },
@@ -868,13 +869,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         match disconnect_state.state() {
             channel_state::State::AuthenticationFailed => {
-                let exception = disconnect_state.exception().unwrap_or("unknown").to_string();
-                self.connection_states.authentication_failed(node_id, now, exception.clone());
+                let auth_err = disconnect_state.error().unwrap_or("unknown").to_string();
+                self.connection_states.authentication_failed(node_id, now, auth_err.clone());
                 error!(
                     "Connection to node {} ({}) failed authentication due to: {}",
                     node_id,
                     disconnect_state.remote_address().unwrap_or("unknown"),
-                    exception
+                    auth_err
                 );
             },
             channel_state::State::Authenticate => {
@@ -900,7 +901,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.handle_server_disconnect(
             now,
             node_id,
-            disconnect_state.exception().map(|e| MetadataError::Fatal(e.to_string())),
+            disconnect_state
+                .error()
+                .map(|e| KafkaError::fatal(Errors::UnknownServerError, e.to_string())),
         );
     }
 
@@ -1109,20 +1112,20 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle a failed metadata request (DefaultMetadataUpdater).
-    fn handle_failed_request(&mut self, now: i64, maybe_fatal_exception: Option<MetadataError>) {
+    fn handle_failed_request(&mut self, now: i64, maybe_fatal_error: Option<KafkaError>) {
         if let Some(ref metadata) = self.metadata {
-            if let Some(exception) = maybe_fatal_exception {
-                metadata.fatal_error(exception);
+            if let Some(err) = maybe_fatal_error {
+                metadata.fatal_error(err);
             }
             metadata.failed_update(now);
             self.in_progress = None;
         } else if let Some(ref mut updater) = self.external_metadata_updater {
-            updater.handle_failed_request(now, maybe_fatal_exception);
+            updater.handle_failed_request(now, maybe_fatal_error);
         }
     }
 
     /// Handle server disconnect (DefaultMetadataUpdater).
-    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_exception: Option<MetadataError>) {
+    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<KafkaError>) {
         if let Some(metadata) = self.metadata.clone() {
             let cluster = metadata.fetch();
             if cluster.is_bootstrap_configured()
@@ -1136,13 +1139,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 self.handle_failed_request(now, None);
             }
 
-            if let Some(auth_exception) = maybe_auth_exception {
-                metadata.fatal_error(auth_exception);
+            if let Some(auth_error) = maybe_auth_error {
+                metadata.fatal_error(auth_error);
             }
 
             metadata.request_update(false);
         } else if let Some(ref mut updater) = self.external_metadata_updater {
-            updater.handle_server_disconnect(now, node_id, maybe_auth_exception);
+            updater.handle_server_disconnect(now, node_id, maybe_auth_error);
         }
     }
 
@@ -1207,9 +1210,9 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.connection_states.is_disconnected(node.id_string())
     }
 
-    fn authentication_exception(&self, node: &crate::common::Node) -> Option<String> {
+    fn authentication_error(&self, node: &crate::common::Node) -> Option<String> {
         self.connection_states
-            .authentication_exception(node.id_string())
+            .authentication_error(node.id_string())
             .map(|s| s.to_string())
     }
 
@@ -1452,9 +1455,9 @@ mod tests {
     use crate::api_versions_response_data::ApiVersionsResponseData;
     use crate::clients::host_resolver::HostResolver;
     use crate::clients::kafka_client::KafkaClient;
-    use crate::clients::metadata::MetadataError;
     use crate::clients::metadata_updater::MetadataUpdater;
     use crate::common::Node;
+    use crate::common::kafka_error::KafkaError;
     use crate::common::network::mock_selector::{DelayedReceive, MockSelector};
     use crate::common::network::network_receive::NetworkReceive;
     use crate::common::protocol::message::Message;
@@ -1522,15 +1525,9 @@ mod tests {
             i64::MAX
         }
 
-        fn handle_server_disconnect(
-            &mut self,
-            _now: i64,
-            _node_id: &str,
-            _maybe_auth_exception: Option<MetadataError>,
-        ) {
-        }
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<KafkaError>) {}
 
-        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_exception: Option<MetadataError>) {}
+        fn handle_failed_request(&mut self, _now: i64, _maybe_fatal_error: Option<KafkaError>) {}
 
         fn handle_successful_response(
             &mut self,
@@ -1551,7 +1548,7 @@ mod tests {
     struct TestMetadataUpdater {
         nodes: Vec<Node>,
         #[allow(dead_code)]
-        failure: Option<MetadataError>,
+        failure: Option<KafkaError>,
     }
 
     impl TestMetadataUpdater {
@@ -1561,7 +1558,7 @@ mod tests {
 
         /// Returns and clears the last failure.
         #[allow(dead_code)]
-        fn get_and_clear_failure(&mut self) -> Option<MetadataError> {
+        fn get_and_clear_failure(&mut self) -> Option<KafkaError> {
             self.failure.take()
         }
     }
@@ -1579,15 +1576,15 @@ mod tests {
             i64::MAX
         }
 
-        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_exception: Option<MetadataError>) {
-            if let Some(exception) = maybe_auth_exception {
-                self.failure = Some(exception);
+        fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, maybe_auth_error: Option<KafkaError>) {
+            if let Some(err) = maybe_auth_error {
+                self.failure = Some(err);
             }
         }
 
-        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_exception: Option<MetadataError>) {
-            if let Some(exception) = maybe_fatal_exception {
-                self.failure = Some(exception);
+        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<KafkaError>) {
+            if let Some(err) = maybe_fatal_error {
+                self.failure = Some(err);
             }
         }
 
@@ -3198,8 +3195,8 @@ mod tests {
         client.selector_mut().server_authentication_failed(node2.id_string());
         client.poll(0, now);
         assert!(
-            client.authentication_exception(&node2).is_some(),
-            "Expected authentication exception for node2"
+            client.authentication_error(&node2).is_some(),
+            "Expected authentication error for node2"
         );
 
         // Now provide a metadata response for node1
@@ -3477,7 +3474,7 @@ mod tests {
         client.poll(1, now);
         client.close_connection(node0.id_string());
 
-        // Poll without any connections should return without exceptions
+        // Poll without any connections should return without errors
         client.poll(0, now);
         assert!(!client.is_ready(node0, now));
         assert!(!client.is_ready(node1, now));

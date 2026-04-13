@@ -263,19 +263,19 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
             .get_mut(id)
             .unwrap_or_else(|| panic!("No entry found for connection {}", id));
         node_state.state = ConnectionState::Ready;
-        node_state.authentication_exception = None;
+        node_state.authentication_error = None;
         Self::reset_reconnect_backoff_inner(&self.reconnect_backoff, node_state);
         Self::reset_connection_setup_timeout_inner(&self.connection_setup_timeout, node_state);
         self.connecting_nodes.remove(id);
     }
 
     /// Enter the authentication failed state for the given node.
-    pub fn authentication_failed(&mut self, id: &str, now: i64, exception: String) {
+    pub fn authentication_failed(&mut self, id: &str, now: i64, error: String) {
         let node_state = self
             .node_state
             .get_mut(id)
             .unwrap_or_else(|| panic!("No entry found for connection {}", id));
-        node_state.authentication_exception = Some(exception);
+        node_state.authentication_error = Some(error);
         node_state.state = ConnectionState::AuthenticationFailed;
         node_state.last_connect_attempt_ms = now;
         Self::update_reconnect_backoff_inner(&self.reconnect_backoff, node_state);
@@ -306,9 +306,9 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         self.node_state.get(id).is_some_and(|s| s.state.is_disconnected())
     }
 
-    /// Return authentication exception message if an authentication error occurred.
-    pub fn authentication_exception(&self, id: &str) -> Option<&str> {
-        self.node_state.get(id).and_then(|s| s.authentication_exception.as_deref())
+    /// Return authentication error message if an authentication error occurred.
+    pub fn authentication_error(&self, id: &str) -> Option<&str> {
+        self.node_state.get(id).and_then(|s| s.authentication_error.as_deref())
     }
 
     /// Get the state of a given connection.
@@ -427,7 +427,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
 struct NodeConnectionState {
     host: String,
     state: ConnectionState,
-    authentication_exception: Option<String>,
+    authentication_error: Option<String>,
     last_connect_attempt_ms: i64,
     failed_attempts: i64,
     failed_connect_attempts: i64,
@@ -451,7 +451,7 @@ impl NodeConnectionState {
         Self {
             host,
             state,
-            authentication_exception: None,
+            authentication_error: None,
             last_connect_attempt_ms,
             failed_attempts: 0,
             failed_connect_attempts: 0,
@@ -777,7 +777,7 @@ mod tests {
             ConnectionState::AuthenticationFailed,
             connection_states.connection_state(NODE_ID1)
         );
-        assert!(connection_states.authentication_exception(NODE_ID1).is_some());
+        assert!(connection_states.authentication_error(NODE_ID1).is_some());
         assert!(!connection_states.has_ready_nodes(time.milliseconds()));
         assert!(!connection_states.can_connect(NODE_ID1, time.milliseconds()));
 
@@ -785,7 +785,7 @@ mod tests {
 
         assert!(connection_states.can_connect(NODE_ID1, time.milliseconds()));
         connection_states.ready(NODE_ID1);
-        assert!(connection_states.authentication_exception(NODE_ID1).is_none());
+        assert!(connection_states.authentication_error(NODE_ID1).is_none());
     }
 
     /// Translated from `ClusterConnectionStatesTest.testRemoveNode`

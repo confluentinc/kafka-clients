@@ -21,6 +21,7 @@ use std::fmt;
 
 use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
 use crate::common::feature::SupportedVersionRange;
+use crate::common::kafka_error::KafkaError;
 use crate::common::protocol::ApiKeys;
 use crate::common::requests::ApiVersionsResponse;
 
@@ -124,7 +125,7 @@ impl NodeApiVersions {
     ///
     /// # Errors
     /// Returns an error if the node does not support the given API key.
-    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, UnsupportedApiError> {
+    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, KafkaError> {
         self.latest_usable_version_in_range(api_key, api_key.oldest_version(), api_key.latest_version())
     }
 
@@ -138,11 +139,11 @@ impl NodeApiVersions {
         api_key: &ApiKeys,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
-    ) -> Result<i16, UnsupportedApiError> {
+    ) -> Result<i16, KafkaError> {
         let supported_version = self
             .supported_versions
             .get(api_key)
-            .ok_or_else(|| UnsupportedApiError(format!("The node does not support {}", api_key.name())))?;
+            .ok_or_else(|| KafkaError::unsupported_version(format!("The node does not support {}", api_key.name())))?;
 
         let mut allowed = ApiVersion::new();
         allowed.set_api_key(api_key.id());
@@ -152,7 +153,7 @@ impl NodeApiVersions {
         let intersect_version = ApiVersionsResponse::intersect(Some(supported_version), Some(&allowed));
         match intersect_version {
             Some(v) => Ok(v.max_version),
-            None => Err(UnsupportedApiError(format!(
+            None => Err(KafkaError::unsupported_version(format!(
                 "The node does not support {} with version in range [{},{}]. \
                  The supported range is [{},{}].",
                 api_key.name(),
@@ -275,20 +276,6 @@ impl fmt::Display for NodeApiVersions {
         write!(f, "{}", self.to_string_with_line_breaks(false))
     }
 }
-
-/// Error returned when an API version is unsupported.
-///
-/// Corresponds to `org.apache.kafka.common.errors.UnsupportedVersionException` in Java.
-#[derive(Debug, Clone)]
-pub struct UnsupportedApiError(pub String);
-
-impl fmt::Display for UnsupportedApiError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0)
-    }
-}
-
-impl std::error::Error for UnsupportedApiError {}
 
 #[cfg(test)]
 mod tests {

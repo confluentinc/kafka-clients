@@ -17,7 +17,7 @@
 //!
 //! Translated from `org.apache.kafka.common.network.NetworkReceive`.
 
-use super::invalid_receive_exception::InvalidReceiveException;
+use super::invalid_receive_error::InvalidReceiveError;
 use super::receive::Receive;
 use super::transport_layer::TransportLayer;
 
@@ -186,12 +186,10 @@ impl Receive for NetworkReceive {
                 if self.size_bytes_read == SIZE_LENGTH {
                     let receive_size = i32::from_be_bytes(self.size_buf);
                     if receive_size < 0 {
-                        return Err(
-                            InvalidReceiveException::new(format!("Invalid receive (size = {receive_size})")).into()
-                        );
+                        return Err(InvalidReceiveError::new(format!("Invalid receive (size = {receive_size})")).into());
                     }
                     if self.max_size != UNLIMITED && receive_size > self.max_size {
-                        return Err(InvalidReceiveException::new(format!(
+                        return Err(InvalidReceiveError::new(format!(
                             "Invalid receive (size = {receive_size} larger than {max_size})",
                             max_size = self.max_size,
                         ))
