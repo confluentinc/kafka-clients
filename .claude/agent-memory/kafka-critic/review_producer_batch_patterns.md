@@ -6,11 +6,11 @@ type: project
 
 ProducerBatch Phase 3 rewrite to use MemoryRecordsBuilder introduced two pattern categories:
 
-1. **Memory accounting asymmetry**: Per-record semaphore acquire includes batch header overhead (61 bytes) for every record, but batch-level release only counts it once. This is a systemic risk whenever per-record estimates are used for batch-level resource tracking. Java avoids this by managing memory at the buffer/batch level via BufferPool, not per-record.
+1. **Memory accounting asymmetry**: The per-batch allocation model (commit e51b9c6) fixed the N-1 batch header double-counting issue. However, `estimate_size()` still uses `DefaultRecord::record_size_upper_bound()` (record-only) instead of `DefaultRecordBatch::estimate_batch_size_upper_bound()` (record + 61-byte batch overhead). Java's `estimateSizeInBytesUpperBound` includes `RECORD_BATCH_OVERHEAD`. This causes under-accounting by 61 bytes when a single oversized record exceeds batch_size.
 
-**Why:** The Rust accumulator uses a different memory management approach (per-record Semaphore permits) than Java (BufferPool with whole-batch allocation). When adapting Java's `estimateSizeInBytesUpperBound` (designed for initial buffer sizing) to per-record permit accounting, the batch overhead gets double-counted.
+**Why:** The Rust accumulator originally used per-record estimates and was corrected to per-batch allocation matching Java. But the estimate function was not updated to include batch overhead, which Java's equivalent always includes.
 
-**How to apply:** When reviewing any size estimation used for resource accounting, verify that acquire and release are symmetric. Check that batch-level overhead is not included in per-record estimates unless the release path also accounts for it per-record.
+**How to apply:** When reviewing size estimation for memory allocation, verify the estimate matches Java's `AbstractRecords.estimateSizeInBytesUpperBound()` which for V2 is `RECORD_BATCH_OVERHEAD + recordSizeUpperBound()`. The existing Rust function `DefaultRecordBatch::estimate_batch_size_upper_bound()` correctly implements this.
 
 2. **Error swallowing via Option return**: When `MemoryRecordsBuilder::append()` returns Err (e.g., invalid timestamp), the error is converted to None, indistinguishable from "batch full." Java throws exceptions from append that propagate to callers. Watch for `Result -> Option` conversions that lose error information.
 
