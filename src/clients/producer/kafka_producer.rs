@@ -23,9 +23,13 @@ use crate::clients::producer::record::ProducerRecord;
 use crate::clients::producer::sender::{PartitionInfo, ProduceClient, Sender};
 use crate::common::TopicPartition;
 use crate::errors::{ErrorCode, KafkaError};
+use log::debug;
 use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
+
+/// Backoff between metadata retry attempts when a topic is first seen.
+const METADATA_RETRY_BACKOFF_MS: u64 = 500;
 
 struct ProducerInner<C: ProduceClient> {
     #[allow(dead_code)]
@@ -75,9 +79,13 @@ impl<C: ProduceClient> KafkaProducer<C> {
 
     /// Send a record to Kafka.
     ///
+    /// Fetches metadata for the topic if not already cached (matching Java's
+    /// `KafkaProducer.doSend()` which calls `waitOnMetadata()` before appending
+    /// to the accumulator), then copies the key/value/headers into the batch
+    /// buffer.
+    ///
     /// Returns a `SendFuture` that resolves to `RecordMetadata` when the record
-    /// is acknowledged by the broker. The key/value/headers are copied into the
-    /// batch buffer before this method returns, so the caller can drop the
+    /// is acknowledged by the broker. The caller can drop the
     /// `ProducerRecord` immediately after.
     pub async fn send(&self, record: &ProducerRecord<'_>) -> crate::errors::Result<SendFuture> {
         let topic = record.topic();
@@ -85,8 +93,24 @@ impl<C: ProduceClient> KafkaProducer<C> {
             return Err(KafkaError::new(ErrorCode::InvalidTopic, "topic must not be empty"));
         }
 
+        // Wait for metadata before appending to the accumulator, matching
+        // Java's KafkaProducer.doSend() -> waitOnMetadata() flow.
+        let partition_count = self.wait_on_metadata(topic).await?;
+
         // Use the partition hint or default to 0 (partitioner skipped per design).
         let partition = record.partition_hint().unwrap_or(0);
+
+        // Validate partition against known partition count.
+        if partition < 0 || partition >= partition_count {
+            return Err(KafkaError::new(
+                ErrorCode::InvalidArgument,
+                format!(
+                    "Invalid partition {} for topic '{}' with {} partition(s)",
+                    partition, topic, partition_count
+                ),
+            ));
+        }
+
         let tp = TopicPartition::new(topic.to_string(), partition);
 
         let now = std::time::SystemTime::now()
@@ -102,6 +126,44 @@ impl<C: ProduceClient> KafkaProducer<C> {
             .await?;
 
         Ok(result.future)
+    }
+
+    /// Waits for metadata to become available for the given topic.
+    ///
+    /// Corresponds to Java's `KafkaProducer.waitOnMetadata()`. On brokers with
+    /// `auto.create.topics.enable=true`, the first metadata request triggers
+    /// topic creation asynchronously, so this method retries until the topic
+    /// appears or `max_block` is exceeded.
+    ///
+    /// Returns the partition count for the topic.
+    async fn wait_on_metadata(&self, topic: &str) -> crate::errors::Result<i32> {
+        let max_wait = self.inner.config.max_block();
+        let deadline = tokio::time::Instant::now() + max_wait;
+
+        loop {
+            match self.inner.client.partitions_for(topic).await {
+                Ok(partitions) if !partitions.is_empty() => {
+                    return Ok(partitions.len() as i32);
+                },
+                Ok(_) => {
+                    debug!("Metadata for topic '{}' returned no partitions, retrying", topic);
+                },
+                Err(e) => {
+                    debug!("Metadata fetch for topic '{}' failed: {}, retrying", topic, e);
+                },
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+            if remaining.is_zero() {
+                return Err(KafkaError::new(
+                    ErrorCode::TimedOut,
+                    format!("Topic '{}' not present in metadata after {:?}", topic, max_wait),
+                ));
+            }
+
+            let sleep_duration = std::time::Duration::from_millis(METADATA_RETRY_BACKOFF_MS).min(remaining);
+            tokio::time::sleep(sleep_duration).await;
+        }
     }
 
     /// Block until all buffered records have been sent and acknowledged.
@@ -268,6 +330,74 @@ mod tests {
         assert_eq!(partitions.len(), 1);
         assert_eq!(partitions[0].topic, "test-topic");
         assert_eq!(partitions[0].partition, 0);
+
+        producer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_invalid_partition_rejected() {
+        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+
+        // The mock returns 1 partition (partition 0), so partition 1 is invalid.
+        let record = ProducerRecord::new("test-topic").partition(1).value(b"value");
+        let result = producer.send(&record).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ErrorCode::InvalidArgument);
+
+        producer.close().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn test_send_negative_partition_rejected() {
+        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+
+        let record = ProducerRecord::new("test-topic").partition(-1).value(b"value");
+        let result = producer.send(&record).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ErrorCode::InvalidArgument);
+
+        producer.close().await.unwrap();
+    }
+
+    /// Mock client that always returns empty partitions, simulating a topic
+    /// that does not exist.
+    struct EmptyMetadataMockClient;
+
+    #[async_trait]
+    impl ProduceClient for EmptyMetadataMockClient {
+        async fn send_produce_request(
+            &self,
+            _node_id: i32,
+            _acks: Acks,
+            _timeout: Duration,
+            _batches: Vec<(TopicPartition, Vec<u8>)>,
+        ) -> Result<Vec<PartitionResponse>, KafkaError> {
+            Ok(Vec::new())
+        }
+
+        async fn partitions_for(&self, _topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+            Ok(Vec::new())
+        }
+    }
+
+    #[tokio::test]
+    async fn test_wait_on_metadata_times_out() {
+        // Use a very short max_block so the test doesn't take long.
+        let config = ProducerConfig::builder()
+            .bootstrap_servers(vec!["localhost:9092".to_string()])
+            .batch_size(4096)
+            .linger_ms(0)
+            .buffer_memory(65536)
+            .max_block_ms(500) // 500ms timeout
+            .build()
+            .unwrap();
+
+        let producer = KafkaProducer::new(config, EmptyMetadataMockClient);
+
+        let record = ProducerRecord::new("nonexistent-topic").value(b"value");
+        let result = producer.send(&record).await;
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().code(), ErrorCode::TimedOut);
 
         producer.close().await.unwrap();
     }

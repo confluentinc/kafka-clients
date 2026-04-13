@@ -22,8 +22,10 @@
 use crate::clients::producer::accumulator::RecordAccumulator;
 use crate::clients::producer::config::{Acks, ProducerConfig};
 use crate::common::TopicPartition;
-use crate::errors::KafkaError;
+use crate::common::Uuid;
+use crate::errors::{ErrorCode, KafkaError};
 use async_trait::async_trait;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -70,6 +72,14 @@ pub trait ProduceClient: Send + Sync + 'static {
 
     /// Get partition metadata for a topic.
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+
+    /// Returns the cached topic name to topic ID mapping.
+    ///
+    /// Used by the Sender to populate topic IDs on ProduceRequest v13+
+    /// (KIP-516). Returns an empty map if no metadata has been fetched yet.
+    async fn topic_ids(&self) -> HashMap<String, Uuid> {
+        HashMap::new()
+    }
 }
 
 /// Background task that drains batches from the accumulator and sends them.
@@ -140,8 +150,12 @@ impl<C: ProduceClient> Sender<C> {
                                 batch.complete(r.base_offset, r.log_append_time, r.error.as_ref());
                             },
                             None => {
-                                // No response for this partition — treat as success with offset 0.
-                                batch.complete(0, 0, None);
+                                // No matching partition in the response — this is unexpected.
+                                let err = KafkaError::new(
+                                    ErrorCode::Unexpected,
+                                    format!("No response for partition {} in ProduceResponse", batch.tp()),
+                                );
+                                batch.complete(0, 0, Some(&err));
                             },
                         }
                         self.accumulator.release_memory(permits);

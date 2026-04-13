@@ -81,6 +81,9 @@ struct KafkaProduceClientInner {
     /// Cleared when a disconnection is detected so that the next request
     /// re-negotiates versions on the fresh connection.
     cached_api_versions: HashMap<String, ApiVersionsResponse>,
+    /// Cached topic IDs from metadata responses, used for produce request v13+
+    /// (KIP-516) which identifies topics by UUID instead of name.
+    topic_ids: HashMap<String, crate::common::Uuid>,
 }
 
 impl KafkaProduceClient {
@@ -102,6 +105,7 @@ impl KafkaProduceClient {
                 correlation_counter: AtomicI32::new(1),
                 connected_nodes: HashMap::new(),
                 cached_api_versions: HashMap::new(),
+                topic_ids: HashMap::new(),
             }),
         }
     }
@@ -124,6 +128,7 @@ impl KafkaProduceClient {
                 correlation_counter: AtomicI32::new(1),
                 connected_nodes: HashMap::new(),
                 cached_api_versions: HashMap::new(),
+                topic_ids: HashMap::new(),
             }),
         }
     }
@@ -155,9 +160,10 @@ impl KafkaProduceClientInner {
             KafkaError::with_source(ErrorCode::Network, "Poll failed while cleaning up stale channel", e)
         })?;
 
-        // Invalidate cached API versions for this node since the connection
-        // is being re-established.
+        // Invalidate cached state for this node since the connection is being
+        // re-established.
         self.cached_api_versions.remove(node_id);
+        self.topic_ids.clear();
 
         // Initiate connection
         self.selector
@@ -296,12 +302,17 @@ impl KafkaProduceClientInner {
 
     /// Builds a `ProduceRequestData` from the raw batch data.
     ///
+    /// Sets both topic name and topic ID on each `TopicProduceData`, matching
+    /// Java's `Sender.sendProduceRequest()` which sets both via
+    /// `.setTopicId(topicId).setName(tp.topic())`.
+    ///
     /// Takes `batches` by value so that the byte vectors can be moved through
     /// without any cloning.
     fn build_produce_request_data(
         acks: &Acks,
         timeout: Duration,
         batches: Vec<(TopicPartition, Vec<u8>)>,
+        topic_ids: &HashMap<String, crate::common::Uuid>,
     ) -> ProduceRequestData {
         // Group batches by topic name, moving the data rather than cloning.
         let mut topics: HashMap<String, Vec<(i32, Vec<u8>)>> = HashMap::new();
@@ -319,8 +330,11 @@ impl KafkaProduceClientInner {
                 partition_data_list.push(pd);
             }
 
+            let topic_id = topic_ids.get(&topic_name).copied().unwrap_or(crate::common::Uuid::ZERO_UUID);
+
             let mut td = TopicProduceData::new();
             td.set_name(topic_name);
+            td.set_topic_id(topic_id);
             td.set_partition_data(partition_data_list);
             topic_data_list.push(td);
         }
@@ -338,6 +352,10 @@ impl KafkaProduceClientInner {
     }
 
     /// Sends a produce request and returns the parsed partition responses.
+    ///
+    /// Metadata is expected to have been fetched by the caller (KafkaProducer)
+    /// before this method is called, matching Java's architecture where
+    /// `KafkaProducer.doSend()` calls `waitOnMetadata()` before appending.
     async fn send_produce(
         &mut self,
         node_id: &str,
@@ -363,15 +381,16 @@ impl KafkaProduceClientInner {
         let topic_partitions: Vec<TopicPartition> = batches.iter().map(|(tp, _)| tp.clone()).collect();
 
         // Build the produce request data, moving batch bytes without cloning.
-        let data = Self::build_produce_request_data(&acks, timeout, batches);
+        // Pass cached topic IDs so that v13+ requests include them.
+        let data = Self::build_produce_request_data(&acks, timeout, batches, &self.topic_ids);
 
-        // Build the request using the builder
+        // Build the request using the builder — no v12 cap; the full negotiated
+        // version (up to what broker and client both support) is used.
+        // Version 13 (KIP-516) uses topic IDs which we now populate.
         let request_builder = ProduceRequestBuilder::new(data);
 
-        // Use the minimum of the broker's max version and our builder's max version
-        let version = max_produce_version
-            .min(request_builder.latest_allowed_version())
-            .max(request_builder.oldest_allowed_version());
+        let max_version = max_produce_version.min(request_builder.latest_allowed_version());
+        let version = max_version.max(request_builder.oldest_allowed_version());
 
         let request = request_builder
             .build_version(version)
@@ -405,6 +424,14 @@ impl KafkaProduceClientInner {
                 .collect());
         }
 
+        // Capture a snapshot of topic_id -> topic_name for resolving the
+        // response.  For v13+ the response identifies topics by UUID, not
+        // name, so we need the reverse mapping.  This mirrors Java's
+        // `Sender.sendProduceRequest()` which snapshots `metadata.topicNames()`
+        // before sending.
+        let topic_names: HashMap<crate::common::Uuid, String> =
+            self.topic_ids.iter().map(|(name, id)| (*id, name.clone())).collect();
+
         // Wait for the response
         let payload = self.poll_for_response(node_id).await?;
 
@@ -417,11 +444,26 @@ impl KafkaProduceClientInner {
             return Err(KafkaError::new(ErrorCode::Network, "Expected Produce response"));
         };
 
-        // Convert the response data to PartitionResponses
+        // Convert the response data to PartitionResponses.
+        // For v13+ (KIP-516), the response may identify topics by UUID
+        // instead of name.  Match Java's Sender.handleProduceResponse():
+        //   if topicId != ZERO_UUID && topicNames.containsKey(topicId):
+        //       use topicNames[topicId]
+        //   else:
+        //       use response.name
         let mut results = Vec::new();
         for topic_response in &produce_response.data().responses {
+            let topic_name = if topic_response.topic_id != crate::common::Uuid::ZERO_UUID {
+                topic_names
+                    .get(&topic_response.topic_id)
+                    .cloned()
+                    .unwrap_or_else(|| topic_response.name.clone())
+            } else {
+                topic_response.name.clone()
+            };
+
             for partition_response in &topic_response.partition_responses {
-                let tp = TopicPartition::new(topic_response.name.clone(), partition_response.index);
+                let tp = TopicPartition::new(topic_name.clone(), partition_response.index);
 
                 let error = Errors::for_code(partition_response.error_code);
                 let error = if error == Errors::None {
@@ -498,6 +540,14 @@ impl KafkaProduceClientInner {
         let mut partitions = Vec::new();
         for topic_metadata in &metadata_response.data().topics {
             let topic_name = topic_metadata.name.as_deref().unwrap_or("");
+
+            // Cache the topic ID for this topic.  The MetadataResponse
+            // includes the topic UUID assigned by the broker, which is
+            // needed for ProduceRequest v13+ (KIP-516).
+            if topic_metadata.topic_id != crate::common::Uuid::ZERO_UUID && !topic_name.is_empty() {
+                self.topic_ids.insert(topic_name.to_string(), topic_metadata.topic_id);
+            }
+
             for partition_metadata in &topic_metadata.partitions {
                 partitions.push(PartitionInfo {
                     topic: topic_name.to_string(),
@@ -548,5 +598,10 @@ impl ProduceClient for KafkaProduceClient {
     async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
         let mut inner = self.inner.lock().await;
         inner.fetch_partitions(topic).await
+    }
+
+    async fn topic_ids(&self) -> std::collections::HashMap<String, crate::common::Uuid> {
+        let inner = self.inner.lock().await;
+        inner.topic_ids.clone()
     }
 }
