@@ -29,3 +29,13 @@
 - **Expected**: Error injection should persist until explicitly cleared, matching Java behavior.
 - **Actual**: Error was consumed after first use via `Option::take()`.
 - **Resolution**: Changed from `take()` to `as_ref()` + `.clone()` in all 4 error-checking paths. Updated setter doc comments to describe persistent semantics. Fixed tests to assert persistent errors (second call also fails) and verify clearing with `set_*_error(None)`. Fixed in commit 600755f.
+
+## [RESOLVED] Issue: External test_auto_complete_mock omits clear() verification present in Java
+
+- **File**: `tests/clients/producer/mock_producer_test.rs`
+- **Severity**: Missing Requirement
+- **Java Reference**: `kafka/clients/src/test/java/org/apache/kafka/clients/producer/MockProducerTest.java:81-82`
+- **Description**: The Java `testAutoCompleteMock` test (line 73-83) sends one record, then calls `producer.clear()` and asserts `producer.history().size() == 0`. The Rust external test sent two records and verified history had both, but never called `clear()` and never verified that clearing the history works.
+- **Expected**: The external `test_auto_complete_mock` should mirror the Java test: send one record, check history contains it, call `producer.clear()`, assert history is empty.
+- **Actual**: `clear()` was never called in the external test.
+- **Resolution**: Restructured the test to match the Java flow: send one record, verify history contains it, call `clear()`, assert history is empty. Kept an additional second-record send to verify history rebuilds after clear. Fixed in commit 31e3b66.
