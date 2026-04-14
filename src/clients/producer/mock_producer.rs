@@ -234,7 +234,11 @@ impl MockProducer {
         inner.completions.is_empty()
     }
 
-    /// Set an error to be returned on the next [`send()`](Producer::send) call.
+    /// Set an error to be returned on every [`send()`](Producer::send) call
+    /// until cleared.
+    ///
+    /// The error persists across calls until explicitly cleared with `None`,
+    /// matching Java's `MockProducer.sendException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
     pub fn set_send_error(&self, error: Option<KafkaError>) {
@@ -242,7 +246,11 @@ impl MockProducer {
         inner.send_error = error;
     }
 
-    /// Set an error to be returned on the next [`flush()`](Producer::flush) call.
+    /// Set an error to be returned on every [`flush()`](Producer::flush) call
+    /// until cleared.
+    ///
+    /// The error persists across calls until explicitly cleared with `None`,
+    /// matching Java's `MockProducer.flushException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
     pub fn set_flush_error(&self, error: Option<KafkaError>) {
@@ -250,8 +258,11 @@ impl MockProducer {
         inner.flush_error = error;
     }
 
-    /// Set an error to be returned on the next
-    /// [`partitions_for()`](Producer::partitions_for) call.
+    /// Set an error to be returned on every
+    /// [`partitions_for()`](Producer::partitions_for) call until cleared.
+    ///
+    /// The error persists across calls until explicitly cleared with `None`,
+    /// matching Java's `MockProducer.partitionsForException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
     pub fn set_partitions_for_error(&self, error: Option<KafkaError>) {
@@ -259,7 +270,11 @@ impl MockProducer {
         inner.partitions_for_error = error;
     }
 
-    /// Set an error to be returned on the next [`close()`](Producer::close) call.
+    /// Set an error to be returned on every [`close()`](Producer::close) call
+    /// until cleared.
+    ///
+    /// The error persists across calls until explicitly cleared with `None`,
+    /// matching Java's `MockProducer.closeException` field semantics.
     ///
     /// Pass `None` to clear a previously set error.
     pub fn set_close_error(&self, error: Option<KafkaError>) {
@@ -299,8 +314,8 @@ impl Producer for MockProducer {
             return Err(KafkaError::illegal_state("MockProducer is already closed."));
         }
 
-        if let Some(err) = inner.send_error.take() {
-            return Err(err);
+        if let Some(err) = inner.send_error.as_ref() {
+            return Err(err.clone());
         }
 
         let partition = record.partition().unwrap_or(0);
@@ -346,8 +361,8 @@ impl Producer for MockProducer {
             return Err(KafkaError::illegal_state("MockProducer is already closed."));
         }
 
-        if let Some(err) = inner.flush_error.take() {
-            return Err(err);
+        if let Some(err) = inner.flush_error.as_ref() {
+            return Err(err.clone());
         }
 
         while let Some(mut completion) = inner.completions.pop_front() {
@@ -366,10 +381,10 @@ impl Producer for MockProducer {
     /// Returns `Err(KafkaError)` if a partitions_for error has been injected
     /// via [`set_partitions_for_error()`](MockProducer::set_partitions_for_error).
     fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-        let mut inner = self.inner.lock().unwrap();
+        let inner = self.inner.lock().unwrap();
 
-        if let Some(err) = inner.partitions_for_error.take() {
-            return Err(err);
+        if let Some(err) = inner.partitions_for_error.as_ref() {
+            return Err(err.clone());
         }
 
         Ok(inner.cluster.partitions_for_topic(topic).to_vec())
@@ -386,8 +401,8 @@ impl Producer for MockProducer {
     fn close(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
 
-        if let Some(err) = inner.close_error.take() {
-            return Err(err);
+        if let Some(err) = inner.close_error.as_ref() {
+            return Err(err.clone());
         }
 
         inner.closed = true;
@@ -732,7 +747,10 @@ mod tests {
         assert_eq!(1, f3.get().await.unwrap().offset());
     }
 
-    /// Tests `set_send_error` injection.
+    /// Tests `set_send_error` injection persists until cleared.
+    ///
+    /// Matches Java behavior: `sendException` is a field that persists until
+    /// manually set to `null`.
     #[test]
     fn test_set_send_error() {
         let producer = MockProducer::with_auto_complete(true);
@@ -741,12 +759,20 @@ mod tests {
         let result = producer.send(make_record("t", "k", "v"));
         assert!(result.is_err());
 
-        // Error should be consumed — next send succeeds
+        // Error persists — second send also fails
         let result = producer.send(make_record("t", "k", "v"));
-        assert!(result.is_ok());
+        assert!(result.is_err(), "Error should persist until cleared");
+
+        // Clear the error — next send succeeds
+        producer.set_send_error(None);
+        let result = producer.send(make_record("t", "k", "v"));
+        assert!(result.is_ok(), "Send should succeed after clearing error");
     }
 
-    /// Tests `set_flush_error` injection.
+    /// Tests `set_flush_error` injection persists until cleared.
+    ///
+    /// Matches Java behavior: `flushException` is a field that persists until
+    /// manually set to `null`.
     #[test]
     fn test_set_flush_error() {
         let producer = MockProducer::with_auto_complete(true);
@@ -755,12 +781,20 @@ mod tests {
         let result = producer.flush();
         assert!(result.is_err());
 
-        // Error should be consumed — next flush succeeds
+        // Error persists — second flush also fails
         let result = producer.flush();
-        assert!(result.is_ok());
+        assert!(result.is_err(), "Error should persist until cleared");
+
+        // Clear the error — next flush succeeds
+        producer.set_flush_error(None);
+        let result = producer.flush();
+        assert!(result.is_ok(), "Flush should succeed after clearing error");
     }
 
-    /// Tests `set_partitions_for_error` injection.
+    /// Tests `set_partitions_for_error` injection persists until cleared.
+    ///
+    /// Matches Java behavior: `partitionsForException` is a field that persists
+    /// until manually set to `null`.
     #[test]
     fn test_set_partitions_for_error() {
         let producer = MockProducer::with_auto_complete(true);
@@ -769,12 +803,20 @@ mod tests {
         let result = producer.partitions_for("t");
         assert!(result.is_err());
 
-        // Error should be consumed — next call succeeds
+        // Error persists — second call also fails
         let result = producer.partitions_for("t");
-        assert!(result.is_ok());
+        assert!(result.is_err(), "Error should persist until cleared");
+
+        // Clear the error — next call succeeds
+        producer.set_partitions_for_error(None);
+        let result = producer.partitions_for("t");
+        assert!(result.is_ok(), "partitions_for should succeed after clearing error");
     }
 
-    /// Tests `set_close_error` injection.
+    /// Tests `set_close_error` injection persists until cleared.
+    ///
+    /// Matches Java behavior: `closeException` is a field that persists until
+    /// manually set to `null`.
     #[test]
     fn test_set_close_error() {
         let producer = MockProducer::with_auto_complete(true);
@@ -783,9 +825,15 @@ mod tests {
         let result = producer.close();
         assert!(result.is_err());
 
-        // Error was consumed, close now succeeds
+        // Error persists — second close also fails
         let result = producer.close();
-        assert!(result.is_ok());
+        assert!(result.is_err(), "Error should persist until cleared");
+        assert!(!producer.closed(), "Producer should not be closed when error persists");
+
+        // Clear the error — close now succeeds
+        producer.set_close_error(None);
+        let result = producer.close();
+        assert!(result.is_ok(), "Close should succeed after clearing error");
         assert!(producer.closed());
     }
 
