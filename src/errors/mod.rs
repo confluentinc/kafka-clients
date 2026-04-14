@@ -62,6 +62,8 @@ pub enum ErrorCode {
     InvalidArgument,
     /// Corresponds to IllegalStateException.
     IllegalState,
+    /// Corresponds to UnsupportedVersionException.
+    UnsupportedVersion,
 }
 
 /// The primary error type for the Kafka client library.

@@ -303,6 +303,25 @@ fn handle_produce_response(
             batch.complete(0, 0, Some(&err));
             accumulator.release_memory(permits);
         }
+    } else if response.version_mismatch().is_some() {
+        warn!(
+            "Cancelled request {} due to a version mismatch with node {}",
+            response,
+            response.destination()
+        );
+        let err = KafkaError::new(
+            ErrorCode::UnsupportedVersion,
+            format!(
+                "Unsupported version for request to node {}: {}",
+                response.destination(),
+                response.version_mismatch().unwrap_or("unknown")
+            ),
+        );
+        for (_, batch) in batches.drain() {
+            let permits = batch.permits_acquired();
+            batch.complete(0, 0, Some(&err));
+            accumulator.release_memory(permits);
+        }
     } else if response.has_response() {
         trace!(
             "Received produce response from node {} with correlation id {}",
@@ -371,6 +390,7 @@ fn errors_to_error_code(error: &Errors) -> ErrorCode {
         Errors::CorruptMessage => ErrorCode::CorruptRecord,
         Errors::TopicAuthorizationFailed => ErrorCode::TopicAuthorization,
         Errors::InvalidTopicException => ErrorCode::InvalidTopic,
+        Errors::UnsupportedVersion => ErrorCode::UnsupportedVersion,
         _ => ErrorCode::Unexpected,
     }
 }
@@ -573,8 +593,8 @@ mod tests {
                     );
                     client_response.on_complete();
                     responses.push(client_response);
-                } else {
-                    // Default success response.
+                } else if request.expect_response() {
+                    // Default success response (acks != 0).
                     let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
                     let response_body =
                         build_produce_response(TOPIC_NAME, 0, offset, Errors::None.code(), current_time_ms());
@@ -589,6 +609,22 @@ mod tests {
                         None,
                         None,
                         Some(response_body),
+                    );
+                    client_response.on_complete();
+                    responses.push(client_response);
+                } else {
+                    // acks=0: no response body expected, complete without a response body.
+                    let header = self.build_response_header();
+                    let mut client_response = ClientResponse::new(
+                        header,
+                        request.take_callback(),
+                        request.destination(),
+                        now_ms,
+                        now_ms,
+                        false,
+                        None,
+                        None,
+                        None, // no response body for acks=0
                     );
                     client_response.on_complete();
                     responses.push(client_response);
@@ -986,6 +1022,58 @@ mod tests {
 
         let result = future.await;
         assert!(result.is_ok(), "acks=0 should succeed without response body");
+        let metadata = result.unwrap();
+        assert_eq!(metadata.offset(), 0, "acks=0 should complete with offset 0");
+    }
+
+    /// Test that a version mismatch response fails all batches with
+    /// `ErrorCode::UnsupportedVersion`.
+    ///
+    /// This covers the `version_mismatch` branch in `handle_produce_response`
+    /// where `response.version_mismatch().is_some()` is true.
+    ///
+    /// Matches Java's `Sender.handleProduceResponse()` version_mismatch branch
+    /// (Sender.java:594-598).
+    #[tokio::test]
+    async fn test_version_mismatch_fails_batch() {
+        let config = test_config();
+        let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
+        let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+        let future = append_to_accumulator(&accumulator, &tp0, "key", "value").await;
+        accumulator.flush_all().await;
+
+        // Directly test handle_produce_response with a version-mismatch response.
+        let batches = accumulator.drain().await;
+        assert_eq!(batches.len(), 1);
+
+        let mut records_by_partition: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
+        for batch in batches {
+            let tp = batch.tp().clone();
+            records_by_partition.insert(tp, batch);
+        }
+
+        let header = RequestHeader::new(&crate::common::protocol::ApiKeys::PRODUCE, 0, "test", 1).unwrap();
+        let mut response = ClientResponse::new(
+            header,
+            None,
+            "0",
+            current_time_ms(),
+            current_time_ms(),
+            false,                                       // not disconnected
+            Some("UnsupportedVersionError".to_string()), // version mismatch
+            None,
+            None, // no response body
+        );
+
+        handle_produce_response(&mut response, records_by_partition, &accumulator, current_time_ms());
+
+        let result = future.await;
+        assert!(result.is_err(), "Version mismatch should cause error");
+        assert_eq!(
+            result.unwrap_err().code(),
+            ErrorCode::UnsupportedVersion,
+            "Error code should be UnsupportedVersion"
+        );
     }
 
     /// Test that the sender's main `run()` loop terminates when `running`
@@ -1053,6 +1141,7 @@ mod tests {
             ErrorCode::TopicAuthorization
         );
         assert_eq!(errors_to_error_code(&Errors::InvalidTopicException), ErrorCode::InvalidTopic);
+        assert_eq!(errors_to_error_code(&Errors::UnsupportedVersion), ErrorCode::UnsupportedVersion);
     }
 
     /// Test multiple records in the same batch — all should complete with
