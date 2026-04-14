@@ -289,6 +289,7 @@ pub unsafe extern "C" fn kafka_producer_destroy(producer: *mut CProducer) {
 /// - `value`: Pointer to value bytes, or null if `value_len` is `-1`.
 /// - `value_len`: Value length in bytes, or `-1` for no value.
 /// - `out_future`: Non-null pointer where the future handle will be written.
+///   On error, `*out_future` is set to null.
 ///
 /// # Returns
 ///
@@ -318,7 +319,12 @@ pub unsafe extern "C" fn kafka_producer_send(
 
     let record = match unsafe { build_record(topic, partition, key, key_len, value, value_len) } {
         Ok(r) => r,
-        Err(code) => return code,
+        Err(code) => {
+            unsafe {
+                *out_future = std::ptr::null_mut();
+            }
+            return code;
+        },
     };
 
     let producer_mtx = unsafe { producer_ref(producer) };
@@ -330,7 +336,12 @@ pub unsafe extern "C" fn kafka_producer_send(
             }
             SUCCESS
         },
-        Err(e) => i32::from(e.code()),
+        Err(e) => {
+            unsafe {
+                *out_future = std::ptr::null_mut();
+            }
+            i32::from(e.code())
+        },
     }
 }
 
@@ -339,7 +350,10 @@ pub unsafe extern "C" fn kafka_producer_send(
 /// Iterates over `records[0..count]`, calling send for each. Writes futures
 /// to `out_futures[0..count]`. On the first error, stops and returns the
 /// error code; futures for successfully sent records prior to the error are
-/// still valid and must be destroyed by the caller.
+/// still valid and must be destroyed by the caller. Remaining slots
+/// (`out_futures[i..count]` where `i` is the failing record index) are set
+/// to null so that callers can safely iterate the full array and destroy
+/// non-null entries without tracking the success count separately.
 ///
 /// # Parameters
 ///
@@ -377,20 +391,41 @@ pub unsafe extern "C" fn kafka_producer_send_batch(
         let rec = unsafe { &*records.add(i) };
 
         if rec.topic.is_null() {
+            // Null-fill remaining slots (including this one) so the caller
+            // can safely iterate the full array and destroy non-null entries.
+            for j in i..count {
+                unsafe {
+                    *out_futures.add(j) = std::ptr::null_mut();
+                }
+            }
             return i32::from(Errors::InvalidRequest.code());
         }
 
         let record =
             match unsafe { build_record(rec.topic, rec.partition, rec.key, rec.key_len, rec.value, rec.value_len) } {
                 Ok(r) => r,
-                Err(code) => return code,
+                Err(code) => {
+                    for j in i..count {
+                        unsafe {
+                            *out_futures.add(j) = std::ptr::null_mut();
+                        }
+                    }
+                    return code;
+                },
             };
 
         match producer_send(&guard, record) {
             Ok(future) => unsafe {
                 *out_futures.add(i) = box_future(future);
             },
-            Err(e) => return i32::from(e.code()),
+            Err(e) => {
+                for j in i..count {
+                    unsafe {
+                        *out_futures.add(j) = std::ptr::null_mut();
+                    }
+                }
+                return i32::from(e.code());
+            },
         }
     }
 
@@ -1115,6 +1150,98 @@ mod tests {
         }
     }
 
+    #[test]
+    fn test_send_batch_partial_failure_nulls_remaining_slots() {
+        // Use a non-auto-complete producer and close it after the first send
+        // succeeds, so that subsequent sends fail.
+        let producer = kafka_producer_new_mock(true);
+        let topic1 = CString::new("topic1").unwrap();
+        let topic2 = CString::new("topic2").unwrap();
+        let topic3 = CString::new("topic3").unwrap();
+
+        // Pre-fill all slots with a non-null sentinel to verify the function
+        // actively nulls them on failure.
+        let sentinel = 0xDEAD_BEEF_usize as *mut CFutureRecordMetadata;
+        let mut futures: [*mut CFutureRecordMetadata; 3] = [sentinel, sentinel, sentinel];
+
+        // First record has a valid topic, second has a null topic to trigger
+        // a mid-batch failure at index 1.
+        let records = [
+            CProducerRecord {
+                topic: topic1.as_ptr(),
+                partition: -1,
+                key: std::ptr::null(),
+                key_len: -1,
+                value: std::ptr::null(),
+                value_len: -1,
+            },
+            CProducerRecord {
+                topic: std::ptr::null(), // This will cause failure at index 1
+                partition: -1,
+                key: std::ptr::null(),
+                key_len: -1,
+                value: std::ptr::null(),
+                value_len: -1,
+            },
+            CProducerRecord {
+                topic: topic3.as_ptr(),
+                partition: -1,
+                key: std::ptr::null(),
+                key_len: -1,
+                value: std::ptr::null(),
+                value_len: -1,
+            },
+        ];
+
+        unsafe {
+            let result = kafka_producer_send_batch(producer, records.as_ptr(), 3, futures.as_mut_ptr());
+            assert_ne!(result, SUCCESS, "Batch should fail at record 1");
+
+            // futures[0] should be valid (first record succeeded)
+            assert!(!futures[0].is_null(), "First future should be valid");
+
+            // futures[1] and futures[2] should be null (failure at index 1
+            // should null-fill remaining slots)
+            assert!(futures[1].is_null(), "Slot at failure index should be null");
+            assert!(futures[2].is_null(), "Slot after failure index should be null");
+
+            // Clean up the successfully sent future
+            kafka_future_destroy(futures[0]);
+            kafka_producer_destroy(producer);
+        }
+
+        // Also test failure at the very first record: ALL slots should be null.
+        let producer2 = kafka_producer_new_mock(true);
+        let mut futures2: [*mut CFutureRecordMetadata; 2] = [sentinel, sentinel];
+        let records2 = [
+            CProducerRecord {
+                topic: std::ptr::null(), // Fails at index 0
+                partition: -1,
+                key: std::ptr::null(),
+                key_len: -1,
+                value: std::ptr::null(),
+                value_len: -1,
+            },
+            CProducerRecord {
+                topic: topic2.as_ptr(),
+                partition: -1,
+                key: std::ptr::null(),
+                key_len: -1,
+                value: std::ptr::null(),
+                value_len: -1,
+            },
+        ];
+
+        unsafe {
+            let result = kafka_producer_send_batch(producer2, records2.as_ptr(), 2, futures2.as_mut_ptr());
+            assert_ne!(result, SUCCESS, "Batch should fail at record 0");
+            assert!(futures2[0].is_null(), "First slot should be null on failure at index 0");
+            assert!(futures2[1].is_null(), "Second slot should be null on failure at index 0");
+
+            kafka_producer_destroy(producer2);
+        }
+    }
+
     // -- Future tests -------------------------------------------------------
 
     #[test]
@@ -1562,7 +1689,10 @@ mod tests {
         unsafe {
             kafka_producer_close(producer);
 
-            let mut future: *mut CFutureRecordMetadata = std::ptr::null_mut();
+            // Use a non-null sentinel to prove the function actively sets
+            // *out_future to null on error, rather than leaving it unchanged.
+            let sentinel = 0xDEAD_BEEF_usize as *mut CFutureRecordMetadata;
+            let mut future: *mut CFutureRecordMetadata = sentinel;
             let result = kafka_producer_send(
                 producer,
                 topic.as_ptr(),
@@ -1574,7 +1704,7 @@ mod tests {
                 &mut future,
             );
             assert_ne!(result, SUCCESS, "Send after close should fail");
-            assert!(future.is_null(), "Future should be null on error");
+            assert!(future.is_null(), "Future should be set to null on error");
 
             kafka_producer_destroy(producer);
         }
