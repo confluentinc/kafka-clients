@@ -19,3 +19,13 @@
 - **Expected**: Either (a) `close` should take `&self` and use interior mutability (a `closed` flag behind a `Mutex` or `AtomicBool`) to prevent concurrent use, matching how Java does it internally, or (b) the doc comment about `Arc<dyn Producer>` should be removed if the intended usage pattern is `Box<dyn Producer>` or owned access only.
 - **Actual**: `close(&mut self)` and `close_with_timeout(&mut self, timeout: Duration)` require exclusive access, contradicting the `Arc<dyn Producer>` design stated in the doc.
 - **Resolution**: Changed both methods from `&mut self` to `&self`. Updated the Design Notes doc comment to explain that implementors use interior mutability (AtomicBool/Mutex) to manage the closed flag. Fixed in commit 81e0616.
+
+## [RESOLVED] Issue: Error injection uses take semantics instead of Java's persistent semantics
+
+- **File**: `src/clients/producer/mock_producer.rs`
+- **Severity**: Behavior Mismatch
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/producer/MockProducer.java:296-298` (sendException), `350-352` (flushException), `359-361` (partitionsForException), `417-419` (closeException)
+- **Description**: All four error injection fields (`send_error`, `flush_error`, `partitions_for_error`, `close_error`) used `Option::take()` in their respective methods (`send()`, `flush()`, `partitions_for()`, `close()`). This consumed the error on first use -- only the first call after setting an error would fail, and subsequent calls would succeed. In Java, these are public fields that persist until manually set to `null`.
+- **Expected**: Error injection should persist until explicitly cleared, matching Java behavior.
+- **Actual**: Error was consumed after first use via `Option::take()`.
+- **Resolution**: Changed from `take()` to `as_ref()` + `.clone()` in all 4 error-checking paths. Updated setter doc comments to describe persistent semantics. Fixed tests to assert persistent errors (second call also fails) and verify clearing with `set_*_error(None)`. Fixed in commit 600755f.
