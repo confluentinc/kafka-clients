@@ -9,6 +9,10 @@ edition = "2024"
 [features]
 skip-generated = []
 integration-tests = []
+ffi = []
+
+[lib]
+crate-type = ["lib", "cdylib"]
 
 [dependencies]
 regex = "1.0"

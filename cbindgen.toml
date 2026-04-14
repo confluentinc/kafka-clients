@@ -1,0 +1,14 @@
+language = "C"
+include_guard = "CONFLUENT_KAFKA_RUST_H"
+no_includes = true
+sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
+
+[defines]
+"feature = ffi" = "CONFLUENT_KAFKA_FFI"
+
+[fn]
+prefix = ""
+args = "Vertical"
+
+[enum]
+prefix_with_name = true

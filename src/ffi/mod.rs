@@ -12,21 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fail on warnings in development
-#![deny(warnings)]
+//! C FFI layer for the Kafka producer API.
+//!
+//! This module exposes the Producer API via C-callable `extern "C"` functions,
+//! allowing non-Rust code (C, C++, Python via ctypes, etc.) to use the Kafka
+//! producer.
+//!
+//! All types exposed across the FFI boundary use fixed-width types (`i32`,
+//! `i64`, `bool`, pointers) for cross-platform portability. Lengths and counts
+//! use `i32`, and negative values (-1) signal "not set" for optional fields.
+//!
+//! # Feature Gate
+//!
+//! This module is only compiled when the `ffi` feature is enabled.
 
-pub mod clients;
-pub mod common;
-
-#[cfg(feature = "ffi")]
-pub mod ffi;
-
-// Include generated message definitions
-#[cfg(not(feature = "skip-generated"))]
-#[allow(dead_code, clippy::all)]
-mod generated {
-    include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
-}
-
-#[cfg(not(feature = "skip-generated"))]
-pub use generated::*;
+pub mod producer;
