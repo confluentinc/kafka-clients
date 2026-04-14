@@ -30,10 +30,9 @@ use std::net::SocketAddr;
 use std::sync::Arc;
 
 use confluent_kafka_rust::clients::api_versions::ApiVersions;
-use confluent_kafka_rust::clients::metadata::Metadata;
 use confluent_kafka_rust::clients::network_client::NetworkClient;
 use confluent_kafka_rust::clients::producer::config::Acks;
-use confluent_kafka_rust::clients::producer::{KafkaProducer, ProducerConfig, ProducerRecord};
+use confluent_kafka_rust::clients::producer::{KafkaProducer, ProducerConfig, ProducerMetadata, ProducerRecord};
 use confluent_kafka_rust::common::internals::ClusterResourceListeners;
 use confluent_kafka_rust::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
 use confluent_kafka_rust::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
@@ -50,17 +49,18 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
         .unwrap_or_else(|_| panic!("Failed to parse bootstrap servers address: {bootstrap_servers}"))
 }
 
-/// Create a `NetworkClient` and shared `Metadata` connected to the test cluster.
-fn create_network_client(bootstrap_servers: &str) -> (NetworkClient, Arc<Metadata>) {
+/// Create a `NetworkClient` and shared `ProducerMetadata` connected to the test cluster.
+fn create_network_client(bootstrap_servers: &str) -> (NetworkClient, Arc<ProducerMetadata>) {
     let addr = parse_bootstrap_addr(bootstrap_servers);
 
-    let metadata = Arc::new(Metadata::new(
+    let metadata = Arc::new(ProducerMetadata::new(
         50,      // refresh_backoff_ms
         5000,    // refresh_backoff_max_ms
         300_000, // metadata_expire_ms
+        60_000,  // metadata_idle_ms
         ClusterResourceListeners::new(),
     ));
-    metadata.bootstrap(vec![addr]);
+    metadata.metadata().bootstrap(vec![addr]);
 
     let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
     let selector = Selector::new(USE_DEFAULT_BUFFER_SIZE, NO_IDLE_TIMEOUT_MS, channel_builder);
@@ -69,7 +69,7 @@ fn create_network_client(bootstrap_servers: &str) -> (NetworkClient, Arc<Metadat
 
     let client = NetworkClient::with_metadata(
         selector,
-        Arc::clone(&metadata),
+        Arc::clone(metadata.metadata()),
         "integration-producer-test",
         5,    // max_in_flight_requests_per_connection
         50,   // reconnect_backoff_ms

@@ -17,10 +17,10 @@
 //! Corresponds to org.apache.kafka.clients.producer.KafkaProducer.
 
 use crate::clients::kafka_client::KafkaClient;
-use crate::clients::metadata::Metadata;
 use crate::clients::producer::accumulator::RecordAccumulator;
 use crate::clients::producer::batch::SendFuture;
 use crate::clients::producer::config::ProducerConfig;
+use crate::clients::producer::producer_metadata::ProducerMetadata;
 use crate::clients::producer::record::ProducerRecord;
 use crate::clients::producer::sender::Sender;
 use crate::common::TopicPartition;
@@ -31,14 +31,19 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
-/// Backoff between metadata retry attempts when a topic is first seen.
-const METADATA_RETRY_BACKOFF_MS: u64 = 500;
+/// Returns the current time in milliseconds since the Unix epoch.
+fn current_time_ms() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as i64
+}
 
 struct ProducerInner {
     #[allow(dead_code)]
     config: Arc<ProducerConfig>,
     accumulator: Arc<RecordAccumulator>,
-    metadata: Arc<Metadata>,
+    metadata: Arc<ProducerMetadata>,
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Flag shared with the Sender to signal shutdown.
     running: Arc<AtomicBool>,
@@ -61,14 +66,21 @@ impl Clone for KafkaProducer {
 }
 
 impl KafkaProducer {
-    /// Create a new producer with the given config and network client.
+    /// Create a new producer with the given config, network client, and metadata.
     ///
     /// The `client` is moved into the `Sender` which owns it exclusively (no
     /// shared lock). The `metadata` is shared between the producer and sender
-    /// for partition lookups.
+    /// for partition lookups and topic tracking.
     ///
     /// Spawns a background sender task immediately.
-    pub fn new<C: KafkaClient + Send + 'static>(config: ProducerConfig, client: C, metadata: Arc<Metadata>) -> Self {
+    ///
+    /// Corresponds to Java's `KafkaProducer` constructor which takes a
+    /// `ProducerMetadata` shared between the producer and sender.
+    pub fn new<C: KafkaClient + Send + 'static>(
+        config: ProducerConfig,
+        client: C,
+        metadata: Arc<ProducerMetadata>,
+    ) -> Self {
         let config = Arc::new(config);
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let running = Arc::new(AtomicBool::new(true));
@@ -161,9 +173,9 @@ impl KafkaProducer {
     /// Corresponds to Java's `KafkaProducer.waitOnMetadata(String topic,
     /// Integer partition, long nowMs, long maxWaitMs)`.
     ///
-    /// Uses the shared `Metadata` cache to look up topic partition counts.
-    /// When the topic is not yet known, blocks until the metadata is updated
-    /// or `max_block` is exceeded.
+    /// Uses `ProducerMetadata` to track the topic and wait for metadata
+    /// version changes. The background sender drives `client.poll()` which
+    /// triggers `DefaultMetadataUpdater` to send metadata requests.
     ///
     /// When `partition` is `Some(p)`, the method also waits until the
     /// partition count grows to include `p`, supporting online partition
@@ -171,27 +183,18 @@ impl KafkaProducer {
     ///
     /// Returns the partition count for the topic.
     async fn wait_on_metadata(&self, topic: &str, partition: Option<i32>) -> crate::errors::Result<i32> {
-        // Check the metadata cache first. If the topic is already known and
-        // the requested partition falls within the cached count, return
-        // immediately without waiting.
-        if let Some(count) = self.partition_count_from_metadata(topic) {
-            let partition_satisfied = match partition {
-                Some(p) => p < count,
-                None => true,
-            };
-            if partition_satisfied {
-                return Ok(count);
-            }
-        }
+        let now = current_time_ms();
+        self.inner.metadata.add(topic, now);
 
         let max_wait = self.inner.config.max_block();
-        let deadline = tokio::time::Instant::now() + max_wait;
-
-        // Request a metadata update for this topic.
-        self.inner.metadata.request_update(false);
+        let max_wait_ms = max_wait.as_millis() as i64;
+        let start = tokio::time::Instant::now();
 
         loop {
-            // Check current metadata snapshot.
+            // Check if the topic partition count is already known and sufficient.
+            // This check before await_update matches Java's pattern where
+            // partitionCount is checked after awaitUpdate returns, but also
+            // handles the case where metadata was pre-populated before send().
             if let Some(count) = self.partition_count_from_metadata(topic) {
                 let partition_satisfied = match partition {
                     Some(p) => p < count,
@@ -210,17 +213,19 @@ impl KafkaProducer {
                 debug!("Metadata for topic '{}' not yet available, retrying", topic);
             }
 
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            if remaining.is_zero() {
+            // Request a metadata update for this topic.
+            let version = self.inner.metadata.request_update_for_topic(topic);
+
+            // Check remaining time.
+            let elapsed = start.elapsed().as_millis() as i64;
+            let remaining = max_wait_ms - elapsed;
+            if remaining <= 0 {
                 let msg = format!("Topic '{}' not present in metadata after {:?}", topic, max_wait);
                 return Err(KafkaError::new(ErrorCode::TimedOut, msg));
             }
 
-            let sleep_duration = std::time::Duration::from_millis(METADATA_RETRY_BACKOFF_MS).min(remaining);
-            tokio::time::sleep(sleep_duration).await;
-
-            // Request another update.
-            self.inner.metadata.request_update(false);
+            // Wait for the metadata version to advance.
+            self.inner.metadata.await_update(version, remaining).await?;
         }
     }
 
@@ -236,6 +241,14 @@ impl KafkaProducer {
         // Give the sender time to drain the flushed batches.
         tokio::task::yield_now().await;
         Ok(())
+    }
+
+    /// Returns a reference to the shared `ProducerMetadata`.
+    ///
+    /// Used by callers who need direct access to the producer's metadata
+    /// (e.g. for integration tests or manual topic tracking).
+    pub fn metadata(&self) -> &Arc<ProducerMetadata> {
+        &self.inner.metadata
     }
 
     /// Gracefully shut down the producer.
@@ -263,7 +276,6 @@ mod tests {
     use crate::clients::client_response::ClientResponse;
     use crate::clients::kafka_client::KafkaClient;
     use crate::clients::least_loaded_node::LeastLoadedNode;
-    use crate::clients::metadata::Metadata;
     use crate::clients::{ClientRequest, RequestCompletionHandler};
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::node::Node;
@@ -473,25 +485,29 @@ mod tests {
         }
     }
 
-    /// Create a test Metadata instance pre-populated with a topic.
-    fn test_metadata_with(topic_partitions: &HashMap<String, i32>) -> Arc<Metadata> {
-        let metadata = Arc::new(Metadata::new(50, 50, 5000, ClusterResourceListeners::new()));
+    /// Create a test ProducerMetadata instance pre-populated with topics.
+    fn test_metadata_with(topic_partitions: &HashMap<String, i32>) -> Arc<ProducerMetadata> {
+        let metadata = Arc::new(ProducerMetadata::new(50, 50, 5000, 60_000, ClusterResourceListeners::new()));
+        let now = current_time_ms();
+        for topic in topic_partitions.keys() {
+            metadata.add(topic, now);
+        }
         let metadata_response = crate::common::requests::request_test_utils::metadata_update_with(1, topic_partitions);
-        metadata.update_with_current_request_version(&metadata_response, false, 0);
+        metadata.update_with_current_request_version(&metadata_response, false, now);
         metadata
     }
 
-    /// Create a test Metadata instance with a single topic having the given
-    /// number of partitions.
-    fn test_metadata(topic: &str, num_partitions: i32) -> Arc<Metadata> {
+    /// Create a test ProducerMetadata instance with a single topic having the
+    /// given number of partitions.
+    fn test_metadata(topic: &str, num_partitions: i32) -> Arc<ProducerMetadata> {
         let mut topics = HashMap::new();
         topics.insert(topic.to_string(), num_partitions);
         test_metadata_with(&topics)
     }
 
-    /// Create an empty Metadata instance (no topics known).
-    fn empty_metadata() -> Arc<Metadata> {
-        Arc::new(Metadata::new(50, 50, 5000, ClusterResourceListeners::new()))
+    /// Create an empty ProducerMetadata instance (no topics known).
+    fn empty_metadata() -> Arc<ProducerMetadata> {
+        Arc::new(ProducerMetadata::new(50, 50, 5000, 60_000, ClusterResourceListeners::new()))
     }
 
     fn test_config() -> ProducerConfig {

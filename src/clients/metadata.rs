@@ -50,7 +50,25 @@ use super::metadata_snapshot::MetadataSnapshot;
 ///
 /// Corresponds to Java's `Metadata.retainTopic()` override pattern used by subclasses.
 /// Parameters: `(topic_name, is_internal, now_ms) -> should_retain`.
-type RetainTopicFn = dyn Fn(&str, bool, i64) -> bool + Send + Sync;
+pub type RetainTopicFn = dyn Fn(&str, bool, i64) -> bool + Send + Sync;
+
+/// Type alias for the metadata request builder override function.
+///
+/// Corresponds to Java's `Metadata.newMetadataRequestBuilder()` override pattern used
+/// by subclasses (e.g., `ProducerMetadata`).
+type MetadataRequestBuilderFn = dyn Fn() -> MetadataRequestBuilder + Send + Sync;
+
+/// Type alias for the new-topics metadata request builder override function.
+///
+/// Corresponds to Java's `Metadata.newMetadataRequestBuilderForNewTopics()` override.
+type MetadataRequestBuilderForNewTopicsFn = dyn Fn() -> Option<MetadataRequestBuilder> + Send + Sync;
+
+/// Type alias for the update listener function, called after each metadata update.
+///
+/// Corresponds to Java's `ProducerMetadata.update()` override pattern where the
+/// subclass intercepts metadata responses to clear the new-topics set.
+/// Parameters: `(response: &MetadataResponse, is_partial_update: bool)`.
+pub type MetadataUpdateListenerFn = dyn Fn(&MetadataResponse, bool) + Send + Sync;
 
 /// A class encapsulating some of the logic around metadata.
 ///
@@ -75,6 +93,26 @@ pub struct Metadata {
     ///
     /// Corresponds to Java's override of `newMetadataRequestBuilderForNewTopics()`.
     enable_partial_updates: bool,
+    /// Optional override for `new_metadata_request_builder()`.
+    ///
+    /// Corresponds to Java's `ProducerMetadata.newMetadataRequestBuilder()` which
+    /// returns a request for the tracked topic set instead of all topics.
+    metadata_request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    /// Optional override for `new_metadata_request_builder_for_new_topics()`.
+    ///
+    /// Corresponds to Java's `ProducerMetadata.newMetadataRequestBuilderForNewTopics()`
+    /// which returns a request for the new-topics set only.
+    metadata_request_builder_for_new_topics_fn: Option<Box<MetadataRequestBuilderForNewTopicsFn>>,
+    /// Notifier used to wake tasks waiting for metadata updates.
+    ///
+    /// Corresponds to Java's `notifyAll()` in `Metadata.update()`, `Metadata.close()`,
+    /// and `Metadata.fatalError()`.
+    notify: std::sync::Arc<tokio::sync::Notify>,
+    /// Optional listener called after each metadata update.
+    ///
+    /// Corresponds to Java's `ProducerMetadata.update()` override which intercepts
+    /// responses to clear the new-topics set.
+    update_listener_fn: Option<Box<MetadataUpdateListenerFn>>,
 }
 
 /// Inner mutable state of `Metadata`, protected by a mutex.
@@ -223,21 +261,30 @@ impl Metadata {
             }),
             retain_topic_fn: None,
             enable_partial_updates: false,
+            metadata_request_builder_fn: None,
+            metadata_request_builder_for_new_topics_fn: None,
+            notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            update_listener_fn: None,
         }
     }
 
-    /// Creates a new `Metadata` instance with custom retain topic behavior and
-    /// optional partial update support.
+    /// Creates a new `Metadata` instance with custom overrides for topic retention,
+    /// request builders, and update listeners.
     ///
     /// This corresponds to the Java pattern of subclassing `Metadata` to override
-    /// `retainTopic()` and `newMetadataRequestBuilderForNewTopics()`.
+    /// `retainTopic()`, `newMetadataRequestBuilder()`, `newMetadataRequestBuilderForNewTopics()`,
+    /// and `update()`.
     ///
     /// # Arguments
     /// * `retain_topic_fn` - Optional function to override topic retention behavior.
     ///   When `None`, the default (retain all topics) is used.
     /// * `enable_partial_updates` - When `true`, `newMetadataRequestBuilderForNewTopics()`
     ///   returns a builder, enabling partial metadata requests.
-    #[cfg(test)]
+    /// * `metadata_request_builder_fn` - Optional override for `new_metadata_request_builder()`.
+    /// * `metadata_request_builder_for_new_topics_fn` - Optional override for
+    ///   `new_metadata_request_builder_for_new_topics()`.
+    /// * `update_listener_fn` - Optional listener called after each metadata update.
+    #[allow(clippy::too_many_arguments)]
     pub fn with_overrides(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
@@ -245,6 +292,9 @@ impl Metadata {
         cluster_resource_listeners: ClusterResourceListeners,
         retain_topic_fn: Option<Box<RetainTopicFn>>,
         enable_partial_updates: bool,
+        metadata_request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+        metadata_request_builder_for_new_topics_fn: Option<Box<MetadataRequestBuilderForNewTopicsFn>>,
+        update_listener_fn: Option<Box<MetadataUpdateListenerFn>>,
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
@@ -277,6 +327,10 @@ impl Metadata {
             }),
             retain_topic_fn,
             enable_partial_updates,
+            metadata_request_builder_fn,
+            metadata_request_builder_for_new_topics_fn,
+            notify: std::sync::Arc::new(tokio::sync::Notify::new()),
+            update_listener_fn,
         }
     }
 
@@ -599,6 +653,19 @@ impl Metadata {
             "Updated cluster metadata updateVersion {} to {}",
             inner.update_version, inner.metadata_snapshot
         );
+
+        // Drop the lock before calling the update listener to avoid holding
+        // the lock across user-supplied closures.
+        drop(inner);
+
+        // Invoke the update listener (corresponds to Java's
+        // ProducerMetadata.update() which clears new-topics after super.update()).
+        if let Some(ref listener) = self.update_listener_fn {
+            listener(response, is_partial_update);
+        }
+
+        // Notify all waiters (corresponds to Java's notifyAll() in Metadata.update()).
+        self.notify.notify_waiters();
     }
 
     /// Updates the partition-leadership info in the metadata.
@@ -1016,9 +1083,13 @@ impl Metadata {
     }
 
     /// Propagate a fatal error which affects the ability to fetch metadata.
+    ///
+    /// Corresponds to Java's `Metadata.fatalError()` which also calls `notifyAll()`.
     pub fn fatal_error(&self, error: KafkaError) {
         let mut inner = self.inner.lock().unwrap();
         inner.fatal_err = Some(error);
+        drop(inner);
+        self.notify.notify_waiters();
     }
 
     /// Returns the current metadata update version.
@@ -1034,9 +1105,13 @@ impl Metadata {
     }
 
     /// Close this metadata instance to indicate that metadata updates are no longer possible.
+    ///
+    /// Corresponds to Java's `Metadata.close()` which also calls `notifyAll()`.
     pub fn close(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.is_closed = true;
+        drop(inner);
+        self.notify.notify_waiters();
     }
 
     /// Check if this metadata instance has been closed.
@@ -1059,7 +1134,7 @@ impl Metadata {
             is_partial_update = true;
         }
         if request.is_none() {
-            request = Some(Self::new_metadata_request_builder());
+            request = Some(self.new_metadata_request_builder());
             is_partial_update = false;
         }
 
@@ -1072,19 +1147,29 @@ impl Metadata {
 
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and all active topics.
-    fn new_metadata_request_builder() -> MetadataRequestBuilder {
-        MetadataRequestBuilder::all_topics()
+    ///
+    /// If a `metadata_request_builder_fn` override is set (e.g. by `ProducerMetadata`),
+    /// it is used instead of the default all-topics builder.
+    fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
+        if let Some(ref f) = self.metadata_request_builder_fn {
+            f()
+        } else {
+            MetadataRequestBuilder::all_topics()
+        }
     }
 
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and any uncached topics, otherwise `None` if the functionality is not supported.
     ///
-    /// The base implementation returns `None`. When `enable_partial_updates` is set,
-    /// returns a full metadata request builder instead (simulating the Java subclass
-    /// override pattern used by `ConsumerMetadata`).
+    /// If a `metadata_request_builder_for_new_topics_fn` override is set (e.g. by
+    /// `ProducerMetadata`), it is used. Otherwise, the base implementation returns
+    /// `None`, except when `enable_partial_updates` is set, in which case it returns
+    /// the full metadata request builder.
     fn new_metadata_request_builder_for_new_topics(&self) -> Option<MetadataRequestBuilder> {
-        if self.enable_partial_updates {
-            Some(Self::new_metadata_request_builder())
+        if let Some(ref f) = self.metadata_request_builder_for_new_topics_fn {
+            f()
+        } else if self.enable_partial_updates {
+            Some(self.new_metadata_request_builder())
         } else {
             None
         }
@@ -1100,6 +1185,14 @@ impl Metadata {
     pub fn fetch_cluster_resource(&self) -> ClusterResource {
         let inner = self.inner.lock().unwrap();
         inner.metadata_snapshot.cluster_resource()
+    }
+
+    /// Returns a reference to the internal `Notify` used for waking waiters
+    /// after metadata updates, fatal errors, or close.
+    ///
+    /// Used by `ProducerMetadata.await_update()` to wait for version changes.
+    pub fn notify(&self) -> &std::sync::Arc<tokio::sync::Notify> {
+        &self.notify
     }
 }
 
@@ -2253,6 +2346,9 @@ mod tests {
             ClusterResourceListeners::new(),
             None,
             true, // enable partial updates
+            None,
+            None,
+            None,
         );
 
         assert!(!metadata.update_requested());
@@ -2483,6 +2579,9 @@ mod tests {
                 retain_topics_clone.lock().unwrap().contains(topic)
             })),
             false,
+            None,
+            None,
+            None,
         );
 
         // Initialize a metadata instance with two topic variants "old" and "keep". Both will be retained.
@@ -2683,6 +2782,9 @@ mod tests {
                 retain_topics_clone.lock().unwrap().contains(topic)
             })),
             false,
+            None,
+            None,
+            None,
         );
 
         // Initialize a metadata instance with two topics. Both will be retained.

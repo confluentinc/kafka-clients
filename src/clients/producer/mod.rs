@@ -18,10 +18,12 @@ pub mod accumulator;
 pub mod batch;
 pub mod config;
 pub mod kafka_producer;
+pub mod producer_metadata;
 pub mod record;
 pub mod sender;
 
 pub use batch::SendFuture;
 pub use config::{Acks, ProducerConfig, ProducerConfigBuilder};
 pub use kafka_producer::KafkaProducer;
+pub use producer_metadata::ProducerMetadata;
 pub use record::{Header, ProducerRecord, RecordMetadata};

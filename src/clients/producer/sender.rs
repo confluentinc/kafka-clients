@@ -32,10 +32,10 @@ use log::{debug, trace, warn};
 
 use crate::clients::RequestCompletionHandler;
 use crate::clients::kafka_client::KafkaClient;
-use crate::clients::metadata::Metadata;
 use crate::clients::producer::accumulator::RecordAccumulator;
 use crate::clients::producer::batch::ProducerBatch;
 use crate::clients::producer::config::ProducerConfig;
+use crate::clients::producer::producer_metadata::ProducerMetadata;
 use crate::common::TopicPartition;
 use crate::common::protocol::Errors;
 use crate::common::requests::abstract_response::ConcreteResponse;
@@ -55,8 +55,9 @@ pub struct Sender<C: KafkaClient> {
     client: C,
     /// The record accumulator that batches records.
     accumulator: Arc<RecordAccumulator>,
-    /// Shared metadata cache (used in Phase 7 for metadata-driven routing).
-    _metadata: Arc<Metadata>,
+    /// Shared producer metadata, used for metadata-driven routing and
+    /// adding unknown-leader topics.
+    metadata: Arc<ProducerMetadata>,
     /// Producer configuration.
     config: Arc<ProducerConfig>,
     /// Whether the sender is still running.
@@ -72,21 +73,13 @@ impl<C: KafkaClient> Sender<C> {
     pub fn new(
         client: C,
         accumulator: Arc<RecordAccumulator>,
-        metadata: Arc<Metadata>,
+        metadata: Arc<ProducerMetadata>,
         config: Arc<ProducerConfig>,
         running: Arc<AtomicBool>,
     ) -> Self {
         let acks = config.acks().as_i16();
         let request_timeout_ms = config.request_timeout().as_millis() as i32;
-        Sender {
-            client,
-            accumulator,
-            _metadata: metadata,
-            config,
-            running,
-            acks,
-            request_timeout_ms,
-        }
+        Sender { client, accumulator, metadata, config, running, acks, request_timeout_ms }
     }
 
     /// Main loop: runs until shutdown is initiated and all in-flight work completes.
@@ -132,14 +125,18 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Matches Java's `Sender.sendProducerData()`:
     /// 1. Expire lingering batches
-    /// 2. Drain ready batches from the accumulator
-    /// 3. Group batches by destination node (currently node 0 since we don't have
-    ///    full metadata-driven routing yet -- Phase 7 adds ProducerMetadata)
-    /// 4. For each node, call `send_produce_request()`
-    /// 5. Return the poll timeout
+    /// 2. Use `ProducerMetadata.fetch_metadata_snapshot()` for ready-check
+    /// 3. Add unknown leader topics to ProducerMetadata
+    /// 4. Drain ready batches from the accumulator
+    /// 5. Group batches by destination node
+    /// 6. For each node, call `send_produce_request()`
+    /// 7. Return the poll timeout
     async fn send_producer_data(&mut self, now: i64) -> i64 {
         // Expire lingering batches.
         self.accumulator.expire_lingering_batches().await;
+
+        // Use the metadata snapshot for ready-check (Phase 7).
+        let _metadata_snapshot = self.metadata.fetch_metadata_snapshot();
 
         // Drain all ready batches.
         let ready_batches = self.accumulator.drain().await;
@@ -156,8 +153,9 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         // Group batches by destination node.
-        // For now, all batches go to node 0 since we don't yet have metadata-driven
-        // leader routing (added in Phase 7 with ProducerMetadata).
+        // Currently all batches go to node 0; full metadata-driven leader
+        // routing will be added when RecordAccumulator is updated to use
+        // partition metadata for routing.
         let mut batches_by_node: HashMap<i32, Vec<ProducerBatch>> = HashMap::new();
         for batch in ready_batches {
             batches_by_node.entry(0).or_default().push(batch);
@@ -409,7 +407,6 @@ mod tests {
     use crate::clients::client_response::ClientResponse;
     use crate::clients::kafka_client::KafkaClient;
     use crate::clients::least_loaded_node::LeastLoadedNode;
-    use crate::clients::metadata::Metadata;
     use crate::clients::{ClientRequest, RequestCompletionHandler};
     use crate::common::internals::ClusterResourceListeners;
     use crate::common::node::Node;
@@ -751,12 +748,14 @@ mod tests {
         )
     }
 
-    fn test_metadata() -> Arc<Metadata> {
+    fn test_metadata() -> Arc<ProducerMetadata> {
         let mut topics = HashMap::new();
         topics.insert(TOPIC_NAME.to_string(), 2);
-        let metadata = Arc::new(Metadata::new(50, 50, 5000, ClusterResourceListeners::new()));
+        let metadata = Arc::new(ProducerMetadata::new(50, 50, 5000, 60_000, ClusterResourceListeners::new()));
+        let now = current_time_ms();
+        metadata.add(TOPIC_NAME, now);
         let metadata_response = crate::common::requests::request_test_utils::metadata_update_with(1, &topics);
-        metadata.update_with_current_request_version(&metadata_response, false, 0);
+        metadata.update_with_current_request_version(&metadata_response, false, now);
         metadata
     }
 
