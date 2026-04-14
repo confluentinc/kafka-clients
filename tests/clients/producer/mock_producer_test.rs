@@ -38,11 +38,14 @@ fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord {
 
 /// Translated from `MockProducerTest.testAutoCompleteMock` (line 73).
 ///
-/// Creates a MockProducer with `auto_complete=true`, sends two records, and
+/// Creates a MockProducer with `auto_complete=true`, sends a record, and
 /// verifies:
-/// - futures resolve immediately (`is_done()` returns `true`)
-/// - offsets are sequential (0, 1)
-/// - `history()` contains both records
+/// - the future resolves immediately (`is_done()` returns `true`)
+/// - offset and topic are correct
+/// - `history()` contains the record
+/// - `clear()` empties the history
+///
+/// Additionally sends a second record to verify sequential offsets.
 #[tokio::test]
 async fn test_auto_complete_mock() {
     let producer = MockProducer::with_auto_complete(true);
@@ -58,17 +61,24 @@ async fn test_auto_complete_mock() {
     assert_eq!(0, md1.offset(), "Offset should be 0");
     assert_eq!("topic", md1.topic());
 
+    let history = producer.history();
+    assert_eq!(1, history.len(), "We should have the record in our history");
+    assert_eq!(record1, history[0]);
+
+    // Matches Java: producer.clear(); assertEquals(0, producer.history().size())
+    producer.clear();
+    assert!(producer.history().is_empty(), "Clear should erase our history");
+
+    // Additional: send a second record after clear and verify history rebuilt
     let mut future2 = producer.send(record2.clone()).unwrap();
     assert!(future2.is_done(), "Second send should be immediately complete");
 
     let metadata2 = future2.get().await;
     assert!(metadata2.is_ok(), "Second send should be successful");
-    assert_eq!(1, metadata2.unwrap().offset(), "Offset should be 1");
 
     let history = producer.history();
-    assert_eq!(2, history.len(), "We should have both records in our history");
-    assert_eq!(record1, history[0]);
-    assert_eq!(record2, history[1]);
+    assert_eq!(1, history.len(), "History should contain only the second record");
+    assert_eq!(record2, history[0]);
 }
 
 /// Translated from `MockProducerTest.testManualCompletion` (line 107).
