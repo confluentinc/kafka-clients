@@ -313,7 +313,16 @@ pub unsafe extern "C" fn kafka_producer_send(
     value_len: i32,
     out_future: *mut *mut CFutureRecordMetadata,
 ) -> i32 {
-    if producer.is_null() || topic.is_null() || out_future.is_null() {
+    // Check out_future first -- if null, we cannot write to it, just return error.
+    if out_future.is_null() {
+        return i32::from(Errors::InvalidRequest.code());
+    }
+
+    // For remaining null checks, we can safely null the output before returning.
+    if producer.is_null() || topic.is_null() {
+        unsafe {
+            *out_future = std::ptr::null_mut();
+        }
         return i32::from(Errors::InvalidRequest.code());
     }
 
@@ -379,7 +388,19 @@ pub unsafe extern "C" fn kafka_producer_send_batch(
     count: i32,
     out_futures: *mut *mut CFutureRecordMetadata,
 ) -> i32 {
-    if producer.is_null() || records.is_null() || out_futures.is_null() || count < 0 {
+    // Check out_futures first -- if null, we cannot write to it, just return error.
+    if out_futures.is_null() || count < 0 {
+        return i32::from(Errors::InvalidRequest.code());
+    }
+
+    // For remaining null checks, we can safely null-fill the output array before returning.
+    if producer.is_null() || records.is_null() {
+        let count = count as usize;
+        for i in 0..count {
+            unsafe {
+                *out_futures.add(i) = std::ptr::null_mut();
+            }
+        }
         return i32::from(Errors::InvalidRequest.code());
     }
 
@@ -942,7 +963,10 @@ mod tests {
     #[test]
     fn test_send_null_producer() {
         let topic = CString::new("topic").unwrap();
-        let mut future: *mut CFutureRecordMetadata = std::ptr::null_mut();
+        // Use a non-null sentinel to prove the function actively sets
+        // *out_future to null, rather than leaving it unchanged.
+        let sentinel = 0xDEAD_BEEF_usize as *mut CFutureRecordMetadata;
+        let mut future: *mut CFutureRecordMetadata = sentinel;
 
         unsafe {
             let result = kafka_producer_send(
@@ -956,13 +980,17 @@ mod tests {
                 &mut future,
             );
             assert_ne!(result, SUCCESS);
+            assert!(future.is_null(), "out_future should be set to null when producer is null");
         }
     }
 
     #[test]
     fn test_send_null_topic() {
         let producer = kafka_producer_new_mock(true);
-        let mut future: *mut CFutureRecordMetadata = std::ptr::null_mut();
+        // Use a non-null sentinel to prove the function actively sets
+        // *out_future to null, rather than leaving it unchanged.
+        let sentinel = 0xDEAD_BEEF_usize as *mut CFutureRecordMetadata;
+        let mut future: *mut CFutureRecordMetadata = sentinel;
 
         unsafe {
             let result = kafka_producer_send(
@@ -976,6 +1004,7 @@ mod tests {
                 &mut future,
             );
             assert_ne!(result, SUCCESS);
+            assert!(future.is_null(), "out_future should be set to null when topic is null");
             kafka_producer_destroy(producer);
         }
     }
@@ -1095,19 +1124,29 @@ mod tests {
             value: std::ptr::null(),
             value_len: -1,
         }];
-        let mut futures: [*mut CFutureRecordMetadata; 1] = [std::ptr::null_mut()];
+        let sentinel = 0xDEAD_BEEF_usize as *mut CFutureRecordMetadata;
 
         unsafe {
-            // Null producer
+            // Null producer -- out_futures should be null-filled
+            let mut futures: [*mut CFutureRecordMetadata; 1] = [sentinel];
             assert_ne!(
                 kafka_producer_send_batch(std::ptr::null_mut(), records.as_ptr(), 1, futures.as_mut_ptr(),),
                 SUCCESS
             );
+            assert!(
+                futures[0].is_null(),
+                "out_futures[0] should be set to null when producer is null"
+            );
 
-            // Null records
+            // Null records -- out_futures should be null-filled
+            let mut futures: [*mut CFutureRecordMetadata; 1] = [sentinel];
             assert_ne!(
                 kafka_producer_send_batch(producer, std::ptr::null(), 1, futures.as_mut_ptr(),),
                 SUCCESS
+            );
+            assert!(
+                futures[0].is_null(),
+                "out_futures[0] should be set to null when records is null"
             );
 
             // Null out_futures
