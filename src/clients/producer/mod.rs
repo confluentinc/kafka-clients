@@ -20,10 +20,12 @@ use crate::common::kafka_error::KafkaError;
 use crate::common::partition_info::PartitionInfo;
 
 pub mod future_record_metadata;
+pub mod mock_producer;
 pub mod record;
 pub mod record_metadata;
 
 pub use future_record_metadata::FutureRecordMetadata;
+pub use mock_producer::MockProducer;
 pub use record::{Header, ProducerRecord};
 pub use record_metadata::RecordMetadata;
 

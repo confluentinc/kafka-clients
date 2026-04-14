@@ -91,6 +91,20 @@ impl FutureRecordMetadata {
         Self { receiver: Some(receiver), result: None }
     }
 
+    /// Creates a `FutureRecordMetadata` that is already completed with the
+    /// given result.
+    ///
+    /// The returned future's [`is_done()`](Self::is_done) will return `true`
+    /// immediately, and [`get()`](Self::get) will return the cached result
+    /// without blocking.
+    ///
+    /// This is used by `MockProducer` in auto-complete mode to match Java's
+    /// behavior where `Future.isDone()` returns `true` immediately after a
+    /// synchronously completed send.
+    pub fn completed(result: Result<RecordMetadata, KafkaError>) -> Self {
+        Self { receiver: None, result: Some(result) }
+    }
+
     /// Awaits the completion of the record send and returns the result.
     ///
     /// Returns `Ok(RecordMetadata)` on success, or `Err(KafkaError)` if the
@@ -157,8 +171,38 @@ impl FutureRecordMetadata {
     ///
     /// Returns `true` if the sender has completed (either successfully or
     /// with an error) or been dropped, `false` if still pending.
-    pub fn is_done(&self) -> bool {
-        self.result.is_some()
+    ///
+    /// This method eagerly tries to receive from the underlying channel if
+    /// the result has not been cached yet, so it can return `true` even
+    /// without having been polled as a `Future`. This matches Java's
+    /// `Future.isDone()` semantics.
+    pub fn is_done(&mut self) -> bool {
+        if self.result.is_some() {
+            return true;
+        }
+
+        // Try to eagerly receive from the channel without blocking.
+        if let Some(rx) = self.receiver.as_mut() {
+            match rx.try_recv() {
+                Ok(result) => {
+                    self.result = Some(result);
+                    self.receiver = None;
+                    true
+                },
+                Err(oneshot::error::TryRecvError::Empty) => false,
+                Err(oneshot::error::TryRecvError::Closed) => {
+                    self.receiver = None;
+                    self.result = Some(Err(KafkaError::with_message(
+                        crate::common::protocol::Errors::UnknownServerError,
+                        "Producer was dropped before completing the send",
+                    )));
+                    true
+                },
+            }
+        } else {
+            // No receiver and no result — should not happen in normal usage
+            false
+        }
     }
 }
 
