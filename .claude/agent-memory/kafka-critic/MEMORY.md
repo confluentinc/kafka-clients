@@ -11,3 +11,5 @@
 - [ProducerBatch rewrite patterns](review_producer_batch_patterns.md) — Memory accounting asymmetry and error swallowing in MemoryRecordsBuilder integration
 - [KafkaProduceClient adapter patterns](review_produce_client_patterns.md) — Per-request handshakes, reconnection without cleanup, double clones in direct-Selector usage
 - [Metadata waitOnMetadata patterns](review_metadata_waiton_patterns.md) — Caching, partition-aware retry, error propagation, integration test compatibility
+- [Sender rewrite patterns](review_sender_rewrite_patterns.md) — Missing branch coverage and mock fidelity when translating handleProduceResponse callback
+- [ProducerMetadata composition patterns](review_producer_metadata_patterns.md) — Override-to-callback gaps when translating Java inheritance to Rust composition

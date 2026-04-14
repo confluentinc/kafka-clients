@@ -1,0 +1,1 @@
+- [Producer refactoring plan](project_producer_refactor.md) -- Phases 5-7 address Mutex bottleneck by aligning with Java KafkaClient architecture
