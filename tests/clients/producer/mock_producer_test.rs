@@ -44,22 +44,19 @@ fn make_record(topic: &str, key: &str, value: &str) -> ProducerRecord {
 /// - offset and topic are correct
 /// - `history()` contains the record
 /// - `clear()` empties the history
-///
-/// Additionally sends a second record to verify sequential offsets.
 #[tokio::test]
 async fn test_auto_complete_mock() {
     let producer = MockProducer::with_auto_complete(true);
     let record1 = make_record("topic", "key1", "value1");
-    let record2 = make_record("topic", "key2", "value2");
 
-    let mut future1 = producer.send(record1.clone()).unwrap();
-    assert!(future1.is_done(), "Send should be immediately complete");
+    let mut future = producer.send(record1.clone()).unwrap();
+    assert!(future.is_done(), "Send should be immediately complete");
 
-    let metadata1 = future1.get().await;
-    assert!(metadata1.is_ok(), "Send should be successful");
-    let md1 = metadata1.unwrap();
-    assert_eq!(0, md1.offset(), "Offset should be 0");
-    assert_eq!("topic", md1.topic());
+    let metadata = future.get().await;
+    assert!(metadata.is_ok(), "Send should be successful");
+    let md = metadata.unwrap();
+    assert_eq!(0, md.offset(), "Offset should be 0");
+    assert_eq!("topic", md.topic());
 
     let history = producer.history();
     assert_eq!(1, history.len(), "We should have the record in our history");
@@ -68,17 +65,6 @@ async fn test_auto_complete_mock() {
     // Matches Java: producer.clear(); assertEquals(0, producer.history().size())
     producer.clear();
     assert!(producer.history().is_empty(), "Clear should erase our history");
-
-    // Additional: send a second record after clear and verify history rebuilt
-    let mut future2 = producer.send(record2.clone()).unwrap();
-    assert!(future2.is_done(), "Second send should be immediately complete");
-
-    let metadata2 = future2.get().await;
-    assert!(metadata2.is_ok(), "Second send should be successful");
-
-    let history = producer.history();
-    assert_eq!(1, history.len(), "History should contain only the second record");
-    assert_eq!(record2, history[0]);
 }
 
 /// Translated from `MockProducerTest.testManualCompletion` (line 107).

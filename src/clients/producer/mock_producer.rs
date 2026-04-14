@@ -176,14 +176,17 @@ impl MockProducer {
         inner.sent.clone()
     }
 
-    /// Clear sent records, completions, and offsets.
+    /// Clear the stored history of sent records.
+    ///
+    /// Note: per-topic-partition offset counters are intentionally preserved
+    /// across `clear()` calls, matching Java's `MockProducer.clear()` which
+    /// does **not** reset the `offsets` map.
     ///
     /// Corresponds to Java's `MockProducer.clear()`.
     pub fn clear(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.sent.clear();
         inner.completions.clear();
-        inner.offsets.clear();
     }
 
     /// Complete the earliest uncompleted call successfully.
@@ -875,9 +878,12 @@ mod tests {
         assert!(producer.closed());
     }
 
-    /// Tests that `clear` resets offsets so they restart from 0.
+    /// Tests that `clear` preserves offset counters (matching Java behavior).
+    ///
+    /// Java's `MockProducer.clear()` does NOT reset the `offsets` map, so
+    /// offset numbering continues after `clear()`.
     #[tokio::test]
-    async fn test_clear_resets_offsets() {
+    async fn test_clear_preserves_offsets() {
         let producer = MockProducer::with_auto_complete(true);
         producer.send(make_record("t", "k", "v")).unwrap();
         producer.send(make_record("t", "k", "v")).unwrap();
@@ -886,9 +892,9 @@ mod tests {
 
         let mut future = producer.send(make_record("t", "k", "v")).unwrap();
         assert_eq!(
-            0,
+            2,
             future.get().await.unwrap().offset(),
-            "Offset should restart from 0 after clear"
+            "Offset should continue from 2 after clear (not restart from 0)"
         );
     }
 
