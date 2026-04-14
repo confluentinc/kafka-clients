@@ -30,8 +30,8 @@ use super::kafka_client::KafkaClient;
 ///
 /// This method can be used to check the status of a connection prior to calling the blocking
 /// version to be able to tell whether the latter completed a new connection.
-pub fn is_ready(client: &mut dyn KafkaClient, node: &Node, current_time: i64) -> bool {
-    client.poll(0, current_time);
+pub async fn is_ready(client: &mut dyn KafkaClient, node: &Node, current_time: i64) -> bool {
+    client.poll(0, current_time).await;
     client.is_ready(node, current_time)
 }
 
@@ -54,7 +54,7 @@ pub fn is_ready(client: &mut dyn KafkaClient, node: &Node, current_time: i64) ->
 /// * `node` - The node to await readiness for
 /// * `now_ms_fn` - A function that returns the current time in milliseconds
 /// * `timeout_ms` - The maximum time to wait in milliseconds
-pub fn await_ready(
+pub async fn await_ready(
     client: &mut dyn KafkaClient,
     node: &Node,
     now_ms_fn: &dyn Fn() -> i64,
@@ -69,7 +69,7 @@ pub fn await_ready(
 
     let start_time = now_ms_fn();
 
-    if is_ready(client, node, start_time) || client.ready(node, start_time) {
+    if is_ready(client, node, start_time).await || client.ready(node, start_time).await {
         return Ok(true);
     }
 
@@ -91,7 +91,7 @@ pub fn await_ready(
             poll_timeout = waiting_time;
         }
 
-        client.poll(poll_timeout, attempt_start_time);
+        client.poll(poll_timeout, attempt_start_time).await;
         if let Some(auth_error) = client.authentication_error(node) {
             return Err(io::Error::new(io::ErrorKind::PermissionDenied, auth_error));
         }
@@ -116,7 +116,7 @@ pub fn await_ready(
 /// * `client` - The Kafka client to use
 /// * `request` - The request to send
 /// * `now_ms_fn` - A function that returns the current time in milliseconds
-pub fn send_and_receive(
+pub async fn send_and_receive(
     client: &mut dyn KafkaClient,
     request: ClientRequest,
     now_ms_fn: &dyn Fn() -> i64,
@@ -125,7 +125,7 @@ pub fn send_and_receive(
     client.send(request, now_ms_fn());
 
     while client.active() {
-        let responses = client.poll(i64::MAX, now_ms_fn());
+        let responses = client.poll(i64::MAX, now_ms_fn()).await;
         for response in responses {
             if response.request_header().correlation_id() == correlation_id {
                 if response.was_disconnected() {
@@ -169,6 +169,6 @@ pub fn maybe_return_auth_failure(client: &dyn KafkaClient, node: &Node) -> io::R
 
 /// Initiate a connection if currently possible. This is only really useful for resetting
 /// the failed status of a socket.
-pub fn try_connect(client: &mut dyn KafkaClient, node: &Node, now: i64) {
-    client.ready(node, now);
+pub async fn try_connect(client: &mut dyn KafkaClient, node: &Node, now: i64) {
+    client.ready(node, now).await;
 }

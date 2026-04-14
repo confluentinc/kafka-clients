@@ -302,6 +302,28 @@ impl RecordAccumulator {
         self.memory_semaphore.add_permits(bytes);
     }
 
+    /// Returns true if there are undrained batches (current or ready).
+    ///
+    /// Matches Java's `RecordAccumulator.hasUndrained()`.
+    pub async fn has_undrained(&self) -> bool {
+        let inner = self.inner.lock().await;
+        !inner.current_batches.is_empty() || !inner.ready_batches.is_empty()
+    }
+
+    /// Synchronous close that prevents new appends and notifies the sender.
+    ///
+    /// Unlike `close()`, this does not flush current batches -- it just marks the
+    /// accumulator as closed. Used by `Sender::initiate_close()` which runs in a
+    /// non-async context.
+    pub fn close_sync(&self) {
+        // Use try_lock to avoid blocking. If the lock is held, the next
+        // drain/expire cycle will see the closed flag.
+        if let Ok(mut inner) = self.inner.try_lock() {
+            inner.closed = true;
+        }
+        self.batch_ready_notify.notify_one();
+    }
+
     fn estimate_size(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[Header<'_>]) -> usize {
         // Estimate the full batch size (record + batch header overhead),
         // matching Java's AbstractRecords.estimateSizeInBytesUpperBound()

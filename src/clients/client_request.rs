@@ -31,7 +31,7 @@ pub struct ClientRequest {
     /// The broker id to send the request to.
     destination: String,
     /// The builder for the request to make.
-    request_builder: Box<dyn RequestBuilder>,
+    request_builder: Box<dyn RequestBuilder + Send>,
     /// The correlation id for this client request.
     correlation_id: i32,
     /// The client ID to use for the header.
@@ -65,7 +65,7 @@ impl ClientRequest {
     #[allow(clippy::too_many_arguments)]
     pub fn new(
         destination: &str,
-        request_builder: Box<dyn RequestBuilder>,
+        request_builder: Box<dyn RequestBuilder + Send>,
         correlation_id: i32,
         client_id: &str,
         created_time_ms: i64,

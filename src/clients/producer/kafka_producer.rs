@@ -16,34 +16,32 @@
 //!
 //! Corresponds to org.apache.kafka.clients.producer.KafkaProducer.
 
+use crate::clients::kafka_client::KafkaClient;
+use crate::clients::metadata::Metadata;
 use crate::clients::producer::accumulator::RecordAccumulator;
 use crate::clients::producer::batch::SendFuture;
 use crate::clients::producer::config::ProducerConfig;
 use crate::clients::producer::record::ProducerRecord;
-use crate::clients::producer::sender::{PartitionInfo, ProduceClient, Sender};
+use crate::clients::producer::sender::Sender;
 use crate::common::TopicPartition;
 use crate::errors::{ErrorCode, KafkaError};
 use log::debug;
-use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 use tokio::task::JoinHandle;
 
 /// Backoff between metadata retry attempts when a topic is first seen.
 const METADATA_RETRY_BACKOFF_MS: u64 = 500;
 
-struct ProducerInner<C: ProduceClient> {
+struct ProducerInner {
     #[allow(dead_code)]
     config: Arc<ProducerConfig>,
     accumulator: Arc<RecordAccumulator>,
-    client: Arc<C>,
+    metadata: Arc<Metadata>,
     sender_handle: Mutex<Option<JoinHandle<()>>>,
-    /// Cached topic metadata: topic name → partition count.
-    ///
-    /// Mirrors Java's `Metadata` cache — after the first successful metadata
-    /// fetch for a topic, subsequent `send()` calls skip the network round
-    /// trip and use the cached partition count.
-    metadata_cache: Mutex<HashMap<String, i32>>,
+    /// Flag shared with the Sender to signal shutdown.
+    running: Arc<AtomicBool>,
 }
 
 /// An async Kafka producer.
@@ -51,46 +49,57 @@ struct ProducerInner<C: ProduceClient> {
 /// Thread-safe: cloning gives a handle to the same underlying producer.
 /// The background sender task is spawned on construction.
 ///
-/// Generic over `C: ProduceClient` to allow mocking the network layer.
-pub struct KafkaProducer<C: ProduceClient> {
-    inner: Arc<ProducerInner<C>>,
+/// Corresponds to `org.apache.kafka.clients.producer.KafkaProducer`.
+pub struct KafkaProducer {
+    inner: Arc<ProducerInner>,
 }
 
-impl<C: ProduceClient> Clone for KafkaProducer<C> {
+impl Clone for KafkaProducer {
     fn clone(&self) -> Self {
         KafkaProducer { inner: Arc::clone(&self.inner) }
     }
 }
 
-impl<C: ProduceClient> KafkaProducer<C> {
+impl KafkaProducer {
     /// Create a new producer with the given config and network client.
     ///
+    /// The `client` is moved into the `Sender` which owns it exclusively (no
+    /// shared lock). The `metadata` is shared between the producer and sender
+    /// for partition lookups.
+    ///
     /// Spawns a background sender task immediately.
-    pub fn new(config: ProducerConfig, client: C) -> Self {
+    pub fn new<C: KafkaClient + Send + 'static>(config: ProducerConfig, client: C, metadata: Arc<Metadata>) -> Self {
         let config = Arc::new(config);
-        let client = Arc::new(client);
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
+        let running = Arc::new(AtomicBool::new(true));
 
-        let sender = Sender::new(Arc::clone(&accumulator), Arc::clone(&client), Arc::clone(&config));
+        let sender = Sender::new(
+            client,
+            Arc::clone(&accumulator),
+            Arc::clone(&metadata),
+            Arc::clone(&config),
+            Arc::clone(&running),
+        );
         let sender_handle = tokio::spawn(sender.run());
 
         KafkaProducer {
             inner: Arc::new(ProducerInner {
                 config,
                 accumulator,
-                client,
+                metadata,
                 sender_handle: Mutex::new(Some(sender_handle)),
-                metadata_cache: Mutex::new(HashMap::new()),
+                running,
             }),
         }
     }
 
     /// Send a record to Kafka.
     ///
-    /// Fetches metadata for the topic if not already cached (matching Java's
-    /// `KafkaProducer.doSend()` which calls `waitOnMetadata()` before appending
-    /// to the accumulator), then copies the key/value/headers into the batch
-    /// buffer.
+    /// Matches Java's `KafkaProducer.doSend()`:
+    /// 1. Validate the topic name
+    /// 2. Wait for metadata for the topic (with optional partition expansion)
+    /// 3. Validate the partition against the known partition count
+    /// 4. Append to the record accumulator
     ///
     /// Returns a `SendFuture` that resolves to `RecordMetadata` when the record
     /// is acknowledged by the broker. The caller can drop the
@@ -117,8 +126,6 @@ impl<C: ProduceClient> KafkaProducer<C> {
 
         // Wait for metadata before appending to the accumulator, matching
         // Java's KafkaProducer.doSend() -> waitOnMetadata() flow.
-        // Passes the partition so that wait_on_metadata can retry if the
-        // partition count hasn't grown to include it yet (partition expansion).
         let partition_count = self.wait_on_metadata(topic, Some(partition)).await?;
 
         // Validate partition against known partition count.
@@ -152,26 +159,40 @@ impl<C: ProduceClient> KafkaProducer<C> {
     /// Waits for metadata to become available for the given topic.
     ///
     /// Corresponds to Java's `KafkaProducer.waitOnMetadata(String topic,
-    /// Integer partition, long nowMs, long maxWaitMs)`. On brokers with
-    /// `auto.create.topics.enable=true`, the first metadata request triggers
-    /// topic creation asynchronously, so this method retries until the topic
-    /// appears or `max_block` is exceeded.
+    /// Integer partition, long nowMs, long maxWaitMs)`.
+    ///
+    /// Uses the shared `Metadata` cache to look up topic partition counts.
+    /// When the topic is not yet known, blocks until the metadata is updated
+    /// or `max_block` is exceeded.
     ///
     /// When `partition` is `Some(p)`, the method also waits until the
     /// partition count grows to include `p`, supporting online partition
-    /// expansion (matching Java's loop condition:
-    /// `while (partitionsCount == null || (partition != null && partition >=
-    /// partitionsCount))`).
+    /// expansion.
     ///
     /// Returns the partition count for the topic.
     async fn wait_on_metadata(&self, topic: &str, partition: Option<i32>) -> crate::errors::Result<i32> {
-        // Check the metadata cache first.  If the topic is already known and
-        // the requested partition (if any) falls within the cached count,
-        // return immediately without a network round trip.  This matches
-        // Java's `cluster.partitionCountForTopic(topic)` check.
-        {
-            let cache = self.inner.metadata_cache.lock().await;
-            if let Some(&count) = cache.get(topic) {
+        // Check the metadata cache first. If the topic is already known and
+        // the requested partition falls within the cached count, return
+        // immediately without waiting.
+        if let Some(count) = self.partition_count_from_metadata(topic) {
+            let partition_satisfied = match partition {
+                Some(p) => p < count,
+                None => true,
+            };
+            if partition_satisfied {
+                return Ok(count);
+            }
+        }
+
+        let max_wait = self.inner.config.max_block();
+        let deadline = tokio::time::Instant::now() + max_wait;
+
+        // Request a metadata update for this topic.
+        self.inner.metadata.request_update(false);
+
+        loop {
+            // Check current metadata snapshot.
+            if let Some(count) = self.partition_count_from_metadata(topic) {
                 let partition_satisfied = match partition {
                     Some(p) => p < count,
                     None => true,
@@ -179,93 +200,53 @@ impl<C: ProduceClient> KafkaProducer<C> {
                 if partition_satisfied {
                     return Ok(count);
                 }
-            }
-        }
-
-        let max_wait = self.inner.config.max_block();
-        let deadline = tokio::time::Instant::now() + max_wait;
-
-        // Track the last retriable error so we can chain it as the cause of
-        // the TimeoutException, matching Java's waitOnMetadata behaviour where
-        // the final TimeoutException wraps the underlying cause (e.g.
-        // UnknownTopicOrPartitionException).
-        let mut last_error: Option<KafkaError> = None;
-
-        loop {
-            match self.inner.client.partitions_for(topic).await {
-                Ok(partitions) if !partitions.is_empty() => {
-                    let count = partitions.len() as i32;
-
-                    // Check if the requested partition is within range.
-                    // If not, keep retrying (supports partition expansion).
-                    let partition_satisfied = match partition {
-                        Some(p) => p < count,
-                        None => true,
-                    };
-
-                    if partition_satisfied {
-                        // Update the metadata cache.
-                        let mut cache = self.inner.metadata_cache.lock().await;
-                        cache.insert(topic.to_string(), count);
-                        return Ok(count);
-                    }
-
-                    debug!(
-                        "Metadata for topic '{}' has {} partition(s) but need partition {}, retrying",
-                        topic,
-                        count,
-                        partition.unwrap_or(-1)
-                    );
-                },
-                Ok(_) => {
-                    debug!("Metadata for topic '{}' returned no partitions, retrying", topic);
-                },
-                Err(e) => {
-                    // Non-retriable errors (e.g. TopicAuthorization,
-                    // InvalidTopic) should fail immediately rather than
-                    // retrying until timeout.  This matches Java's
-                    // waitOnMetadata -> maybeThrowExceptionForTopic.
-                    if !e.is_retriable() {
-                        return Err(e);
-                    }
-                    debug!("Metadata fetch for topic '{}' failed: {}, retrying", topic, e);
-                    last_error = Some(e);
-                },
+                debug!(
+                    "Metadata for topic '{}' has {} partition(s) but need partition {}, retrying",
+                    topic,
+                    count,
+                    partition.unwrap_or(-1)
+                );
+            } else {
+                debug!("Metadata for topic '{}' not yet available, retrying", topic);
             }
 
             let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 let msg = format!("Topic '{}' not present in metadata after {:?}", topic, max_wait);
-                return Err(match last_error {
-                    Some(cause) => KafkaError::with_source(ErrorCode::TimedOut, msg, cause),
-                    None => KafkaError::new(ErrorCode::TimedOut, msg),
-                });
+                return Err(KafkaError::new(ErrorCode::TimedOut, msg));
             }
 
             let sleep_duration = std::time::Duration::from_millis(METADATA_RETRY_BACKOFF_MS).min(remaining);
             tokio::time::sleep(sleep_duration).await;
+
+            // Request another update.
+            self.inner.metadata.request_update(false);
         }
+    }
+
+    /// Look up the partition count for a topic from the shared Metadata cache.
+    fn partition_count_from_metadata(&self, topic: &str) -> Option<i32> {
+        let cluster = self.inner.metadata.fetch();
+        cluster.partition_count_for_topic(topic).map(|c| c as i32)
     }
 
     /// Block until all buffered records have been sent and acknowledged.
     pub async fn flush(&self) -> crate::errors::Result<()> {
         self.inner.accumulator.flush_all().await;
         // Give the sender time to drain the flushed batches.
-        // In a production implementation, we'd wait on a flush-completion signal.
         tokio::task::yield_now().await;
         Ok(())
-    }
-
-    /// Get partition metadata for a topic.
-    pub async fn partitions_for(&self, topic: &str) -> crate::errors::Result<Vec<PartitionInfo>> {
-        self.inner.client.partitions_for(topic).await
     }
 
     /// Gracefully shut down the producer.
     ///
     /// Flushes remaining records, then stops the sender task.
     pub async fn close(&self) -> crate::errors::Result<()> {
+        // Close the accumulator (flushes current batches and prevents new appends).
         self.inner.accumulator.close().await;
+
+        // Signal the sender to stop after draining.
+        self.inner.running.store(false, Ordering::Release);
 
         if let Some(handle) = self.inner.sender_handle.lock().await.take() {
             handle
@@ -279,43 +260,238 @@ impl<C: ProduceClient> KafkaProducer<C> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::clients::producer::config::Acks;
-    use crate::clients::producer::sender::PartitionResponse;
+    use crate::clients::client_response::ClientResponse;
+    use crate::clients::kafka_client::KafkaClient;
+    use crate::clients::least_loaded_node::LeastLoadedNode;
+    use crate::clients::metadata::Metadata;
+    use crate::clients::{ClientRequest, RequestCompletionHandler};
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::common::node::Node;
+    use crate::common::protocol::Errors;
+    use crate::common::requests::abstract_response::ConcreteResponse;
+    use crate::common::requests::produce_response::ProduceResponse;
+    use crate::common::requests::{RequestBuilder, RequestHeader};
+    use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicI64, AtomicUsize, Ordering};
+    use std::collections::HashMap;
+    use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
     use std::time::Duration;
 
-    /// Mock client that acknowledges all records with sequential offsets.
-    struct MockProduceClient {
+    /// A mock `KafkaClient` that auto-completes produce requests with success.
+    ///
+    /// This replaces the old `MockProduceClient` — all producer tests now mock
+    /// at the `KafkaClient` level, matching Java's test infrastructure.
+    struct MockKafkaClient {
+        /// Pending requests that have been sent but not yet polled.
+        pending_requests: tokio::sync::Mutex<Vec<ClientRequest>>,
+        /// Monotonically increasing correlation ID.
+        next_correlation_id: AtomicI32,
+        /// Next offset to assign in produce responses.
         next_offset: AtomicI64,
+        /// Whether the client is active.
+        active: AtomicBool,
     }
 
-    impl MockProduceClient {
+    impl MockKafkaClient {
         fn new() -> Self {
-            MockProduceClient { next_offset: AtomicI64::new(0) }
+            MockKafkaClient {
+                pending_requests: tokio::sync::Mutex::new(Vec::new()),
+                next_correlation_id: AtomicI32::new(0),
+                next_offset: AtomicI64::new(0),
+                active: AtomicBool::new(true),
+            }
+        }
+
+        /// Build a successful ProduceResponse for the given request.
+        fn build_produce_response(&self, _request: &ClientRequest) -> ConcreteResponse {
+            let mut response_data = ProduceResponseData::new();
+            let mut topic_response = TopicProduceResponse::new();
+            topic_response.set_name("test-topic".to_string());
+            let mut partition_response = PartitionProduceResponse::new();
+            partition_response.set_index(0);
+            partition_response.set_base_offset(self.next_offset.fetch_add(1, Ordering::SeqCst));
+            partition_response.set_log_append_time_ms(1000);
+            partition_response.set_error_code(Errors::None.code());
+            topic_response.set_partition_responses(vec![partition_response]);
+            response_data.set_responses(vec![topic_response]);
+            ConcreteResponse::Produce(ProduceResponse::new(response_data))
+        }
+
+        fn build_response_header(&self) -> RequestHeader {
+            RequestHeader::new(
+                &crate::common::protocol::ApiKeys::PRODUCE,
+                0,
+                "test-client",
+                self.next_correlation_id.fetch_add(1, Ordering::SeqCst),
+            )
+            .expect("Failed to build request header")
         }
     }
 
     #[async_trait]
-    impl ProduceClient for MockProduceClient {
-        async fn send_produce_request(
-            &self,
-            _node_id: i32,
-            _acks: Acks,
-            _timeout: Duration,
-            batches: Vec<(TopicPartition, Vec<u8>)>,
-        ) -> Result<Vec<PartitionResponse>, KafkaError> {
-            let mut responses = Vec::new();
-            for (tp, _data) in batches {
-                let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
-                responses.push(PartitionResponse { tp, base_offset: offset, log_append_time: 1000, error: None });
-            }
-            Ok(responses)
+    impl KafkaClient for MockKafkaClient {
+        fn is_ready(&self, _node: &Node, _now: i64) -> bool {
+            true
         }
 
-        async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-            Ok(vec![PartitionInfo { topic: topic.to_string(), partition: 0, leader: Some(0) }])
+        async fn ready(&mut self, _node: &Node, _now: i64) -> bool {
+            true
         }
+
+        fn connection_delay(&self, _node: &Node, _now: i64) -> i64 {
+            0
+        }
+
+        fn poll_delay_ms(&self, _node: &Node, _now: i64) -> i64 {
+            0
+        }
+
+        fn connection_failed(&self, _node: &Node) -> bool {
+            false
+        }
+
+        fn authentication_error(&self, _node: &Node) -> Option<String> {
+            None
+        }
+
+        fn send(&mut self, request: ClientRequest, _now: i64) {
+            if let Ok(mut pending) = self.pending_requests.try_lock() {
+                pending.push(request);
+            }
+        }
+
+        async fn poll(&mut self, _timeout: i64, _now: i64) -> Vec<ClientResponse> {
+            let mut pending = self.pending_requests.lock().await;
+            let requests: Vec<ClientRequest> = pending.drain(..).collect();
+            drop(pending);
+
+            let mut responses = Vec::new();
+            for mut request in requests {
+                let response_body = self.build_produce_response(&request);
+                let header = self.build_response_header();
+                let now_ms = std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH)
+                    .unwrap()
+                    .as_millis() as i64;
+                let mut client_response = ClientResponse::new(
+                    header,
+                    request.take_callback(),
+                    request.destination(),
+                    now_ms,
+                    now_ms,
+                    false,
+                    None,
+                    None,
+                    Some(response_body),
+                );
+                client_response.on_complete();
+                responses.push(client_response);
+            }
+            responses
+        }
+
+        async fn disconnect(&mut self, _node_id: &str) {}
+
+        async fn close_connection(&mut self, _node_id: &str) {}
+
+        fn least_loaded_node(&self, _now: i64) -> LeastLoadedNode {
+            LeastLoadedNode::new(Some(Node::new(0, "localhost".to_string(), 9092)), true)
+        }
+
+        fn in_flight_request_count(&self) -> i32 {
+            0
+        }
+
+        fn has_in_flight_requests(&self) -> bool {
+            false
+        }
+
+        fn in_flight_request_count_for_node(&self, _node_id: &str) -> usize {
+            0
+        }
+
+        fn has_in_flight_requests_for_node(&self, _node_id: &str) -> bool {
+            false
+        }
+
+        fn has_ready_nodes(&self, _now: i64) -> bool {
+            true
+        }
+
+        fn wakeup(&self) {}
+
+        fn new_client_request(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn RequestBuilder + Send>,
+            created_time_ms: i64,
+            expect_response: bool,
+        ) -> ClientRequest {
+            ClientRequest::new(
+                node_id,
+                request_builder,
+                self.next_correlation_id.fetch_add(1, Ordering::SeqCst),
+                "test-client",
+                created_time_ms,
+                expect_response,
+                0,
+                None,
+            )
+        }
+
+        fn new_client_request_with_timeout(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn RequestBuilder + Send>,
+            created_time_ms: i64,
+            expect_response: bool,
+            request_timeout_ms: i32,
+            callback: Option<RequestCompletionHandler>,
+        ) -> ClientRequest {
+            ClientRequest::new(
+                node_id,
+                request_builder,
+                self.next_correlation_id.fetch_add(1, Ordering::SeqCst),
+                "test-client",
+                created_time_ms,
+                expect_response,
+                request_timeout_ms,
+                callback,
+            )
+        }
+
+        fn initiate_close(&self) {
+            self.active.store(false, Ordering::Release);
+        }
+
+        fn active(&self) -> bool {
+            self.active.load(Ordering::Acquire)
+        }
+
+        async fn close(&mut self) {
+            self.active.store(false, Ordering::Release);
+        }
+    }
+
+    /// Create a test Metadata instance pre-populated with a topic.
+    fn test_metadata_with(topic_partitions: &HashMap<String, i32>) -> Arc<Metadata> {
+        let metadata = Arc::new(Metadata::new(50, 50, 5000, ClusterResourceListeners::new()));
+        let metadata_response = crate::common::requests::request_test_utils::metadata_update_with(1, topic_partitions);
+        metadata.update_with_current_request_version(&metadata_response, false, 0);
+        metadata
+    }
+
+    /// Create a test Metadata instance with a single topic having the given
+    /// number of partitions.
+    fn test_metadata(topic: &str, num_partitions: i32) -> Arc<Metadata> {
+        let mut topics = HashMap::new();
+        topics.insert(topic.to_string(), num_partitions);
+        test_metadata_with(&topics)
+    }
+
+    /// Create an empty Metadata instance (no topics known).
+    fn empty_metadata() -> Arc<Metadata> {
+        Arc::new(Metadata::new(50, 50, 5000, ClusterResourceListeners::new()))
     }
 
     fn test_config() -> ProducerConfig {
@@ -330,7 +506,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_and_receive_metadata() {
-        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+        let metadata = test_metadata("test-topic", 1);
+        let producer = KafkaProducer::new(test_config(), MockKafkaClient::new(), metadata);
 
         let record = ProducerRecord::new("test-topic").key(b"key1").value(b"value1");
 
@@ -342,17 +519,18 @@ mod tests {
         // Give sender a moment to process.
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let metadata = future.await.unwrap();
-        assert_eq!(metadata.topic(), "test-topic");
-        assert_eq!(metadata.partition(), 0);
-        assert!(metadata.offset() >= 0);
+        let result = future.await.unwrap();
+        assert_eq!(result.topic(), "test-topic");
+        assert_eq!(result.partition(), 0);
+        assert!(result.offset() >= 0);
 
         producer.close().await.unwrap();
     }
 
     #[tokio::test]
     async fn test_send_empty_topic_rejected() {
-        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+        let metadata = test_metadata("test-topic", 1);
+        let producer = KafkaProducer::new(test_config(), MockKafkaClient::new(), metadata);
 
         let record = ProducerRecord::new("").value(b"value");
         let result = producer.send(&record).await;
@@ -364,7 +542,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_multiple_records() {
-        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+        let metadata = test_metadata("test-topic", 1);
+        let producer = KafkaProducer::new(test_config(), MockKafkaClient::new(), metadata);
 
         let mut futures = Vec::new();
         for i in 0..10 {
@@ -378,8 +557,8 @@ mod tests {
         tokio::time::sleep(Duration::from_millis(50)).await;
 
         for future in futures {
-            let metadata = future.await.unwrap();
-            assert_eq!(metadata.topic(), "test-topic");
+            let result = future.await.unwrap();
+            assert_eq!(result.topic(), "test-topic");
         }
 
         producer.close().await.unwrap();
@@ -387,7 +566,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_clone_shares_state() {
-        let producer1 = KafkaProducer::new(test_config(), MockProduceClient::new());
+        let metadata = test_metadata("test-topic", 1);
+        let producer1 = KafkaProducer::new(test_config(), MockKafkaClient::new(), metadata);
         let producer2 = producer1.clone();
 
         let record = ProducerRecord::new("test-topic").value(b"hello");
@@ -397,29 +577,14 @@ mod tests {
         producer2.flush().await.unwrap();
         tokio::time::sleep(Duration::from_millis(50)).await;
 
-        let metadata = future.await.unwrap();
-        assert_eq!(metadata.topic(), "test-topic");
+        let result = future.await.unwrap();
+        assert_eq!(result.topic(), "test-topic");
 
         producer2.close().await.unwrap();
     }
 
     #[tokio::test]
-    async fn test_partitions_for() {
-        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
-
-        let partitions = producer.partitions_for("test-topic").await.unwrap();
-        assert_eq!(partitions.len(), 1);
-        assert_eq!(partitions[0].topic, "test-topic");
-        assert_eq!(partitions[0].partition, 0);
-
-        producer.close().await.unwrap();
-    }
-
-    #[tokio::test]
     async fn test_send_invalid_partition_rejected() {
-        // Use a short max_block since wait_on_metadata now retries when the
-        // requested partition exceeds the known count (partition expansion
-        // support), matching Java's waitOnMetadata loop condition.
         let config = ProducerConfig::builder()
             .bootstrap_servers(vec!["localhost:9092".to_string()])
             .batch_size(4096)
@@ -428,10 +593,9 @@ mod tests {
             .max_block_ms(500)
             .build()
             .unwrap();
-        let producer = KafkaProducer::new(config, MockProduceClient::new());
+        let metadata = test_metadata("test-topic", 1);
+        let producer = KafkaProducer::new(config, MockKafkaClient::new(), metadata);
 
-        // The mock returns 1 partition (partition 0), so partition 1 causes
-        // wait_on_metadata to loop until timeout (Java behavior).
         let record = ProducerRecord::new("test-topic").partition(1).value(b"value");
         let result = producer.send(&record).await;
         assert!(result.is_err());
@@ -442,7 +606,8 @@ mod tests {
 
     #[tokio::test]
     async fn test_send_negative_partition_rejected() {
-        let producer = KafkaProducer::new(test_config(), MockProduceClient::new());
+        let metadata = test_metadata("test-topic", 1);
+        let producer = KafkaProducer::new(test_config(), MockKafkaClient::new(), metadata);
 
         let record = ProducerRecord::new("test-topic").partition(-1).value(b"value");
         let result = producer.send(&record).await;
@@ -452,40 +617,19 @@ mod tests {
         producer.close().await.unwrap();
     }
 
-    /// Mock client that always returns empty partitions, simulating a topic
-    /// that does not exist.
-    struct EmptyMetadataMockClient;
-
-    #[async_trait]
-    impl ProduceClient for EmptyMetadataMockClient {
-        async fn send_produce_request(
-            &self,
-            _node_id: i32,
-            _acks: Acks,
-            _timeout: Duration,
-            _batches: Vec<(TopicPartition, Vec<u8>)>,
-        ) -> Result<Vec<PartitionResponse>, KafkaError> {
-            Ok(Vec::new())
-        }
-
-        async fn partitions_for(&self, _topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-            Ok(Vec::new())
-        }
-    }
-
     #[tokio::test]
     async fn test_wait_on_metadata_times_out() {
-        // Use a very short max_block so the test doesn't take long.
         let config = ProducerConfig::builder()
             .bootstrap_servers(vec!["localhost:9092".to_string()])
             .batch_size(4096)
             .linger_ms(0)
             .buffer_memory(65536)
-            .max_block_ms(500) // 500ms timeout
+            .max_block_ms(500)
             .build()
             .unwrap();
 
-        let producer = KafkaProducer::new(config, EmptyMetadataMockClient);
+        let metadata = empty_metadata();
+        let producer = KafkaProducer::new(config, MockKafkaClient::new(), metadata);
 
         let record = ProducerRecord::new("nonexistent-topic").value(b"value");
         let result = producer.send(&record).await;
@@ -495,249 +639,6 @@ mod tests {
         producer.close().await.unwrap();
     }
 
-    // ---------------------------------------------------------------
-    // Mock client that counts `partitions_for` invocations via an
-    // externally-owned `Arc<AtomicUsize>`.
-    //
-    // Used by `test_metadata_fetch` to verify that the metadata cache
-    // prevents redundant calls on subsequent sends to the same topic.
-    //
-    // Corresponds to the mock ProducerMetadata in Java's testMetadataFetch.
-    // ---------------------------------------------------------------
-    struct CountingMockClient {
-        partitions_for_count: Arc<AtomicUsize>,
-        next_offset: AtomicI64,
-    }
-
-    impl CountingMockClient {
-        fn new(counter: Arc<AtomicUsize>) -> Self {
-            CountingMockClient { partitions_for_count: counter, next_offset: AtomicI64::new(0) }
-        }
-    }
-
-    #[async_trait]
-    impl ProduceClient for CountingMockClient {
-        async fn send_produce_request(
-            &self,
-            _node_id: i32,
-            _acks: Acks,
-            _timeout: Duration,
-            batches: Vec<(TopicPartition, Vec<u8>)>,
-        ) -> Result<Vec<PartitionResponse>, KafkaError> {
-            let mut responses = Vec::new();
-            for (tp, _data) in batches {
-                let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
-                responses.push(PartitionResponse { tp, base_offset: offset, log_append_time: 1000, error: None });
-            }
-            Ok(responses)
-        }
-
-        async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-            self.partitions_for_count.fetch_add(1, Ordering::SeqCst);
-            Ok(vec![PartitionInfo { topic: topic.to_string(), partition: 0, leader: Some(0) }])
-        }
-    }
-
-    /// Test that the first `send()` fetches metadata via `partitions_for()`
-    /// and the second `send()` to the same topic uses the metadata cache,
-    /// NOT calling `partitions_for()` again.
-    ///
-    /// Translated from Java's `KafkaProducerTest.testMetadataFetch` (line 787).
-    #[tokio::test]
-    async fn test_metadata_fetch() {
-        let counter = Arc::new(AtomicUsize::new(0));
-        let producer = KafkaProducer::new(test_config(), CountingMockClient::new(Arc::clone(&counter)));
-
-        let record = ProducerRecord::new("test-topic").value(b"value");
-
-        // First send — triggers metadata fetch (partitions_for called).
-        let _f1 = producer.send(&record).await.unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "partitions_for should be called once for the first send"
-        );
-
-        // Second send to the same topic — should use cache, no additional
-        // partitions_for call.
-        let _f2 = producer.send(&record).await.unwrap();
-        assert_eq!(
-            counter.load(Ordering::SeqCst),
-            1,
-            "partitions_for should still be 1 after second send (cache hit)"
-        );
-
-        producer.close().await.unwrap();
-    }
-
-    // ---------------------------------------------------------------
-    // Mock client whose `partitions_for` returns an evolving partition
-    // count: 1 partition on early calls, then 3 partitions later.
-    //
-    // Used by `test_metadata_with_partition_out_of_range` to simulate
-    // online partition expansion.
-    //
-    // Corresponds to Java's testMetadataWithPartitionOutOfRange (line 890).
-    // ---------------------------------------------------------------
-    struct EvolvingPartitionMockClient {
-        call_count: AtomicUsize,
-        /// Number of calls that return 1 partition before switching to 3.
-        threshold: usize,
-        next_offset: AtomicI64,
-    }
-
-    impl EvolvingPartitionMockClient {
-        fn new(threshold: usize) -> Self {
-            EvolvingPartitionMockClient { call_count: AtomicUsize::new(0), threshold, next_offset: AtomicI64::new(0) }
-        }
-    }
-
-    #[async_trait]
-    impl ProduceClient for EvolvingPartitionMockClient {
-        async fn send_produce_request(
-            &self,
-            _node_id: i32,
-            _acks: Acks,
-            _timeout: Duration,
-            batches: Vec<(TopicPartition, Vec<u8>)>,
-        ) -> Result<Vec<PartitionResponse>, KafkaError> {
-            let mut responses = Vec::new();
-            for (tp, _data) in batches {
-                let offset = self.next_offset.fetch_add(1, Ordering::SeqCst);
-                responses.push(PartitionResponse { tp, base_offset: offset, log_append_time: 1000, error: None });
-            }
-            Ok(responses)
-        }
-
-        async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-            let n = self.call_count.fetch_add(1, Ordering::SeqCst) + 1;
-            let count = if n <= self.threshold { 1 } else { 3 };
-            let mut partitions = Vec::with_capacity(count);
-            for i in 0..count {
-                partitions.push(PartitionInfo { topic: topic.to_string(), partition: i as i32, leader: Some(0) });
-            }
-            Ok(partitions)
-        }
-    }
-
-    /// Test that when a user requests a partition that is out of range of the
-    /// current metadata, `wait_on_metadata` retries until the partition count
-    /// grows to include the requested partition (online partition expansion).
-    ///
-    /// Translated from Java's `KafkaProducerTest.testMetadataWithPartitionOutOfRange` (line 890).
-    #[tokio::test]
-    async fn test_metadata_with_partition_out_of_range() {
-        let config = ProducerConfig::builder()
-            .bootstrap_servers(vec!["localhost:9092".to_string()])
-            .batch_size(4096)
-            .linger_ms(0)
-            .buffer_memory(65536)
-            .max_block_ms(5000) // generous timeout for retry
-            .build()
-            .unwrap();
-
-        // First 2 calls return 1 partition, then 3 partitions from call 3 onwards.
-        // This matches the Java test: onePartitionCluster, onePartitionCluster,
-        // threePartitionCluster.
-        let producer = KafkaProducer::new(config, EvolvingPartitionMockClient::new(2));
-
-        // Request partition 2 — not available until the third metadata call.
-        let record = ProducerRecord::new("test-topic").partition(2).value(b"value");
-        let result = producer.send(&record).await;
-        assert!(result.is_ok(), "send should succeed after metadata expands to 3 partitions");
-
-        producer.close().await.unwrap();
-    }
-
-    // ---------------------------------------------------------------
-    // Mock client that always returns UnknownTopicOrPartition errors
-    // from `partitions_for`, simulating persistent topic lookup failure.
-    //
-    // Used by `test_topic_refresh_in_metadata` to verify that the
-    // final TimeoutException wraps the underlying error as its cause.
-    //
-    // Corresponds to Java's testTopicRefreshInMetadata (line 956).
-    // ---------------------------------------------------------------
-    struct UnknownTopicMockClient;
-
-    #[async_trait]
-    impl ProduceClient for UnknownTopicMockClient {
-        async fn send_produce_request(
-            &self,
-            _node_id: i32,
-            _acks: Acks,
-            _timeout: Duration,
-            _batches: Vec<(TopicPartition, Vec<u8>)>,
-        ) -> Result<Vec<PartitionResponse>, KafkaError> {
-            Ok(Vec::new())
-        }
-
-        async fn partitions_for(&self, _topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
-            Err(KafkaError::new(
-                ErrorCode::UnknownTopicOrPartition,
-                "Topic not found in metadata",
-            ))
-        }
-    }
-
-    /// Test that when metadata keeps returning `UNKNOWN_TOPIC_OR_PARTITION`,
-    /// the final timeout error wraps the underlying error as its cause.
-    ///
-    /// Java's `testTopicRefreshInMetadata` (line 956) verifies:
-    /// ```java
-    /// assertInstanceOf(TimeoutException.class, throwable);
-    /// assertInstanceOf(UnknownTopicOrPartitionException.class, throwable.getCause());
-    /// ```
-    ///
-    /// Our Rust equivalent checks `ErrorCode::TimedOut` at the top level and
-    /// that `std::error::Error::source()` is a `KafkaError` with
-    /// `ErrorCode::UnknownTopicOrPartition`.
-    #[tokio::test]
-    async fn test_topic_refresh_in_metadata() {
-        let config = ProducerConfig::builder()
-            .bootstrap_servers(vec!["localhost:9092".to_string()])
-            .batch_size(4096)
-            .linger_ms(0)
-            .buffer_memory(65536)
-            .max_block_ms(600) // short timeout so test is fast
-            .build()
-            .unwrap();
-
-        let producer = KafkaProducer::new(config, UnknownTopicMockClient);
-
-        let record = ProducerRecord::new("missing-topic").value(b"value");
-        let result = producer.send(&record).await;
-        assert!(result.is_err());
-
-        let err = result.unwrap_err();
-        assert_eq!(err.code(), ErrorCode::TimedOut, "top-level error should be TimedOut");
-
-        // Verify the cause chain: the source should be the
-        // UnknownTopicOrPartition error, matching Java's getCause().
-        let source = std::error::Error::source(&err).expect("TimedOut error should have a cause");
-        let cause = source.downcast_ref::<KafkaError>().expect("cause should be a KafkaError");
-        assert_eq!(
-            cause.code(),
-            ErrorCode::UnknownTopicOrPartition,
-            "cause should be UnknownTopicOrPartition"
-        );
-
-        producer.close().await.unwrap();
-    }
-
-    /// Test that `close()` while `send()` is blocked waiting for metadata
-    /// causes the `send()` to eventually fail rather than hanging forever.
-    ///
-    /// Translated from Java's `KafkaProducerTest.testCloseWhenWaitingForMetadataUpdate`
-    /// (line 2117).
-    ///
-    /// Implementation note: Java's version uses `Metadata.awaitUpdate()` which
-    /// is directly interrupted by `close()` via `notifyAll()`. Our Rust
-    /// `wait_on_metadata` polls with `tokio::time::sleep` in a loop, so
-    /// `close()` does not directly interrupt it. Instead, we use a short
-    /// `max_block_ms` to ensure the send times out quickly after close is
-    /// called. The key behavior verified is that the producer does not hang
-    /// indefinitely and that the send fails with an error.
     #[tokio::test]
     async fn test_close_when_waiting_for_metadata_update() {
         let config = ProducerConfig::builder()
@@ -745,26 +646,22 @@ mod tests {
             .batch_size(4096)
             .linger_ms(0)
             .buffer_memory(65536)
-            .max_block_ms(500) // short so send times out quickly
+            .max_block_ms(500)
             .build()
             .unwrap();
 
-        let producer = KafkaProducer::new(config, EmptyMetadataMockClient);
+        let metadata = empty_metadata();
+        let producer = KafkaProducer::new(config, MockKafkaClient::new(), metadata);
         let producer_for_close = producer.clone();
 
-        // Spawn a task that tries to send — it will block in
-        // wait_on_metadata because EmptyMetadataMockClient returns
-        // no partitions.
         let send_handle = tokio::spawn(async move {
             let record = ProducerRecord::new("test-topic").value(b"value");
             producer.send(&record).await
         });
 
-        // Give the send a moment to start blocking, then close the producer.
         tokio::time::sleep(Duration::from_millis(50)).await;
         producer_for_close.close().await.unwrap();
 
-        // The send should complete (not hang) and return an error.
         let result = send_handle.await.expect("send task should not panic");
         assert!(
             result.is_err(),

@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "generator", "xtask"]
+members = [".", "generator", "xtask", "performance_tests"]
 
 [package]
 name = "confluent-kafka-rust"

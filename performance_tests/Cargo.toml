@@ -1,0 +1,13 @@
+[package]
+name = "performance-tests"
+version = "0.1.0"
+edition = "2024"
+
+[[bin]]
+name = "producer_perf"
+path = "src/producer_perf.rs"
+
+[dependencies]
+confluent-kafka-rust = { path = ".." }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "time", "sync"] }
+rand = "0.9"

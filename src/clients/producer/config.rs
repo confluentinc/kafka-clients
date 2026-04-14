@@ -30,6 +30,22 @@ pub enum Acks {
     All,
 }
 
+impl Acks {
+    /// Returns the wire protocol value for this acks level.
+    ///
+    /// Matches Java's `ProducerConfig.ACKS_CONFIG` values:
+    /// - `None` → 0
+    /// - `Leader` → 1
+    /// - `All` → -1
+    pub fn as_i16(self) -> i16 {
+        match self {
+            Acks::None => 0,
+            Acks::Leader => 1,
+            Acks::All => -1,
+        }
+    }
+}
+
 /// Configuration for a KafkaProducer.
 #[derive(Debug, Clone)]
 pub struct ProducerConfig {

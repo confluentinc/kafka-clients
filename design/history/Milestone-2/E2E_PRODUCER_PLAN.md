@@ -87,3 +87,70 @@ Verify the full pipeline against a real Kafka broker.
 4. `test_produce_to_nonexistent_topic` — verify error handling
 
 Uses existing testcontainers infrastructure.
+
+---
+
+## Phase 5 — Make KafkaClient Trait Async-Compatible
+
+### Goal
+Solve the async/sync impedance mismatch in `NetworkClient`.  Currently, `NetworkClient`
+calls `block_on()` for every `Selector` operation, which panics if the future is not
+immediately ready.  Make `KafkaClient` trait methods (`ready`, `poll`, `disconnect`,
+`close_connection`, `close`) async so they can be called from Tokio tasks.
+
+### Key Changes
+- `src/clients/kafka_client.rs` — add `async` to 5 methods
+- `src/clients/network_client.rs` — replace `block_on()` with `.await`
+- `src/clients/network_client_utils.rs` — update for async methods
+- Remove `block_on()` and `noop_waker()` helper functions
+
+### Scope
+Pure refactor — no producer changes, no new classes.  All existing `NetworkClient`
+tests must pass under `#[tokio::test]`.
+
+See `Phase-5/PHASE5_PLAN.md` for full details.
+
+---
+
+## Phase 6 — Rewrite Sender to Use KafkaClient (Eliminate Mutex Bottleneck)
+
+### Goal
+Rewrite `Sender` to own a `KafkaClient` implementation directly (matching Java's
+`Sender` which owns `KafkaClient`).  Delete the invented `ProduceClient` trait and
+`KafkaProduceClient`.  Implement Java's `sendProducerData()` + `client.poll()` loop
+with `RequestCompletionHandler` callbacks for response handling.
+
+### Key Changes
+- DELETE `src/clients/producer/kafka_produce_client.rs`
+- `src/clients/producer/sender.rs` — remove `ProduceClient`, implement `run_once()` with `send_producer_data()` + `client.poll()`, implement `send_produce_request()` with callback, implement `handle_produce_response()`
+- `src/clients/producer/kafka_producer.rs` — remove generic `<C: ProduceClient>`, use `NetworkClient` via `KafkaClient` trait
+- `src/clients/producer/mod.rs` — remove `KafkaProduceClient`, `ProduceClient` exports
+- `performance_tests/src/producer_perf.rs` — update construction
+- Update all unit tests to mock `KafkaClient` instead of `ProduceClient`
+
+### Java Classes Being Aligned With
+- `Sender.runOnce()`, `Sender.sendProducerData()`, `Sender.sendProduceRequest()`, `Sender.handleProduceResponse()`
+
+See `Phase-6/PHASE6_PLAN.md` for full details.
+
+---
+
+## Phase 7 — ProducerMetadata and Integration Test Update
+
+### Goal
+Translate Java's `ProducerMetadata` class.  Update `KafkaProducer` to use it for
+topic metadata management instead of the ad-hoc `metadata_cache`.  Update integration
+and performance tests to use the refactored producer with `NetworkClient`.
+
+### Key Changes
+- ADD `src/clients/producer/producer_metadata.rs` — `ProducerMetadata` wrapping `Metadata`
+- `src/clients/producer/kafka_producer.rs` — use `ProducerMetadata`, rewrite `wait_on_metadata()`
+- `src/clients/producer/sender.rs` — use `ProducerMetadata` for metadata snapshots
+- `performance_tests/src/producer_perf.rs` — full update for new architecture
+- Translate `ProducerMetadataTest.java` tests
+
+### Java Classes Being Aligned With
+- `ProducerMetadata` (extends `Metadata`)
+- `KafkaProducer.waitOnMetadata()` using `ProducerMetadata.awaitUpdate()`
+
+See `Phase-7/PHASE7_PLAN.md` for full details.

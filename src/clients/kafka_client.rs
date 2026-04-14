@@ -16,6 +16,8 @@
 //!
 //! Translated from `org.apache.kafka.clients.KafkaClient`.
 
+use async_trait::async_trait;
+
 use crate::common::node::Node;
 use crate::common::requests::RequestBuilder;
 
@@ -30,6 +32,7 @@ use super::least_loaded_node::LeastLoadedNode;
 /// requests/receiving responses.
 ///
 /// Translated from `org.apache.kafka.clients.KafkaClient`.
+#[async_trait]
 pub trait KafkaClient {
     /// Check if we are currently ready to send another request to the given node
     /// but don't attempt to connect if we aren't.
@@ -50,7 +53,7 @@ pub trait KafkaClient {
     ///
     /// Returns `true` iff we are ready to immediately initiate the sending of another
     /// request to the given node.
-    fn ready(&mut self, node: &Node, now: i64) -> bool;
+    async fn ready(&mut self, node: &Node, now: i64) -> bool;
 
     /// Return the number of milliseconds to wait, based on the connection state,
     /// before attempting to send data. When disconnected, this respects the reconnect
@@ -115,7 +118,7 @@ pub trait KafkaClient {
     /// * `now` - The current time in ms
     ///
     /// Returns the list of responses received.
-    fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse>;
+    async fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse>;
 
     /// Disconnects the connection to a particular node, if there is one.
     /// Any pending ClientRequests for this connection will receive disconnections.
@@ -123,7 +126,7 @@ pub trait KafkaClient {
     /// # Arguments
     ///
     /// * `node_id` - The id of the node
-    fn disconnect(&mut self, node_id: &str);
+    async fn disconnect(&mut self, node_id: &str);
 
     /// Closes the connection to a particular node (if there is one).
     /// All requests on the connection will be cleared. ClientRequest callbacks will
@@ -132,7 +135,7 @@ pub trait KafkaClient {
     /// # Arguments
     ///
     /// * `node_id` - The id of the node
-    fn close_connection(&mut self, node_id: &str);
+    async fn close_connection(&mut self, node_id: &str);
 
     /// Choose the node with the fewest outstanding requests. This method will prefer
     /// a node with an existing connection, but will potentially choose a node for which
@@ -185,7 +188,7 @@ pub trait KafkaClient {
     fn new_client_request(
         &mut self,
         node_id: &str,
-        request_builder: Box<dyn RequestBuilder>,
+        request_builder: Box<dyn RequestBuilder + Send>,
         created_time_ms: i64,
         expect_response: bool,
     ) -> ClientRequest;
@@ -204,7 +207,7 @@ pub trait KafkaClient {
     fn new_client_request_with_timeout(
         &mut self,
         node_id: &str,
-        request_builder: Box<dyn RequestBuilder>,
+        request_builder: Box<dyn RequestBuilder + Send>,
         created_time_ms: i64,
         expect_response: bool,
         request_timeout_ms: i32,
@@ -222,5 +225,5 @@ pub trait KafkaClient {
     fn active(&self) -> bool;
 
     /// Close the network client.
-    fn close(&mut self);
+    async fn close(&mut self);
 }

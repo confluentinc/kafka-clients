@@ -15,7 +15,7 @@
 //! Integration tests for the end-to-end producer pipeline.
 //!
 //! Tests produce records to a real Kafka broker via the full
-//! `KafkaProducer<KafkaProduceClient>` pipeline, verifying that records
+//! `KafkaProducer` + `NetworkClient` pipeline, verifying that records
 //! are accepted and valid offsets are returned.
 //!
 //! These tests require Docker to be running and are feature-gated behind
@@ -27,9 +27,17 @@ mod common;
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
+use confluent_kafka_rust::clients::api_versions::ApiVersions;
+use confluent_kafka_rust::clients::metadata::Metadata;
+use confluent_kafka_rust::clients::network_client::NetworkClient;
 use confluent_kafka_rust::clients::producer::config::Acks;
-use confluent_kafka_rust::clients::producer::{KafkaProduceClient, KafkaProducer, ProducerConfig, ProducerRecord};
+use confluent_kafka_rust::clients::producer::{KafkaProducer, ProducerConfig, ProducerRecord};
+use confluent_kafka_rust::common::internals::ClusterResourceListeners;
+use confluent_kafka_rust::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
+use confluent_kafka_rust::common::network::selectable::USE_DEFAULT_BUFFER_SIZE;
+use confluent_kafka_rust::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka_rust::errors::ErrorCode;
 
 use common::cluster_config::ClusterConfig;
@@ -42,10 +50,43 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
         .unwrap_or_else(|_| panic!("Failed to parse bootstrap servers address: {bootstrap_servers}"))
 }
 
-/// Create a `KafkaProduceClient` connected to the test cluster.
-fn create_produce_client(bootstrap_servers: &str) -> KafkaProduceClient {
+/// Create a `NetworkClient` and shared `Metadata` connected to the test cluster.
+fn create_network_client(bootstrap_servers: &str) -> (NetworkClient, Arc<Metadata>) {
     let addr = parse_bootstrap_addr(bootstrap_servers);
-    KafkaProduceClient::new(addr, "integration-producer-test")
+
+    let metadata = Arc::new(Metadata::new(
+        50,      // refresh_backoff_ms
+        5000,    // refresh_backoff_max_ms
+        300_000, // metadata_expire_ms
+        ClusterResourceListeners::new(),
+    ));
+    metadata.bootstrap(vec![addr]);
+
+    let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
+    let selector = Selector::new(USE_DEFAULT_BUFFER_SIZE, NO_IDLE_TIMEOUT_MS, channel_builder);
+    let api_versions = Arc::new(ApiVersions::new());
+    let host_resolver = confluent_kafka_rust::clients::DefaultHostResolver;
+
+    let client = NetworkClient::with_metadata(
+        selector,
+        Arc::clone(&metadata),
+        "integration-producer-test",
+        5,    // max_in_flight_requests_per_connection
+        50,   // reconnect_backoff_ms
+        5000, // reconnect_backoff_max_ms
+        USE_DEFAULT_BUFFER_SIZE,
+        USE_DEFAULT_BUFFER_SIZE,
+        30_000,  // default_request_timeout_ms
+        10_000,  // connection_setup_timeout_ms
+        127_000, // connection_setup_timeout_max_ms
+        true,    // discover_broker_versions
+        api_versions,
+        host_resolver,
+        300_000, // rebootstrap_trigger_ms
+        confluent_kafka_rust::clients::metadata_recovery_strategy::MetadataRecoveryStrategy::None,
+    );
+
+    (client, metadata)
 }
 
 /// Create a `ProducerConfig` for integration tests.
@@ -62,7 +103,7 @@ fn test_producer_config(bootstrap_servers: &str) -> ProducerConfig {
 }
 
 /// Test: Produce a single record to a real Kafka broker using the full
-/// `KafkaProducer<KafkaProduceClient>` pipeline.
+/// `KafkaProducer` + `NetworkClient` pipeline.
 ///
 /// Verifies that:
 /// - The record is accepted without error
@@ -73,9 +114,9 @@ async fn test_produce_single_record() {
     let mut ctx = TestContext::new(ClusterConfig::default()).await;
     let topic = ctx.topic("single_record");
 
-    let client = create_produce_client(ctx.bootstrap_servers());
+    let (client, metadata) = create_network_client(ctx.bootstrap_servers());
     let config = test_producer_config(ctx.bootstrap_servers());
-    let producer = KafkaProducer::new(config, client);
+    let producer = KafkaProducer::new(config, client, metadata);
 
     let record = ProducerRecord::new(&topic).value(b"hello-kafka");
     let future = producer.send(&record).await.expect("send should succeed");
@@ -106,9 +147,9 @@ async fn test_produce_multiple_records() {
     let mut ctx = TestContext::new(ClusterConfig::default()).await;
     let topic = ctx.topic("multi_record");
 
-    let client = create_produce_client(ctx.bootstrap_servers());
+    let (client, metadata) = create_network_client(ctx.bootstrap_servers());
     let config = test_producer_config(ctx.bootstrap_servers());
-    let producer = KafkaProducer::new(config, client);
+    let producer = KafkaProducer::new(config, client, metadata);
 
     let num_records = 5;
     let mut futures = Vec::new();
@@ -158,9 +199,9 @@ async fn test_produce_with_key_and_headers() {
     let mut ctx = TestContext::new(ClusterConfig::default()).await;
     let topic = ctx.topic("key_headers");
 
-    let client = create_produce_client(ctx.bootstrap_servers());
+    let (client, metadata) = create_network_client(ctx.bootstrap_servers());
     let config = test_producer_config(ctx.bootstrap_servers());
-    let producer = KafkaProducer::new(config, client);
+    let producer = KafkaProducer::new(config, client, metadata);
 
     let record = ProducerRecord::new(&topic)
         .key(b"my-key")
@@ -210,7 +251,7 @@ async fn test_produce_to_nonexistent_topic() {
     // Use a topic name that definitely does not exist.
     let topic = ctx.topic("nonexistent_topic_that_should_not_exist");
 
-    let client = create_produce_client(ctx.bootstrap_servers());
+    let (client, metadata) = create_network_client(ctx.bootstrap_servers());
     // Use a short max_block_ms so the test doesn't hang for 60 seconds.
     let config = ProducerConfig::builder()
         .bootstrap_servers(vec![ctx.bootstrap_servers().to_string()])
@@ -222,7 +263,7 @@ async fn test_produce_to_nonexistent_topic() {
         .max_block_ms(3000)
         .build()
         .unwrap();
-    let producer = KafkaProducer::new(config, client);
+    let producer = KafkaProducer::new(config, client, metadata);
 
     let record = ProducerRecord::new(&topic).value(b"should-fail");
     // send() now calls wait_on_metadata() which loops until max_block_ms.

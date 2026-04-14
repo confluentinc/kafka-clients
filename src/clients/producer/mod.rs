@@ -17,14 +17,11 @@
 pub mod accumulator;
 pub mod batch;
 pub mod config;
-pub mod kafka_produce_client;
 pub mod kafka_producer;
 pub mod record;
 pub mod sender;
 
 pub use batch::SendFuture;
 pub use config::{Acks, ProducerConfig, ProducerConfigBuilder};
-pub use kafka_produce_client::KafkaProduceClient;
 pub use kafka_producer::KafkaProducer;
 pub use record::{Header, ProducerRecord, RecordMetadata};
-pub use sender::{PartitionInfo, PartitionResponse, ProduceClient};
