@@ -274,6 +274,16 @@ impl KafkaError {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
     }
 
+    /// Create an illegal argument error.
+    ///
+    /// Corresponds to Java's `IllegalArgumentException`. Used for client-side
+    /// input validation (e.g., null topic, negative partition). Uses
+    /// `InvalidConfig` as the error code since there is no dedicated protocol
+    /// error code for illegal arguments.
+    pub fn illegal_argument(message: impl Into<String>) -> Self {
+        Self::Generic(KafkaGenericError::with_message(Errors::InvalidConfig, message))
+    }
+
     // -- Base access -------------------------------------------------------
 
     /// Access the base [`KafkaGenericError`] common to all variants.

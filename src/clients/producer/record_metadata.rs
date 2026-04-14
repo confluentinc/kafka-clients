@@ -32,7 +32,7 @@ const NO_TIMESTAMP: i64 = -1;
 /// The metadata for a record that has been acknowledged by the server.
 ///
 /// Corresponds to Java's `org.apache.kafka.clients.producer.RecordMetadata`.
-#[derive(Debug)]
+#[derive(Clone, Debug)]
 pub struct RecordMetadata {
     /// The offset of the record in the topic/partition.
     offset: i64,

@@ -19,6 +19,8 @@
 
 use std::fmt;
 
+use crate::common::kafka_error::KafkaError;
+
 /// A key-value pair attached to a Kafka record.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.header.Header` interface
@@ -29,7 +31,7 @@ use std::fmt;
 /// ```
 /// use confluent_kafka_rust::clients::producer::Header;
 ///
-/// let header = Header::new("trace-id", Some(b"abc123".to_vec()));
+/// let header = Header::new("trace-id", Some(b"abc123".to_vec())).unwrap();
 /// assert_eq!(header.key(), "trace-id");
 /// assert_eq!(header.value(), Some(b"abc123".as_slice()));
 /// ```
@@ -42,14 +44,17 @@ pub struct Header {
 impl Header {
     /// Creates a new header with the given key and optional value.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `key` is empty (matching Java's `Objects.requireNonNull`
-    /// on header keys).
-    pub fn new(key: impl Into<String>, value: Option<Vec<u8>>) -> Self {
+    /// Returns `Err(KafkaError)` if `key` is empty (matching Java's
+    /// `Objects.requireNonNull` on header keys which throws
+    /// `IllegalArgumentException`).
+    pub fn new(key: impl Into<String>, value: Option<Vec<u8>>) -> Result<Self, KafkaError> {
         let key = key.into();
-        assert!(!key.is_empty(), "Null header keys are not permitted");
-        Self { key, value }
+        if key.is_empty() {
+            return Err(KafkaError::illegal_argument("Null header keys are not permitted"));
+        }
+        Ok(Self { key, value })
     }
 
     /// Returns the key of the header.
@@ -102,9 +107,9 @@ impl fmt::Display for Header {
 /// ```
 /// use confluent_kafka_rust::clients::producer::ProducerRecord;
 ///
-/// let record = ProducerRecord::new("my-topic")
-///     .with_partition(0)
-///     .with_timestamp(1234567890)
+/// let record = ProducerRecord::new("my-topic").unwrap()
+///     .with_partition(0).unwrap()
+///     .with_timestamp(1234567890).unwrap()
 ///     .with_key(b"my-key".to_vec())
 ///     .with_value(b"my-value".to_vec());
 ///
@@ -129,21 +134,23 @@ impl ProducerRecord {
     /// Use the builder methods (`with_partition`, `with_key`, etc.) to set
     /// additional fields.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `topic` is empty (matching Java's `IllegalArgumentException`
-    /// for null topic).
-    pub fn new(topic: impl Into<String>) -> Self {
+    /// Returns `Err(KafkaError)` if `topic` is empty (matching Java's
+    /// `IllegalArgumentException` for null topic).
+    pub fn new(topic: impl Into<String>) -> Result<Self, KafkaError> {
         let topic = topic.into();
-        assert!(!topic.is_empty(), "Topic cannot be null.");
-        Self {
+        if topic.is_empty() {
+            return Err(KafkaError::illegal_argument("Topic cannot be null."));
+        }
+        Ok(Self {
             topic,
             partition: None,
             timestamp: None,
             key: None,
             value: None,
             headers: Vec::new(),
-        }
+        })
     }
 
     /// Creates a `ProducerRecord` with all fields set explicitly.
@@ -151,11 +158,12 @@ impl ProducerRecord {
     /// This mirrors Java's most complete constructor:
     /// `ProducerRecord(topic, partition, timestamp, key, value, headers)`.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// - Panics if `topic` is empty.
-    /// - Panics if `partition` is `Some` and negative.
-    /// - Panics if `timestamp` is `Some` and negative.
+    /// Returns `Err(KafkaError)` if:
+    /// - `topic` is empty.
+    /// - `partition` is `Some` and negative.
+    /// - `timestamp` is `Some` and negative.
     pub fn with_all_fields(
         topic: impl Into<String>,
         partition: Option<i32>,
@@ -163,52 +171,58 @@ impl ProducerRecord {
         key: Option<Vec<u8>>,
         value: Option<Vec<u8>>,
         headers: Vec<Header>,
-    ) -> Self {
+    ) -> Result<Self, KafkaError> {
         let topic = topic.into();
-        assert!(!topic.is_empty(), "Topic cannot be null.");
-        if let Some(ts) = timestamp {
-            assert!(
-                ts >= 0,
+        if topic.is_empty() {
+            return Err(KafkaError::illegal_argument("Topic cannot be null."));
+        }
+        if let Some(ts) = timestamp
+            && ts < 0
+        {
+            return Err(KafkaError::illegal_argument(format!(
                 "Invalid timestamp: {ts}. Timestamp should always be non-negative or null."
-            );
+            )));
         }
-        if let Some(p) = partition {
-            assert!(
-                p >= 0,
+        if let Some(p) = partition
+            && p < 0
+        {
+            return Err(KafkaError::illegal_argument(format!(
                 "Invalid partition: {p}. Partition number should always be non-negative or null."
-            );
+            )));
         }
-        Self { topic, partition, timestamp, key, value, headers }
+        Ok(Self { topic, partition, timestamp, key, value, headers })
     }
 
-    // -- Builder methods (consume self, return Self) --------------------------
+    // -- Builder methods (consume self, return Result<Self>) ------------------
 
     /// Sets the partition for this record.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `partition` is negative.
-    pub fn with_partition(mut self, partition: i32) -> Self {
-        assert!(
-            partition >= 0,
-            "Invalid partition: {partition}. Partition number should always be non-negative or null."
-        );
+    /// Returns `Err(KafkaError)` if `partition` is negative.
+    pub fn with_partition(mut self, partition: i32) -> Result<Self, KafkaError> {
+        if partition < 0 {
+            return Err(KafkaError::illegal_argument(format!(
+                "Invalid partition: {partition}. Partition number should always be non-negative or null."
+            )));
+        }
         self.partition = Some(partition);
-        self
+        Ok(self)
     }
 
     /// Sets the timestamp for this record, in milliseconds since epoch.
     ///
-    /// # Panics
+    /// # Errors
     ///
-    /// Panics if `timestamp` is negative.
-    pub fn with_timestamp(mut self, timestamp: i64) -> Self {
-        assert!(
-            timestamp >= 0,
-            "Invalid timestamp: {timestamp}. Timestamp should always be non-negative or null."
-        );
+    /// Returns `Err(KafkaError)` if `timestamp` is negative.
+    pub fn with_timestamp(mut self, timestamp: i64) -> Result<Self, KafkaError> {
+        if timestamp < 0 {
+            return Err(KafkaError::illegal_argument(format!(
+                "Invalid timestamp: {timestamp}. Timestamp should always be non-negative or null."
+            )));
+        }
         self.timestamp = Some(timestamp);
-        self
+        Ok(self)
     }
 
     /// Sets the key for this record.
@@ -224,9 +238,13 @@ impl ProducerRecord {
     }
 
     /// Adds a header to this record by key and value.
-    pub fn with_header(mut self, key: impl Into<String>, value: Option<Vec<u8>>) -> Self {
-        self.headers.push(Header::new(key, value));
-        self
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(KafkaError)` if the header key is empty.
+    pub fn with_header(mut self, key: impl Into<String>, value: Option<Vec<u8>>) -> Result<Self, KafkaError> {
+        self.headers.push(Header::new(key, value)?);
+        Ok(self)
     }
 
     /// Adds a pre-constructed [`Header`] to this record.
@@ -321,7 +339,8 @@ mod tests {
             Some(b"key".to_vec()),
             Some(b"\x01".to_vec()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(producer_record, producer_record.clone());
         assert_eq!(hash_of(&producer_record), hash_of(&producer_record));
 
@@ -332,7 +351,8 @@ mod tests {
             Some(b"key".to_vec()),
             Some(b"\x01".to_vec()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_eq!(producer_record, equal_record);
         assert_eq!(hash_of(&producer_record), hash_of(&equal_record));
 
@@ -343,7 +363,8 @@ mod tests {
             Some(b"key".to_vec()),
             Some(b"\x01".to_vec()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_ne!(producer_record, topic_mismatch);
 
         let partition_mismatch = ProducerRecord::with_all_fields(
@@ -353,7 +374,8 @@ mod tests {
             Some(b"key".to_vec()),
             Some(b"\x01".to_vec()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_ne!(producer_record, partition_mismatch);
 
         let key_mismatch = ProducerRecord::with_all_fields(
@@ -363,7 +385,8 @@ mod tests {
             Some(b"key-1".to_vec()),
             Some(b"\x01".to_vec()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_ne!(producer_record, key_mismatch);
 
         let value_mismatch = ProducerRecord::with_all_fields(
@@ -373,11 +396,12 @@ mod tests {
             Some(b"key".to_vec()),
             Some(b"\x02".to_vec()),
             Vec::new(),
-        );
+        )
+        .unwrap();
         assert_ne!(producer_record, value_mismatch);
 
         // Null fields record: topic only, everything else None/empty
-        let null_fields_record = ProducerRecord::with_all_fields("topic", None, None, None, None, Vec::new());
+        let null_fields_record = ProducerRecord::with_all_fields("topic", None, None, None, None, Vec::new()).unwrap();
         assert_eq!(null_fields_record, null_fields_record.clone());
         assert_eq!(hash_of(&null_fields_record), hash_of(&null_fields_record));
     }
@@ -386,43 +410,40 @@ mod tests {
     #[test]
     fn test_invalid_records() {
         // Empty topic (Java: null topic)
-        let result = std::panic::catch_unwind(|| {
-            ProducerRecord::with_all_fields(
-                "",
-                Some(0),
-                None,
-                Some(b"key".to_vec()),
-                Some(b"\x01".to_vec()),
-                Vec::new(),
-            );
-        });
-        assert!(result.is_err(), "Expected panic because topic is empty");
+        let result = ProducerRecord::with_all_fields(
+            "",
+            Some(0),
+            None,
+            Some(b"key".to_vec()),
+            Some(b"\x01".to_vec()),
+            Vec::new(),
+        );
+        assert!(result.is_err(), "Expected error because topic is empty");
+        assert!(result.unwrap_err().message().contains("Topic cannot be null"));
 
         // Negative timestamp
-        let result = std::panic::catch_unwind(|| {
-            ProducerRecord::with_all_fields(
-                "test",
-                Some(0),
-                Some(-1),
-                Some(b"key".to_vec()),
-                Some(b"\x01".to_vec()),
-                Vec::new(),
-            );
-        });
-        assert!(result.is_err(), "Expected panic because of negative timestamp");
+        let result = ProducerRecord::with_all_fields(
+            "test",
+            Some(0),
+            Some(-1),
+            Some(b"key".to_vec()),
+            Some(b"\x01".to_vec()),
+            Vec::new(),
+        );
+        assert!(result.is_err(), "Expected error because of negative timestamp");
+        assert!(result.unwrap_err().message().contains("Invalid timestamp"));
 
         // Negative partition
-        let result = std::panic::catch_unwind(|| {
-            ProducerRecord::with_all_fields(
-                "test",
-                Some(-1),
-                None,
-                Some(b"key".to_vec()),
-                Some(b"\x01".to_vec()),
-                Vec::new(),
-            );
-        });
-        assert!(result.is_err(), "Expected panic because of negative partition");
+        let result = ProducerRecord::with_all_fields(
+            "test",
+            Some(-1),
+            None,
+            Some(b"key".to_vec()),
+            Some(b"\x01".to_vec()),
+            Vec::new(),
+        );
+        assert!(result.is_err(), "Expected error because of negative partition");
+        assert!(result.unwrap_err().message().contains("Invalid partition"));
     }
 
     // -----------------------------------------------------------------------
@@ -431,7 +452,7 @@ mod tests {
 
     #[test]
     fn test_builder_minimal() {
-        let record = ProducerRecord::new("my-topic");
+        let record = ProducerRecord::new("my-topic").unwrap();
         assert_eq!(record.topic(), "my-topic");
         assert_eq!(record.partition(), None);
         assert_eq!(record.timestamp(), None);
@@ -443,11 +464,15 @@ mod tests {
     #[test]
     fn test_builder_full() {
         let record = ProducerRecord::new("topic")
+            .unwrap()
             .with_partition(3)
+            .unwrap()
             .with_timestamp(1000)
+            .unwrap()
             .with_key(b"k".to_vec())
             .with_value(b"v".to_vec())
-            .with_header("h1", Some(b"hv1".to_vec()));
+            .with_header("h1", Some(b"hv1".to_vec()))
+            .unwrap();
 
         assert_eq!(record.topic(), "topic");
         assert_eq!(record.partition(), Some(3));
@@ -460,26 +485,29 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "Topic cannot be null")]
-    fn test_new_empty_topic_panics() {
-        ProducerRecord::new("");
+    fn test_new_empty_topic_returns_error() {
+        let result = ProducerRecord::new("");
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("Topic cannot be null"));
     }
 
     #[test]
-    #[should_panic(expected = "Invalid partition")]
-    fn test_builder_negative_partition_panics() {
-        ProducerRecord::new("topic").with_partition(-1);
+    fn test_builder_negative_partition_returns_error() {
+        let result = ProducerRecord::new("topic").unwrap().with_partition(-1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("Invalid partition"));
     }
 
     #[test]
-    #[should_panic(expected = "Invalid timestamp")]
-    fn test_builder_negative_timestamp_panics() {
-        ProducerRecord::new("topic").with_timestamp(-1);
+    fn test_builder_negative_timestamp_returns_error() {
+        let result = ProducerRecord::new("topic").unwrap().with_timestamp(-1);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("Invalid timestamp"));
     }
 
     #[test]
     fn test_display() {
-        let record = ProducerRecord::new("test").with_key(b"key".to_vec());
+        let record = ProducerRecord::new("test").unwrap().with_key(b"key".to_vec());
         let display = format!("{record}");
         assert!(display.contains("topic=test"));
         assert!(display.contains("key="));
@@ -487,20 +515,21 @@ mod tests {
 
     #[test]
     fn test_header_display() {
-        let header = Header::new("trace-id", Some(b"abc".to_vec()));
+        let header = Header::new("trace-id", Some(b"abc".to_vec())).unwrap();
         let display = format!("{header}");
         assert!(display.contains("trace-id"));
     }
 
     #[test]
-    #[should_panic(expected = "Null header keys are not permitted")]
-    fn test_header_empty_key_panics() {
-        Header::new("", None);
+    fn test_header_empty_key_returns_error() {
+        let result = Header::new("", None);
+        assert!(result.is_err());
+        assert!(result.unwrap_err().message().contains("Null header keys are not permitted"));
     }
 
     #[test]
     fn test_header_null_value() {
-        let header = Header::new("key", None);
+        let header = Header::new("key", None).unwrap();
         assert_eq!(header.key(), "key");
         assert_eq!(header.value(), None);
     }
@@ -508,7 +537,9 @@ mod tests {
     #[test]
     fn test_clone() {
         let record = ProducerRecord::new("topic")
+            .unwrap()
             .with_partition(1)
+            .unwrap()
             .with_key(b"k".to_vec())
             .with_value(b"v".to_vec());
         let cloned = record.clone();

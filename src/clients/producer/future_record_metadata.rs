@@ -20,8 +20,6 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 
 use tokio::sync::oneshot;
@@ -40,8 +38,7 @@ pub type CompletionSender = oneshot::Sender<Result<RecordMetadata, KafkaError>>;
 /// This is a convenience function that wraps `tokio::sync::oneshot::channel`.
 pub fn create() -> (CompletionSender, FutureRecordMetadata) {
     let (tx, rx) = oneshot::channel();
-    let done = Arc::new(AtomicBool::new(false));
-    (tx, FutureRecordMetadata { receiver: rx, done })
+    (tx, FutureRecordMetadata { receiver: Some(rx), result: None })
 }
 
 /// The future result of a record send.
@@ -50,6 +47,12 @@ pub fn create() -> (CompletionSender, FutureRecordMetadata) {
 /// [`RecordMetadata`] on success or a [`KafkaError`] on failure.
 ///
 /// Implements [`Future`] so it can be `.await`ed directly.
+///
+/// Unlike a typical Rust future, this type supports calling [`get()`](Self::get)
+/// multiple times (matching Java's `Future.get()` semantics). After the first
+/// successful resolution, the result is cached and returned on subsequent calls.
+/// This allows patterns like calling `get()` with a timeout first, then calling
+/// `get()` again without a timeout on the same future.
 ///
 /// Corresponds to Java's
 /// `org.apache.kafka.clients.producer.internals.FutureRecordMetadata`.
@@ -62,44 +65,90 @@ pub fn create() -> (CompletionSender, FutureRecordMetadata) {
 /// use confluent_kafka_rust::common::TopicPartition;
 ///
 /// # async fn example() {
-/// let (sender, future) = future_record_metadata::create();
+/// let (sender, mut future) = future_record_metadata::create();
 ///
 /// let tp = TopicPartition::new("topic".to_string(), 0);
 /// let metadata = RecordMetadata::new(tp, 10, 0, 1000, 3, 5);
 /// sender.send(Ok(metadata)).unwrap();
 ///
-/// let result = future.await;
+/// let result = future.get().await;
 /// assert!(result.is_ok());
 /// assert_eq!(result.unwrap().offset(), 10);
 /// # }
 /// ```
 pub struct FutureRecordMetadata {
-    receiver: oneshot::Receiver<Result<RecordMetadata, KafkaError>>,
-    done: Arc<AtomicBool>,
+    /// The oneshot receiver, set to `None` after the result has been received
+    /// and cached.
+    receiver: Option<oneshot::Receiver<Result<RecordMetadata, KafkaError>>>,
+    /// Cached result after first completion. Allows subsequent `get()` calls
+    /// to return the same result without needing the receiver.
+    result: Option<Result<RecordMetadata, KafkaError>>,
 }
 
 impl FutureRecordMetadata {
     /// Creates a `FutureRecordMetadata` from an existing oneshot receiver.
     pub fn new(receiver: oneshot::Receiver<Result<RecordMetadata, KafkaError>>) -> Self {
-        Self { receiver, done: Arc::new(AtomicBool::new(false)) }
+        Self { receiver: Some(receiver), result: None }
     }
 
     /// Awaits the completion of the record send and returns the result.
     ///
     /// Returns `Ok(RecordMetadata)` on success, or `Err(KafkaError)` if the
     /// send failed or the sender was dropped.
-    pub async fn get(self) -> Result<RecordMetadata, KafkaError> {
-        match self.receiver.await {
-            Ok(result) => {
-                self.done.store(true, Ordering::Release);
-                result
+    ///
+    /// This method can be called multiple times. After the first successful
+    /// completion, subsequent calls return the cached result immediately.
+    /// This matches Java's `Future.get()` semantics where the same future
+    /// can be called first with a timeout, and then again indefinitely.
+    ///
+    /// If cancelled (e.g., via `tokio::time::timeout`), the receiver is
+    /// preserved so subsequent calls to `get()` can still succeed once the
+    /// sender completes.
+    pub async fn get(&mut self) -> Result<RecordMetadata, KafkaError> {
+        // If we already have a cached result, return a clone of it.
+        if let Some(ref result) = self.result {
+            return result.clone();
+        }
+
+        // Poll the receiver in-place using poll_fn. This does NOT take()
+        // the receiver, so if this future is cancelled (e.g., by timeout),
+        // the receiver remains available for a subsequent call.
+        std::future::poll_fn(|cx| self.poll_receiver(cx)).await
+    }
+
+    /// Internal poll helper that polls the receiver without consuming it
+    /// until it's ready. Once ready, takes the receiver and caches the result.
+    fn poll_receiver(&mut self, cx: &mut Context<'_>) -> Poll<Result<RecordMetadata, KafkaError>> {
+        // Already have a result cached.
+        if let Some(ref result) = self.result {
+            return Poll::Ready(result.clone());
+        }
+
+        match self.receiver.as_mut() {
+            Some(rx) => match Pin::new(rx).poll(cx) {
+                Poll::Ready(Ok(result)) => {
+                    self.receiver = None;
+                    self.result = Some(result.clone());
+                    Poll::Ready(result)
+                },
+                Poll::Ready(Err(_)) => {
+                    self.receiver = None;
+                    let err = Err(KafkaError::with_message(
+                        crate::common::protocol::Errors::UnknownServerError,
+                        "Producer was dropped before completing the send",
+                    ));
+                    self.result = Some(err.clone());
+                    Poll::Ready(err)
+                },
+                Poll::Pending => Poll::Pending,
             },
-            Err(_) => {
-                self.done.store(true, Ordering::Release);
-                Err(KafkaError::with_message(
+            None => {
+                // Receiver was already consumed but result wasn't cached.
+                // This shouldn't happen in normal usage.
+                Poll::Ready(Err(KafkaError::with_message(
                     crate::common::protocol::Errors::UnknownServerError,
                     "Producer was dropped before completing the send",
-                ))
+                )))
             },
         }
     }
@@ -109,7 +158,7 @@ impl FutureRecordMetadata {
     /// Returns `true` if the sender has completed (either successfully or
     /// with an error) or been dropped, `false` if still pending.
     pub fn is_done(&self) -> bool {
-        self.done.load(Ordering::Acquire)
+        self.result.is_some()
     }
 }
 
@@ -117,20 +166,7 @@ impl Future for FutureRecordMetadata {
     type Output = Result<RecordMetadata, KafkaError>;
 
     fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
-        match Pin::new(&mut self.receiver).poll(cx) {
-            Poll::Ready(Ok(result)) => {
-                self.done.store(true, Ordering::Release);
-                Poll::Ready(result)
-            },
-            Poll::Ready(Err(_)) => {
-                self.done.store(true, Ordering::Release);
-                Poll::Ready(Err(KafkaError::with_message(
-                    crate::common::protocol::Errors::UnknownServerError,
-                    "Producer was dropped before completing the send",
-                )))
-            },
-            Poll::Pending => Poll::Pending,
-        }
+        self.poll_receiver(cx)
     }
 }
 
@@ -145,29 +181,36 @@ mod tests {
 
     /// Translated from `RecordSendTest.testTimeout`.
     ///
-    /// Tests that waiting on a request that never completes times out.
-    /// In Rust, we use `tokio::time::timeout` instead of Java's `Future.get(timeout)`.
+    /// Tests that waiting on a request that never completes times out,
+    /// and that the *same* future resolves correctly once the underlying
+    /// result is completed. This matches Java's test which calls
+    /// `future.get(5, TimeUnit.MILLISECONDS)` (timeout), then completes
+    /// the `ProduceRequestResult`, then calls `future.get()` again on the
+    /// same future and verifies the offset.
     #[tokio::test]
     async fn test_timeout() {
         let base_offset = 45_i64;
         let rel_offset = 5;
 
-        let (sender, future) = create();
+        let (sender, mut future) = create();
         assert!(!future.is_done(), "Request is not completed");
 
-        // Attempt to get with a short timeout — should time out
+        // Attempt to get with a short timeout -- should time out
         let timeout_result = tokio::time::timeout(std::time::Duration::from_millis(5), future.get()).await;
         assert!(timeout_result.is_err(), "Request should have timed out");
 
-        // Complete the request on a new future (the old one was consumed by get())
-        let (sender2, future2) = create();
+        // The future should still not be done after timeout
+        assert!(!future.is_done(), "Request should still not be completed after timeout");
+
+        // Complete the underlying request on the same future
         let tp = TopicPartition::new("test".to_string(), 0);
         let metadata = RecordMetadata::new(tp, base_offset, rel_offset, -1, 0, 0);
-        sender2.send(Ok(metadata)).unwrap();
-        drop(sender); // drop unused sender
+        sender.send(Ok(metadata)).unwrap();
 
-        let result = future2.await;
+        // Now the same future should resolve with the correct offset
+        let result = future.get().await;
         assert!(result.is_ok());
+        assert!(future.is_done());
         assert_eq!(result.unwrap().offset(), base_offset + i64::from(rel_offset));
     }
 
@@ -176,7 +219,7 @@ mod tests {
     /// Tests that an asynchronous request will eventually return the right error.
     #[tokio::test]
     async fn test_error() {
-        let (sender, future) = create();
+        let (sender, mut future) = create();
 
         // Complete with error after a short delay (simulating async completion)
         tokio::spawn(async move {
@@ -184,7 +227,7 @@ mod tests {
             let _ = sender.send(Err(KafkaError::new(crate::common::protocol::Errors::CorruptMessage)));
         });
 
-        let result = future.await;
+        let result = future.get().await;
         assert!(result.is_err());
     }
 
@@ -196,7 +239,7 @@ mod tests {
         let base_offset = 45_i64;
         let rel_offset = 5;
 
-        let (sender, future) = create();
+        let (sender, mut future) = create();
 
         // Complete successfully after a short delay
         tokio::spawn(async move {
@@ -206,10 +249,24 @@ mod tests {
             let _ = sender.send(Ok(metadata));
         });
 
-        let result = future.await;
+        let result = future.get().await;
         assert!(result.is_ok());
         assert_eq!(result.unwrap().offset(), base_offset + i64::from(rel_offset));
     }
+
+    // -----------------------------------------------------------------------
+    // FutureRecordMetadataTest.java tests are intentionally deferred.
+    //
+    // Java's `FutureRecordMetadataTest.java` contains two tests:
+    // - `testFutureGetWithSeconds`
+    // - `testFutureGetWithMilliSeconds`
+    //
+    // Both tests exercise the `chain()` method which supports batch splitting
+    // (linking a chained future to a parent future). The `chain()` method is
+    // intentionally out of scope for Phase 1 as per the milestone plan.
+    // These tests will be translated when `chain()` is implemented in a
+    // later phase.
+    // -----------------------------------------------------------------------
 
     // -----------------------------------------------------------------------
     // Additional unit tests
@@ -218,17 +275,17 @@ mod tests {
     /// Tests that dropping the sender causes the future to return an error.
     #[tokio::test]
     async fn test_sender_dropped() {
-        let (sender, future) = create();
+        let (sender, mut future) = create();
         drop(sender);
 
-        let result = future.await;
+        let result = future.get().await;
         assert!(result.is_err());
     }
 
     /// Tests the `get()` method directly.
     #[tokio::test]
     async fn test_get() {
-        let (sender, future) = create();
+        let (sender, mut future) = create();
         let tp = TopicPartition::new("topic".to_string(), 1);
         let metadata = RecordMetadata::new(tp, 100, 3, 5000, 10, 20);
         sender.send(Ok(metadata)).unwrap();
@@ -246,13 +303,13 @@ mod tests {
     #[tokio::test]
     async fn test_new_constructor() {
         let (tx, rx) = oneshot::channel();
-        let future = FutureRecordMetadata::new(rx);
+        let mut future = FutureRecordMetadata::new(rx);
 
         let tp = TopicPartition::new("t".to_string(), 0);
         let md = RecordMetadata::new(tp, 0, 0, 0, 0, 0);
         tx.send(Ok(md)).unwrap();
 
-        let result = future.await;
+        let result = future.get().await;
         assert!(result.is_ok());
     }
 
@@ -270,5 +327,24 @@ mod tests {
         let result = (&mut future).await;
         assert!(result.is_ok());
         assert!(future.is_done());
+    }
+
+    /// Tests that `get()` can be called multiple times and returns the same result.
+    #[tokio::test]
+    async fn test_get_multiple_calls() {
+        let (sender, mut future) = create();
+        let tp = TopicPartition::new("topic".to_string(), 0);
+        let metadata = RecordMetadata::new(tp, 42, 0, 1000, 5, 10);
+        sender.send(Ok(metadata)).unwrap();
+
+        // First call
+        let result1 = future.get().await;
+        assert!(result1.is_ok());
+        assert_eq!(result1.unwrap().offset(), 42);
+
+        // Second call should return the same cached result
+        let result2 = future.get().await;
+        assert!(result2.is_ok());
+        assert_eq!(result2.unwrap().offset(), 42);
     }
 }
