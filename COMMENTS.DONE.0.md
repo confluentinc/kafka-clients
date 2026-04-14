@@ -59,3 +59,23 @@
 - **Expected**: The second-record section should either assert `offset == 1` (after fixing `clear()`) or be removed entirely to match the Java test exactly.
 - **Actual**: The second record's offset was never checked, hiding the behavioral divergence in `clear()`.
 - **Resolution**: Removed the extra post-clear second-record code entirely, matching Java's `testAutoCompleteMock` exactly: send one record, verify metadata (offset + topic), verify history, clear, verify history is empty. Fixed in commit 41ed6aa.
+
+## [RESOLVED] Issue: `kafka_producer_send` does not set `*out_future` to null on error
+
+- **File**: `src/ffi/producer.rs`
+- **Severity**: Bug
+- **Lines**: 319-334
+- **Description**: On both error paths in `kafka_producer_send` -- the `build_record` error return (line 322) and the `producer_send` error return (line 333) -- the function returns an error code but never writes `std::ptr::null_mut()` to `*out_future`. A C caller who does not pre-initialize `*out_future` to NULL before the call will have a garbage/stale value in `*out_future` when the function returns an error. The test `test_send_after_close_returns_error` (line 1577) asserts `future.is_null()` which only passes because the test variable was initialized to `null_mut()` before the call -- it does not actually verify the function's behavior.
+- **Expected**: On all error paths, explicitly set `unsafe { *out_future = std::ptr::null_mut(); }` before returning the error code, matching the pattern used in `kafka_future_get` (lines 483-485) which correctly sets `*out_metadata = std::ptr::null_mut()` on error.
+- **Actual**: `*out_future` is left unmodified on error, making the test pass only by coincidence of pre-initialization.
+- **Resolution**: Added explicit `*out_future = std::ptr::null_mut()` on both error paths in `kafka_producer_send`. Updated `test_send_after_close_returns_error` to use a non-null sentinel value (`0xDEAD_BEEF`) to verify the function actively sets the pointer to null rather than relying on pre-initialization. Updated docstring to document the null-on-error behavior. Fixed in commit 3166af8.
+
+## [RESOLVED] Issue: `kafka_producer_send_batch` does not null-initialize `out_futures` on partial failure
+
+- **File**: `src/ffi/producer.rs`
+- **Severity**: Design Flaw
+- **Lines**: 376-401
+- **Description**: When `kafka_producer_send_batch` fails mid-way through the batch (e.g., at record `i=2` of 5), the slots `out_futures[2]` through `out_futures[4]` are left with whatever values the C caller had there (likely uninitialized). Although the documentation says "futures for successfully sent records prior to the error are still valid," a C caller performing cleanup has no way to know how many records succeeded unless they also track the return-code/index separately.
+- **Expected**: At minimum, initialize `out_futures[i]` through `out_futures[count-1]` to null on any failure.
+- **Actual**: Remaining slots are left uninitialized on partial failure; the only way a C caller can avoid accessing garbage pointers is to pre-initialize the entire array to NULL before the call.
+- **Resolution**: Added null-fill loops for `out_futures[i..count]` on all three failure paths in `kafka_producer_send_batch` (null topic, build_record error, producer_send error). Added `test_send_batch_partial_failure_nulls_remaining_slots` which tests both mid-batch failure (at index 1 of 3) and first-record failure (at index 0 of 2), using non-null sentinel values to verify active null-filling. Updated docstring to document the null-fill behavior. Fixed in commit 3166af8.
