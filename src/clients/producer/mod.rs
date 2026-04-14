@@ -36,9 +36,10 @@ pub use record_metadata::RecordMetadata;
 /// - `&self` is used for `send` and `flush` because Java uses `synchronized`
 ///   blocks inside the implementation. In Rust, interior mutability via `Mutex`
 ///   allows `&self` methods, which also enables `Arc<dyn Producer>` sharing.
-/// - `&mut self` is used for `close` because closing is a terminal operation.
-///   Exclusive access prevents concurrent use after close begins, matching
-///   Java's `Closeable.close()` semantics.
+/// - `&self` is used for `close` because Java's `KafkaProducer.close()` uses
+///   internal synchronization (not exclusive ownership). In Rust, implementors
+///   use interior mutability (e.g., `AtomicBool` or `Mutex`) to manage the
+///   `closed` flag, which keeps `close` callable through `Arc<dyn Producer>`.
 /// - `Result` return types match Java's unchecked exceptions
 ///   (`IllegalStateException`, `KafkaException`). Per CLAUDE.md rule 10.2,
 ///   we return `Result` for recoverable errors even when Java uses unchecked
@@ -91,11 +92,21 @@ pub trait Producer: Send + Sync {
 
     /// Close this producer. Blocks until all previously sent records are
     /// acknowledged.
-    fn close(&mut self);
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(KafkaError)` if the close operation fails (e.g., due to
+    /// an interrupt or an internal error while flushing pending records).
+    fn close(&self) -> Result<(), KafkaError>;
 
     /// Close this producer with a timeout.
     ///
     /// If the close does not complete within the given timeout, any pending
     /// sends may be aborted.
-    fn close_with_timeout(&mut self, timeout: Duration);
+    ///
+    /// # Errors
+    ///
+    /// Returns `Err(KafkaError)` if the close operation fails (e.g., due to
+    /// an interrupt or an internal error while flushing pending records).
+    fn close_with_timeout(&self, timeout: Duration) -> Result<(), KafkaError>;
 }
