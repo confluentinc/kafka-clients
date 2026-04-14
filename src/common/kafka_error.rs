@@ -284,6 +284,16 @@ impl KafkaError {
         Self::Generic(KafkaGenericError::with_message(Errors::InvalidConfig, message))
     }
 
+    /// Create an illegal state error.
+    ///
+    /// Corresponds to Java's `IllegalStateException`. Used for client-side
+    /// state violations (e.g., using a closed producer). Uses
+    /// `UnknownServerError` as the error code since there is no dedicated
+    /// protocol error code for illegal state.
+    pub fn illegal_state(message: impl Into<String>) -> Self {
+        Self::Generic(KafkaGenericError::with_message(Errors::UnknownServerError, message))
+    }
+
     // -- Base access -------------------------------------------------------
 
     /// Access the base [`KafkaGenericError`] common to all variants.
