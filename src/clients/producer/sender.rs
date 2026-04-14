@@ -62,6 +62,12 @@ pub struct Sender<C: KafkaClient> {
     config: Arc<ProducerConfig>,
     /// Whether the sender is still running.
     running: Arc<AtomicBool>,
+    /// Notifier used by `KafkaProducer.wait_on_metadata()` to interrupt the
+    /// sender's poll wait, ensuring metadata requests are processed immediately.
+    ///
+    /// Corresponds to Java's `Sender.wakeup()` which calls `client.wakeup()`
+    /// to interrupt the selector's `select()` call.
+    wakeup: Arc<tokio::sync::Notify>,
     /// The number of acknowledgements to request from the server.
     acks: i16,
     /// The max time to wait for the server to respond to the request.
@@ -76,10 +82,11 @@ impl<C: KafkaClient> Sender<C> {
         metadata: Arc<ProducerMetadata>,
         config: Arc<ProducerConfig>,
         running: Arc<AtomicBool>,
+        wakeup: Arc<tokio::sync::Notify>,
     ) -> Self {
         let acks = config.acks().as_i16();
         let request_timeout_ms = config.request_timeout().as_millis() as i32;
-        Sender { client, accumulator, metadata, config, running, acks, request_timeout_ms }
+        Sender { client, accumulator, metadata, config, running, wakeup, acks, request_timeout_ms }
     }
 
     /// Main loop: runs until shutdown is initiated and all in-flight work completes.
@@ -115,10 +122,28 @@ impl<C: KafkaClient> Sender<C> {
     /// 1. `send_producer_data()` drains the accumulator, groups batches by node,
     ///    and calls `client.send()` for each node
     /// 2. `client.poll()` drives all I/O and fires callbacks
+    ///
+    /// The poll is interruptible via the `wakeup` notify, matching Java's
+    /// `sender.wakeup()` which interrupts `client.poll()` via the selector.
     async fn run_once(&mut self) {
         let now = current_time_ms();
         let poll_timeout = self.send_producer_data(now).await;
-        self.client.poll(poll_timeout, now).await;
+
+        if poll_timeout > 0 {
+            // Wait for either the poll timeout or a wakeup signal from the
+            // producer (e.g., when wait_on_metadata requests an immediate
+            // metadata update). This matches Java's selector wakeup mechanism.
+            tokio::select! {
+                _ = self.client.poll(poll_timeout, now) => {},
+                _ = self.wakeup.notified() => {
+                    // Woken up -- run poll with 0 timeout to process any pending
+                    // metadata requests without blocking.
+                    self.client.poll(0, current_time_ms()).await;
+                },
+            }
+        } else {
+            self.client.poll(poll_timeout, now).await;
+        }
     }
 
     /// Drain the accumulator and send produce requests.
@@ -765,7 +790,8 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
-        Sender::new(client, accumulator, metadata, config, running)
+        let wakeup = Arc::new(tokio::sync::Notify::new());
+        Sender::new(client, accumulator, metadata, config, running, wakeup)
     }
 
     /// Append a record to the accumulator directly, bypassing the producer.
@@ -796,6 +822,7 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
 
@@ -805,7 +832,7 @@ mod tests {
         // Flush so the batch is marked as ready.
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
 
         // run_once: drains the accumulator and sends the produce request via client.send().
         // Since MockKafkaClient.poll() immediately responds, this also completes the batch.
@@ -836,6 +863,7 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
 
@@ -846,7 +874,7 @@ mod tests {
         // Flush the batch.
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
 
         // A single run_once should drain the batch and poll.
         sender.run_once().await;
@@ -903,13 +931,14 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
         let future = append_to_accumulator(&accumulator, &tp0, "key", "value").await;
 
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
         sender.run_once().await;
 
         // The batch should be failed with a network error due to disconnect.
@@ -934,13 +963,14 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
         let future = append_to_accumulator(&accumulator, &tp0, "key", "value").await;
 
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
         sender.run_once().await;
 
         // The batch should be failed with RecordTooLarge.
@@ -965,13 +995,14 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
         let future = append_to_accumulator(&accumulator, &tp0, "key", "value").await;
 
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
         sender.run_once().await;
 
         let result = future.await;
@@ -1006,13 +1037,14 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
         let future = append_to_accumulator(&accumulator, &tp0, "key", "value").await;
 
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
 
         // With acks=0, the client should get expect_response=false, meaning
         // the mock won't send a response body. The callback should complete
@@ -1085,6 +1117,7 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
         let future = append_to_accumulator(&accumulator, &tp0, "key", "value").await;
@@ -1100,6 +1133,7 @@ mod tests {
             metadata,
             config,
             Arc::clone(&running),
+            wakeup,
         );
 
         // Signal shutdown before spawning so the run loop terminates quickly.
@@ -1157,6 +1191,7 @@ mod tests {
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let metadata = test_metadata();
         let running = Arc::new(AtomicBool::new(true));
+        let wakeup = Arc::new(tokio::sync::Notify::new());
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
         let future1 = append_to_accumulator(&accumulator, &tp0, "k1", "v1").await;
@@ -1165,7 +1200,7 @@ mod tests {
 
         accumulator.flush_all().await;
 
-        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running);
+        let mut sender = Sender::new(client, Arc::clone(&accumulator), metadata, config, running, wakeup);
         sender.run_once().await;
 
         // All three records should be completed. They share the same base offset

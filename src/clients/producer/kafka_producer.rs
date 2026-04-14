@@ -47,6 +47,22 @@ struct ProducerInner {
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Flag shared with the Sender to signal shutdown.
     running: Arc<AtomicBool>,
+    /// Notifier shared with the Sender to wake its poll loop when metadata
+    /// requests need immediate processing.
+    ///
+    /// Matches Java's `sender.wakeup()` which interrupts the selector's
+    /// `select()` call.
+    sender_wakeup: Arc<tokio::sync::Notify>,
+}
+
+impl ProducerInner {
+    /// Wake up the sender task so it processes metadata requests immediately.
+    ///
+    /// Corresponds to Java's `sender.wakeup()` called from
+    /// `KafkaProducer.waitOnMetadata()`.
+    fn wakeup_sender(&self) {
+        self.sender_wakeup.notify_one();
+    }
 }
 
 /// An async Kafka producer.
@@ -84,6 +100,7 @@ impl KafkaProducer {
         let config = Arc::new(config);
         let accumulator = Arc::new(RecordAccumulator::new(Arc::clone(&config)));
         let running = Arc::new(AtomicBool::new(true));
+        let sender_wakeup = Arc::new(tokio::sync::Notify::new());
 
         let sender = Sender::new(
             client,
@@ -91,6 +108,7 @@ impl KafkaProducer {
             Arc::clone(&metadata),
             Arc::clone(&config),
             Arc::clone(&running),
+            Arc::clone(&sender_wakeup),
         );
         let sender_handle = tokio::spawn(sender.run());
 
@@ -101,6 +119,7 @@ impl KafkaProducer {
                 metadata,
                 sender_handle: Mutex::new(Some(sender_handle)),
                 running,
+                sender_wakeup,
             }),
         }
     }
@@ -183,6 +202,8 @@ impl KafkaProducer {
     ///
     /// Returns the partition count for the topic.
     async fn wait_on_metadata(&self, topic: &str, partition: Option<i32>) -> crate::errors::Result<i32> {
+        // Add the topic to metadata tracking and reset its expiry.
+        // Matches Java: `metadata.add(topic, nowMs)` before the loop.
         let now = current_time_ms();
         self.inner.metadata.add(topic, now);
 
@@ -213,12 +234,22 @@ impl KafkaProducer {
                 debug!("Metadata for topic '{}' not yet available, retrying", topic);
             }
 
+            // Refresh the topic's expiry timestamp on each iteration so it
+            // doesn't get evicted while we are still waiting for metadata.
+            // Matches Java: `metadata.add(topic, nowMs + elapsed)` inside the
+            // do-while loop (KafkaProducer.java:1127).
+            let elapsed_ms = start.elapsed().as_millis() as i64;
+            self.inner.metadata.add(topic, current_time_ms());
+
             // Request a metadata update for this topic.
             let version = self.inner.metadata.request_update_for_topic(topic);
 
+            // Wake up the sender so it processes the metadata request immediately,
+            // matching Java's `sender.wakeup()` (KafkaProducer.java:1129).
+            self.inner.wakeup_sender();
+
             // Check remaining time.
-            let elapsed = start.elapsed().as_millis() as i64;
-            let remaining = max_wait_ms - elapsed;
+            let remaining = max_wait_ms - elapsed_ms;
             if remaining <= 0 {
                 let msg = format!("Topic '{}' not present in metadata after {:?}", topic, max_wait);
                 return Err(KafkaError::new(ErrorCode::TimedOut, msg));

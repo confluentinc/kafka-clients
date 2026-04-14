@@ -61,7 +61,12 @@ pub struct ProducerMetadata {
     /// Maximum idle time before a topic is removed from tracking.
     metadata_idle_ms: i64,
     /// Per-topic errors from the last metadata response.
-    errors: Mutex<Option<HashMap<String, Errors>>>,
+    ///
+    /// Shared with the `update_listener_fn` closure so that errors are
+    /// captured regardless of whether the update comes through
+    /// `update_with_current_request_version()` or directly through
+    /// `Metadata.update()` (via `DefaultMetadataUpdater`).
+    errors: Arc<Mutex<Option<HashMap<String, Errors>>>>,
 }
 
 impl ProducerMetadata {
@@ -85,6 +90,7 @@ impl ProducerMetadata {
     ) -> Self {
         let topics: Arc<Mutex<HashMap<String, i64>>> = Arc::new(Mutex::new(HashMap::new()));
         let new_topics: Arc<Mutex<HashSet<String>>> = Arc::new(Mutex::new(HashSet::new()));
+        let errors: Arc<Mutex<Option<HashMap<String, Errors>>>> = Arc::new(Mutex::new(None));
 
         // Closures that capture Arc references to the topic maps.
         let topics_for_retain = Arc::clone(&topics);
@@ -130,8 +136,18 @@ impl ProducerMetadata {
             });
 
         let new_topics_for_listener = Arc::clone(&new_topics);
+        let errors_for_listener = Arc::clone(&errors);
         let update_listener_fn: Box<crate::clients::metadata::MetadataUpdateListenerFn> =
             Box::new(move |response: &MetadataResponse, _is_partial_update: bool| {
+                // Store per-topic errors from the response, matching Java's
+                // ProducerMetadata.update() which sets `this.errors = response.errors()`.
+                // This is done in the listener (rather than only in
+                // update_with_current_request_version) so errors are captured when
+                // DefaultMetadataUpdater calls Metadata.update() directly.
+                {
+                    let mut errors = errors_for_listener.lock().unwrap();
+                    *errors = Some(response.errors());
+                }
                 let mut new_topics = new_topics_for_listener.lock().unwrap();
                 if !new_topics.is_empty() {
                     for topic_metadata in response.topic_metadata() {
@@ -152,7 +168,7 @@ impl ProducerMetadata {
             Some(update_listener_fn),
         ));
 
-        ProducerMetadata { metadata, topics, new_topics, metadata_idle_ms, errors: Mutex::new(None) }
+        ProducerMetadata { metadata, topics, new_topics, metadata_idle_ms, errors }
     }
 
     /// Add a topic to the set of topics being tracked.
@@ -329,18 +345,16 @@ impl ProducerMetadata {
 
     /// Delegates to `Metadata.update_with_current_request_version()`.
     ///
-    /// Also stores per-topic errors from the response.
+    /// Per-topic errors are stored by the `update_listener_fn` callback which
+    /// is invoked by `Metadata.update()`, ensuring errors are captured
+    /// regardless of whether this method or `Metadata.update()` is called
+    /// directly (e.g. by `DefaultMetadataUpdater`).
     pub fn update_with_current_request_version(
         &self,
         response: &MetadataResponse,
         is_partial_update: bool,
         now_ms: i64,
     ) {
-        // Store errors before delegating (the update listener handles new_topics).
-        {
-            let mut errors = self.errors.lock().unwrap();
-            *errors = Some(response.errors());
-        }
         self.metadata
             .update_with_current_request_version(response, is_partial_update, now_ms);
     }
