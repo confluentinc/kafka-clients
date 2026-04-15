@@ -1,10 +1,15 @@
 language = "C"
+# Use "Type" style so function signatures use the typedef name
+# (e.g. kafka_producer_ProducerRecord_t *) without the "struct" keyword.
+style = "Type"
 include_guard = "CONFLUENT_KAFKA_RUST_H"
 no_includes = true
 sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
 
-[defines]
-"feature = ffi" = "CONFLUENT_KAFKA_FFI"
+[export]
+# Only export FFI types — no internal Kafka client constants or structs.
+include = ["kafka_producer_Producer_t", "kafka_producer_FutureRecordMetadata_t", "kafka_producer_RecordMetadata_t", "kafka_producer_ProducerRecord_t", "kafka_KafkaError_t"]
+item_types = ["functions", "structs"]
 
 [fn]
 prefix = ""

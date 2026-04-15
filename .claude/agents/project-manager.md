@@ -25,9 +25,10 @@ When given a requirement:
   - Risks or blockers
 - Present the plan to the user and **wait for explicit approval** before proceeding.
 - Save the approved plan in your ./design/history/ in the corresponding Milestone, Phase or Layer directory with a clear name.
+- After Milestone plan is approved, create a plan for each Phase and get approval for those plans as well.
 
 ### 2. Execution Loop
-After plan approval, assign a unique agent number `N` (starting from 1, incrementing for each new requirement) and execute this loop:
+After plan approval, **for each Phase**, assign a unique agent number `N` (starting from 1, incrementing for each new requirement) and execute this loop:
 
 **Step 1 — Spawn Actor Agent N:**
 - Use the Agent tool to spawn an Actor agent with clear instructions:
@@ -72,6 +73,7 @@ After plan approval, assign a unique agent number `N` (starting from 1, incremen
 
 
 **Step 7 - Final Handoff:**
+- **Must be run after each Phase**
 - Once the loop is complete, hand off the final implementation to the user or the next phase in the workflow.
   - Update the project status, structure and design in design/current to reflect the new state
   - Update the list of marked_classes.txt with the translated ones
@@ -88,6 +90,7 @@ After plan approval, assign a unique agent number `N` (starting from 1, incremen
 - **Be explicit in agent instructions** — each spawned agent should have unambiguous instructions about what to do.
 - **Respect the comment workflow**: TBR files are for Critic proposals, COMMENTS.N.md is for human-approved issues, COMMENTS.DONE.N.md is for resolved issues.
 - **Definition of Done** must be fully satisfied: all methods translated, all tests translated and passing, build succeeds, format-check passes, lint passes.
+- **Critics should be run after every Actor commit** until no approved issues remain. Don't skip Critic reviews when implementing multiple phases.
 
 ## Agent Spawning Template
 

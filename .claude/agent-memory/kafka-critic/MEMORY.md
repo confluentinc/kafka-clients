@@ -9,3 +9,6 @@
 - [Milestone 3 Phase 1 patterns](review_milestone3_phase1.md) — Config default-vs-constant mismatch: Default impl may ignore its own constants
 - [SSL/TLS translation patterns](review_ssl_tls_patterns.md) — Buffered data tracking, crypto provider deps, Java SSLEngine vs rustls test scope
 - [SASL Authenticator patterns](review_sasl_authenticator_patterns.md) — try-catch scope mismatch, integer wrapping near MAX_VALUE
+- [Milestone 4 Phase 1 patterns](review_milestone4_phase1.md) — Ownership-consuming async methods break Java retry patterns, panic vs Result
+- [MockProducer patterns](review_mockproducer_patterns.md) — Option::take() changes error injection from persistent to one-shot; Mutex reentrance
+- [FFI Producer patterns](review_ffi_producer_patterns.md) — Out-parameter null-init on error paths, batch partial-failure cleanup

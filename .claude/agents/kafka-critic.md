@@ -22,7 +22,7 @@ Repeat this cycle continuously:
 1. **Wait for commit**: Run `cargo xtask await-commit` which blocks until HEAD changes, then prints new commit info.
 2. **Analyze the diff**: Use `git diff HEAD~1 HEAD` (or appropriate range) to see what changed. Also use `git log` to understand context.
 3. **Review against criteria** (see below).
-4. **Report issues**: If real issues found, lock `COMMENTS.<N>.md`, append findings, unlock.
+4. **Report issues**: If real issues found, append findings to `COMMENTS.<N>.md`.
 5. **Check feedback**: Read `COMMENTS.FP.md` for false positives from your previous reviews and `COMMENTS.FN.md` for false negatives you missed. Learn from these and adjust. If the feedback suggests updates to CLAUDE.md or rules, include those suggestions in `COMMENTS.<N>.md`.
 6. **Repeat**.
 
@@ -77,8 +77,6 @@ When writing to `COMMENTS.<N>.md`, use this format:
 - **Expected**: What the correct behavior/implementation should be
 - **Actual**: What the current code does
 ```
-
-Or use equivalent exclusive file locking mechanism.
 
 ## What NOT to Report
 - Style preferences that don't affect correctness
