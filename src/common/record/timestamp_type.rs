@@ -16,6 +16,9 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
 
+use crate::common::KafkaError;
+use crate::common::protocol::Errors;
+
 /// The timestamp type of the records.
 ///
 /// Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
@@ -46,13 +49,19 @@ impl TimestampType {
 
     /// Look up a `TimestampType` by name.
     ///
-    /// Returns `None` if the name is not recognized.
-    pub fn for_name(name: &str) -> Option<Self> {
+    /// # Errors
+    ///
+    /// Returns a `KafkaError` if the name is not recognized, matching Java's
+    /// `NoSuchElementException` thrown by `TimestampType.forName()`.
+    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
         match name {
-            "NoTimestampType" => Some(Self::NoTimestampType),
-            "CreateTime" => Some(Self::CreateTime),
-            "LogAppendTime" => Some(Self::LogAppendTime),
-            _ => None,
+            "NoTimestampType" => Ok(Self::NoTimestampType),
+            "CreateTime" => Ok(Self::CreateTime),
+            "LogAppendTime" => Ok(Self::LogAppendTime),
+            _ => Err(KafkaError::with_message(
+                Errors::UnknownServerError,
+                format!("No timestamp type with name: {name}"),
+            )),
         }
     }
 }
@@ -83,10 +92,18 @@ mod tests {
 
     #[test]
     fn test_for_name() {
-        assert_eq!(TimestampType::for_name("NoTimestampType"), Some(TimestampType::NoTimestampType));
-        assert_eq!(TimestampType::for_name("CreateTime"), Some(TimestampType::CreateTime));
-        assert_eq!(TimestampType::for_name("LogAppendTime"), Some(TimestampType::LogAppendTime));
-        assert_eq!(TimestampType::for_name("Unknown"), None);
+        assert_eq!(
+            TimestampType::for_name("NoTimestampType").unwrap(),
+            TimestampType::NoTimestampType
+        );
+        assert_eq!(TimestampType::for_name("CreateTime").unwrap(), TimestampType::CreateTime);
+        assert_eq!(TimestampType::for_name("LogAppendTime").unwrap(), TimestampType::LogAppendTime);
+    }
+
+    #[test]
+    fn test_for_name_unknown() {
+        let err = TimestampType::for_name("Unknown").unwrap_err();
+        assert!(err.message().contains("No timestamp type with name: Unknown"));
     }
 
     #[test]

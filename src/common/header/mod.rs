@@ -53,10 +53,12 @@ pub trait Headers {
 
     /// Creates and adds a header, to the end, returning if the operation succeeded.
     ///
+    /// The key and value are borrowed; the allocation is performed internally.
+    ///
     /// # Errors
     ///
     /// Returns an error if headers are in a read-only state.
-    fn add_key_value(&mut self, key: String, value: Option<Vec<u8>>) -> Result<(), IllegalStateError>;
+    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError>;
 
     /// Removes all headers for the given key returning if the operation succeeded,
     /// while preserving the insertion order of the remaining headers.

@@ -153,7 +153,17 @@ impl Compression {
     ///
     /// The returned writer compresses data written to it. Call `finish()` on the
     /// inner writer (via the returned `CompressingWriter`) when done.
-    pub fn wrap_for_output<W: Write>(&self, writer: W) -> io::Result<CompressingWriter<W>> {
+    ///
+    /// # Arguments
+    ///
+    /// * `writer` - The underlying writer to compress data into.
+    /// * `message_version` - The record batch magic version. For LZ4 with
+    ///   `message_version == RecordBatch::MAGIC_VALUE_V0`, Java uses a broken
+    ///   flag-descriptor checksum for compatibility. Currently only v2 behavior
+    ///   is implemented; the parameter is accepted for forward compatibility so
+    ///   that later phases (consumer reading v0/v1 records) do not need to
+    ///   change the public API.
+    pub fn wrap_for_output<W: Write>(&self, writer: W, _message_version: i8) -> io::Result<CompressingWriter<W>> {
         match self {
             Self::None => Ok(CompressingWriter::None(writer)),
             Self::Gzip { level } => {
@@ -169,7 +179,13 @@ impl Compression {
                 Ok(CompressingWriter::Snappy(Box::new(encoder)))
             },
             Self::Lz4 { .. } => {
-                // lz4_flex does not support compression levels in the frame encoder
+                // Note: lz4_flex is a pure-Rust LZ4 implementation that does not support
+                // compression levels. The Java client uses net.jpountz.lz4.LZ4Compressor
+                // which supports levels 1-17 via Lz4BlockOutputStream. We keep lz4_flex
+                // to avoid a C dependency; the configured level (stored in the Lz4 { level }
+                // field) is accepted and validated but does not affect compression output.
+                // All data is compressed at lz4_flex's single default level, which is
+                // equivalent to Java's default LZ4 fast compressor.
                 let encoder = lz4_flex::frame::FrameEncoder::new(writer);
                 Ok(CompressingWriter::Lz4(encoder))
             },
@@ -181,7 +197,15 @@ impl Compression {
     }
 
     /// Wrap a reader with a decompressing input stream.
-    pub fn wrap_for_input<R: Read>(&self, reader: R) -> io::Result<DecompressingReader<R>> {
+    ///
+    /// # Arguments
+    ///
+    /// * `reader` - The underlying reader containing compressed data.
+    /// * `message_version` - The record batch magic version. For LZ4 with
+    ///   `message_version == RecordBatch::MAGIC_VALUE_V0`, Java uses a broken
+    ///   flag-descriptor checksum for compatibility. Currently only v2 behavior
+    ///   is implemented; the parameter is accepted for forward compatibility.
+    pub fn wrap_for_input<R: Read>(&self, reader: R, _message_version: i8) -> io::Result<DecompressingReader<R>> {
         match self {
             Self::None => Ok(DecompressingReader::None(reader)),
             Self::Gzip { .. } => {
@@ -288,16 +312,20 @@ mod tests {
     use super::*;
     use std::io::{Read, Write};
 
+    /// Use record batch magic v2 for tests — this is the only version the
+    /// producer creates.
+    const TEST_MESSAGE_VERSION: i8 = 2;
+
     fn round_trip(compression: &Compression, data: &[u8]) -> Vec<u8> {
         // Compress
         let mut compressed = Vec::new();
-        let mut writer = compression.wrap_for_output(&mut compressed).unwrap();
+        let mut writer = compression.wrap_for_output(&mut compressed, TEST_MESSAGE_VERSION).unwrap();
         writer.write_all(data).unwrap();
         let compressed = writer.finish().unwrap().clone();
 
         // Decompress
         let mut decompressed = Vec::new();
-        let mut reader = compression.wrap_for_input(compressed.as_slice()).unwrap();
+        let mut reader = compression.wrap_for_input(compressed.as_slice(), TEST_MESSAGE_VERSION).unwrap();
         reader.read_to_end(&mut decompressed).unwrap();
 
         decompressed

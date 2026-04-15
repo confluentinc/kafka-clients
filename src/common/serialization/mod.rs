@@ -24,6 +24,7 @@ pub use byte_array_serializer::ByteArraySerializer;
 pub use string_serializer::StringSerializer;
 
 use crate::common::KafkaError;
+use crate::common::header::internals::RecordHeaders;
 
 /// An interface for converting objects to bytes.
 ///
@@ -47,4 +48,31 @@ pub trait Serializer<T: ?Sized> {
     ///
     /// Serialized bytes; may be `None`.
     fn serialize(&self, topic: &str, data: Option<&T>) -> Result<Option<Vec<u8>>, KafkaError>;
+
+    /// Convert `data` into a byte array, with access to the record headers.
+    ///
+    /// The default implementation ignores the headers and delegates to
+    /// [`serialize`](Serializer::serialize). Override this method in custom
+    /// serializer implementations that need to inspect or modify headers during
+    /// serialization (e.g., for schema registry integration).
+    ///
+    /// Corresponds to Java's `Serializer.serialize(String topic, Headers headers, T data)`.
+    ///
+    /// # Arguments
+    ///
+    /// * `topic` - topic associated with data
+    /// * `headers` - record headers
+    /// * `data` - typed data; may be `None`
+    ///
+    /// # Returns
+    ///
+    /// Serialized bytes; may be `None`.
+    fn serialize_with_headers(
+        &self,
+        topic: &str,
+        _headers: &RecordHeaders,
+        data: Option<&T>,
+    ) -> Result<Option<Vec<u8>>, KafkaError> {
+        self.serialize(topic, data)
+    }
 }

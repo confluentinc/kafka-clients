@@ -16,6 +16,9 @@
 //!
 //! Corresponds to Java's `org.apache.kafka.common.record.CompressionType`.
 
+use crate::common::KafkaError;
+use crate::common::protocol::Errors;
+
 /// The compression type to use.
 ///
 /// Compression type is represented by two bits in the attributes field of the
@@ -63,29 +66,41 @@ impl CompressionType {
 
     /// Look up a `CompressionType` by numeric ID.
     ///
-    /// Returns `None` if the ID is not recognized.
-    pub fn for_id(id: u8) -> Option<Self> {
+    /// # Errors
+    ///
+    /// Returns a `KafkaError` if the ID is not recognized, matching Java's
+    /// `IllegalArgumentException` thrown by `CompressionType.forId()`.
+    pub fn for_id(id: u8) -> Result<Self, KafkaError> {
         match id {
-            0 => Some(Self::None),
-            1 => Some(Self::Gzip),
-            2 => Some(Self::Snappy),
-            3 => Some(Self::Lz4),
-            4 => Some(Self::Zstd),
-            _ => Option::None,
+            0 => Ok(Self::None),
+            1 => Ok(Self::Gzip),
+            2 => Ok(Self::Snappy),
+            3 => Ok(Self::Lz4),
+            4 => Ok(Self::Zstd),
+            _ => Err(KafkaError::with_message(
+                Errors::UnknownServerError,
+                format!("Unknown compression type id: {id}"),
+            )),
         }
     }
 
     /// Look up a `CompressionType` by name.
     ///
-    /// Returns `None` if the name is not recognized.
-    pub fn for_name(name: &str) -> Option<Self> {
+    /// # Errors
+    ///
+    /// Returns a `KafkaError` if the name is not recognized, matching Java's
+    /// `IllegalArgumentException` thrown by `CompressionType.forName()`.
+    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
         match name {
-            "none" => Some(Self::None),
-            "gzip" => Some(Self::Gzip),
-            "snappy" => Some(Self::Snappy),
-            "lz4" => Some(Self::Lz4),
-            "zstd" => Some(Self::Zstd),
-            _ => Option::None,
+            "none" => Ok(Self::None),
+            "gzip" => Ok(Self::Gzip),
+            "snappy" => Ok(Self::Snappy),
+            "lz4" => Ok(Self::Lz4),
+            "zstd" => Ok(Self::Zstd),
+            _ => Err(KafkaError::with_message(
+                Errors::UnknownServerError,
+                format!("Unknown compression type name: {name}"),
+            )),
         }
     }
 
@@ -162,22 +177,32 @@ mod tests {
 
     #[test]
     fn test_for_id() {
-        assert_eq!(CompressionType::for_id(0), Some(CompressionType::None));
-        assert_eq!(CompressionType::for_id(1), Some(CompressionType::Gzip));
-        assert_eq!(CompressionType::for_id(2), Some(CompressionType::Snappy));
-        assert_eq!(CompressionType::for_id(3), Some(CompressionType::Lz4));
-        assert_eq!(CompressionType::for_id(4), Some(CompressionType::Zstd));
-        assert_eq!(CompressionType::for_id(5), Option::None);
+        assert_eq!(CompressionType::for_id(0).unwrap(), CompressionType::None);
+        assert_eq!(CompressionType::for_id(1).unwrap(), CompressionType::Gzip);
+        assert_eq!(CompressionType::for_id(2).unwrap(), CompressionType::Snappy);
+        assert_eq!(CompressionType::for_id(3).unwrap(), CompressionType::Lz4);
+        assert_eq!(CompressionType::for_id(4).unwrap(), CompressionType::Zstd);
+    }
+
+    #[test]
+    fn test_for_id_unknown() {
+        let err = CompressionType::for_id(5).unwrap_err();
+        assert!(err.message().contains("Unknown compression type id: 5"));
     }
 
     #[test]
     fn test_for_name() {
-        assert_eq!(CompressionType::for_name("none"), Some(CompressionType::None));
-        assert_eq!(CompressionType::for_name("gzip"), Some(CompressionType::Gzip));
-        assert_eq!(CompressionType::for_name("snappy"), Some(CompressionType::Snappy));
-        assert_eq!(CompressionType::for_name("lz4"), Some(CompressionType::Lz4));
-        assert_eq!(CompressionType::for_name("zstd"), Some(CompressionType::Zstd));
-        assert_eq!(CompressionType::for_name("unknown"), Option::None);
+        assert_eq!(CompressionType::for_name("none").unwrap(), CompressionType::None);
+        assert_eq!(CompressionType::for_name("gzip").unwrap(), CompressionType::Gzip);
+        assert_eq!(CompressionType::for_name("snappy").unwrap(), CompressionType::Snappy);
+        assert_eq!(CompressionType::for_name("lz4").unwrap(), CompressionType::Lz4);
+        assert_eq!(CompressionType::for_name("zstd").unwrap(), CompressionType::Zstd);
+    }
+
+    #[test]
+    fn test_for_name_unknown() {
+        let err = CompressionType::for_name("unknown").unwrap_err();
+        assert!(err.message().contains("Unknown compression type name: unknown"));
     }
 
     #[test]

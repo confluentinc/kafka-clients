@@ -98,8 +98,8 @@ impl Headers for RecordHeaders {
         Ok(())
     }
 
-    fn add_key_value(&mut self, key: String, value: Option<Vec<u8>>) -> Result<(), IllegalStateError> {
-        self.add(RecordHeader::new(key, value))
+    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError> {
+        self.add(RecordHeader::new(key.to_owned(), value.map(|v| v.to_vec())))
     }
 
     fn remove(&mut self, key: &str) -> Result<(), IllegalStateError> {
