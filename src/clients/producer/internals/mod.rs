@@ -15,6 +15,7 @@
 //! Producer internal types (org.apache.kafka.clients.producer.internals)
 
 pub mod buffer_pool;
+pub mod built_in_partitioner;
 pub mod future_record_metadata;
 pub mod incomplete_batches;
 pub mod produce_request_result;
