@@ -24,10 +24,10 @@ use super::object_serialization_cache::ObjectSerializationCache;
 use super::readable::RawTaggedField;
 
 /// Maximum value of an unsigned 16-bit integer.
-pub const UNSIGNED_SHORT_MAX: u32 = 0xFFFF;
+pub const MESSAGE_UTIL_UNSIGNED_SHORT_MAX: u32 = 0xFFFF;
 
 /// Maximum value of an unsigned 32-bit integer.
-pub const UNSIGNED_INT_MAX: u64 = 0xFFFF_FFFF;
+pub const MESSAGE_UTIL_UNSIGNED_INT_MAX: u64 = 0xFFFF_FFFF;
 
 /// Compares two lists of raw tagged fields.
 ///
@@ -134,10 +134,10 @@ mod tests {
     }
 
     /// Translated from Java MessageUtilTest.testConstants.
-    /// Verifies UNSIGNED_SHORT_MAX and UNSIGNED_INT_MAX values.
+    /// Verifies MESSAGE_UTIL_UNSIGNED_SHORT_MAX and MESSAGE_UTIL_UNSIGNED_INT_MAX values.
     #[test]
     fn test_constants() {
-        assert_eq!(UNSIGNED_SHORT_MAX, 0xFFFF);
-        assert_eq!(UNSIGNED_INT_MAX, 0xFFFF_FFFF);
+        assert_eq!(MESSAGE_UTIL_UNSIGNED_SHORT_MAX, 0xFFFF);
+        assert_eq!(MESSAGE_UTIL_UNSIGNED_INT_MAX, 0xFFFF_FFFF);
     }
 }

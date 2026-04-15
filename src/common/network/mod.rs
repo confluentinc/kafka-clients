@@ -62,7 +62,7 @@ pub use plaintext_channel_builder::PlaintextChannelBuilder;
 pub use plaintext_transport_layer::PlaintextTransportLayer;
 pub use receive::Receive;
 pub use sasl_channel_builder::SaslChannelBuilder;
-pub use selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+pub use selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
 pub use selector::Selector;
 pub use send::KafkaSend;
 pub use ssl_channel_builder::SslChannelBuilder;

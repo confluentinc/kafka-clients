@@ -42,13 +42,13 @@ use super::abstract_response::update_error_counts;
 use super::request_utils::get_leader_epoch;
 
 /// Sentinel value indicating that the controller ID is unknown.
-pub const NO_CONTROLLER_ID: i32 = -1;
+pub const METADATA_RESPONSE_NO_CONTROLLER_ID: i32 = -1;
 
 /// Sentinel value indicating that the partition has no leader.
-pub const NO_LEADER_ID: i32 = -1;
+pub const METADATA_RESPONSE_NO_LEADER_ID: i32 = -1;
 
 /// Sentinel value indicating that authorized operations have been omitted.
-pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
+pub const METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
 
 /// A Metadata response.
 ///
@@ -465,7 +465,7 @@ impl TopicMetadata {
             topic_id: Uuid::zero(),
             is_internal,
             partition_metadata,
-            authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
+            authorized_operations: METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED,
         }
     }
 

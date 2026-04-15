@@ -26,8 +26,8 @@ use std::net::SocketAddr;
 
 use confluent_kafka_rust::common::network::NetworkSend;
 use confluent_kafka_rust::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
-use confluent_kafka_rust::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
-use confluent_kafka_rust::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
+use confluent_kafka_rust::common::network::selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
+use confluent_kafka_rust::common::network::selector::{SELECTOR_NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka_rust::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 use confluent_kafka_rust::common::requests::abstract_response::ConcreteResponse;
 use confluent_kafka_rust::common::requests::{
@@ -49,7 +49,7 @@ const NODE_ID: &str = "0";
 /// Helper: create a Selector with a PlaintextChannelBuilder.
 fn create_selector() -> Selector {
     let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder)
+    Selector::with_defaults(SELECTOR_NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: parse `host:port` from a bootstrap servers string.
@@ -127,7 +127,13 @@ async fn test_tcp_connection() {
     let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
 
     selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(
+            NODE_ID,
+            addr,
+            "localhost",
+            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
+            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
+        )
         .await
         .expect("Failed to connect");
 
@@ -148,7 +154,13 @@ async fn test_api_versions_request_response() {
 
     // Connect
     selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(
+            NODE_ID,
+            addr,
+            "localhost",
+            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
+            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
+        )
         .await
         .expect("Failed to connect");
     poll_until_connected(&mut selector).await;
@@ -205,7 +217,13 @@ async fn test_full_connection_flow() {
 
     // Step 1: Connect
     selector
-        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(
+            NODE_ID,
+            addr,
+            "localhost",
+            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
+            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
+        )
         .await
         .expect("Failed to connect");
     poll_until_connected(&mut selector).await;

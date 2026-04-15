@@ -22,14 +22,14 @@ use crate::common::protocol::object_serialization_cache::ObjectSerializationCach
 
 use std::io;
 
-use super::NO_PARTITION_LEADER_EPOCH;
+use super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 
 /// Returns `Some(leader_epoch)` if the given epoch is valid (not
-/// [`NO_PARTITION_LEADER_EPOCH`]), or `None` otherwise.
+/// [`RECORD_BATCH_NO_PARTITION_LEADER_EPOCH`]), or `None` otherwise.
 ///
 /// Corresponds to `RequestUtils.getLeaderEpoch` in Java.
 pub fn get_leader_epoch(leader_epoch: i32) -> Option<i32> {
-    if leader_epoch == NO_PARTITION_LEADER_EPOCH {
+    if leader_epoch == RECORD_BATCH_NO_PARTITION_LEADER_EPOCH {
         None
     } else {
         Some(leader_epoch)
@@ -78,6 +78,6 @@ mod tests {
 
     #[test]
     fn test_get_leader_epoch_no_epoch() {
-        assert_eq!(get_leader_epoch(NO_PARTITION_LEADER_EPOCH), None);
+        assert_eq!(get_leader_epoch(RECORD_BATCH_NO_PARTITION_LEADER_EPOCH), None);
     }
 }

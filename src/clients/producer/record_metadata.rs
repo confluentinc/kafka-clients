@@ -21,13 +21,13 @@ use std::fmt;
 use crate::common::TopicPartition;
 
 /// Partition value for record without partition assigned.
-pub const UNKNOWN_PARTITION: i32 = -1;
+pub const RECORD_METADATA_UNKNOWN_PARTITION: i32 = -1;
 
-/// The invalid offset constant, matching Java's `ProduceResponse.INVALID_OFFSET`.
-const INVALID_OFFSET: i64 = -1;
+/// The invalid offset constant, matching Java's `ProduceResponse.PRODUCE_RESPONSE_INVALID_OFFSET`.
+const PRODUCE_RESPONSE_INVALID_OFFSET: i64 = -1;
 
-/// The no-timestamp constant, matching Java's `RecordBatch.NO_TIMESTAMP`.
-const NO_TIMESTAMP: i64 = -1;
+/// The no-timestamp constant, matching Java's `RecordBatch.RECORD_BATCH_NO_TIMESTAMP`.
+const RECORD_BATCH_NO_TIMESTAMP: i64 = -1;
 
 /// The metadata for a record that has been acknowledged by the server.
 ///
@@ -84,7 +84,7 @@ impl RecordMetadata {
     /// Returns `true` if the offset is included in the metadata, `false`
     /// otherwise.
     pub fn has_offset(&self) -> bool {
-        self.offset != INVALID_OFFSET
+        self.offset != PRODUCE_RESPONSE_INVALID_OFFSET
     }
 
     /// The offset of the record in the topic/partition.
@@ -98,7 +98,7 @@ impl RecordMetadata {
     ///
     /// Returns `true` if a valid timestamp exists, `false` otherwise.
     pub fn has_timestamp(&self) -> bool {
-        self.timestamp != NO_TIMESTAMP
+        self.timestamp != RECORD_BATCH_NO_TIMESTAMP
     }
 
     /// The timestamp of the record in the topic/partition.
@@ -202,7 +202,7 @@ mod tests {
         let with_ts = RecordMetadata::new(tp.clone(), 0, 0, 1000, 0, 0);
         assert!(with_ts.has_timestamp());
 
-        let no_ts = RecordMetadata::new(tp, 0, 0, NO_TIMESTAMP, 0, 0);
+        let no_ts = RecordMetadata::new(tp, 0, 0, RECORD_BATCH_NO_TIMESTAMP, 0, 0);
         assert!(!no_ts.has_timestamp());
     }
 
@@ -219,6 +219,6 @@ mod tests {
 
     #[test]
     fn test_unknown_partition_constant() {
-        assert_eq!(UNKNOWN_PARTITION, -1);
+        assert_eq!(RECORD_METADATA_UNKNOWN_PARTITION, -1);
     }
 }

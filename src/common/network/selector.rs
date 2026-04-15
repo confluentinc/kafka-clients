@@ -39,7 +39,7 @@ use super::kafka_channel::KafkaChannel;
 use super::network_receive::NetworkReceive;
 use super::network_send::NetworkSend;
 use super::receive::Receive;
-use super::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+use super::selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
 
 use indexmap::IndexMap;
 use log::{debug, error, trace};
@@ -53,7 +53,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 /// Value indicating no idle timeout.
-pub const NO_IDLE_TIMEOUT_MS: i64 = -1;
+pub const SELECTOR_NO_IDLE_TIMEOUT_MS: i64 = -1;
 
 /// Close mode for channel closing operations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -123,9 +123,9 @@ impl Selector {
     /// # Arguments
     ///
     /// * `max_receive_size` - Max size in bytes of a single network receive
-    ///   (use `NetworkReceive::UNLIMITED` for no limit)
+    ///   (use `NETWORK_RECEIVE_UNLIMITED` for no limit)
     /// * `connection_max_idle_ms` - Max idle connection time
-    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    ///   (use [`SELECTOR_NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     pub fn new(max_receive_size: i32, connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self {
@@ -153,7 +153,11 @@ impl Selector {
 
     /// Convenience constructor matching the common Java pattern.
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
-        Self::new(super::network_receive::UNLIMITED, connection_max_idle_ms, channel_builder)
+        Self::new(
+            super::network_receive::NETWORK_RECEIVE_UNLIMITED,
+            connection_max_idle_ms,
+            channel_builder,
+        )
     }
 
     fn ensure_not_registered(&self, id: &str) -> Result<(), String> {
@@ -575,10 +579,10 @@ impl Selectable for Selector {
 
         // Configure socket
         socket.set_keepalive(true)?;
-        if send_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+        if send_buffer_size != SELECTABLE_USE_DEFAULT_BUFFER_SIZE {
             socket.set_send_buffer_size(send_buffer_size as u32)?;
         }
-        if receive_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+        if receive_buffer_size != SELECTABLE_USE_DEFAULT_BUFFER_SIZE {
             socket.set_recv_buffer_size(receive_buffer_size as u32)?;
         }
         socket.set_nodelay(true)?;
@@ -1037,7 +1041,7 @@ mod tests {
     async fn create_selector() -> Selector {
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
         Selector::new(
-            super::super::network_receive::UNLIMITED,
+            super::super::network_receive::NETWORK_RECEIVE_UNLIMITED,
             CONNECTION_MAX_IDLE_MS,
             channel_builder,
         )
@@ -1292,7 +1296,7 @@ mod tests {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
         let mut selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
+            super::super::network_receive::NETWORK_RECEIVE_UNLIMITED,
             CONNECTION_MAX_IDLE_MS,
             channel_builder,
         );
@@ -1614,7 +1618,7 @@ mod tests {
         let server = EchoServer::new().await.unwrap();
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
         let mut selector = Selector::new(
-            super::super::network_receive::UNLIMITED,
+            super::super::network_receive::NETWORK_RECEIVE_UNLIMITED,
             CONNECTION_MAX_IDLE_MS,
             channel_builder,
         );

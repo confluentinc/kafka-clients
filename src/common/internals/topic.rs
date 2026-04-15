@@ -17,28 +17,28 @@
 //! Corresponds to `org.apache.kafka.common.internals.Topic`.
 
 /// Consumer offsets internal topic name.
-pub const GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
+pub const TOPIC_GROUP_METADATA_TOPIC_NAME: &str = "__consumer_offsets";
 
 /// Transaction state internal topic name.
-pub const TRANSACTION_STATE_TOPIC_NAME: &str = "__transaction_state";
+pub const TOPIC_TRANSACTION_STATE_TOPIC_NAME: &str = "__transaction_state";
 
 /// Share group state internal topic name.
-pub const SHARE_GROUP_STATE_TOPIC_NAME: &str = "__share_group_state";
+pub const TOPIC_SHARE_GROUP_STATE_TOPIC_NAME: &str = "__share_group_state";
 
 /// Cluster metadata internal topic name.
-pub const CLUSTER_METADATA_TOPIC_NAME: &str = "__cluster_metadata";
+pub const TOPIC_CLUSTER_METADATA_TOPIC_NAME: &str = "__cluster_metadata";
 
 /// Legal characters for Kafka topic names.
-pub const LEGAL_CHARS: &str = "[a-zA-Z0-9._-]";
+pub const TOPIC_LEGAL_CHARS: &str = "[a-zA-Z0-9._-]";
 
 /// Maximum topic name length.
 const MAX_NAME_LENGTH: usize = 249;
 
 /// Set of internal topic names.
 const INTERNAL_TOPICS: &[&str] = &[
-    GROUP_METADATA_TOPIC_NAME,
-    TRANSACTION_STATE_TOPIC_NAME,
-    SHARE_GROUP_STATE_TOPIC_NAME,
+    TOPIC_GROUP_METADATA_TOPIC_NAME,
+    TOPIC_TRANSACTION_STATE_TOPIC_NAME,
+    TOPIC_SHARE_GROUP_STATE_TOPIC_NAME,
 ];
 
 /// Topic name utilities.
@@ -113,11 +113,11 @@ mod tests {
 
     #[test]
     fn test_is_internal() {
-        assert!(Topic::is_internal(GROUP_METADATA_TOPIC_NAME));
-        assert!(Topic::is_internal(TRANSACTION_STATE_TOPIC_NAME));
-        assert!(Topic::is_internal(SHARE_GROUP_STATE_TOPIC_NAME));
+        assert!(Topic::is_internal(TOPIC_GROUP_METADATA_TOPIC_NAME));
+        assert!(Topic::is_internal(TOPIC_TRANSACTION_STATE_TOPIC_NAME));
+        assert!(Topic::is_internal(TOPIC_SHARE_GROUP_STATE_TOPIC_NAME));
         assert!(!Topic::is_internal("my-topic"));
-        assert!(!Topic::is_internal(CLUSTER_METADATA_TOPIC_NAME));
+        assert!(!Topic::is_internal(TOPIC_CLUSTER_METADATA_TOPIC_NAME));
     }
 
     #[test]

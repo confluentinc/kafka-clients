@@ -37,7 +37,7 @@ use super::sasl_handshake_response::SaslHandshakeResponse;
 use super::send_builder::SendBuilder;
 
 /// Default throttle time in milliseconds.
-pub const DEFAULT_THROTTLE_TIME: i32 = 0;
+pub const ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME: i32 = 0;
 
 /// Enum dispatch for all supported Kafka response types.
 ///

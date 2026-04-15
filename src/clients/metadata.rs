@@ -36,7 +36,7 @@ use crate::common::internals::ClusterResourceListeners;
 use crate::common::kafka_error::KafkaError;
 use crate::common::node::Node;
 use crate::common::protocol::Errors;
-use crate::common::requests::NO_PARTITION_LEADER_EPOCH;
+use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::metadata_request::MetadataRequestBuilder;
 use crate::common::requests::metadata_response::{MetadataResponse, PartitionMetadata};
 use crate::common::topic_partition::TopicPartition;
@@ -194,9 +194,9 @@ impl Metadata {
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
-            common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_EXP_BASE,
             refresh_backoff_max_ms,
-            common_client_configs::RETRY_BACKOFF_JITTER,
+            common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER,
         )
         .expect("Invalid backoff parameters");
 
@@ -248,9 +248,9 @@ impl Metadata {
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
-            common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_EXP_BASE,
             refresh_backoff_max_ms,
-            common_client_configs::RETRY_BACKOFF_JITTER,
+            common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER,
         )
         .expect("Invalid backoff parameters");
 
@@ -475,7 +475,7 @@ impl Metadata {
                 partition_metadata.cloned()
             },
             Some(epoch) => partition_metadata
-                .filter(|metadata| metadata.leader_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH) == epoch)
+                .filter(|metadata| metadata.leader_epoch.unwrap_or(RECORD_BATCH_NO_PARTITION_LEADER_EPOCH) == epoch)
                 .cloned(),
         }
     }
@@ -1223,10 +1223,12 @@ mod tests {
         metadata.failed_update(now);
 
         // Backing off. Remaining time until next try should be returned.
-        let lower_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 - super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
-        let upper_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 + super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+        let lower_bound_backoff_ms = (REFRESH_BACKOFF_MS as f64
+            * (1.0 - super::common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER))
+            as i64;
+        let upper_bound_backoff_ms = (REFRESH_BACKOFF_MS as f64
+            * (1.0 + super::common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER))
+            as i64;
         let tolerance = upper_bound_backoff_ms - lower_bound_backoff_ms;
         let actual = metadata.time_to_next_update(now);
         assert!(
@@ -1264,10 +1266,12 @@ mod tests {
         assert_eq!(100, metadata.time_to_next_update(1000));
         metadata.failed_update(1100);
 
-        let lower_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 - super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
-        let upper_bound_backoff_ms =
-            (REFRESH_BACKOFF_MS as f64 * (1.0 + super::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+        let lower_bound_backoff_ms = (REFRESH_BACKOFF_MS as f64
+            * (1.0 - super::common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER))
+            as i64;
+        let upper_bound_backoff_ms = (REFRESH_BACKOFF_MS as f64
+            * (1.0 + super::common_client_configs::COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER))
+            as i64;
         let tolerance = upper_bound_backoff_ms - lower_bound_backoff_ms;
 
         let actual = metadata.time_to_next_update(1100);
@@ -1714,7 +1718,7 @@ mod tests {
         let mut errors = HashMap::new();
         counts.insert("topic1".to_string(), 2);
         counts.insert("topic2".to_string(), 3);
-        counts.insert(crate::common::internals::topic::GROUP_METADATA_TOPIC_NAME.to_string(), 3);
+        counts.insert(crate::common::internals::topic::TOPIC_GROUP_METADATA_TOPIC_NAME.to_string(), 3);
         errors.insert("topic3".to_string(), Errors::InvalidTopicException);
         errors.insert("topic4".to_string(), Errors::TopicAuthorizationFailed);
 
@@ -1737,7 +1741,7 @@ mod tests {
         );
         assert_eq!(3, cluster.topics().count());
         assert_eq!(
-            &[crate::common::internals::topic::GROUP_METADATA_TOPIC_NAME.to_string()]
+            &[crate::common::internals::topic::TOPIC_GROUP_METADATA_TOPIC_NAME.to_string()]
                 .into_iter()
                 .collect::<HashSet<_>>(),
             cluster.internal_topics()
@@ -2079,7 +2083,8 @@ mod tests {
             topic_id,
             is_internal: false,
             partition_metadata: vec![partition0, partition1],
-            authorized_operations: crate::common::requests::metadata_response::AUTHORIZED_OPERATIONS_OMITTED,
+            authorized_operations:
+                crate::common::requests::metadata_response::METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED,
         };
 
         let response = request_test_utils::metadata_response(

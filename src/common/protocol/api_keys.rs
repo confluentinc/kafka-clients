@@ -35,7 +35,7 @@ pub struct ApiKeys {
 // Due to a bug in librdkafka, version `0` has to be included in the api versions response
 // (see KAFKA-18659).
 #[cfg(not(feature = "skip-generated"))]
-pub const PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
+pub const API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
 
 #[cfg(not(feature = "skip-generated"))]
 impl ApiKeys {
@@ -354,9 +354,9 @@ impl ApiKeys {
         enable_unstable_last_version: bool,
         listener_type: Option<ListenerType>,
     ) -> Option<ApiVersion> {
-        // See `PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION` for details on why we do this
+        // See `API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION` for details on why we do this
         let oldest_version = if self == Self::PRODUCE && (listener_type == Some(ListenerType::Broker)) {
-            PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
+            API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
         } else {
             self.oldest_version()
         };

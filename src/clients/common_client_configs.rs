@@ -19,7 +19,7 @@
 //! full configuration support will be added as needed.
 
 /// The base for exponential retry backoff.
-pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
+pub const COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_EXP_BASE: i32 = 2;
 
 /// The jitter factor for retry backoff.
-pub const RETRY_BACKOFF_JITTER: f64 = 0.2;
+pub const COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_JITTER: f64 = 0.2;

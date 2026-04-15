@@ -53,5 +53,5 @@ pub use send_builder::SendBuilder;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
 ///
-/// Corresponds to `RecordBatch.NO_PARTITION_LEADER_EPOCH` in Java.
-pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
+/// Corresponds to `RecordBatch.RECORD_BATCH_NO_PARTITION_LEADER_EPOCH` in Java.
+pub const RECORD_BATCH_NO_PARTITION_LEADER_EPOCH: i32 = -1;

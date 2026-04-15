@@ -27,13 +27,13 @@ use super::host_resolver::HostResolver;
 use crate::common::utils::ExponentialBackoff;
 
 /// Exponential base for reconnect backoff.
-pub const RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
+pub const CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
 /// Jitter factor for reconnect backoff.
-pub const RECONNECT_BACKOFF_JITTER: f64 = 0.2;
+pub const CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER: f64 = 0.2;
 /// Exponential base for connection setup timeout.
-pub const CONNECTION_SETUP_TIMEOUT_EXP_BASE: i32 = 2;
+pub const CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE: i32 = 2;
 /// Jitter factor for connection setup timeout.
-pub const CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
+pub const CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
 
 /// The state of our connection to each node in the cluster.
 ///
@@ -68,16 +68,16 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         Self {
             reconnect_backoff: ExponentialBackoff::new(
                 reconnect_backoff_ms,
-                RECONNECT_BACKOFF_EXP_BASE,
+                CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE,
                 reconnect_backoff_max_ms,
-                RECONNECT_BACKOFF_JITTER,
+                CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER,
             )
             .expect("Invalid reconnect backoff jitter"),
             connection_setup_timeout: ExponentialBackoff::new(
                 connection_setup_timeout_ms,
-                CONNECTION_SETUP_TIMEOUT_EXP_BASE,
+                CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE,
                 connection_setup_timeout_max_ms,
-                CONNECTION_SETUP_TIMEOUT_JITTER,
+                CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER,
             )
             .expect("Invalid connection setup timeout jitter"),
             node_state: HashMap::new(),
@@ -666,7 +666,8 @@ mod tests {
         assert!(!connection_states.is_blacked_out(NODE_ID1, time.milliseconds()));
         assert!(!connection_states.has_ready_nodes(time.milliseconds()));
         let connection_delay = connection_states.connection_delay(NODE_ID1, time.milliseconds());
-        let connection_delay_delta = CONNECTION_SETUP_TIMEOUT_MS as f64 * CONNECTION_SETUP_TIMEOUT_JITTER;
+        let connection_delay_delta =
+            CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
         assert!(
             (connection_delay as f64 - CONNECTION_SETUP_TIMEOUT_MS as f64).abs() <= connection_delay_delta,
             "Expected connectionDelay ~= {} +/- {}, got {}",
@@ -699,7 +700,7 @@ mod tests {
 
         // After disconnecting we expect a backoff value equal to the reconnect.backoff.ms setting
         // (plus minus 20% jitter)
-        let backoff_tolerance = RECONNECT_BACKOFF_MS as f64 * RECONNECT_BACKOFF_JITTER;
+        let backoff_tolerance = RECONNECT_BACKOFF_MS as f64 * CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER;
         let current_backoff = connection_states.connection_delay(NODE_ID1, time.milliseconds());
         assert!(
             (current_backoff as f64 - RECONNECT_BACKOFF_MS as f64).abs() <= backoff_tolerance,
@@ -814,7 +815,7 @@ mod tests {
         let mut time = MockTime::new();
 
         let effective_max_reconnect_backoff =
-            (RECONNECT_BACKOFF_MAX as f64 * (1.0 + RECONNECT_BACKOFF_JITTER)).round() as i64;
+            (RECONNECT_BACKOFF_MAX as f64 * (1.0 + CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER)).round() as i64;
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         time.sleep(1000);
         connection_states.disconnected(NODE_ID1, time.milliseconds());
@@ -986,12 +987,13 @@ mod tests {
 
         // Check the exponential timeout growth
         let max_n = ((CONNECTION_SETUP_TIMEOUT_MAX_MS as f64 / CONNECTION_SETUP_TIMEOUT_MS as f64).ln()
-            / (CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).ln()) as i32;
+            / (CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).ln()) as i32;
         for n in 0..=max_n {
             connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
             assert!(connection_states.connecting_nodes().contains(NODE_ID1));
-            let expected = CONNECTION_SETUP_TIMEOUT_MS as f64 * (CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).powi(n);
-            let tolerance = expected * CONNECTION_SETUP_TIMEOUT_JITTER;
+            let expected = CONNECTION_SETUP_TIMEOUT_MS as f64
+                * (CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_EXP_BASE as f64).powi(n);
+            let tolerance = expected * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
             let actual = connection_states.connection_setup_timeout_ms(NODE_ID1) as f64;
             assert!(
                 (actual - expected).abs() <= tolerance,
@@ -1007,7 +1009,8 @@ mod tests {
         // Check the timeout value upper bound
         connection_states.connecting(NODE_ID1, time.milliseconds(), "localhost");
         let actual = connection_states.connection_setup_timeout_ms(NODE_ID1) as f64;
-        let tolerance = CONNECTION_SETUP_TIMEOUT_MAX_MS as f64 * CONNECTION_SETUP_TIMEOUT_JITTER;
+        let tolerance =
+            CONNECTION_SETUP_TIMEOUT_MAX_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
         assert!(
             (actual - CONNECTION_SETUP_TIMEOUT_MAX_MS as f64).abs() <= tolerance,
             "Expected connectionSetupTimeoutMs ~= {} +/- {}, got {}",
@@ -1020,7 +1023,7 @@ mod tests {
         // Should reset the timeout value to the init value
         connection_states.ready(NODE_ID1);
         let actual = connection_states.connection_setup_timeout_ms(NODE_ID1) as f64;
-        let tolerance = CONNECTION_SETUP_TIMEOUT_MS as f64 * CONNECTION_SETUP_TIMEOUT_JITTER;
+        let tolerance = CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER;
         assert!(
             (actual - CONNECTION_SETUP_TIMEOUT_MS as f64).abs() <= tolerance,
             "Expected connectionSetupTimeoutMs ~= {} +/- {}, got {}",
@@ -1071,7 +1074,8 @@ mod tests {
         // connections
         time.sleep(
             CONNECTION_SETUP_TIMEOUT_MS / 2
-                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * CONNECTION_SETUP_TIMEOUT_JITTER) as i64,
+                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER)
+                    as i64,
         );
 
         // Expect two timed out connections.
@@ -1088,7 +1092,8 @@ mod tests {
         // connection
         time.sleep(
             CONNECTION_SETUP_TIMEOUT_MS / 2
-                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * CONNECTION_SETUP_TIMEOUT_JITTER) as i64,
+                + (CONNECTION_SETUP_TIMEOUT_MS as f64 * CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER)
+                    as i64,
         );
 
         // Expect one timed out connection
@@ -1135,7 +1140,7 @@ mod tests {
         let mut time = MockTime::new();
 
         let reconnect_backoff_max_exp = (RECONNECT_BACKOFF_MAX as f64 / (RECONNECT_BACKOFF_MS.max(1) as f64)).ln()
-            / (RECONNECT_BACKOFF_EXP_BASE as f64).ln();
+            / (CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE as f64).ln();
 
         connection_states.remove(NODE_ID1);
         // Run through 10 disconnects and check that reconnect backoff value is within expected
@@ -1148,17 +1153,18 @@ mod tests {
 
             connection_states.disconnected(NODE_ID1, time.milliseconds());
             // Calculate expected backoff value without jitter
-            let expected_backoff = ((RECONNECT_BACKOFF_EXP_BASE as f64).powf((i as f64).min(reconnect_backoff_max_exp))
+            let expected_backoff = ((CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE as f64)
+                .powf((i as f64).min(reconnect_backoff_max_exp))
                 * RECONNECT_BACKOFF_MS as f64)
                 .round() as i64;
             let current_backoff = connection_states.connection_delay(NODE_ID1, time.milliseconds());
             assert!(
                 (current_backoff as f64 - expected_backoff as f64).abs()
-                    <= RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
+                    <= CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
                 "Attempt {}: Expected backoff ~= {} +/- {}, got {}",
                 i,
                 expected_backoff,
-                RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
+                CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_JITTER * expected_backoff as f64,
                 current_backoff
             );
             time.sleep(connection_states.connection_delay(NODE_ID1, time.milliseconds()) + 1);

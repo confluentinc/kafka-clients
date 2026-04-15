@@ -25,7 +25,7 @@ use std::io;
 use std::net::SocketAddr;
 
 /// See [`Selectable::connect`] — use the platform default buffer size.
-pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
+pub const SELECTABLE_USE_DEFAULT_BUFFER_SIZE: i32 = -1;
 
 /// An interface for asynchronous, multi-channel network I/O.
 ///
@@ -42,9 +42,9 @@ pub trait Selectable: Send {
     /// * `address` - The address to connect to
     /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
     /// * `send_buffer_size` - The send buffer for the socket
-    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///   (use [`SELECTABLE_USE_DEFAULT_BUFFER_SIZE`] for platform default)
     /// * `receive_buffer_size` - The receive buffer for the socket
-    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
+    ///   (use [`SELECTABLE_USE_DEFAULT_BUFFER_SIZE`] for platform default)
     ///
     /// # Errors
     ///
