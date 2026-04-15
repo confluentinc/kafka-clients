@@ -236,6 +236,14 @@ impl MemoryRecordsBuilder {
         self.buffer.capacity()
     }
 
+    /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.
+    ///
+    /// This is used by [`RecordAccumulator::deallocate`] to return the actual batch
+    /// buffer to the pool rather than allocating a new one.
+    pub fn take_buffer(&mut self) -> Vec<u8> {
+        std::mem::take(&mut self.buffer)
+    }
+
     /// Returns the actual compression ratio after building.
     pub fn compression_ratio(&self) -> f64 {
         self.actual_compression_ratio as f64

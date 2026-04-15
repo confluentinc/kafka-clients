@@ -19,8 +19,8 @@
 //! This class is not thread safe and external synchronization must be used when modifying it.
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, AtomicU8, Ordering};
+use std::sync::{Arc, Mutex};
 
 use log::{debug, trace};
 
@@ -73,6 +73,10 @@ fn from_final_state(state: FinalState) -> u8 {
 }
 
 /// Type alias for the callback function.
+///
+/// In Java, `Callback.onCompletion(RecordMetadata, Exception)` is an interface with a single
+/// method. We use `FnOnce` because each callback is invoked exactly once when the batch
+/// completes, fails, or is aborted.
 pub type Callback =
     Box<dyn FnOnce(Option<&crate::clients::producer::RecordMetadata>, Option<&KafkaError>) + Send + Sync>;
 
@@ -98,7 +102,10 @@ pub struct ProducerBatch {
     /// Maximum single record size in the batch (estimated upper bound).
     pub max_record_size: i32,
 
-    thunks: Vec<Thunk>,
+    /// The list of thunks (callback + future) for each record appended to this batch.
+    /// Wrapped in a `Mutex` to allow `complete_future_and_fire_callbacks` (which takes
+    /// `&self` due to the atomic state machine) to take ownership of the callbacks.
+    thunks: Mutex<Vec<Thunk>>,
     records_builder: MemoryRecordsBuilder,
     attempts: AtomicI32,
     is_split_batch: bool,
@@ -149,7 +156,7 @@ impl ProducerBatch {
             is_split_batch,
             current_leader_epoch: None,
             attempts_when_leader_last_changed: 0,
-            thunks: Vec::new(),
+            thunks: Mutex::new(Vec::new()),
             attempts: AtomicI32::new(0),
             final_state: AtomicU8::new(FINAL_STATE_NONE),
             buffer_deallocated: false,
@@ -211,7 +218,8 @@ impl ProducerBatch {
     /// Append the record to the current record set and return the relative offset within that
     /// record set.
     ///
-    /// Returns `None` if there isn't sufficient room.
+    /// Returns `Ok(future)` if the record was appended, or `Err(callback)` if there isn't
+    /// sufficient room (the callback is returned so the caller can retry with a new batch).
     pub fn try_append(
         &mut self,
         timestamp: i64,
@@ -220,9 +228,9 @@ impl ProducerBatch {
         headers: &[RecordHeader],
         callback: Option<Callback>,
         now: i64,
-    ) -> Option<Arc<FutureRecordMetadata>> {
+    ) -> Result<Arc<FutureRecordMetadata>, Option<Callback>> {
         if !self.records_builder.has_room_for(timestamp, key, value, headers) {
-            return None;
+            return Err(callback);
         }
 
         self.records_builder.append(timestamp, key, value, headers);
@@ -246,9 +254,12 @@ impl ProducerBatch {
             value_size,
         ));
 
-        self.thunks.push(Thunk { callback, future: Arc::clone(&future) });
+        self.thunks
+            .lock()
+            .unwrap()
+            .push(Thunk { callback, future: Arc::clone(&future) });
         self.record_count += 1;
-        Some(future)
+        Ok(future)
     }
 
     /// This method is only used by [`split`](Self::split) when splitting a large batch to smaller
@@ -290,7 +301,7 @@ impl ProducerBatch {
 
         // Chain the future to the original thunk.
         thunk.future.chain_arc(Arc::clone(&future));
-        self.thunks.push(Thunk { callback: thunk.callback, future });
+        self.thunks.lock().unwrap().push(Thunk { callback: thunk.callback, future });
         self.record_count += 1;
         Ok(())
     }
@@ -415,12 +426,25 @@ impl ProducerBatch {
         log_append_time: i64,
         record_exceptions: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
     ) {
-        // Set the future before invoking the callbacks
-        self.produce_future.set(base_offset, log_append_time, record_exceptions);
+        // Set the future before invoking the callbacks as we rely on its state for the
+        // `on_completion` call.
+        self.produce_future.set(base_offset, log_append_time, record_exceptions.clone());
 
-        // In Java, callbacks are fired here. In Rust, callback invocation is handled
-        // through the FutureRecordMetadata.get() async pattern. The produce_future.done()
-        // call unblocks all FutureRecordMetadata waiters.
+        // Execute callbacks — matches Java's loop in completeFutureAndFireCallbacks.
+        // Take ownership of the thunks so we can consume FnOnce callbacks.
+        let mut thunks = self.thunks.lock().unwrap();
+        for (i, thunk) in thunks.iter_mut().enumerate() {
+            if let Some(callback) = thunk.callback.take() {
+                if let Some(ref errors_fn) = record_exceptions {
+                    let exception = errors_fn(i as i32);
+                    callback(None, exception.as_ref());
+                } else {
+                    let metadata = thunk.future.value();
+                    callback(Some(&metadata), None);
+                }
+            }
+        }
+        drop(thunks);
 
         self.produce_future.done();
     }
@@ -457,7 +481,7 @@ impl ProducerBatch {
         split_batch_size: i32,
     ) -> VecDeque<ProducerBatch> {
         let mut batches = VecDeque::new();
-        let mut thunk_iter = std::mem::take(&mut self.thunks).into_iter();
+        let mut thunk_iter = std::mem::take(&mut *self.thunks.lock().unwrap()).into_iter();
         let mut current_batch: Option<ProducerBatch> = None;
 
         for record in memory_records.records() {
@@ -686,6 +710,14 @@ impl ProducerBatch {
         self.records_builder.buffer()
     }
 
+    /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.
+    ///
+    /// Used by [`RecordAccumulator::deallocate`] to return the actual batch buffer
+    /// to the pool rather than allocating a new one.
+    pub fn take_buffer(&mut self) -> Vec<u8> {
+        self.records_builder.take_buffer()
+    }
+
     /// Returns the initial capacity of the buffer.
     pub fn initial_capacity(&self) -> usize {
         self.records_builder.initial_capacity()
@@ -809,7 +841,7 @@ mod tests {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         let future = batch
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
-            .expect("Append should succeed");
+            .unwrap_or_else(|_| panic!("Append should succeed"));
 
         let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
         batch.abort(exception);
@@ -827,7 +859,7 @@ mod tests {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         batch
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
-            .expect("Append should succeed");
+            .unwrap_or_else(|_| panic!("Append should succeed"));
 
         let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
         batch.abort(exception);
@@ -846,7 +878,7 @@ mod tests {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         batch
             .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
-            .expect("Append should succeed");
+            .unwrap_or_else(|_| panic!("Append should succeed"));
 
         assert!(batch.complete(500, 10));
 
@@ -884,13 +916,13 @@ mod tests {
     fn test_should_not_attempt_append_once_records_builder_is_closed_for_appends() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         let result0 = batch.try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW);
-        assert!(result0.is_some());
+        assert!(result0.is_ok());
 
         batch.close_for_record_appends();
 
-        // After closing for record appends, try_append should return None.
+        // After closing for record appends, try_append should return Err (no room).
         let result1 = batch.try_append(NOW + 1, None, Some(&[0u8; 10]), &[], None, NOW + 1);
-        assert!(result1.is_none());
+        assert!(result1.is_err());
     }
 
     /// Translated from `ProducerBatchTest.testSplitPreservesHeaders`.
@@ -912,8 +944,8 @@ mod tests {
 
         let mut count = 0;
         loop {
-            let future = batch.try_append(NOW, Some(b"hi"), Some(b"there"), std::slice::from_ref(&header), None, NOW);
-            if future.is_none() {
+            let result = batch.try_append(NOW, Some(b"hi"), Some(b"there"), std::slice::from_ref(&header), None, NOW);
+            if result.is_err() {
                 break;
             }
             count += 1;
@@ -1015,7 +1047,7 @@ mod tests {
         for _ in 0..record_count {
             let future = batch
                 .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
-                .expect("Append should succeed");
+                .unwrap_or_else(|_| panic!("Append should succeed"));
             futures.push(future);
         }
         assert_eq!(record_count, batch.record_count);
@@ -1046,11 +1078,11 @@ mod tests {
     fn test_try_append_basic() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         let future = batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
-        assert!(future.is_some(), "First append should succeed");
+        assert!(future.is_ok(), "First append should succeed");
         assert_eq!(1, batch.record_count);
 
         let future2 = batch.try_append(NOW, Some(b"key2"), Some(b"value2"), &[], None, NOW);
-        assert!(future2.is_some(), "Second append should succeed");
+        assert!(future2.is_ok(), "Second append should succeed");
         assert_eq!(2, batch.record_count);
     }
 
@@ -1059,7 +1091,7 @@ mod tests {
     fn test_estimated_size_increases() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         let initial_size = batch.estimated_size_in_bytes();
-        batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
+        let _ = batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
         let after_first = batch.estimated_size_in_bytes();
         assert!(after_first > initial_size, "Size should increase after appending a record");
     }
@@ -1069,7 +1101,7 @@ mod tests {
     fn test_close_and_is_closed() {
         let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         assert!(!batch.is_closed());
-        batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
+        let _ = batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
         batch.close();
         assert!(batch.is_closed());
     }
@@ -1102,5 +1134,156 @@ mod tests {
     fn test_magic() {
         let batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
         assert_eq!(RecordBatch::CURRENT_MAGIC_VALUE, batch.magic());
+    }
+
+    /// Translated from `ProducerBatchTest.testSplitPreservesMagicAndCompressionType`.
+    ///
+    /// Tests that split batches preserve the magic version and compression type from the
+    /// original batch. Only tests magic V2 + NONE compression since our MemoryRecordsBuilder
+    /// only supports magic V2 and record-level iteration for NONE compression.
+    #[test]
+    fn test_split_preserves_magic_and_compression_type() {
+        // We only support magic V2 and NONE compression for record-level iteration.
+        let magic = RecordBatch::CURRENT_MAGIC_VALUE;
+        let builder = MemoryRecords::builder_with_buffer(
+            vec![0u8; 1024],
+            magic,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+
+        loop {
+            let result = batch.try_append(NOW, Some(b"hi"), Some(b"there"), &[], None, NOW);
+            if result.is_err() {
+                break;
+            }
+        }
+
+        let batches = batch.split(512);
+        assert!(batches.len() >= 2, "Batch should split into multiple sub-batches");
+
+        for mut split_batch in batches {
+            assert_eq!(magic, split_batch.magic(), "Split batch magic should match original");
+            assert!(split_batch.is_split_batch(), "Split batch should be marked as split");
+
+            let records = split_batch.records();
+            for record_batch in records.batches() {
+                assert_eq!(magic, record_batch.magic(), "Record batch magic should match original");
+                assert_eq!(0, record_batch.base_offset(), "Base offset should be 0");
+                assert_eq!(
+                    CompressionType::None,
+                    record_batch.compression_type(),
+                    "Compression type should match"
+                );
+            }
+        }
+    }
+
+    /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithNullRecordErrors`.
+    ///
+    /// In Java, passing `null` for the `recordExceptions` function to `completeExceptionally`
+    /// results in a `NullPointerException` when the code tries to call `recordExceptions.apply(i)`.
+    /// In Rust, `complete_exceptionally` takes a non-optional `Arc<dyn Fn(...)>`, so passing
+    /// "null" is not possible at the type level. This test verifies that the function is invoked
+    /// correctly by providing a function that returns `None` for all indices (the closest Rust
+    /// analog of a "null" result from the function).
+    #[test]
+    fn test_complete_exceptionally_with_none_returning_error_fn() {
+        let record_count = 5;
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+
+        let mut futures = Vec::new();
+        for _ in 0..record_count {
+            let future = batch
+                .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
+                .unwrap_or_else(|_| panic!("Append should succeed"));
+            futures.push(future);
+        }
+        assert_eq!(record_count, batch.record_count);
+
+        // A function that returns None for all indices (closest to Java null behavior).
+        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|_idx| None);
+
+        let top_level_exception = KafkaError::with_message(Errors::UnknownServerError, "top level");
+        batch.complete_exceptionally(top_level_exception, record_exceptions);
+        assert!(batch.is_done());
+
+        for future in &futures {
+            assert!(future.is_done());
+        }
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchAbort` - extended version with callback
+    /// verification.
+    ///
+    /// Verifies that callbacks are invoked exactly once when a batch is aborted.
+    #[test]
+    fn test_batch_abort_with_callback() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+
+        let invocations = Arc::new(AtomicI32::new(0));
+        let got_error = Arc::new(Mutex::new(false));
+        let got_metadata = Arc::new(Mutex::new(false));
+
+        let inv = Arc::clone(&invocations);
+        let err_flag = Arc::clone(&got_error);
+        let meta_flag = Arc::clone(&got_metadata);
+
+        let callback: Callback = Box::new(move |metadata, exception| {
+            inv.fetch_add(1, Ordering::SeqCst);
+            *err_flag.lock().unwrap() = exception.is_some();
+            *meta_flag.lock().unwrap() = metadata.is_some();
+        });
+
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let future = batch
+            .try_append(NOW, None, Some(&[0u8; 10]), &[], Some(callback), NOW)
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(exception);
+        assert!(future.is_done());
+        assert_eq!(1, invocations.load(Ordering::SeqCst));
+        assert!(*got_error.lock().unwrap(), "Callback should receive error");
+        assert!(!*got_metadata.lock().unwrap(), "Callback should not receive metadata on abort");
+
+        // subsequent completion should be ignored
+        assert!(!batch.complete(500, 2342342341));
+        assert_eq!(1, invocations.load(Ordering::SeqCst), "Callback should not be invoked again");
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchCannotCompleteTwice` - extended version
+    /// with callback verification.
+    ///
+    /// Verifies that callbacks are invoked exactly once when a batch completes successfully.
+    #[test]
+    fn test_batch_complete_with_callback() {
+        use std::sync::atomic::{AtomicI32, Ordering};
+
+        let invocations = Arc::new(AtomicI32::new(0));
+        let got_error = Arc::new(Mutex::new(false));
+        let got_metadata = Arc::new(Mutex::new(false));
+
+        let inv = Arc::clone(&invocations);
+        let err_flag = Arc::clone(&got_error);
+        let meta_flag = Arc::clone(&got_metadata);
+
+        let callback: Callback = Box::new(move |metadata, exception| {
+            inv.fetch_add(1, Ordering::SeqCst);
+            *err_flag.lock().unwrap() = exception.is_some();
+            *meta_flag.lock().unwrap() = metadata.is_some();
+        });
+
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        batch
+            .try_append(NOW, None, Some(&[0u8; 10]), &[], Some(callback), NOW)
+            .unwrap_or_else(|_| panic!("Append should succeed"));
+
+        assert!(batch.complete(500, 10));
+        assert_eq!(1, invocations.load(Ordering::SeqCst));
+        assert!(!*got_error.lock().unwrap(), "Callback should not receive error on success");
+        assert!(*got_metadata.lock().unwrap(), "Callback should receive metadata on success");
     }
 }

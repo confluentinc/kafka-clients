@@ -182,6 +182,15 @@ impl FutureRecordMetadata {
         }
     }
 
+    /// Construct `RecordMetadata` from this node's data.
+    ///
+    /// This is the synchronous equivalent of Java's `FutureRecordMetadata.value()`.
+    /// It returns the metadata based on the current state of the result.
+    /// Should only be called after the result has been set (via `set()`).
+    pub fn value(&self) -> RecordMetadata {
+        self.to_metadata()
+    }
+
     /// Construct `RecordMetadata` from this node's data after its result has completed.
     fn to_metadata(&self) -> RecordMetadata {
         let timestamp = if self.result.has_log_append_time() {
