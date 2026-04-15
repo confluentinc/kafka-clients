@@ -20,6 +20,11 @@ rand = "0.9"
 tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time", "sync"] }
 indexmap = "2"
 log = "0.4"
+flate2 = "1"
+snap = "1"
+lz4_flex = "0.11"
+zstd = "0.13"
+crc32c = "0.6"
 
 [dev-dependencies]
 testcontainers = "0.27"
