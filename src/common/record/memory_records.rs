@@ -217,6 +217,42 @@ impl MemoryRecords {
         )
     }
 
+    /// Create a builder using a pre-allocated buffer.
+    ///
+    /// This is the equivalent of Java's `MemoryRecords.builder(ByteBuffer, ...)` overload
+    /// that accepts an existing buffer (e.g., from a buffer pool) instead of allocating a
+    /// new one.
+    pub fn builder_with_buffer(
+        buffer: Vec<u8>,
+        magic: i8,
+        compression: Compression,
+        timestamp_type: TimestampType,
+        base_offset: i64,
+    ) -> MemoryRecordsBuilder {
+        let write_limit = buffer.capacity();
+        let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
+            current_time_millis()
+        } else {
+            RecordBatch::NO_TIMESTAMP
+        };
+        MemoryRecordsBuilder::new_default(
+            buffer,
+            0,
+            magic,
+            compression,
+            timestamp_type,
+            base_offset,
+            log_append_time,
+            RecordBatch::NO_PRODUCER_ID,
+            RecordBatch::NO_PRODUCER_EPOCH,
+            RecordBatch::NO_SEQUENCE,
+            false,
+            false,
+            RecordBatch::NO_PARTITION_LEADER_EPOCH,
+            write_limit,
+        )
+    }
+
     /// Create a builder with a max size limit.
     pub fn builder_with_max_size(
         initial_capacity: usize,
