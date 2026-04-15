@@ -488,7 +488,10 @@ impl ProducerBatch {
                     self.create_batch_off_accumulator_for_record(key, value, &headers, split_batch_size);
                 // The first record in a new batch always fits because has_room_for
                 // returns true when num_records == 0.
-                if new_batch.try_append_for_split(timestamp, key, value, &headers, returned_thunk).is_err() {
+                if new_batch
+                    .try_append_for_split(timestamp, key, value, &headers, returned_thunk)
+                    .is_err()
+                {
                     panic!("first record in a new batch always fits");
                 }
                 current_batch = Some(new_batch);
