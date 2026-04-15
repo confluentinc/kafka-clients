@@ -29,6 +29,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
+use rand::SeedableRng;
+use rand::rngs::StdRng;
 
 use crate::common::network::channel_state::{self, ChannelState};
 use crate::common::network::network_send::NetworkSend;
@@ -54,36 +56,6 @@ use super::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use super::metadata_updater::MetadataUpdater;
 use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
 use crate::common::kafka_error::KafkaError;
-
-/// Polls a future to completion synchronously.
-///
-/// This utility is used by `NetworkClient` (which has a synchronous API) to call
-/// `Selectable` methods that return `impl Future`. For the `MockSelector` used in
-/// tests, these futures are always immediately ready, so no async runtime is needed.
-///
-/// # Panics
-///
-/// Panics if the future does not resolve immediately (i.e. returns `Pending`).
-fn block_on<F: std::future::Future>(fut: F) -> F::Output {
-    let mut fut = std::pin::pin!(fut);
-    let waker = noop_waker();
-    let mut cx = std::task::Context::from_waker(&waker);
-    match fut.as_mut().poll(&mut cx) {
-        std::task::Poll::Ready(val) => val,
-        std::task::Poll::Pending => panic!("block_on called on a future that is not immediately ready"),
-    }
-}
-
-/// Creates a no-op waker that does nothing when woken.
-fn noop_waker() -> std::task::Waker {
-    use std::task::{RawWaker, RawWakerVTable, Waker};
-    fn no_op(_: *const ()) {}
-    fn clone(data: *const ()) -> RawWaker {
-        RawWaker::new(data, &VTABLE)
-    }
-    static VTABLE: RawWakerVTable = RawWakerVTable::new(clone, no_op, no_op, no_op);
-    unsafe { Waker::from_raw(RawWaker::new(std::ptr::null(), &VTABLE)) }
-}
 
 /// Returns current wall-clock time in milliseconds since the Unix epoch.
 /// This is the default time provider, equivalent to Java's `SystemTime`.
@@ -148,7 +120,7 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// The client state (ACTIVE, CLOSING, CLOSED).
     state: Arc<AtomicU8>,
     /// Random offset for round-robin node selection.
-    rand_offset: rand::rngs::ThreadRng,
+    rand_offset: std::sync::Mutex<StdRng>,
     /// The `now` timestamp from the most recent `poll()` call, used in methods
     /// like `disconnect()` that need a timestamp but don't receive one as a
     /// parameter. In Java, the `Time` instance provides this; here we store it
@@ -237,7 +209,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             nodes_needing_api_versions_fetch: HashMap::new(),
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
-            rand_offset: rand::rng(),
+            rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
             last_poll_time_ms: 0,
             time_provider: Arc::new(system_time_ms),
             poll_time_store: Arc::new(AtomicI64::new(0)),
@@ -308,7 +280,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             nodes_needing_api_versions_fetch: HashMap::new(),
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
-            rand_offset: rand::rng(),
+            rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
             last_poll_time_ms: 0,
             time_provider: Arc::new(system_time_ms),
             poll_time_store: Arc::new(AtomicI64::new(0)),
@@ -610,7 +582,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle any completed receives and update the response list.
-    fn handle_completed_receives(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
+    async fn handle_completed_receives(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         // Collect owned copies so we release the borrow on self.selector
         // before calling &mut self methods.
         let receives: Vec<(String, Option<Vec<u8>>)> = self
@@ -637,7 +609,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                                     self.handle_successful_metadata_response(&req.header, now, metadata_response);
                                 },
                                 ConcreteResponse::ApiVersions(api_versions_response) => {
-                                    self.handle_api_versions_response(responses, &mut req, now, api_versions_response);
+                                    self.handle_api_versions_response(responses, &mut req, now, api_versions_response)
+                                        .await;
                                 },
                                 _ => {
                                     // Other response types are not internal requests
@@ -661,7 +634,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle an ApiVersions response.
-    fn handle_api_versions_response(
+    async fn handle_api_versions_response(
         &mut self,
         responses: &mut Vec<ClientResponse>,
         req: &mut InFlightRequest,
@@ -678,7 +651,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     node,
                     req.header.correlation_id()
                 );
-                block_on(self.selector.close_channel(&node));
+                self.selector.close_channel(&node).await;
                 self.process_disconnection(
                     responses,
                     &node,
@@ -774,10 +747,10 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle connections that timed out.
-    fn handle_timed_out_connections(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
+    async fn handle_timed_out_connections(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         let nodes = self.connection_states.nodes_with_connection_setup_timeout(now);
         for node_id in nodes {
-            block_on(self.selector.close_channel(&node_id));
+            self.selector.close_channel(&node_id).await;
             info!(
                 "Disconnecting from node {} due to socket connection setup timeout. The timeout value is {} ms.",
                 node_id,
@@ -788,10 +761,10 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle requests that timed out.
-    fn handle_timed_out_requests(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
+    async fn handle_timed_out_requests(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         let node_ids = self.in_flight_requests.nodes_with_timed_out_requests(now);
         for node_id in node_ids {
-            block_on(self.selector.close_channel(&node_id));
+            self.selector.close_channel(&node_id).await;
             info!("Disconnecting from node {} due to request timeout.", node_id);
             self.process_timeout_disconnection(responses, &node_id, now);
         }
@@ -803,12 +776,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Handle rebootstrap if needed.
-    fn handle_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
+    async fn handle_rebootstrap(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
         if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap && self.needs_rebootstrap(now) {
             let nodes = self.fetch_nodes();
             let node_ids: Vec<String> = nodes.iter().map(|n| n.id_string().to_string()).collect();
             for node_id in node_ids {
-                block_on(self.selector.close_channel(&node_id));
+                self.selector.close_channel(&node_id).await;
                 if self.connection_states.is_connecting(&node_id) || self.connection_states.is_connected(&node_id) {
                     info!("Disconnecting from node {} due to client rebootstrap.", node_id);
                     self.process_disconnection(
@@ -995,9 +968,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Perform a metadata update if needed.
-    fn maybe_update(&mut self, now: i64) -> i64 {
+    async fn maybe_update(&mut self, now: i64) -> i64 {
         if let Some(ref metadata) = self.metadata {
-            self.default_maybe_update(now, metadata.clone())
+            self.default_maybe_update(now, metadata.clone()).await
         } else if let Some(ref mut updater) = self.external_metadata_updater {
             updater.maybe_update(now)
         } else {
@@ -1006,7 +979,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// DefaultMetadataUpdater implementation of maybe_update.
-    fn default_maybe_update(&mut self, now: i64, metadata: Arc<Metadata>) -> i64 {
+    async fn default_maybe_update(&mut self, now: i64, metadata: Arc<Metadata>) -> i64 {
         let time_to_next_metadata_update = metadata.time_to_next_update(now);
         let wait_for_metadata_fetch = if self.has_fetch_in_progress() {
             self.default_request_timeout_ms as i64
@@ -1037,7 +1010,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 return self.reconnect_backoff_ms;
             }
             let node = least_loaded.node().unwrap().clone();
-            return self.default_maybe_update_with_node(now, &node);
+            return self.default_maybe_update_with_node(now, &node).await;
         }
 
         if least_loaded.node().is_none() {
@@ -1046,11 +1019,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
 
         let node = least_loaded.node().unwrap().clone();
-        self.default_maybe_update_with_node(now, &node)
+        self.default_maybe_update_with_node(now, &node).await
     }
 
     /// DefaultMetadataUpdater: try to send a metadata request to a specific node.
-    fn default_maybe_update_with_node(&mut self, now: i64, node: &crate::common::Node) -> i64 {
+    async fn default_maybe_update_with_node(&mut self, now: i64, node: &crate::common::Node) -> i64 {
         let node_connection_id = node.id_string();
 
         if self.can_send_request(node_connection_id, now) {
@@ -1072,7 +1045,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         if self.connection_states.can_connect(node_connection_id, now) {
             debug!("Initialize connection to node {} for sending metadata request", node);
-            block_on(self.initiate_connect(node, now));
+            self.initiate_connect(node, now).await;
             return self.reconnect_backoff_ms;
         }
 
@@ -1179,7 +1152,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         !self.is_update_due(now) && self.can_send_request(node.id_string(), now)
     }
 
-    fn ready(&mut self, node: &crate::common::Node, now: i64) -> bool {
+    async fn ready(&mut self, node: &crate::common::Node, now: i64) -> bool {
         if node.is_empty() {
             panic!("Cannot connect to empty node {}", node);
         }
@@ -1192,7 +1165,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         }
 
         if self.connection_states.can_connect(node.id_string(), now) {
-            block_on(self.initiate_connect(node, now));
+            self.initiate_connect(node, now).await;
         }
 
         false
@@ -1220,7 +1193,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.do_send(request, false, now);
     }
 
-    fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse> {
+    async fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse> {
         self.ensure_active();
         self.last_poll_time_ms = now;
         self.poll_time_store.store(now, Ordering::Relaxed);
@@ -1232,10 +1205,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             return responses;
         }
 
-        let metadata_timeout = self.maybe_update(now);
+        let metadata_timeout = self.maybe_update(now).await;
         let effective_timeout = timeout.min(metadata_timeout).min(self.default_request_timeout_ms as i64);
 
-        let _poll_result = block_on(self.selector.poll(effective_timeout));
+        let _poll_result = self.selector.poll(effective_timeout).await;
 
         // Compute a fresh timestamp after the (potentially blocking) poll,
         // matching Java's `long updatedNow = this.time.milliseconds()`.
@@ -1245,19 +1218,19 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         // Process completed actions
         let mut responses = Vec::new();
         self.handle_completed_sends(&mut responses, updated_now);
-        self.handle_completed_receives(&mut responses, updated_now);
+        self.handle_completed_receives(&mut responses, updated_now).await;
         self.handle_disconnections(&mut responses, updated_now);
         self.handle_connections();
         self.handle_initiate_api_version_requests(updated_now);
-        self.handle_timed_out_connections(&mut responses, updated_now);
-        self.handle_timed_out_requests(&mut responses, updated_now);
-        self.handle_rebootstrap(&mut responses, updated_now);
+        self.handle_timed_out_connections(&mut responses, updated_now).await;
+        self.handle_timed_out_requests(&mut responses, updated_now).await;
+        self.handle_rebootstrap(&mut responses, updated_now).await;
         Self::complete_responses(&mut responses);
 
         responses
     }
 
-    fn disconnect(&mut self, node_id: &str) {
+    async fn disconnect(&mut self, node_id: &str) {
         if self.connection_states.is_disconnected(node_id) {
             debug!(
                 "Client requested disconnect from node {}, which is already disconnected",
@@ -1267,7 +1240,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         }
 
         info!("Client requested disconnect from node {}", node_id);
-        block_on(self.selector.close_channel(node_id));
+        self.selector.close_channel(node_id).await;
         let now = self.last_poll_time_ms;
         let mut aborted = Vec::new();
         self.cancel_in_flight_requests(node_id, now, Some(&mut aborted), false);
@@ -1275,9 +1248,9 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.connection_states.disconnected(node_id, now);
     }
 
-    fn close_connection(&mut self, node_id: &str) {
+    async fn close_connection(&mut self, node_id: &str) {
         info!("Client requested connection close from node {}", node_id);
-        block_on(self.selector.close_channel(node_id));
+        self.selector.close_channel(node_id).await;
         let now = self.last_poll_time_ms;
         self.cancel_in_flight_requests(node_id, now, None, false);
         self.connection_states.remove(node_id);
@@ -1297,7 +1270,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         let mut found_ready = None;
         let mut at_least_one_connection_ready = false;
 
-        let offset = self.rand_offset.clone().random_range(0..nodes.len());
+        let offset = self.rand_offset.lock().unwrap().random_range(0..nodes.len());
         for i in 0..nodes.len() {
             let idx = (offset + i) % nodes.len();
             let node = &nodes[idx];
@@ -1426,7 +1399,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.state.load(Ordering::SeqCst) == STATE_ACTIVE
     }
 
-    fn close(&mut self) {
+    async fn close(&mut self) {
         let _ = self
             .state
             .compare_exchange(STATE_ACTIVE, STATE_CLOSING, Ordering::SeqCst, Ordering::SeqCst);
@@ -1435,7 +1408,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             .compare_exchange(STATE_CLOSING, STATE_CLOSED, Ordering::SeqCst, Ordering::SeqCst)
             .is_ok()
         {
-            block_on(self.selector.close());
+            self.selector.close().await;
             if let Some(ref metadata) = self.metadata {
                 metadata.close();
             } else if let Some(ref mut updater) = self.external_metadata_updater {
@@ -1803,14 +1776,14 @@ mod tests {
     // Translated from Java `awaitReady()`.
     // ---------------------------------------------------------------------------
 
-    fn await_ready(client: &mut NetworkClient<MockSelector, TestHostResolver>, node: &Node) {
+    async fn await_ready(client: &mut NetworkClient<MockSelector, TestHostResolver>, node: &Node) {
         if client.discover_broker_versions() {
             set_expected_api_versions_response(client.selector_mut(), node);
         }
         let now = 0_i64; // Use fixed time for tests
         let mut tries = 0;
-        while !client.ready(node, now) {
-            client.poll(1, now);
+        while !client.ready(node, now).await {
+            client.poll(1, now).await;
             tries += 1;
             if tries > 100 {
                 panic!("Could not make node {} ready after 100 tries", node);
@@ -1824,15 +1797,15 @@ mod tests {
     // =========================================================================
 
     /// Translated from `NetworkClientTest.testClose`.
-    #[test]
-    fn test_close() {
+    #[tokio::test]
+    async fn test_close() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        client.ready(&node, now);
-        await_ready(&mut client, &node);
-        client.poll(1, now);
+        client.ready(&node, now).await;
+        await_ready(&mut client, &node).await;
+        client.poll(1, now).await;
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
@@ -1858,28 +1831,28 @@ mod tests {
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
-        client.poll(1, now);
+        client.poll(1, now).await;
 
         // Now close
-        client.close();
+        client.close().await;
         assert!(!client.active(), "Client should not be active after close");
     }
 
     /// Translated from `NetworkClientTest.testLeastLoadedNode`.
-    #[test]
-    fn test_least_loaded_node() {
+    #[tokio::test]
+    async fn test_least_loaded_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         assert!(!client.is_ready(&node, now), "Node should not be ready before awaitReady");
         let least_loaded_node = client.least_loaded_node(now);
         assert_eq!(least_loaded_node.node().map(|n| n.id()), Some(node.id()));
         assert!(least_loaded_node.has_node_available_or_connection_ready());
 
-        await_ready(&mut client, &node);
-        client.poll(1, now);
+        await_ready(&mut client, &node).await;
+        client.poll(1, now).await;
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // leastloadednode should be our single node
@@ -1891,9 +1864,9 @@ mod tests {
         // Disconnect the node
         client.selector_mut().server_disconnect(node.id_string());
 
-        client.poll(1, now);
+        client.poll(1, now).await;
         assert!(
-            !client.ready(&node, now),
+            !client.ready(&node, now).await,
             "After we forced the disconnection the client is no longer ready."
         );
         let least_loaded_node = client.least_loaded_node(now);
@@ -1902,8 +1875,8 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testConnectionDelay`.
-    #[test]
-    fn test_connection_delay() {
+    #[tokio::test]
+    async fn test_connection_delay() {
         let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
@@ -1913,30 +1886,30 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testConnectionDelayConnected`.
-    #[test]
-    fn test_connection_delay_connected() {
+    #[tokio::test]
+    async fn test_connection_delay_connected() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         let delay = client.connection_delay(&node, now);
         assert_eq!(i64::MAX, delay, "Delay should be i64::MAX for connected node");
     }
 
     /// Translated from `NetworkClientTest.testConnectionDelayDisconnected`.
-    #[test]
-    fn test_connection_delay_disconnected() {
+    #[tokio::test]
+    async fn test_connection_delay_disconnected() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         // First disconnection
         client.selector_mut().server_disconnect(node.id_string());
-        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
         let delay = client.connection_delay(&node, now);
         let expected_delay = RECONNECT_BACKOFF_MS_TEST;
         let jitter = 0.3;
@@ -1952,8 +1925,8 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testConnectionDelayWithNoExponentialBackoff`.
-    #[test]
-    fn test_connection_delay_with_no_exponential_backoff() {
+    #[tokio::test]
+    async fn test_connection_delay_with_no_exponential_backoff() {
         // Create client where backoff max = backoff (no exponential growth)
         let client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
@@ -1964,22 +1937,22 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testConnectionDelayConnectedWithNoExponentialBackoff`.
-    #[test]
-    fn test_connection_delay_connected_with_no_exponential_backoff() {
+    #[tokio::test]
+    async fn test_connection_delay_connected_with_no_exponential_backoff() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         let delay = client.connection_delay(&node, now);
         assert_eq!(i64::MAX, delay);
     }
 
     /// Translated from `NetworkClientTest.testSendToUnreadyNode`.
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "Attempt to send a request to node")]
-    fn test_send_to_unready_node() {
+    async fn test_send_to_unready_node() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let now = 0_i64;
         let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
@@ -1988,13 +1961,13 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testInFlightRequestCount` (part of testClose).
-    #[test]
-    fn test_in_flight_request_count() {
+    #[tokio::test]
+    async fn test_in_flight_request_count() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         assert_eq!(0, client.in_flight_request_count());
         assert!(!client.has_in_flight_requests());
@@ -2013,13 +1986,13 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testReadyAndDisconnect` / `testCallDisconnect`.
-    #[test]
-    fn test_ready_and_disconnect() {
+    #[tokio::test]
+    async fn test_ready_and_disconnect() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
         assert!(
             client.is_ready(&node, now),
             "Expected NetworkClient to be ready to send to node"
@@ -2029,7 +2002,7 @@ mod tests {
             "Did not expect connection to node to be failed"
         );
 
-        client.disconnect(node.id_string());
+        client.disconnect(node.id_string()).await;
         assert!(!client.is_ready(&node, now), "Expected node to be disconnected");
         assert!(
             client.connection_failed(&node),
@@ -2042,17 +2015,17 @@ mod tests {
     ///
     /// Tests the full ApiVersions flow: initiate connection, send ApiVersionsRequest,
     /// receive response, become ready.
-    #[test]
-    fn test_api_versions_request() {
+    #[tokio::test]
+    async fn test_api_versions_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
         // Initiate the connection
-        client.ready(&node, now);
+        client.ready(&node, now).await;
 
         // Handle the connection, send the ApiVersionsRequest
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // Check that the ApiVersionsRequest has been initiated
         assert!(client.has_in_flight_requests_for_node(node.id_string()));
@@ -2068,7 +2041,7 @@ mod tests {
         );
 
         // Handle completed receives
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The ApiVersionsRequest is gone
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
@@ -2081,17 +2054,17 @@ mod tests {
     ///
     /// Tests that an INVALID_REQUEST error in ApiVersions response causes the
     /// node to become not ready.
-    #[test]
-    fn test_invalid_api_versions_request() {
+    #[tokio::test]
+    async fn test_invalid_api_versions_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
         // Initiate the connection
-        client.ready(&node, now);
+        client.ready(&node, now).await;
 
         // Handle the connection, send the ApiVersionsRequest
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // Check that the ApiVersionsRequest has been initiated
         assert!(client.has_in_flight_requests_for_node(node.id_string()));
@@ -2111,7 +2084,7 @@ mod tests {
         );
 
         // Handle completed receives
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The ApiVersionsRequest is gone
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
@@ -2123,37 +2096,40 @@ mod tests {
     /// Translated from `NetworkClientTest.testSimpleRequestResponse`.
     ///
     /// Tests that version discovery followed by a metadata request/response works.
-    #[test]
-    fn test_simple_request_response() {
+    #[tokio::test]
+    async fn test_simple_request_response() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
-        check_simple_metadata_request_response(&mut client, &node);
+        check_simple_metadata_request_response(&mut client, &node).await;
     }
 
     /// Translated from `NetworkClientTest.testSimpleRequestResponseWithStaticNodes`.
-    #[test]
-    fn test_simple_request_response_with_static_nodes() {
+    #[tokio::test]
+    async fn test_simple_request_response_with_static_nodes() {
         let mut client = create_network_client_with_static_nodes();
         let node = Node::new(0, "localhost".to_string(), 9092);
-        check_simple_metadata_request_response(&mut client, &node);
+        check_simple_metadata_request_response(&mut client, &node).await;
     }
 
     /// Translated from `NetworkClientTest.testSimpleRequestResponseWithNoBrokerDiscovery`.
-    #[test]
-    fn test_simple_request_response_with_no_broker_discovery() {
+    #[tokio::test]
+    async fn test_simple_request_response_with_no_broker_discovery() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
-        check_simple_metadata_request_response(&mut client, &node);
+        check_simple_metadata_request_response(&mut client, &node).await;
     }
 
     /// Common logic for testSimpleRequestResponse variants.
     ///
     /// Since our ConcreteRequest only supports METADATA and API_VERSIONS (not PRODUCE),
     /// we send a MetadataRequest instead of a ProduceRequest.
-    fn check_simple_metadata_request_response(client: &mut NetworkClient<MockSelector, TestHostResolver>, node: &Node) {
+    async fn check_simple_metadata_request_response(
+        client: &mut NetworkClient<MockSelector, TestHostResolver>,
+        node: &Node,
+    ) {
         let now = 0_i64;
         // Must call before creating any request, as it may send ApiVersionsRequest
-        await_ready(client, node);
+        await_ready(client, node).await;
 
         let builder = MetadataRequestBuilder::new(Some(&["test_topic"]), true);
         let callback_executed = Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -2174,7 +2150,7 @@ mod tests {
         let correlation_id = request.correlation_id();
 
         client.send(request, now);
-        client.poll(1, now);
+        client.poll(1, now).await;
         assert_eq!(1, client.in_flight_request_count());
 
         // Prepare a metadata response
@@ -2185,7 +2161,7 @@ mod tests {
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
 
-        let responses = client.poll(1, now);
+        let responses = client.poll(1, now).await;
         assert_eq!(1, responses.len());
         assert!(
             callback_executed.load(std::sync::atomic::Ordering::SeqCst),
@@ -2200,8 +2176,8 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testUnsupportedVersionDuringInternalMetadataRequest`.
-    #[test]
-    fn test_unsupported_version_during_internal_metadata_request() {
+    #[tokio::test]
+    async fn test_unsupported_version_during_internal_metadata_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
@@ -2223,13 +2199,13 @@ mod tests {
     ///
     /// With max 1 in-flight request per connection, after sending a request,
     /// `least_loaded_node` should report no node but still have connection ready.
-    #[test]
-    fn test_has_node_available_or_connection_ready() {
+    #[tokio::test]
+    async fn test_has_node_available_or_connection_ready() {
         let mut client = create_network_client_with_max_in_flight(1, RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         let least_loaded = client.least_loaded_node(now);
         assert_eq!(least_loaded.node().map(|n| n.id()), Some(node.id()));
@@ -2239,7 +2215,7 @@ mod tests {
         let builder = MetadataRequestBuilder::new(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
-        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
 
         // With max 1 in-flight, no node should be available but connection is still ready
         let least_loaded = client.least_loaded_node(now);
@@ -2248,14 +2224,14 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testLeastLoadedNodeConsidersThrottledConnections`.
-    #[test]
-    fn test_least_loaded_node_considers_throttled_connections() {
+    #[tokio::test]
+    async fn test_least_loaded_node_considers_throttled_connections() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
-        client.poll(1, now);
+        await_ready(&mut client, &node).await;
+        client.poll(1, now).await;
         assert!(client.is_ready(&node, now), "The client should be ready");
 
         // Send a metadata request
@@ -2263,7 +2239,7 @@ mod tests {
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         let correlation_id = request.correlation_id();
         client.send(request, now);
-        client.poll(1, now);
+        client.poll(1, now).await;
 
         // Send a throttled metadata response (100ms throttle)
         let mut response_data = MetadataResponseData::new();
@@ -2276,7 +2252,7 @@ mod tests {
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
-        client.poll(1, now);
+        client.poll(1, now).await;
 
         // leastloadednode should return None since the node is throttled
         let least_loaded = client.least_loaded_node(now);
@@ -2290,39 +2266,39 @@ mod tests {
     ///
     /// Ensures that the default metadata updater does not intercept a user-initiated
     /// metadata request when the remote node disconnects with the request in-flight.
-    #[test]
-    fn test_disconnect_during_user_metadata_request() {
+    #[tokio::test]
+    async fn test_disconnect_during_user_metadata_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         let builder = MetadataRequestBuilder::new(Some(&[]), true);
         let request = client.new_client_request(node.id_string(), Box::new(builder), now, true);
         client.send(request, now);
-        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
         assert_eq!(1, client.in_flight_request_count_for_node(node.id_string()));
         assert!(client.has_in_flight_requests_for_node(node.id_string()));
         assert!(client.has_in_flight_requests());
 
         // Disconnect
-        client.disconnect(node.id_string());
+        client.disconnect(node.id_string()).await;
 
         // The disconnected request should be returned as an aborted send
-        let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        let responses = client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
         assert_eq!(1, responses.len());
         assert!(responses[0].was_disconnected());
     }
 
     /// Translated from `NetworkClientTest.testDisconnectWithMultipleInFlights`.
-    #[test]
-    fn test_disconnect_with_multiple_in_flights() {
+    #[tokio::test]
+    async fn test_disconnect_with_multiple_in_flights() {
         let mut client = create_network_client_with_no_version_discovery();
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
         assert!(
             client.is_ready(&node, now),
             "Expected NetworkClient to be ready to send to node"
@@ -2347,7 +2323,7 @@ mod tests {
         );
         let correlation_id1 = request1.correlation_id();
         client.send(request1, now);
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // Send second request
         let builder2 = MetadataRequestBuilder::new(Some(&[]), true);
@@ -2366,15 +2342,15 @@ mod tests {
         );
         let correlation_id2 = request2.correlation_id();
         client.send(request2, now);
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         assert_ne!(correlation_id1, correlation_id2);
         assert_eq!(2, client.in_flight_request_count());
         assert_eq!(2, client.in_flight_request_count_for_node(node.id_string()));
 
-        client.disconnect(node.id_string());
+        client.disconnect(node.id_string()).await;
 
-        let responses = client.poll(0, now);
+        let responses = client.poll(0, now).await;
         assert_eq!(2, responses.len());
 
         // Verify callbacks were called
@@ -2393,8 +2369,8 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testCorrelationId`.
-    #[test]
-    fn test_correlation_id() {
+    #[tokio::test]
+    async fn test_correlation_id() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let count = 100;
         let mut ids = std::collections::HashSet::new();
@@ -2405,8 +2381,8 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp`.
-    #[test]
-    fn test_least_loaded_node_provide_disconnected_nodes_prioritized_by_last_connection_timestamp() {
+    #[tokio::test]
+    async fn test_least_loaded_node_provide_disconnected_nodes_prioritized_by_last_connection_timestamp() {
         let node_number = 3;
         let mut client = create_network_client_with_multiple_nodes(0, CONNECTION_SETUP_TIMEOUT_MS_TEST, node_number);
         // Start at a non-zero time, matching Java's MockTime which initializes to
@@ -2422,10 +2398,10 @@ mod tests {
             let node = node.unwrap();
             provided_node_ids.insert(node.id());
 
-            client.ready(&node, now);
-            client.disconnect(node.id_string());
+            client.ready(&node, now).await;
+            client.disconnect(node.id_string()).await;
             now += CONNECTION_SETUP_TIMEOUT_MS_TEST + 1;
-            client.poll(0, now);
+            client.poll(0, now).await;
 
             // Define a round as nodeNumber of nodes have been provided.
             // In each round every node should be provided exactly once.
@@ -2437,17 +2413,17 @@ mod tests {
     }
 
     /// Translated from `NetworkClientTest.testClientDisconnectAfterInternalApiVersionRequest`.
-    #[test]
-    fn test_client_disconnect_after_internal_api_version_request() {
+    #[tokio::test]
+    async fn test_client_disconnect_after_internal_api_version_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
         // Initiate connection and wait for the ApiVersionsRequest to be in-flight
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         let mut tries = 0;
         loop {
-            client.poll(0, now);
+            client.poll(0, now).await;
             if client.has_in_flight_requests_for_node(node.id_string()) {
                 break;
             }
@@ -2459,26 +2435,26 @@ mod tests {
 
         assert!(!client.is_ready(&node, now));
 
-        client.disconnect(node.id_string());
+        client.disconnect(node.id_string()).await;
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
 
         // The failed ApiVersion request should not be forwarded to upper layers
-        let responses = client.poll(0, now);
+        let responses = client.poll(0, now).await;
         assert!(responses.is_empty());
     }
 
     /// Translated from `NetworkClientTest.testServerDisconnectAfterInternalApiVersionRequest`.
-    #[test]
-    fn test_server_disconnect_after_internal_api_version_request() {
+    #[tokio::test]
+    async fn test_server_disconnect_after_internal_api_version_request() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
         // Initiate connection and wait for the ApiVersionsRequest to be in-flight
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         let mut tries = 0;
         loop {
-            client.poll(0, now);
+            client.poll(0, now).await;
             if client.has_in_flight_requests_for_node(node.id_string()) {
                 break;
             }
@@ -2494,7 +2470,7 @@ mod tests {
         client.selector_mut().server_disconnect(node.id_string());
 
         // The failed ApiVersion request should not be forwarded to upper layers
-        let responses = client.poll(0, now);
+        let responses = client.poll(0, now).await;
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
         assert!(responses.is_empty());
 
@@ -2512,8 +2488,8 @@ mod tests {
     }
 
     /// Verifies that initiating close transitions the client state.
-    #[test]
-    fn test_initiate_close() {
+    #[tokio::test]
+    async fn test_initiate_close() {
         let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         assert!(client.active());
         client.initiate_close();
@@ -2521,38 +2497,38 @@ mod tests {
     }
 
     /// Verifies that closing a closed client does not panic.
-    #[test]
-    fn test_close_idempotent() {
+    #[tokio::test]
+    async fn test_close_idempotent() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         assert!(client.active());
-        client.close();
+        client.close().await;
         assert!(!client.active());
         // Second close should not panic
-        client.close();
+        client.close().await;
         assert!(!client.active());
     }
 
     /// Verifies that `active()` returns false after close.
-    #[test]
-    fn test_active_after_close() {
+    #[tokio::test]
+    async fn test_active_after_close() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         assert!(client.active(), "Client should be active after creation");
-        client.close();
+        client.close().await;
         assert!(!client.active(), "Client should not be active after close");
     }
 
     /// Verifies that poll panics after close.
-    #[test]
+    #[tokio::test]
     #[should_panic(expected = "NetworkClient is no longer active")]
-    fn test_poll_after_close() {
+    async fn test_poll_after_close() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
-        client.close();
-        client.poll(0, 0);
+        client.close().await;
+        client.poll(0, 0).await;
     }
 
     /// Verifies the wakeup method does not panic.
-    #[test]
-    fn test_wakeup() {
+    #[tokio::test]
+    async fn test_wakeup() {
         let client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         client.wakeup(); // Should not panic
     }
@@ -2685,14 +2661,14 @@ mod tests {
     ///
     /// The Java test uses ProduceRequest but we use MetadataRequest since that's
     /// the only request type fully supported in our ConcreteRequest.
-    fn send_metadata_request(
+    async fn send_metadata_request(
         client: &mut NetworkClient<MockSelector, TestHostResolver>,
         node: &Node,
         request_timeout_ms: i32,
         should_emulate_timeout: bool,
         now: &mut i64,
     ) -> ClientResponse {
-        await_ready(client, node);
+        await_ready(client, node).await;
 
         let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
         let request = client.new_client_request_with_timeout(
@@ -2722,7 +2698,7 @@ mod tests {
             client.selector_mut().complete_receive(receive);
         }
 
-        let responses = client.poll(0, *now);
+        let responses = client.poll(0, *now).await;
         assert_eq!(1, responses.len());
         responses.into_iter().next().unwrap()
     }
@@ -2732,21 +2708,21 @@ mod tests {
     /// Tests that sending a request with a specific timeout, and then emulating a
     /// timeout, results in the response being flagged as disconnected and timed out.
     /// Also verifies that a metadata update is requested after a timeout.
-    #[test]
-    fn test_request_timeout() {
-        test_request_timeout_helper(DEFAULT_REQUEST_TIMEOUT_MS + 5000);
+    #[tokio::test]
+    async fn test_request_timeout() {
+        test_request_timeout_helper(DEFAULT_REQUEST_TIMEOUT_MS + 5000).await;
     }
 
     /// Translated from `NetworkClientTest.testDefaultRequestTimeout`.
-    #[test]
-    fn test_default_request_timeout() {
-        test_request_timeout_helper(DEFAULT_REQUEST_TIMEOUT_MS);
+    #[tokio::test]
+    async fn test_default_request_timeout() {
+        test_request_timeout_helper(DEFAULT_REQUEST_TIMEOUT_MS).await;
     }
 
     /// Helper for testRequestTimeout and testDefaultRequestTimeout.
     ///
     /// Translated from the private `testRequestTimeout(int requestTimeoutMs)` method.
-    fn test_request_timeout_helper(request_timeout_ms: i32) {
+    async fn test_request_timeout_helper(request_timeout_ms: i32) {
         let metadata = Arc::new(Metadata::new(
             50,
             50,
@@ -2762,7 +2738,7 @@ mod tests {
         let mut now = 0_i64;
 
         // Send first request without any timeout - should succeed.
-        let response = send_metadata_request(&mut client, &node, request_timeout_ms, false, &mut now);
+        let response = send_metadata_request(&mut client, &node, request_timeout_ms, false, &mut now).await;
         assert_eq!(node.id_string(), response.destination());
         assert!(!response.was_disconnected(), "Expected response to succeed and not disconnect");
         assert!(!response.was_timed_out(), "Expected response to succeed and not time out");
@@ -2772,7 +2748,7 @@ mod tests {
         );
 
         // Send second request, but emulate a timeout.
-        let response = send_metadata_request(&mut client, &node, request_timeout_ms, true, &mut now);
+        let response = send_metadata_request(&mut client, &node, request_timeout_ms, true, &mut now).await;
         assert_eq!(node.id_string(), response.destination());
         assert!(response.was_disconnected(), "Expected response to fail due to disconnection");
         assert!(response.was_timed_out(), "Expected response to fail due to timeout");
@@ -2786,8 +2762,8 @@ mod tests {
     ///
     /// Uses two nodes to ensure the logic iterates over a set of more than one
     /// element.
-    #[test]
-    fn test_connection_setup_timeout() {
+    #[tokio::test]
+    async fn test_connection_setup_timeout() {
         // Use a different TestMetadataUpdater with 2 nodes.
         // Since our create_network_client only has 1 node, we create a custom one.
         let nodes = vec![
@@ -2819,13 +2795,13 @@ mod tests {
     ///
     /// Verifies that a throttled response does not cause the connection to timeout
     /// prematurely -- the throttle time should not count towards the request timeout.
-    #[test]
-    fn test_connection_timeout_after_throttling() {
+    #[tokio::test]
+    async fn test_connection_timeout_after_throttling() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let mut now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         // Send first request
         let timeout_ms = 1000;
@@ -2840,7 +2816,7 @@ mod tests {
         );
         let r1_correlation_id = request.correlation_id();
         client.send(request, now);
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // Throttle long enough to ensure other inFlight requests timeout.
         let mut response_data = MetadataResponseData::new();
@@ -2869,7 +2845,7 @@ mod tests {
         client.send(request2, now);
 
         now += timeout_ms as i64;
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         assert_eq!(1, client.in_flight_request_count_for_node(node.id_string()));
         assert!(
@@ -2882,13 +2858,13 @@ mod tests {
     ///
     /// Verifies that a throttled connection is not ready during the throttle period
     /// and becomes ready again once the throttle expires.
-    #[test]
-    fn test_connection_throttling() {
+    #[tokio::test]
+    async fn test_connection_throttling() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let mut now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         // Send a request
         let builder = MetadataRequestBuilder::new(Some(&["test"]), true);
@@ -2902,7 +2878,7 @@ mod tests {
         );
         let correlation_id = request.correlation_id();
         client.send(request, now);
-        client.poll(1, now);
+        client.poll(1, now).await;
 
         // Send a throttled response
         let throttle_time = 100;
@@ -2916,16 +2892,16 @@ mod tests {
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
-        client.poll(1, now);
+        client.poll(1, now).await;
 
         // The connection is not ready due to throttling.
-        assert!(!client.ready(&node, now), "Expected connection to be throttled");
+        assert!(!client.ready(&node, now).await, "Expected connection to be throttled");
         assert_eq!(100, client.throttle_delay_ms(&node, now));
 
         // After 50ms, the connection is not ready yet.
         now += 50;
         assert!(
-            !client.ready(&node, now),
+            !client.ready(&node, now).await,
             "Expected connection to still be throttled after 50ms"
         );
         assert_eq!(50, client.throttle_delay_ms(&node, now));
@@ -2933,7 +2909,7 @@ mod tests {
         // After another 50ms, the throttling is done and the connection becomes ready again.
         now += 50;
         assert!(
-            client.ready(&node, now),
+            client.ready(&node, now).await,
             "Expected connection to be ready after throttle expired"
         );
         assert_eq!(0, client.throttle_delay_ms(&node, now));
@@ -2948,8 +2924,8 @@ mod tests {
     /// NOTE: The Java test uses `Metadata` subclassing to count rebootstrap calls.
     /// In Rust we cannot subclass, so we check the observable metadata state instead
     /// (specifically the update_version increments caused by rebootstrap).
-    #[test]
-    fn test_rebootstrap() {
+    #[tokio::test]
+    async fn test_rebootstrap() {
         let rebootstrap_trigger_ms: i64 = 1000;
         let metadata = Arc::new(Metadata::new(
             50,
@@ -2986,11 +2962,11 @@ mod tests {
         // Request initial metadata update
         metadata.request_update(true);
         let version_before = metadata.update_version();
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // Sleep past rebootstrap trigger
         now += rebootstrap_trigger_ms + 1;
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The rebootstrap should have incremented update_version
         let version_after_first_rebootstrap = metadata.update_version();
@@ -3003,7 +2979,7 @@ mod tests {
 
         // Another poll shortly after should NOT trigger another rebootstrap
         now += 1;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert_eq!(
             version_after_first_rebootstrap,
             metadata.update_version(),
@@ -3012,13 +2988,13 @@ mod tests {
 
         // Request another update and trigger rebootstrap again
         metadata.request_update(true);
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The internal metadata attempt just started, so no rebootstrap yet
         let version_after_request = metadata.update_version();
         // Advance past the trigger again
         now += rebootstrap_trigger_ms;
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         let version_after_second_rebootstrap = metadata.update_version();
         assert!(
@@ -3031,8 +3007,8 @@ mod tests {
     ///
     /// Tests that in-flight requests are aborted when rebootstrap is triggered.
     /// Since our ConcreteRequest doesn't support PRODUCE, we use METADATA requests.
-    #[test]
-    fn test_inflight_requests_during_rebootstrap() {
+    #[tokio::test]
+    async fn test_inflight_requests_during_rebootstrap() {
         let refresh_backoff_ms: i64 = 50;
         let rebootstrap_trigger_ms: i64 = 1000;
         let default_request_timeout: i32 = 5000;
@@ -3074,7 +3050,7 @@ mod tests {
 
         // Ready all nodes
         for node in &nodes {
-            await_ready(&mut client, node);
+            await_ready(&mut client, node).await;
         }
 
         // Queue a user request to nodes[0]
@@ -3088,20 +3064,20 @@ mod tests {
             None,
         );
         client.send(request, now);
-        let responses = client.poll(0, now);
+        let responses = client.poll(0, now).await;
         assert_eq!(0, responses.len());
         assert_eq!(1, client.in_flight_request_count());
 
         // Trigger rebootstrap by requesting metadata update and sleeping
         metadata.request_update(true);
         now += refresh_backoff_ms;
-        let responses = client.poll(0, now);
+        let responses = client.poll(0, now).await;
         assert_eq!(0, responses.len());
         // Should now have the user request + internal metadata request
         assert!(client.in_flight_request_count() >= 1, "Expected at least 1 in-flight request");
 
         now += rebootstrap_trigger_ms + 1;
-        let responses = client.poll(0, now);
+        let responses = client.poll(0, now).await;
 
         // Verify that inflight user request was aborted with disconnection
         // (internal metadata requests are NOT returned to upper layers)
@@ -3129,13 +3105,13 @@ mod tests {
     ///
     /// Verifies that when DNS lookup fails for a node, `ready()` returns false
     /// without panicking.
-    #[test]
-    fn test_dns_lookup_failure() {
+    #[tokio::test]
+    async fn test_dns_lookup_failure() {
         let mut client = create_network_client_with_failing_dns();
         let bad_node = Node::new(1234, "badhost".to_string(), 1234);
         let now = 0_i64;
         assert!(
-            !client.ready(&bad_node, now),
+            !client.ready(&bad_node, now).await,
             "ready() should return false for a node with a bad hostname"
         );
     }
@@ -3144,8 +3120,8 @@ mod tests {
     ///
     /// Tests that an authentication failure on one node does not interfere with
     /// a pending metadata request on another node.
-    #[test]
-    fn test_authentication_failure_with_in_flight_metadata_request() {
+    #[tokio::test]
+    async fn test_authentication_failure_with_in_flight_metadata_request() {
         let refresh_backoff_ms: i64 = 50;
 
         let metadata = Arc::new(Metadata::new(
@@ -3168,13 +3144,13 @@ mod tests {
 
         let mut now = 0_i64;
 
-        await_ready(&mut client, &node1);
+        await_ready(&mut client, &node1).await;
 
         // Request metadata update
         metadata.request_update(true);
         now += refresh_backoff_ms;
 
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // Check which node has the pending metadata request
         let node_with_pending = if client.has_in_flight_requests_for_node(node1.id_string()) {
@@ -3191,9 +3167,9 @@ mod tests {
         );
 
         // Try to connect to node2 and simulate auth failure
-        assert!(!client.ready(&node2, now));
+        assert!(!client.ready(&node2, now).await);
         client.selector_mut().server_authentication_failed(node2.id_string());
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(
             client.authentication_error(&node2).is_some(),
             "Expected authentication error for node2"
@@ -3224,7 +3200,7 @@ mod tests {
             .selector_mut()
             .delayed_receive(DelayedReceive::new(node1.id_string(), receive));
 
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The metadata should have been updated (update_version incremented)
         assert!(
@@ -3237,8 +3213,8 @@ mod tests {
     ///
     /// Tests that after a DNS address change, the client reconnects to the new
     /// address. Telemetry assertions are omitted as telemetry is deferred.
-    #[test]
-    fn test_reconnect_after_address_change() {
+    #[tokio::test]
+    async fn test_reconnect_after_address_change() {
         let initial_addresses: Vec<std::net::IpAddr> = vec![
             "10.200.20.100".parse().unwrap(),
             "10.200.20.101".parse().unwrap(),
@@ -3275,22 +3251,22 @@ mod tests {
         let mut now = 0_i64;
 
         // Connect to one of the initial addresses
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(client.is_ready(&node, now));
 
         // Change addresses and disconnect
         mock_host_resolver.change_addresses();
         client.selector_mut().server_disconnect(node.id_string());
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(!client.is_ready(&node, now));
 
         // Reconnect to the new address
         now += RECONNECT_BACKOFF_MAX_MS_TEST;
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(client.is_ready(&node, now));
 
         // Should have resolved DNS twice (once for initial, once after change)
@@ -3301,8 +3277,8 @@ mod tests {
     ///
     /// Tests that if the first connection attempt fails, the client retries with
     /// the next address from the same DNS resolution. Telemetry assertions omitted.
-    #[test]
-    fn test_failed_connection_to_first_address() {
+    #[tokio::test]
+    async fn test_failed_connection_to_first_address() {
         let initial_addresses: Vec<std::net::IpAddr> = vec![
             "10.200.20.100".parse().unwrap(),
             "10.200.20.101".parse().unwrap(),
@@ -3339,17 +3315,17 @@ mod tests {
         let mut now = 0_i64;
 
         // First connection attempt -- simulate connection blocked (timeout)
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         client.selector_mut().server_connection_blocked(node.id_string());
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(!client.is_ready(&node, now), "First connection attempt should fail");
 
         // Second connection attempt should succeed
         now += RECONNECT_BACKOFF_MAX_MS_TEST;
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(client.is_ready(&node, now), "Second connection attempt should succeed");
 
         // Should only have resolved DNS once (both attempts use the same resolution)
@@ -3361,8 +3337,8 @@ mod tests {
     /// Tests that after a successful connection, if addresses change and the first
     /// connection to the new address fails, the client retries with the next new
     /// address. Telemetry assertions omitted.
-    #[test]
-    fn test_failed_connection_to_first_address_after_reconnect() {
+    #[tokio::test]
+    async fn test_failed_connection_to_first_address_after_reconnect() {
         let initial_addresses: Vec<std::net::IpAddr> = vec![
             "10.200.20.100".parse().unwrap(),
             "10.200.20.101".parse().unwrap(),
@@ -3399,23 +3375,23 @@ mod tests {
         let mut now = 0_i64;
 
         // Connect to one of the initial addresses
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(client.is_ready(&node, now));
 
         // Change addresses and disconnect
         mock_host_resolver.change_addresses();
         client.selector_mut().server_disconnect(node.id_string());
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(!client.is_ready(&node, now));
 
         // First connection attempt to new addresses should fail
         now += RECONNECT_BACKOFF_MAX_MS_TEST;
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         client.selector_mut().server_connection_blocked(node.id_string());
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(
             !client.is_ready(&node, now),
             "First connection attempt to new addresses should fail"
@@ -3423,9 +3399,9 @@ mod tests {
 
         // Second connection attempt to new addresses should succeed
         now += RECONNECT_BACKOFF_MAX_MS_TEST;
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         now += CONNECTION_SETUP_TIMEOUT_MAX_MS_TEST;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(
             client.is_ready(&node, now),
             "Second connection attempt to new addresses should succeed"
@@ -3439,8 +3415,8 @@ mod tests {
     ///
     /// Tests that closing a connecting node works properly and allows
     /// new connections to other nodes and reconnection to the closed node.
-    #[test]
-    fn test_close_connecting_node() {
+    #[tokio::test]
+    async fn test_close_connecting_node() {
         let nodes = vec![
             Node::new(0, "localhost".to_string(), 9092),
             Node::new(1, "localhost".to_string(), 9093),
@@ -3469,13 +3445,13 @@ mod tests {
         let node0 = &nodes[0];
         let node1 = &nodes[1];
 
-        client.ready(node0, now);
+        client.ready(node0, now).await;
         client.selector_mut().server_connection_blocked(node0.id_string());
-        client.poll(1, now);
-        client.close_connection(node0.id_string());
+        client.poll(1, now).await;
+        client.close_connection(node0.id_string()).await;
 
         // Poll without any connections should return without errors
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(!client.is_ready(node0, now));
         assert!(!client.is_ready(node1, now));
 
@@ -3488,8 +3464,8 @@ mod tests {
             .unwrap_or(ApiKeys::API_VERSIONS.latest_version());
         delayed_api_versions_response(client.selector_mut(), node1, 0, api_versions_response_version, &response);
         let mut tries = 0;
-        while !client.ready(node1, now) {
-            client.poll(1, now);
+        while !client.ready(node1, now).await {
+            client.poll(1, now).await;
             tries += 1;
             assert!(tries <= 100, "Could not make node1 ready after 100 tries");
         }
@@ -3502,8 +3478,8 @@ mod tests {
         let response = default_api_versions_response();
         delayed_api_versions_response(client.selector_mut(), node0, 1, api_versions_response_version, &response);
         tries = 0;
-        while !client.ready(node0, now) {
-            client.poll(1, now);
+        while !client.ready(node0, now).await {
+            client.poll(1, now).await;
             tries += 1;
             assert!(tries <= 100, "Could not make node0 ready after 100 tries");
         }
@@ -3514,18 +3490,18 @@ mod tests {
     ///
     /// Tests that if a channel never becomes ready (i.e. stays in checking API
     /// versions state), the connection eventually times out.
-    #[test]
-    fn test_connection_does_not_remain_stuck_in_checking_api_versions_state_if_channel_never_becomes_ready() {
+    #[tokio::test]
+    async fn test_connection_does_not_remain_stuck_in_checking_api_versions_state_if_channel_never_becomes_ready() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let mut now = 0_i64;
 
         // Channel is ready by default so we mark it as not ready.
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         client.selector_mut().channel_not_ready(node.id_string());
 
         // Channel should not be ready.
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(
             !client.is_ready(&node, now),
             "Expected node to not be ready when channel is not ready"
@@ -3535,7 +3511,7 @@ mod tests {
         // the connection setup timeout. This ensures that the client does not remain
         // stuck in the CHECKING_API_VERSIONS state.
         now += (CONNECTION_SETUP_TIMEOUT_MS_TEST as f64 * 1.2) as i64 + 1;
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert!(
             client.connection_failed(&node),
             "Expected connection to fail due to connection setup timeout"
@@ -3547,23 +3523,23 @@ mod tests {
     /// Tests that when the first ApiVersionsRequest returns UNSUPPORTED_VERSION
     /// with the supported version range provided, the client retries with the
     /// version indicated by the broker and eventually becomes ready.
-    #[test]
-    fn test_unsupported_api_versions_request_with_version_provided_by_the_broker() {
+    #[tokio::test]
+    async fn test_unsupported_api_versions_request_with_version_provided_by_the_broker() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
         // Initiate the connection
-        client.ready(&node, now);
+        client.ready(&node, now).await;
 
         // Handle the connection, initiate first ApiVersionsRequest
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // ApiVersionsRequest is in flight
         assert!(client.has_in_flight_requests_for_node(node.id_string()));
 
         // Completes initiated sends
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert_eq!(
             1,
             client.selector().completed_sends().len(),
@@ -3583,7 +3559,7 @@ mod tests {
         delayed_api_versions_response(client.selector_mut(), &node, 0, 0, &error_response);
 
         // Handle ApiVersionResponse, initiate second ApiVersionRequest
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // ApiVersionsRequest is in flight (the retry)
         assert!(
@@ -3596,7 +3572,7 @@ mod tests {
         client.selector_mut().clear_completed_receives();
 
         // Completes the second send
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // ApiVersionsRequest retry has been sent
         assert_eq!(
@@ -3610,7 +3586,7 @@ mod tests {
         delayed_api_versions_response(client.selector_mut(), &node, 1, 0, &success_response);
 
         // Handle completed receives
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The ApiVersionsRequest is gone
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
@@ -3627,23 +3603,23 @@ mod tests {
     /// Tests that when the first ApiVersionsRequest returns UNSUPPORTED_VERSION
     /// without any version information, the client retries with version 0 and
     /// eventually becomes ready.
-    #[test]
-    fn test_unsupported_api_versions_request_without_version_provided_by_the_broker() {
+    #[tokio::test]
+    async fn test_unsupported_api_versions_request_without_version_provided_by_the_broker() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MAX_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let now = 0_i64;
 
         // Initiate the connection
-        client.ready(&node, now);
+        client.ready(&node, now).await;
 
         // Handle the connection, initiate first ApiVersionsRequest
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // ApiVersionsRequest is in flight
         assert!(client.has_in_flight_requests_for_node(node.id_string()));
 
         // Completes initiated sends
-        client.poll(0, now);
+        client.poll(0, now).await;
         assert_eq!(
             1,
             client.selector().completed_sends().len(),
@@ -3659,7 +3635,7 @@ mod tests {
         delayed_api_versions_response(client.selector_mut(), &node, 0, 0, &error_response);
 
         // Handle ApiVersionResponse, initiate second ApiVersionRequest
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // ApiVersionsRequest is in flight (the retry)
         assert!(
@@ -3672,7 +3648,7 @@ mod tests {
         client.selector_mut().clear_completed_receives();
 
         // Completes the second send
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // ApiVersionsRequest retry has been sent
         assert_eq!(
@@ -3686,7 +3662,7 @@ mod tests {
         delayed_api_versions_response(client.selector_mut(), &node, 1, 0, &success_response);
 
         // Handle completed receives
-        client.poll(0, now);
+        client.poll(0, now).await;
 
         // The ApiVersionsRequest is gone
         assert!(!client.has_in_flight_requests_for_node(node.id_string()));
@@ -3704,17 +3680,17 @@ mod tests {
     /// after disconnection equals the reconnect backoff, and after sleeping that
     /// long the delay resets to 0. Also verifies a second disconnect has the same
     /// backoff (no exponential growth).
-    #[test]
-    fn test_connection_delay_disconnected_with_no_exponential_backoff() {
+    #[tokio::test]
+    async fn test_connection_delay_disconnected_with_no_exponential_backoff() {
         let mut client = create_network_client(RECONNECT_BACKOFF_MS_TEST);
         let node = Node::new(0, "localhost".to_string(), 9092);
         let mut now = 0_i64;
 
-        await_ready(&mut client, &node);
+        await_ready(&mut client, &node).await;
 
         // First disconnect
         client.selector_mut().server_disconnect(node.id_string());
-        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
         let delay = client.connection_delay(&node, now);
         assert_eq!(RECONNECT_BACKOFF_MS_TEST, delay);
 
@@ -3723,9 +3699,9 @@ mod tests {
         assert_eq!(0, client.connection_delay(&node, now));
 
         // Start connecting and disconnect before the connection is established
-        client.ready(&node, now);
+        client.ready(&node, now).await;
         client.selector_mut().server_disconnect(node.id_string());
-        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now);
+        client.poll(DEFAULT_REQUEST_TIMEOUT_MS as i64, now).await;
 
         // Second attempt should have the same behaviour as exponential backoff is disabled
         let delay2 = client.connection_delay(&node, now);

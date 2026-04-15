@@ -31,7 +31,7 @@ use crate::common::kafka_error::KafkaError;
 /// Corresponds to `org.apache.kafka.clients.MetadataUpdater`.
 ///
 /// This is an internal trait. It is NOT thread-safe.
-pub trait MetadataUpdater {
+pub trait MetadataUpdater: Send {
     /// Gets the current cluster info without blocking.
     fn fetch_nodes(&self) -> Vec<Node>;
 

@@ -50,7 +50,7 @@ pub trait KafkaClient {
     ///
     /// Returns `true` iff we are ready to immediately initiate the sending of another
     /// request to the given node.
-    fn ready(&mut self, node: &Node, now: i64) -> bool;
+    fn ready(&mut self, node: &Node, now: i64) -> impl std::future::Future<Output = bool> + Send;
 
     /// Return the number of milliseconds to wait, based on the connection state,
     /// before attempting to send data. When disconnected, this respects the reconnect
@@ -115,7 +115,7 @@ pub trait KafkaClient {
     /// * `now` - The current time in ms
     ///
     /// Returns the list of responses received.
-    fn poll(&mut self, timeout: i64, now: i64) -> Vec<ClientResponse>;
+    fn poll(&mut self, timeout: i64, now: i64) -> impl std::future::Future<Output = Vec<ClientResponse>> + Send;
 
     /// Disconnects the connection to a particular node, if there is one.
     /// Any pending ClientRequests for this connection will receive disconnections.
@@ -123,7 +123,7 @@ pub trait KafkaClient {
     /// # Arguments
     ///
     /// * `node_id` - The id of the node
-    fn disconnect(&mut self, node_id: &str);
+    fn disconnect(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send;
 
     /// Closes the connection to a particular node (if there is one).
     /// All requests on the connection will be cleared. ClientRequest callbacks will
@@ -132,7 +132,7 @@ pub trait KafkaClient {
     /// # Arguments
     ///
     /// * `node_id` - The id of the node
-    fn close_connection(&mut self, node_id: &str);
+    fn close_connection(&mut self, node_id: &str) -> impl std::future::Future<Output = ()> + Send;
 
     /// Choose the node with the fewest outstanding requests. This method will prefer
     /// a node with an existing connection, but will potentially choose a node for which
@@ -222,5 +222,5 @@ pub trait KafkaClient {
     fn active(&self) -> bool;
 
     /// Close the network client.
-    fn close(&mut self);
+    fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
 }
