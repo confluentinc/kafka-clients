@@ -12,3 +12,8 @@ The Producer should be able to accumulate the messages into batches to produce i
 
 The Producer should be able to connect to a SSL endpoint, do a SaslHandshake and
 then a SaslAuthenticate with PLAIN credential
+
+## Milestone 4
+
+The MockProducer implementation is translated and a C FFI is added to call
+the Rust client from many languages.
