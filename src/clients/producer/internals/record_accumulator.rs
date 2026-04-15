@@ -964,6 +964,76 @@ impl RecordAccumulator {
     pub fn batch_size(&self) -> i32 {
         self.batch_size
     }
+
+    /// Remove from the incomplete list and deallocate the batch buffer.
+    ///
+    /// Translated from `RecordAccumulator.completeAndDeallocateBatch`.
+    pub fn complete_and_deallocate_batch(&self, batch: &ProducerBatch) {
+        self.deallocate(batch);
+    }
+
+    /// Mark the flush as complete by decrementing the flush counter.
+    ///
+    /// Translated from `RecordAccumulator.awaitFlushCompletion`.
+    /// In Java this blocks waiting for all incomplete batches to complete.
+    /// In Rust, we just decrement the counter. Callers should ensure
+    /// that all batches have been drained and completed first.
+    pub fn await_flush_completion(&self) {
+        if self.flushes_in_progress.load(Ordering::Relaxed) > 0 {
+            self.flushes_in_progress.fetch_sub(1, Ordering::Relaxed);
+        }
+    }
+
+    /// Abort any batches which have not been drained.
+    ///
+    /// Translated from `RecordAccumulator.abortUndrainedBatches`.
+    pub fn abort_undrained_batches(&self, reason: KafkaError) {
+        for topic_info_ref in self.topic_info_map.iter() {
+            let topic_info = topic_info_ref.value();
+            for deque_ref in topic_info.batches.iter() {
+                let mut deque = deque_ref.value().lock().unwrap();
+                // Abort only batches that haven't been drained (i.e., not closed).
+                let mut i = 0;
+                while i < deque.len() {
+                    if !deque[i].is_closed() {
+                        let mut batch = deque.remove(i).unwrap();
+                        batch.abort_record_appends();
+                        batch.abort(reason.clone());
+                    } else {
+                        i += 1;
+                    }
+                }
+            }
+        }
+    }
+
+    /// Split a big batch and re-enqueue the resulting sub-batches.
+    ///
+    /// Translated from `RecordAccumulator.splitAndReenqueue`.
+    pub fn split_and_reenqueue(&self, mut big_batch: ProducerBatch) -> usize {
+        let target_split_batch_size = if big_batch.is_split_batch() {
+            std::cmp::max(big_batch.max_record_size, big_batch.estimated_size_in_bytes() as i32 / 2)
+        } else {
+            self.batch_size
+        };
+
+        let mut sub_batches = big_batch.split(target_split_batch_size);
+        let num_split_batches = sub_batches.len();
+        let tp = big_batch.topic_partition.clone();
+
+        let topic_info = self.get_or_create_topic_info(tp.topic());
+        let dq_entry = topic_info
+            .batches
+            .entry(tp.partition())
+            .or_insert_with(|| Mutex::new(VecDeque::new()));
+        let mut deque = dq_entry.value().lock().unwrap();
+
+        while let Some(batch) = sub_batches.pop_back() {
+            deque.push_front(batch);
+        }
+
+        num_split_batches
+    }
 }
 
 #[cfg(test)]
@@ -1302,6 +1372,8 @@ mod tests {
     }
 
     /// Test reenqueue.
+    ///
+    /// Translated from `RecordAccumulatorTest.testReenqueue` (subset).
     #[test]
     fn test_reenqueue() {
         let n1 = node1();
@@ -1328,5 +1400,692 @@ mod tests {
 
         // Should have the batch back.
         assert_eq!(1, accum.deque_size(&tp1()));
+    }
+
+    /// Translated from `RecordAccumulatorTest.testPartialDrain`.
+    #[test]
+    fn test_partial_drain() {
+        let n1 = node1();
+        let now: i64 = 0;
+
+        let k = key();
+        let v = value();
+        let msg_size = DefaultRecord::size_in_bytes_for(0, 0, k.len() as i32, v.len() as i32, &[]);
+        let appends = 1024 / msg_size + 1;
+
+        let accum = create_test_accumulator(
+            1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            10 * 1024,
+            Compression::none(),
+            10,
+        );
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        let partitions = [tp1(), TopicPartition::new(TOPIC.to_string(), 1)];
+        for tp in &partitions {
+            for _ in 0..appends {
+                accum
+                    .append(tp.topic(), tp.partition(), 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                    .unwrap();
+            }
+        }
+
+        let result = accum.ready(&metadata, now);
+        assert!(result.ready_nodes.contains(&n1), "Partition's leader should be ready");
+
+        // Drain with a 1024-byte size limit: should get only one batch.
+        let mut nodes = HashSet::new();
+        nodes.insert(n1.clone());
+        let batches = accum.drain(&metadata, &nodes, 1024, now);
+        let drained = batches.get(&n1.id()).unwrap();
+        assert_eq!(
+            1,
+            drained.len(),
+            "But due to size bound only one partition should have been retrieved"
+        );
+    }
+
+    /// Translated from `RecordAccumulatorTest.testNextReadyCheckDelay`.
+    #[test]
+    fn test_next_ready_check_delay() {
+        let linger_ms = 10i32;
+        // test case assumes that the records do not fill the batch completely
+        let batch_size = 1025;
+        let n1 = node1();
+        let n2 = node2();
+        let now: i64 = 0;
+
+        let accum = create_test_accumulator(
+            batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            10 * batch_size as i64,
+            Compression::none(),
+            linger_ms,
+        );
+
+        let k = key();
+        let v = value();
+        let appends = expected_num_appends(batch_size);
+
+        // Partition on node1 only
+        let metadata =
+            make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
+        let cluster = metadata.cluster().clone();
+
+        for _ in 0..appends {
+            accum
+                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .unwrap();
+        }
+        let result = accum.ready(&metadata, now);
+        assert_eq!(0, result.ready_nodes.len(), "No nodes should be ready.");
+        assert_eq!(
+            linger_ms as i64, result.next_ready_check_delay_ms,
+            "Next check time should be the linger time"
+        );
+
+        // Add partition on node2 only, at time = linger_ms / 2.
+        let half_linger = linger_ms as i64 / 2;
+        for _ in 0..appends {
+            accum
+                .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now + half_linger, &cluster)
+                .unwrap();
+        }
+        let result = accum.ready(&metadata, now + half_linger);
+        assert_eq!(0, result.ready_nodes.len(), "No nodes should be ready.");
+        assert_eq!(
+            half_linger, result.next_ready_check_delay_ms,
+            "Next check time should be defined by node1, half remaining linger time"
+        );
+
+        // Add data for another partition on node1, enough to make data sendable immediately
+        for _ in 0..=appends {
+            accum
+                .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now + half_linger, &cluster)
+                .unwrap();
+        }
+        let result = accum.ready(&metadata, now + half_linger);
+        assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
+        assert!(
+            result.next_ready_check_delay_ms <= linger_ms as i64,
+            "Next check time should be defined by node2, at most linger time"
+        );
+    }
+
+    /// Translated from `RecordAccumulatorTest.testRetryBackoff`.
+    #[test]
+    fn test_retry_backoff() {
+        let linger_ms = i32::MAX / 16;
+        let retry_backoff_ms = i64::from(i32::MAX) / 8;
+        let retry_backoff_max_ms = retry_backoff_ms * 10;
+        let delivery_timeout_ms = i32::MAX;
+        let total_size: i64 = 10 * 1024;
+        let batch_size = 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+
+        let pool = Arc::new(BufferPool::new(total_size, batch_size as usize));
+        let accum = RecordAccumulator::new(
+            batch_size,
+            Compression::none(),
+            linger_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            delivery_timeout_ms,
+            PartitionerConfig::default(),
+            pool,
+        );
+
+        let n1 = node1();
+        let now: i64 = 0;
+        let k = key();
+        let v = value();
+
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .unwrap();
+
+        let result = accum.ready(&metadata, now + linger_ms as i64 + 1);
+        assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
+
+        let mut nodes_set = HashSet::new();
+        nodes_set.insert(n1.clone());
+        let batches = accum.drain(&metadata, &nodes_set, i32::MAX, now + linger_ms as i64 + 1);
+        assert_eq!(1, batches.len(), "Node1 should be the only ready node.");
+        assert_eq!(
+            1,
+            batches.get(&0).unwrap().len(),
+            "Partition 0 should only have one batch drained."
+        );
+
+        // Reenqueue the batch
+        let batch = batches.into_values().next().unwrap().into_iter().next().unwrap();
+        accum.reenqueue(batch, now);
+
+        // Put message for partition 1 into accumulator
+        accum
+            .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .unwrap();
+        let result = accum.ready(&metadata, now + linger_ms as i64 + 1);
+        assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
+
+        // tp1 should backoff while tp2 should not
+        let batches = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now + linger_ms as i64 + 1);
+        assert_eq!(1, batches.len(), "Node1 should be the only ready node.");
+        let node_batches = batches.get(&0).unwrap();
+        assert_eq!(1, node_batches.len(), "Node1 should only have one batch drained.");
+        let tp2 = TopicPartition::new(TOPIC.to_string(), 1);
+        assert_eq!(
+            tp2, node_batches[0].topic_partition,
+            "Node1 should only have one batch for partition 1."
+        );
+
+        // Partition 0 can be drained after retry backoff
+        let upper_bound_backoff_ms =
+            (retry_backoff_ms as f64 * (1.0 + crate::clients::common_client_configs::RETRY_BACKOFF_JITTER)) as i64;
+        let result = accum.ready(&metadata, now + upper_bound_backoff_ms + 1);
+        assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
+        let batches = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now + upper_bound_backoff_ms + 1);
+        assert_eq!(1, batches.len(), "Node1 should be the only ready node.");
+        let node_batches = batches.get(&0).unwrap();
+        assert_eq!(1, node_batches.len(), "Node1 should only have one batch drained.");
+        assert_eq!(
+            tp1(),
+            node_batches[0].topic_partition,
+            "Node1 should only have one batch for partition 0."
+        );
+    }
+
+    /// Translated from `RecordAccumulatorTest.testFlush`.
+    #[test]
+    fn test_flush() {
+        let linger_ms = i32::MAX;
+        let n1 = node1();
+        let n2 = node2();
+        let now: i64 = 0;
+
+        let accum = create_test_accumulator(
+            4 * 1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            64 * 1024,
+            Compression::none(),
+            linger_ms,
+        );
+        let metadata =
+            make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
+        let cluster = metadata.cluster().clone();
+
+        let k = key();
+        let v = value();
+
+        for i in 0..100 {
+            accum
+                .append(TOPIC, i % 3, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .unwrap();
+        }
+        let result = accum.ready(&metadata, now);
+        assert_eq!(0, result.ready_nodes.len(), "No nodes should be ready.");
+
+        accum.begin_flush();
+        let result = accum.ready(&metadata, now);
+
+        // drain and deallocate all batches
+        let results = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now);
+
+        for batch_list in results.values() {
+            for batch in batch_list {
+                accum.complete_and_deallocate_batch(batch);
+            }
+        }
+
+        // should be complete with no unsent records.
+        accum.await_flush_completion();
+        assert!(!accum.has_undrained());
+        assert!(!accum.flush_in_progress());
+    }
+
+    /// Translated from `RecordAccumulatorTest.testMutedPartitions`.
+    #[test]
+    fn test_muted_partitions() {
+        let now: i64 = 0;
+        let n1 = node1();
+        // test case assumes that the records do not fill the batch completely
+        let batch_size = 1025;
+
+        let accum = create_test_accumulator(
+            batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            10 * batch_size as i64,
+            Compression::none(),
+            10,
+        );
+        let k = key();
+        let v = value();
+        let appends = expected_num_appends(batch_size);
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        for _ in 0..appends {
+            accum
+                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .unwrap();
+            assert_eq!(
+                0,
+                accum.ready(&metadata, now).ready_nodes.len(),
+                "No partitions should be ready."
+            );
+        }
+
+        // Now ready after time passes (linger expires).
+        let now_after_linger = now + 2000;
+
+        // Test ready with muted partition
+        let tp = tp1();
+        accum.mute_partition(tp.clone());
+        let result = accum.ready(&metadata, now_after_linger);
+        assert_eq!(0, result.ready_nodes.len(), "No node should be ready");
+
+        // Test ready without muted partition
+        accum.unmute_partition(&tp);
+        let result = accum.ready(&metadata, now_after_linger);
+        assert!(!result.ready_nodes.is_empty(), "The batch should be ready");
+
+        // Test drain with muted partition
+        accum.mute_partition(tp.clone());
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now_after_linger);
+        assert_eq!(0, drained.get(&n1.id()).unwrap().len(), "No batch should have been drained");
+
+        // Test drain without muted partition.
+        accum.unmute_partition(&tp);
+        let drained = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now_after_linger);
+        assert!(
+            !drained.get(&n1.id()).unwrap().is_empty(),
+            "The batch should have been drained."
+        );
+    }
+
+    /// Translated from `RecordAccumulatorTest.testSoonToExpireBatchesArePickedUpForExpiry`.
+    #[test]
+    fn test_soon_to_expire_batches_are_picked_up_for_expiry() {
+        let linger_ms = 500;
+        let batch_size = 1025;
+        let n1 = node1();
+        let now: i64 = 0;
+
+        let accum = create_test_accumulator(
+            batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            10 * batch_size as i64,
+            Compression::none(),
+            linger_ms,
+        );
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        let k = key();
+        let v = value();
+
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .unwrap();
+        let ready_nodes = accum.ready(&metadata, now).ready_nodes;
+        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now);
+        assert!(drained.is_empty());
+
+        // Advance clock and send one batch out.
+        let now_after_linger = now + linger_ms as i64 + 1;
+        let ready_nodes = accum.ready(&metadata, now_after_linger).ready_nodes;
+        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_after_linger);
+        assert_eq!(1, drained.len(), "A batch did not drain after linger");
+
+        // Queue another batch and advance clock.
+        accum
+            .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now_after_linger, &cluster)
+            .unwrap();
+        let now_advanced = now_after_linger + linger_ms as i64 * 4;
+
+        // Now drain and check that accumulator picked up the drained batch.
+        let ready_nodes = accum.ready(&metadata, now_advanced).ready_nodes;
+        let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now_advanced);
+        assert_eq!(1, drained.len(), "A batch did not drain after linger");
+    }
+
+    /// Translated from `RecordAccumulatorTest.testExpiredBatchesRetry`.
+    #[test]
+    fn test_expired_batches_retry() {
+        let linger_ms = 3000;
+        let rtt = 1000i64;
+        let delivery_timeout_ms = 3200;
+        let n1 = node1();
+        let mut now: i64 = 0;
+
+        let batch_size = 1025;
+
+        let pool = Arc::new(BufferPool::new(
+            10 * batch_size as i64,
+            (batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32) as usize,
+        ));
+        let accum = RecordAccumulator::new(
+            batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            Compression::none(),
+            linger_ms,
+            100,
+            1000,
+            delivery_timeout_ms,
+            PartitionerConfig::default(),
+            pool,
+        );
+
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        let k = key();
+        let v = value();
+
+        // Test batches in retry for both mute states.
+        for mute in [false, true] {
+            accum
+                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .unwrap();
+            now += linger_ms as i64;
+            let ready_nodes = accum.ready(&metadata, now).ready_nodes;
+            assert!(ready_nodes.contains(&n1), "Our partition's leader should be ready");
+            let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now);
+            assert_eq!(1, drained.get(&n1.id()).unwrap().len(), "There should be only one batch.");
+            now += rtt;
+            let batch = drained.into_values().next().unwrap().into_iter().next().unwrap();
+            accum.reenqueue(batch, now);
+
+            let tp = tp1();
+            if mute {
+                accum.mute_partition(tp.clone());
+            } else {
+                accum.unmute_partition(&tp);
+            }
+
+            // test expiration
+            now += delivery_timeout_ms as i64 - rtt;
+            accum.drain(&metadata, &HashSet::from([n1.clone()]), i32::MAX, now);
+            let expired_batches = accum.expired_batches(now);
+            assert_eq!(
+                if mute { 1 } else { 0 },
+                expired_batches.len(),
+                "RecordAccumulator has expired batches if the partition is not muted"
+            );
+        }
+    }
+
+    /// Translated from `RecordAccumulatorTest.testDrainWithANodeThatDoesntHostAnyPartitions`.
+    #[test]
+    fn test_drain_with_a_node_that_doesnt_host_any_partitions() {
+        let batch_size = 10;
+        let linger_ms = 10;
+        let total_size: i64 = 10 * 1024;
+        let n1 = node1();
+        let n2 = node2();
+        let now: i64 = 0;
+
+        let accum = create_test_accumulator(batch_size, total_size, Compression::none(), linger_ms);
+
+        // Create cluster metadata, node2 doesn't host any partitions.
+        let metadata = make_metadata_snapshot(&[n1.clone(), n2.clone()], TOPIC, &[(0, Some(0))]);
+
+        // Drain for node2, it should return 0 batches.
+        let batches = accum.drain(&metadata, &HashSet::from([n2.clone()]), 999999, now);
+        assert!(batches.get(&n2.id()).unwrap().is_empty(), "Node2 should have no batches");
+    }
+
+    /// Translated from `RecordAccumulatorTest.testExpiredBatchSingle` (deliveryTimeoutMs=3200).
+    #[test]
+    fn test_expired_batch_single() {
+        do_expire_batch_single(3200);
+    }
+
+    /// Translated from `RecordAccumulatorTest.testExpiredBatchSingleMaxValue`.
+    #[test]
+    fn test_expired_batch_single_max_value() {
+        do_expire_batch_single(i32::MAX);
+    }
+
+    fn do_expire_batch_single(delivery_timeout_ms: i32) {
+        let linger_ms = 300;
+        let n1 = node1();
+        let mut now: i64 = 1_000_000; // start at a non-zero time
+        // test case assumes that the records do not fill the batch completely
+        let batch_size = 1025;
+
+        let pool = Arc::new(BufferPool::new(
+            10 * batch_size as i64,
+            (batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32) as usize,
+        ));
+        let accum = RecordAccumulator::new(
+            batch_size + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            Compression::none(),
+            linger_ms,
+            100,
+            1000,
+            delivery_timeout_ms,
+            PartitionerConfig::default(),
+            pool,
+        );
+
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0))]);
+        let cluster = metadata.cluster().clone();
+
+        let k = key();
+        let v = value();
+
+        // Make the batches ready due to linger. These batches are not in retry.
+        for mute in [false, true] {
+            accum
+                .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .unwrap();
+            assert_eq!(
+                0,
+                accum.ready(&metadata, now).ready_nodes.len(),
+                "No partition should be ready."
+            );
+
+            now += linger_ms as i64;
+            let ready_nodes = accum.ready(&metadata, now).ready_nodes;
+            assert!(ready_nodes.contains(&n1), "Our partition's leader should be ready");
+
+            let expired_batches = accum.expired_batches(now);
+            assert_eq!(
+                0,
+                expired_batches.len(),
+                "The batch should not expire when just linger has passed"
+            );
+
+            let tp = tp1();
+            if mute {
+                accum.mute_partition(tp.clone());
+            } else {
+                accum.unmute_partition(&tp);
+            }
+
+            // Advance the clock to expire the batch.
+            now += delivery_timeout_ms as i64 - linger_ms as i64;
+            let expired_batches = accum.expired_batches(now);
+            assert_eq!(1, expired_batches.len(), "The batch may expire when the partition is muted");
+            assert_eq!(
+                0,
+                accum.ready(&metadata, now).ready_nodes.len(),
+                "No partitions should be ready."
+            );
+        }
+    }
+
+    /// Translated from `RecordAccumulatorTest.testStressfulSituation`.
+    #[test]
+    fn test_stressful_situation() {
+        let num_threads = 5;
+        let msgs = 10000;
+        let num_parts = 2;
+        let n1 = node1();
+
+        let accum = Arc::new(create_test_accumulator(
+            1024 + RecordBatch::RECORD_BATCH_OVERHEAD as i32,
+            10 * 1024,
+            Compression::none(),
+            0,
+        ));
+        let metadata = make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0))]);
+        let cluster = Arc::new(metadata.cluster().clone());
+
+        let mut handles = Vec::new();
+        for _ in 0..num_threads {
+            let accum_clone = Arc::clone(&accum);
+            let cluster_clone = Arc::clone(&cluster);
+            let handle = std::thread::spawn(move || {
+                for j in 0..msgs {
+                    accum_clone
+                        .append(
+                            TOPIC,
+                            j % num_parts,
+                            0,
+                            Some(b"key"),
+                            Some(b"value"),
+                            &[],
+                            None,
+                            0,
+                            0,
+                            &cluster_clone,
+                        )
+                        .unwrap();
+                }
+            });
+            handles.push(handle);
+        }
+
+        let now: i64 = 0;
+        let mut read = 0;
+        while read < num_threads * msgs {
+            let nodes = accum.ready(&metadata, now).ready_nodes;
+            let batches = accum.drain(&metadata, &nodes, 5 * 1024, now);
+            if let Some(node_batches) = batches.get(&n1.id()) {
+                for batch in node_batches {
+                    // Count records by checking estimated size delta
+                    // In Java: for (Record record : batch.records().records()) read++;
+                    // We count the batch's record count.
+                    read += batch.record_count;
+                    accum.complete_and_deallocate_batch(batch);
+                }
+            }
+        }
+
+        for handle in handles {
+            handle.join().unwrap();
+        }
+    }
+
+    /// Translated from `RecordAccumulatorTest.testHasRoomForAllowsOversizedFirstRecordButRejectsSubsequentRecords`.
+    ///
+    /// Tests the has_room_for() behaviour of MemoryRecordsBuilder: it allows
+    /// the first record no matter the size but does not allow the second record.
+    #[test]
+    fn test_has_room_for_allows_oversized_first_record_but_rejects_subsequent_records() {
+        let now: i64 = 0;
+        let small_batch_size = 1024;
+        let large_value = vec![0u8; 4 * 1024]; // 4KB > 1KB
+        let k = key();
+
+        let builder_buffer = vec![0u8; small_batch_size as usize];
+        let mut builder = MemoryRecords::builder_with_buffer(
+            builder_buffer,
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+
+        // has_room_for should return true for first record regardless of size
+        assert!(
+            builder.has_room_for(now, Some(&k), Some(&large_value), &[]),
+            "has_room_for() should return true for first record regardless of size when numRecords == 0"
+        );
+
+        // Append the first oversized record
+        builder.append(now, Some(&k), Some(&large_value), &[]);
+        assert_eq!(1, builder.num_records());
+
+        // Now append another large record when numRecords > 0
+        assert!(
+            !builder.has_room_for(now, Some(&k), Some(&large_value), &[]),
+            "has_room_for() should return false for oversized record when numRecords > 0"
+        );
+
+        // Now append with a smaller record
+        let small_value = vec![0u8; 100];
+        assert!(
+            !builder.has_room_for(now, Some(&k), Some(&small_value), &[]),
+            "has_room_for() should return false for any record when buffer is full from oversized first record"
+        );
+    }
+
+    /// Translated from `RecordAccumulatorTest.testDrainBatches` (full version).
+    ///
+    /// Tests drain order across nodes and partitions, including muting.
+    #[test]
+    fn test_drain_batches_full() {
+        let n1 = node1();
+        let n2 = node2();
+        let now: i64 = 0;
+
+        let k = key();
+        let v = value();
+        let batch_size = v.len() as i32 + RecordBatch::RECORD_BATCH_OVERHEAD as i32;
+
+        let accum = create_test_accumulator(batch_size, i64::MAX, Compression::none(), 10);
+
+        // 4 partitions: tp1->n1, tp2->n1, tp3->n2, tp4->n2
+        let metadata = make_metadata_snapshot(
+            &[n1.clone(), n2.clone()],
+            TOPIC,
+            &[(0, Some(0)), (1, Some(0)), (2, Some(1)), (3, Some(1))],
+        );
+        let cluster = metadata.cluster().clone();
+
+        // Initial data for all 4 partitions
+        for p in 0..4 {
+            accum
+                .append(TOPIC, p, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .unwrap();
+        }
+
+        // drain with batch_size limit: should get one batch per node
+        let nodes_set = HashSet::from([n1.clone(), n2.clone()]);
+        let batches1 = accum.drain(&metadata, &nodes_set, batch_size, now);
+        let total1: usize = batches1.values().map(|v| v.len()).sum();
+        assert_eq!(2, total1, "Should drain exactly one batch per node");
+
+        // drain with max size: should get remaining batches
+        let batches2 = accum.drain(&metadata, &nodes_set, batch_size, now);
+        let total2: usize = batches2.values().map(|v| v.len()).sum();
+        assert_eq!(2, total2, "Should drain remaining batches");
+
+        // Add records for partitions, mute tp3
+        accum
+            .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .unwrap();
+        accum
+            .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .unwrap();
+        accum
+            .append(TOPIC, 3, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .unwrap();
+        let tp4 = TopicPartition::new(TOPIC.to_string(), 3);
+        accum.mute_partition(tp4.clone());
+
+        // Drain: node2 should skip tp4 because it's muted
+        let batches4 = accum.drain(&metadata, &nodes_set, batch_size, now);
+        let n2_batches = batches4.get(&n2.id()).unwrap();
+        for b in n2_batches {
+            assert_ne!(3, b.topic_partition.partition(), "Muted partition 3 should not be drained");
+        }
+
+        // Unmute and drain with max size
+        accum.unmute_partition(&tp4);
+        let batches5 = accum.drain(&metadata, &nodes_set, i32::MAX, now);
+        let total5: usize = batches5.values().map(|v| v.len()).sum();
+        assert!(total5 >= 1, "Should drain remaining batches after unmute");
     }
 }

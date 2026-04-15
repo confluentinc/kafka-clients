@@ -73,7 +73,8 @@ fn from_final_state(state: FinalState) -> u8 {
 }
 
 /// Type alias for the callback function.
-pub type Callback = Box<dyn FnOnce(Option<&crate::clients::producer::RecordMetadata>, Option<&KafkaError>) + Send>;
+pub type Callback =
+    Box<dyn FnOnce(Option<&crate::clients::producer::RecordMetadata>, Option<&KafkaError>) + Send + Sync>;
 
 /// A callback and the associated FutureRecordMetadata argument to pass to it.
 pub(crate) struct Thunk {
