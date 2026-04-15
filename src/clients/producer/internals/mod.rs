@@ -19,6 +19,7 @@ pub mod future_record_metadata;
 pub mod incomplete_batches;
 pub mod produce_request_result;
 pub mod producer_batch;
+pub mod producer_metadata;
 
 pub use buffer_pool::BufferPool;
 pub use future_record_metadata::FutureRecordMetadata;

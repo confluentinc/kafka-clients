@@ -52,6 +52,42 @@ use super::metadata_snapshot::MetadataSnapshot;
 /// Parameters: `(topic_name, is_internal, now_ms) -> should_retain`.
 type RetainTopicFn = dyn Fn(&str, bool, i64) -> bool + Send + Sync;
 
+/// Type alias for a function that builds metadata request builders.
+///
+/// Used by subclasses (e.g., `ProducerMetadata`) to override metadata request
+/// construction. Returns a `MetadataRequestBuilder`.
+type MetadataRequestBuilderFn = dyn Fn() -> MetadataRequestBuilder + Send + Sync;
+
+/// Type alias for a post-update callback invoked at the end of `Metadata::update()`.
+///
+/// Corresponds to Java's pattern of overriding `Metadata.update()` in subclasses
+/// (e.g., `ProducerMetadata`) to perform additional work after the base update.
+/// Parameters: `(response, is_partial_update, now_ms)`.
+type PostUpdateFn = dyn Fn(&MetadataResponse, bool, i64) + Send + Sync;
+
+/// Configuration for overriding `Metadata` behavior, used by subclasses like
+/// `ProducerMetadata` that need to customize topic retention, request building,
+/// and post-update processing.
+///
+/// Corresponds to Java's pattern of subclassing `Metadata` to override
+/// `retainTopic()`, `newMetadataRequestBuilder()`,
+/// `newMetadataRequestBuilderForNewTopics()`, and `update()`.
+#[derive(Default)]
+pub struct MetadataOverrides {
+    /// Optional function to override topic retention behavior.
+    /// When `None`, the default (retain all topics) is used.
+    pub retain_topic_fn: Option<Box<RetainTopicFn>>,
+    /// When `true`, `new_metadata_request_builder_for_new_topics()` returns a
+    /// builder, enabling partial metadata requests.
+    pub enable_partial_updates: bool,
+    /// Optional function to override metadata request construction.
+    pub request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    /// Optional function to override metadata request construction for new topics.
+    pub new_topics_request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    /// Optional post-update callback invoked at the end of `update()`.
+    pub post_update_fn: Option<Box<PostUpdateFn>>,
+}
+
 /// A class encapsulating some of the logic around metadata.
 ///
 /// This class is shared by the client thread (for partitioning) and the background
@@ -75,6 +111,24 @@ pub struct Metadata {
     ///
     /// Corresponds to Java's override of `newMetadataRequestBuilderForNewTopics()`.
     enable_partial_updates: bool,
+    /// Optional custom metadata request builder function. When set, overrides the
+    /// default `new_metadata_request_builder()` behavior.
+    ///
+    /// Corresponds to Java's `Metadata.newMetadataRequestBuilder()` override pattern
+    /// used by subclasses (e.g., `ProducerMetadata`).
+    request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    /// Optional custom metadata request builder function for new topics. When set,
+    /// overrides the `new_metadata_request_builder_for_new_topics()` behavior.
+    ///
+    /// Corresponds to Java's `Metadata.newMetadataRequestBuilderForNewTopics()`
+    /// override pattern used by subclasses (e.g., `ProducerMetadata`).
+    new_topics_request_builder_fn: Option<Box<MetadataRequestBuilderFn>>,
+    /// Optional post-update callback invoked at the end of `update()`.
+    ///
+    /// Corresponds to Java's pattern of overriding `Metadata.update()` in subclasses
+    /// (e.g., `ProducerMetadata.update()`) to perform additional work after the base
+    /// update completes.
+    post_update_fn: Option<Box<PostUpdateFn>>,
 }
 
 /// Inner mutable state of `Metadata`, protected by a mutex.
@@ -223,28 +277,31 @@ impl Metadata {
             }),
             retain_topic_fn: None,
             enable_partial_updates: false,
+            request_builder_fn: None,
+            new_topics_request_builder_fn: None,
+            post_update_fn: None,
         }
     }
 
-    /// Creates a new `Metadata` instance with custom retain topic behavior and
-    /// optional partial update support.
+    /// Creates a new `Metadata` instance with custom behavior overrides.
     ///
     /// This corresponds to the Java pattern of subclassing `Metadata` to override
-    /// `retainTopic()` and `newMetadataRequestBuilderForNewTopics()`.
+    /// `retainTopic()`, `newMetadataRequestBuilder()`,
+    /// `newMetadataRequestBuilderForNewTopics()`, and `update()`.
     ///
     /// # Arguments
-    /// * `retain_topic_fn` - Optional function to override topic retention behavior.
-    ///   When `None`, the default (retain all topics) is used.
-    /// * `enable_partial_updates` - When `true`, `newMetadataRequestBuilderForNewTopics()`
-    ///   returns a builder, enabling partial metadata requests.
-    #[cfg(test)]
+    /// * `refresh_backoff_ms` - The minimum amount of time between metadata refreshes
+    /// * `refresh_backoff_max_ms` - The maximum amount of time to wait between metadata
+    ///   refreshes
+    /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
+    /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    /// * `overrides` - Configuration for overriding default behavior
     pub fn with_overrides(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
         metadata_expire_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
-        retain_topic_fn: Option<Box<RetainTopicFn>>,
-        enable_partial_updates: bool,
+        overrides: MetadataOverrides,
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
@@ -275,8 +332,11 @@ impl Metadata {
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
-            retain_topic_fn,
-            enable_partial_updates,
+            retain_topic_fn: overrides.retain_topic_fn,
+            enable_partial_updates: overrides.enable_partial_updates,
+            request_builder_fn: overrides.request_builder_fn,
+            new_topics_request_builder_fn: overrides.new_topics_request_builder_fn,
+            post_update_fn: overrides.post_update_fn,
         }
     }
 
@@ -599,6 +659,15 @@ impl Metadata {
             "Updated cluster metadata updateVersion {} to {}",
             inner.update_version, inner.metadata_snapshot
         );
+
+        // Release the inner lock before calling the post-update callback to avoid
+        // deadlocks — the callback may acquire its own lock (e.g., ProducerMetadata's
+        // inner lock).
+        drop(inner);
+
+        if let Some(ref post_update) = self.post_update_fn {
+            post_update(response, is_partial_update, now_ms);
+        }
     }
 
     /// Updates the partition-leadership info in the metadata.
@@ -1059,7 +1128,7 @@ impl Metadata {
             is_partial_update = true;
         }
         if request.is_none() {
-            request = Some(Self::new_metadata_request_builder());
+            request = Some(self.new_metadata_request_builder());
             is_partial_update = false;
         }
 
@@ -1072,19 +1141,29 @@ impl Metadata {
 
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and all active topics.
-    fn new_metadata_request_builder() -> MetadataRequestBuilder {
-        MetadataRequestBuilder::all_topics()
+    ///
+    /// When a custom `request_builder_fn` is set (e.g. by `ProducerMetadata`),
+    /// that function is called instead of the default `all_topics()`.
+    fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
+        if let Some(f) = &self.request_builder_fn {
+            f()
+        } else {
+            MetadataRequestBuilder::all_topics()
+        }
     }
 
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and any uncached topics, otherwise `None` if the functionality is not supported.
     ///
-    /// The base implementation returns `None`. When `enable_partial_updates` is set,
-    /// returns a full metadata request builder instead (simulating the Java subclass
-    /// override pattern used by `ConsumerMetadata`).
+    /// When a custom `new_topics_request_builder_fn` is set (e.g. by `ProducerMetadata`),
+    /// that function is called. When `enable_partial_updates` is set (e.g. by
+    /// `ConsumerMetadata`), the default metadata request builder is returned.
+    /// Otherwise returns `None`.
     fn new_metadata_request_builder_for_new_topics(&self) -> Option<MetadataRequestBuilder> {
-        if self.enable_partial_updates {
-            Some(Self::new_metadata_request_builder())
+        if let Some(f) = &self.new_topics_request_builder_fn {
+            Some(f())
+        } else if self.enable_partial_updates {
+            Some(self.new_metadata_request_builder())
         } else {
             None
         }
@@ -2251,8 +2330,7 @@ mod tests {
             REFRESH_BACKOFF_MAX_MS,
             METADATA_EXPIRE_MS,
             ClusterResourceListeners::new(),
-            None,
-            true, // enable partial updates
+            MetadataOverrides { enable_partial_updates: true, ..MetadataOverrides::default() },
         );
 
         assert!(!metadata.update_requested());
@@ -2479,10 +2557,12 @@ mod tests {
             REFRESH_BACKOFF_MAX_MS,
             METADATA_EXPIRE_MS,
             ClusterResourceListeners::new(),
-            Some(Box::new(move |topic: &str, _is_internal: bool, _now_ms: i64| -> bool {
-                retain_topics_clone.lock().unwrap().contains(topic)
-            })),
-            false,
+            MetadataOverrides {
+                retain_topic_fn: Some(Box::new(move |topic: &str, _is_internal: bool, _now_ms: i64| -> bool {
+                    retain_topics_clone.lock().unwrap().contains(topic)
+                })),
+                ..MetadataOverrides::default()
+            },
         );
 
         // Initialize a metadata instance with two topic variants "old" and "keep". Both will be retained.
@@ -2679,10 +2759,12 @@ mod tests {
             REFRESH_BACKOFF_MAX_MS,
             METADATA_EXPIRE_MS,
             ClusterResourceListeners::new(),
-            Some(Box::new(move |topic: &str, _is_internal: bool, _now_ms: i64| -> bool {
-                retain_topics_clone.lock().unwrap().contains(topic)
-            })),
-            false,
+            MetadataOverrides {
+                retain_topic_fn: Some(Box::new(move |topic: &str, _is_internal: bool, _now_ms: i64| -> bool {
+                    retain_topics_clone.lock().unwrap().contains(topic)
+                })),
+                ..MetadataOverrides::default()
+            },
         );
 
         // Initialize a metadata instance with two topics. Both will be retained.
