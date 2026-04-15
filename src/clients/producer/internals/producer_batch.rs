@@ -254,7 +254,8 @@ impl ProducerBatch {
     /// This method is only used by [`split`](Self::split) when splitting a large batch to smaller
     /// ones.
     ///
-    /// Returns `true` if the record has been successfully appended, `false` otherwise.
+    /// Returns `Ok(())` if the record has been successfully appended, or returns the
+    /// `Thunk` back via `Err(thunk)` if there was no room so it can be reused.
     fn try_append_for_split(
         &mut self,
         timestamp: i64,
@@ -262,9 +263,9 @@ impl ProducerBatch {
         value: Option<&[u8]>,
         headers: &[RecordHeader],
         thunk: Thunk,
-    ) -> bool {
+    ) -> Result<(), Thunk> {
         if !self.records_builder.has_room_for(timestamp, key, value, headers) {
-            return false;
+            return Err(thunk);
         }
 
         self.records_builder.append(timestamp, key, value, headers);
@@ -291,7 +292,7 @@ impl ProducerBatch {
         thunk.future.chain_arc(Arc::clone(&future));
         self.thunks.push(Thunk { callback: thunk.callback, future });
         self.record_count += 1;
-        true
+        Ok(())
     }
 
     /// Abort the batch and complete the future and callbacks.
@@ -477,19 +478,20 @@ impl ProducerBatch {
             }
 
             let b = current_batch.as_mut().unwrap();
-            if !b.try_append_for_split(timestamp, key, value, &headers, thunk) {
+            if let Err(returned_thunk) = b.try_append_for_split(timestamp, key, value, &headers, thunk) {
                 // Current batch is full, close it and start a new one
                 let mut completed_batch = current_batch.take().unwrap();
                 completed_batch.close_for_record_appends();
                 batches.push_back(completed_batch);
 
+                let mut new_batch =
+                    self.create_batch_off_accumulator_for_record(key, value, &headers, split_batch_size);
                 // The first record in a new batch always fits because has_room_for
-                // returns true when num_records == 0. In Java the same thunk is
-                // reused for the retry, but our method takes ownership of the Thunk.
-                // Since the first record always fits, this path is unreachable.
-                unreachable!(
-                    "first record in a new batch always fits (has_room_for returns true when num_records == 0)"
-                );
+                // returns true when num_records == 0.
+                if new_batch.try_append_for_split(timestamp, key, value, &headers, returned_thunk).is_err() {
+                    panic!("first record in a new batch always fits");
+                }
+                current_batch = Some(new_batch);
             }
         }
 
@@ -779,5 +781,323 @@ impl std::fmt::Debug for ProducerBatch {
             .field("record_count", &self.record_count)
             .field("created_ms", &self.created_ms)
             .finish()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::compress::Compression;
+    use crate::common::protocol::Errors;
+
+    const NOW: i64 = 1488748346917;
+
+    fn make_tp() -> TopicPartition {
+        TopicPartition::new("topic".to_string(), 1)
+    }
+
+    fn make_builder() -> MemoryRecordsBuilder {
+        MemoryRecords::builder(512, Compression::none(), TimestampType::CreateTime, 128)
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchAbort`.
+    #[test]
+    fn test_batch_abort() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let future = batch
+            .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
+            .expect("Append should succeed");
+
+        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(exception);
+        assert!(future.is_done());
+
+        // subsequent completion should be ignored
+        assert!(!batch.complete(500, 2342342341));
+        assert!(batch.is_done());
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchCannotAbortTwice`.
+    #[test]
+    #[should_panic(expected = "Batch has already been completed")]
+    fn test_batch_cannot_abort_twice() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        batch
+            .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
+            .expect("Append should succeed");
+
+        let exception = KafkaError::with_message(Errors::UnknownServerError, "test abort");
+        batch.abort(exception);
+
+        // This should panic
+        let exception2 = KafkaError::with_message(Errors::UnknownServerError, "test abort 2");
+        batch.abort(exception2);
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchCannotCompleteTwice`.
+    ///
+    /// Java: `assertThrows(IllegalStateException.class, () -> batch.complete(1000L, 20L))`
+    /// Rust: panics because a Succeeded batch must not attempt another state change to Succeeded.
+    #[test]
+    fn test_batch_cannot_complete_twice() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        batch
+            .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
+            .expect("Append should succeed");
+
+        assert!(batch.complete(500, 10));
+
+        // Second complete should panic (IllegalStateException in Java).
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            batch.complete(1000, 20);
+        }));
+        assert!(result.is_err(), "Second complete should panic");
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchExpiration`.
+    #[test]
+    fn test_batch_expiration() {
+        let delivery_timeout_ms: i64 = 10240;
+        let batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+
+        // Set `now` to 2ms before the create time.
+        assert!(!batch.has_reached_delivery_timeout(delivery_timeout_ms, NOW - 2));
+        // Set `now` to deliveryTimeoutMs.
+        assert!(batch.has_reached_delivery_timeout(delivery_timeout_ms, NOW + delivery_timeout_ms));
+    }
+
+    /// Translated from `ProducerBatchTest.testBatchExpirationAfterReenqueue`.
+    #[test]
+    fn test_batch_expiration_after_reenqueue() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        // Set batch.retry = true
+        batch.reenqueued(NOW);
+        // Set `now` to 2ms before the create time.
+        assert!(!batch.has_reached_delivery_timeout(10240, NOW - 2));
+    }
+
+    /// Translated from `ProducerBatchTest.testShouldNotAttemptAppendOnceRecordsBuilderIsClosedForAppends`.
+    #[test]
+    fn test_should_not_attempt_append_once_records_builder_is_closed_for_appends() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let result0 = batch.try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW);
+        assert!(result0.is_some());
+
+        batch.close_for_record_appends();
+
+        // After closing for record appends, try_append should return None.
+        let result1 = batch.try_append(NOW + 1, None, Some(&[0u8; 10]), &[], None, NOW + 1);
+        assert!(result1.is_none());
+    }
+
+    /// Translated from `ProducerBatchTest.testSplitPreservesHeaders`.
+    ///
+    /// Only tests with NONE compression since we only support NONE currently
+    /// in record-level iteration.
+    #[test]
+    fn test_split_preserves_headers() {
+        let builder = MemoryRecords::builder_with_buffer(
+            vec![0u8; 1024],
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            Compression::none(),
+            TimestampType::CreateTime,
+            0,
+        );
+        let mut batch = ProducerBatch::new(make_tp(), builder, NOW);
+
+        let header = RecordHeader::new("header-key".to_string(), Some(b"header-value".to_vec()));
+
+        let mut count = 0;
+        loop {
+            let future = batch.try_append(NOW, Some(b"hi"), Some(b"there"), std::slice::from_ref(&header), None, NOW);
+            if future.is_none() {
+                break;
+            }
+            count += 1;
+        }
+        assert!(count > 1, "Should have appended multiple records");
+
+        let batches = batch.split(200);
+        assert!(batches.len() >= 2, "This batch should be split to multiple small batches.");
+
+        for mut split_batch in batches {
+            let records = split_batch.records();
+            for record_batch in records.batches() {
+                use crate::common::record::record_trait::Record;
+                for record in record_batch.iter_records().unwrap() {
+                    let hdrs = record.headers();
+                    assert_eq!(1, hdrs.len(), "Header size should be 1.");
+                    assert_eq!("header-key", hdrs[0].key(), "Header key should be 'header-key'.");
+                    assert_eq!(
+                        b"header-value",
+                        hdrs[0].value().unwrap(),
+                        "Header value should be 'header-value'."
+                    );
+                }
+            }
+        }
+    }
+
+    /// Translated from `ProducerBatchTest.testWithLeaderChangesAcrossRetries`.
+    #[test]
+    fn test_with_leader_changes_across_retries() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+
+        // Starting state for the batch, no attempt made to send it yet.
+        assert_eq!(None, batch.current_leader_epoch());
+        assert_eq!(0, batch.attempts_when_leader_last_changed());
+        batch.maybe_update_leader_epoch(None);
+        assert!(!batch.has_leader_changed_for_the_ongoing_retry());
+
+        // 1st attempt [Not a retry] to send the batch.
+        let mut batch_leader_epoch = 100;
+        batch.maybe_update_leader_epoch(Some(batch_leader_epoch));
+        assert!(
+            !batch.has_leader_changed_for_the_ongoing_retry(),
+            "batch leader is assigned for 1st time"
+        );
+        assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
+        assert_eq!(0, batch.attempts_when_leader_last_changed());
+
+        // 2nd attempt [1st retry] to send the batch to a new leader.
+        batch_leader_epoch = 101;
+        batch.reenqueued(0);
+        batch.maybe_update_leader_epoch(Some(batch_leader_epoch));
+        assert!(batch.has_leader_changed_for_the_ongoing_retry(), "batch leader has changed");
+        assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
+        assert_eq!(1, batch.attempts_when_leader_last_changed());
+
+        // 2nd attempt [1st retry] still ongoing, yet to be made.
+        batch.maybe_update_leader_epoch(Some(batch_leader_epoch));
+        assert!(batch.has_leader_changed_for_the_ongoing_retry(), "batch leader has changed");
+        assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
+        assert_eq!(1, batch.attempts_when_leader_last_changed());
+
+        // 3rd attempt [2nd retry] to the same leader-epoch(101).
+        batch.reenqueued(0);
+        batch.maybe_update_leader_epoch(Some(batch_leader_epoch));
+        assert!(
+            !batch.has_leader_changed_for_the_ongoing_retry(),
+            "batch leader has not changed"
+        );
+        assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
+        assert_eq!(1, batch.attempts_when_leader_last_changed());
+
+        // Attempt made to update batch leader-epoch to an older leader-epoch(100).
+        batch.maybe_update_leader_epoch(Some(batch_leader_epoch - 1));
+        assert!(
+            !batch.has_leader_changed_for_the_ongoing_retry(),
+            "batch leader has not changed"
+        );
+        assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
+        assert_eq!(1, batch.attempts_when_leader_last_changed());
+
+        // Attempt made to update batch leader-epoch to an unknown leader(None).
+        batch.maybe_update_leader_epoch(None);
+        assert!(
+            !batch.has_leader_changed_for_the_ongoing_retry(),
+            "batch leader has not changed"
+        );
+        assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
+        assert_eq!(1, batch.attempts_when_leader_last_changed());
+    }
+
+    /// Translated from `ProducerBatchTest.testCompleteExceptionallyWithRecordErrors`.
+    #[test]
+    fn test_complete_exceptionally_with_record_errors() {
+        let record_count = 5;
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+
+        let mut futures = Vec::new();
+        for _ in 0..record_count {
+            let future = batch
+                .try_append(NOW, None, Some(&[0u8; 10]), &[], None, NOW)
+                .expect("Append should succeed");
+            futures.push(future);
+        }
+        assert_eq!(record_count, batch.record_count);
+
+        // Create per-record exceptions for records 0 and 3.
+        let record_exceptions: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
+            Arc::new(|idx: i32| -> Option<KafkaError> {
+                match idx {
+                    0 | 3 => Some(KafkaError::with_message(
+                        Errors::UnknownServerError,
+                        format!("record error {}", idx),
+                    )),
+                    _ => Some(KafkaError::with_message(Errors::UnknownServerError, "top level")),
+                }
+            });
+
+        let top_level_exception = KafkaError::with_message(Errors::UnknownServerError, "top level");
+        batch.complete_exceptionally(top_level_exception, record_exceptions);
+        assert!(batch.is_done());
+
+        for future in &futures {
+            assert!(future.is_done());
+        }
+    }
+
+    /// Basic test: try_append succeeds and returns a FutureRecordMetadata.
+    #[test]
+    fn test_try_append_basic() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let future = batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
+        assert!(future.is_some(), "First append should succeed");
+        assert_eq!(1, batch.record_count);
+
+        let future2 = batch.try_append(NOW, Some(b"key2"), Some(b"value2"), &[], None, NOW);
+        assert!(future2.is_some(), "Second append should succeed");
+        assert_eq!(2, batch.record_count);
+    }
+
+    /// Test that estimated_size_in_bytes increases as records are appended.
+    #[test]
+    fn test_estimated_size_increases() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        let initial_size = batch.estimated_size_in_bytes();
+        batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
+        let after_first = batch.estimated_size_in_bytes();
+        assert!(after_first > initial_size, "Size should increase after appending a record");
+    }
+
+    /// Test close and is_closed.
+    #[test]
+    fn test_close_and_is_closed() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        assert!(!batch.is_closed());
+        batch.try_append(NOW, Some(b"key"), Some(b"value"), &[], None, NOW);
+        batch.close();
+        assert!(batch.is_closed());
+    }
+
+    /// Test reenqueue increments attempts.
+    #[test]
+    fn test_reenqueue_increments_attempts() {
+        let mut batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        assert_eq!(0, batch.attempts());
+        batch.reenqueued(NOW);
+        assert_eq!(1, batch.attempts());
+        assert!(batch.in_retry());
+        batch.reenqueued(NOW + 10);
+        assert_eq!(2, batch.attempts());
+    }
+
+    /// Test is_split_batch default and explicit.
+    #[test]
+    fn test_is_split_batch() {
+        let batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        assert!(!batch.is_split_batch());
+
+        let builder2 = make_builder();
+        let batch2 = ProducerBatch::new_with_split(make_tp(), builder2, NOW, true);
+        assert!(batch2.is_split_batch());
+    }
+
+    /// Test magic returns current magic value.
+    #[test]
+    fn test_magic() {
+        let batch = ProducerBatch::new(make_tp(), make_builder(), NOW);
+        assert_eq!(RecordBatch::CURRENT_MAGIC_VALUE, batch.magic());
     }
 }
