@@ -14,6 +14,14 @@
 
 //! Producer internal types (org.apache.kafka.clients.producer.internals)
 
+pub mod buffer_pool;
+pub mod future_record_metadata;
+pub mod incomplete_batches;
 pub mod produce_request_result;
+pub mod producer_batch;
 
+pub use buffer_pool::BufferPool;
+pub use future_record_metadata::FutureRecordMetadata;
+pub use incomplete_batches::IncompleteBatches;
 pub use produce_request_result::ProduceRequestResult;
+pub use producer_batch::ProducerBatch;

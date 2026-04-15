@@ -247,6 +247,10 @@ pub enum KafkaError {
     ///
     /// Corresponds to Java's `IllegalStateException`.
     IllegalState(String),
+    /// Timeout error — an operation did not complete within the specified time.
+    ///
+    /// Corresponds to Java's `TimeoutException`.
+    Timeout(String),
 }
 
 impl KafkaError {
@@ -303,6 +307,13 @@ impl KafkaError {
         Self::IllegalState(message.into())
     }
 
+    /// Create a timeout error.
+    ///
+    /// Corresponds to Java's `TimeoutException`.
+    pub fn timeout(message: impl Into<String>) -> Self {
+        Self::Timeout(message.into())
+    }
+
     /// Create an unsupported version error.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
@@ -320,7 +331,7 @@ impl KafkaError {
             Self::TopicAuthorization(e) => Some(&e.kafka_error),
             Self::InvalidTopic(e) => Some(&e.kafka_error),
             Self::GroupAuthorization(e) => Some(&e.kafka_error),
-            Self::IllegalArgument(_) | Self::IllegalState(_) => None,
+            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Timeout(_) => None,
         }
     }
 
@@ -345,7 +356,7 @@ impl KafkaError {
     /// The error message.
     pub fn message(&self) -> &str {
         match self {
-            Self::IllegalArgument(msg) | Self::IllegalState(msg) => msg,
+            Self::IllegalArgument(msg) | Self::IllegalState(msg) | Self::Timeout(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
     }
@@ -387,6 +398,7 @@ impl fmt::Display for KafkaError {
             },
             Self::IllegalArgument(msg) => write!(f, "IllegalArgumentError: {msg}"),
             Self::IllegalState(msg) => write!(f, "IllegalStateError: {msg}"),
+            Self::Timeout(msg) => write!(f, "TimeoutError: {msg}"),
         }
     }
 }
