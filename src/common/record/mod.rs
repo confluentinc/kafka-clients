@@ -19,12 +19,19 @@
 
 pub mod compression_ratio_estimator;
 pub mod compression_type;
+pub mod default_record;
+pub mod invalid_record_error;
 pub mod record_batch;
+pub mod record_trait;
 pub mod record_version;
+pub mod simple_record;
 pub mod timestamp_type;
 
 pub use compression_ratio_estimator::CompressionRatioEstimator;
 pub use compression_type::CompressionType;
+pub use default_record::DefaultRecord;
+pub use invalid_record_error::InvalidRecordError;
 pub use record_batch::RecordBatch;
 pub use record_version::RecordVersion;
+pub use simple_record::SimpleRecord;
 pub use timestamp_type::TimestampType;

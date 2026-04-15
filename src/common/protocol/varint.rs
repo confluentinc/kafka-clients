@@ -211,11 +211,130 @@ pub fn write_varlong<W: Write>(value: i64, writer: &mut W) -> io::Result<()> {
 /// Returns the number of bytes needed to encode a value as an unsigned varint.
 ///
 /// Corresponds to Java's `ByteUtils.sizeOfUnsignedVarint()`.
-pub fn size_of_unsigned_varint(value: u32) -> i32 {
+pub const fn size_of_unsigned_varint(value: u32) -> i32 {
     let leading_zeros = value.leading_zeros() as i32;
     // Equivalent to: ceil((32 - leading_zeros) / 7.0), min 1
     // Uses the same bit trick as the Java implementation
     (((38 - leading_zeros) * 0b10010010010010011i32) >> 19) + (leading_zeros >> 5)
+}
+
+/// Returns the number of bytes needed to encode a signed varint (zig-zag encoded).
+///
+/// Corresponds to Java's `ByteUtils.sizeOfVarint()`.
+pub const fn size_of_varint(value: i32) -> i32 {
+    let encoded = ((value << 1) ^ (value >> 31)) as u32;
+    size_of_unsigned_varint(encoded)
+}
+
+/// Returns the number of bytes needed to encode an unsigned varlong.
+///
+/// Corresponds to Java's `ByteUtils.sizeOfUnsignedVarlong()`.
+pub const fn size_of_unsigned_varlong(v: u64) -> i32 {
+    let leading_zeros = v.leading_zeros() as i32;
+    let leading_zeros_below_70_divided_by_7 = ((70 - leading_zeros) * 0b10010010010010011i32) >> 19;
+    leading_zeros_below_70_divided_by_7 + (leading_zeros >> 6)
+}
+
+/// Returns the number of bytes needed to encode a signed varlong (zig-zag encoded).
+///
+/// Corresponds to Java's `ByteUtils.sizeOfVarlong()`.
+pub const fn size_of_varlong(value: i64) -> i32 {
+    let encoded = ((value << 1) ^ (value >> 63)) as u64;
+    size_of_unsigned_varlong(encoded)
+}
+
+/// Read an unsigned varint from a `Read` stream.
+///
+/// Corresponds to Java's `ByteUtils.readUnsignedVarint(InputStream)`.
+///
+/// # Errors
+/// Returns an I/O error if reading fails or the varint doesn't terminate after 5 bytes.
+pub fn read_unsigned_varint_reader<R: io::Read>(reader: &mut R) -> io::Result<u32> {
+    let mut buf = [0u8; 1];
+
+    reader.read_exact(&mut buf)?;
+    let mut tmp = buf[0] as i8;
+    if tmp >= 0 {
+        return Ok(tmp as u32);
+    }
+    let mut result = (tmp & 0x7F) as u32;
+
+    reader.read_exact(&mut buf)?;
+    tmp = buf[0] as i8;
+    if tmp >= 0 {
+        result |= (tmp as u32) << 7;
+        return Ok(result);
+    }
+    result |= ((tmp & 0x7F) as u32) << 7;
+
+    reader.read_exact(&mut buf)?;
+    tmp = buf[0] as i8;
+    if tmp >= 0 {
+        result |= (tmp as u32) << 14;
+        return Ok(result);
+    }
+    result |= ((tmp & 0x7F) as u32) << 14;
+
+    reader.read_exact(&mut buf)?;
+    tmp = buf[0] as i8;
+    if tmp >= 0 {
+        result |= (tmp as u32) << 21;
+        return Ok(result);
+    }
+    result |= ((tmp & 0x7F) as u32) << 21;
+
+    reader.read_exact(&mut buf)?;
+    tmp = buf[0] as i8;
+    result |= (tmp as u32) << 28;
+    if tmp < 0 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            format!("Varint is too long, value so far: {}", result),
+        ));
+    }
+
+    Ok(result)
+}
+
+/// Read a signed varint from a `Read` stream using zig-zag decoding.
+///
+/// Corresponds to Java's `ByteUtils.readVarint(InputStream)`.
+///
+/// # Errors
+/// Returns an I/O error if reading fails or the varint is malformed.
+pub fn read_varint_reader<R: io::Read>(reader: &mut R) -> io::Result<i32> {
+    let value = read_unsigned_varint_reader(reader)?;
+    Ok(((value >> 1) as i32) ^ -((value & 1) as i32))
+}
+
+/// Read a signed varlong from a `Read` stream using zig-zag decoding.
+///
+/// Corresponds to Java's `ByteUtils.readVarlong(InputStream)`.
+///
+/// # Errors
+/// Returns an I/O error if reading fails or the varlong is malformed.
+pub fn read_varlong_reader<R: io::Read>(reader: &mut R) -> io::Result<i64> {
+    let mut value = 0u64;
+    let mut i = 0;
+    let mut buf = [0u8; 1];
+    loop {
+        reader.read_exact(&mut buf)?;
+        let b = buf[0] as u64;
+        if (b & 0x80) != 0 {
+            value |= (b & 0x7F) << i;
+            i += 7;
+            if i > 63 {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!("Varlong is too long, value so far: {}", value),
+                ));
+            }
+        } else {
+            value |= b << i;
+            let decoded = ((value >> 1) as i64) ^ -((value & 1) as i64);
+            return Ok(decoded);
+        }
+    }
 }
 
 #[cfg(test)]
@@ -485,6 +604,63 @@ mod tests {
         );
         assert_varlong_serde(i64::MAX, &[0xFE, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
         assert_varlong_serde(i64::MIN, &[0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0x01]);
+    }
+
+    #[test]
+    fn test_size_of_varint() {
+        assert_eq!(size_of_varint(0), 1);
+        assert_eq!(size_of_varint(1), 1);
+        assert_eq!(size_of_varint(-1), 1);
+        assert_eq!(size_of_varint(63), 1);
+        assert_eq!(size_of_varint(-64), 1);
+        assert_eq!(size_of_varint(64), 2);
+        assert_eq!(size_of_varint(-65), 2);
+        assert_eq!(size_of_varint(i32::MAX), 5);
+        assert_eq!(size_of_varint(i32::MIN), 5);
+    }
+
+    #[test]
+    fn test_size_of_varlong() {
+        assert_eq!(size_of_varlong(0), 1);
+        assert_eq!(size_of_varlong(1), 1);
+        assert_eq!(size_of_varlong(-1), 1);
+        assert_eq!(size_of_varlong(63), 1);
+        assert_eq!(size_of_varlong(-64), 1);
+        assert_eq!(size_of_varlong(64), 2);
+        assert_eq!(size_of_varlong(-65), 2);
+        assert_eq!(size_of_varlong(i64::MAX), 10);
+        assert_eq!(size_of_varlong(i64::MIN), 10);
+    }
+
+    #[test]
+    fn test_read_varint_reader() {
+        use std::io::Cursor;
+        // encode 42 and read it back via reader
+        let mut buf = Vec::new();
+        write_varint(42, &mut buf).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_varint_reader(&mut cursor).unwrap();
+        assert_eq!(decoded, 42);
+
+        // negative
+        let mut buf = Vec::new();
+        write_varint(-123, &mut buf).unwrap();
+        let mut cursor = Cursor::new(buf);
+        let decoded = read_varint_reader(&mut cursor).unwrap();
+        assert_eq!(decoded, -123);
+    }
+
+    #[test]
+    fn test_read_varlong_reader() {
+        use std::io::Cursor;
+        let test_values = vec![0i64, 1, -1, 100, -100, i64::MAX, i64::MIN];
+        for value in test_values {
+            let mut buf = Vec::new();
+            write_varlong(value, &mut buf).unwrap();
+            let mut cursor = Cursor::new(buf);
+            let decoded = read_varlong_reader(&mut cursor).unwrap();
+            assert_eq!(decoded, value, "Failed for value: {}", value);
+        }
     }
 
     /// Translated from ByteUtilsTest.testInvalidVarint.
