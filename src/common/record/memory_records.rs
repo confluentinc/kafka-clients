@@ -23,6 +23,8 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use crate::common::compress::Compression;
+use crate::common::kafka_error::KafkaError;
+use crate::common::protocol::Errors;
 use crate::common::record::abstract_records::{self, LOG_OVERHEAD};
 use crate::common::record::default_record::DefaultRecord;
 use crate::common::record::default_record_batch::DefaultRecordBatch;
@@ -96,28 +98,73 @@ impl MemoryRecords {
 
     /// Validates the header of the first batch and returns batch size.
     ///
-    /// Returns `None` if the buffer does not contain enough bytes for a header.
-    pub fn first_batch_size(&self) -> Option<usize> {
-        if self.buffer.len() < abstract_records::HEADER_SIZE_UP_TO_MAGIC {
-            return None;
+    /// Returns `Ok(None)` if the buffer does not contain enough bytes for a
+    /// header. Returns `Err(CorruptMessage)` if the record size is invalid
+    /// (too small, too large, or negative) or if the magic byte is invalid.
+    ///
+    /// Corresponds to Java's `MemoryRecords.firstBatchSize()` which delegates
+    /// to `ByteBufferLogInputStream.nextBatchSize()`.
+    pub fn first_batch_size(&self) -> Result<Option<usize>, KafkaError> {
+        // Minimum overhead for LegacyRecord v0:
+        //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
+        const LEGACY_RECORD_OVERHEAD_V0: i32 = 14;
+
+        if self.buffer.len() < LOG_OVERHEAD {
+            return Ok(None);
         }
-        // Read the length field
-        let length = i32::from_be_bytes(
+
+        // Read the record size (length) field
+        let record_size = i32::from_be_bytes(
             self.buffer[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4]
                 .try_into()
-                .ok()?,
+                .map_err(|_| KafkaError::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
         );
-        Some(LOG_OVERHEAD + length as usize)
+
+        // Validate minimum record size (V0 has the smallest overhead)
+        if record_size < LEGACY_RECORD_OVERHEAD_V0 {
+            return Err(KafkaError::with_message(
+                Errors::CorruptMessage,
+                format!(
+                    "Record size {} is less than the minimum record overhead ({})",
+                    record_size, LEGACY_RECORD_OVERHEAD_V0
+                ),
+            ));
+        }
+
+        // Validate maximum message size (use i32::MAX like Java's Integer.MAX_VALUE)
+        // Java passes Integer.MAX_VALUE as maxMessageSize from firstBatchSize(),
+        // so this check only catches negative values that wrapped or truly
+        // enormous sizes. Since we already checked >= LEGACY_RECORD_OVERHEAD_V0
+        // and record_size is i32, the max check here matches Java behavior.
+
+        if self.buffer.len() < abstract_records::HEADER_SIZE_UP_TO_MAGIC {
+            return Ok(None);
+        }
+
+        // Validate magic byte
+        let magic = self.buffer[RecordBatch::MAGIC_OFFSET] as i8;
+        if !(0..=RecordBatch::CURRENT_MAGIC_VALUE).contains(&magic) {
+            return Err(KafkaError::with_message(
+                Errors::CorruptMessage,
+                format!("Invalid magic found in record: {}", magic),
+            ));
+        }
+
+        Ok(Some(LOG_OVERHEAD + record_size as usize))
     }
 
     /// Returns a slice of the records data at the given position and size.
+    ///
+    /// The `size` parameter is clamped to the available bytes from `position`
+    /// to the end of the buffer, matching Java's
+    /// `MemoryRecords.slice(int, int)` which uses
+    /// `Math.min(size, buffer.limit() - position)`.
     pub fn slice(&self, position: usize, size: usize) -> MemoryRecords {
         assert!(
             position <= self.buffer.len(),
             "Slice from position {} exceeds end position",
             position
         );
-        assert!(size <= self.buffer.len(), "Invalid size: {}", size);
         let available_bytes = size.min(self.buffer.len() - position);
         MemoryRecords::new(self.buffer[position..position + available_bytes].to_vec())
     }
@@ -724,7 +771,7 @@ mod tests {
         }
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testNextBatchSize` (v2 only, partial).
+    /// Corresponds to Java's `MemoryRecordsTest.testNextBatchSize` (v2 only).
     #[test]
     fn test_first_batch_size() {
         let log_append_time = current_time_millis();
@@ -742,7 +789,34 @@ mod tests {
             let records = builder.build();
 
             let size = records.size_in_bytes();
-            assert_eq!(Some(size), records.first_batch_size());
+            assert_eq!(Some(size), records.first_batch_size().unwrap());
+
+            // size not in buffer (only 1 byte)
+            let short_records = MemoryRecords::new(records.buffer()[..1].to_vec());
+            assert_eq!(None, short_records.first_batch_size().unwrap());
+
+            // magic not in buffer (only LOG_OVERHEAD bytes = 12)
+            let short_records = MemoryRecords::new(records.buffer()[..LOG_OVERHEAD].to_vec());
+            assert_eq!(None, short_records.first_batch_size().unwrap());
+
+            // payload not in buffer, but header up to magic is present
+            let short_records =
+                MemoryRecords::new(records.buffer()[..abstract_records::HEADER_SIZE_UP_TO_MAGIC].to_vec());
+            assert_eq!(Some(size), short_records.first_batch_size().unwrap());
+
+            // Invalid magic byte (10) should return CorruptMessage error
+            let mut corrupt_magic_buf = records.buffer().to_vec();
+            corrupt_magic_buf[RecordBatch::MAGIC_OFFSET] = 10;
+            let corrupt_records = MemoryRecords::new(corrupt_magic_buf);
+            let err = corrupt_records.first_batch_size().unwrap_err();
+            assert_eq!(err.error(), Errors::CorruptMessage);
+
+            // Invalid record size (set LSB of size field to 0, making it too small)
+            let mut corrupt_size_buf = records.buffer().to_vec();
+            corrupt_size_buf[RecordBatch::LENGTH_OFFSET + 3] = 0;
+            let corrupt_records = MemoryRecords::new(corrupt_size_buf);
+            let err = corrupt_records.first_batch_size().unwrap_err();
+            assert_eq!(err.error(), Errors::CorruptMessage);
         }
     }
 
@@ -790,12 +864,48 @@ mod tests {
             assert_eq!(items.len() - 1, sliced_batches.len());
             assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
 
+            // Read from second message and size is past the end of the file
+            // (Java: records.slice(first.sizeInBytes(), records.sizeInBytes()))
+            let sliced = records.slice(first_size, records.size_in_bytes());
+            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(items.len() - 1, sliced_batches.len());
+            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
+
+            // Read from second message and position + size overflows
+            // (Java: records.slice(first.sizeInBytes(), Integer.MAX_VALUE))
+            let sliced = records.slice(first_size, usize::MAX);
+            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(items.len() - 1, sliced_batches.len());
+            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
+
             // Read a single batch starting from second batch
             let second_size = items[1].size_in_bytes();
             let sliced = records.slice(first_size, second_size);
             assert_eq!(second_size, sliced.size_in_bytes());
             let sliced_batches: Vec<_> = sliced.batches().collect();
             assert_eq!(1, sliced_batches.len());
+
+            // Read from second message and size is past the end on an already-sliced view
+            // (Java: records.slice(1, records.sizeInBytes() - 1)
+            //               .slice(first.sizeInBytes() - 1, records.sizeInBytes()))
+            let sliced = records
+                .slice(1, records.size_in_bytes() - 1)
+                .slice(first_size - 1, records.size_in_bytes());
+            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(items.len() - 1, sliced_batches.len());
+            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
+
+            // Read from second message and position + size overflows on already-sliced view
+            // (Java: records.slice(1, records.sizeInBytes() - 1)
+            //               .slice(first.sizeInBytes() - 1, Integer.MAX_VALUE))
+            let sliced = records.slice(1, records.size_in_bytes() - 1).slice(first_size - 1, usize::MAX);
+            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(items.len() - 1, sliced_batches.len());
+            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
         }
     }
 
