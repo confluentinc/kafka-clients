@@ -234,6 +234,19 @@ pub enum KafkaError {
     InvalidTopic(InvalidTopicError),
     /// Group authorization failure with group ID.
     GroupAuthorization(GroupAuthorizationError),
+    /// Buffer exhausted error — the producer cannot allocate memory for a record
+    /// because the buffer pool is full and the max blocking time has elapsed.
+    ///
+    /// Corresponds to Java's `BufferExhaustedException`.
+    BufferExhausted(KafkaGenericError),
+    /// Illegal argument error — an invalid argument was provided to a method.
+    ///
+    /// Corresponds to Java's `IllegalArgumentException`.
+    IllegalArgument(String),
+    /// Illegal state error — a method was called in an invalid state.
+    ///
+    /// Corresponds to Java's `IllegalStateException`.
+    IllegalState(String),
 }
 
 impl KafkaError {
@@ -269,6 +282,27 @@ impl KafkaError {
         Self::GroupAuthorization(GroupAuthorizationError::new(group_id))
     }
 
+    /// Create a buffer exhausted error.
+    ///
+    /// Corresponds to Java's `BufferExhaustedException`.
+    pub fn buffer_exhausted(message: impl Into<String>) -> Self {
+        Self::BufferExhausted(KafkaGenericError::with_message(Errors::UnknownServerError, message))
+    }
+
+    /// Create an illegal argument error.
+    ///
+    /// Corresponds to Java's `IllegalArgumentException`.
+    pub fn illegal_argument(message: impl Into<String>) -> Self {
+        Self::IllegalArgument(message.into())
+    }
+
+    /// Create an illegal state error.
+    ///
+    /// Corresponds to Java's `IllegalStateException`.
+    pub fn illegal_state(message: impl Into<String>) -> Self {
+        Self::IllegalState(message.into())
+    }
+
     /// Create an unsupported version error.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
@@ -277,52 +311,71 @@ impl KafkaError {
     // -- Base access -------------------------------------------------------
 
     /// Access the base [`KafkaGenericError`] common to all variants.
-    pub fn kafka_error(&self) -> &KafkaGenericError {
+    ///
+    /// Returns `None` for variants that do not carry a [`KafkaGenericError`]
+    /// (e.g. [`IllegalArgument`](Self::IllegalArgument), [`IllegalState`](Self::IllegalState)).
+    pub fn kafka_error(&self) -> Option<&KafkaGenericError> {
         match self {
-            Self::Generic(e) => e,
-            Self::TopicAuthorization(e) => &e.kafka_error,
-            Self::InvalidTopic(e) => &e.kafka_error,
-            Self::GroupAuthorization(e) => &e.kafka_error,
+            Self::Generic(e) | Self::BufferExhausted(e) => Some(e),
+            Self::TopicAuthorization(e) => Some(&e.kafka_error),
+            Self::InvalidTopic(e) => Some(&e.kafka_error),
+            Self::GroupAuthorization(e) => Some(&e.kafka_error),
+            Self::IllegalArgument(_) | Self::IllegalState(_) => None,
         }
     }
 
     // -- Delegating methods ------------------------------------------------
 
     /// The protocol error code.
+    ///
+    /// Returns [`Errors::UnknownServerError`] for variants without a
+    /// [`KafkaGenericError`].
     pub fn error(&self) -> Errors {
-        self.kafka_error().error()
+        match self.kafka_error() {
+            Some(e) => e.error(),
+            None => Errors::UnknownServerError,
+        }
     }
 
     /// The numeric error code (i16).
     pub fn code(&self) -> i16 {
-        self.kafka_error().code()
+        self.error().code()
     }
 
     /// The error message.
     pub fn message(&self) -> &str {
-        self.kafka_error().message()
+        match self {
+            Self::IllegalArgument(msg) | Self::IllegalState(msg) => msg,
+            _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
+        }
     }
 
     /// Whether this error is retriable.
+    ///
+    /// [`IllegalArgument`](Self::IllegalArgument) and
+    /// [`IllegalState`](Self::IllegalState) are never retriable.
     pub fn is_retriable(&self) -> bool {
-        self.kafka_error().is_retriable()
+        self.kafka_error().is_some_and(|e| e.is_retriable())
     }
 
     /// Whether this error is fatal.
+    ///
+    /// [`IllegalArgument`](Self::IllegalArgument) and
+    /// [`IllegalState`](Self::IllegalState) are not marked fatal.
     pub fn is_fatal(&self) -> bool {
-        self.kafka_error().is_fatal()
+        self.kafka_error().is_some_and(|e| e.is_fatal())
     }
 
     /// Whether this error requires the transaction to be aborted.
     pub fn txn_requires_abort(&self) -> bool {
-        self.kafka_error().txn_requires_abort()
+        self.kafka_error().is_some_and(|e| e.txn_requires_abort())
     }
 }
 
 impl fmt::Display for KafkaError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::Generic(e) => write!(f, "{e}"),
+            Self::Generic(e) | Self::BufferExhausted(e) => write!(f, "{e}"),
             Self::TopicAuthorization(e) => {
                 write!(f, "{}: {:?}", e.kafka_error, e.unauthorized_topics)
             },
@@ -332,6 +385,8 @@ impl fmt::Display for KafkaError {
             Self::GroupAuthorization(e) => {
                 write!(f, "{}: {}", e.kafka_error, e.group_id)
             },
+            Self::IllegalArgument(msg) => write!(f, "IllegalArgumentError: {msg}"),
+            Self::IllegalState(msg) => write!(f, "IllegalStateError: {msg}"),
         }
     }
 }

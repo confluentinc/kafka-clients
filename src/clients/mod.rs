@@ -43,6 +43,8 @@ pub mod network_client;
 pub mod network_client_utils;
 #[cfg(not(feature = "skip-generated"))]
 pub mod node_api_versions;
+#[cfg(not(feature = "skip-generated"))]
+pub mod producer;
 
 /// Callback type for request completion.
 ///

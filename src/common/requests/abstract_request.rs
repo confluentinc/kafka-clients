@@ -28,10 +28,12 @@ use crate::common::network::ByteBufferSend;
 use crate::common::protocol::message::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::metadata_request_data::MetadataRequestData;
+use crate::produce_request_data::ProduceRequestData;
 
 use super::abstract_response::ConcreteResponse;
 use super::api_versions_request::ApiVersionsRequest;
 use super::metadata_request::MetadataRequest;
+use super::produce_request::ProduceRequest;
 use super::request_and_size::RequestAndSize;
 use super::request_header::RequestHeader;
 use super::send_builder::SendBuilder;
@@ -80,6 +82,8 @@ pub enum ConcreteRequest {
     ApiVersions(ApiVersionsRequest),
     /// A Metadata request.
     Metadata(MetadataRequest),
+    /// A Produce request.
+    Produce(ProduceRequest),
 }
 
 impl ConcreteRequest {
@@ -88,6 +92,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => r.version(),
             Self::Metadata(r) => r.version(),
+            Self::Produce(r) => r.version(),
         }
     }
 
@@ -96,6 +101,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => r.api_key(),
             Self::Metadata(r) => r.api_key(),
+            Self::Produce(r) => r.api_key(),
         }
     }
 
@@ -110,6 +116,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data()),
             Self::Metadata(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::Produce(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -149,6 +156,9 @@ impl ConcreteRequest {
             Self::Metadata(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::Produce(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -163,6 +173,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => Self::serialize_body(r.data(), r.version()),
             Self::Metadata(r) => Self::serialize_body(r.data(), r.version()),
+            Self::Produce(r) => Self::serialize_body(r.data(), r.version()),
         }
     }
 
@@ -185,6 +196,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => r.get_error_response(throttle_time_ms, error),
             Self::Metadata(r) => r.get_error_response(throttle_time_ms, error),
+            Self::Produce(r) => r.get_error_response(throttle_time_ms, error),
         }
     }
 
@@ -213,6 +225,10 @@ impl ConcreteRequest {
                 let data = MetadataRequestData::read(readable, api_version)?;
                 Ok(Self::Metadata(MetadataRequest::new(data, api_version)))
             },
+            ApiKeys::PRODUCE => {
+                let data = ProduceRequestData::read(readable, api_version)?;
+                Ok(Self::Produce(ProduceRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -226,6 +242,7 @@ impl std::fmt::Display for ConcreteRequest {
         match self {
             Self::ApiVersions(r) => write!(f, "{r}"),
             Self::Metadata(r) => write!(f, "{r}"),
+            Self::Produce(r) => write!(f, "{r}"),
         }
     }
 }
