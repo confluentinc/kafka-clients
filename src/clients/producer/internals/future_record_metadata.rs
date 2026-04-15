@@ -29,50 +29,6 @@ use crate::clients::producer::internals::produce_request_result::ProduceRequestR
 use crate::clients::producer::record_metadata::RecordMetadata;
 use crate::common::kafka_error::KafkaError;
 
-/// Snapshot of the leaf node's data extracted from the chain while holding locks.
-/// Used to avoid holding any `MutexGuard` across `.await` points.
-struct LeafData {
-    result: Arc<ProduceRequestResult>,
-    batch_index: i32,
-    create_timestamp: i64,
-    serialized_key_size: i32,
-    serialized_value_size: i32,
-}
-
-impl LeafData {
-    /// Construct `RecordMetadata` from this leaf's data after its result has completed.
-    fn to_metadata(&self) -> RecordMetadata {
-        let timestamp = if self.result.has_log_append_time() {
-            self.result.log_append_time()
-        } else {
-            self.create_timestamp
-        };
-
-        RecordMetadata::new(
-            self.result.topic_partition().clone(),
-            self.result.base_offset().unwrap_or(-1),
-            self.batch_index,
-            timestamp,
-            self.serialized_key_size,
-            self.serialized_value_size,
-        )
-    }
-
-    /// Check for errors and return metadata or error.
-    ///
-    /// Now returns the typed [`KafkaError`] directly from the produce result,
-    /// preserving error code information (retriable, fatal, etc.) through the
-    /// pipeline. This matches Java's `valueOrError()` which wraps the
-    /// `RuntimeException` in an `ExecutionException`.
-    fn value_or_error(&self) -> Result<RecordMetadata, KafkaError> {
-        if let Some(error) = self.result.error(self.batch_index) {
-            Err(error)
-        } else {
-            Ok(self.to_metadata())
-        }
-    }
-}
-
 /// The future result of a record send.
 ///
 /// This is returned to the caller of `KafkaProducer.send()` and allows them to await
@@ -93,7 +49,10 @@ pub struct FutureRecordMetadata {
     serialized_value_size: i32,
     /// Chained future for when a batch is split. Protected by a mutex because
     /// `chain()` can be called from a different task than `get()`.
-    next_record_metadata: Mutex<Option<Box<FutureRecordMetadata>>>,
+    ///
+    /// Uses `Arc` so the chain pointer can be cloned out of the lock and awaited
+    /// without holding the `MutexGuard` across `.await` points.
+    next_record_metadata: Mutex<Option<Arc<FutureRecordMetadata>>>,
 }
 
 impl FutureRecordMetadata {
@@ -123,59 +82,51 @@ impl FutureRecordMetadata {
         }
     }
 
-    /// Traverse the chain to the leaf node and collect all `ProduceRequestResult`s
-    /// along the way, plus the leaf's metadata. This is done synchronously under
-    /// locks so no `MutexGuard` is held across an `.await`.
-    ///
-    /// The chain depth is typically 1-2 levels (batch splits), so recursion is safe.
-    /// Each recursive call holds the parent node's lock while descending, which is
-    /// safe because locks are always acquired in parent-to-child order.
-    fn collect_chain(&self) -> (Vec<Arc<ProduceRequestResult>>, LeafData) {
-        let mut results = Vec::new();
-        let leaf = self.collect_chain_inner(&mut results);
-        (results, leaf)
-    }
-
-    /// Recursive helper that collects results and returns the leaf node's data.
-    fn collect_chain_inner(&self, results: &mut Vec<Arc<ProduceRequestResult>>) -> LeafData {
-        results.push(Arc::clone(&self.result));
-        let guard = self.next_record_metadata.lock().unwrap();
-        match guard.as_ref() {
-            Some(next) => next.collect_chain_inner(results),
-            None => LeafData {
-                result: Arc::clone(&self.result),
-                batch_index: self.batch_index,
-                create_timestamp: self.create_timestamp,
-                serialized_key_size: self.serialized_key_size,
-                serialized_value_size: self.serialized_value_size,
-            },
-        }
-    }
-
     /// Await the completion of this record's produce request and return the metadata.
     ///
     /// This is the Rust equivalent of Java's `Future.get()`.
     ///
-    /// If this future has been chained (due to batch splitting), it follows the chain
-    /// to the final result and awaits all intermediate results.
+    /// Follows Java's await-then-read pattern: first awaits the current node's result,
+    /// THEN checks for a chained future (set during batch splitting). This ordering
+    /// is critical because `chain()` may be called between the user calling `get()`
+    /// and the result completing. Reading `next_record_metadata` AFTER `await_completion()`
+    /// guarantees the chain is visible if it was set before `done()`.
     ///
     /// # Errors
     ///
     /// Returns the error from the produce response if the record failed.
-    pub async fn get(&self) -> Result<RecordMetadata, KafkaError> {
-        let (results, leaf) = self.collect_chain();
+    pub fn get(
+        &self,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+        Box::pin(async move {
+            // Step 1: Await THIS node's result (no lock held across await)
+            self.result.await_completion().await;
 
-        // Await all results in the chain (no locks held)
-        for result in &results {
-            result.await_completion().await;
-        }
+            // Step 2: AFTER awaiting, check if there's a chained future.
+            // This read-after-await ordering matches Java's volatile read of
+            // `nextRecordMetadata` after `this.result.await()`.
+            // Clone the Arc out of the lock so we don't hold the MutexGuard across await.
+            let next = {
+                let guard = self.next_record_metadata.lock().unwrap();
+                guard.as_ref().map(Arc::clone)
+            };
 
-        leaf.value_or_error()
+            if let Some(chained) = next {
+                // Delegate to the chained future (recursive, matching Java's pattern)
+                return chained.get().await;
+            }
+
+            self.value_or_error()
+        })
     }
 
     /// Await the completion of this record's produce request with a timeout.
     ///
     /// This is the Rust equivalent of Java's `Future.get(timeout, unit)`.
+    ///
+    /// Follows the same await-then-read pattern as [`get`](Self::get): first awaits
+    /// the current result with a timeout, THEN checks for a chained future and
+    /// delegates to it with the remaining time.
     ///
     /// # Arguments
     ///
@@ -185,23 +136,68 @@ impl FutureRecordMetadata {
     ///
     /// Returns [`KafkaError::Timeout`] if the timeout elapses before the result is available.
     /// Returns the error from the produce response if the record failed.
-    pub async fn get_timeout(&self, timeout: std::time::Duration) -> Result<RecordMetadata, KafkaError> {
-        let deadline = tokio::time::Instant::now() + timeout;
-        let (results, leaf) = self.collect_chain();
+    pub fn get_timeout(
+        &self,
+        timeout: std::time::Duration,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+        Box::pin(async move {
+            let deadline = tokio::time::Instant::now() + timeout;
 
-        // Await all results in the chain with remaining time (no locks held)
-        for result in &results {
-            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-            let occurred = result.await_timeout(remaining).await;
+            // Step 1: Await THIS node's result with timeout
+            let occurred = self.result.await_timeout(timeout).await;
             if !occurred {
                 return Err(KafkaError::timeout(format!(
                     "Timeout after waiting for {} ms.",
                     timeout.as_millis()
                 )));
             }
-        }
 
-        leaf.value_or_error()
+            // Step 2: AFTER awaiting, check for chained future (read-after-await)
+            // Clone the Arc out of the lock so we don't hold the MutexGuard across await.
+            let next = {
+                let guard = self.next_record_metadata.lock().unwrap();
+                guard.as_ref().map(Arc::clone)
+            };
+
+            if let Some(chained) = next {
+                let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+                return chained.get_timeout(remaining).await;
+            }
+
+            self.value_or_error()
+        })
+    }
+
+    /// Check for errors and return metadata or error.
+    ///
+    /// Returns the typed [`KafkaError`] directly from the produce result,
+    /// preserving error code information (retriable, fatal, etc.) through the
+    /// pipeline. This matches Java's `valueOrError()` which wraps the
+    /// `RuntimeException` in an `ExecutionException`.
+    fn value_or_error(&self) -> Result<RecordMetadata, KafkaError> {
+        if let Some(error) = self.result.error(self.batch_index) {
+            Err(error)
+        } else {
+            Ok(self.to_metadata())
+        }
+    }
+
+    /// Construct `RecordMetadata` from this node's data after its result has completed.
+    fn to_metadata(&self) -> RecordMetadata {
+        let timestamp = if self.result.has_log_append_time() {
+            self.result.log_append_time()
+        } else {
+            self.create_timestamp
+        };
+
+        RecordMetadata::new(
+            self.result.topic_partition().clone(),
+            self.result.base_offset().unwrap_or(-1),
+            self.batch_index,
+            timestamp,
+            self.serialized_key_size,
+            self.serialized_value_size,
+        )
     }
 
     /// Chain this future to wait on a different `FutureRecordMetadata`.
@@ -211,21 +207,31 @@ impl FutureRecordMetadata {
     /// users to wait on the newly created split batches even after the old big batch
     /// has been deemed as done.
     pub fn chain(&self, future_record_metadata: FutureRecordMetadata) {
+        self.chain_arc(Arc::new(future_record_metadata));
+    }
+
+    /// Chain this future to wait on an `Arc<FutureRecordMetadata>`.
+    fn chain_arc(&self, future_record_metadata: Arc<FutureRecordMetadata>) {
         let mut next = self.next_record_metadata.lock().unwrap();
         if next.is_none() {
-            *next = Some(Box::new(future_record_metadata));
+            *next = Some(future_record_metadata);
         } else {
-            next.as_ref().unwrap().chain(future_record_metadata);
+            next.as_ref().unwrap().chain_arc(future_record_metadata);
         }
     }
 
     /// Whether this future is complete.
     ///
     /// This is the Rust equivalent of Java's `Future.isDone()`.
-    /// If chained, checks whether the leaf future's result is completed.
+    /// If chained, checks whether the chained future's result is completed.
+    /// Matches Java's pattern of reading `nextRecordMetadata` and delegating.
     pub fn is_done(&self) -> bool {
-        let (_, leaf) = self.collect_chain();
-        leaf.result.completed()
+        let guard = self.next_record_metadata.lock().unwrap();
+        if let Some(next) = guard.as_ref() {
+            next.is_done()
+        } else {
+            self.result.completed()
+        }
     }
 }
 
@@ -436,5 +442,57 @@ mod tests {
 
         let metadata = handle.await.unwrap().unwrap();
         assert_eq!(42, metadata.offset());
+    }
+
+    /// Test that chain() called AFTER get() starts waiting but BEFORE done()
+    /// is correctly followed. This validates the await-then-read pattern:
+    /// the chain must be visible after awaiting the current result.
+    ///
+    /// Simulates the batch splitting scenario:
+    /// 1. User calls get() which starts awaiting result1
+    /// 2. Producer receives MESSAGE_TOO_LARGE, calls chain() to redirect to result2
+    /// 3. Producer calls done() on result1 (original batch)
+    /// 4. get() should follow the chain and return result2's metadata
+    #[tokio::test]
+    async fn test_chain_set_during_await_is_followed() {
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let result1 = make_result(tp.clone());
+        let result2 = make_result(tp);
+
+        let future = Arc::new(FutureRecordMetadata::new(
+            Arc::clone(&result1),
+            0,
+            RecordBatch::NO_TIMESTAMP,
+            0,
+            0,
+        ));
+
+        // Start get() in a background task -- it will block on result1
+        let future_clone = Arc::clone(&future);
+        let result2_clone = Arc::clone(&result2);
+        let handle = tokio::spawn(async move { future_clone.get().await });
+
+        // Give the task time to start awaiting result1
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+
+        // Step 2: chain() is called (batch split scenario) WHILE get() is awaiting
+        let chained = FutureRecordMetadata::new(Arc::clone(&result2), 0, RecordBatch::NO_TIMESTAMP, 0, 0);
+        future.chain(chained);
+
+        // Step 3: Complete result1 (original batch marked as done)
+        result1.set(100, RecordBatch::NO_TIMESTAMP, None);
+        result1.done();
+
+        // Step 4: Complete result2 (split batch)
+        result2_clone.set(200, RecordBatch::NO_TIMESTAMP, None);
+        result2_clone.done();
+
+        // get() should follow the chain to result2 and return offset 200
+        let metadata = handle.await.unwrap().unwrap();
+        assert_eq!(
+            200,
+            metadata.offset(),
+            "get() must follow chain set during await, not return stale result1 data"
+        );
     }
 }

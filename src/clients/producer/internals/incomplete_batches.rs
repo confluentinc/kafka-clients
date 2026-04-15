@@ -69,7 +69,13 @@ impl IncompleteBatches {
     ///
     /// # Panics
     ///
-    /// Panics if the batch was not in the set, matching Java's `IllegalStateException`.
+    /// Panics if the batch was not in the set. This matches Java's `IllegalStateException`
+    /// thrown for the same case. The panic is intentional because a batch missing from the
+    /// incomplete set indicates a logic bug in the producer (the batch was never added or
+    /// was removed twice), not a runtime condition that callers can recover from. Java's
+    /// own comment says "This should be impossible." Using `panic!` for impossible
+    /// invariant violations is idiomatic Rust (see
+    /// [`std::vec::Vec::remove`](https://doc.rust-lang.org/std/vec/struct.Vec.html#panics-6)).
     pub fn remove(&self, batch: &Arc<ProducerBatch>) {
         let mut incomplete = self.incomplete.lock().unwrap();
         let removed = incomplete.remove(&ArcBatchKey(Arc::clone(batch)));
