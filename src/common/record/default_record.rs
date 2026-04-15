@@ -181,6 +181,13 @@ impl DefaultRecord {
         let (size_of_body, varint_size) = varint::read_varint(buffer)
             .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
 
+        if size_of_body < 0 {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: expected non-negative size but got {}",
+                size_of_body
+            )));
+        }
+
         let body_start = varint_size;
         let body = &buffer[body_start..];
 
@@ -220,6 +227,13 @@ impl DefaultRecord {
         let size_of_body = varint::read_varint_reader(input)
             .map_err(|e| InvalidRecordError::new(format!("Failed to read record size: {}", e)))?;
 
+        if size_of_body < 0 {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: expected non-negative size but got {}",
+                size_of_body
+            )));
+        }
+
         let mut record_buffer = vec![0u8; size_of_body as usize];
         let bytes_read = read_fully(input, &mut record_buffer)?;
         if bytes_read != size_of_body as usize {
@@ -249,6 +263,13 @@ impl DefaultRecord {
         base_sequence: i32,
         log_append_time: Option<i64>,
     ) -> Result<DefaultRecord, InvalidRecordError> {
+        if size_of_body < 0 {
+            return Err(InvalidRecordError::new(format!(
+                "Invalid record size: expected non-negative size but got {}",
+                size_of_body
+            )));
+        }
+
         if (body.len() as i32) < size_of_body {
             return Err(InvalidRecordError::new(format!(
                 "Invalid record size: expected {} bytes in record payload, but instead the buffer has only {} remaining bytes.",
@@ -1002,6 +1023,16 @@ mod tests {
         let mut prefix = Vec::new();
         varint::write_varint(size_of_body, &mut prefix).unwrap();
         buf[..prefix.len()].copy_from_slice(&prefix);
+
+        assert_decoding_from_buffer_throws(&buf);
+    }
+
+    #[test]
+    fn test_negative_size_of_body() {
+        // A negative size_of_body should return InvalidRecordError, not panic.
+        let size_of_body: i32 = -1;
+        let mut buf = Vec::new();
+        varint::write_varint(size_of_body, &mut buf).unwrap();
 
         assert_decoding_from_buffer_throws(&buf);
     }
