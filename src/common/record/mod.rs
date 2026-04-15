@@ -17,10 +17,14 @@
 //! Contains the record batch constants, timestamp types, compression types,
 //! record version, and compression ratio estimation.
 
+pub mod abstract_records;
 pub mod compression_ratio_estimator;
 pub mod compression_type;
 pub mod default_record;
+pub mod default_record_batch;
 pub mod invalid_record_error;
+pub mod memory_records;
+pub mod memory_records_builder;
 pub mod record_batch;
 pub mod record_trait;
 pub mod record_version;
@@ -30,7 +34,10 @@ pub mod timestamp_type;
 pub use compression_ratio_estimator::CompressionRatioEstimator;
 pub use compression_type::CompressionType;
 pub use default_record::DefaultRecord;
+pub use default_record_batch::DefaultRecordBatch;
 pub use invalid_record_error::InvalidRecordError;
+pub use memory_records::MemoryRecords;
+pub use memory_records_builder::MemoryRecordsBuilder;
 pub use record_batch::RecordBatch;
 pub use record_version::RecordVersion;
 pub use simple_record::SimpleRecord;
