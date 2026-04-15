@@ -25,6 +25,7 @@ use std::sync::{Arc, Mutex};
 
 use tokio::sync::watch;
 
+use crate::common::kafka_error::KafkaError;
 use crate::common::record::record_batch::RecordBatch;
 use crate::common::topic_partition::TopicPartition;
 
@@ -35,10 +36,13 @@ pub struct ProduceResult {
     pub base_offset: i64,
     /// The log append time or -1 if CreateTime is being used.
     pub log_append_time: i64,
-    /// Optional error function that maps batch index to an error string.
-    /// In Rust we store the error as an optional string per index.
+    /// Optional error function that maps batch index to a typed error.
     /// `None` means no error (successful response).
-    pub error: Option<Arc<dyn Fn(i32) -> Option<String> + Send + Sync>>,
+    ///
+    /// In Java, this is `Function<Integer, RuntimeException>` which returns a typed
+    /// exception preserving error code information needed by
+    /// `FutureRecordMetadata.valueOrError()`.
+    pub error: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
 }
 
 impl std::fmt::Debug for ProduceResult {
@@ -58,13 +62,24 @@ impl std::fmt::Debug for ProduceResult {
 /// batched together for the same partition in the request.
 ///
 /// In Java, this uses a `CountDownLatch` for synchronization. In Rust, we use a
-/// `tokio::sync::watch` channel: the sender sets the result and receivers (FutureRecordMetadata)
-/// observe it.
+/// two-phase approach matching Java's semantics:
+/// - `set()` stores the result data in a `Mutex` without notifying waiters
+/// - `done()` publishes the result through the `watch` channel, unblocking waiters
+///
+/// This separation is critical because `ProducerBatch.completeFutureAndFireCallbacks()`
+/// calls `set()` first, then executes user callbacks, then calls `done()`. External
+/// waiters (e.g. `flush()`) are intentionally blocked until after all callbacks complete.
 pub struct ProduceRequestResult {
-    /// The watch channel sender. Sends `None` initially, then `Some(ProduceResult)` when done.
-    tx: watch::Sender<Option<ProduceResult>>,
+    /// The watch channel sender. Sends `true` when `done()` is called.
+    tx: watch::Sender<bool>,
     /// The watch channel receiver (cloned for each FutureRecordMetadata).
-    rx: watch::Receiver<Option<ProduceResult>>,
+    rx: watch::Receiver<bool>,
+    /// Stores the result data set by `set()`, separate from notification.
+    ///
+    /// This implements the two-phase set/done protocol: `set()` writes here,
+    /// `done()` notifies via the watch channel. Waiters read from here after
+    /// being unblocked.
+    result: Mutex<Option<ProduceResult>>,
     /// The topic and partition to which this record set was sent.
     topic_partition: TopicPartition,
     /// List of dependent ProduceRequestResults created when this batch is split.
@@ -81,44 +96,55 @@ impl ProduceRequestResult {
     ///
     /// * `topic_partition` - The topic and partition to which this record set was sent
     pub fn new(topic_partition: TopicPartition) -> Self {
-        let (tx, rx) = watch::channel(None);
-        Self { tx, rx, topic_partition, dependent_results: Mutex::new(Vec::new()) }
+        let (tx, rx) = watch::channel(false);
+        Self {
+            tx,
+            rx,
+            result: Mutex::new(None),
+            topic_partition,
+            dependent_results: Mutex::new(Vec::new()),
+        }
     }
 
     /// Set the result of the produce request.
+    ///
+    /// This stores the result data but does **not** notify waiters.
+    /// Waiters are only unblocked when [`done()`](Self::done) is called,
+    /// matching Java's two-phase `set()` / `done()` protocol where user
+    /// callbacks are executed between the two calls.
     ///
     /// # Arguments
     ///
     /// * `base_offset` - The base offset assigned to the record
     /// * `log_append_time` - The log append time or -1 if CreateTime is being used
-    /// * `errors_by_index` - Function mapping the batch index to the error string,
+    /// * `errors_by_index` - Function mapping the batch index to a typed error,
     ///   or `None` if the response was successful
     pub fn set(
         &self,
         base_offset: i64,
         log_append_time: i64,
-        errors_by_index: Option<Arc<dyn Fn(i32) -> Option<String> + Send + Sync>>,
+        errors_by_index: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
     ) {
-        // Store the result but don't notify yet (done() does that).
-        // We use send_modify to avoid requiring the old value to implement PartialEq.
-        self.tx.send_modify(|val| {
-            *val = Some(ProduceResult { base_offset, log_append_time, error: errors_by_index });
-        });
+        let mut guard = self.result.lock().unwrap();
+        *guard = Some(ProduceResult { base_offset, log_append_time, error: errors_by_index });
+        // Do NOT notify receivers here — done() does that.
     }
 
     /// Mark this request as complete and unblock any tasks waiting on its completion.
+    ///
+    /// This is the second phase of the two-phase protocol. After `set()` stores the
+    /// result and user callbacks have been executed, `done()` notifies all waiters.
     ///
     /// # Panics
     ///
     /// Panics if `set` was not called before `done`.
     pub fn done(&self) {
-        // The value should already be set by `set()`. We just need to ensure
-        // the receivers are notified, which `send_modify` already did.
-        // But we verify the invariant.
-        let current = self.tx.borrow().clone();
-        assert!(current.is_some(), "The method `set` must be invoked before `done`.");
-        // The watch channel already has the value set; receivers blocked on
-        // `changed()` / `wait_for()` will see it.
+        {
+            let guard = self.result.lock().unwrap();
+            assert!(guard.is_some(), "The method `set` must be invoked before `done`.");
+        }
+        // Now notify all waiters via the watch channel.
+        let _ = self.tx.send(true);
     }
 
     /// Add a dependent ProduceRequestResult.
@@ -144,8 +170,8 @@ impl ProduceRequestResult {
     /// [`await_all_dependents`](Self::await_all_dependents).
     pub async fn await_completion(&self) {
         let mut rx = self.rx.clone();
-        // Wait until the value is Some
-        let _ = rx.wait_for(|v| v.is_some()).await;
+        // Wait until done() has been called (value becomes true).
+        let _ = rx.wait_for(|done| *done).await;
     }
 
     /// Await the completion of this request with a timeout.
@@ -153,7 +179,7 @@ impl ProduceRequestResult {
     /// Returns `true` if the request completed, `false` if the timeout elapsed.
     pub async fn await_timeout(&self, timeout: std::time::Duration) -> bool {
         let mut rx = self.rx.clone();
-        tokio::time::timeout(timeout, rx.wait_for(|v| v.is_some())).await.is_ok()
+        tokio::time::timeout(timeout, rx.wait_for(|done| *done)).await.is_ok()
     }
 
     /// Await the completion of this request and all the dependent requests.
@@ -184,21 +210,23 @@ impl ProduceRequestResult {
     ///
     /// Returns `None` if the result has not been set yet.
     pub fn base_offset(&self) -> Option<i64> {
-        self.rx.borrow().as_ref().map(|r| r.base_offset)
+        self.result.lock().unwrap().as_ref().map(|r| r.base_offset)
     }
 
     /// Return true if log append time is being used for this topic.
     pub fn has_log_append_time(&self) -> bool {
-        self.rx
-            .borrow()
+        self.result
+            .lock()
+            .unwrap()
             .as_ref()
             .is_some_and(|r| r.log_append_time != RecordBatch::NO_TIMESTAMP)
     }
 
     /// The log append time or -1 if CreateTime is being used.
     pub fn log_append_time(&self) -> i64 {
-        self.rx
-            .borrow()
+        self.result
+            .lock()
+            .unwrap()
             .as_ref()
             .map_or(RecordBatch::NO_TIMESTAMP, |r| r.log_append_time)
     }
@@ -206,8 +234,10 @@ impl ProduceRequestResult {
     /// The error thrown (generally on the server) while processing this request.
     ///
     /// Returns `None` if there was no error for the given batch index.
-    pub fn error(&self, batch_index: i32) -> Option<String> {
-        let guard = self.rx.borrow();
+    /// Returns a typed [`KafkaError`] preserving error code information
+    /// needed by `FutureRecordMetadata.value_or_error()`.
+    pub fn error(&self, batch_index: i32) -> Option<KafkaError> {
+        let guard = self.result.lock().unwrap();
         match guard.as_ref() {
             Some(result) => match &result.error {
                 Some(errors_fn) => errors_fn(batch_index),
@@ -225,15 +255,18 @@ impl ProduceRequestResult {
     /// Has the request completed?
     ///
     /// This method only checks if THIS request has completed and not its dependent results.
+    /// Completion means that `done()` has been called (not just `set()`).
     pub fn completed(&self) -> bool {
-        self.rx.borrow().is_some()
+        *self.rx.borrow()
     }
 
     /// Subscribe to this result by obtaining a watch receiver clone.
     ///
     /// Used internally by [`FutureRecordMetadata`](super::FutureRecordMetadata) to observe
-    /// completion.
-    pub fn subscribe(&self) -> watch::Receiver<Option<ProduceResult>> {
+    /// completion. The receiver yields `true` when `done()` is called.
+    /// The actual result data can be read from the `ProduceRequestResult` methods
+    /// after the subscription fires.
+    pub fn subscribe(&self) -> watch::Receiver<bool> {
         self.rx.clone()
     }
 }
@@ -250,6 +283,7 @@ impl std::fmt::Debug for ProduceRequestResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::Errors;
 
     #[tokio::test]
     async fn test_set_and_done() {
@@ -286,9 +320,9 @@ mod tests {
         let tp = TopicPartition::new("test".to_string(), 0);
         let result = ProduceRequestResult::new(tp);
 
-        let errors_fn: Arc<dyn Fn(i32) -> Option<String> + Send + Sync> = Arc::new(|idx| {
+        let errors_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|idx| {
             if idx == 0 {
-                Some("Error for index 0".to_string())
+                Some(KafkaError::new(Errors::RecordListTooLarge))
             } else {
                 None
             }
@@ -297,8 +331,32 @@ mod tests {
         result.set(-1, RecordBatch::NO_TIMESTAMP, Some(errors_fn));
         result.done();
 
-        assert_eq!(result.error(0), Some("Error for index 0".to_string()));
+        let err = result.error(0).expect("should have error for index 0");
+        assert_eq!(err.error(), Errors::RecordListTooLarge);
         assert!(result.error(1).is_none());
+    }
+
+    #[tokio::test]
+    async fn test_set_does_not_notify_waiters() {
+        // Verifies the two-phase protocol: set() should NOT unblock waiters.
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let result = Arc::new(ProduceRequestResult::new(tp));
+
+        result.set(42, RecordBatch::NO_TIMESTAMP, None);
+
+        // After set() but before done(), the result should NOT be completed
+        assert!(!result.completed());
+
+        // A short await should time out because done() hasn't been called
+        let completed = result.await_timeout(std::time::Duration::from_millis(10)).await;
+        assert!(!completed, "set() should not unblock waiters before done()");
+
+        // But the data should be readable via the accessor methods
+        assert_eq!(result.base_offset(), Some(42));
+
+        // Now call done() and verify completion
+        result.done();
+        assert!(result.completed());
     }
 
     #[tokio::test]

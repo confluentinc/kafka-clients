@@ -59,12 +59,14 @@ impl LeafData {
     }
 
     /// Check for errors and return metadata or error.
+    ///
+    /// Now returns the typed [`KafkaError`] directly from the produce result,
+    /// preserving error code information (retriable, fatal, etc.) through the
+    /// pipeline. This matches Java's `valueOrError()` which wraps the
+    /// `RuntimeException` in an `ExecutionException`.
     fn value_or_error(&self) -> Result<RecordMetadata, KafkaError> {
-        if let Some(error_msg) = self.result.error(self.batch_index) {
-            Err(KafkaError::with_message(
-                crate::common::protocol::Errors::UnknownServerError,
-                error_msg,
-            ))
+        if let Some(error) = self.result.error(self.batch_index) {
+            Err(error)
         } else {
             Ok(self.to_metadata())
         }
@@ -338,14 +340,16 @@ mod tests {
 
     #[tokio::test]
     async fn test_future_get_with_error() {
+        use crate::common::protocol::Errors;
+
         let tp = TopicPartition::new("test-topic".to_string(), 0);
         let result = make_result(tp);
 
         let future = FutureRecordMetadata::new(Arc::clone(&result), 0, 1000, 0, 0);
 
-        let error_fn: Arc<dyn Fn(i32) -> Option<String> + Send + Sync> = Arc::new(|idx| {
+        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|idx| {
             if idx == 0 {
-                Some("Record too large".to_string())
+                Some(KafkaError::new(Errors::RecordListTooLarge))
             } else {
                 None
             }
@@ -354,7 +358,7 @@ mod tests {
         result.done();
 
         let err = future.get().await.unwrap_err();
-        assert_eq!("Record too large", err.message());
+        assert_eq!(Errors::RecordListTooLarge, err.error());
     }
 
     #[tokio::test]

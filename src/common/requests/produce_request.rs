@@ -19,6 +19,9 @@
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
+use crate::common::record::compression_type::CompressionType;
+use crate::common::record::memory_records::MemoryRecords;
+use crate::common::record::record_batch::RecordBatch;
 use crate::produce_request_data::ProduceRequestData;
 use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
 
@@ -97,34 +100,115 @@ impl ProduceRequest {
 
     /// Creates an error response for this request.
     ///
-    /// If acks is 0, returns a response with no partition data (the producer does not
-    /// want any response in this case).
-    pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
+    /// Returns `None` when acks is 0 because the producer does not expect any
+    /// response in that case. In Java, `getErrorResponse()` returns `null` for
+    /// acks=0.
+    pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> Option<ConcreteResponse> {
+        // In case the producer doesn't actually want any response
+        if self.acks == 0 {
+            return None;
+        }
+
         let mut response_data = ProduceResponseData::new();
         response_data.set_throttle_time_ms(throttle_time_ms);
 
-        if self.acks != 0 {
-            for topic_data in &self.data.topic_data {
-                let mut tpr = TopicProduceResponse::new();
-                tpr.set_name(topic_data.name.clone());
-                tpr.set_topic_id(topic_data.topic_id);
+        for topic_data in &self.data.topic_data {
+            let mut tpr = TopicProduceResponse::new();
+            tpr.set_name(topic_data.name.clone());
+            tpr.set_topic_id(topic_data.topic_id);
 
-                let mut partition_responses = Vec::new();
-                for partition_data in &topic_data.partition_data {
-                    let mut ppr = PartitionProduceResponse::new();
-                    ppr.set_index(partition_data.index);
-                    ppr.set_base_offset(INVALID_OFFSET);
-                    ppr.set_log_append_time_ms(crate::common::record::record_batch::RecordBatch::NO_TIMESTAMP);
-                    ppr.set_log_start_offset(INVALID_OFFSET);
-                    ppr.set_error_code(error.code());
-                    partition_responses.push(ppr);
-                }
-                tpr.set_partition_responses(partition_responses);
-                response_data.responses.push(tpr);
+            let mut partition_responses = Vec::new();
+            for partition_data in &topic_data.partition_data {
+                let mut ppr = PartitionProduceResponse::new();
+                ppr.set_index(partition_data.index);
+                ppr.set_base_offset(INVALID_OFFSET);
+                ppr.set_log_append_time_ms(RecordBatch::NO_TIMESTAMP);
+                ppr.set_log_start_offset(INVALID_OFFSET);
+                ppr.set_error_code(error.code());
+                ppr.set_error_message(Some(error.message().to_string()));
+                partition_responses.push(ppr);
             }
+            tpr.set_partition_responses(partition_responses);
+            response_data.responses.push(tpr);
         }
 
-        ConcreteResponse::Produce(ProduceResponse::new(response_data))
+        Some(ConcreteResponse::Produce(ProduceResponse::new(response_data)))
+    }
+
+    /// Validates the record batches for a partition before building a produce request.
+    ///
+    /// Checks that:
+    /// 1. At least one record batch exists per partition
+    /// 2. Record batch magic is V2
+    /// 3. ZStandard compression is not used before version 7
+    /// 4. Exactly one record batch per partition
+    ///
+    /// Corresponds to Java's `ProduceRequest.validateRecords`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if validation fails.
+    pub fn validate_records(version: i16, records_bytes: &Option<Vec<u8>>) -> io::Result<()> {
+        let bytes = match records_bytes {
+            Some(b) if !b.is_empty() => b,
+            _ => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Produce requests with version {} must have at least one record batch per partition",
+                        version
+                    ),
+                ));
+            },
+        };
+
+        let memory_records = MemoryRecords::new(bytes.clone());
+        let mut batches = memory_records.batches();
+
+        let first_batch = match batches.next() {
+            Some(batch) => batch,
+            None => {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    format!(
+                        "Produce requests with version {} must have at least one record batch per partition",
+                        version
+                    ),
+                ));
+            },
+        };
+
+        if first_batch.magic() != RecordBatch::MAGIC_VALUE_V2 {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Produce requests with version {} are only allowed to contain record batches with magic version 2",
+                    version
+                ),
+            ));
+        }
+
+        if version < 7 && first_batch.compression_type() == CompressionType::Zstd {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Produce requests with version {} are not allowed to use ZStandard compression",
+                    version
+                ),
+            ));
+        }
+
+        if batches.next().is_some() {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                format!(
+                    "Produce requests with version {} are only allowed to contain exactly one record batch per partition",
+                    version
+                ),
+            ));
+        }
+
+        Ok(())
     }
 
     /// Parses a `ProduceRequest` from a readable buffer at the given version.
@@ -202,6 +286,12 @@ impl RequestBuilder for ProduceRequestBuilder {
     }
 
     fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+        // Validate the given records first, matching Java's Builder.build(short version)
+        for topic_data in &self.data.topic_data {
+            for partition_data in &topic_data.partition_data {
+                ProduceRequest::validate_records(version, &partition_data.records)?;
+            }
+        }
         Ok(ConcreteRequest::Produce(ProduceRequest::new(self.data.clone(), version)))
     }
 }
@@ -261,12 +351,8 @@ mod tests {
         data.set_acks(0);
         let request = ProduceRequest::new(data, 9);
         let response = request.get_error_response(100, &Errors::UnknownTopicOrPartition);
-        let ConcreteResponse::Produce(r) = &response else {
-            panic!("Expected Produce response");
-        };
-        // With acks=0, no partition data should be present
-        assert!(r.data().responses.is_empty());
-        assert_eq!(r.data().throttle_time_ms, 100);
+        // With acks=0, the response should be None (Java returns null)
+        assert!(response.is_none());
     }
 
     #[test]
@@ -286,8 +372,8 @@ mod tests {
 
         let request = ProduceRequest::new(data, 9);
         let response = request.get_error_response(0, &Errors::UnknownTopicOrPartition);
-        let ConcreteResponse::Produce(r) = &response else {
-            panic!("Expected Produce response");
+        let Some(ConcreteResponse::Produce(r)) = &response else {
+            panic!("Expected Some(Produce response)");
         };
         assert_eq!(r.data().responses.len(), 1);
         assert_eq!(r.data().responses[0].name, "test-topic");
@@ -295,6 +381,11 @@ mod tests {
         assert_eq!(
             r.data().responses[0].partition_responses[0].error_code,
             Errors::UnknownTopicOrPartition.code()
+        );
+        // Verify error message is also set (Issue 3)
+        assert_eq!(
+            r.data().responses[0].partition_responses[0].error_message,
+            Some(Errors::UnknownTopicOrPartition.message().to_string())
         );
     }
 }

@@ -188,14 +188,18 @@ impl ConcreteRequest {
     }
 
     /// Returns an error response for this request.
+    ///
+    /// Returns `None` when the request type does not expect a response (e.g.,
+    /// Produce with acks=0). In Java, `getErrorResponse()` returns `null` in
+    /// those cases.
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
         error: &crate::common::protocol::Errors,
-    ) -> ConcreteResponse {
+    ) -> Option<ConcreteResponse> {
         match self {
-            Self::ApiVersions(r) => r.get_error_response(throttle_time_ms, error),
-            Self::Metadata(r) => r.get_error_response(throttle_time_ms, error),
+            Self::ApiVersions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::Metadata(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::Produce(r) => r.get_error_response(throttle_time_ms, error),
         }
     }

@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::produce_response_data::ProduceResponseData;
+use crate::produce_response_data::{LeaderIdAndEpoch, ProduceResponseData};
 
 /// Sentinel value for an invalid offset.
 pub const INVALID_OFFSET: i64 = -1;
@@ -137,6 +137,9 @@ pub struct PartitionResponse {
     pub record_errors: Vec<RecordError>,
     /// Optional error message.
     pub error_message: Option<String>,
+    /// The current leader for this partition, used by the producer to discover
+    /// the leader when a `NOT_LEADER_OR_FOLLOWER` error is returned.
+    pub current_leader: LeaderIdAndEpoch,
 }
 
 impl PartitionResponse {
@@ -149,6 +152,7 @@ impl PartitionResponse {
             log_start_offset: INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message: None,
+            current_leader: LeaderIdAndEpoch::new(),
         }
     }
 
@@ -161,10 +165,11 @@ impl PartitionResponse {
             log_start_offset: INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message,
+            current_leader: LeaderIdAndEpoch::new(),
         }
     }
 
-    /// Creates a `PartitionResponse` with all fields.
+    /// Creates a `PartitionResponse` with all fields except `current_leader` (defaults to empty).
     pub fn new(
         error: Errors,
         base_offset: i64,
@@ -173,6 +178,27 @@ impl PartitionResponse {
         record_errors: Vec<RecordError>,
         error_message: Option<String>,
     ) -> Self {
+        Self::with_leader(
+            error,
+            base_offset,
+            log_append_time,
+            log_start_offset,
+            record_errors,
+            error_message,
+            LeaderIdAndEpoch::new(),
+        )
+    }
+
+    /// Creates a `PartitionResponse` with all fields including `current_leader`.
+    pub fn with_leader(
+        error: Errors,
+        base_offset: i64,
+        log_append_time: i64,
+        log_start_offset: i64,
+        record_errors: Vec<RecordError>,
+        error_message: Option<String>,
+        current_leader: LeaderIdAndEpoch,
+    ) -> Self {
         Self {
             error,
             base_offset,
@@ -180,6 +206,7 @@ impl PartitionResponse {
             log_start_offset,
             record_errors,
             error_message,
+            current_leader,
         }
     }
 }
@@ -188,12 +215,13 @@ impl std::fmt::Display for PartitionResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{{error: {:?},offset: {},logAppendTime: {}, logStartOffset: {}, recordErrors: {:?}, errorMessage: {}}}",
+            "{{error: {:?}, offset: {}, logAppendTime: {}, logStartOffset: {}, recordErrors: {:?}, currentLeader: {:?}, errorMessage: {}}}",
             self.error,
             self.base_offset,
             self.log_append_time,
             self.log_start_offset,
             self.record_errors,
+            self.current_leader,
             self.error_message.as_deref().unwrap_or("null"),
         )
     }
