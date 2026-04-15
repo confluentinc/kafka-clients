@@ -22,11 +22,9 @@ pub mod common;
 pub mod ffi;
 
 // Include generated message definitions
-#[cfg(not(feature = "skip-generated"))]
 #[allow(dead_code, clippy::all)]
 mod generated {
     include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
 }
 
-#[cfg(not(feature = "skip-generated"))]
 pub use generated::*;

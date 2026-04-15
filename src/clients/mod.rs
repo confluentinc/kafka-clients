@@ -14,34 +14,23 @@
 
 //! Client implementations (org.apache.kafka.clients)
 
-#[cfg(not(feature = "skip-generated"))]
 pub mod api_versions;
-#[cfg(not(feature = "skip-generated"))]
 pub mod client_request;
-#[cfg(not(feature = "skip-generated"))]
 pub mod client_response;
 pub mod client_utils;
 pub mod cluster_connection_states;
 pub mod common_client_configs;
 pub mod connection_state;
 pub mod host_resolver;
-#[cfg(not(feature = "skip-generated"))]
 pub mod in_flight_requests;
-#[cfg(not(feature = "skip-generated"))]
 pub mod kafka_client;
 pub mod least_loaded_node;
-#[cfg(not(feature = "skip-generated"))]
 pub mod metadata;
 pub mod metadata_recovery_strategy;
-#[cfg(not(feature = "skip-generated"))]
 pub mod metadata_snapshot;
-#[cfg(not(feature = "skip-generated"))]
 pub mod metadata_updater;
-#[cfg(not(feature = "skip-generated"))]
 pub mod network_client;
-#[cfg(not(feature = "skip-generated"))]
 pub mod network_client_utils;
-#[cfg(not(feature = "skip-generated"))]
 pub mod node_api_versions;
 pub mod producer;
 
@@ -53,21 +42,15 @@ pub mod producer;
 ///
 /// The callback receives a mutable reference to the [`client_response::ClientResponse`]
 /// so it can inspect the response (e.g., extract the response body).
-#[cfg(not(feature = "skip-generated"))]
 pub type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
 
-#[cfg(not(feature = "skip-generated"))]
 pub use api_versions::ApiVersions;
-#[cfg(not(feature = "skip-generated"))]
 pub use client_request::ClientRequest;
-#[cfg(not(feature = "skip-generated"))]
 pub use client_response::ClientResponse;
 pub use cluster_connection_states::ClusterConnectionStates;
 pub use connection_state::ConnectionState;
 pub use host_resolver::{DefaultHostResolver, HostResolver};
-#[cfg(not(feature = "skip-generated"))]
 pub use in_flight_requests::{InFlightRequest, InFlightRequests};
 pub use least_loaded_node::LeastLoadedNode;
 pub use metadata_recovery_strategy::MetadataRecoveryStrategy;
-#[cfg(not(feature = "skip-generated"))]
 pub use node_api_versions::NodeApiVersions;

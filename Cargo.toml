@@ -7,7 +7,6 @@ version = "0.1.0"
 edition = "2024"
 
 [features]
-skip-generated = []
 integration-tests = []
 ffi = ["dep:cbindgen"]
 
