@@ -829,3 +829,660 @@ impl RecordsInfo {
         Self { max_timestamp, shallow_offset_of_max_timestamp }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::record::record_trait::Record;
+
+    /// All compression types to test with, each only for magic v2.
+    fn all_compressions() -> Vec<Compression> {
+        vec![
+            Compression::none(),
+            Compression::gzip(),
+            Compression::snappy(),
+            Compression::lz4(),
+            Compression::zstd(),
+        ]
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteEmptyRecordSet`.
+    #[test]
+    fn test_write_empty_record_set() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+
+            let records = builder.build();
+            assert_eq!(
+                0,
+                records.size_in_bytes(),
+                "Failed for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteTransactionalRecordSet`.
+    #[test]
+    fn test_write_transactional_record_set() {
+        let pid = 9809_i64;
+        let epoch = 15_i16;
+        let sequence = 2342_i32;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                pid,
+                epoch,
+                sequence,
+                true,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            builder.append_kv(1_700_000_000_000, Some(b"foo"), Some(b"bar"));
+            let records = builder.build();
+
+            let batches: Vec<_> = records.batches().collect();
+            assert_eq!(1, batches.len());
+            assert!(batches[0].is_transactional());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteTransactionalWithInvalidPID`.
+    #[test]
+    fn test_write_transactional_with_invalid_pid() {
+        let pid = RecordBatch::NO_PRODUCER_ID;
+        let epoch = 15_i16;
+        let sequence = 2342_i32;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                pid,
+                epoch,
+                sequence,
+                true,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.close();
+            }));
+            assert!(
+                result.is_err(),
+                "Should have panicked for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteIdempotentWithInvalidEpoch`.
+    #[test]
+    fn test_write_idempotent_with_invalid_epoch() {
+        let pid = 9809_i64;
+        let epoch = RecordBatch::NO_PRODUCER_EPOCH;
+        let sequence = 2342_i32;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                pid,
+                epoch,
+                sequence,
+                true,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.close();
+            }));
+            assert!(
+                result.is_err(),
+                "Should have panicked for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testWriteIdempotentWithInvalidBaseSequence`.
+    #[test]
+    fn test_write_idempotent_with_invalid_base_sequence() {
+        let pid = 9809_i64;
+        let epoch = 15_i16;
+        let sequence = RecordBatch::NO_SEQUENCE;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                pid,
+                epoch,
+                sequence,
+                true,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.close();
+            }));
+            assert!(
+                result.is_err(),
+                "Should have panicked for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testEstimatedSizeInBytes`.
+    #[test]
+    fn test_estimated_size_in_bytes() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                1024,
+            );
+
+            let mut previous_estimate = 0;
+            for i in 0..10 {
+                let value = format!("{}", i);
+                builder.append_kv(i as i64, None, Some(value.as_bytes()));
+                let current_estimate = builder.estimated_size_in_bytes();
+                assert!(
+                    current_estimate > previous_estimate,
+                    "Estimate should increase after append for {:?}, iteration {}",
+                    compression.compression_type(),
+                    i
+                );
+                previous_estimate = current_estimate;
+            }
+
+            let bytes_written_before_close = builder.estimated_size_in_bytes();
+            let records = builder.build();
+            assert_eq!(records.size_in_bytes(), builder.estimated_size_in_bytes());
+            if compression.compression_type() == CompressionType::None {
+                assert_eq!(records.size_in_bytes(), bytes_written_before_close);
+            }
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.buildUsingLogAppendTime`.
+    #[test]
+    fn test_build_using_log_append_time() {
+        let log_append_time = 1_700_000_000_000_i64;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::LogAppendTime,
+                0,
+                log_append_time,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                1024,
+            );
+            builder.append_kv(0, Some(b"a"), Some(b"1"));
+            builder.append_kv(0, Some(b"b"), Some(b"2"));
+            builder.append_kv(0, Some(b"c"), Some(b"3"));
+            let records = builder.build();
+
+            let info = builder.info();
+            assert_eq!(log_append_time, info.max_timestamp);
+            // For v2, offset_of_max_timestamp is always last offset
+            assert_eq!(2, info.shallow_offset_of_max_timestamp);
+
+            for batch in records.batches() {
+                assert_eq!(TimestampType::LogAppendTime, batch.timestamp_type());
+                for record in batch.iter_records().unwrap() {
+                    assert_eq!(log_append_time, record.timestamp());
+                }
+            }
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.buildUsingCreateTime`.
+    #[test]
+    fn test_build_using_create_time() {
+        let log_append_time = 1_700_000_000_000_i64;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                log_append_time,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                1024,
+            );
+            builder.append_kv(0, Some(b"a"), Some(b"1"));
+            builder.append_kv(2, Some(b"b"), Some(b"2"));
+            builder.append_kv(1, Some(b"c"), Some(b"3"));
+            let records = builder.build();
+
+            let info = builder.info();
+            assert_eq!(2, info.max_timestamp);
+            // For v2, offset_of_max_timestamp is always the last offset
+            assert_eq!(2, info.shallow_offset_of_max_timestamp);
+
+            let expected_timestamps = [0_i64, 2, 1];
+            let mut i = 0;
+            for batch in records.batches() {
+                assert_eq!(TimestampType::CreateTime, batch.timestamp_type());
+                for record in batch.iter_records().unwrap() {
+                    assert_eq!(expected_timestamps[i], record.timestamp());
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testAppendedChecksumConsistency`.
+    #[test]
+    fn test_appended_checksum_consistency() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(512),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                RecordBatch::NO_TIMESTAMP,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                512,
+            );
+            builder.append_kv(1, Some(b"key"), Some(b"value"));
+            let records = builder.build();
+            let all_records: Vec<_> = records.records().collect();
+            assert_eq!(1, all_records.len());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testSmallWriteLimit`.
+    #[test]
+    fn test_small_write_limit() {
+        let key = b"foo";
+        let value = b"bar";
+        let write_limit = 0;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(512),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                RecordBatch::NO_TIMESTAMP,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                write_limit,
+            );
+
+            assert!(!builder.is_full());
+            assert!(builder.has_room_for(0, Some(key), Some(value), RecordBatch::EMPTY_HEADERS));
+            builder.append_kv(0, Some(key), Some(value));
+
+            assert!(builder.is_full());
+            assert!(!builder.has_room_for(0, Some(key), Some(value), RecordBatch::EMPTY_HEADERS));
+
+            let records = builder.build();
+            let all_records: Vec<_> = records.records().collect();
+            assert_eq!(
+                1,
+                all_records.len(),
+                "Failed for compression {:?}",
+                compression.compression_type()
+            );
+
+            let record = &all_records[0];
+            assert_eq!(Some(key.as_slice()), record.key());
+            assert_eq!(Some(value.as_slice()), record.value());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.writePastLimit`.
+    #[test]
+    fn test_write_past_limit() {
+        let log_append_time = 1_700_000_000_000_i64;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(64),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                log_append_time,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                64,
+            );
+            builder.set_estimated_compression_ratio(0.5);
+            builder.append_kv(0, Some(b"a"), Some(b"1"));
+            builder.append_kv(1, Some(b"b"), Some(b"2"));
+
+            assert!(!builder.has_room_for(2, Some(b"c"), Some(b"3"), RecordBatch::EMPTY_HEADERS));
+            builder.append_kv(2, Some(b"c"), Some(b"3"));
+            let records = builder.build();
+
+            let info = builder.info();
+            assert_eq!(2, info.shallow_offset_of_max_timestamp);
+            assert_eq!(2, info.max_timestamp);
+
+            let mut i = 0_i64;
+            for batch in records.batches() {
+                assert_eq!(TimestampType::CreateTime, batch.timestamp_type());
+                for record in batch.iter_records().unwrap() {
+                    assert_eq!(i, record.timestamp());
+                    i += 1;
+                }
+            }
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testAppendAtInvalidOffset`.
+    #[test]
+    fn test_append_at_invalid_offset() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                1_700_000_000_000,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                1024,
+            );
+
+            builder.append_with_offset_bytes(0, 1_700_000_000_000, Some(b"a"), None);
+
+            // offsets must increase monotonically
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.append_with_offset_bytes(0, 1_700_000_000_000, Some(b"b"), None);
+            }));
+            assert!(
+                result.is_err(),
+                "Should panic for duplicate offset with compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnBuildWhenAborted`.
+    #[test]
+    fn test_throw_on_build_when_aborted() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            builder.abort();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.build();
+            }));
+            assert!(result.is_err());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.shouldResetBufferToInitialPositionOnAbort`.
+    #[test]
+    fn test_reset_buffer_on_abort() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            builder.append_kv(0, Some(b"a"), Some(b"1"));
+            builder.abort();
+            // After abort, the buffer should be truncated to initial_position (0)
+            assert_eq!(0, builder.buffer().len());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnCloseWhenAborted`.
+    #[test]
+    fn test_throw_on_close_when_aborted() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            builder.abort();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.close();
+            }));
+            assert!(result.is_err());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnAppendWhenAborted`.
+    #[test]
+    fn test_throw_on_append_when_aborted() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            builder.abort();
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.append_kv(0, Some(b"a"), Some(b"1"));
+            }));
+            assert!(result.is_err());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.shouldThrowIllegalStateExceptionOnAppendWhenClosed`.
+    #[test]
+    fn test_throw_on_append_when_closed() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(128),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                128,
+            );
+            builder.append_kv(0, Some(b"a"), Some(b"1"));
+            builder.build();
+
+            let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                builder.append_kv(0, Some(b"a"), Some(b"1"));
+            }));
+            assert!(result.is_err());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsBuilderTest.testRecordTimestampsWithDeleteHorizon`.
+    #[test]
+    fn test_record_timestamps_with_delete_horizon() {
+        let delete_horizon = 100_i64;
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecordsBuilder::new(
+                Vec::with_capacity(2 * 1024 * 1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+                0,
+                RecordBatch::NO_PRODUCER_ID,
+                RecordBatch::NO_PRODUCER_EPOCH,
+                RecordBatch::NO_SEQUENCE,
+                false,
+                false,
+                RecordBatch::NO_PARTITION_LEADER_EPOCH,
+                0,
+                delete_horizon,
+            );
+
+            builder.append_kv(50, Some(b"0"), Some(b"0"));
+            builder.append_kv(100, Some(b"1"), None);
+            builder.append_kv(150, Some(b"2"), Some(b"2"));
+
+            let records = builder.build();
+            let batches: Vec<_> = records.batches().collect();
+            assert_eq!(Some(delete_horizon), batches[0].delete_horizon_ms());
+
+            let record_list = batches[0].iter_records().unwrap();
+            assert_eq!(50, record_list[0].timestamp());
+            assert_eq!(100, record_list[1].timestamp());
+            assert_eq!(150, record_list[2].timestamp());
+        }
+    }
+
+    // Note: testUnsupportedCompress, testLegacyCompressionRate are skipped because
+    // they test magic v0/v1 which we do not support in the Rust producer path.
+
+    // Note: testWriteEndTxnMarkerNonTransactionalBatch, testWriteEndTxnMarkerNonControlBatch,
+    // testWriteLeaderChangeControlBatchWithoutLeaderEpoch, testWriteLeaderChangeControlBatch
+    // are skipped because they require EndTransactionMarker, ControlRecordType, and
+    // LeaderChangeMessage which are not yet implemented.
+}

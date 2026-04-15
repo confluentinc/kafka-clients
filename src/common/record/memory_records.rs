@@ -534,3 +534,356 @@ impl<'a> Iterator for BatchIterator<'a> {
 fn current_time_millis() -> i64 {
     SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::header::internals::RecordHeader as HeaderImpl;
+    use crate::common::record::default_record_batch::DefaultRecordBatch;
+    use crate::common::record::record_trait::Record;
+
+    /// All compression types to test with.
+    fn all_compressions() -> Vec<Compression> {
+        vec![
+            Compression::none(),
+            Compression::gzip(),
+            Compression::snappy(),
+            Compression::lz4(),
+            Compression::zstd(),
+        ]
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testIterator`.
+    #[test]
+    fn test_iterator() {
+        let log_append_time = current_time_millis();
+
+        for compression in all_compressions() {
+            let first_offset = 0_i64;
+            let pid = 134234_i64;
+            let epoch = 28_i16;
+            let first_sequence = 777_i32;
+            let partition_leader_epoch = 998;
+
+            let records = vec![
+                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                SimpleRecord::new_with_key_value(4, None, Some(b"4".to_vec())),
+                SimpleRecord::new_with_key_value(5, Some(b"d".to_vec()), None),
+                SimpleRecord::new_with_key_value(6, None, None),
+            ];
+
+            let mut builder = MemoryRecordsBuilder::new_default(
+                Vec::with_capacity(1024),
+                0,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                first_offset,
+                log_append_time,
+                pid,
+                epoch,
+                first_sequence,
+                false,
+                false,
+                partition_leader_epoch,
+                1024,
+            );
+            for record in &records {
+                builder.append_simple(record);
+            }
+            let memory_records = builder.build();
+
+            // Iterate twice to verify idempotency
+            for _iteration in 0..2 {
+                let mut total = 0;
+                for batch in memory_records.batches() {
+                    assert!(batch.is_valid());
+                    assert_eq!(compression.compression_type(), batch.compression_type());
+                    assert_eq!(first_offset + total as i64, batch.base_offset());
+
+                    assert_eq!(pid, batch.producer_id());
+                    assert_eq!(epoch, batch.producer_epoch());
+                    assert_eq!(first_sequence + total as i32, batch.base_sequence());
+                    assert_eq!(partition_leader_epoch, batch.partition_leader_epoch());
+                    assert_eq!(Some(records.len() as i32), batch.count_or_null());
+                    assert_eq!(TimestampType::CreateTime, batch.timestamp_type());
+                    assert_eq!(records[records.len() - 1].timestamp(), batch.max_timestamp());
+
+                    let mut record_count = 0;
+                    for record in batch.iter_records().unwrap() {
+                        record.ensure_valid().unwrap();
+                        assert!(record.has_magic(batch.magic()));
+                        assert!(!record.is_compressed());
+                        assert_eq!(first_offset + total as i64, record.offset());
+                        assert_eq!(records[total].key(), record.key());
+                        assert_eq!(records[total].value(), record.value());
+                        assert_eq!(first_sequence + total as i32, record.sequence());
+                        assert!(!record.has_timestamp_type(TimestampType::LogAppendTime));
+                        assert_eq!(records[total].timestamp(), record.timestamp());
+                        assert!(!record.has_timestamp_type(TimestampType::NoTimestampType));
+                        // For v2, has_timestamp_type(CreateTime) returns false
+                        assert!(!record.has_timestamp_type(TimestampType::CreateTime));
+
+                        total += 1;
+                        record_count += 1;
+                    }
+
+                    assert_eq!(batch.base_offset() + record_count as i64 - 1, batch.last_offset());
+                }
+            }
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testHasRoomForMethod`.
+    #[test]
+    fn test_has_room_for_method() {
+        for compression in all_compressions() {
+            let mut builder = MemoryRecords::builder_with_magic(
+                1024,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+            );
+            builder.append_kv(0, Some(b"a"), Some(b"1"));
+            assert!(builder.has_room_for(1, Some(b"b"), Some(b"2"), RecordBatch::EMPTY_HEADERS));
+            builder.close();
+            assert!(!builder.has_room_for(1, Some(b"b"), Some(b"2"), RecordBatch::EMPTY_HEADERS));
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testHasRoomForMethodWithHeaders`.
+    #[test]
+    fn test_has_room_for_method_with_headers() {
+        let log_append_time = current_time_millis();
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecords::builder_with_magic(
+                120,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::CreateTime,
+                0,
+            );
+            builder.append_kv(log_append_time, Some(b"key"), Some(b"value"));
+
+            let mut headers = Vec::new();
+            for _ in 0..10 {
+                headers.push(HeaderImpl::new("hello".to_string(), Some(b"world.world".to_vec())));
+            }
+
+            // A record without headers should fit
+            assert!(builder.has_room_for(log_append_time, Some(b"key"), Some(b"value"), RecordBatch::EMPTY_HEADERS,));
+            // A record with many headers should not fit (for v2)
+            assert!(!builder.has_room_for(log_append_time, Some(b"key"), Some(b"value"), &headers));
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testChecksum` (v2 only).
+    #[test]
+    fn test_checksum_v2() {
+        // We get reasonable coverage with uncompressed and one compression type
+        for (compression, expected_checksum) in &[
+            (Compression::none(), 3851219455_u32),
+            (Compression::lz4(), 2745969314_u32),
+        ] {
+            let records = vec![
+                SimpleRecord::new_with_key_value(283843, Some(b"key1".to_vec()), Some(b"value1".to_vec())),
+                SimpleRecord::new_with_key_value(1234, Some(b"key2".to_vec()), Some(b"value2".to_vec())),
+            ];
+            let mem_records =
+                MemoryRecords::with_records_magic(RecordBatch::MAGIC_VALUE_V2, compression.clone(), &records);
+            let batch = mem_records.batches().next().unwrap();
+            assert_eq!(
+                *expected_checksum,
+                batch.checksum(),
+                "Unexpected checksum for compression {:?}",
+                compression.compression_type()
+            );
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testWithRecords`.
+    #[test]
+    fn test_with_records() {
+        for compression in all_compressions() {
+            let mem_records = MemoryRecords::with_records_magic(
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                &[SimpleRecord::new_with_key_value(
+                    10,
+                    Some(b"key1".to_vec()),
+                    Some(b"value1".to_vec()),
+                )],
+            );
+            let batch = mem_records.batches().next().unwrap();
+            let record = batch.iter_records().unwrap().into_iter().next().unwrap();
+            assert_eq!(Some(b"key1".as_slice()), record.key());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testNextBatchSize` (v2 only, partial).
+    #[test]
+    fn test_first_batch_size() {
+        let log_append_time = current_time_millis();
+
+        for compression in all_compressions() {
+            let mut builder = MemoryRecords::builder_with_log_append_time(
+                2048,
+                RecordBatch::MAGIC_VALUE_V2,
+                compression.clone(),
+                TimestampType::LogAppendTime,
+                0,
+                log_append_time,
+            );
+            builder.append_kv(10, None, Some(b"abc"));
+            let records = builder.build();
+
+            let size = records.size_in_bytes();
+            assert_eq!(Some(size), records.first_batch_size());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testSlice` (v2 only).
+    #[test]
+    fn test_slice() {
+        for compression in all_compressions() {
+            // Create records with multiple batches
+            let mut buf = Vec::new();
+            for (offset, count) in &[(0_i64, 3_usize), (6_i64, 8_usize), (15_i64, 4_usize)] {
+                let mut builder = MemoryRecords::builder_with_magic(
+                    1024,
+                    RecordBatch::MAGIC_VALUE_V2,
+                    compression.clone(),
+                    TimestampType::CreateTime,
+                    *offset,
+                );
+                for i in 0..*count {
+                    builder.append_with_offset_bytes(
+                        *offset + i as i64,
+                        0,
+                        Some(format!("key{}", i).as_bytes()),
+                        Some(format!("val{}", i).as_bytes()),
+                    );
+                }
+                let batch_records = builder.build();
+                buf.extend_from_slice(batch_records.buffer());
+            }
+
+            let records = MemoryRecords::new(buf);
+
+            // Test slicing from start
+            let sliced = records.slice(0, records.size_in_bytes());
+            assert_eq!(records.size_in_bytes(), sliced.size_in_bytes());
+            assert_eq!(records.valid_bytes(), sliced.valid_bytes());
+
+            let items: Vec<_> = records.batches().collect();
+
+            // Test slicing past first batch
+            let first_size = items[0].size_in_bytes();
+            let sliced = records.slice(first_size, records.size_in_bytes() - first_size);
+            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
+
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(items.len() - 1, sliced_batches.len());
+            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
+
+            // Read a single batch starting from second batch
+            let second_size = items[1].size_in_bytes();
+            let sliced = records.slice(first_size, second_size);
+            assert_eq!(second_size, sliced.size_in_bytes());
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(1, sliced_batches.len());
+        }
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testSliceEmptyRecords`.
+    #[test]
+    fn test_slice_empty_records() {
+        let empty = MemoryRecords::empty();
+        let sliced = empty.slice(0, 0);
+        assert_eq!(0, sliced.size_in_bytes());
+        assert_eq!(0, sliced.batches().count());
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testSliceInvalidPosition`.
+    #[test]
+    #[should_panic(expected = "Slice from position")]
+    fn test_slice_invalid_position() {
+        let records = MemoryRecords::with_records(
+            Compression::none(),
+            &[SimpleRecord::new_with_key_value(
+                1,
+                Some(b"k".to_vec()),
+                Some(b"v".to_vec()),
+            )],
+        );
+        records.slice(records.size_in_bytes() + 1, records.size_in_bytes());
+    }
+
+    /// Corresponds to Java's `MemoryRecordsTest.testSliceForAlreadySlicedMemoryRecords`.
+    #[test]
+    fn test_slice_for_already_sliced_memory_records() {
+        for compression in all_compressions() {
+            // Create records with multiple batches
+            let mut buf = Vec::new();
+            for (offset, count) in &[
+                (0_i64, 5_usize),
+                (5_i64, 10_usize),
+                (15_i64, 12_usize),
+                (27_i64, 4_usize),
+            ] {
+                let mut builder = MemoryRecords::builder_with_magic(
+                    1024,
+                    RecordBatch::MAGIC_VALUE_V2,
+                    compression.clone(),
+                    TimestampType::CreateTime,
+                    *offset,
+                );
+                for i in 0..*count {
+                    builder.append_with_offset_bytes(
+                        *offset + i as i64,
+                        0,
+                        Some(format!("key{}", i).as_bytes()),
+                        Some(format!("val{}", i).as_bytes()),
+                    );
+                }
+                let batch_records = builder.build();
+                buf.extend_from_slice(batch_records.buffer());
+            }
+            let records = MemoryRecords::new(buf);
+
+            let items: Vec<DefaultRecordBatch> = records.batches().collect();
+
+            // Slice from third batch
+            let position: usize = items[0].size_in_bytes() + items[1].size_in_bytes();
+            let sliced = records.slice(position, records.size_in_bytes() - position);
+            assert_eq!(records.size_in_bytes() - position, sliced.size_in_bytes());
+            let sliced_batches: Vec<_> = sliced.batches().collect();
+            assert_eq!(items.len() - 2, sliced_batches.len());
+
+            // Further slice from fourth batch
+            let position2 = items[2].size_in_bytes();
+            let final_sliced = sliced.slice(position2, sliced.size_in_bytes() - position2);
+            assert_eq!(sliced.size_in_bytes() - position2, final_sliced.size_in_bytes());
+            let final_batches: Vec<_> = final_sliced.batches().collect();
+            assert_eq!(items.len() - 3, final_batches.len());
+        }
+    }
+
+    // Note: filterTo tests (testFilterToPreservesPartitionLeaderEpoch, testFilterToEmptyBatchRetention,
+    // testEmptyBatchRetention, testEmptyBatchDeletion, testBaseTimestampToDeleteHorizonConversion,
+    // testFilterToBatchDiscard, testFilterToAlreadyCompactedLog, testFilterToPreservesProducerInfo,
+    // testFilterToWithUndersizedBuffer, testFilterTo, testFilterToPreservesLogAppendTime) are
+    // skipped because filterTo is not implemented in the Rust version. The filterTo method is
+    // a server-side operation used for log compaction and not needed for the producer path.
+
+    // Note: testBuildEndTxnMarker and testBuildLeaderChangeMessage are skipped because
+    // EndTransactionMarker, ControlRecordType, and LeaderChangeMessage/ControlRecordUtils
+    // are not yet implemented.
+
+    // Note: testUnsupportedCompress is skipped because it tests magic v0/v1 which
+    // we do not support in the Rust producer path.
+}

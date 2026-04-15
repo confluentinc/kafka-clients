@@ -726,6 +726,9 @@ fn write_i16(buf: &mut [u8], offset: usize, value: i16) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::record::record_trait::Record;
+    use crate::common::record::simple_record::SimpleRecord;
 
     #[test]
     fn test_increment_sequence() {
@@ -766,4 +769,464 @@ mod tests {
     fn test_compute_attributes_no_timestamp_type() {
         compute_attributes(CompressionType::None, TimestampType::NoTimestampType, false, false, false);
     }
+
+    // -- Tests translated from DefaultRecordBatchTest.java --
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testWriteEmptyHeader`.
+    #[test]
+    fn test_write_empty_header() {
+        let producer_id = 23423_i64;
+        let producer_epoch = 145_i16;
+        let base_sequence = 983_i32;
+        let base_offset = 15_i64;
+        let last_offset = 37_i64;
+        let partition_leader_epoch = 15_i32;
+        let timestamp = 1_700_000_000_000_i64;
+
+        for timestamp_type in &[TimestampType::CreateTime, TimestampType::LogAppendTime] {
+            for &is_transactional in &[true, false] {
+                for &is_control_batch in &[true, false] {
+                    let mut buffer = Vec::with_capacity(2048);
+                    DefaultRecordBatch::write_empty_header(
+                        &mut buffer,
+                        RecordBatch::CURRENT_MAGIC_VALUE,
+                        producer_id,
+                        producer_epoch,
+                        base_sequence,
+                        base_offset,
+                        last_offset,
+                        partition_leader_epoch,
+                        *timestamp_type,
+                        timestamp,
+                        is_transactional,
+                        is_control_batch,
+                    );
+                    let batch = DefaultRecordBatch::new(buffer);
+                    assert_eq!(producer_id, batch.producer_id());
+                    assert_eq!(producer_epoch, batch.producer_epoch());
+                    assert_eq!(base_sequence, batch.base_sequence());
+                    assert_eq!(base_sequence + ((last_offset - base_offset) as i32), batch.last_sequence());
+                    assert_eq!(base_offset, batch.base_offset());
+                    assert_eq!(last_offset, batch.last_offset());
+                    assert_eq!(partition_leader_epoch, batch.partition_leader_epoch());
+                    assert_eq!(is_transactional, batch.is_transactional());
+                    assert_eq!(*timestamp_type, batch.timestamp_type());
+                    assert_eq!(timestamp, batch.max_timestamp());
+                    assert_eq!(RecordBatch::NO_TIMESTAMP, batch.base_timestamp());
+                    assert_eq!(is_control_batch, batch.is_control_batch());
+                }
+            }
+        }
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.buildDefaultRecordBatch`.
+    #[test]
+    fn test_build_default_record_batch() {
+        let mut builder = MemoryRecords::builder_with_magic(
+            2048,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            1234567,
+        );
+        builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
+        builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
+
+        let records = builder.build();
+        for batch in records.batches() {
+            assert!(batch.is_valid());
+            assert_eq!(1234567, batch.base_offset());
+            assert_eq!(1234568, batch.last_offset());
+            assert_eq!(2, batch.max_timestamp());
+            assert_eq!(RecordBatch::NO_PRODUCER_ID, batch.producer_id());
+            assert_eq!(RecordBatch::NO_PRODUCER_EPOCH, batch.producer_epoch());
+            assert_eq!(RecordBatch::NO_SEQUENCE, batch.base_sequence());
+            assert_eq!(RecordBatch::NO_SEQUENCE, batch.last_sequence());
+
+            for record in batch.iter_records().unwrap() {
+                record.ensure_valid().unwrap();
+            }
+        }
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.buildDefaultRecordBatchWithProducerId`.
+    #[test]
+    fn test_build_default_record_batch_with_producer_id() {
+        let pid = 23423_i64;
+        let epoch = 145_i16;
+        let base_sequence = 983_i32;
+
+        let mut builder = MemoryRecords::builder_with_producer(
+            2048,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            1234567,
+            RecordBatch::NO_TIMESTAMP,
+            pid,
+            epoch,
+            base_sequence,
+        );
+        builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
+        builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
+
+        let records = builder.build();
+        for batch in records.batches() {
+            assert!(batch.is_valid());
+            assert_eq!(1234567, batch.base_offset());
+            assert_eq!(1234568, batch.last_offset());
+            assert_eq!(2, batch.max_timestamp());
+            assert_eq!(pid, batch.producer_id());
+            assert_eq!(epoch, batch.producer_epoch());
+            assert_eq!(base_sequence, batch.base_sequence());
+            assert_eq!(base_sequence + 1, batch.last_sequence());
+
+            for record in batch.iter_records().unwrap() {
+                record.ensure_valid().unwrap();
+            }
+        }
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.buildDefaultRecordBatchWithSequenceWrapAround`.
+    #[test]
+    fn test_build_default_record_batch_with_sequence_wrap_around() {
+        let pid = 23423_i64;
+        let epoch = 145_i16;
+        let base_sequence = i32::MAX - 1;
+
+        let mut builder = MemoryRecords::builder_with_producer(
+            2048,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            1234567,
+            RecordBatch::NO_TIMESTAMP,
+            pid,
+            epoch,
+            base_sequence,
+        );
+        builder.append_with_offset_bytes(1234567, 1, Some(b"a"), Some(b"v"));
+        builder.append_with_offset_bytes(1234568, 2, Some(b"b"), Some(b"v"));
+        builder.append_with_offset_bytes(1234569, 3, Some(b"c"), Some(b"v"));
+
+        let records = builder.build();
+        let batches: Vec<_> = records.batches().collect();
+        assert_eq!(1, batches.len());
+
+        let batch = &batches[0];
+        assert_eq!(pid, batch.producer_id());
+        assert_eq!(epoch, batch.producer_epoch());
+        assert_eq!(base_sequence, batch.base_sequence());
+        assert_eq!(0, batch.last_sequence());
+
+        let all_records = batch.iter_records().unwrap();
+        assert_eq!(3, all_records.len());
+        assert_eq!(i32::MAX - 1, all_records[0].sequence());
+        assert_eq!(i32::MAX, all_records[1].sequence());
+        assert_eq!(0, all_records[2].sequence());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testSizeInBytes`.
+    #[test]
+    fn test_size_in_bytes() {
+        use crate::common::header::internals::RecordHeader;
+
+        let headers = vec![
+            RecordHeader::new("foo".to_string(), Some(b"value".to_vec())),
+            RecordHeader::new("bar".to_string(), None),
+        ];
+
+        let timestamp = 1_700_000_000_000_i64;
+        let records = vec![
+            SimpleRecord::new_with_key_value(timestamp, Some(b"key".to_vec()), Some(b"value".to_vec())),
+            SimpleRecord::new_with_key_value(timestamp + 30000, None, Some(b"value".to_vec())),
+            SimpleRecord::new_with_key_value(timestamp + 60000, Some(b"key".to_vec()), None),
+            SimpleRecord::new(timestamp + 60000, Some(b"key".to_vec()), Some(b"value".to_vec()), headers),
+        ];
+        let actual_size = MemoryRecords::with_records(Compression::none(), &records).size_in_bytes();
+        assert_eq!(actual_size, DefaultRecordBatch::size_in_bytes_of_simple_records(&records));
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordSize`.
+    #[test]
+    fn test_invalid_record_size() {
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[
+                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            ],
+        );
+
+        let mut buf = records.buffer().to_vec();
+        // Corrupt the length field
+        buf[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4].copy_from_slice(&10_i32.to_be_bytes());
+
+        let batch = DefaultRecordBatch::new(buf);
+        assert!(!batch.is_valid());
+        assert!(batch.ensure_valid().is_err());
+    }
+
+    /// Helper to create records with an invalid record count.
+    fn records_with_invalid_record_count(
+        timestamp: i64,
+        compression_type: CompressionType,
+        invalid_count: i32,
+    ) -> DefaultRecordBatch {
+        let compression = Compression::of(compression_type);
+        let mut builder = MemoryRecords::builder_with_magic(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            compression,
+            TimestampType::CreateTime,
+            0,
+        );
+        builder.append_with_offset_bytes(0, timestamp, None, Some(b"hello"));
+        builder.append_with_offset_bytes(1, timestamp, None, Some(b"there"));
+        builder.append_with_offset_bytes(2, timestamp, None, Some(b"beautiful"));
+        let records = builder.build();
+
+        let mut buf = records.buffer().to_vec();
+        // Overwrite the records count
+        buf[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
+            .copy_from_slice(&invalid_count.to_be_bytes());
+        DefaultRecordBatch::new(buf)
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooManyNonCompressedV2`.
+    #[test]
+    fn test_invalid_record_count_too_many_non_compressed_v2() {
+        let now = 1_700_000_000_000_i64;
+        let batch = records_with_invalid_record_count(now, CompressionType::None, 5);
+        let result = batch.iter_records();
+        assert!(result.is_err());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleNonCompressedV2`.
+    #[test]
+    fn test_invalid_record_count_too_little_non_compressed_v2() {
+        let now = 1_700_000_000_000_i64;
+        let batch = records_with_invalid_record_count(now, CompressionType::None, 2);
+        let result = batch.iter_records();
+        assert!(result.is_err());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooManyCompressedV2`.
+    #[test]
+    fn test_invalid_record_count_too_many_compressed_v2() {
+        let now = 1_700_000_000_000_i64;
+        let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 5);
+        let result = batch.iter_records();
+        assert!(result.is_err());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidRecordCountTooLittleCompressedV2`.
+    #[test]
+    fn test_invalid_record_count_too_little_compressed_v2() {
+        let now = 1_700_000_000_000_i64;
+        let batch = records_with_invalid_record_count(now, CompressionType::Gzip, 2);
+        let result = batch.iter_records();
+        assert!(result.is_err());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testInvalidCrc`.
+    #[test]
+    fn test_invalid_crc() {
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[
+                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            ],
+        );
+
+        let mut buf = records.buffer().to_vec();
+        // Corrupt the last_offset_delta field (will invalidate CRC)
+        buf[RecordBatch::LAST_OFFSET_DELTA_OFFSET..RecordBatch::LAST_OFFSET_DELTA_OFFSET + 4]
+            .copy_from_slice(&23_i32.to_be_bytes());
+
+        let batch = DefaultRecordBatch::new(buf);
+        assert!(!batch.is_valid());
+        assert!(batch.ensure_valid().is_err());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testSetLastOffset`.
+    #[test]
+    fn test_set_last_offset() {
+        let simple_records = vec![
+            SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+            SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+            SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+        ];
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &simple_records,
+        );
+
+        let last_offset = 500_i64;
+        let first_offset = last_offset - simple_records.len() as i64 + 1;
+
+        let buf = records.buffer().to_vec();
+        let mut batch = DefaultRecordBatch::new(buf);
+        batch.set_last_offset(last_offset);
+        assert_eq!(last_offset, batch.last_offset());
+        assert_eq!(first_offset, batch.base_offset());
+        assert!(batch.is_valid());
+
+        // Also verify via MemoryRecords iteration
+        let records2 = MemoryRecords::new(batch.buffer().to_vec());
+        let batches: Vec<_> = records2.batches().collect();
+        assert_eq!(1, batches.len());
+        assert_eq!(last_offset, batches[0].last_offset());
+
+        let mut offset = first_offset;
+        for record in records2.records() {
+            assert_eq!(offset, record.offset());
+            offset += 1;
+        }
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testSetPartitionLeaderEpoch`.
+    #[test]
+    fn test_set_partition_leader_epoch() {
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[
+                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            ],
+        );
+
+        let leader_epoch = 500;
+
+        let buf = records.buffer().to_vec();
+        let mut batch = DefaultRecordBatch::new(buf);
+        batch.set_partition_leader_epoch(leader_epoch);
+        assert_eq!(leader_epoch, batch.partition_leader_epoch());
+        assert!(batch.is_valid());
+
+        let records2 = MemoryRecords::new(batch.buffer().to_vec());
+        let batches: Vec<_> = records2.batches().collect();
+        assert_eq!(1, batches.len());
+        assert_eq!(leader_epoch, batches[0].partition_leader_epoch());
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testSetLogAppendTime`.
+    #[test]
+    fn test_set_log_append_time() {
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[
+                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            ],
+        );
+
+        let log_append_time = 15_i64;
+
+        let buf = records.buffer().to_vec();
+        let mut batch = DefaultRecordBatch::new(buf);
+        batch.set_max_timestamp(TimestampType::LogAppendTime, log_append_time);
+        assert_eq!(TimestampType::LogAppendTime, batch.timestamp_type());
+        assert_eq!(log_append_time, batch.max_timestamp());
+        assert!(batch.is_valid());
+
+        let records2 = MemoryRecords::new(batch.buffer().to_vec());
+        let batches: Vec<_> = records2.batches().collect();
+        assert_eq!(1, batches.len());
+        assert_eq!(log_append_time, batches[0].max_timestamp());
+        assert_eq!(TimestampType::LogAppendTime, batches[0].timestamp_type());
+
+        // When timestamp type is LogAppendTime, all records should have the log append time
+        for record in records2.records() {
+            assert_eq!(log_append_time, record.timestamp());
+        }
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testSetNoTimestampTypeNotAllowed`.
+    #[test]
+    #[should_panic(expected = "Timestamp type must be provided")]
+    fn test_set_no_timestamp_type_not_allowed() {
+        let records = MemoryRecords::with_records_at_offset(
+            RecordBatch::MAGIC_VALUE_V2,
+            0,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &[
+                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+            ],
+        );
+        let buf = records.buffer().to_vec();
+        let mut batch = DefaultRecordBatch::new(buf);
+        batch.set_max_timestamp(TimestampType::NoTimestampType, RecordBatch::NO_TIMESTAMP);
+    }
+
+    /// Corresponds to Java's `DefaultRecordBatchTest.testStreamingIteratorConsistency`.
+    ///
+    /// For each compression type, verifies that iterating records produces consistent results.
+    #[test]
+    fn test_streaming_iterator_consistency() {
+        for compression_type in &[
+            CompressionType::None,
+            CompressionType::Gzip,
+            CompressionType::Snappy,
+            CompressionType::Lz4,
+            CompressionType::Zstd,
+        ] {
+            let compression = Compression::of(*compression_type);
+            let records = MemoryRecords::with_records_at_offset(
+                RecordBatch::MAGIC_VALUE_V2,
+                0,
+                compression,
+                TimestampType::CreateTime,
+                &[
+                    SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
+                    SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
+                    SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
+                ],
+            );
+            let batch = DefaultRecordBatch::from_slice(records.buffer());
+            let iter_records = batch
+                .iter_records()
+                .unwrap_or_else(|e| panic!("Failed for {:?}: {}", compression_type, e));
+            assert_eq!(3, iter_records.len(), "Failed for {:?}", compression_type);
+
+            // Verify offsets and keys
+            assert_eq!(0, iter_records[0].offset());
+            assert_eq!(Some(b"a".as_slice()), iter_records[0].key());
+            assert_eq!(1, iter_records[1].offset());
+            assert_eq!(Some(b"b".as_slice()), iter_records[1].key());
+            assert_eq!(2, iter_records[2].offset());
+            assert_eq!(Some(b"c".as_slice()), iter_records[2].key());
+        }
+    }
+
+    // Note: testReadAndWriteControlBatch is skipped because it requires EndTransactionMarker
+    // and ControlRecordType which are not yet implemented.
+
+    // Note: testSkipKeyValueIteratorCorrectness, testBufferReuseInSkipKeyValueIterator,
+    // and testZstdJniForSkipKeyValueIterator are skipped because they test internal
+    // Java-specific iterator types (StreamRecordIterator, RecordIterator) and
+    // BufferSupplier, which are not applicable to the Rust implementation.
 }
