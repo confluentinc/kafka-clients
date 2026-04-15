@@ -319,6 +319,13 @@ impl KafkaError {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
     }
 
+    /// Create a record batch too large error.
+    ///
+    /// Corresponds to Java's `RecordBatchTooLargeException`.
+    pub fn record_batch_too_large(message: impl Into<String>) -> Self {
+        Self::Generic(KafkaGenericError::with_message(Errors::MessageTooLarge, message))
+    }
+
     // -- Base access -------------------------------------------------------
 
     /// Access the base [`KafkaGenericError`] common to all variants.

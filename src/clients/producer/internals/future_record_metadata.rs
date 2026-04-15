@@ -211,7 +211,7 @@ impl FutureRecordMetadata {
     }
 
     /// Chain this future to wait on an `Arc<FutureRecordMetadata>`.
-    fn chain_arc(&self, future_record_metadata: Arc<FutureRecordMetadata>) {
+    pub fn chain_arc(&self, future_record_metadata: Arc<FutureRecordMetadata>) {
         let mut next = self.next_record_metadata.lock().unwrap();
         if next.is_none() {
             *next = Some(future_record_metadata);

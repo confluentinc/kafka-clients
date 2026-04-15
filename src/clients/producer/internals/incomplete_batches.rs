@@ -110,12 +110,16 @@ impl Default for IncompleteBatches {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::compress::Compression;
+    use crate::common::record::memory_records::MemoryRecords;
+    use crate::common::record::timestamp_type::TimestampType;
     use crate::common::topic_partition::TopicPartition;
 
+    #[allow(clippy::arc_with_non_send_sync)]
     fn make_batch(topic: &str, partition: i32) -> Arc<ProducerBatch> {
         let tp = TopicPartition::new(topic.to_string(), partition);
-        let result = Arc::new(ProduceRequestResult::new(tp));
-        Arc::new(ProducerBatch { produce_future: result })
+        let builder = MemoryRecords::builder(1024, Compression::none(), TimestampType::CreateTime, 0);
+        Arc::new(ProducerBatch::new(tp, builder, 0))
     }
 
     #[test]
