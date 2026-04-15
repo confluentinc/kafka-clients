@@ -453,17 +453,26 @@ unsafe fn send_batch_inner(
             continue;
         }
 
-        let record =
-            match unsafe { build_record(rec.topic, rec.partition, rec.timestamp, rec.key, rec.key_len, rec.value, rec.value_len) } {
-                Ok(r) => r,
-                Err(e) => {
-                    unsafe {
-                        *out_futures.add(i) = std::ptr::null_mut();
-                        *out_errors.add(i) = box_error(e);
-                    }
-                    continue;
-                },
-            };
+        let record = match unsafe {
+            build_record(
+                rec.topic,
+                rec.partition,
+                rec.timestamp,
+                rec.key,
+                rec.key_len,
+                rec.value,
+                rec.value_len,
+            )
+        } {
+            Ok(r) => r,
+            Err(e) => {
+                unsafe {
+                    *out_futures.add(i) = std::ptr::null_mut();
+                    *out_errors.add(i) = box_error(e);
+                }
+                continue;
+            },
+        };
 
         match producer_send(&guard, record) {
             Ok(future) => unsafe {
@@ -1481,8 +1490,7 @@ mod tests {
                 value: std::ptr::null(),
                 value_len: -1,
             };
-            let sent =
-                kafka_producer_Producer_send_batch(producer, &dummy_record, 0, &mut futures, &mut errors);
+            let sent = kafka_producer_Producer_send_batch(producer, &dummy_record, 0, &mut futures, &mut errors);
             assert_eq!(sent, 0);
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 0);
 
@@ -1588,8 +1596,7 @@ mod tests {
             },
         ];
 
-        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 2] =
-            [std::ptr::null_mut(), std::ptr::null_mut()];
+        let mut futures: [*mut kafka_producer_FutureRecordMetadata_t; 2] = [std::ptr::null_mut(), std::ptr::null_mut()];
         let mut errors: [*mut kafka_KafkaError_t; 2] = [std::ptr::null_mut(), std::ptr::null_mut()];
 
         unsafe {
