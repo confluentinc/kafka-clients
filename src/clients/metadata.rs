@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Condvar, Mutex};
 
 use log::{debug, error, info, trace};
 
@@ -99,6 +99,11 @@ pub struct Metadata {
     // Java uses `volatile` for this field; in Rust we protect all mutable state
     // behind the mutex for correctness.
     inner: Mutex<MetadataInner>,
+    /// Condition variable for waiting on metadata updates.
+    ///
+    /// Corresponds to Java's `Object.wait()/notifyAll()` on the Metadata instance.
+    /// Used by `await_update()` to block until the metadata version changes.
+    update_condvar: Condvar,
     /// Optional custom retain topic function. When set, this overrides
     /// the default `retain_topic_default` behavior.
     ///
@@ -275,6 +280,7 @@ impl Metadata {
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
+            update_condvar: Condvar::new(),
             retain_topic_fn: None,
             enable_partial_updates: false,
             request_builder_fn: None,
@@ -332,6 +338,7 @@ impl Metadata {
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
+            update_condvar: Condvar::new(),
             retain_topic_fn: overrides.retain_topic_fn,
             enable_partial_updates: overrides.enable_partial_updates,
             request_builder_fn: overrides.request_builder_fn,
@@ -668,6 +675,10 @@ impl Metadata {
         if let Some(ref post_update) = self.post_update_fn {
             post_update(response, is_partial_update, now_ms);
         }
+
+        // Notify all threads waiting on metadata updates.
+        // Corresponds to Java's notifyAll() at the end of Metadata.update().
+        self.update_condvar.notify_all();
     }
 
     /// Updates the partition-leadership info in the metadata.
@@ -1090,6 +1101,46 @@ impl Metadata {
         inner.fatal_err = Some(error);
     }
 
+    /// Wait for metadata update until the given version is exceeded or the timeout expires.
+    ///
+    /// Corresponds to Java's `Metadata.awaitUpdate(int lastVersion, long timeoutMs)`.
+    ///
+    /// # Arguments
+    /// * `last_version` - The metadata version at the time the caller started waiting.
+    /// * `timeout_ms` - Maximum time to wait in milliseconds.
+    ///
+    /// # Errors
+    /// Returns a `KafkaError::Timeout` if the metadata version is not updated within
+    /// the given timeout.
+    pub fn await_update(&self, last_version: i32, timeout_ms: i64) -> Result<(), KafkaError> {
+        use std::time::{Duration, Instant};
+
+        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
+        let mut inner = self.inner.lock().unwrap();
+
+        while inner.update_version <= last_version {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(KafkaError::timeout(format!(
+                    "Failed to update metadata after {} ms.",
+                    timeout_ms
+                )));
+            }
+
+            let (guard, wait_result) = self.update_condvar.wait_timeout(inner, remaining).unwrap();
+            inner = guard;
+
+            if wait_result.timed_out() && inner.update_version <= last_version {
+                return Err(KafkaError::timeout(format!(
+                    "Failed to update metadata after {} ms.",
+                    timeout_ms
+                )));
+            }
+        }
+
+        Ok(())
+    }
+
     /// Returns the current metadata update version.
     pub fn update_version(&self) -> i32 {
         let inner = self.inner.lock().unwrap();
@@ -1106,6 +1157,10 @@ impl Metadata {
     pub fn close(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.is_closed = true;
+        // Wake up any threads waiting for metadata updates so they can detect the close.
+        inner.update_version += 1;
+        drop(inner);
+        self.update_condvar.notify_all();
     }
 
     /// Check if this metadata instance has been closed.

@@ -251,6 +251,14 @@ pub enum KafkaError {
     ///
     /// Corresponds to Java's `TimeoutException`.
     Timeout(String),
+    /// Record too large error — the record is larger than the configured maximum.
+    ///
+    /// Corresponds to Java's `RecordTooLargeException`.
+    RecordTooLarge(String),
+    /// Serialization error — the key or value could not be serialized.
+    ///
+    /// Corresponds to Java's `SerializationException`.
+    Serialization(String),
 }
 
 impl KafkaError {
@@ -314,6 +322,20 @@ impl KafkaError {
         Self::Timeout(message.into())
     }
 
+    /// Create a record too large error.
+    ///
+    /// Corresponds to Java's `RecordTooLargeException`.
+    pub fn record_too_large(message: impl Into<String>) -> Self {
+        Self::RecordTooLarge(message.into())
+    }
+
+    /// Create a serialization error.
+    ///
+    /// Corresponds to Java's `SerializationException`.
+    pub fn serialization(message: impl Into<String>) -> Self {
+        Self::Serialization(message.into())
+    }
+
     /// Create an unsupported version error.
     pub fn unsupported_version(message: impl Into<String>) -> Self {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
@@ -338,7 +360,11 @@ impl KafkaError {
             Self::TopicAuthorization(e) => Some(&e.kafka_error),
             Self::InvalidTopic(e) => Some(&e.kafka_error),
             Self::GroupAuthorization(e) => Some(&e.kafka_error),
-            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Timeout(_) => None,
+            Self::IllegalArgument(_)
+            | Self::IllegalState(_)
+            | Self::Timeout(_)
+            | Self::RecordTooLarge(_)
+            | Self::Serialization(_) => None,
         }
     }
 
@@ -363,7 +389,11 @@ impl KafkaError {
     /// The error message.
     pub fn message(&self) -> &str {
         match self {
-            Self::IllegalArgument(msg) | Self::IllegalState(msg) | Self::Timeout(msg) => msg,
+            Self::IllegalArgument(msg)
+            | Self::IllegalState(msg)
+            | Self::Timeout(msg)
+            | Self::RecordTooLarge(msg)
+            | Self::Serialization(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
     }
@@ -406,6 +436,8 @@ impl fmt::Display for KafkaError {
             Self::IllegalArgument(msg) => write!(f, "IllegalArgumentError: {msg}"),
             Self::IllegalState(msg) => write!(f, "IllegalStateError: {msg}"),
             Self::Timeout(msg) => write!(f, "TimeoutError: {msg}"),
+            Self::RecordTooLarge(msg) => write!(f, "RecordTooLargeError: {msg}"),
+            Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
         }
     }
 }
