@@ -17,3 +17,7 @@ then a SaslAuthenticate with PLAIN credential
 
 The MockProducer implementation is translated and a C FFI is added to call
 the Rust client from many languages.
+
+## Milestone 5
+
+Python CPython C extension binding module wrapping the Rust C FFI, with a high-level Pythonic wrapper, unit tests and a performance test.

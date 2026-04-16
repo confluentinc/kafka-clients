@@ -636,6 +636,98 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
     }
 }
 
+/// Blocks until all futures in the array resolve, writing results into the
+/// parallel output arrays.
+///
+/// For each index `i` in `0..count`:
+/// - On success: `out_metadata[i]` is set to a valid
+///   [`kafka_producer_RecordMetadata_t`] handle and `out_errors[i]` is set to
+///   null.
+/// - On failure: `out_errors[i]` is set to a valid [`kafka_KafkaError_t`]
+///   handle and `out_metadata[i]` is set to null.
+/// - If `futures[i]` is null it is treated as an error
+///   ([`Errors::InvalidRequest`]).
+///
+/// The caller must free every non-null metadata handle with
+/// [`kafka_producer_RecordMetadata_destroy`] and every non-null error handle
+/// with [`kafka_KafkaError_destroy`].  The future handles in `futures` are
+/// **not** consumed — the caller still owns them and must destroy them
+/// separately.
+///
+/// # Parameters
+///
+/// - `futures`: Non-null pointer to an array of `count` future handles.
+/// - `count`: Number of elements (must be ≥ 0).
+/// - `out_metadata`: Non-null pointer to a caller-allocated array of `count`
+///   `*mut kafka_producer_RecordMetadata_t`.
+/// - `out_errors`: Non-null pointer to a caller-allocated array of `count`
+///   `*mut kafka_KafkaError_t`.
+///
+/// # Safety
+///
+/// - `futures`, `out_metadata`, and `out_errors` must be non-null and point to
+///   arrays of at least `count` elements.
+/// - Each non-null entry in `futures` must be a valid handle from a send
+///   function.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
+    futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+    count: i32,
+    out_metadata: *mut *mut kafka_producer_RecordMetadata_t,
+    out_errors: *mut *mut kafka_KafkaError_t,
+) {
+    assert!(!futures.is_null(), "futures must not be null");
+    assert!(!out_metadata.is_null(), "out_metadata must not be null");
+    assert!(!out_errors.is_null(), "out_errors must not be null");
+    assert!(count >= 0, "count must not be negative");
+
+    let count = count as usize;
+
+    // Build a single-threaded tokio runtime shared across all futures.
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(_) => {
+            let err = box_error(KafkaError::illegal_state(
+                "failed to create tokio runtime",
+            ));
+            for i in 0..count {
+                unsafe {
+                    *out_metadata.add(i) = std::ptr::null_mut();
+                    *out_errors.add(i) = err; // same error for all
+                }
+            }
+            return;
+        },
+    };
+
+    for i in 0..count {
+        let future_ptr = unsafe { *futures.add(i) };
+        if future_ptr.is_null() {
+            unsafe {
+                *out_metadata.add(i) = std::ptr::null_mut();
+                *out_errors.add(i) =
+                    box_error(KafkaError::new(Errors::InvalidRequest));
+            }
+            continue;
+        }
+
+        let f = unsafe { future_ref(future_ptr) };
+        match rt.block_on(f.get()) {
+            Ok(metadata) => unsafe {
+                *out_metadata.add(i) = box_metadata(metadata);
+                *out_errors.add(i) = std::ptr::null_mut();
+            },
+            Err(e) => unsafe {
+                *out_metadata.add(i) = std::ptr::null_mut();
+                *out_errors.add(i) = box_error(e);
+            },
+        }
+    }
+}
+
 /// Destroys a future handle, freeing all associated resources.
 ///
 /// Safe to call with a null pointer (no-op).
@@ -651,6 +743,40 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy(
     if !future.is_null() {
         unsafe {
             drop(Box::from_raw(future as *mut FutureRecordMetadata));
+        }
+    }
+}
+
+/// Destroys an array of future handles, freeing all associated resources.
+///
+/// Null entries in the array are skipped (no-op for each).
+///
+/// # Parameters
+///
+/// - `futures`: Non-null pointer to an array of `count` future handles.
+/// - `count`: Number of elements (must be ≥ 0).
+///
+/// # Safety
+///
+/// - `futures` must be non-null and point to an array of at least `count`
+///   elements.
+/// - Each non-null entry must be a valid handle from a send function.
+/// - After this call, all pointers in the array are invalid and must not be
+///   used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
+    futures: *mut *mut kafka_producer_FutureRecordMetadata_t,
+    count: i32,
+) {
+    assert!(!futures.is_null(), "futures must not be null");
+    assert!(count >= 0, "count must not be negative");
+
+    for i in 0..count as usize {
+        let future = unsafe { *futures.add(i) };
+        if !future.is_null() {
+            unsafe {
+                drop(Box::from_raw(future as *mut FutureRecordMetadata));
+            }
         }
     }
 }
@@ -729,6 +855,60 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
         return -1;
     }
     unsafe { metadata_ref(metadata) }.metadata.partition()
+}
+
+/// Copies all metadata fields to the caller via a callback, then destroys the
+/// handle.
+///
+/// This is a convenience function that extracts offset, partition, topic, and
+/// timestamp in a single call and frees the handle, avoiding multiple
+/// round-trips through the FFI boundary.
+///
+/// # Parameters
+///
+/// - `metadata`: Non-null metadata handle.
+/// - `callback`: Function pointer invoked with the extracted fields.
+/// - `user_data`: Opaque pointer forwarded to `callback`.
+///
+/// The callback signature is:
+/// ```c
+/// void callback(int64_t offset, int32_t partition,
+///               const char *topic, int64_t timestamp,
+///               void *user_data);
+/// ```
+///
+/// # Safety
+///
+/// - `metadata` must be a valid, non-null handle from
+///   [`kafka_producer_FutureRecordMetadata_get`].
+/// - `callback` must be a valid function pointer.
+/// - The `topic` pointer passed to the callback is only valid for the duration
+///   of the callback invocation.
+/// - After this call the metadata handle is destroyed and must not be used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_RecordMetadata_copy(
+    metadata: *mut kafka_producer_RecordMetadata_t,
+    callback: unsafe extern "C" fn(i64, i32, *const c_char, i64, *mut std::ffi::c_void),
+    user_data: *mut std::ffi::c_void,
+) {
+    if metadata.is_null() {
+        return;
+    }
+
+    let inner = unsafe { metadata_ref(metadata) };
+    let offset = inner.metadata.offset();
+    let partition = inner.metadata.partition();
+    let topic = inner.topic_cstring.as_ptr();
+    let timestamp = inner.metadata.timestamp();
+
+    unsafe {
+        callback(offset, partition, topic, timestamp, user_data);
+    }
+
+    // Destroy the handle after the callback returns.
+    unsafe {
+        drop(Box::from_raw(metadata as *mut RecordMetadataInner));
+    }
 }
 
 /// Destroys a record metadata handle, freeing all associated resources.

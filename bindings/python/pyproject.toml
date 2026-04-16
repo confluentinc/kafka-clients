@@ -1,0 +1,24 @@
+[build-system]
+requires = ["setuptools>=62.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "confluent-kafka-rust-python"
+version = "0.1.0"
+description = "Python bindings for the Confluent Kafka Rust client"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+authors = [
+    {name = "Confluent Inc."}
+]
+
+[project.optional-dependencies]
+dev = [
+    "confluent-kafka>=2.13.0",
+    "psutil",
+    "matplotlib",
+    "pytest",
+]
+
+[tool.setuptools]
+py-modules = ["producer"]
