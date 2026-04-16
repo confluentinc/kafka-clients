@@ -14,3 +14,4 @@
 - [M2 Phase 6 patterns](review_m2_phase6_patterns.md) — Callback drop/no-fire, leader epoch tracking dead code, IncompleteBatches unused, buffer pool deallocate fakes
 - [M2 Phase 7 patterns](review_m2_phase7_patterns.md) — Ownership transfer gap in retry path, split_and_reenqueue missing silently drops records, test gaps predict bugs
 - [M2 Phase 8 patterns](review_m2_phase8_patterns.md) — close/flush never awaits async sender, accumulator not closed, ApiException callback contract broken
+- [from_config factory patterns](review_from_config_patterns.md) — Hardcoded defaults instead of config values, missing validation steps in constructor translation
