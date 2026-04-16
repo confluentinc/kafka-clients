@@ -14,8 +14,8 @@
 
 //! Internal types (org.apache.kafka.common.internals)
 
-pub mod cluster_resource_listeners;
-pub mod topic;
+pub(crate) mod cluster_resource_listeners;
+pub(crate) mod topic;
 
-pub use cluster_resource_listeners::{ClusterResourceListener, ClusterResourceListeners};
-pub use topic::Topic;
+pub(crate) use cluster_resource_listeners::ClusterResourceListeners;
+pub(crate) use topic::Topic;

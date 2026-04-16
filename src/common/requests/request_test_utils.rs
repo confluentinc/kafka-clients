@@ -12,21 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! Test utilities for creating metadata responses.
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestTestUtils`.
 
 use std::collections::HashMap;
 
+use crate::common::Node;
+use crate::common::TopicPartition;
+use crate::common::Uuid;
 use crate::common::internals::Topic;
-use crate::common::node::Node;
 use crate::common::protocol::{ApiKeys, Errors};
-use crate::common::topic_partition::TopicPartition;
-use crate::common::uuid::Uuid;
 
-use super::metadata_response::{
-    METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED, MetadataResponse, PartitionMetadata, TopicMetadata,
-};
+use super::metadata_response::AUTHORIZED_OPERATIONS_OMITTED;
+use super::{MetadataResponse, PartitionMetadata, TopicMetadata};
 
 /// Default partition metadata supplier: creates a standard `PartitionMetadata`.
 fn default_partition_supplier(
@@ -93,7 +93,7 @@ pub fn metadata_response_with_version(
             let mut rp = MetadataResponsePartition::new();
             rp.set_error_code(pm.error.code());
             rp.set_partition_index(pm.partition());
-            rp.set_leader_id(pm.leader_id.unwrap_or(super::metadata_response::METADATA_RESPONSE_NO_LEADER_ID));
+            rp.set_leader_id(pm.leader_id.unwrap_or(super::metadata_response::NO_LEADER_ID));
             rp.set_leader_epoch(pm.leader_epoch.unwrap_or(super::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH));
             rp.set_replica_nodes(pm.replica_ids.clone());
             rp.set_isr_nodes(pm.in_sync_replica_ids.clone());
@@ -106,12 +106,12 @@ pub fn metadata_response_with_version(
 
     MetadataResponse::prepare_response(
         response_version,
-        0, // ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME
+        0, // DEFAULT_THROTTLE_TIME
         brokers,
         cluster_id.map(|s| s.to_string()),
         controller_id,
         topics,
-        METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED,
+        AUTHORIZED_OPERATIONS_OMITTED,
     )
 }
 
@@ -214,7 +214,7 @@ pub fn metadata_update_with_full(
             topic_id,
             is_internal: Topic::is_internal(topic),
             partition_metadata,
-            authorized_operations: METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED,
+            authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
         });
     }
 

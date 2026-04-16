@@ -25,14 +25,14 @@
 //! `SslTransportLayer` (which handles the TLS handshake), and pairs it with a
 //! `PlaintextAuthenticator`.
 
-use super::authenticator::PlaintextAuthenticator;
-use super::channel_builder::ChannelBuilder;
-use super::channel_metadata_registry::ChannelMetadataRegistry;
-use super::kafka_channel::KafkaChannel;
-use super::listener_name::ListenerName;
-use super::ssl_transport_layer::SslTransportLayer;
+use super::ChannelBuilder;
+use super::ChannelMetadataRegistry;
+use super::KafkaChannel;
+use super::ListenerName;
+use super::PlaintextAuthenticator;
+use super::SslTransportLayer;
 
-use crate::common::security::ssl::SslFactory;
+use crate::common::security::SslFactory;
 
 use std::io;
 
@@ -98,7 +98,7 @@ impl ChannelBuilder for SslChannelBuilder {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
-    use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+    use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test that SslChannelBuilder creates a channel that is not immediately ready
     /// (TLS handshake has not been performed yet).

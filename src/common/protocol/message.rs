@@ -21,11 +21,11 @@
 
 use std::io;
 
+use super::MessageSizeAccumulator;
+use super::ObjectSerializationCache;
+use super::RawTaggedField;
 use super::Readable;
 use super::Writable;
-use super::message_size_accumulator::MessageSizeAccumulator;
-use super::object_serialization_cache::ObjectSerializationCache;
-use super::readable::RawTaggedField;
 
 /// Trait for Kafka protocol messages that can serialize and deserialize themselves.
 ///

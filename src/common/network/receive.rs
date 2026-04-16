@@ -20,7 +20,7 @@
 //! extends `ScatteringByteChannel`, in Rust `read_from` takes `&mut dyn TransportLayer`
 //! to preserve the same composability.
 
-use super::transport_layer::TransportLayer;
+use super::TransportLayer;
 
 use std::future::Future;
 use std::io;

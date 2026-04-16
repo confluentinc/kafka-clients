@@ -36,22 +36,22 @@
 //! 3. Returns `Ok(())` if I/O would block (partial read/write)
 //! 4. Stores partial reads in `net_in_buffer` for the next call
 
-use crate::common::network::authenticator::Authenticator;
-use crate::common::network::byte_buffer_send::ByteBufferSend;
-use crate::common::network::network_receive::NetworkReceive;
-use crate::common::network::receive::Receive;
-use crate::common::network::send::KafkaSend;
-use crate::common::network::transport_layer::{InterestOps, TransportLayer};
+use crate::common::network::Authenticator;
+use crate::common::network::ByteBufferSend;
+use crate::common::network::KafkaSend;
+use crate::common::network::NetworkReceive;
+use crate::common::network::Receive;
+use crate::common::network::{InterestOps, TransportLayer};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use crate::common::requests::abstract_request::ConcreteRequest;
-use crate::common::requests::abstract_request::RequestBuilder;
-use crate::common::requests::abstract_response::ConcreteResponse;
-use crate::common::requests::api_versions_request::ApiVersionsRequestBuilder;
-use crate::common::requests::api_versions_response::ApiVersionsResponse;
-use crate::common::requests::request_header::RequestHeader;
-use crate::common::requests::sasl_authenticate_request::SaslAuthenticateRequest;
-use crate::common::requests::sasl_handshake_request::SaslHandshakeRequest;
-use crate::common::requests::sasl_handshake_response::SaslHandshakeResponse;
+use crate::common::requests::ApiVersionsRequestBuilder;
+use crate::common::requests::ApiVersionsResponse;
+use crate::common::requests::ConcreteRequest;
+use crate::common::requests::ConcreteResponse;
+use crate::common::requests::RequestBuilder;
+use crate::common::requests::RequestHeader;
+use crate::common::requests::SaslAuthenticateRequest;
+use crate::common::requests::SaslHandshakeRequest;
+use crate::common::requests::SaslHandshakeResponse;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
@@ -604,11 +604,11 @@ impl Authenticator for SaslClientAuthenticator {
 mod tests {
     use super::*;
     use crate::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
-    use crate::common::network::transport_layer::InterestOps;
-    use crate::common::protocol::message::Message;
-    use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
-    use crate::common::protocol::writable::Writable;
-    use crate::common::requests::response_header::ResponseHeader;
+    use crate::common::network::InterestOps;
+    use crate::common::protocol::Message;
+    use crate::common::protocol::ObjectSerializationCache;
+    use crate::common::protocol::Writable;
+    use crate::common::requests::ResponseHeader;
     use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
     use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
 

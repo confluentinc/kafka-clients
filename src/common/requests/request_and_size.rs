@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.RequestAndSize`.
 
-use super::abstract_request::ConcreteRequest;
+use super::ConcreteRequest;
 
 /// A parsed request together with the number of bytes it consumed from the buffer.
 ///

@@ -20,8 +20,8 @@
 //! further authentication needs to be done. For SASL_PLAINTEXT and SASL_SSL,
 //! this would perform the SASL authentication.
 
-use super::network_receive::NetworkReceive;
-use super::transport_layer::TransportLayer;
+use super::NetworkReceive;
+use super::TransportLayer;
 
 use std::future::Future;
 use std::io;

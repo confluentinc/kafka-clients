@@ -20,7 +20,7 @@
 //! In Rust, this wraps a `tokio::net::TcpStream` for async non-blocking I/O,
 //! per CLAUDE.md rule 8.
 
-use super::transport_layer::{InterestOps, TransportLayer};
+use super::{InterestOps, TransportLayer};
 
 use std::future::Future;
 use std::io;

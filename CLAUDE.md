@@ -13,17 +13,26 @@ Suggestions for changes are possible through the process highlighted in [agent-r
        keep the same licence: GPL + Classpath Exception (important).
 2. **Naming Conventions**:
    - Java package `org.apache.kafka.message` → Rust module `message`
-   - Java package `org.apache.kafka.clients.consumer` → Rust module `clients::consumer`
+   - Java package `org.apache.kafka.clients.consumer` → Rust module `consumer`. `clients` MUST NOT appear in folder name or Rust module.
    - Java class names (PascalCase) → Rust struct/enum names (PascalCase)
    - Java method names (camelCase) → Rust function names (snake_case)
-   - Java const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE → Rust COMMON_CLIENT_CONFIGS_RETRY_BACKOFF_EXP_BASE
+   - Java const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE → Rust `common_client_configs::RETRY_BACKOFF_EXP_BASE`
+   - Each Java class MUST be in its own file, but internal imports for the struct MUST use the parent module re-export, not the file module path. For example,
+   `ProducerRecord` is defined in `producer_record.rs` but imported preferably as
+   `use crate::producer::ProducerRecord;` not `use crate::producer::producer_record::ProducerRecord;`. Externally it's possible to use both
+   - Constant MUST be exported only by the file defining them. E.g.:
+     `GROUP_METADATA_TOPIC_NAME` is accessible through
+     `::common::internals::topic::GROUP_METADATA_TOPIC_NAME`
+   - Static functions MUST be exported only by the file defining them. E.g:
+     `to_byte_buffer_accessor` is accessible through `::common::protocol::message_util::to_byte_buffer_accessor`
+   - Classes whose package contains `internal` MUST  use only `pub(crate)`
    - Java `Exception` → Rust `Error` (e.g. `TopicAuthorizationException` → `TopicAuthorizationError`)
    - Java `throws` / `throw` → Rust `return Err(...)` (e.g. `maybeThrowAnyException` → `maybe_return_any_error`)
    - Preserve original architecture and logical structure
 3. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
-    - `org.apache.kafka.common.KafkaException` -> `kafka_KafkaError_t`.
-    - `is_retriable` -> `kafka_KafkaError_is_retriable`.
+    - `org.apache.kafka.common.KafkaException` -> `kafka_common_KafkaError_t`.
+    - `is_retriable` -> `kafka_common_KafkaError_is_retriable`.
     - preserve Java namespaces in first part of the function name, skipping `clients`:
       - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
       - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`

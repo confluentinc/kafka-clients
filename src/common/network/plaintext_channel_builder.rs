@@ -23,12 +23,12 @@
 //! the `PlaintextTransportLayer` internally and wraps it with a
 //! `PlaintextAuthenticator` in a `KafkaChannel`.
 
-use super::authenticator::PlaintextAuthenticator;
-use super::channel_builder::ChannelBuilder;
-use super::channel_metadata_registry::ChannelMetadataRegistry;
-use super::kafka_channel::KafkaChannel;
-use super::listener_name::ListenerName;
-use super::plaintext_transport_layer::PlaintextTransportLayer;
+use super::ChannelBuilder;
+use super::ChannelMetadataRegistry;
+use super::KafkaChannel;
+use super::ListenerName;
+use super::PlaintextAuthenticator;
+use super::PlaintextTransportLayer;
 
 use std::io;
 

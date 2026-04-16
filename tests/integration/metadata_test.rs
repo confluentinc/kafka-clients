@@ -21,11 +21,11 @@
 use std::net::SocketAddr;
 
 use confluent_kafka::common::network::NetworkSend;
-use confluent_kafka::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
-use confluent_kafka::common::network::selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
-use confluent_kafka::common::network::selector::{SELECTOR_NO_IDLE_TIMEOUT_MS, Selector};
+use confluent_kafka::common::network::PlaintextChannelBuilder;
+use confluent_kafka::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use confluent_kafka::common::requests::abstract_response::ConcreteResponse;
+use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{
     ApiVersionsRequestBuilder, MetadataRequestBuilder, MetadataResponse, RequestBuilder, RequestHeader,
 };
@@ -45,7 +45,7 @@ const NODE_ID: &str = "0";
 /// Helper: create a Selector with PlaintextChannelBuilder.
 fn create_selector() -> Selector {
     let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-    Selector::with_defaults(SELECTOR_NO_IDLE_TIMEOUT_MS, channel_builder)
+    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: parse address from bootstrap servers string.
@@ -58,13 +58,7 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
 /// Helper: connect and wait until connected.
 async fn connect_and_wait(selector: &mut Selector, addr: SocketAddr) {
     selector
-        .connect(
-            NODE_ID,
-            addr,
-            "localhost",
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-        )
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 

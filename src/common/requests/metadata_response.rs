@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! Metadata response handling.
 //!
 //! Corresponds to `org.apache.kafka.common.requests.MetadataResponse`.
@@ -30,25 +31,25 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use crate::common::cluster::Cluster;
-use crate::common::node::Node;
-use crate::common::partition_info::PartitionInfo;
+use crate::common::Cluster;
+use crate::common::Node;
+use crate::common::PartitionInfo;
+use crate::common::TopicPartition;
+use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::topic_partition::TopicPartition;
-use crate::common::uuid::Uuid;
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
 
 use super::abstract_response::update_error_counts;
 use super::request_utils::get_leader_epoch;
 
 /// Sentinel value indicating that the controller ID is unknown.
-pub const METADATA_RESPONSE_NO_CONTROLLER_ID: i32 = -1;
+pub const NO_CONTROLLER_ID: i32 = -1;
 
 /// Sentinel value indicating that the partition has no leader.
-pub const METADATA_RESPONSE_NO_LEADER_ID: i32 = -1;
+pub const NO_LEADER_ID: i32 = -1;
 
 /// Sentinel value indicating that authorized operations have been omitted.
-pub const METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
+pub const AUTHORIZED_OPERATIONS_OMITTED: i32 = i32::MIN;
 
 /// A Metadata response.
 ///
@@ -465,7 +466,7 @@ impl TopicMetadata {
             topic_id: Uuid::zero(),
             is_internal,
             partition_metadata,
-            authorized_operations: METADATA_RESPONSE_AUTHORIZED_OPERATIONS_OMITTED,
+            authorized_operations: AUTHORIZED_OPERATIONS_OMITTED,
         }
     }
 

@@ -21,8 +21,8 @@
 //! — the Selector creates the TCP connection and passes the raw stream to the builder,
 //! which wraps it in the appropriate transport layer (plaintext or SSL/TLS).
 
-use super::channel_metadata_registry::ChannelMetadataRegistry;
-use super::kafka_channel::KafkaChannel;
+use super::ChannelMetadataRegistry;
+use super::KafkaChannel;
 
 use std::io;
 

@@ -10,7 +10,7 @@ The Rust project already exposes a complete C API via `src/ffi/producer.rs` with
 
 ## What Already Exists
 
-- Rust FFI: `src/ffi/producer.rs` — all `kafka_producer_*`, `kafka_KafkaError_*` functions
+- Rust FFI: `src/ffi/producer.rs` — all `kafka_producer_*`, `kafka_common_KafkaError_*` functions
 - Generated header: `target/include/confluent_kafka_rust.h`
 - `Cargo.toml`: `crate-type = ["lib", "cdylib"]` — needs `"staticlib"` added
 
@@ -40,7 +40,7 @@ kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
 // 2. Send a record
 kafka_producer_FutureRecordMetadata_t *future = NULL;
-kafka_KafkaError_t *err = kafka_producer_Producer_send(
+kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
     producer, "test-topic", -1, -1,
     key, key_len, value, value_len, &future);
 

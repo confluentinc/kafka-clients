@@ -23,17 +23,17 @@
 //! This is a simplified client-only translation that supports PLAIN mechanism.
 //! Server-side logic (JAAS contexts, callback handlers, login managers) is omitted.
 
-use super::channel_builder::ChannelBuilder;
-use super::channel_metadata_registry::ChannelMetadataRegistry;
-use super::kafka_channel::KafkaChannel;
-use super::listener_name::ListenerName;
-use super::plaintext_transport_layer::PlaintextTransportLayer;
-use super::ssl_transport_layer::SslTransportLayer;
+use super::ChannelBuilder;
+use super::ChannelMetadataRegistry;
+use super::KafkaChannel;
+use super::ListenerName;
+use super::PlaintextTransportLayer;
+use super::SslTransportLayer;
 
 use crate::common::config::SaslConfig;
-use crate::common::security::auth::SecurityProtocol;
-use crate::common::security::authenticator::SaslClientAuthenticator;
-use crate::common::security::ssl::SslFactory;
+use crate::common::security::SaslClientAuthenticator;
+use crate::common::security::SecurityProtocol;
+use crate::common::security::SslFactory;
 
 use std::io;
 
@@ -145,7 +145,7 @@ impl ChannelBuilder for SaslChannelBuilder {
         max_receive_size: i32,
         metadata_registry: Box<dyn ChannelMetadataRegistry>,
     ) -> io::Result<KafkaChannel> {
-        let transport_layer: Box<dyn crate::common::network::transport_layer::TransportLayer> =
+        let transport_layer: Box<dyn crate::common::network::TransportLayer> =
             if self.security_protocol == SecurityProtocol::SaslSsl {
                 let ssl_factory = self.ssl_factory.as_ref().unwrap();
                 let connector = ssl_factory.create_tls_connector();
@@ -185,7 +185,7 @@ impl ChannelBuilder for SaslChannelBuilder {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
-    use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+    use crate::common::network::DefaultChannelMetadataRegistry;
 
     /// Test 1: Build channel with SASL_PLAINTEXT creates a channel that is not ready.
     #[tokio::test]

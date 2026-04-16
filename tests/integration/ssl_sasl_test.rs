@@ -25,15 +25,15 @@ use std::net::SocketAddr;
 
 use confluent_kafka::common::config::{SaslConfig, SslConfig};
 use confluent_kafka::common::network::NetworkSend;
-use confluent_kafka::common::network::sasl_channel_builder::SaslChannelBuilder;
-use confluent_kafka::common::network::selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
-use confluent_kafka::common::network::selector::{SELECTOR_NO_IDLE_TIMEOUT_MS, Selector};
-use confluent_kafka::common::network::ssl_channel_builder::SslChannelBuilder;
+use confluent_kafka::common::network::SaslChannelBuilder;
+use confluent_kafka::common::network::SslChannelBuilder;
+use confluent_kafka::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use confluent_kafka::common::requests::abstract_response::ConcreteResponse;
+use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{ApiVersionsRequestBuilder, RequestBuilder, RequestHeader};
-use confluent_kafka::common::security::auth::SecurityProtocol;
-use confluent_kafka::common::security::ssl::SslFactory;
+use confluent_kafka::common::security::SecurityProtocol;
+use confluent_kafka::common::security::SslFactory;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
@@ -65,7 +65,7 @@ fn create_ssl_selector(ca_cert_pem: &str) -> Selector {
     };
     let ssl_factory = SslFactory::new(&ssl_config).unwrap();
     let channel_builder = Box::new(SslChannelBuilder::new(ssl_factory, None));
-    Selector::with_defaults(SELECTOR_NO_IDLE_TIMEOUT_MS, channel_builder)
+    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder)
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_PLAINTEXT.
@@ -78,7 +78,7 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
     };
     let channel_builder =
         SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "integration-test").unwrap();
-    Selector::with_defaults(SELECTOR_NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
+    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
 }
 
 /// Helper: create a Selector with SaslChannelBuilder for SASL_SSL.
@@ -103,7 +103,7 @@ fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -
         "integration-test",
     )
     .unwrap();
-    Selector::with_defaults(SELECTOR_NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
+    Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
 }
 
 /// Helper: poll until the channel is fully ready (transport + auth complete).
@@ -183,13 +183,7 @@ async fn test_ssl_connection() {
     let addr = parse_bootstrap_addr(ctx.ssl_bootstrap_servers());
 
     selector
-        .connect(
-            NODE_ID,
-            addr,
-            "localhost",
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-        )
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
     // TLS handshake completes over multiple poll cycles after TCP connect
@@ -221,13 +215,7 @@ async fn test_sasl_plaintext_connection() {
     let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector
-        .connect(
-            NODE_ID,
-            addr,
-            "localhost",
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-        )
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
     // SASL authentication completes over multiple poll cycles after TCP connect
@@ -259,13 +247,7 @@ async fn test_sasl_ssl_connection() {
     let addr = parse_bootstrap_addr(ctx.sasl_ssl_bootstrap_servers());
 
     selector
-        .connect(
-            NODE_ID,
-            addr,
-            "localhost",
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-        )
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
     // TLS handshake + SASL authentication completes over multiple poll cycles
@@ -297,13 +279,7 @@ async fn test_sasl_wrong_credentials() {
     let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector
-        .connect(
-            NODE_ID,
-            addr,
-            "localhost",
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-        )
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Connect should succeed (TCP level)");
 
@@ -330,17 +306,11 @@ async fn test_sasl_unsupported_mechanism() {
     };
     let channel_builder =
         SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "integration-test").unwrap();
-    let mut selector = Selector::with_defaults(SELECTOR_NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
+    let mut selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
     let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 
     selector
-        .connect(
-            NODE_ID,
-            addr,
-            "localhost",
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-            SELECTABLE_USE_DEFAULT_BUFFER_SIZE,
-        )
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Connect should succeed (TCP level)");
 

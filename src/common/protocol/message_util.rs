@@ -12,22 +12,23 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! Utility methods for working with protocol messages.
 //!
 //! Corresponds to org.apache.kafka.common.protocol.MessageUtil
 
 use std::io;
 
-use super::byte_buffer_accessor::ByteBufferAccessor;
-use super::message::Message;
-use super::object_serialization_cache::ObjectSerializationCache;
-use super::readable::RawTaggedField;
+use super::ByteBufferAccessor;
+use super::Message;
+use super::ObjectSerializationCache;
+use super::RawTaggedField;
 
 /// Maximum value of an unsigned 16-bit integer.
-pub const MESSAGE_UTIL_UNSIGNED_SHORT_MAX: u32 = 0xFFFF;
+pub const UNSIGNED_SHORT_MAX: u32 = 0xFFFF;
 
 /// Maximum value of an unsigned 32-bit integer.
-pub const MESSAGE_UTIL_UNSIGNED_INT_MAX: u64 = 0xFFFF_FFFF;
+pub const UNSIGNED_INT_MAX: u64 = 0xFFFF_FFFF;
 
 /// Compares two lists of raw tagged fields.
 ///
@@ -59,10 +60,10 @@ pub fn to_byte_buffer_accessor(message: &impl Message, version: i16) -> io::Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::protocol::MessageSizeAccumulator;
+    use crate::common::protocol::RawTaggedField;
     use crate::common::protocol::Readable;
     use crate::common::protocol::Writable;
-    use crate::common::protocol::message_size_accumulator::MessageSizeAccumulator;
-    use crate::common::protocol::readable::RawTaggedField;
 
     #[derive(Debug, Clone, PartialEq)]
     struct TestMsg {
@@ -134,10 +135,10 @@ mod tests {
     }
 
     /// Translated from Java MessageUtilTest.testConstants.
-    /// Verifies MESSAGE_UTIL_UNSIGNED_SHORT_MAX and MESSAGE_UTIL_UNSIGNED_INT_MAX values.
+    /// Verifies UNSIGNED_SHORT_MAX and UNSIGNED_INT_MAX values.
     #[test]
     fn test_constants() {
-        assert_eq!(MESSAGE_UTIL_UNSIGNED_SHORT_MAX, 0xFFFF);
-        assert_eq!(MESSAGE_UTIL_UNSIGNED_INT_MAX, 0xFFFF_FFFF);
+        assert_eq!(UNSIGNED_SHORT_MAX, 0xFFFF);
+        assert_eq!(UNSIGNED_INT_MAX, 0xFFFF_FFFF);
     }
 }

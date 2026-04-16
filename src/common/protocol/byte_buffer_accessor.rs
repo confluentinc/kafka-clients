@@ -16,9 +16,9 @@
 //!
 //! Corresponds to org.apache.kafka.common.protocol.ByteBufferAccessor
 
-use super::readable::Readable;
+use super::Readable;
+use super::Writable;
 use super::varint;
-use super::writable::Writable;
 use std::io;
 
 /// A struct that implements both Readable and Writable traits for a byte buffer.

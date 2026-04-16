@@ -428,6 +428,31 @@ impl Errors {
         )
     }
 
+    /// Whether this error corresponds to an `InvalidMetadataException` in Java,
+    /// i.e. errors that indicate the client's cached metadata may be stale.
+    ///
+    /// The classification matches the Java client's exception hierarchy where
+    /// exceptions extending `InvalidMetadataException` are considered invalid
+    /// metadata errors.
+    pub fn is_invalid_metadata(&self) -> bool {
+        matches!(
+            self,
+            Self::UnknownTopicOrPartition
+                | Self::LeaderNotAvailable
+                | Self::NotLeaderOrFollower
+                | Self::ReplicaNotAvailable
+                | Self::ListenerNotFound
+                | Self::FencedLeaderEpoch
+                | Self::UnknownTopicId
+                | Self::NetworkException
+                | Self::KafkaStorageError
+                | Self::InconsistentTopicId
+                | Self::PreferredLeaderNotAvailable
+                | Self::EligibleLeadersNotAvailable
+                | Self::ElectionNotNeeded
+        )
+    }
+
     /// Whether the transaction must be aborted due to this error.
     ///
     /// Currently only `TransactionAbortable` requires a transaction abort.

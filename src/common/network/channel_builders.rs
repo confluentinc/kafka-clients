@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! Factory for creating the appropriate `ChannelBuilder` based on `SecurityProtocol`.
 //!
 //! Translated from `org.apache.kafka.common.network.ChannelBuilders.clientChannelBuilder()`
@@ -31,13 +32,13 @@
 use std::io;
 
 use crate::common::config::{SaslConfig, SslConfig};
-use crate::common::network::channel_builder::ChannelBuilder;
-use crate::common::network::listener_name::ListenerName;
-use crate::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
-use crate::common::network::sasl_channel_builder::SaslChannelBuilder;
-use crate::common::network::ssl_channel_builder::SslChannelBuilder;
-use crate::common::security::auth::SecurityProtocol;
-use crate::common::security::ssl::SslFactory;
+use crate::common::network::ChannelBuilder;
+use crate::common::network::ListenerName;
+use crate::common::network::PlaintextChannelBuilder;
+use crate::common::network::SaslChannelBuilder;
+use crate::common::network::SslChannelBuilder;
+use crate::common::security::SecurityProtocol;
+use crate::common::security::SslFactory;
 
 /// Creates a client-side `ChannelBuilder` for the given security protocol.
 ///

@@ -24,7 +24,7 @@ use std::collections::HashMap;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
 
-use super::abstract_response::ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME;
+use super::abstract_response::DEFAULT_THROTTLE_TIME;
 
 /// Possible error codes:
 /// - [`Errors::SaslAuthenticationFailed`] (57): Authentication failed
@@ -76,10 +76,10 @@ impl SaslAuthenticateResponse {
 
     /// Returns the throttle time in milliseconds.
     ///
-    /// Always returns [`ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME`] (0) because the SaslAuthenticate schema
+    /// Always returns [`DEFAULT_THROTTLE_TIME`] (0) because the SaslAuthenticate schema
     /// does not support throttle time.
     pub fn throttle_time_ms(&self) -> i32 {
-        ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME
+        DEFAULT_THROTTLE_TIME
     }
 
     /// No-op: the SaslAuthenticate schema does not support throttle time.
@@ -119,7 +119,7 @@ impl std::fmt::Display for SaslAuthenticateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::requests::abstract_response::ConcreteResponse;
+    use crate::common::requests::ConcreteResponse;
 
     #[test]
     fn test_error() {
@@ -174,7 +174,7 @@ mod tests {
     fn test_throttle_time_ms() {
         let data = SaslAuthenticateResponseData::new();
         let response = SaslAuthenticateResponse::new(data);
-        assert_eq!(response.throttle_time_ms(), ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME);
+        assert_eq!(response.throttle_time_ms(), DEFAULT_THROTTLE_TIME);
     }
 
     #[test]

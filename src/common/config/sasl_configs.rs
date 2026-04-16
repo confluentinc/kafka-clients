@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! SASL configuration for Kafka connections.
 //!
 //! Translated from `org.apache.kafka.common.config.SaslConfigs`.
@@ -35,19 +36,19 @@
 ///
 /// SASL mechanism used for client connections. This may be any mechanism for
 /// which a security provider is available. GSSAPI is the default mechanism.
-pub const SASL_CONFIGS_SASL_MECHANISM: &str = "sasl.mechanism";
+pub const SASL_MECHANISM: &str = "sasl.mechanism";
 
 /// Config key: `sasl.jaas.config`.
 ///
 /// JAAS login context parameters for SASL connections in the format used by
 /// JAAS configuration files.
-pub const SASL_CONFIGS_SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
+pub const SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
 
 /// The GSSAPI (Kerberos) mechanism name.
-pub const SASL_CONFIGS_GSSAPI_MECHANISM: &str = "GSSAPI";
+pub const GSSAPI_MECHANISM: &str = "GSSAPI";
 
 /// Default SASL mechanism (matches Java `DEFAULT_SASL_MECHANISM`).
-pub const SASL_CONFIGS_DEFAULT_SASL_MECHANISM: &str = SASL_CONFIGS_GSSAPI_MECHANISM;
+pub const DEFAULT_SASL_MECHANISM: &str = GSSAPI_MECHANISM;
 
 // ---------------------------------------------------------------------------
 // SaslConfig struct
@@ -61,7 +62,7 @@ pub const SASL_CONFIGS_DEFAULT_SASL_MECHANISM: &str = SASL_CONFIGS_GSSAPI_MECHAN
 /// Translated from `org.apache.kafka.common.config.SaslConfigs`.
 #[derive(Debug, Clone)]
 pub struct SaslConfig {
-    /// SASL mechanism. Default: `"GSSAPI"` (matches Java `SASL_CONFIGS_DEFAULT_SASL_MECHANISM`).
+    /// SASL mechanism. Default: `"GSSAPI"` (matches Java `DEFAULT_SASL_MECHANISM`).
     /// Corresponds to `sasl.mechanism`.
     pub mechanism: String,
 
@@ -90,7 +91,7 @@ pub struct SaslConfig {
 impl Default for SaslConfig {
     fn default() -> Self {
         SaslConfig {
-            mechanism: SASL_CONFIGS_DEFAULT_SASL_MECHANISM.to_owned(),
+            mechanism: DEFAULT_SASL_MECHANISM.to_owned(),
             jaas_config: None,
             username: None,
             password: None,
@@ -327,10 +328,10 @@ mod tests {
 
     #[test]
     fn test_config_key_constants() {
-        assert_eq!(SASL_CONFIGS_SASL_MECHANISM, "sasl.mechanism");
-        assert_eq!(SASL_CONFIGS_SASL_JAAS_CONFIG, "sasl.jaas.config");
-        assert_eq!(SASL_CONFIGS_DEFAULT_SASL_MECHANISM, "GSSAPI");
-        assert_eq!(SASL_CONFIGS_GSSAPI_MECHANISM, "GSSAPI");
+        assert_eq!(SASL_MECHANISM, "sasl.mechanism");
+        assert_eq!(SASL_JAAS_CONFIG, "sasl.jaas.config");
+        assert_eq!(DEFAULT_SASL_MECHANISM, "GSSAPI");
+        assert_eq!(GSSAPI_MECHANISM, "GSSAPI");
     }
 
     #[test]

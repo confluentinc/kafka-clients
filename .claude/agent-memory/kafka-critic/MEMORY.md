@@ -6,6 +6,15 @@
 - [Layer 5 Channel & Selection patterns](review_layer5_patterns.md) — Format string typos, poll loop design, test coverage gaps in Selector/KafkaChannel
 - [Layer 3 Request/Response patterns](review_layer3_patterns.md) — Validation gaps, panic vs Result in builders, per-field flexibleVersions
 - [Layer 6 NetworkClient patterns](review_layer6_patterns.md) — Async boundary gaps, exception hierarchy, time update, ISE mapping
+- [M2 Phase 1 patterns](review_m2_phase1_patterns.md) — Option vs Result for Java exceptions, compression wire compat, missing Serializer overloads
+- [M2 Phase 2 patterns](review_m2_phase2_patterns.md) — Negative varint-as-usize cast causes panic; Java try/catch vs Rust missing size guard
+- [M2 Phase 3 patterns](review_m2_phase3_patterns.md) — Assert-vs-clamp in slice(), missing delegated validation, i32-to-usize wrap in batch layer
+- [M2 Phase 5 patterns](review_m2_phase5_patterns.md) — TOCTOU in chain snapshot-before-await, OOM omission, reduced large-value test coverage
+- [M2 Phase 4 patterns](review_m2_phase4_patterns.md) — Watch channel notify-on-set vs latch semantics, null-return vs empty-response, error type erasure
+- [M2 Phase 6 patterns](review_m2_phase6_patterns.md) — Callback drop/no-fire, leader epoch tracking dead code, IncompleteBatches unused, buffer pool deallocate fakes
+- [M2 Phase 7 patterns](review_m2_phase7_patterns.md) — Ownership transfer gap in retry path, split_and_reenqueue missing silently drops records, test gaps predict bugs
+- [M2 Phase 8 patterns](review_m2_phase8_patterns.md) — close/flush never awaits async sender, accumulator not closed, ApiException callback contract broken
+- [from_config factory patterns](review_from_config_patterns.md) — Hardcoded defaults instead of config values, missing validation steps in constructor translation
 - [Milestone 3 Phase 1 patterns](review_milestone3_phase1.md) — Config default-vs-constant mismatch: Default impl may ignore its own constants
 - [SSL/TLS translation patterns](review_ssl_tls_patterns.md) — Buffered data tracking, crypto provider deps, Java SSLEngine vs rustls test scope
 - [SASL Authenticator patterns](review_sasl_authenticator_patterns.md) — try-catch scope mismatch, integer wrapping near MAX_VALUE

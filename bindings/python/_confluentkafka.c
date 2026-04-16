@@ -220,7 +220,7 @@ typedef struct BatchNode {
     kafka_producer_ProducerRecord_t* producer_structs[PRODUCER_RECORD_SLOT_CAPACITY];
     PyObject* complete_cbs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_producer_FutureRecordMetadata_t* futures[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_KafkaError_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
+    kafka_common_KafkaError_t* batch_errors[PRODUCER_RECORD_SLOT_CAPACITY];
     struct BatchNode* next_batch;
 } BatchNode;
 
@@ -246,7 +246,7 @@ typedef struct {
 static void Producer_complete_callback(PyObject* cb,
     ProducerRecordObject *record_obj,
     kafka_producer_RecordMetadata_t *metadata,
-    kafka_KafkaError_t *error) {
+    kafka_common_KafkaError_t *error) {
     // Pass raw pointers as Python ints — the Python wrapper
     // calls accessor/destroy functions on them.
     PyObject *result_long = PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)metadata);
@@ -272,7 +272,7 @@ static void Producer_complete_callbacks(
     // Phase 1: Block on all futures at once WITHOUT the GIL.
     // Uses a single tokio runtime for the entire batch.
     kafka_producer_RecordMetadata_t *metadata_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
-    kafka_KafkaError_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
+    kafka_common_KafkaError_t *error_ptrs[PRODUCER_RECORD_SLOT_CAPACITY];
     kafka_producer_FutureRecordMetadata_get_all(
         futures, count, metadata_ptrs, error_ptrs);
     kafka_producer_FutureRecordMetadata_destroy_all(futures, count);
@@ -632,7 +632,7 @@ static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
     }
 
     Producer* producer = (Producer*)producer_ptr;
-    kafka_KafkaError_t *err = kafka_producer_Producer_flush(producer->producer);
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_flush(producer->producer);
     if (err != NULL) {
         return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
     }
@@ -683,15 +683,15 @@ static PyObject* py_RecordMetadata_copy(PyObject* self, PyObject* args) {
 static PyObject* py_KafkaError_code(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_KafkaError_t *e = (kafka_KafkaError_t*)(uintptr_t)ptr;
-    return PyLong_FromLong(kafka_KafkaError_code(e));
+    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
+    return PyLong_FromLong(kafka_common_KafkaError_code(e));
 }
 
 static PyObject* py_KafkaError_message(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_KafkaError_t *e = (kafka_KafkaError_t*)(uintptr_t)ptr;
-    const char *msg = kafka_KafkaError_message(e);
+    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
+    const char *msg = kafka_common_KafkaError_message(e);
     if (msg == NULL) Py_RETURN_NONE;
     return PyUnicode_FromString(msg);
 }
@@ -699,22 +699,22 @@ static PyObject* py_KafkaError_message(PyObject* self, PyObject* args) {
 static PyObject* py_KafkaError_is_retriable(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_KafkaError_t *e = (kafka_KafkaError_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_KafkaError_is_retriable(e) ? 1 : 0);
+    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
+    return PyBool_FromLong(kafka_common_KafkaError_is_retriable(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_is_fatal(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_KafkaError_t *e = (kafka_KafkaError_t*)(uintptr_t)ptr;
-    return PyBool_FromLong(kafka_KafkaError_is_fatal(e) ? 1 : 0);
+    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
+    return PyBool_FromLong(kafka_common_KafkaError_is_fatal(e) ? 1 : 0);
 }
 
 static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
     unsigned long long ptr;
     if (!PyArg_ParseTuple(args, "K", &ptr)) return NULL;
-    kafka_KafkaError_t *e = (kafka_KafkaError_t*)(uintptr_t)ptr;
-    kafka_KafkaError_destroy(e);
+    kafka_common_KafkaError_t *e = (kafka_common_KafkaError_t*)(uintptr_t)ptr;
+    kafka_common_KafkaError_destroy(e);
     Py_RETURN_NONE;
 }
 

@@ -18,7 +18,7 @@
 //!
 //! Renamed from `Send` to `KafkaSend` to avoid conflict with `std::marker::Send`.
 
-use super::transport_layer::TransportLayer;
+use super::TransportLayer;
 
 use std::future::Future;
 use std::io;

@@ -26,4 +26,4 @@
 //!
 //! This module is only compiled when the `ffi` feature is enabled.
 
-pub mod producer;
+pub(crate) mod producer;

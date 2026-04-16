@@ -25,27 +25,29 @@ use std::io;
 
 use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
-use crate::common::protocol::message::Message;
+use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::metadata_request_data::MetadataRequestData;
+use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
-use super::abstract_response::ConcreteResponse;
-use super::api_versions_request::ApiVersionsRequest;
-use super::metadata_request::MetadataRequest;
-use super::request_and_size::RequestAndSize;
-use super::request_header::RequestHeader;
-use super::sasl_authenticate_request::SaslAuthenticateRequest;
-use super::sasl_handshake_request::SaslHandshakeRequest;
-use super::send_builder::SendBuilder;
+use super::ApiVersionsRequest;
+use super::ConcreteResponse;
+use super::MetadataRequest;
+use super::ProduceRequest;
+use super::RequestAndSize;
+use super::RequestHeader;
+use super::SaslAuthenticateRequest;
+use super::SaslHandshakeRequest;
+use super::SendBuilder;
 
 /// Trait for building requests at a specific version.
 ///
 /// Corresponds to the `AbstractRequest.Builder` inner class in Java.
 ///
 /// Each concrete request type provides its own builder that implements this trait.
-pub trait RequestBuilder {
+pub trait RequestBuilder: Send {
     /// Returns the API key for this builder's request type.
     fn api_key(&self) -> &'static ApiKeys;
 
@@ -84,6 +86,8 @@ pub enum ConcreteRequest {
     ApiVersions(ApiVersionsRequest),
     /// A Metadata request.
     Metadata(MetadataRequest),
+    /// A Produce request.
+    Produce(ProduceRequest),
     /// A SASL handshake request.
     SaslHandshake(SaslHandshakeRequest),
     /// A SASL authenticate request.
@@ -96,6 +100,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => r.version(),
             Self::Metadata(r) => r.version(),
+            Self::Produce(r) => r.version(),
             Self::SaslHandshake(r) => r.version(),
             Self::SaslAuthenticate(r) => r.version(),
         }
@@ -106,6 +111,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => r.api_key(),
             Self::Metadata(r) => r.api_key(),
+            Self::Produce(r) => r.api_key(),
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
         }
@@ -122,6 +128,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data()),
             Self::Metadata(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::Produce(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data()),
         }
@@ -163,6 +170,9 @@ impl ConcreteRequest {
             Self::Metadata(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::Produce(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
             Self::SaslHandshake(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
@@ -183,6 +193,7 @@ impl ConcreteRequest {
         match self {
             Self::ApiVersions(r) => Self::serialize_body(r.data(), r.version()),
             Self::Metadata(r) => Self::serialize_body(r.data(), r.version()),
+            Self::Produce(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslHandshake(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), r.version()),
         }
@@ -190,7 +201,7 @@ impl ConcreteRequest {
 
     /// Serializes a message body at a given version.
     fn serialize_body(msg: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
-        let mut cache = crate::common::protocol::object_serialization_cache::ObjectSerializationCache::new();
+        let mut cache = crate::common::protocol::ObjectSerializationCache::new();
         let size = Message::size(msg, &mut cache, version)?;
         let mut buf = ByteBufferAccessor::new(size as usize);
         Message::write(msg, &mut buf, &cache, version)?;
@@ -199,16 +210,21 @@ impl ConcreteRequest {
     }
 
     /// Returns an error response for this request.
+    ///
+    /// Returns `None` when the request type does not expect a response (e.g.,
+    /// Produce with acks=0). In Java, `getErrorResponse()` returns `null` in
+    /// those cases.
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
         error: &crate::common::protocol::Errors,
-    ) -> ConcreteResponse {
+    ) -> Option<ConcreteResponse> {
         match self {
-            Self::ApiVersions(r) => r.get_error_response(throttle_time_ms, error),
-            Self::Metadata(r) => r.get_error_response(throttle_time_ms, error),
-            Self::SaslHandshake(r) => r.get_error_response(throttle_time_ms, error),
-            Self::SaslAuthenticate(r) => r.get_error_response(throttle_time_ms, error),
+            Self::ApiVersions(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::Metadata(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::Produce(r) => r.get_error_response(throttle_time_ms, error),
+            Self::SaslHandshake(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::SaslAuthenticate(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -237,6 +253,10 @@ impl ConcreteRequest {
                 let data = MetadataRequestData::read(readable, api_version)?;
                 Ok(Self::Metadata(MetadataRequest::new(data, api_version)))
             },
+            ApiKeys::PRODUCE => {
+                let data = ProduceRequestData::read(readable, api_version)?;
+                Ok(Self::Produce(ProduceRequest::new(data, api_version)))
+            },
             ApiKeys::SASL_HANDSHAKE => {
                 let data = SaslHandshakeRequestData::read(readable, api_version)?;
                 Ok(Self::SaslHandshake(SaslHandshakeRequest::new(data, api_version)))
@@ -258,6 +278,7 @@ impl std::fmt::Display for ConcreteRequest {
         match self {
             Self::ApiVersions(r) => write!(f, "{r}"),
             Self::Metadata(r) => write!(f, "{r}"),
+            Self::Produce(r) => write!(f, "{r}"),
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
         }

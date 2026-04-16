@@ -42,7 +42,7 @@
 //! and `AsyncWriteExt::write()` directly. The selector's existing poll flow with
 //! `tokio::time::timeout(Duration::ZERO, ...)` handles non-blocking semantics.
 
-use super::transport_layer::{InterestOps, TransportLayer};
+use super::{InterestOps, TransportLayer};
 
 use std::future::Future;
 use std::io;
@@ -341,7 +341,7 @@ impl TransportLayer for SslTransportLayer {
 mod tests {
     use super::*;
     use crate::common::config::SslConfig;
-    use crate::common::security::ssl::SslFactory;
+    use crate::common::security::SslFactory;
 
     fn create_test_factory() -> SslFactory {
         SslFactory::new(&SslConfig::default()).unwrap()

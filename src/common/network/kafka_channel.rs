@@ -24,14 +24,15 @@
 //! - A [`NetworkSend`] representing the current in-progress send, if any
 //! - A [`ChannelMuteState`] to document if the channel has been muted
 
-use super::authenticator::Authenticator;
-use super::channel_metadata_registry::ChannelMetadataRegistry;
-use super::channel_state::{self, ChannelState, State};
-use super::network_receive::NetworkReceive;
-use super::network_send::NetworkSend;
-use super::receive::Receive;
-use super::send::KafkaSend;
-use super::transport_layer::{InterestOps, TransportLayer};
+use super::Authenticator;
+use super::ChannelMetadataRegistry;
+use super::KafkaSend;
+use super::NetworkReceive;
+use super::NetworkSend;
+use super::Receive;
+use super::channel_state::State;
+use super::{ChannelState, channel_state};
+use super::{InterestOps, TransportLayer};
 
 use std::io;
 use std::net::SocketAddr;
@@ -209,10 +210,11 @@ impl KafkaChannel {
     /// Disconnects the channel.
     pub fn disconnect(&mut self) {
         self.disconnected = true;
-        if self.state == channel_state::NOT_CONNECTED && self.remote_address.is_some() {
+        if self.state == channel_state::NOT_CONNECTED
+            && let Some(addr) = &self.remote_address
+        {
             // If we captured the remote address we can provide more information
-            self.state =
-                ChannelState::with_remote_address(State::NotConnected, &self.remote_address.unwrap().to_string());
+            self.state = ChannelState::with_remote_address(State::NotConnected, &addr.to_string());
         }
         self.transport_layer.disconnect();
     }
@@ -660,9 +662,9 @@ impl std::fmt::Debug for KafkaChannel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::network::byte_buffer_send::ByteBufferSend;
-    use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
-    use crate::common::network::transport_layer::InterestOps;
+    use crate::common::network::ByteBufferSend;
+    use crate::common::network::DefaultChannelMetadataRegistry;
+    use crate::common::network::InterestOps;
 
     use std::future::Future;
     use std::io;

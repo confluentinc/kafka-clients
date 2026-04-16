@@ -12,31 +12,15 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cluster resource listener support.
+//! Cluster resource listeners collection.
 //!
-//! Corresponds to `org.apache.kafka.common.ClusterResourceListener` and
-//! `org.apache.kafka.common.internals.ClusterResourceListeners`.
+//! Corresponds to `org.apache.kafka.common.internals.ClusterResourceListeners`.
 //!
 //! In Java, `ClusterResourceListeners.maybeAdd()` uses `instanceof` to check if
 //! an arbitrary object implements the `ClusterResourceListener` interface. In Rust,
 //! callers add listeners explicitly via `add_listener()`.
 
-use crate::common::cluster_resource::ClusterResource;
-
-/// A callback trait that users can implement to get notified about changes in the
-/// cluster metadata.
-///
-/// Users who need access to cluster metadata in interceptors, metric reporters,
-/// serializers and deserializers can implement this trait.
-///
-/// There will be one invocation of [`ClusterResourceListener::on_update`] after
-/// each metadata response.
-///
-/// Corresponds to `org.apache.kafka.common.ClusterResourceListener`.
-pub trait ClusterResourceListener: Send {
-    /// Called when the cluster metadata is updated.
-    fn on_update(&self, cluster_resource: &ClusterResource);
-}
+use crate::common::{ClusterResource, ClusterResourceListener};
 
 /// A collection of [`ClusterResourceListener`]s that are notified when the cluster
 /// resource (cluster ID) changes.

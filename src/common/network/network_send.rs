@@ -16,8 +16,8 @@
 //!
 //! Translated from `org.apache.kafka.common.network.NetworkSend`.
 
-use super::send::KafkaSend;
-use super::transport_layer::TransportLayer;
+use super::KafkaSend;
+use super::TransportLayer;
 
 use std::future::Future;
 use std::io;

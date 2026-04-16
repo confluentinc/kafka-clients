@@ -20,9 +20,9 @@ use std::collections::{HashMap, HashSet};
 use std::io;
 use std::net::SocketAddr;
 
-use super::channel_state::ChannelState;
-use super::network_receive::NetworkReceive;
-use super::network_send::NetworkSend;
+use super::ChannelState;
+use super::NetworkReceive;
+use super::NetworkSend;
 
 /// A delayed receive that is delivered when a matching send completes.
 ///

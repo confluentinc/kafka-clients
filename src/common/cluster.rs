@@ -21,11 +21,11 @@ use std::net::SocketAddr;
 
 use rand::seq::SliceRandom;
 
-use super::cluster_resource::ClusterResource;
-use super::node::Node;
-use super::partition_info::PartitionInfo;
-use super::topic_partition::TopicPartition;
-use super::uuid::Uuid;
+use super::ClusterResource;
+use super::Node;
+use super::PartitionInfo;
+use super::TopicPartition;
+use super::Uuid;
 
 /// An immutable representation of a subset of the nodes, topics, and partitions
 /// in the Kafka cluster.

@@ -25,10 +25,10 @@ use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::api_versions_response_data::ApiVersionsResponseData;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
 
+use super::ApiVersionsResponse;
 use super::ConcreteRequest;
-use super::abstract_request::RequestBuilder;
-use super::abstract_response::ConcreteResponse;
-use super::api_versions_response::ApiVersionsResponse;
+use super::ConcreteResponse;
+use super::RequestBuilder;
 
 /// Default client software name for this Rust Kafka client.
 const DEFAULT_CLIENT_SOFTWARE_NAME: &str = "confluent-kafka-rust";

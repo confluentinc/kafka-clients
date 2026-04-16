@@ -31,9 +31,9 @@ use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
 
 use super::ConcreteRequest;
-use super::abstract_request::RequestBuilder;
-use super::abstract_response::ConcreteResponse;
-use super::sasl_handshake_response::SaslHandshakeResponse;
+use super::ConcreteResponse;
+use super::RequestBuilder;
+use super::SaslHandshakeResponse;
 
 /// A SASL handshake request.
 ///
@@ -212,7 +212,7 @@ mod tests {
     #[test]
     fn test_invalid_sasl_handshake_request() {
         use crate::common::protocol::ByteBufferAccessor;
-        use crate::common::requests::abstract_request::ConcreteRequest;
+        use crate::common::requests::ConcreteRequest;
 
         let mut data = SaslHandshakeRequestData::new();
         data.set_mechanism("PLAIN".to_string());

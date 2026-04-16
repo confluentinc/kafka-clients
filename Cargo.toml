@@ -21,13 +21,19 @@ serde_json = "1.0"
 generator = { path = "generator" }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
-tokio = { version = "1", features = ["net", "io-util", "rt", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["logging", "std", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 indexmap = "2"
 log = "0.4"
+flate2 = "1"
+snap = "1"
+lz4_flex = "0.11"
+zstd = "0.13"
+crc32c = "0.6"
+dashmap = "6"
 
 [dev-dependencies]
 testcontainers = "0.27"
@@ -39,8 +45,8 @@ name = "common"
 path = "tests/main.rs"
 
 [[test]]
-name = "clients-producer"
-path = "tests/clients/producer/main.rs"
+name = "producer"
+path = "tests/producer/main.rs"
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

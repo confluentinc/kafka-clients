@@ -418,7 +418,7 @@ fn create_finalized_feature_keys(finalized_features: &HashMap<String, i16>) -> V
 mod tests {
     use super::*;
     use crate::api_versions_response_data::SupportedFeatureKey;
-    use crate::common::protocol::api_keys::API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION;
+    use crate::common::protocol::api_keys::PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION;
     use std::collections::HashSet;
 
     // Helper: extract the set of ApiKeys in a response
@@ -490,7 +490,7 @@ mod tests {
 
             if *key == ApiKeys::PRODUCE {
                 assert_eq!(
-                    API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION,
+                    PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION,
                     version.min_version,
                     "Incorrect min version for Api {}",
                     key.name()
@@ -561,7 +561,7 @@ mod tests {
     #[test]
     fn test_should_return_all_keys_when_throttle_ms_is_default_throttle() {
         let response = ApiVersionsResponseBuilder::new()
-            .set_throttle_time_ms(super::super::abstract_response::ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME)
+            .set_throttle_time_ms(super::super::abstract_response::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
@@ -572,7 +572,7 @@ mod tests {
             ApiKeys::apis_for_listener(ListenerType::Broker).into_iter().copied().collect();
         assert_eq!(broker_apis, api_keys_in_response(&response));
         assert_eq!(
-            super::super::abstract_response::ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME,
+            super::super::abstract_response::DEFAULT_THROTTLE_TIME,
             response.throttle_time_ms()
         );
         assert!(response.data().supported_features.is_empty());
@@ -613,7 +613,7 @@ mod tests {
     #[test]
     fn test_broker_apis_are_enabled() {
         let response = ApiVersionsResponseBuilder::new()
-            .set_throttle_time_ms(super::super::abstract_response::ABSTRACT_RESPONSE_DEFAULT_THROTTLE_TIME)
+            .set_throttle_time_ms(super::super::abstract_response::DEFAULT_THROTTLE_TIME)
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())

@@ -17,9 +17,9 @@
 //!
 //! Translated from `org.apache.kafka.common.network.NetworkReceive`.
 
-use super::invalid_receive_error::InvalidReceiveError;
-use super::receive::Receive;
-use super::transport_layer::TransportLayer;
+use super::InvalidReceiveError;
+use super::Receive;
+use super::TransportLayer;
 
 use log::trace;
 
@@ -28,10 +28,10 @@ use std::io;
 use std::pin::Pin;
 
 /// Source identifier used when the source is unknown.
-pub const NETWORK_RECEIVE_UNKNOWN_SOURCE: &str = "";
+pub const UNKNOWN_SOURCE: &str = "";
 
 /// Value indicating no maximum size limit for receives.
-pub const NETWORK_RECEIVE_UNLIMITED: i32 = -1;
+pub const UNLIMITED: i32 = -1;
 
 /// Size of the header that precedes each message (4 bytes for the i32 size).
 const SIZE_LENGTH: usize = 4;
@@ -59,7 +59,7 @@ pub struct NetworkReceive {
     size_buf: [u8; SIZE_LENGTH],
     /// Number of bytes read into the size buffer so far.
     size_bytes_read: usize,
-    /// Maximum allowed receive size. `NETWORK_RECEIVE_UNLIMITED` (-1) means no limit.
+    /// Maximum allowed receive size. `UNLIMITED` (-1) means no limit.
     max_size: i32,
     /// The requested buffer size, or -1 if not yet known.
     requested_buffer_size: i32,
@@ -84,7 +84,7 @@ impl NetworkReceive {
             source: source.to_string(),
             size_buf: [0; SIZE_LENGTH],
             size_bytes_read: SIZE_LENGTH,
-            max_size: NETWORK_RECEIVE_UNLIMITED,
+            max_size: UNLIMITED,
             requested_buffer_size: buffer_len as i32,
             buffer: Some(buffer),
             buffer_bytes_read: buffer_len,
@@ -93,7 +93,7 @@ impl NetworkReceive {
 
     /// Creates a new `NetworkReceive` with the given source and no size limit.
     pub fn with_source(source: &str) -> Self {
-        Self::with_max_size(NETWORK_RECEIVE_UNLIMITED, source)
+        Self::with_max_size(UNLIMITED, source)
     }
 
     /// Creates a new `NetworkReceive` with the given maximum size and source.
@@ -111,7 +111,7 @@ impl NetworkReceive {
 
     /// Creates a new `NetworkReceive` with unknown source and no size limit.
     pub fn new() -> Self {
-        Self::with_source(NETWORK_RECEIVE_UNKNOWN_SOURCE)
+        Self::with_source(UNKNOWN_SOURCE)
     }
 
     /// Returns the payload buffer, or `None` if it has not been allocated yet.
@@ -188,7 +188,7 @@ impl Receive for NetworkReceive {
                     if receive_size < 0 {
                         return Err(InvalidReceiveError::new(format!("Invalid receive (size = {receive_size})")).into());
                     }
-                    if self.max_size != NETWORK_RECEIVE_UNLIMITED && receive_size > self.max_size {
+                    if self.max_size != UNLIMITED && receive_size > self.max_size {
                         return Err(InvalidReceiveError::new(format!(
                             "Invalid receive (size = {receive_size} larger than {max_size})",
                             max_size = self.max_size,
@@ -254,7 +254,7 @@ impl Receive for NetworkReceive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::network::transport_layer::InterestOps;
+    use crate::common::network::InterestOps;
 
     use std::io;
     use std::net::SocketAddr;
@@ -504,7 +504,7 @@ mod tests {
     #[test]
     fn test_default() {
         let receive = NetworkReceive::new();
-        assert_eq!(NETWORK_RECEIVE_UNKNOWN_SOURCE, receive.source());
+        assert_eq!(UNKNOWN_SOURCE, receive.source());
         assert!(!receive.complete());
         assert!(!receive.required_memory_amount_known());
         assert!(!receive.memory_allocated());

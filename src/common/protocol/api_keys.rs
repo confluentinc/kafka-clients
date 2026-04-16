@@ -31,7 +31,7 @@ pub struct ApiKeys {
 // Versions 0-2 were removed in Apache Kafka 4.0, version 3 is the new baseline.
 // Due to a bug in librdkafka, version `0` has to be included in the api versions response
 // (see KAFKA-18659).
-pub const API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
+pub const PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
 
 impl ApiKeys {
     const fn new(message_type: ApiMessageType) -> Self {
@@ -349,9 +349,9 @@ impl ApiKeys {
         enable_unstable_last_version: bool,
         listener_type: Option<ListenerType>,
     ) -> Option<ApiVersion> {
-        // See `API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION` for details on why we do this
+        // See `PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION` for details on why we do this
         let oldest_version = if self == Self::PRODUCE && (listener_type == Some(ListenerType::Broker)) {
-            API_KEYS_PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
+            PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION
         } else {
             self.oldest_version()
         };

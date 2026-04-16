@@ -32,8 +32,8 @@ static int tests_passed = 0;
 #define ASSERT_SUCCESS(err) do { \
     if ((err) != NULL) { \
         fprintf(stderr, "  FAIL (line %d): expected success but got error: %s\n", \
-                __LINE__, kafka_KafkaError_message(err)); \
-        kafka_KafkaError_destroy(err); \
+                __LINE__, kafka_common_KafkaError_message(err)); \
+        kafka_common_KafkaError_destroy(err); \
         return 1; \
     } \
 } while (0)
@@ -82,7 +82,7 @@ static int test_send_with_key_and_value(void) {
     const uint8_t value[] = "my-value";
     kafka_producer_FutureRecordMetadata_t *future = NULL;
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_send(
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
         producer, "test-topic", 2, -1,
         key, (int32_t)sizeof(key) - 1,
         value, (int32_t)sizeof(value) - 1,
@@ -127,7 +127,7 @@ static int test_send_null_key(void) {
     const uint8_t value[] = "value-only";
     kafka_producer_FutureRecordMetadata_t *future = NULL;
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_send(
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1,
         value, (int32_t)sizeof(value) - 1,
@@ -147,7 +147,7 @@ static int test_send_null_value(void) {
     const uint8_t key[] = "key-only";
     kafka_producer_FutureRecordMetadata_t *future = NULL;
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_send(
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         key, (int32_t)sizeof(key) - 1,
         NULL, -1,
@@ -169,7 +169,7 @@ static int test_multiple_sends_incrementing_offsets(void) {
 
     for (int i = 0; i < 3; i++) {
         kafka_producer_FutureRecordMetadata_t *future = NULL;
-        kafka_KafkaError_t *err = kafka_producer_Producer_send(
+        kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
             producer, "topic", 0, -1,
             NULL, -1, NULL, -1, &future);
         ASSERT_SUCCESS(err);
@@ -199,7 +199,7 @@ static int test_manual_complete(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
     kafka_producer_FutureRecordMetadata_t *future = NULL;
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_send(
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &future);
     ASSERT_SUCCESS(err);
@@ -232,7 +232,7 @@ static int test_manual_error(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
     kafka_producer_FutureRecordMetadata_t *future = NULL;
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_send(
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &future);
     ASSERT_SUCCESS(err);
@@ -247,13 +247,13 @@ static int test_manual_error(void) {
     ASSERT(metadata == NULL, "metadata should be null on error");
 
     /* Inspect error */
-    int32_t code = kafka_KafkaError_code(err);
+    int32_t code = kafka_common_KafkaError_code(err);
     ASSERT(code == 2, "error code should be 2 (CorruptMessage)");
 
-    const char *msg = kafka_KafkaError_message(err);
+    const char *msg = kafka_common_KafkaError_message(err);
     ASSERT(msg != NULL, "error message should not be null");
 
-    kafka_KafkaError_destroy(err);
+    kafka_common_KafkaError_destroy(err);
     kafka_producer_FutureRecordMetadata_destroy(future);
     kafka_producer_Producer_destroy(producer);
     return 0;
@@ -283,7 +283,7 @@ static int test_send_batch(void) {
     };
 
     kafka_producer_FutureRecordMetadata_t *futures[2] = { NULL, NULL };
-    kafka_KafkaError_t *errors[2] = { NULL, NULL };
+    kafka_common_KafkaError_t *errors[2] = { NULL, NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
         producer, records, 2, futures, errors);
@@ -315,7 +315,7 @@ static int test_send_batch_partial_failure(void) {
     };
 
     kafka_producer_FutureRecordMetadata_t *futures[3] = { NULL, NULL, NULL };
-    kafka_KafkaError_t *errors[3] = { NULL, NULL, NULL };
+    kafka_common_KafkaError_t *errors[3] = { NULL, NULL, NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
         producer, records, 3, futures, errors);
@@ -334,7 +334,7 @@ static int test_send_batch_partial_failure(void) {
     ASSERT(errors[2] == NULL, "error[2] should be null");
 
     kafka_producer_FutureRecordMetadata_destroy(futures[0]);
-    kafka_KafkaError_destroy(errors[1]);
+    kafka_common_KafkaError_destroy(errors[1]);
     kafka_producer_FutureRecordMetadata_destroy(futures[2]);
     kafka_producer_Producer_destroy(producer);
     return 0;
@@ -347,7 +347,7 @@ static int test_send_batch_partial_failure(void) {
 static int test_close_then_send(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_close(producer);
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_close(producer);
     ASSERT_SUCCESS(err);
 
     kafka_producer_FutureRecordMetadata_t *future = NULL;
@@ -357,7 +357,7 @@ static int test_close_then_send(void) {
     ASSERT_ERROR(err);
     ASSERT(future == NULL, "future should be null after close");
 
-    kafka_KafkaError_destroy(err);
+    kafka_common_KafkaError_destroy(err);
     kafka_producer_Producer_destroy(producer);
     return 0;
 }
@@ -370,7 +370,7 @@ static int test_flush(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(false);
     kafka_producer_FutureRecordMetadata_t *future = NULL;
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_send(
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_send(
         producer, "topic", -1, -1,
         NULL, -1, NULL, -1, &future);
     ASSERT_SUCCESS(err);
@@ -394,7 +394,7 @@ static int test_flush(void) {
 static int test_error_inspection(void) {
     kafka_producer_Producer_t *producer = kafka_producer_MockProducer_new(true);
 
-    kafka_KafkaError_t *err = kafka_producer_Producer_close(producer);
+    kafka_common_KafkaError_t *err = kafka_producer_Producer_close(producer);
     ASSERT_SUCCESS(err);
 
     kafka_producer_FutureRecordMetadata_t *future = NULL;
@@ -403,32 +403,32 @@ static int test_error_inspection(void) {
         NULL, -1, NULL, -1, &future);
     ASSERT_ERROR(err);
 
-    int32_t code = kafka_KafkaError_code(err);
+    int32_t code = kafka_common_KafkaError_code(err);
     ASSERT(code != 0, "error code should be non-zero");
 
-    const char *msg = kafka_KafkaError_message(err);
+    const char *msg = kafka_common_KafkaError_message(err);
     ASSERT(msg != NULL, "error message should not be null");
     ASSERT(strlen(msg) > 0, "error message should not be empty");
 
     /* is_retriable and is_fatal should be callable */
-    (void)kafka_KafkaError_is_retriable(err);
-    (void)kafka_KafkaError_is_fatal(err);
+    (void)kafka_common_KafkaError_is_retriable(err);
+    (void)kafka_common_KafkaError_is_fatal(err);
 
-    kafka_KafkaError_destroy(err);
+    kafka_common_KafkaError_destroy(err);
     kafka_producer_Producer_destroy(producer);
     return 0;
 }
 
 static int test_error_null_safety(void) {
-    ASSERT(kafka_KafkaError_code(NULL) == 0,
+    ASSERT(kafka_common_KafkaError_code(NULL) == 0,
            "code(null) should be 0");
-    ASSERT(kafka_KafkaError_message(NULL) == NULL,
+    ASSERT(kafka_common_KafkaError_message(NULL) == NULL,
            "message(null) should be null");
-    ASSERT(!kafka_KafkaError_is_retriable(NULL),
+    ASSERT(!kafka_common_KafkaError_is_retriable(NULL),
            "is_retriable(null) should be false");
-    ASSERT(!kafka_KafkaError_is_fatal(NULL),
+    ASSERT(!kafka_common_KafkaError_is_fatal(NULL),
            "is_fatal(null) should be false");
-    kafka_KafkaError_destroy(NULL);  /* no-op */
+    kafka_common_KafkaError_destroy(NULL);  /* no-op */
     return 0;
 }
 
@@ -470,7 +470,7 @@ static int test_record_metadata_getters_from_batch(void) {
     };
 
     kafka_producer_FutureRecordMetadata_t *futures[1] = { NULL };
-    kafka_KafkaError_t *errors[1] = { NULL };
+    kafka_common_KafkaError_t *errors[1] = { NULL };
 
     int32_t sent = kafka_producer_Producer_send_batch(
         producer, records, 1, futures, errors);
@@ -478,7 +478,7 @@ static int test_record_metadata_getters_from_batch(void) {
     ASSERT(errors[0] == NULL, "error should be null");
 
     kafka_producer_RecordMetadata_t *metadata = NULL;
-    kafka_KafkaError_t *err = kafka_producer_FutureRecordMetadata_get(
+    kafka_common_KafkaError_t *err = kafka_producer_FutureRecordMetadata_get(
         futures[0], &metadata);
     ASSERT_SUCCESS(err);
     ASSERT(metadata != NULL, "metadata should not be null");
