@@ -51,7 +51,7 @@ use crate::common::header::Headers;
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::kafka_error::KafkaError;
 use crate::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
-use crate::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
+use crate::common::network::selector::Selector;
 use crate::common::partition_info::PartitionInfo;
 use crate::common::record::abstract_records;
 use crate::common::record::compression_type::CompressionType;
@@ -258,10 +258,14 @@ impl<K, V> KafkaProducer<K, V> {
         // 1. Parse and validate bootstrap server addresses
         let addresses = client_utils::parse_and_validate_addresses(&config.bootstrap_servers)?;
 
-        // 2. Derive compression from config if not explicitly provided
+        // 2. Validate delivery timeout configuration
+        //    Translated from KafkaProducer.configureDeliveryTimeout().
+        let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
+
+        // 3. Derive compression from config if not explicitly provided
         let compression = compression.unwrap_or_else(|| Compression::of(config.compression_type));
 
-        // 3. Create a system clock time provider
+        // 4. Create a system clock time provider
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
@@ -269,7 +273,7 @@ impl<K, V> KafkaProducer<K, V> {
                 .as_millis() as i64
         });
 
-        // 4. Create ProducerMetadata and bootstrap it with the resolved addresses
+        // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
         let metadata = Arc::new(ProducerMetadata::new(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
@@ -279,14 +283,14 @@ impl<K, V> KafkaProducer<K, V> {
         ));
         metadata.bootstrap(addresses);
 
-        // 5. Get the shared Metadata Arc from ProducerMetadata so the NetworkClient
+        // 6. Get the shared Metadata Arc from ProducerMetadata so the NetworkClient
         //    uses the same Metadata instance. This mirrors Java's inheritance where
         //    ProducerMetadata extends Metadata.
         let shared_metadata = metadata.metadata_arc();
 
-        // 6. Create Selector + NetworkClient
+        // 7. Create Selector + NetworkClient
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder);
+        let selector = Selector::with_defaults(config.connections_max_idle_ms, channel_builder);
         let api_versions = Arc::new(ApiVersions::new());
 
         let client = NetworkClient::with_metadata(
@@ -308,7 +312,7 @@ impl<K, V> KafkaProducer<K, V> {
             MetadataRecoveryStrategy::None,
         );
 
-        // 7. Create BufferPool and RecordAccumulator
+        // 8. Create BufferPool and RecordAccumulator
         //    As per Kafka configuration documentation, batch.size may be set to 0
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
@@ -319,7 +323,7 @@ impl<K, V> KafkaProducer<K, V> {
             config.linger_ms as i32,
             config.retry_backoff_ms,
             config.retry_backoff_max_ms,
-            config.delivery_timeout_ms,
+            delivery_timeout_ms,
             PartitionerConfig {
                 enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
@@ -327,7 +331,7 @@ impl<K, V> KafkaProducer<K, V> {
             buffer_pool,
         ));
 
-        // 8. Wire up the Sender and spawn the I/O background task
+        // 9. Wire up the Sender and spawn the I/O background task
         Ok(Self::with_client(
             &config,
             key_serializer,
@@ -406,6 +410,39 @@ impl<K, V> KafkaProducer<K, V> {
             sender_handle: Mutex::new(Some(sender_handle)),
             time_provider,
         }
+    }
+
+    /// Validate and optionally adjust `delivery.timeout.ms` against
+    /// `linger.ms + request.timeout.ms`.
+    ///
+    /// Translated from `KafkaProducer.configureDeliveryTimeout()`.
+    ///
+    /// Since the Rust config struct does not track which fields were explicitly
+    /// set by the user (unlike Java's `ConfigDef`), this always returns an error
+    /// when `delivery_timeout_ms < linger_ms + request_timeout_ms`. With the
+    /// default values (delivery=120000, linger=5, request=30000) the constraint
+    /// is satisfied, so this only triggers when the user supplies inconsistent
+    /// overrides — matching the Java "explicitly set" branch.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] if the delivery timeout is too
+    /// small (corresponds to Java's `ConfigException`).
+    fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, KafkaError> {
+        let delivery_timeout_ms = config.delivery_timeout_ms;
+        let linger_ms = config.linger_ms.min(i32::MAX as i64) as i32;
+        let request_timeout_ms = config.request_timeout_ms;
+        let linger_and_request_timeout_ms = (linger_ms as i64 + request_timeout_ms as i64).min(i32::MAX as i64) as i32;
+
+        if delivery_timeout_ms < linger_and_request_timeout_ms {
+            return Err(KafkaError::illegal_argument(format!(
+                "{} should be equal to or larger than {} + {}",
+                ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG,
+                ProducerConfig::LINGER_MS_CONFIG,
+                ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG,
+            )));
+        }
+        Ok(delivery_timeout_ms)
     }
 
     /// Returns the client ID for this producer.
@@ -1313,6 +1350,8 @@ mod tests {
     /// Translated from `KafkaProducerTest.testDeliveryTimeoutAndLingerMsConfig`.
     ///
     /// Tests that delivery timeout must be >= linger.ms + request.timeout.ms.
+    /// Java throws ConfigException when the user explicitly sets an inconsistent
+    /// value; Rust returns Err(IllegalArgument).
     #[test]
     fn test_delivery_timeout_and_linger_ms_config() {
         let config = ProducerConfig {
@@ -1322,12 +1361,53 @@ mod tests {
             ..Default::default()
         };
 
-        // In our implementation, we validate this in the constructor rather than throwing.
-        // The Java code validates this in configureDeliveryTimeout.
-        // For Rust, we test the validate method separately.
-        let linger_and_request_timeout =
-            (config.linger_ms + config.request_timeout_ms as i64).min(i32::MAX as i64) as i32;
-        assert!(config.delivery_timeout_ms < linger_and_request_timeout);
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        assert!(
+            result.is_err(),
+            "Should reject delivery_timeout_ms < linger_ms + request_timeout_ms"
+        );
+        let err = result.unwrap_err();
+        match &err {
+            KafkaError::IllegalArgument(msg) => {
+                assert!(
+                    msg.contains(ProducerConfig::DELIVERY_TIMEOUT_MS_CONFIG),
+                    "Error should mention delivery.timeout.ms: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains(ProducerConfig::LINGER_MS_CONFIG),
+                    "Error should mention linger.ms: {}",
+                    msg
+                );
+                assert!(
+                    msg.contains(ProducerConfig::REQUEST_TIMEOUT_MS_CONFIG),
+                    "Error should mention request.timeout.ms: {}",
+                    msg
+                );
+            },
+            other => panic!("Expected IllegalArgument error, got: {:?}", other),
+        }
+    }
+
+    /// Tests that configure_delivery_timeout accepts valid configurations.
+    #[test]
+    fn test_delivery_timeout_valid_config() {
+        // Default values: delivery=120000, linger=5, request=30000
+        let config = ProducerConfig::default();
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 120_000);
+
+        // Exactly equal: delivery = linger + request
+        let config = ProducerConfig {
+            delivery_timeout_ms: 30_010,
+            linger_ms: 10,
+            request_timeout_ms: 30_000,
+            ..Default::default()
+        };
+        let result = KafkaProducer::<String, String>::configure_delivery_timeout(&config);
+        assert!(result.is_ok());
+        assert_eq!(result.unwrap(), 30_010);
     }
 
     /// Tests that `negativePartitionShouldThrow` from Java is already handled
