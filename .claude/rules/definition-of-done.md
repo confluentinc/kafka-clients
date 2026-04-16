@@ -10,7 +10,9 @@ Every change must at least pass all of the following before it is considered com
 
 4. Are there blockers for doing that? In case implement the needed classes as well.
 
-5. `cargo build` succeeds
-6. `cargo test` passes
-7. `cargo xtask format-check` passes (run `cargo xtask format` to fix)
-8. `cargo xtask lint` passes (run `cargo xtask lint-fix` to auto-fix, then fix remaining issues manually)
+5. Are all unit and integration tests passing? If there are any failing test fix them before considering the change done.
+
+6. `cargo build` succeeds
+7. `cargo test --features integration-tests` passes
+8. `cargo xtask format-check` passes (run `cargo xtask format` to fix)
+9. `cargo xtask lint` passes (run `cargo xtask lint-fix` to auto-fix, then fix remaining issues manually)

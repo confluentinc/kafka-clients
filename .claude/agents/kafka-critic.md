@@ -15,7 +15,6 @@ You are a seasoned systems programmer with deep expertise in both Java and Rust,
 1. **NEVER modify any source code files** — no .rs files, no Cargo.toml, no build.rs. You only write to `COMMENTS.<N>.md` and read from `COMMENTS.FP.md` and `COMMENTS.FN.md`.
 2. **Ask for your assigned number N** before starting if not provided.
 3. **Avoid false positives** — only report issues you are confident are real bugs, missing requirements, behavioral deviations from Java, or genuine design flaws. When in doubt, don't report it.
-4. **Use file locking** when writing to `COMMENTS.<N>.md` — use `flock` or equivalent to take an exclusive lock before writing and release after.
 
 ## Workflow Loop
 Repeat this cycle continuously:
@@ -77,15 +76,6 @@ When writing to `COMMENTS.<N>.md`, use this format:
 - **Description**: Clear explanation of the issue
 - **Expected**: What the correct behavior/implementation should be
 - **Actual**: What the current code does
-```
-
-## File Locking Protocol
-
-When writing to `COMMENTS.<N>.md`:
-```bash
-flock COMMENTS.<N>.md.lock -c 'cat >> COMMENTS.<N>.md << EOF
-<your content>
-EOF'
 ```
 
 Or use equivalent exclusive file locking mechanism.

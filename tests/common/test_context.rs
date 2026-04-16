@@ -62,9 +62,29 @@ impl TestContext {
         Self { cluster, prefix, created_topics: Vec::new() }
     }
 
-    /// Bootstrap servers string (delegates to cluster).
+    /// Bootstrap servers for the PLAINTEXT listener.
     pub fn bootstrap_servers(&self) -> &str {
         self.cluster.bootstrap_servers()
+    }
+
+    /// Bootstrap servers for the SSL listener.
+    pub fn ssl_bootstrap_servers(&self) -> &str {
+        self.cluster.ssl_bootstrap_servers()
+    }
+
+    /// Bootstrap servers for the SASL_PLAINTEXT listener.
+    pub fn sasl_plaintext_bootstrap_servers(&self) -> &str {
+        self.cluster.sasl_plaintext_bootstrap_servers()
+    }
+
+    /// Bootstrap servers for the SASL_SSL listener.
+    pub fn sasl_ssl_bootstrap_servers(&self) -> &str {
+        self.cluster.sasl_ssl_bootstrap_servers()
+    }
+
+    /// CA certificate PEM for SSL tests.
+    pub fn ca_cert_pem(&self) -> &str {
+        self.cluster.ca_cert_pem()
     }
 
     /// Generate a unique topic name for this test.

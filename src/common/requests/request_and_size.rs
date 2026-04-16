@@ -21,6 +21,7 @@ use super::abstract_request::ConcreteRequest;
 /// A parsed request together with the number of bytes it consumed from the buffer.
 ///
 /// Corresponds to `RequestAndSize` in Java.
+#[derive(Debug)]
 pub struct RequestAndSize {
     /// The parsed request.
     pub request: ConcreteRequest,

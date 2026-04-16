@@ -16,6 +16,7 @@
 
 pub mod cluster;
 pub mod cluster_resource;
+pub mod config;
 pub mod feature;
 pub mod internals;
 pub mod kafka_error;
@@ -25,6 +26,7 @@ pub mod node;
 pub mod partition_info;
 pub mod protocol;
 pub mod requests;
+pub mod security;
 pub mod topic_partition;
 pub mod utils;
 pub mod uuid;

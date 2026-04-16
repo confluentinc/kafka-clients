@@ -38,7 +38,6 @@ use super::channel_state::{self, ChannelState};
 use super::kafka_channel::KafkaChannel;
 use super::network_receive::NetworkReceive;
 use super::network_send::NetworkSend;
-use super::plaintext_transport_layer::PlaintextTransportLayer;
 use super::receive::Receive;
 use super::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
 
@@ -560,6 +559,7 @@ impl Selectable for Selector {
         &mut self,
         id: &str,
         address: SocketAddr,
+        peer_host: &str,
         send_buffer_size: i32,
         receive_buffer_size: i32,
     ) -> io::Result<()> {
@@ -591,22 +591,20 @@ impl Selectable for Selector {
             },
         };
 
-        // Wrap in transport layer
-        let transport_layer = PlaintextTransportLayer::connected(stream);
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 
-        // Build channel
-        let channel = match self.channel_builder.build_channel(
-            id,
-            Box::new(transport_layer),
-            self.max_receive_size,
-            metadata_registry,
-        ) {
-            Ok(c) => c,
-            Err(e) => {
-                return Err(e);
-            },
-        };
+        // Build channel — the channel builder wraps the stream in the
+        // appropriate transport layer (plaintext or SSL/TLS).
+        let channel =
+            match self
+                .channel_builder
+                .build_channel(id, stream, peer_host, self.max_receive_size, metadata_registry)
+            {
+                Ok(c) => c,
+                Err(e) => {
+                    return Err(e);
+                },
+            };
 
         // The connection completed immediately (Tokio connect is async but resolves when done)
         self.immediately_connected_keys.insert(id.to_string());
@@ -1047,7 +1045,10 @@ mod tests {
 
     async fn blocking_connect(selector: &mut Selector, node: &str, port: u16) {
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        selector.connect(node, addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+        selector
+            .connect(node, addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
         wait_for_channel_ready(selector, node).await;
     }
 
@@ -1091,7 +1092,7 @@ mod tests {
         let addr: SocketAddr = "192.0.2.1:9999".parse().unwrap();
         let result = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            selector.connect("0", addr, BUFFER_SIZE, BUFFER_SIZE),
+            selector.connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE),
         )
         .await;
 
@@ -1123,7 +1124,10 @@ mod tests {
         // Create connections
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
         for i in 0..conns {
-            selector.connect(&i.to_string(), addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+            selector
+                .connect(&i.to_string(), addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+                .await
+                .unwrap();
         }
 
         // Wait for all connections
@@ -1223,7 +1227,7 @@ mod tests {
 
         blocking_connect(&mut selector, "0", server.port()).await;
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
-        let result = selector.connect("0", addr, BUFFER_SIZE, BUFFER_SIZE).await;
+        let result = selector.connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE).await;
         assert!(result.is_err());
 
         selector.close_channel("0").await;
@@ -1294,7 +1298,10 @@ mod tests {
         );
 
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
-        selector.connect("0", addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
         wait_for_channel_ready(&mut selector, "0").await;
 
         // Simulate time passing by manipulating the idle expiry manager.
@@ -1327,7 +1334,10 @@ mod tests {
         let mut selector = create_selector().await;
 
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
-        selector.connect("0", addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
 
         // After connect, immediately_connected_keys should be non-empty
         assert!(
@@ -1410,7 +1420,7 @@ mod tests {
         drop(listener); // Close the listener so connections are refused
 
         let addr: SocketAddr = format!("127.0.0.1:{port}").parse().unwrap();
-        let result = selector.connect("0", addr, BUFFER_SIZE, BUFFER_SIZE).await;
+        let result = selector.connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE).await;
 
         // Connection refused can manifest either as an error from connect()
         // or as a disconnect detected during poll()
@@ -1432,8 +1442,14 @@ mod tests {
         let mut selector = create_selector().await;
 
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
-        selector.connect("0", addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
-        selector.connect("1", addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+        selector
+            .connect("0", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
+        selector
+            .connect("1", addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
 
         selector.close().await;
         assert!(selector.channels.is_empty());
@@ -1524,7 +1540,10 @@ mod tests {
         let node = "0";
         let reqs = 50;
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
-        selector.connect(node, addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+        selector
+            .connect(node, addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
         wait_for_channel_ready(&mut selector, node).await;
 
         // Generate a large random-ish prefix
@@ -1546,7 +1565,10 @@ mod tests {
 
         let node = "0";
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
-        selector.connect(node, addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+        selector
+            .connect(node, addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+            .await
+            .unwrap();
         wait_for_channel_ready(&mut selector, node).await;
 
         let request: String = (0..1024).map(|i| (b'a' + (i % 26) as u8) as char).collect();
@@ -1600,7 +1622,10 @@ mod tests {
         let conns = 5;
         let addr: SocketAddr = format!("127.0.0.1:{}", server.port()).parse().unwrap();
         for i in 0..conns {
-            selector.connect(&i.to_string(), addr, BUFFER_SIZE, BUFFER_SIZE).await.unwrap();
+            selector
+                .connect(&i.to_string(), addr, "localhost", BUFFER_SIZE, BUFFER_SIZE)
+                .await
+                .unwrap();
             wait_for_channel_ready(&mut selector, &i.to_string()).await;
         }
 

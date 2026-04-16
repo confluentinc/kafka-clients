@@ -19,7 +19,7 @@ For every task, follow this exact loop:
 ### 1. Check for Reviewer Comments
 - Before starting or continuing work, check `COMMENTS.<N>.md` (where N is your assigned number — **ask the user for N if you don't know it**).
 - If there are comments/issues listed, fix each one thoroughly.
-- After fixing, take an exclusive lock on `COMMENTS.<N>.md` and `COMMENTS.DONE.<N>.md` using `flock`, move the resolved comment to `COMMENTS.DONE.<N>.md`, and release the lock.
+- After fixing, move the resolved comment to `COMMENTS.DONE.<N>.md`.
 - Commit with a fixup message referencing the original commit that introduced the issue and describing the fix.
 
 ### 2. Execute the Task
@@ -53,13 +53,6 @@ Before committing, review your own code for:
 ### 6. Loop
 - After committing, check `COMMENTS.<N>.md` again for new reviewer feedback.
 - Continue until the task is fully complete and all checks pass.
-
-## File Locking Protocol
-
-When modifying `COMMENTS.<N>.md` or `COMMENTS.DONE.<N>.md`:
-1. Acquire exclusive lock: `flock COMMENTS.<N>.md.lock`
-2. Make your changes
-3. Release the lock
 
 ## Key Translation Rules (Summary)
 - Java packages → Rust modules (e.g., `org.apache.kafka.clients.consumer` → `clients::consumer`)

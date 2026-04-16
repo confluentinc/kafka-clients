@@ -108,7 +108,7 @@ async fn test_api_versions_no_error() {
     let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
 
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 
@@ -140,7 +140,7 @@ async fn test_expected_apis_present() {
     let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
 
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 
@@ -195,7 +195,7 @@ async fn test_version_ranges_valid() {
     let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
 
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 
@@ -236,7 +236,7 @@ async fn test_metadata_api_version_range() {
     let addr = parse_bootstrap_addr(ctx.bootstrap_servers());
 
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 

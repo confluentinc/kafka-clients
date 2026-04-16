@@ -25,6 +25,9 @@ fn main() -> anyhow::Result<()> {
         Some("check-generated") => check_generated()?,
         Some("lint") => lint()?,
         Some("lint-fix") => lint_fix()?,
+        Some("coverage") => coverage()?,
+        Some("coverage-lcov") => coverage_lcov()?,
+        Some("coverage-all") => coverage_all()?,
         _ => print_help(),
     }
 
@@ -190,6 +193,49 @@ fn lint_fix() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn coverage() -> anyhow::Result<()> {
+    println!("Running unit test coverage...");
+    run_coverage_lcov(&[])?;
+    run_grcov_html()?;
+    println!("Coverage report: coverage/html/index.html");
+    Ok(())
+}
+
+fn coverage_lcov() -> anyhow::Result<()> {
+    println!("Running unit test coverage (lcov)...");
+    run_coverage_lcov(&[])?;
+    println!("lcov report: coverage/lcov.info");
+    Ok(())
+}
+
+fn coverage_all() -> anyhow::Result<()> {
+    println!("Running full test coverage (unit + integration, requires Docker)...");
+    run_coverage_lcov(&["--features", "integration-tests"])?;
+    run_grcov_html()?;
+    println!("Coverage report: coverage/html/index.html");
+    Ok(())
+}
+
+fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
+    fs::create_dir_all("coverage")?;
+    let mut args = vec![
+        "llvm-cov",
+        "--package",
+        "confluent-kafka-rust",
+        "--ignore-filename-regex",
+        "(target/debug/build/.*/out/(test_)?generated/|src/bin/)",
+        "--lcov",
+        "--output-path",
+        "coverage/lcov.info",
+    ];
+    args.extend_from_slice(extra_args);
+    run_command("cargo", &args)
+}
+
+fn run_grcov_html() -> anyhow::Result<()> {
+    run_command("grcov", &["coverage/lcov.info", "-s", ".", "-t", "html", "-o", "coverage/html"])
+}
+
 fn run_command(program: &str, args: &[&str]) -> anyhow::Result<()> {
     let status = Command::new(program).args(args).status()?;
 
@@ -208,12 +254,18 @@ fn print_help() {
   check-generated Check generated code formatting only (no changes)
   lint            Run clippy lints (warnings are errors)
   lint-fix        Run clippy and automatically fix what it can
+  coverage        Run unit test coverage (HTML report)
+  coverage-lcov   Run unit test coverage (lcov for CI)
+  coverage-all    Run all test coverage including integration (requires Docker)
 
 Usage:
   cargo xtask format
   cargo xtask format-check
   cargo xtask check-generated
   cargo xtask lint
-  cargo xtask lint-fix"
+  cargo xtask lint-fix
+  cargo xtask coverage
+  cargo xtask coverage-lcov
+  cargo xtask coverage-all"
     );
 }

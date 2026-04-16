@@ -19,8 +19,8 @@
 //! In Java, `PlaintextChannelBuilder` creates a `PlaintextTransportLayer` from a
 //! `SelectionKey` and wraps it with a `PlaintextAuthenticator` in a `KafkaChannel`.
 //!
-//! In Rust, the Selector creates the `PlaintextTransportLayer` and passes it as a
-//! `Box<dyn TransportLayer>` to the builder. The builder wraps it with a
+//! In Rust, the Selector passes the raw `TcpStream` to the builder, which creates
+//! the `PlaintextTransportLayer` internally and wraps it with a
 //! `PlaintextAuthenticator` in a `KafkaChannel`.
 
 use super::authenticator::PlaintextAuthenticator;
@@ -28,9 +28,11 @@ use super::channel_builder::ChannelBuilder;
 use super::channel_metadata_registry::ChannelMetadataRegistry;
 use super::kafka_channel::KafkaChannel;
 use super::listener_name::ListenerName;
-use super::transport_layer::TransportLayer;
+use super::plaintext_transport_layer::PlaintextTransportLayer;
 
 use std::io;
+
+use tokio::net::TcpStream;
 
 /// Plaintext channel builder that creates unencrypted channels.
 ///
@@ -55,10 +57,12 @@ impl ChannelBuilder for PlaintextChannelBuilder {
     fn build_channel(
         &self,
         id: &str,
-        transport_layer: Box<dyn TransportLayer>,
+        stream: TcpStream,
+        _peer_host: &str,
         max_receive_size: i32,
         metadata_registry: Box<dyn ChannelMetadataRegistry>,
     ) -> io::Result<KafkaChannel> {
+        let transport_layer = Box::new(PlaintextTransportLayer::connected(stream));
         let authenticator = Box::new(PlaintextAuthenticator::new());
         Ok(KafkaChannel::new(
             id,

@@ -7,3 +7,8 @@ The client should be able to connect to a Kafka broker with PLAINTEXT connection
 ## Milestone 2
 
 The Producer should be able to accumulate the messages into batches to produce in a Produce RPC.
+
+## Milestone 3
+
+The Producer should be able to connect to a SSL endpoint, do a SaslHandshake and
+then a SaslAuthenticate with PLAIN credential

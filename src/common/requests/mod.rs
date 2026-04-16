@@ -29,6 +29,10 @@ pub mod request_header;
 pub mod request_test_utils;
 pub mod request_utils;
 pub mod response_header;
+pub mod sasl_authenticate_request;
+pub mod sasl_authenticate_response;
+pub mod sasl_handshake_request;
+pub mod sasl_handshake_response;
 pub mod send_builder;
 
 pub use abstract_request::{ConcreteRequest, RequestBuilder};
@@ -41,6 +45,10 @@ pub use request_and_size::RequestAndSize;
 pub use request_header::RequestHeader;
 pub use request_utils::serialize;
 pub use response_header::ResponseHeader;
+pub use sasl_authenticate_request::{SaslAuthenticateRequest, SaslAuthenticateRequestBuilder};
+pub use sasl_authenticate_response::SaslAuthenticateResponse;
+pub use sasl_handshake_request::{SaslHandshakeRequest, SaslHandshakeRequestBuilder};
+pub use sasl_handshake_response::SaslHandshakeResponse;
 pub use send_builder::SendBuilder;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
