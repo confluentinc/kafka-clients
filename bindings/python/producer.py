@@ -1,9 +1,9 @@
-import _confluent_kafka_rust as _lib
-from _confluent_kafka_rust import ProducerRecord
+import _confluentkafka as _lib
+from _confluentkafka import ProducerRecord
 from concurrent.futures import (Future)
 
 
-# ProducerRecord is a C extension type imported from _confluent_kafka_rust module
+# ProducerRecord is a C extension type imported from _confluentkafka module
 # It stores kafka_producer_ProducerRecord_t internally for optimized performance
 
 

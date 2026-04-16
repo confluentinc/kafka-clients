@@ -19,7 +19,7 @@
 //! They exercise the public API through the library crate boundary, verifying
 //! that the types are properly exported and usable by downstream consumers.
 
-use confluent_kafka_rust::clients::producer::{MockProducer, Producer, ProducerRecord};
+use confluent_kafka::clients::producer::{MockProducer, Producer, ProducerRecord};
 
 // ---------------------------------------------------------------------------
 // Helper
@@ -93,7 +93,7 @@ async fn test_manual_completion() {
     assert!(result1.is_ok(), "Request should be successful");
     assert!(!md2.is_done(), "Second request still incomplete");
 
-    let e = confluent_kafka_rust::common::KafkaError::illegal_argument("blah");
+    let e = confluent_kafka::common::KafkaError::illegal_argument("blah");
     assert!(producer.error_next(e), "Complete the second request with an error");
     let result2 = md2.get().await;
     assert!(result2.is_err(), "Expected error to be thrown");

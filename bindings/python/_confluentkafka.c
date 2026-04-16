@@ -1,7 +1,7 @@
 #define PY_SSIZE_T_CLEAN
 #include <Python.h>
 #include <structmember.h>
-#include <confluent_kafka_rust.h>
+#include <confluent_kafka.h>
 #include <threads.h>
 #include <string.h>
 #include <stdint.h>
@@ -752,14 +752,14 @@ static PyMethodDef ProducerNativeMethods[] = {
 // Module definition
 static struct PyModuleDef kafkanativemodule = {
     PyModuleDef_HEAD_INIT,
-    "_confluent_kafka_rust",
+    "_confluentkafka",
     "Native producer module for Confluent Kafka Rust",
     -1,
     ProducerNativeMethods
 };
 
 // Module initialization
-PyMODINIT_FUNC PyInit__confluent_kafka_rust(void) {
+PyMODINIT_FUNC PyInit__confluentkafka(void) {
     PyObject* m;
 
     if (PyType_Ready(&ProducerRecordType) < 0) {

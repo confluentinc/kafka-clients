@@ -20,8 +20,11 @@ from producer import (
     MockProducer, ProducerRecord, RecordMetadata, KafkaError
 )
 
-# Time to wait for background threads to process batches
-BATCH_WAIT = 0.5
+# Timeout in seconds for future.result() calls
+FUTURE_TIMEOUT = 2
+
+# Time for the batch thread to dispatch records (batch interval is 10ms)
+BATCH_DISPATCH = 0.02
 
 
 # -- MockProducer lifecycle ---------------------------------------------------
@@ -44,9 +47,8 @@ def test_send_with_key_and_value():
     with MockProducer(auto_complete=True) as p:
         record = ProducerRecord("test-topic", b"value", b"key")
         future = p.send(record)
-        time.sleep(BATCH_WAIT)
+        meta = future.result(timeout=FUTURE_TIMEOUT)
         assert future.done()
-        meta = future.result(timeout=2)
         assert isinstance(meta, RecordMetadata)
         assert meta.topic() == "test-topic"
         assert meta.offset() == 0
@@ -57,8 +59,7 @@ def test_send_value_only():
     with MockProducer(auto_complete=True) as p:
         record = ProducerRecord("test-topic", b"value")
         future = p.send(record)
-        time.sleep(BATCH_WAIT)
-        meta = future.result(timeout=2)
+        meta = future.result(timeout=FUTURE_TIMEOUT)
         assert meta.topic() == "test-topic"
 
 
@@ -66,8 +67,7 @@ def test_send_with_key_none():
     with MockProducer(auto_complete=True) as p:
         record = ProducerRecord("test-topic", b"value", None)
         future = p.send(record)
-        time.sleep(BATCH_WAIT)
-        meta = future.result(timeout=2)
+        meta = future.result(timeout=FUTURE_TIMEOUT)
         assert meta.offset() == 0
 
 
@@ -76,8 +76,7 @@ def test_send_with_key_none():
 def test_metadata_fields():
     with MockProducer(auto_complete=True) as p:
         future = p.send(ProducerRecord("my-topic", b"v", b"k"))
-        time.sleep(BATCH_WAIT)
-        meta = future.result(timeout=2)
+        meta = future.result(timeout=FUTURE_TIMEOUT)
         assert meta.topic() == "my-topic"
         assert meta.offset() == 0
         assert meta.partition() == 0
@@ -90,8 +89,7 @@ def test_multiple_sends_incrementing_offsets():
         for i in range(3):
             f = p.send(ProducerRecord("test-topic", f"v{i}".encode()))
             futures.append(f)
-        time.sleep(BATCH_WAIT)
-        offsets = [f.result(timeout=2).offset() for f in futures]
+        offsets = [f.result(timeout=FUTURE_TIMEOUT).offset() for f in futures]
         assert offsets == [0, 1, 2]
 
 
@@ -100,12 +98,11 @@ def test_multiple_sends_incrementing_offsets():
 def test_manual_complete_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_WAIT)
+    time.sleep(BATCH_DISPATCH)
     assert not future.done()
     p.complete_next()
-    time.sleep(BATCH_WAIT)
+    meta = future.result(timeout=FUTURE_TIMEOUT)
     assert future.done()
-    meta = future.result(timeout=2)
     assert isinstance(meta, RecordMetadata)
     assert meta.offset() == 0
     p.close()
@@ -114,12 +111,10 @@ def test_manual_complete_next():
 def test_manual_error_next():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_WAIT)
+    time.sleep(BATCH_DISPATCH)
     p.error_next(2, "test error")
-    time.sleep(BATCH_WAIT)
-    assert future.done()
     with pytest.raises(KafkaError) as exc_info:
-        future.result(timeout=2)
+        future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
     assert err.code == 2
     assert err.message == "test error"
@@ -131,11 +126,10 @@ def test_manual_error_next():
 def test_manual_error_next_null_message():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_WAIT)
+    time.sleep(BATCH_DISPATCH)
     p.error_next(2, None)
-    time.sleep(BATCH_WAIT)
     with pytest.raises(KafkaError) as exc_info:
-        future.result(timeout=2)
+        future.result(timeout=FUTURE_TIMEOUT)
     assert exc_info.value.code == 2
     p.close()
 
@@ -145,14 +139,13 @@ def test_manual_error_next_null_message():
 def test_flush():
     with MockProducer(auto_complete=True) as p:
         p.send(ProducerRecord("test-topic", b"v"))
-        time.sleep(BATCH_WAIT)
         p.flush()  # Should not raise
 
 
 def test_close():
     p = MockProducer(auto_complete=True)
-    p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_WAIT)
+    future = p.send(ProducerRecord("test-topic", b"v"))
+    future.result(timeout=FUTURE_TIMEOUT)
     p.close()
     with pytest.raises(RuntimeError):
         p.send(ProducerRecord("test-topic", b"v2"))
@@ -168,17 +161,21 @@ def test_close_idempotent():
 
 def test_history_count():
     with MockProducer(auto_complete=True) as p:
+        futures = []
         for i in range(3):
-            p.send(ProducerRecord("test-topic", f"v{i}".encode()))
-        time.sleep(BATCH_WAIT)
+            futures.append(p.send(ProducerRecord("test-topic", f"v{i}".encode())))
+        for f in futures:
+            f.result(timeout=FUTURE_TIMEOUT)
         assert p.history_count() == 3
 
 
 def test_clear():
     with MockProducer(auto_complete=True) as p:
+        futures = []
         for i in range(3):
-            p.send(ProducerRecord("test-topic", f"v{i}".encode()))
-        time.sleep(BATCH_WAIT)
+            futures.append(p.send(ProducerRecord("test-topic", f"v{i}".encode())))
+        for f in futures:
+            f.result(timeout=FUTURE_TIMEOUT)
         p.clear()
         assert p.history_count() == 0
 
@@ -188,11 +185,10 @@ def test_clear():
 def test_kafka_error_properties():
     p = MockProducer(auto_complete=False)
     future = p.send(ProducerRecord("test-topic", b"v"))
-    time.sleep(BATCH_WAIT)
+    time.sleep(BATCH_DISPATCH)
     p.error_next(2, "corrupt message")
-    time.sleep(BATCH_WAIT)
     with pytest.raises(KafkaError) as exc_info:
-        future.result(timeout=2)
+        future.result(timeout=FUTURE_TIMEOUT)
     err = exc_info.value
     assert err.code == 2
     assert err.message == "corrupt message"
@@ -213,8 +209,7 @@ def test_send_after_close_raises():
 def test_context_manager():
     with MockProducer(auto_complete=True) as p:
         future = p.send(ProducerRecord("test-topic", b"v"))
-        time.sleep(BATCH_WAIT)
-        meta = future.result(timeout=2)
+        meta = future.result(timeout=FUTURE_TIMEOUT)
         assert isinstance(meta, RecordMetadata)
     # After with block, producer is closed
     assert p.closed

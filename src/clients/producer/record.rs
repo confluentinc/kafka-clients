@@ -29,7 +29,7 @@ use crate::common::kafka_error::KafkaError;
 /// # Examples
 ///
 /// ```
-/// use confluent_kafka_rust::clients::producer::Header;
+/// use confluent_kafka::clients::producer::Header;
 ///
 /// let header = Header::new("trace-id", Some(b"abc123".to_vec())).unwrap();
 /// assert_eq!(header.key(), "trace-id");
@@ -105,7 +105,7 @@ impl fmt::Display for Header {
 /// # Builder-style construction
 ///
 /// ```
-/// use confluent_kafka_rust::clients::producer::ProducerRecord;
+/// use confluent_kafka::clients::producer::ProducerRecord;
 ///
 /// let record = ProducerRecord::new("my-topic").unwrap()
 ///     .with_partition(0).unwrap()

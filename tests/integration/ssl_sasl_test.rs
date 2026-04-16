@@ -23,17 +23,17 @@
 
 use std::net::SocketAddr;
 
-use confluent_kafka_rust::common::config::{SaslConfig, SslConfig};
-use confluent_kafka_rust::common::network::NetworkSend;
-use confluent_kafka_rust::common::network::sasl_channel_builder::SaslChannelBuilder;
-use confluent_kafka_rust::common::network::selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
-use confluent_kafka_rust::common::network::selector::{SELECTOR_NO_IDLE_TIMEOUT_MS, Selector};
-use confluent_kafka_rust::common::network::ssl_channel_builder::SslChannelBuilder;
-use confluent_kafka_rust::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use confluent_kafka_rust::common::requests::abstract_response::ConcreteResponse;
-use confluent_kafka_rust::common::requests::{ApiVersionsRequestBuilder, RequestBuilder, RequestHeader};
-use confluent_kafka_rust::common::security::auth::SecurityProtocol;
-use confluent_kafka_rust::common::security::ssl::SslFactory;
+use confluent_kafka::common::config::{SaslConfig, SslConfig};
+use confluent_kafka::common::network::NetworkSend;
+use confluent_kafka::common::network::sasl_channel_builder::SaslChannelBuilder;
+use confluent_kafka::common::network::selectable::{SELECTABLE_USE_DEFAULT_BUFFER_SIZE, Selectable};
+use confluent_kafka::common::network::selector::{SELECTOR_NO_IDLE_TIMEOUT_MS, Selector};
+use confluent_kafka::common::network::ssl_channel_builder::SslChannelBuilder;
+use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
+use confluent_kafka::common::requests::abstract_response::ConcreteResponse;
+use confluent_kafka::common::requests::{ApiVersionsRequestBuilder, RequestBuilder, RequestHeader};
+use confluent_kafka::common::security::auth::SecurityProtocol;
+use confluent_kafka::common::security::ssl::SslFactory;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};

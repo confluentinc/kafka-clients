@@ -57,7 +57,7 @@ use crate::common::topic_partition::TopicPartition;
 /// # Examples
 ///
 /// ```
-/// use confluent_kafka_rust::clients::producer::{MockProducer, Producer, ProducerRecord};
+/// use confluent_kafka::clients::producer::{MockProducer, Producer, ProducerRecord};
 ///
 /// // Auto-complete mode: sends complete immediately
 /// let producer = MockProducer::with_auto_complete(true);

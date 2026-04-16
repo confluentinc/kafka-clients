@@ -22,11 +22,11 @@ include_dir = os.path.join(project_root, 'target', 'include')
 lib_dir = os.path.join(project_root, 'target', 'debug')
 
 ext = Extension(
-    '_confluent_kafka_rust',
-    sources=['_confluent_kafka_rust.c'],
+    '_confluentkafka',
+    sources=['_confluentkafka.c'],
     include_dirs=[include_dir],
     library_dirs=[lib_dir],
-    libraries=['confluent_kafka_rust'],
+    libraries=['confluent_kafka'],
     extra_compile_args=['-std=c99'],
     runtime_library_dirs=[lib_dir],
 )

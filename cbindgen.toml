@@ -2,7 +2,7 @@ language = "C"
 # Use "Type" style so function signatures use the typedef name
 # (e.g. kafka_producer_ProducerRecord_t *) without the "struct" keyword.
 style = "Type"
-include_guard = "CONFLUENT_KAFKA_RUST_H"
+include_guard = "CONFLUENT_KAFKA_H"
 no_includes = true
 sys_includes = ["stdint.h", "stdbool.h", "stddef.h"]
 

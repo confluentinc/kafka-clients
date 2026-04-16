@@ -44,8 +44,8 @@ use super::protocol::Errors;
 /// # Examples
 ///
 /// ```
-/// use confluent_kafka_rust::common::kafka_error::KafkaGenericError;
-/// use confluent_kafka_rust::common::protocol::Errors;
+/// use confluent_kafka::common::kafka_error::KafkaGenericError;
+/// use confluent_kafka::common::protocol::Errors;
 ///
 /// let err = KafkaGenericError::new(Errors::RequestTimedOut);
 /// assert!(err.is_retriable());

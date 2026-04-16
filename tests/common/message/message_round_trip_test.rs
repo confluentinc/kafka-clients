@@ -17,8 +17,8 @@
 //! Comprehensive message round-trip tests matching Java's MessageTest.java
 //! Tests full RPC serialization and deserialization across all supported versions.
 
-use confluent_kafka_rust::common::protocol::ByteBufferAccessor;
-use confluent_kafka_rust::*;
+use confluent_kafka::common::protocol::ByteBufferAccessor;
+use confluent_kafka::*;
 use std::io;
 
 /// Test helper to perform round-trip serialization for any message at a specific version

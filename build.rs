@@ -107,7 +107,7 @@ fn main() {
         println!("cargo:rerun-if-changed=cbindgen.toml");
 
         let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
-        let header_path = Path::new(&crate_dir).join("target/include/confluent_kafka_rust.h");
+        let header_path = Path::new(&crate_dir).join("target/include/confluent_kafka.h");
 
         if let Some(parent) = header_path.parent() {
             fs::create_dir_all(parent).expect("Failed to create target/include/");

@@ -20,61 +20,61 @@
 
 use std::hash::{DefaultHasher, Hash, Hasher};
 
-use confluent_kafka_rust::common::Uuid;
-use confluent_kafka_rust::common::protocol::message_util::to_byte_buffer_accessor;
-use confluent_kafka_rust::common::protocol::{
+use confluent_kafka::common::Uuid;
+use confluent_kafka::common::protocol::message_util::to_byte_buffer_accessor;
+use confluent_kafka::common::protocol::{
     ApiKeys, ByteBufferAccessor, Errors, Message, ObjectSerializationCache, RawTaggedField,
 };
 
 // Re-export generated types
 use crate::common::simple_example_message_data::{MyStruct, SimpleExampleMessageData, StructArray, TaggedStruct};
-use confluent_kafka_rust::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
-use confluent_kafka_rust::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
-use confluent_kafka_rust::add_partitions_to_txn_request_data::{
+use confluent_kafka::add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData;
+use confluent_kafka::add_offsets_to_txn_response_data::AddOffsetsToTxnResponseData;
+use confluent_kafka::add_partitions_to_txn_request_data::{
     AddPartitionsToTxnRequestData, AddPartitionsToTxnTopic, AddPartitionsToTxnTransaction,
 };
-use confluent_kafka_rust::create_topics_request_data::CreateTopicsRequestData;
-use confluent_kafka_rust::describe_acls_request_data::DescribeAclsRequestData;
-use confluent_kafka_rust::describe_cluster_request_data::DescribeClusterRequestData;
-use confluent_kafka_rust::describe_cluster_response_data::{DescribeClusterBroker, DescribeClusterResponseData};
-use confluent_kafka_rust::describe_groups_request_data::DescribeGroupsRequestData;
-use confluent_kafka_rust::describe_groups_response_data::{
+use confluent_kafka::create_topics_request_data::CreateTopicsRequestData;
+use confluent_kafka::describe_acls_request_data::DescribeAclsRequestData;
+use confluent_kafka::describe_cluster_request_data::DescribeClusterRequestData;
+use confluent_kafka::describe_cluster_response_data::{DescribeClusterBroker, DescribeClusterResponseData};
+use confluent_kafka::describe_groups_request_data::DescribeGroupsRequestData;
+use confluent_kafka::describe_groups_response_data::{
     DescribeGroupsResponseData, DescribedGroup, DescribedGroupMember,
 };
 // FetchRequestData and ForgottenTopic are used by testDefaultValues (not yet translated)
-use confluent_kafka_rust::heartbeat_request_data::HeartbeatRequestData;
-use confluent_kafka_rust::join_group_request_data::JoinGroupRequestData;
-use confluent_kafka_rust::join_group_response_data::{JoinGroupResponseData, JoinGroupResponseMember};
-use confluent_kafka_rust::leave_group_response_data::{LeaveGroupResponseData, MemberResponse};
-use confluent_kafka_rust::list_offsets_request_data::{ListOffsetsPartition, ListOffsetsRequestData, ListOffsetsTopic};
-use confluent_kafka_rust::list_offsets_response_data::{
+use confluent_kafka::heartbeat_request_data::HeartbeatRequestData;
+use confluent_kafka::join_group_request_data::JoinGroupRequestData;
+use confluent_kafka::join_group_response_data::{JoinGroupResponseData, JoinGroupResponseMember};
+use confluent_kafka::leave_group_response_data::{LeaveGroupResponseData, MemberResponse};
+use confluent_kafka::list_offsets_request_data::{ListOffsetsPartition, ListOffsetsRequestData, ListOffsetsTopic};
+use confluent_kafka::list_offsets_response_data::{
     ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
 };
-use confluent_kafka_rust::metadata_request_data::{self, MetadataRequestData};
-use confluent_kafka_rust::offset_commit_request_data::{
+use confluent_kafka::metadata_request_data::{self, MetadataRequestData};
+use confluent_kafka::offset_commit_request_data::{
     OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
 };
-use confluent_kafka_rust::offset_commit_response_data::{
+use confluent_kafka::offset_commit_response_data::{
     OffsetCommitResponseData, OffsetCommitResponsePartition, OffsetCommitResponseTopic,
 };
-use confluent_kafka_rust::offset_fetch_request_data::{
+use confluent_kafka::offset_fetch_request_data::{
     OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopic, OffsetFetchRequestTopics,
 };
-use confluent_kafka_rust::offset_fetch_response_data::{
+use confluent_kafka::offset_fetch_response_data::{
     OffsetFetchResponseData, OffsetFetchResponseGroup, OffsetFetchResponsePartition, OffsetFetchResponsePartitions,
     OffsetFetchResponseTopic, OffsetFetchResponseTopics,
 };
-use confluent_kafka_rust::offset_for_leader_epoch_request_data::{
+use confluent_kafka::offset_for_leader_epoch_request_data::{
     OffsetForLeaderEpochRequestData, OffsetForLeaderPartition, OffsetForLeaderTopic,
 };
-use confluent_kafka_rust::produce_response_data::{
+use confluent_kafka::produce_response_data::{
     BatchIndexAndErrorMessage, PartitionProduceResponse, ProduceResponseData, TopicProduceResponse,
 };
-use confluent_kafka_rust::sync_group_request_data::SyncGroupRequestData;
-use confluent_kafka_rust::txn_offset_commit_request_data::{
+use confluent_kafka::sync_group_request_data::SyncGroupRequestData;
+use confluent_kafka::txn_offset_commit_request_data::{
     TxnOffsetCommitRequestData, TxnOffsetCommitRequestPartition, TxnOffsetCommitRequestTopic,
 };
-use confluent_kafka_rust::txn_offset_commit_response_data::{
+use confluent_kafka::txn_offset_commit_response_data::{
     TxnOffsetCommitResponseData, TxnOffsetCommitResponsePartition, TxnOffsetCommitResponseTopic,
 };
 
@@ -470,165 +470,165 @@ fn test_message_versions() {
 
     // Exhaustive check: verify all API keys with valid versions against their generated types.
     // This matches the Java testMessageVersions which checks ALL keys via ApiMessageType.
-    use confluent_kafka_rust::add_partitions_to_txn_response_data::AddPartitionsToTxnResponseData;
-    use confluent_kafka_rust::add_raft_voter_request_data::AddRaftVoterRequestData;
-    use confluent_kafka_rust::add_raft_voter_response_data::AddRaftVoterResponseData;
-    use confluent_kafka_rust::allocate_producer_ids_request_data::AllocateProducerIdsRequestData;
-    use confluent_kafka_rust::allocate_producer_ids_response_data::AllocateProducerIdsResponseData;
-    use confluent_kafka_rust::alter_client_quotas_request_data::AlterClientQuotasRequestData;
-    use confluent_kafka_rust::alter_client_quotas_response_data::AlterClientQuotasResponseData;
-    use confluent_kafka_rust::alter_configs_request_data::AlterConfigsRequestData;
-    use confluent_kafka_rust::alter_configs_response_data::AlterConfigsResponseData;
-    use confluent_kafka_rust::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
-    use confluent_kafka_rust::alter_partition_reassignments_response_data::AlterPartitionReassignmentsResponseData;
-    use confluent_kafka_rust::alter_partition_request_data::AlterPartitionRequestData;
-    use confluent_kafka_rust::alter_partition_response_data::AlterPartitionResponseData;
-    use confluent_kafka_rust::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
-    use confluent_kafka_rust::alter_replica_log_dirs_response_data::AlterReplicaLogDirsResponseData;
-    use confluent_kafka_rust::alter_share_group_offsets_request_data::AlterShareGroupOffsetsRequestData;
-    use confluent_kafka_rust::alter_share_group_offsets_response_data::AlterShareGroupOffsetsResponseData;
-    use confluent_kafka_rust::alter_user_scram_credentials_request_data::AlterUserScramCredentialsRequestData;
-    use confluent_kafka_rust::alter_user_scram_credentials_response_data::AlterUserScramCredentialsResponseData;
-    use confluent_kafka_rust::api_versions_request_data::ApiVersionsRequestData;
-    use confluent_kafka_rust::api_versions_response_data::ApiVersionsResponseData;
-    use confluent_kafka_rust::assign_replicas_to_dirs_request_data::AssignReplicasToDirsRequestData;
-    use confluent_kafka_rust::assign_replicas_to_dirs_response_data::AssignReplicasToDirsResponseData;
-    use confluent_kafka_rust::begin_quorum_epoch_request_data::BeginQuorumEpochRequestData;
-    use confluent_kafka_rust::begin_quorum_epoch_response_data::BeginQuorumEpochResponseData;
-    use confluent_kafka_rust::broker_heartbeat_request_data::BrokerHeartbeatRequestData;
-    use confluent_kafka_rust::broker_heartbeat_response_data::BrokerHeartbeatResponseData;
-    use confluent_kafka_rust::broker_registration_request_data::BrokerRegistrationRequestData;
-    use confluent_kafka_rust::broker_registration_response_data::BrokerRegistrationResponseData;
-    use confluent_kafka_rust::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
-    use confluent_kafka_rust::consumer_group_describe_response_data::ConsumerGroupDescribeResponseData;
-    use confluent_kafka_rust::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
-    use confluent_kafka_rust::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
-    use confluent_kafka_rust::controller_registration_request_data::ControllerRegistrationRequestData;
-    use confluent_kafka_rust::controller_registration_response_data::ControllerRegistrationResponseData;
-    use confluent_kafka_rust::create_acls_request_data::CreateAclsRequestData;
-    use confluent_kafka_rust::create_acls_response_data::CreateAclsResponseData;
-    use confluent_kafka_rust::create_delegation_token_request_data::CreateDelegationTokenRequestData;
-    use confluent_kafka_rust::create_delegation_token_response_data::CreateDelegationTokenResponseData;
-    use confluent_kafka_rust::create_partitions_request_data::CreatePartitionsRequestData;
-    use confluent_kafka_rust::create_partitions_response_data::CreatePartitionsResponseData;
-    use confluent_kafka_rust::create_topics_response_data::CreateTopicsResponseData;
-    use confluent_kafka_rust::delete_acls_request_data::DeleteAclsRequestData;
-    use confluent_kafka_rust::delete_acls_response_data::DeleteAclsResponseData;
-    use confluent_kafka_rust::delete_groups_request_data::DeleteGroupsRequestData;
-    use confluent_kafka_rust::delete_groups_response_data::DeleteGroupsResponseData;
-    use confluent_kafka_rust::delete_records_request_data::DeleteRecordsRequestData;
-    use confluent_kafka_rust::delete_records_response_data::DeleteRecordsResponseData;
-    use confluent_kafka_rust::delete_share_group_offsets_request_data::DeleteShareGroupOffsetsRequestData;
-    use confluent_kafka_rust::delete_share_group_offsets_response_data::DeleteShareGroupOffsetsResponseData;
-    use confluent_kafka_rust::delete_share_group_state_request_data::DeleteShareGroupStateRequestData;
-    use confluent_kafka_rust::delete_share_group_state_response_data::DeleteShareGroupStateResponseData;
-    use confluent_kafka_rust::delete_topics_request_data::DeleteTopicsRequestData;
-    use confluent_kafka_rust::delete_topics_response_data::DeleteTopicsResponseData;
-    use confluent_kafka_rust::describe_acls_response_data::DescribeAclsResponseData;
-    use confluent_kafka_rust::describe_client_quotas_request_data::DescribeClientQuotasRequestData;
-    use confluent_kafka_rust::describe_client_quotas_response_data::DescribeClientQuotasResponseData;
-    use confluent_kafka_rust::describe_cluster_response_data::DescribeClusterResponseData;
-    use confluent_kafka_rust::describe_configs_request_data::DescribeConfigsRequestData;
-    use confluent_kafka_rust::describe_configs_response_data::DescribeConfigsResponseData;
-    use confluent_kafka_rust::describe_delegation_token_request_data::DescribeDelegationTokenRequestData;
-    use confluent_kafka_rust::describe_delegation_token_response_data::DescribeDelegationTokenResponseData;
-    use confluent_kafka_rust::describe_groups_response_data::DescribeGroupsResponseData;
-    use confluent_kafka_rust::describe_log_dirs_request_data::DescribeLogDirsRequestData;
-    use confluent_kafka_rust::describe_log_dirs_response_data::DescribeLogDirsResponseData;
-    use confluent_kafka_rust::describe_producers_request_data::DescribeProducersRequestData;
-    use confluent_kafka_rust::describe_producers_response_data::DescribeProducersResponseData;
-    use confluent_kafka_rust::describe_quorum_request_data::DescribeQuorumRequestData;
-    use confluent_kafka_rust::describe_quorum_response_data::DescribeQuorumResponseData;
-    use confluent_kafka_rust::describe_share_group_offsets_request_data::DescribeShareGroupOffsetsRequestData;
-    use confluent_kafka_rust::describe_share_group_offsets_response_data::DescribeShareGroupOffsetsResponseData;
-    use confluent_kafka_rust::describe_topic_partitions_request_data::DescribeTopicPartitionsRequestData;
-    use confluent_kafka_rust::describe_topic_partitions_response_data::DescribeTopicPartitionsResponseData;
-    use confluent_kafka_rust::describe_transactions_request_data::DescribeTransactionsRequestData;
-    use confluent_kafka_rust::describe_transactions_response_data::DescribeTransactionsResponseData;
-    use confluent_kafka_rust::describe_user_scram_credentials_request_data::DescribeUserScramCredentialsRequestData;
-    use confluent_kafka_rust::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResponseData;
-    use confluent_kafka_rust::elect_leaders_request_data::ElectLeadersRequestData;
-    use confluent_kafka_rust::elect_leaders_response_data::ElectLeadersResponseData;
-    use confluent_kafka_rust::end_quorum_epoch_request_data::EndQuorumEpochRequestData;
-    use confluent_kafka_rust::end_quorum_epoch_response_data::EndQuorumEpochResponseData;
-    use confluent_kafka_rust::end_txn_request_data::EndTxnRequestData;
-    use confluent_kafka_rust::end_txn_response_data::EndTxnResponseData;
-    use confluent_kafka_rust::envelope_request_data::EnvelopeRequestData;
-    use confluent_kafka_rust::envelope_response_data::EnvelopeResponseData;
-    use confluent_kafka_rust::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
-    use confluent_kafka_rust::expire_delegation_token_response_data::ExpireDelegationTokenResponseData;
-    use confluent_kafka_rust::fetch_request_data::FetchRequestData;
-    use confluent_kafka_rust::fetch_response_data::FetchResponseData;
-    use confluent_kafka_rust::fetch_snapshot_request_data::FetchSnapshotRequestData;
-    use confluent_kafka_rust::fetch_snapshot_response_data::FetchSnapshotResponseData;
-    use confluent_kafka_rust::find_coordinator_request_data::FindCoordinatorRequestData;
-    use confluent_kafka_rust::find_coordinator_response_data::FindCoordinatorResponseData;
-    use confluent_kafka_rust::get_telemetry_subscriptions_request_data::GetTelemetrySubscriptionsRequestData;
-    use confluent_kafka_rust::get_telemetry_subscriptions_response_data::GetTelemetrySubscriptionsResponseData;
-    use confluent_kafka_rust::heartbeat_response_data::HeartbeatResponseData;
-    use confluent_kafka_rust::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
-    use confluent_kafka_rust::incremental_alter_configs_response_data::IncrementalAlterConfigsResponseData;
-    use confluent_kafka_rust::init_producer_id_request_data::InitProducerIdRequestData;
-    use confluent_kafka_rust::init_producer_id_response_data::InitProducerIdResponseData;
-    use confluent_kafka_rust::initialize_share_group_state_request_data::InitializeShareGroupStateRequestData;
-    use confluent_kafka_rust::initialize_share_group_state_response_data::InitializeShareGroupStateResponseData;
-    use confluent_kafka_rust::join_group_response_data::JoinGroupResponseData;
-    use confluent_kafka_rust::leave_group_request_data::LeaveGroupRequestData;
-    use confluent_kafka_rust::list_config_resources_request_data::ListConfigResourcesRequestData;
-    use confluent_kafka_rust::list_config_resources_response_data::ListConfigResourcesResponseData;
-    use confluent_kafka_rust::list_groups_request_data::ListGroupsRequestData;
-    use confluent_kafka_rust::list_groups_response_data::ListGroupsResponseData;
-    use confluent_kafka_rust::list_offsets_response_data::ListOffsetsResponseData;
-    use confluent_kafka_rust::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
-    use confluent_kafka_rust::list_partition_reassignments_response_data::ListPartitionReassignmentsResponseData;
-    use confluent_kafka_rust::list_transactions_request_data::ListTransactionsRequestData;
-    use confluent_kafka_rust::list_transactions_response_data::ListTransactionsResponseData;
-    use confluent_kafka_rust::metadata_response_data::MetadataResponseData;
-    use confluent_kafka_rust::offset_commit_response_data::OffsetCommitResponseData;
-    use confluent_kafka_rust::offset_delete_request_data::OffsetDeleteRequestData;
-    use confluent_kafka_rust::offset_delete_response_data::OffsetDeleteResponseData;
-    use confluent_kafka_rust::offset_for_leader_epoch_response_data::OffsetForLeaderEpochResponseData;
-    use confluent_kafka_rust::produce_request_data::ProduceRequestData;
-    use confluent_kafka_rust::push_telemetry_request_data::PushTelemetryRequestData;
-    use confluent_kafka_rust::push_telemetry_response_data::PushTelemetryResponseData;
-    use confluent_kafka_rust::read_share_group_state_request_data::ReadShareGroupStateRequestData;
-    use confluent_kafka_rust::read_share_group_state_response_data::ReadShareGroupStateResponseData;
-    use confluent_kafka_rust::read_share_group_state_summary_request_data::ReadShareGroupStateSummaryRequestData;
-    use confluent_kafka_rust::read_share_group_state_summary_response_data::ReadShareGroupStateSummaryResponseData;
-    use confluent_kafka_rust::remove_raft_voter_request_data::RemoveRaftVoterRequestData;
-    use confluent_kafka_rust::remove_raft_voter_response_data::RemoveRaftVoterResponseData;
-    use confluent_kafka_rust::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
-    use confluent_kafka_rust::renew_delegation_token_response_data::RenewDelegationTokenResponseData;
-    use confluent_kafka_rust::sasl_authenticate_request_data::SaslAuthenticateRequestData;
-    use confluent_kafka_rust::sasl_authenticate_response_data::SaslAuthenticateResponseData;
-    use confluent_kafka_rust::sasl_handshake_request_data::SaslHandshakeRequestData;
-    use confluent_kafka_rust::sasl_handshake_response_data::SaslHandshakeResponseData;
-    use confluent_kafka_rust::share_acknowledge_request_data::ShareAcknowledgeRequestData;
-    use confluent_kafka_rust::share_acknowledge_response_data::ShareAcknowledgeResponseData;
-    use confluent_kafka_rust::share_fetch_request_data::ShareFetchRequestData;
-    use confluent_kafka_rust::share_fetch_response_data::ShareFetchResponseData;
-    use confluent_kafka_rust::share_group_describe_request_data::ShareGroupDescribeRequestData;
-    use confluent_kafka_rust::share_group_describe_response_data::ShareGroupDescribeResponseData;
-    use confluent_kafka_rust::share_group_heartbeat_request_data::ShareGroupHeartbeatRequestData;
-    use confluent_kafka_rust::share_group_heartbeat_response_data::ShareGroupHeartbeatResponseData;
-    use confluent_kafka_rust::streams_group_describe_request_data::StreamsGroupDescribeRequestData;
-    use confluent_kafka_rust::streams_group_describe_response_data::StreamsGroupDescribeResponseData;
-    use confluent_kafka_rust::streams_group_heartbeat_request_data::StreamsGroupHeartbeatRequestData;
-    use confluent_kafka_rust::streams_group_heartbeat_response_data::StreamsGroupHeartbeatResponseData;
-    use confluent_kafka_rust::sync_group_response_data::SyncGroupResponseData;
-    use confluent_kafka_rust::txn_offset_commit_response_data::TxnOffsetCommitResponseData;
-    use confluent_kafka_rust::unregister_broker_request_data::UnregisterBrokerRequestData;
-    use confluent_kafka_rust::unregister_broker_response_data::UnregisterBrokerResponseData;
-    use confluent_kafka_rust::update_features_request_data::UpdateFeaturesRequestData;
-    use confluent_kafka_rust::update_features_response_data::UpdateFeaturesResponseData;
-    use confluent_kafka_rust::update_raft_voter_request_data::UpdateRaftVoterRequestData;
-    use confluent_kafka_rust::update_raft_voter_response_data::UpdateRaftVoterResponseData;
-    use confluent_kafka_rust::vote_request_data::VoteRequestData;
-    use confluent_kafka_rust::vote_response_data::VoteResponseData;
-    use confluent_kafka_rust::write_share_group_state_request_data::WriteShareGroupStateRequestData;
-    use confluent_kafka_rust::write_share_group_state_response_data::WriteShareGroupStateResponseData;
-    use confluent_kafka_rust::write_txn_markers_request_data::WriteTxnMarkersRequestData;
-    use confluent_kafka_rust::write_txn_markers_response_data::WriteTxnMarkersResponseData;
+    use confluent_kafka::add_partitions_to_txn_response_data::AddPartitionsToTxnResponseData;
+    use confluent_kafka::add_raft_voter_request_data::AddRaftVoterRequestData;
+    use confluent_kafka::add_raft_voter_response_data::AddRaftVoterResponseData;
+    use confluent_kafka::allocate_producer_ids_request_data::AllocateProducerIdsRequestData;
+    use confluent_kafka::allocate_producer_ids_response_data::AllocateProducerIdsResponseData;
+    use confluent_kafka::alter_client_quotas_request_data::AlterClientQuotasRequestData;
+    use confluent_kafka::alter_client_quotas_response_data::AlterClientQuotasResponseData;
+    use confluent_kafka::alter_configs_request_data::AlterConfigsRequestData;
+    use confluent_kafka::alter_configs_response_data::AlterConfigsResponseData;
+    use confluent_kafka::alter_partition_reassignments_request_data::AlterPartitionReassignmentsRequestData;
+    use confluent_kafka::alter_partition_reassignments_response_data::AlterPartitionReassignmentsResponseData;
+    use confluent_kafka::alter_partition_request_data::AlterPartitionRequestData;
+    use confluent_kafka::alter_partition_response_data::AlterPartitionResponseData;
+    use confluent_kafka::alter_replica_log_dirs_request_data::AlterReplicaLogDirsRequestData;
+    use confluent_kafka::alter_replica_log_dirs_response_data::AlterReplicaLogDirsResponseData;
+    use confluent_kafka::alter_share_group_offsets_request_data::AlterShareGroupOffsetsRequestData;
+    use confluent_kafka::alter_share_group_offsets_response_data::AlterShareGroupOffsetsResponseData;
+    use confluent_kafka::alter_user_scram_credentials_request_data::AlterUserScramCredentialsRequestData;
+    use confluent_kafka::alter_user_scram_credentials_response_data::AlterUserScramCredentialsResponseData;
+    use confluent_kafka::api_versions_request_data::ApiVersionsRequestData;
+    use confluent_kafka::api_versions_response_data::ApiVersionsResponseData;
+    use confluent_kafka::assign_replicas_to_dirs_request_data::AssignReplicasToDirsRequestData;
+    use confluent_kafka::assign_replicas_to_dirs_response_data::AssignReplicasToDirsResponseData;
+    use confluent_kafka::begin_quorum_epoch_request_data::BeginQuorumEpochRequestData;
+    use confluent_kafka::begin_quorum_epoch_response_data::BeginQuorumEpochResponseData;
+    use confluent_kafka::broker_heartbeat_request_data::BrokerHeartbeatRequestData;
+    use confluent_kafka::broker_heartbeat_response_data::BrokerHeartbeatResponseData;
+    use confluent_kafka::broker_registration_request_data::BrokerRegistrationRequestData;
+    use confluent_kafka::broker_registration_response_data::BrokerRegistrationResponseData;
+    use confluent_kafka::consumer_group_describe_request_data::ConsumerGroupDescribeRequestData;
+    use confluent_kafka::consumer_group_describe_response_data::ConsumerGroupDescribeResponseData;
+    use confluent_kafka::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+    use confluent_kafka::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+    use confluent_kafka::controller_registration_request_data::ControllerRegistrationRequestData;
+    use confluent_kafka::controller_registration_response_data::ControllerRegistrationResponseData;
+    use confluent_kafka::create_acls_request_data::CreateAclsRequestData;
+    use confluent_kafka::create_acls_response_data::CreateAclsResponseData;
+    use confluent_kafka::create_delegation_token_request_data::CreateDelegationTokenRequestData;
+    use confluent_kafka::create_delegation_token_response_data::CreateDelegationTokenResponseData;
+    use confluent_kafka::create_partitions_request_data::CreatePartitionsRequestData;
+    use confluent_kafka::create_partitions_response_data::CreatePartitionsResponseData;
+    use confluent_kafka::create_topics_response_data::CreateTopicsResponseData;
+    use confluent_kafka::delete_acls_request_data::DeleteAclsRequestData;
+    use confluent_kafka::delete_acls_response_data::DeleteAclsResponseData;
+    use confluent_kafka::delete_groups_request_data::DeleteGroupsRequestData;
+    use confluent_kafka::delete_groups_response_data::DeleteGroupsResponseData;
+    use confluent_kafka::delete_records_request_data::DeleteRecordsRequestData;
+    use confluent_kafka::delete_records_response_data::DeleteRecordsResponseData;
+    use confluent_kafka::delete_share_group_offsets_request_data::DeleteShareGroupOffsetsRequestData;
+    use confluent_kafka::delete_share_group_offsets_response_data::DeleteShareGroupOffsetsResponseData;
+    use confluent_kafka::delete_share_group_state_request_data::DeleteShareGroupStateRequestData;
+    use confluent_kafka::delete_share_group_state_response_data::DeleteShareGroupStateResponseData;
+    use confluent_kafka::delete_topics_request_data::DeleteTopicsRequestData;
+    use confluent_kafka::delete_topics_response_data::DeleteTopicsResponseData;
+    use confluent_kafka::describe_acls_response_data::DescribeAclsResponseData;
+    use confluent_kafka::describe_client_quotas_request_data::DescribeClientQuotasRequestData;
+    use confluent_kafka::describe_client_quotas_response_data::DescribeClientQuotasResponseData;
+    use confluent_kafka::describe_cluster_response_data::DescribeClusterResponseData;
+    use confluent_kafka::describe_configs_request_data::DescribeConfigsRequestData;
+    use confluent_kafka::describe_configs_response_data::DescribeConfigsResponseData;
+    use confluent_kafka::describe_delegation_token_request_data::DescribeDelegationTokenRequestData;
+    use confluent_kafka::describe_delegation_token_response_data::DescribeDelegationTokenResponseData;
+    use confluent_kafka::describe_groups_response_data::DescribeGroupsResponseData;
+    use confluent_kafka::describe_log_dirs_request_data::DescribeLogDirsRequestData;
+    use confluent_kafka::describe_log_dirs_response_data::DescribeLogDirsResponseData;
+    use confluent_kafka::describe_producers_request_data::DescribeProducersRequestData;
+    use confluent_kafka::describe_producers_response_data::DescribeProducersResponseData;
+    use confluent_kafka::describe_quorum_request_data::DescribeQuorumRequestData;
+    use confluent_kafka::describe_quorum_response_data::DescribeQuorumResponseData;
+    use confluent_kafka::describe_share_group_offsets_request_data::DescribeShareGroupOffsetsRequestData;
+    use confluent_kafka::describe_share_group_offsets_response_data::DescribeShareGroupOffsetsResponseData;
+    use confluent_kafka::describe_topic_partitions_request_data::DescribeTopicPartitionsRequestData;
+    use confluent_kafka::describe_topic_partitions_response_data::DescribeTopicPartitionsResponseData;
+    use confluent_kafka::describe_transactions_request_data::DescribeTransactionsRequestData;
+    use confluent_kafka::describe_transactions_response_data::DescribeTransactionsResponseData;
+    use confluent_kafka::describe_user_scram_credentials_request_data::DescribeUserScramCredentialsRequestData;
+    use confluent_kafka::describe_user_scram_credentials_response_data::DescribeUserScramCredentialsResponseData;
+    use confluent_kafka::elect_leaders_request_data::ElectLeadersRequestData;
+    use confluent_kafka::elect_leaders_response_data::ElectLeadersResponseData;
+    use confluent_kafka::end_quorum_epoch_request_data::EndQuorumEpochRequestData;
+    use confluent_kafka::end_quorum_epoch_response_data::EndQuorumEpochResponseData;
+    use confluent_kafka::end_txn_request_data::EndTxnRequestData;
+    use confluent_kafka::end_txn_response_data::EndTxnResponseData;
+    use confluent_kafka::envelope_request_data::EnvelopeRequestData;
+    use confluent_kafka::envelope_response_data::EnvelopeResponseData;
+    use confluent_kafka::expire_delegation_token_request_data::ExpireDelegationTokenRequestData;
+    use confluent_kafka::expire_delegation_token_response_data::ExpireDelegationTokenResponseData;
+    use confluent_kafka::fetch_request_data::FetchRequestData;
+    use confluent_kafka::fetch_response_data::FetchResponseData;
+    use confluent_kafka::fetch_snapshot_request_data::FetchSnapshotRequestData;
+    use confluent_kafka::fetch_snapshot_response_data::FetchSnapshotResponseData;
+    use confluent_kafka::find_coordinator_request_data::FindCoordinatorRequestData;
+    use confluent_kafka::find_coordinator_response_data::FindCoordinatorResponseData;
+    use confluent_kafka::get_telemetry_subscriptions_request_data::GetTelemetrySubscriptionsRequestData;
+    use confluent_kafka::get_telemetry_subscriptions_response_data::GetTelemetrySubscriptionsResponseData;
+    use confluent_kafka::heartbeat_response_data::HeartbeatResponseData;
+    use confluent_kafka::incremental_alter_configs_request_data::IncrementalAlterConfigsRequestData;
+    use confluent_kafka::incremental_alter_configs_response_data::IncrementalAlterConfigsResponseData;
+    use confluent_kafka::init_producer_id_request_data::InitProducerIdRequestData;
+    use confluent_kafka::init_producer_id_response_data::InitProducerIdResponseData;
+    use confluent_kafka::initialize_share_group_state_request_data::InitializeShareGroupStateRequestData;
+    use confluent_kafka::initialize_share_group_state_response_data::InitializeShareGroupStateResponseData;
+    use confluent_kafka::join_group_response_data::JoinGroupResponseData;
+    use confluent_kafka::leave_group_request_data::LeaveGroupRequestData;
+    use confluent_kafka::list_config_resources_request_data::ListConfigResourcesRequestData;
+    use confluent_kafka::list_config_resources_response_data::ListConfigResourcesResponseData;
+    use confluent_kafka::list_groups_request_data::ListGroupsRequestData;
+    use confluent_kafka::list_groups_response_data::ListGroupsResponseData;
+    use confluent_kafka::list_offsets_response_data::ListOffsetsResponseData;
+    use confluent_kafka::list_partition_reassignments_request_data::ListPartitionReassignmentsRequestData;
+    use confluent_kafka::list_partition_reassignments_response_data::ListPartitionReassignmentsResponseData;
+    use confluent_kafka::list_transactions_request_data::ListTransactionsRequestData;
+    use confluent_kafka::list_transactions_response_data::ListTransactionsResponseData;
+    use confluent_kafka::metadata_response_data::MetadataResponseData;
+    use confluent_kafka::offset_commit_response_data::OffsetCommitResponseData;
+    use confluent_kafka::offset_delete_request_data::OffsetDeleteRequestData;
+    use confluent_kafka::offset_delete_response_data::OffsetDeleteResponseData;
+    use confluent_kafka::offset_for_leader_epoch_response_data::OffsetForLeaderEpochResponseData;
+    use confluent_kafka::produce_request_data::ProduceRequestData;
+    use confluent_kafka::push_telemetry_request_data::PushTelemetryRequestData;
+    use confluent_kafka::push_telemetry_response_data::PushTelemetryResponseData;
+    use confluent_kafka::read_share_group_state_request_data::ReadShareGroupStateRequestData;
+    use confluent_kafka::read_share_group_state_response_data::ReadShareGroupStateResponseData;
+    use confluent_kafka::read_share_group_state_summary_request_data::ReadShareGroupStateSummaryRequestData;
+    use confluent_kafka::read_share_group_state_summary_response_data::ReadShareGroupStateSummaryResponseData;
+    use confluent_kafka::remove_raft_voter_request_data::RemoveRaftVoterRequestData;
+    use confluent_kafka::remove_raft_voter_response_data::RemoveRaftVoterResponseData;
+    use confluent_kafka::renew_delegation_token_request_data::RenewDelegationTokenRequestData;
+    use confluent_kafka::renew_delegation_token_response_data::RenewDelegationTokenResponseData;
+    use confluent_kafka::sasl_authenticate_request_data::SaslAuthenticateRequestData;
+    use confluent_kafka::sasl_authenticate_response_data::SaslAuthenticateResponseData;
+    use confluent_kafka::sasl_handshake_request_data::SaslHandshakeRequestData;
+    use confluent_kafka::sasl_handshake_response_data::SaslHandshakeResponseData;
+    use confluent_kafka::share_acknowledge_request_data::ShareAcknowledgeRequestData;
+    use confluent_kafka::share_acknowledge_response_data::ShareAcknowledgeResponseData;
+    use confluent_kafka::share_fetch_request_data::ShareFetchRequestData;
+    use confluent_kafka::share_fetch_response_data::ShareFetchResponseData;
+    use confluent_kafka::share_group_describe_request_data::ShareGroupDescribeRequestData;
+    use confluent_kafka::share_group_describe_response_data::ShareGroupDescribeResponseData;
+    use confluent_kafka::share_group_heartbeat_request_data::ShareGroupHeartbeatRequestData;
+    use confluent_kafka::share_group_heartbeat_response_data::ShareGroupHeartbeatResponseData;
+    use confluent_kafka::streams_group_describe_request_data::StreamsGroupDescribeRequestData;
+    use confluent_kafka::streams_group_describe_response_data::StreamsGroupDescribeResponseData;
+    use confluent_kafka::streams_group_heartbeat_request_data::StreamsGroupHeartbeatRequestData;
+    use confluent_kafka::streams_group_heartbeat_response_data::StreamsGroupHeartbeatResponseData;
+    use confluent_kafka::sync_group_response_data::SyncGroupResponseData;
+    use confluent_kafka::txn_offset_commit_response_data::TxnOffsetCommitResponseData;
+    use confluent_kafka::unregister_broker_request_data::UnregisterBrokerRequestData;
+    use confluent_kafka::unregister_broker_response_data::UnregisterBrokerResponseData;
+    use confluent_kafka::update_features_request_data::UpdateFeaturesRequestData;
+    use confluent_kafka::update_features_response_data::UpdateFeaturesResponseData;
+    use confluent_kafka::update_raft_voter_request_data::UpdateRaftVoterRequestData;
+    use confluent_kafka::update_raft_voter_response_data::UpdateRaftVoterResponseData;
+    use confluent_kafka::vote_request_data::VoteRequestData;
+    use confluent_kafka::vote_response_data::VoteResponseData;
+    use confluent_kafka::write_share_group_state_request_data::WriteShareGroupStateRequestData;
+    use confluent_kafka::write_share_group_state_response_data::WriteShareGroupStateResponseData;
+    use confluent_kafka::write_txn_markers_request_data::WriteTxnMarkersRequestData;
+    use confluent_kafka::write_txn_markers_response_data::WriteTxnMarkersResponseData;
 
     // Verify all API keys with valid versions.
     // Skipped: LEADER_AND_ISR, STOP_REPLICA, UPDATE_METADATA, CONTROLLED_SHUTDOWN

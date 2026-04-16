@@ -60,9 +60,9 @@ pub fn create() -> (CompletionSender, FutureRecordMetadata) {
 /// # Examples
 ///
 /// ```no_run
-/// use confluent_kafka_rust::clients::producer::future_record_metadata;
-/// use confluent_kafka_rust::clients::producer::RecordMetadata;
-/// use confluent_kafka_rust::common::TopicPartition;
+/// use confluent_kafka::clients::producer::future_record_metadata;
+/// use confluent_kafka::clients::producer::RecordMetadata;
+/// use confluent_kafka::common::TopicPartition;
 ///
 /// # async fn example() {
 /// let (sender, mut future) = future_record_metadata::create();

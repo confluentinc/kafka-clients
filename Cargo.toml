@@ -11,7 +11,8 @@ integration-tests = []
 ffi = ["dep:cbindgen"]
 
 [lib]
-crate-type = ["lib", "cdylib"]
+name = "confluent_kafka"
+crate-type = ["lib", "staticlib", "cdylib"]
 
 [dependencies]
 regex = "1.0"

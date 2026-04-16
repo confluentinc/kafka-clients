@@ -684,15 +684,10 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
     let count = count as usize;
 
     // Build a single-threaded tokio runtime shared across all futures.
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
         Ok(rt) => rt,
         Err(_) => {
-            let err = box_error(KafkaError::illegal_state(
-                "failed to create tokio runtime",
-            ));
+            let err = box_error(KafkaError::illegal_state("failed to create tokio runtime"));
             for i in 0..count {
                 unsafe {
                     *out_metadata.add(i) = std::ptr::null_mut();
@@ -708,8 +703,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
         if future_ptr.is_null() {
             unsafe {
                 *out_metadata.add(i) = std::ptr::null_mut();
-                *out_errors.add(i) =
-                    box_error(KafkaError::new(Errors::InvalidRequest));
+                *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
             }
             continue;
         }
@@ -855,6 +849,30 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_partition(
         return -1;
     }
     unsafe { metadata_ref(metadata) }.metadata.partition()
+}
+
+/// Returns the timestamp of the record.
+///
+/// # Parameters
+///
+/// - `metadata`: Non-null metadata handle.
+///
+/// # Returns
+///
+/// The timestamp in milliseconds, or `-1` if the metadata handle is null
+/// or no timestamp was set.
+///
+/// # Safety
+///
+/// `metadata` must be a valid handle from [`kafka_producer_FutureRecordMetadata_get`], or null.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_RecordMetadata_timestamp(
+    metadata: *const kafka_producer_RecordMetadata_t,
+) -> i64 {
+    if metadata.is_null() {
+        return -1;
+    }
+    unsafe { metadata_ref(metadata) }.metadata.timestamp()
 }
 
 /// Copies all metadata fields to the caller via a callback, then destroys the
