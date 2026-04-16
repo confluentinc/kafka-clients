@@ -29,20 +29,29 @@ use log::{debug, info, trace, warn};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
+use crate::clients::client_utils;
 use crate::clients::kafka_client::KafkaClient;
+use crate::clients::metadata_recovery_strategy::MetadataRecoveryStrategy;
+use crate::clients::network_client::NetworkClient;
+use crate::clients::producer::internals::buffer_pool::BufferPool;
 use crate::clients::producer::internals::built_in_partitioner::BuiltInPartitioner;
 use crate::clients::producer::internals::future_record_metadata::FutureRecordMetadata;
 use crate::clients::producer::internals::producer_batch::Callback;
 use crate::clients::producer::internals::producer_metadata::ProducerMetadata;
-use crate::clients::producer::internals::record_accumulator::RecordAccumulator;
+use crate::clients::producer::internals::record_accumulator::{PartitionerConfig, RecordAccumulator};
 use crate::clients::producer::internals::sender::Sender;
 use crate::clients::producer::producer_config::ProducerConfig;
 use crate::clients::producer::producer_record::ProducerRecord;
 use crate::clients::producer::producer_trait::Producer;
 use crate::clients::producer::record_metadata::{self, RecordMetadata};
+use crate::clients::{ApiVersions, DefaultHostResolver};
 use crate::common::cluster::Cluster;
+use crate::common::compress::Compression;
 use crate::common::header::Headers;
+use crate::common::internals::ClusterResourceListeners;
 use crate::common::kafka_error::KafkaError;
+use crate::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
+use crate::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use crate::common::partition_info::PartitionInfo;
 use crate::common::record::abstract_records;
 use crate::common::record::compression_type::CompressionType;
@@ -165,6 +174,169 @@ impl<K, V> KafkaProducer<K, V> {
             sender_handle: Mutex::new(sender_handle),
             time_provider,
         }
+    }
+
+    /// Creates a `KafkaProducer` from configuration, serializers, and an optional
+    /// compression override.
+    ///
+    /// This is the primary public factory method, mirroring Java's
+    /// `new KafkaProducer(Properties, Serializer, Serializer)` constructor.
+    /// It internally wires up all infrastructure components:
+    ///
+    /// 1. Parses and resolves bootstrap server addresses from the config
+    /// 2. Creates [`ProducerMetadata`] and bootstraps it with the resolved addresses
+    /// 3. Creates a [`PlaintextChannelBuilder`], [`Selector`], and [`NetworkClient`]
+    /// 4. Creates a [`BufferPool`] and [`RecordAccumulator`]
+    /// 5. Spawns the background sender task via [`with_client`](Self::with_client)
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The producer configuration
+    /// * `key_serializer` - The key serializer
+    /// * `value_serializer` - The value serializer
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] if no valid bootstrap server addresses
+    /// can be resolved from `config.bootstrap_servers`.
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use confluent_kafka_rust::clients::producer::kafka_producer::KafkaProducer;
+    /// use confluent_kafka_rust::clients::producer::producer_config::ProducerConfig;
+    /// use confluent_kafka_rust::common::serialization::StringSerializer;
+    ///
+    /// let config = ProducerConfig {
+    ///     bootstrap_servers: vec!["localhost:9092".to_string()],
+    ///     client_id: "my-producer".to_string(),
+    ///     ..Default::default()
+    /// };
+    ///
+    /// let producer = KafkaProducer::<String, String>::from_config(
+    ///     config,
+    ///     Box::new(StringSerializer),
+    ///     Box::new(StringSerializer),
+    /// ).expect("Failed to create producer");
+    /// ```
+    pub fn from_config(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+    ) -> Result<Self, KafkaError> {
+        Self::from_config_with_compression(config, key_serializer, value_serializer, None)
+    }
+
+    /// Creates a `KafkaProducer` from configuration with an explicit compression
+    /// override.
+    ///
+    /// This is identical to [`from_config`](Self::from_config) but allows
+    /// overriding the compression codec. When `compression` is `None`, the
+    /// compression is derived from `config.compression_type` using
+    /// [`Compression::of`].
+    ///
+    /// # Arguments
+    ///
+    /// * `config` - The producer configuration
+    /// * `key_serializer` - The key serializer
+    /// * `value_serializer` - The value serializer
+    /// * `compression` - Optional compression override; if `None`, uses
+    ///   `Compression::of(config.compression_type)`
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] if no valid bootstrap server addresses
+    /// can be resolved from `config.bootstrap_servers`.
+    pub fn from_config_with_compression(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
+        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
+        compression: Option<Compression>,
+    ) -> Result<Self, KafkaError> {
+        info!("Starting the Kafka producer");
+
+        // 1. Parse and validate bootstrap server addresses
+        let addresses = client_utils::parse_and_validate_addresses(&config.bootstrap_servers)?;
+
+        // 2. Derive compression from config if not explicitly provided
+        let compression = compression.unwrap_or_else(|| Compression::of(config.compression_type));
+
+        // 3. Create a system clock time provider
+        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as i64
+        });
+
+        // 4. Create ProducerMetadata and bootstrap it with the resolved addresses
+        let metadata = Arc::new(ProducerMetadata::new(
+            config.reconnect_backoff_ms,
+            config.reconnect_backoff_max_ms,
+            config.metadata_max_age_ms,
+            config.metadata_max_idle_ms,
+            ClusterResourceListeners::new(),
+        ));
+        metadata.bootstrap(addresses);
+
+        // 5. Get the shared Metadata Arc from ProducerMetadata so the NetworkClient
+        //    uses the same Metadata instance. This mirrors Java's inheritance where
+        //    ProducerMetadata extends Metadata.
+        let shared_metadata = metadata.metadata_arc();
+
+        // 6. Create Selector + NetworkClient
+        let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
+        let selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder);
+        let api_versions = Arc::new(ApiVersions::new());
+
+        let client = NetworkClient::with_metadata(
+            selector,
+            shared_metadata,
+            &config.client_id,
+            config.max_in_flight_requests_per_connection as usize,
+            config.reconnect_backoff_ms,
+            config.reconnect_backoff_max_ms,
+            config.send_buffer_bytes,
+            config.receive_buffer_bytes,
+            config.request_timeout_ms,
+            config.socket_connection_setup_timeout_ms,
+            config.socket_connection_setup_timeout_max_ms,
+            true, // discover_broker_versions
+            api_versions,
+            DefaultHostResolver::new(),
+            config.metadata_max_age_ms, // rebootstrap_trigger_ms
+            MetadataRecoveryStrategy::None,
+        );
+
+        // 7. Create BufferPool and RecordAccumulator
+        //    As per Kafka configuration documentation, batch.size may be set to 0
+        //    to explicitly disable batching, which in practice uses a batch size of 1.
+        let batch_size = config.batch_size.max(1);
+        let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize));
+        let accumulator = Arc::new(RecordAccumulator::new(
+            batch_size,
+            compression,
+            config.linger_ms as i32,
+            config.retry_backoff_ms,
+            config.retry_backoff_max_ms,
+            config.delivery_timeout_ms,
+            PartitionerConfig {
+                enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
+                partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
+            },
+            buffer_pool,
+        ));
+
+        // 8. Wire up the Sender and spawn the I/O background task
+        Ok(Self::with_client(
+            &config,
+            key_serializer,
+            value_serializer,
+            metadata,
+            accumulator,
+            client,
+            time_provider,
+        ))
     }
 
     /// Creates a `KafkaProducer` with a full sender task and network client.

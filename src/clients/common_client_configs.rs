@@ -18,6 +18,9 @@
 //! Only the constants needed by the Metadata class are included here;
 //! full configuration support will be added as needed.
 
+/// Config key: `bootstrap.servers`
+pub const BOOTSTRAP_SERVERS_CONFIG: &str = "bootstrap.servers";
+
 /// The base for exponential retry backoff.
 pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
 

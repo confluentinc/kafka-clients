@@ -17,9 +17,12 @@
 //! Translated from `org.apache.kafka.clients.ClientUtils`.
 
 use std::io;
-use std::net::IpAddr;
+use std::net::{IpAddr, SocketAddr, ToSocketAddrs};
+
+use log::warn;
 
 use super::HostResolver;
+use crate::common::kafka_error::KafkaError;
 
 /// Resolves a hostname using the given resolver and filters preferred addresses.
 ///
@@ -46,6 +49,57 @@ fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
     let first = all_addresses[0];
     let is_ipv4 = first.is_ipv4();
     all_addresses.iter().filter(|addr| addr.is_ipv4() == is_ipv4).copied().collect()
+}
+
+/// Parse and validate a list of bootstrap server URLs into socket addresses.
+///
+/// Each entry should be a `"host:port"` string. Hostnames are resolved via DNS.
+/// Entries that cannot be resolved are logged as warnings and skipped.
+///
+/// Translated from `ClientUtils.parseAndValidateAddresses(List<String>, ClientDnsLookup)`.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if no valid addresses can be resolved
+/// (corresponds to Java's `ConfigException`).
+pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<SocketAddr>, KafkaError> {
+    let mut addresses = Vec::new();
+    for url in urls {
+        let trimmed = url.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        // ToSocketAddrs handles both "ip:port" and "hostname:port" with DNS resolution
+        match trimmed.to_socket_addrs() {
+            Ok(addrs) => {
+                let resolved: Vec<SocketAddr> = addrs.collect();
+                if resolved.is_empty() {
+                    warn!(
+                        "Couldn't resolve server {} from {} as DNS resolution failed",
+                        url,
+                        super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG
+                    );
+                } else {
+                    addresses.extend(resolved);
+                }
+            },
+            Err(e) => {
+                warn!(
+                    "Couldn't resolve server {} from {}: {}",
+                    url,
+                    super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG,
+                    e
+                );
+            },
+        }
+    }
+    if addresses.is_empty() {
+        return Err(KafkaError::illegal_argument(format!(
+            "No resolvable bootstrap urls given in {}",
+            super::common_client_configs::BOOTSTRAP_SERVERS_CONFIG
+        )));
+    }
+    Ok(addresses)
 }
 
 #[cfg(test)]
@@ -81,5 +135,61 @@ mod tests {
     fn test_filter_preferred_addresses_empty() {
         let filtered = filter_preferred_addresses(&[]);
         assert!(filtered.is_empty());
+    }
+
+    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses`.
+    #[test]
+    fn test_parse_and_validate_addresses_ip_port() {
+        let urls = vec!["127.0.0.1:9092".to_string()];
+        let result = parse_and_validate_addresses(&urls);
+        assert!(result.is_ok());
+        let addrs = result.unwrap();
+        assert!(!addrs.is_empty());
+        assert_eq!(addrs[0].port(), 9092);
+    }
+
+    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — multiple servers.
+    #[test]
+    fn test_parse_and_validate_addresses_multiple() {
+        let urls = vec!["127.0.0.1:9092".to_string(), "127.0.0.1:9093".to_string()];
+        let result = parse_and_validate_addresses(&urls);
+        assert!(result.is_ok());
+        let addrs = result.unwrap();
+        assert_eq!(addrs.len(), 2);
+    }
+
+    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — empty list.
+    #[test]
+    fn test_parse_and_validate_addresses_empty() {
+        let urls: Vec<String> = Vec::new();
+        let result = parse_and_validate_addresses(&urls);
+        assert!(result.is_err());
+    }
+
+    /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — unresolvable host.
+    #[test]
+    fn test_parse_and_validate_addresses_unresolvable() {
+        let urls = vec!["this.host.does.not.exist.ever.kafka.test:9092".to_string()];
+        let result = parse_and_validate_addresses(&urls);
+        assert!(result.is_err());
+    }
+
+    /// Test that whitespace-only entries are skipped.
+    #[test]
+    fn test_parse_and_validate_addresses_whitespace_only() {
+        let urls = vec!["  ".to_string(), "".to_string()];
+        let result = parse_and_validate_addresses(&urls);
+        assert!(result.is_err());
+    }
+
+    /// Test that localhost resolution works.
+    #[test]
+    fn test_parse_and_validate_addresses_localhost() {
+        let urls = vec!["localhost:9092".to_string()];
+        let result = parse_and_validate_addresses(&urls);
+        assert!(result.is_ok());
+        let addrs = result.unwrap();
+        assert!(!addrs.is_empty());
+        assert_eq!(addrs[0].port(), 9092);
     }
 }

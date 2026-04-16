@@ -25,38 +25,17 @@
 //! - Error handling (invalid topic, record too large)
 //! - Flush and close semantics
 
-use std::net::SocketAddr;
-use std::sync::Arc;
 use std::time::Duration;
 
-use confluent_kafka_rust::clients::metadata_recovery_strategy::MetadataRecoveryStrategy;
-use confluent_kafka_rust::clients::network_client::NetworkClient;
-use confluent_kafka_rust::clients::producer::internals::buffer_pool::BufferPool;
-use confluent_kafka_rust::clients::producer::internals::producer_metadata::ProducerMetadata;
-use confluent_kafka_rust::clients::producer::internals::record_accumulator::{PartitionerConfig, RecordAccumulator};
 use confluent_kafka_rust::clients::producer::kafka_producer::KafkaProducer;
 use confluent_kafka_rust::clients::producer::producer_config::ProducerConfig;
 use confluent_kafka_rust::clients::producer::producer_record::ProducerRecord;
 use confluent_kafka_rust::clients::producer::producer_trait::Producer;
-use confluent_kafka_rust::clients::{ApiVersions, DefaultHostResolver};
 use confluent_kafka_rust::common::compress::Compression;
-use confluent_kafka_rust::common::internals::ClusterResourceListeners;
-use confluent_kafka_rust::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
-use confluent_kafka_rust::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
 use confluent_kafka_rust::common::serialization::StringSerializer;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
-
-/// Default time provider using system clock.
-fn default_time_provider() -> Arc<dyn Fn() -> i64 + Send + Sync> {
-    Arc::new(|| {
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_millis() as i64
-    })
-}
 
 /// Create a ProducerConfig with the given bootstrap servers and optional overrides.
 fn make_config(bootstrap_servers: &str) -> ProducerConfig {
@@ -73,89 +52,27 @@ fn make_config(bootstrap_servers: &str) -> ProducerConfig {
     }
 }
 
-/// Create a fully-wired KafkaProducer connected to a real broker.
+/// Create a fully-wired KafkaProducer connected to a real broker using
+/// [`KafkaProducer::from_config`].
 ///
-/// This constructs the full pipeline:
-/// 1. Selector with PlaintextChannelBuilder
-/// 2. ProducerMetadata bootstrapped with the broker address
-/// 3. NetworkClient wired to the metadata
-/// 4. RecordAccumulator for batching
-/// 5. KafkaProducer with Sender background task
-fn create_producer(
-    bootstrap_servers: &str,
-    config: &ProducerConfig,
-    compression: Compression,
-) -> KafkaProducer<String, String> {
-    let addr: SocketAddr = bootstrap_servers
-        .parse()
-        .unwrap_or_else(|_| panic!("Failed to parse bootstrap address: {}", bootstrap_servers));
+/// This is the simple path for tests that use the default (no) compression.
+fn create_producer_from_config(config: ProducerConfig) -> KafkaProducer<String, String> {
+    KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
+        .expect("Failed to create producer from config")
+}
 
-    let time_provider = default_time_provider();
-
-    // Create ProducerMetadata and bootstrap it with the broker address.
-    let metadata = Arc::new(ProducerMetadata::new(
-        config.reconnect_backoff_ms,
-        config.reconnect_backoff_max_ms,
-        config.metadata_max_age_ms,
-        config.metadata_max_idle_ms,
-        ClusterResourceListeners::new(),
-    ));
-    metadata.bootstrap(vec![addr]);
-
-    // Get the shared Metadata Arc from ProducerMetadata so the NetworkClient
-    // uses the same Metadata instance. This mirrors Java's inheritance where
-    // ProducerMetadata extends Metadata.
-    let shared_metadata = metadata.metadata_arc();
-
-    // Create Selector + NetworkClient
-    let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-    let selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, channel_builder);
-    let api_versions = Arc::new(ApiVersions::new());
-
-    let client = NetworkClient::with_metadata(
-        selector,
-        shared_metadata,
-        &config.client_id,
-        config.max_in_flight_requests_per_connection as usize,
-        config.reconnect_backoff_ms,
-        config.reconnect_backoff_max_ms,
-        config.send_buffer_bytes,
-        config.receive_buffer_bytes,
-        config.request_timeout_ms,
-        config.socket_connection_setup_timeout_ms,
-        config.socket_connection_setup_timeout_max_ms,
-        true, // discover_broker_versions
-        api_versions,
-        DefaultHostResolver::new(),
-        300_000, // rebootstrap_trigger_ms
-        MetadataRecoveryStrategy::None,
-    );
-
-    // Create RecordAccumulator
-    let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, config.batch_size as usize));
-    let accumulator = Arc::new(RecordAccumulator::new(
-        config.batch_size,
-        compression,
-        config.linger_ms as i32,
-        config.retry_backoff_ms,
-        config.retry_backoff_max_ms,
-        config.delivery_timeout_ms,
-        PartitionerConfig {
-            enable_adaptive_partitioning: config.partitioner_adaptive_partitioning_enable,
-            partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
-        },
-        buffer_pool,
-    ));
-
-    KafkaProducer::with_client(
+/// Create a fully-wired KafkaProducer with an explicit compression override.
+///
+/// Uses [`KafkaProducer::from_config_with_compression`] for tests that need
+/// a specific compression codec (e.g., the compression test).
+fn create_producer_with_compression(config: ProducerConfig, compression: Compression) -> KafkaProducer<String, String> {
+    KafkaProducer::from_config_with_compression(
         config,
         Box::new(StringSerializer),
         Box::new(StringSerializer),
-        metadata,
-        accumulator,
-        client,
-        time_provider,
+        Some(compression),
     )
+    .expect("Failed to create producer with compression")
 }
 
 /// Test: Create a KafkaProducer, send a single record with key and value,
@@ -168,7 +85,7 @@ async fn test_produce_single_record() {
     let topic = ctx.topic("single_record");
     let config = make_config(ctx.bootstrap_servers());
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     let record = ProducerRecord::with_key(topic.clone(), Some("test-key".to_string()), Some("test-value".to_string()));
     let future = producer.send(record).expect("send should succeed");
@@ -202,7 +119,7 @@ async fn test_produce_with_key() {
     let topic = ctx.topic("with_key");
     let config = make_config(ctx.bootstrap_servers());
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     let key = "deterministic-key".to_string();
     let mut partitions = Vec::new();
@@ -239,7 +156,7 @@ async fn test_produce_multiple_records_ordering() {
     let topic = ctx.topic("ordering");
     let config = make_config(ctx.bootstrap_servers());
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     // Send to an explicit partition so we can verify ordering
     let mut offsets = Vec::new();
@@ -293,7 +210,7 @@ async fn test_produce_with_compression() {
     for (name, compression) in compressions {
         let topic = ctx.topic(&format!("compress_{}", name));
 
-        let producer = create_producer(ctx.bootstrap_servers(), &config, compression);
+        let producer = create_producer_with_compression(config.clone(), compression);
 
         let record = ProducerRecord::with_key(
             topic.clone(),
@@ -330,7 +247,7 @@ async fn test_produce_to_invalid_topic() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
     let config = make_config(ctx.bootstrap_servers());
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     // Topic names with spaces or special characters are invalid in Kafka
     let invalid_topic = "topic with spaces!@#$".to_string();
@@ -359,7 +276,7 @@ async fn test_produce_record_too_large() {
     // Set a very small max request size to trigger the error
     config.max_request_size = 100;
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     // Create a record larger than 100 bytes
     let large_value = "x".repeat(200);
@@ -390,7 +307,7 @@ async fn test_flush_sends_pending_records() {
     let topic = ctx.topic("flush_test");
     let config = make_config(ctx.bootstrap_servers());
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     // Send multiple records without awaiting them
     let mut futures = Vec::new();
@@ -425,7 +342,7 @@ async fn test_close_flushes_pending() {
     let topic = ctx.topic("close_flush");
     let config = make_config(ctx.bootstrap_servers());
 
-    let producer = create_producer(ctx.bootstrap_servers(), &config, Compression::none());
+    let producer = create_producer_from_config(config);
 
     // Send records
     let mut futures = Vec::new();
