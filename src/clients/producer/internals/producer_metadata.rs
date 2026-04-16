@@ -58,8 +58,11 @@ struct ProducerMetadataInner {
 /// (`retain_topic_fn`, `request_builder_fn`, `new_topics_request_builder_fn`)
 /// are set at construction to delegate to the producer state.
 pub struct ProducerMetadata {
-    /// The underlying metadata instance.
-    metadata: Metadata,
+    /// The underlying metadata instance, wrapped in `Arc` so it can be shared
+    /// with the `NetworkClient` (which also needs `Arc<Metadata>`). This mirrors
+    /// Java's inheritance model where `ProducerMetadata extends Metadata` and
+    /// both the producer and network client use the same object.
+    metadata: Arc<Metadata>,
     /// Producer-specific mutable state.
     inner: Arc<Mutex<ProducerMetadataInner>>,
 }
@@ -142,7 +145,7 @@ impl ProducerMetadata {
             }
         });
 
-        let metadata = Metadata::with_overrides(
+        let metadata = Arc::new(Metadata::with_overrides(
             refresh_backoff_ms,
             refresh_backoff_max_ms,
             metadata_expire_ms,
@@ -154,7 +157,7 @@ impl ProducerMetadata {
                 new_topics_request_builder_fn: Some(new_topics_request_builder_fn),
                 post_update_fn: Some(post_update_fn),
             },
-        );
+        ));
 
         Self { metadata, inner }
     }
@@ -212,6 +215,17 @@ impl ProducerMetadata {
     pub fn get_error(&self, topic: &str) -> Option<Errors> {
         let state = self.inner.lock().unwrap();
         state.errors.as_ref().and_then(|e| e.get(topic).copied())
+    }
+
+    /// Returns a shared reference to the underlying [`Metadata`].
+    ///
+    /// This `Arc` can be passed to the [`NetworkClient`] so that metadata updates
+    /// from the network layer are visible to the producer, mirroring Java's
+    /// inheritance model where `ProducerMetadata extends Metadata`.
+    ///
+    /// [`NetworkClient`]: crate::clients::network_client::NetworkClient
+    pub fn metadata_arc(&self) -> Arc<Metadata> {
+        Arc::clone(&self.metadata)
     }
 }
 
