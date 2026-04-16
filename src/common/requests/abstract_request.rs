@@ -43,7 +43,7 @@ use super::send_builder::SendBuilder;
 /// Corresponds to the `AbstractRequest.Builder` inner class in Java.
 ///
 /// Each concrete request type provides its own builder that implements this trait.
-pub trait RequestBuilder {
+pub trait RequestBuilder: Send {
     /// Returns the API key for this builder's request type.
     fn api_key(&self) -> &'static ApiKeys;
 

@@ -37,6 +37,8 @@ pub mod metadata_recovery_strategy;
 pub mod metadata_snapshot;
 #[cfg(not(feature = "skip-generated"))]
 pub mod metadata_updater;
+#[cfg(test)]
+pub mod mock_client;
 #[cfg(not(feature = "skip-generated"))]
 pub mod network_client;
 #[cfg(not(feature = "skip-generated"))]
