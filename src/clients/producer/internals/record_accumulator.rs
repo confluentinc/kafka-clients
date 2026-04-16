@@ -1023,16 +1023,23 @@ impl RecordAccumulator {
         self.incomplete.remove(&batch.produce_future);
     }
 
-    /// Mark the flush as complete by decrementing the flush counter.
+    /// Mark all partitions as ready to send and block until the send is complete.
     ///
     /// Translated from `RecordAccumulator.awaitFlushCompletion`.
-    /// In Java this blocks waiting for all incomplete batches to complete.
-    /// In Rust, we just decrement the counter. Callers should ensure
-    /// that all batches have been drained and completed first.
-    pub fn await_flush_completion(&self) {
-        if self.flushes_in_progress.load(Ordering::Relaxed) > 0 {
-            self.flushes_in_progress.fetch_sub(1, Ordering::Relaxed);
+    ///
+    /// In Java this obtains a copy of all incomplete `ProduceRequestResult`s, then
+    /// calls `awaitAllDependents()` on each one. We replicate the same blocking
+    /// behavior here: obtain a snapshot of incomplete results, then `.await` each
+    /// one (including its dependents from batch splitting).
+    pub async fn await_flush_completion(&self) {
+        // Obtain a copy of all of the incomplete ProduceRequestResult(s) at the
+        // time of the flush. We must be careful not to hold a reference to the
+        // ProducerBatch(s) so that the sender can complete and remove them.
+        let results = self.incomplete.request_results();
+        for result in results {
+            result.await_all_dependents().await;
         }
+        self.flushes_in_progress.fetch_sub(1, Ordering::Relaxed);
     }
 
     /// Abort any batches which have not been drained.
@@ -1660,8 +1667,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testFlush`.
-    #[test]
-    fn test_flush() {
+    #[tokio::test]
+    async fn test_flush() {
         let linger_ms = i32::MAX;
         let n1 = node1();
         let n2 = node2();
@@ -1701,7 +1708,7 @@ mod tests {
         }
 
         // should be complete with no unsent records.
-        accum.await_flush_completion();
+        accum.await_flush_completion().await;
         assert!(!accum.has_undrained());
         assert!(!accum.flush_in_progress());
     }
@@ -2552,11 +2559,12 @@ mod tests {
 
     /// Translated from `RecordAccumulatorTest.testAwaitFlushComplete`.
     ///
-    /// In Java, this test verifies that awaitFlushCompletion blocks until interrupted and
-    /// then decrements the flush counter. In Rust, our await_flush_completion just decrements
-    /// the counter (it does not actually block). We verify the flush counter lifecycle.
-    #[test]
-    fn test_await_flush_complete() {
+    /// In Java, this test verifies that awaitFlushCompletion blocks until all
+    /// incomplete batches are completed. In Rust, our `await_flush_completion`
+    /// awaits all incomplete `ProduceRequestResult`s (including dependents from
+    /// batch splitting), then decrements the counter. We verify the full lifecycle.
+    #[tokio::test]
+    async fn test_await_flush_complete() {
         let n1 = node1();
         let now: i64 = 0;
 
@@ -2577,8 +2585,17 @@ mod tests {
         accum.begin_flush();
         assert!(accum.flush_in_progress());
 
-        // In Rust, await_flush_completion just decrements the counter
-        accum.await_flush_completion();
+        // Drain and complete all batches so await_flush_completion can proceed
+        let result = accum.ready(&metadata, now);
+        let mut results = accum.drain(&metadata, &result.ready_nodes, i32::MAX, now);
+        for batch_list in results.values_mut() {
+            for batch in batch_list.iter_mut() {
+                batch.complete(0, 100);
+                accum.complete_and_deallocate_batch(batch);
+            }
+        }
+
+        accum.await_flush_completion().await;
         assert!(!accum.flush_in_progress(), "flushInProgress count should be decremented");
     }
 

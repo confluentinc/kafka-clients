@@ -28,6 +28,8 @@ use std::sync::{Arc, Mutex};
 use crate::clients::producer::internals::produce_request_result::ProduceRequestResult;
 use crate::clients::producer::record_metadata::RecordMetadata;
 use crate::common::kafka_error::KafkaError;
+use crate::common::record::record_batch::RecordBatch;
+use crate::common::topic_partition::TopicPartition;
 
 /// The future result of a record send.
 ///
@@ -78,6 +80,28 @@ impl FutureRecordMetadata {
             create_timestamp,
             serialized_key_size,
             serialized_value_size,
+            next_record_metadata: Mutex::new(None),
+        }
+    }
+
+    /// Create a `FutureRecordMetadata` that is already completed with an error.
+    ///
+    /// This is the Rust equivalent of Java's `KafkaProducer.FutureFailure`.
+    /// When `do_send` catches an `ApiException`, it returns this so the caller
+    /// gets back a future whose `get()` immediately returns the error.
+    pub fn failed(topic_partition: TopicPartition, error: KafkaError) -> Self {
+        let result = Arc::new(ProduceRequestResult::new(topic_partition));
+        let error_clone = error.clone();
+        let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
+            Arc::new(move |_| Some(error_clone.clone()));
+        result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
+        result.done();
+        Self {
+            result,
+            batch_index: 0,
+            create_timestamp: RecordBatch::NO_TIMESTAMP,
+            serialized_key_size: -1,
+            serialized_value_size: -1,
             next_record_metadata: Mutex::new(None),
         }
     }

@@ -418,6 +418,30 @@ impl KafkaError {
     pub fn txn_requires_abort(&self) -> bool {
         self.kafka_error().is_some_and(|e| e.txn_requires_abort())
     }
+
+    /// Whether this error corresponds to a Java `ApiException`.
+    ///
+    /// In Java, `ApiException` is a subclass of `KafkaException` that
+    /// represents errors from the Kafka API. In `KafkaProducer.doSend()`,
+    /// `ApiException`s are caught and returned via a failed future (with
+    /// callback invocation), while other exceptions propagate directly.
+    ///
+    /// The following error types correspond to Java `ApiException` subclasses:
+    /// - `InvalidTopic` (InvalidTopicException extends ApiException)
+    /// - `RecordTooLarge` (RecordTooLargeException extends ApiException)
+    /// - `Timeout` (TimeoutException extends RetriableException extends ApiException)
+    /// - `Generic` (covers all other Errors-based exceptions)
+    /// - `TopicAuthorization` (TopicAuthorizationException extends ApiException)
+    /// - `GroupAuthorization` (GroupAuthorizationException extends ApiException)
+    /// - `BufferExhausted` (BufferExhaustedException extends ApiException)
+    ///
+    /// NOT `ApiException`:
+    /// - `IllegalArgument` (IllegalArgumentException extends RuntimeException)
+    /// - `IllegalState` (IllegalStateException extends RuntimeException)
+    /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
+    pub fn is_api_exception(&self) -> bool {
+        !matches!(self, Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_))
+    }
 }
 
 impl fmt::Display for KafkaError {
