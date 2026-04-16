@@ -212,6 +212,14 @@ impl MockClient {
         self.connection_state(node.id_string()).ready_delayed_until_ms = now + duration_ms;
     }
 
+    /// Disconnect a node by ID string, creating disconnect responses for all
+    /// pending requests to that node.
+    ///
+    /// Translated from `MockClient.disconnect(String)`.
+    pub fn disconnect_by_id(&mut self, node_id: &str) {
+        self.disconnect_node(node_id);
+    }
+
     fn disconnect_node(&mut self, node_id: &str) {
         let now = (self.time_provider)();
         // Create disconnect responses for all pending requests to this node

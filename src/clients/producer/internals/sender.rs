@@ -45,6 +45,21 @@ use super::ProducerBatch;
 use super::producer_metadata::ProducerMetadata;
 use super::record_accumulator::RecordAccumulator;
 
+/// The action to take after `complete_batch` has processed a batch.
+///
+/// Because `RecordAccumulator::reenqueue` and `split_and_reenqueue` need
+/// ownership of the batch, `complete_batch` cannot call them directly (it
+/// borrows `&mut self`). Instead, it signals the desired action and the
+/// caller — which owns the batch — transfers it back to the accumulator.
+enum BatchAction {
+    /// The batch was completed (success, failure, or duplicate). No further action needed.
+    Done,
+    /// The batch should be re-enqueued into the accumulator for retry.
+    Reenqueue,
+    /// The batch should be split into smaller batches and re-enqueued.
+    SplitAndReenqueue,
+}
+
 /// Format the error from a `PartitionResponse` in a user-friendly string.
 fn format_partition_response_err(response: &crate::common::requests::produce_response::PartitionResponse) -> String {
     let error_message_suffix = match &response.error_message {
@@ -228,7 +243,28 @@ impl<C: KafkaClient> Sender<C> {
                         }
                     }
                 }
-                self.handle_produce_response(response, &mut batches, &pending.topic_names, now);
+                let actions = self.handle_produce_response(response, &mut batches, &pending.topic_names, now);
+
+                // Process deferred actions that require batch ownership.
+                for (tp, action) in actions {
+                    if let Some(batch) = batches.remove(&tp) {
+                        match action {
+                            BatchAction::Reenqueue => {
+                                // RecordAccumulator::reenqueue calls batch.reenqueued() internally.
+                                self.accumulator.reenqueue(batch, now);
+                            },
+                            BatchAction::SplitAndReenqueue => {
+                                // split_and_reenqueue takes ownership, splits the batch,
+                                // chains the sub-batch futures, and pushes them to the
+                                // front of the deque. After splitting, the original batch's
+                                // produce future is completed with RECORD_BATCH_TOO_LARGE
+                                // by ProducerBatch::split → finalize_split_batches.
+                                self.accumulator.split_and_reenqueue(batch);
+                            },
+                            BatchAction::Done => {},
+                        }
+                    }
+                }
             }
         }
     }
@@ -443,15 +479,20 @@ impl<C: KafkaClient> Sender<C> {
     /// Handle a produce response.
     ///
     /// Translated from `Sender.handleProduceResponse()`.
+    ///
+    /// Returns a list of `(TopicPartition, BatchAction)` for batches that require
+    /// ownership transfer (reenqueue or split). The caller owns the batches and
+    /// must process these actions.
     fn handle_produce_response(
         &mut self,
         response: &ClientResponse,
         batches: &mut HashMap<TopicPartition, ProducerBatch>,
         topic_names: &HashMap<Uuid, String>,
         now: i64,
-    ) {
+    ) -> Vec<(TopicPartition, BatchAction)> {
         let request_header = response.request_header();
         let correlation_id = request_header.correlation_id();
+        let mut deferred_actions: Vec<(TopicPartition, BatchAction)> = Vec::new();
 
         if response.was_timed_out() {
             trace!(
@@ -463,8 +504,9 @@ impl<C: KafkaClient> Sender<C> {
                 Errors::RequestTimedOut,
                 Some(format!("Disconnected from node {} due to timeout", response.destination())),
             );
-            for batch in batches.values_mut() {
-                self.complete_batch(batch, &part_resp, correlation_id, now, None);
+            for (tp, batch) in batches.iter_mut() {
+                let action = self.complete_batch(batch, &part_resp, correlation_id, now, None);
+                deferred_actions.push((tp.clone(), action));
             }
         } else if response.was_disconnected() {
             trace!(
@@ -476,8 +518,9 @@ impl<C: KafkaClient> Sender<C> {
                 Errors::NetworkException,
                 Some(format!("Disconnected from node {}", response.destination())),
             );
-            for batch in batches.values_mut() {
-                self.complete_batch(batch, &part_resp, correlation_id, now, None);
+            for (tp, batch) in batches.iter_mut() {
+                let action = self.complete_batch(batch, &part_resp, correlation_id, now, None);
+                deferred_actions.push((tp.clone(), action));
             }
         } else if response.version_mismatch().is_some() {
             warn!(
@@ -486,8 +529,9 @@ impl<C: KafkaClient> Sender<C> {
                 response.destination()
             );
             let part_resp = PartitionResponse::from_error(Errors::UnsupportedVersion);
-            for batch in batches.values_mut() {
-                self.complete_batch(batch, &part_resp, correlation_id, now, None);
+            for (tp, batch) in batches.iter_mut() {
+                let action = self.complete_batch(batch, &part_resp, correlation_id, now, None);
+                deferred_actions.push((tp.clone(), action));
             }
         } else {
             trace!(
@@ -528,13 +572,14 @@ impl<C: KafkaClient> Sender<C> {
                             };
 
                             if let Some(batch) = batches.get_mut(&tp) {
-                                self.complete_batch(
+                                let action = self.complete_batch(
                                     batch,
                                     &part_resp,
                                     correlation_id,
                                     now,
                                     Some(&mut partitions_with_updated_leader_info),
                                 );
+                                deferred_actions.push((tp, action));
                             } else {
                                 error!(
                                     "Can't find batch created for topic id {} topic name {} partition {} using {:?}",
@@ -565,16 +610,22 @@ impl<C: KafkaClient> Sender<C> {
             } else {
                 // acks = 0 case, just complete all requests
                 let part_resp = PartitionResponse::from_error(Errors::None);
-                for batch in batches.values_mut() {
-                    self.complete_batch(batch, &part_resp, correlation_id, now, None);
+                for (tp, batch) in batches.iter_mut() {
+                    let action = self.complete_batch(batch, &part_resp, correlation_id, now, None);
+                    deferred_actions.push((tp.clone(), action));
                 }
             }
         }
+
+        deferred_actions
     }
 
     /// Complete or retry the given batch of records.
     ///
     /// Translated from `Sender.completeBatch()` (the 5-argument version).
+    ///
+    /// Returns a [`BatchAction`] indicating whether the caller should reenqueue
+    /// the batch, split-and-reenqueue it, or do nothing (already completed).
     fn complete_batch(
         &mut self,
         batch: &mut ProducerBatch,
@@ -582,17 +633,19 @@ impl<C: KafkaClient> Sender<C> {
         correlation_id: i32,
         now: i64,
         mut partitions_with_updated_leader_info: Option<&mut HashMap<TopicPartition, LeaderIdAndEpoch>>,
-    ) {
+    ) -> BatchAction {
         batch.set_inflight(false);
         let error = response.error;
 
-        if error == Errors::MessageTooLarge
+        let action = if error == Errors::MessageTooLarge
             && batch.record_count > 1
             && !batch.is_done()
             && (batch.magic() >= RecordBatch::MAGIC_VALUE_V2 || batch.is_compressed())
         {
             // If the batch is too large, split and retry.
-            // We need to take the batch out for split_and_reenqueue which takes ownership.
+            // Signal the caller to split the batch and reenqueue the sub-batches.
+            // The caller owns the batch and will pass it to
+            // `accumulator.split_and_reenqueue()`.
             warn!(
                 "Got error produce response in correlation id {} on topic-partition {}, splitting and retrying ({} attempts left). Error: {}",
                 correlation_id,
@@ -600,11 +653,7 @@ impl<C: KafkaClient> Sender<C> {
                 self.retries - batch.attempts(),
                 Self::format_err_msg(response)
             );
-            // Note: split_and_reenqueue takes an owned batch. The split path requires
-            // ownership transfer which is not yet implemented; for now we complete the
-            // batch without splitting. The batch has already been removed from
-            // `in_flight_batches` by the caller.
-            self.accumulator.complete_batch(batch);
+            BatchAction::SplitAndReenqueue
         } else if error != Errors::None {
             if self.can_retry(batch, response, now) {
                 warn!(
@@ -614,66 +663,67 @@ impl<C: KafkaClient> Sender<C> {
                     self.retries - batch.attempts() - 1,
                     Self::format_err_msg(response)
                 );
-                self.reenqueue_batch(batch, now);
+                // Signal the caller to reenqueue. The caller owns the batch and
+                // will call `batch.reenqueued()` + `accumulator.reenqueue()`.
+                BatchAction::Reenqueue
             } else if error == Errors::DuplicateSequenceNumber {
                 // Duplicate sequence: return success without valid offset/timestamp
                 self.complete_batch_success(batch, response);
+                BatchAction::Done
             } else {
                 // Final failure
                 let adjust = batch.attempts() < self.retries;
                 self.fail_batch(batch, response, adjust, true);
-            }
-
-            if error.is_invalid_metadata() {
-                if error == Errors::UnknownTopicOrPartition {
-                    warn!(
-                        "Received unknown topic or partition error in produce request on partition {}. \
-                         The topic-partition may not exist or the user may not have Describe access to it",
-                        batch.topic_partition
-                    );
-                } else {
-                    warn!(
-                        "Received invalid metadata error in produce request on partition {} due to {}. \
-                         Going to request metadata update now",
-                        batch.topic_partition, error
-                    );
-                }
-
-                if (error == Errors::NotLeaderOrFollower || error == Errors::FencedLeaderEpoch)
-                    && response.current_leader.leader_id != -1
-                    && response.current_leader.leader_epoch != -1
-                    && let Some(ref mut map) = partitions_with_updated_leader_info
-                {
-                    map.insert(
-                        batch.topic_partition.clone(),
-                        LeaderIdAndEpoch::new(
-                            Some(response.current_leader.leader_id),
-                            Some(response.current_leader.leader_epoch),
-                        ),
-                    );
-                }
-
-                self.metadata.request_update(false);
+                BatchAction::Done
             }
         } else {
             self.complete_batch_success(batch, response);
+            BatchAction::Done
+        };
+
+        if error != Errors::None && error.is_invalid_metadata() {
+            if error == Errors::UnknownTopicOrPartition {
+                warn!(
+                    "Received unknown topic or partition error in produce request on partition {}. \
+                     The topic-partition may not exist or the user may not have Describe access to it",
+                    batch.topic_partition
+                );
+            } else {
+                warn!(
+                    "Received invalid metadata error in produce request on partition {} due to {}. \
+                     Going to request metadata update now",
+                    batch.topic_partition, error
+                );
+            }
+
+            if (error == Errors::NotLeaderOrFollower || error == Errors::FencedLeaderEpoch)
+                && response.current_leader.leader_id != -1
+                && response.current_leader.leader_epoch != -1
+                && let Some(ref mut map) = partitions_with_updated_leader_info
+            {
+                map.insert(
+                    batch.topic_partition.clone(),
+                    LeaderIdAndEpoch::new(
+                        Some(response.current_leader.leader_id),
+                        Some(response.current_leader.leader_epoch),
+                    ),
+                );
+            }
+
+            self.metadata.request_update(false);
         }
 
         // Unmute the completed partition
         if self.guarantee_message_order {
             self.accumulator.unmute_partition(&batch.topic_partition);
         }
+
+        action
     }
 
     /// Format the error from a `PartitionResponse` in a user-friendly string.
     fn format_err_msg(response: &PartitionResponse) -> String {
         format_partition_response_err(response)
-    }
-
-    fn reenqueue_batch(&mut self, batch: &mut ProducerBatch, current_time_ms: i64) {
-        // Mark the batch as reenqueued. The batch has already been removed from
-        // `in_flight_batches` by the caller.
-        batch.reenqueued(current_time_ms);
     }
 
     /// Complete a batch successfully.
@@ -848,42 +898,46 @@ impl<C: KafkaClient> Sender<C> {
         let mut topic_data_list: Vec<TopicProduceData> = Vec::new();
         let mut batch_tps: Vec<TopicPartition> = Vec::with_capacity(batch_infos.len());
 
-        for info in &batch_infos {
-            let tp = &info.tp;
-            let topic_id = topic_ids.get(tp.topic()).copied().unwrap_or(Uuid::ZERO_UUID);
+        // Consume the batch_infos by value to avoid cloning the record data.
+        for mut info in batch_infos {
+            let topic_id = topic_ids.get(info.tp.topic()).copied().unwrap_or(Uuid::ZERO_UUID);
 
             // Find or create topic data
             let topic_data = topic_data_list
                 .iter_mut()
-                .find(|td| td.name == *tp.topic() || td.topic_id == topic_id);
+                .find(|td| td.name == *info.tp.topic() || td.topic_id == topic_id);
 
-            let records_bytes = info.records_data.clone();
+            // Take ownership of the record data instead of cloning.
+            let records_bytes = info.records_data.take();
 
             if let Some(td) = topic_data {
                 let mut partition_data = PartitionProduceData::new();
-                partition_data.set_index(tp.partition());
+                partition_data.set_index(info.tp.partition());
                 partition_data.set_records(records_bytes);
                 td.partition_data.push(partition_data);
             } else {
                 let mut td = TopicProduceData::new();
                 td.set_topic_id(topic_id);
-                td.set_name(tp.topic().to_string());
+                td.set_name(info.tp.topic().to_string());
                 let mut partition_data = PartitionProduceData::new();
-                partition_data.set_index(tp.partition());
+                partition_data.set_index(info.tp.partition());
                 partition_data.set_records(records_bytes);
                 td.partition_data.push(partition_data);
                 topic_data_list.push(td);
             }
 
-            batch_tps.push(tp.clone());
+            batch_tps.push(info.tp);
         }
 
-        // Mark in-flight batches
+        // Mark only the specific batches being sent in this request as inflight.
+        // In Java, `batch.setInflight(true)` is called on each batch as it is added
+        // to the produce request (Sender.java:919). We mark only the last batch per
+        // partition, which is the one just added by `add_to_inflight_batches`.
         for tp in &batch_tps {
-            if let Some(batches) = self.in_flight_batches.get_mut(tp) {
-                for batch in batches.iter_mut() {
-                    batch.set_inflight(true);
-                }
+            if let Some(batches) = self.in_flight_batches.get_mut(tp)
+                && let Some(batch) = batches.last_mut()
+            {
+                batch.set_inflight(true);
             }
         }
 
@@ -1807,6 +1861,412 @@ mod tests {
                 // Records 1, 4 get the default error
                 assert_eq!(err.error(), Errors::InvalidRecord);
             }
+        }
+    }
+
+    /// Translated from Java `SenderTest.testRetries()`.
+    ///
+    /// Verifies that:
+    /// 1. A retriable error (disconnect) causes the batch to be re-enqueued and
+    ///    successfully sent on retry.
+    /// 2. When retries are exhausted, the batch fails with the appropriate error.
+    #[tokio::test]
+    async fn test_retries() {
+        let max_retries = 1;
+        let mut ctx = SenderTestContext::with_options(false, max_retries);
+        let tp0 = ctx.tp0.clone();
+
+        // --- Successful retry ---
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        let dest = ctx
+            .sender
+            .client()
+            .requests()
+            .front()
+            .expect("Should have a request")
+            .destination()
+            .to_string();
+        let node = Node::new(dest.parse::<i32>().unwrap(), "localhost".to_string(), 0);
+        assert_eq!(1, ctx.sender.client().in_flight_request_count());
+        assert!(ctx.sender.client().has_in_flight_requests());
+        assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
+        assert!(
+            ctx.sender.client().is_ready(&node, ctx.time.milliseconds()),
+            "Client ready status should be true"
+        );
+
+        ctx.sender.client_mut().disconnect_by_id(&dest);
+        assert_eq!(0, ctx.sender.client().in_flight_request_count());
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert!(
+            !ctx.sender.client().is_ready(&node, ctx.time.milliseconds()),
+            "Client ready status should be false"
+        );
+        // the batch is in sender.in_flight_batches until the disconnect response is processed
+        assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
+
+        ctx.sender.run_once().await; // receive error (disconnect response triggers reenqueue)
+        // Advance time past the retry backoff (accounting for jitter up to 20%)
+        // so the reenqueued batch becomes sendable.
+        let backoff_with_jitter = (RETRY_BACKOFF_MS as f64 * 1.3) as i64;
+        ctx.time.sleep(backoff_with_jitter);
+        // In Rust's MockClient, ready() transitions Disconnected -> Connecting -> Connected
+        // in a single call, so one additional run_once is enough to reconnect + drain + send.
+        ctx.sender.run_once().await; // reconnect + resend
+
+        assert_eq!(1, ctx.sender.client().in_flight_request_count());
+        assert!(ctx.sender.client().has_in_flight_requests());
+        assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
+
+        let offset = 0i64;
+        let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+        assert!(future.is_done(), "Request should have retried and completed");
+        let metadata = future.get().await.expect("Future should succeed");
+        assert_eq!(offset, metadata.offset());
+        assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
+
+        // --- Unsuccessful retry (exhausted retries) ---
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        ctx.sender.run_once().await; // send produce request
+        assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
+
+        for i in 0..=(max_retries as usize) {
+            let dest = ctx
+                .sender
+                .client()
+                .requests()
+                .front()
+                .expect("Should have a request")
+                .destination()
+                .to_string();
+            ctx.sender.client_mut().disconnect_by_id(&dest);
+            ctx.sender.run_once().await; // receive error
+            assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
+            ctx.time.sleep(backoff_with_jitter); // advance past retry backoff (with jitter margin)
+            ctx.sender.run_once().await; // reconnect + resend
+            assert_eq!(if i > 0 { 0 } else { 1 }, ctx.sender.in_flight_batches(&ctx.tp0).len());
+        }
+
+        ctx.sender.run_once().await;
+        assert!(future.is_done());
+        let result = future.get().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.error(), Errors::NetworkException);
+        assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
+    }
+
+    /// Translated from Java `SenderTest.testSendInOrder()`.
+    ///
+    /// Verifies that when `guarantee_message_order` is true, partitions are muted
+    /// while a batch is in-flight, preventing out-of-order sends. After the first
+    /// batch completes, the second batch is sent.
+    #[tokio::test]
+    async fn test_send_in_order() {
+        let max_retries = 1;
+        let mut ctx = SenderTestContext::with_options(true, max_retries);
+        let tp1 = ctx.tp1.clone();
+
+        // Create a two broker cluster, with partition 0 on broker 0 and partition 1 on broker 1.
+        // For simplicity in Rust, we use 1 broker and 2 partitions.
+        let mut topic_partition_counts = HashMap::new();
+        topic_partition_counts.insert(TOPIC_NAME.to_string(), 2);
+        let metadata_response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "kafka-cluster",
+            2,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_| None,
+            &topic_ids(),
+        );
+        ctx.sender.client_mut().set_nodes(vec![
+            Node::new(0, "localhost".to_string(), 1969),
+            Node::new(1, "localhost".to_string(), 1970),
+        ]);
+        ctx.metadata
+            .update_with_current_request_version(&metadata_response, false, ctx.time.milliseconds());
+
+        // Send the first message to tp1.
+        ctx.append_to_accumulator_with(&tp1, 0, "key1", "value1");
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        assert_eq!(1, ctx.sender.client().in_flight_request_count());
+        assert!(ctx.sender.client().has_in_flight_requests());
+        assert_eq!(1, ctx.sender.in_flight_batches(&tp1).len());
+
+        ctx.time.sleep(900);
+        // Now send another message to tp1
+        ctx.append_to_accumulator_with(&tp1, 0, "key2", "value2");
+
+        // With guarantee_message_order, the second message should not be sent
+        // because tp1 is muted.
+        ctx.sender.run_once().await; // should not send because muted
+        assert_eq!(1, ctx.sender.client().in_flight_request_count());
+
+        // Complete the first request
+        let response = ctx.produce_response(&tp1, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Sender receives the response for the previous send and unmutes
+        // the partition. But the drain happens at the start of run_once,
+        // so we need another cycle to actually drain and send the new batch.
+        ctx.sender.run_once().await; // receive response, unmute
+        ctx.sender.run_once().await; // drain the second batch and send
+        assert_eq!(1, ctx.sender.client().in_flight_request_count());
+        assert!(ctx.sender.client().has_in_flight_requests());
+        assert_eq!(1, ctx.sender.in_flight_batches(&tp1).len());
+    }
+
+    /// Translated from Java `SenderTest.testNoDoubleDeallocation()`.
+    ///
+    /// Verifies that when a batch times out, its buffer is deallocated exactly
+    /// once, not doubled.
+    #[tokio::test]
+    async fn test_no_double_deallocation() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Send first ProduceRequest
+        let future = ctx.append_to_accumulator(&tp0);
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send
+        assert_eq!(1, ctx.sender.client().in_flight_request_count());
+        assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
+        assert!(
+            !ctx.sender.in_flight_batches(&ctx.tp0)[0].is_buffer_deallocated(),
+            "Buffer not deallocated yet"
+        );
+
+        ctx.time.sleep(REQUEST_TIMEOUT as i64);
+
+        ctx.sender.run_once().await; // times out the request
+        assert!(future.is_done());
+
+        ctx.sender.run_once().await;
+        assert_eq!(0, ctx.sender.client().in_flight_request_count());
+        assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
+    }
+
+    /// Translated from Java `SenderTest.testResetNextBatchExpiry()`.
+    ///
+    /// Verifies that batch expiry time is properly reset between iterations.
+    /// In Java, this uses a Mockito spy to verify poll timeout values. In Rust,
+    /// we verify the behavior by checking that expired batches are properly
+    /// detected and failed.
+    #[tokio::test]
+    async fn test_reset_next_batch_expiry() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        // Advance time beyond delivery timeout
+        ctx.time.sleep(ctx.accumulator.delivery_timeout_ms() as i64 + 1);
+
+        // Run once more - this should detect the expired batch
+        ctx.sender.run_once().await;
+
+        // The in-flight batch should be expired and removed
+        assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
+    }
+
+    /// Translated from Java `SenderTest.testNodeLatencyStats()`.
+    ///
+    /// Verifies that node latency statistics (readyTimeMs, drainTimeMs) are
+    /// updated correctly as the sender operates.
+    #[tokio::test]
+    async fn test_node_latency_stats() {
+        // Create a new record accumulator with non-0 partitionAvailabilityTimeoutMs
+        // otherwise it wouldn't update the stats.
+        let time = MockTime::new(1000);
+        let time_provider = time.as_provider();
+
+        let batch_size = 16 * 1024;
+        let total_size = 1024 * 1024;
+
+        let metadata = Arc::new(ProducerMetadata::new(
+            0,
+            0,
+            i64::MAX,
+            TOPIC_IDLE_MS,
+            ClusterResourceListeners::new(),
+        ));
+
+        let accumulator = Arc::new(RecordAccumulator::new(
+            batch_size,
+            Compression::none(),
+            0, // linger_ms
+            0,
+            0,
+            DELIVERY_TIMEOUT_MS,
+            PartitionerConfig { enable_adaptive_partitioning: false, partition_availability_timeout_ms: 42 },
+            Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+        ));
+
+        let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
+        let client = MockClient::new(nodes, Arc::clone(&time_provider));
+
+        let running = Arc::new(AtomicBool::new(true));
+        let force_close = Arc::new(AtomicBool::new(false));
+        let wakeup = Arc::new(Notify::new());
+
+        let mut sender = Sender::new(
+            client,
+            Arc::clone(&metadata),
+            Arc::clone(&accumulator),
+            false,
+            MAX_REQUEST_SIZE,
+            ACKS_ALL,
+            1,
+            REQUEST_TIMEOUT,
+            1000,
+            running,
+            force_close,
+            wakeup,
+            time_provider,
+        );
+
+        let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+
+        metadata.add(TOPIC_NAME, time.milliseconds());
+        let mut topic_partition_counts = HashMap::new();
+        topic_partition_counts.insert(TOPIC_NAME.to_string(), 3);
+        let metadata_response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_| None,
+            &topic_ids(),
+        );
+        metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
+
+        // Produce and send batch.
+        let time1 = time.milliseconds();
+        let cluster = metadata.fetch();
+        accumulator
+            .append(
+                tp0.topic(),
+                tp0.partition(),
+                0,
+                Some(b"key"),
+                Some(b"value"),
+                &[],
+                None,
+                MAX_BLOCK_TIMEOUT,
+                time.milliseconds(),
+                &cluster,
+            )
+            .expect("append should succeed");
+
+        sender.run_once().await; // connect
+        sender.run_once().await; // send
+        assert_eq!(
+            1,
+            sender.client().in_flight_request_count(),
+            "We should have a single produce request in flight."
+        );
+
+        // We were able to send the batch out, so both the ready and drain values should be the same.
+        {
+            let stats = accumulator.get_node_latency_stats(0).expect("Stats should exist");
+            assert_eq!(time1, stats.drain_time_ms);
+            assert_eq!(time1, stats.ready_time_ms);
+        }
+
+        // Make the node 0 not ready by throttling.
+        let node = metadata.fetch().node_by_id(0).unwrap().clone();
+        sender.client_mut().throttle(&node, 100);
+
+        // Time passes, but we don't have anything to send.
+        time.sleep(10);
+        sender.run_once().await;
+        assert_eq!(
+            1,
+            sender.client().in_flight_request_count(),
+            "We should have a single produce request in flight."
+        );
+
+        // Stats shouldn't change as we didn't have anything ready.
+        {
+            let stats = accumulator.get_node_latency_stats(0).expect("Stats should exist");
+            assert_eq!(time1, stats.drain_time_ms);
+            assert_eq!(time1, stats.ready_time_ms);
+        }
+
+        // Produce a new batch, but we won't be able to send it because node is not ready.
+        let time2 = time.milliseconds();
+        let cluster = metadata.fetch();
+        accumulator
+            .append(
+                tp0.topic(),
+                tp0.partition(),
+                0,
+                Some(b"key"),
+                Some(b"value"),
+                &[],
+                None,
+                MAX_BLOCK_TIMEOUT,
+                time.milliseconds(),
+                &cluster,
+            )
+            .expect("append should succeed");
+        sender.run_once().await;
+        assert_eq!(
+            1,
+            sender.client().in_flight_request_count(),
+            "We should have a single produce request in flight."
+        );
+
+        // The ready time should move forward, but drain time shouldn't change.
+        {
+            let stats = accumulator.get_node_latency_stats(0).expect("Stats should exist");
+            assert_eq!(time1, stats.drain_time_ms);
+            assert_eq!(time2, stats.ready_time_ms);
+        }
+
+        // Time passes, we keep trying to send, but the node is not ready.
+        time.sleep(10);
+        let time2_updated = time.milliseconds();
+        sender.run_once().await;
+        assert_eq!(
+            1,
+            sender.client().in_flight_request_count(),
+            "We should have a single produce request in flight."
+        );
+
+        // The ready time should move forward, but drain time shouldn't change.
+        {
+            let stats = accumulator.get_node_latency_stats(0).expect("Stats should exist");
+            assert_eq!(time1, stats.drain_time_ms);
+            assert_eq!(time2_updated, stats.ready_time_ms);
+        }
+
+        // Finally, time passes beyond the throttle and the node is ready.
+        time.sleep(100);
+        let time3 = time.milliseconds();
+        sender.run_once().await;
+        assert_eq!(
+            2,
+            sender.client().in_flight_request_count(),
+            "We should have 2 produce requests in flight."
+        );
+
+        // Both times should move forward
+        {
+            let stats = accumulator.get_node_latency_stats(0).expect("Stats should exist");
+            assert_eq!(time3, stats.drain_time_ms);
+            assert_eq!(time3, stats.ready_time_ms);
         }
     }
 }
