@@ -21,9 +21,156 @@
 //! subclasses (`NoCompression`, `GzipCompression`, `SnappyCompression`,
 //! `Lz4Compression`, `ZstdCompression`).
 
-use std::io::{self, Read, Write};
+use std::io::{self, Cursor, Read, Write};
 
 use crate::common::record::CompressionType;
+
+// --- Xerial/snappy-java framing format ---
+//
+// Kafka uses the xerial/snappy-java block format, NOT the standard Snappy
+// framing format (RFC 7849). The formats are incompatible.
+//
+// Xerial format:
+//   - 16-byte magic header
+//   - Sequence of blocks, each: 4-byte big-endian compressed length + compressed data
+//
+// See: https://github.com/xerial/snappy-java
+
+/// Magic header for the xerial/snappy-java format.
+const XERIAL_HEADER: [u8; 16] = [
+    0x82, b'S', b'N', b'A', b'P', b'P', b'Y', 0, // magic
+    0, 0, 0, 1, // min compatible version
+    0, 0, 0, 1, // version
+];
+
+/// Default block size for xerial snappy (matches Java's default of 32KB).
+const XERIAL_BLOCK_SIZE: usize = 32 * 1024;
+
+/// A writer that compresses data using the xerial/snappy-java block format.
+///
+/// Buffers input data and compresses in blocks when the buffer reaches
+/// `XERIAL_BLOCK_SIZE`. Call `finish()` to flush the final block.
+pub struct XerialSnappyWriter<W: Write> {
+    inner: W,
+    buffer: Vec<u8>,
+    header_written: bool,
+}
+
+impl<W: Write> XerialSnappyWriter<W> {
+    fn new(inner: W) -> Self {
+        Self { inner, buffer: Vec::with_capacity(XERIAL_BLOCK_SIZE), header_written: false }
+    }
+
+    fn ensure_header(&mut self) -> io::Result<()> {
+        if !self.header_written {
+            self.inner.write_all(&XERIAL_HEADER)?;
+            self.header_written = true;
+        }
+        Ok(())
+    }
+
+    fn flush_block(&mut self) -> io::Result<()> {
+        if self.buffer.is_empty() {
+            return Ok(());
+        }
+        self.ensure_header()?;
+        let mut encoder = snap::raw::Encoder::new();
+        let compressed = encoder
+            .compress_vec(&self.buffer)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        let len = compressed.len() as u32;
+        self.inner.write_all(&len.to_be_bytes())?;
+        self.inner.write_all(&compressed)?;
+        self.buffer.clear();
+        Ok(())
+    }
+
+    fn finish(mut self) -> io::Result<W> {
+        self.ensure_header()?;
+        self.flush_block()?;
+        Ok(self.inner)
+    }
+}
+
+impl<W: Write> Write for XerialSnappyWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.buffer.extend_from_slice(buf);
+        while self.buffer.len() >= XERIAL_BLOCK_SIZE {
+            let block: Vec<u8> = self.buffer.drain(..XERIAL_BLOCK_SIZE).collect();
+            self.ensure_header()?;
+            let mut encoder = snap::raw::Encoder::new();
+            let compressed = encoder.compress_vec(&block).map_err(|e| io::Error::other(e.to_string()))?;
+            let len = compressed.len() as u32;
+            self.inner.write_all(&len.to_be_bytes())?;
+            self.inner.write_all(&compressed)?;
+        }
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+/// A reader that decompresses data in the xerial/snappy-java block format.
+///
+/// Reads the magic header, then decompresses blocks one at a time.
+pub struct XerialSnappyReader<R: Read> {
+    inner: R,
+    decompressed: Cursor<Vec<u8>>,
+    header_read: bool,
+}
+
+impl<R: Read> XerialSnappyReader<R> {
+    fn new(inner: R) -> Self {
+        Self { inner, decompressed: Cursor::new(Vec::new()), header_read: false }
+    }
+
+    fn ensure_header(&mut self) -> io::Result<()> {
+        if !self.header_read {
+            let mut header = [0u8; 16];
+            self.inner.read_exact(&mut header)?;
+            if header[..8] != XERIAL_HEADER[..8] {
+                return Err(io::Error::other("Invalid xerial snappy header"));
+            }
+            self.header_read = true;
+        }
+        Ok(())
+    }
+
+    fn read_next_block(&mut self) -> io::Result<bool> {
+        let mut len_buf = [0u8; 4];
+        match self.inner.read_exact(&mut len_buf) {
+            Ok(()) => {},
+            Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(false),
+            Err(e) => return Err(e),
+        }
+        let compressed_len = u32::from_be_bytes(len_buf) as usize;
+        let mut compressed = vec![0u8; compressed_len];
+        self.inner.read_exact(&mut compressed)?;
+        let mut decoder = snap::raw::Decoder::new();
+        let decompressed = decoder
+            .decompress_vec(&compressed)
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        self.decompressed = Cursor::new(decompressed);
+        Ok(true)
+    }
+}
+
+impl<R: Read> Read for XerialSnappyReader<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.ensure_header()?;
+        loop {
+            let n = self.decompressed.read(buf)?;
+            if n > 0 {
+                return Ok(n);
+            }
+            if !self.read_next_block()? {
+                return Ok(0);
+            }
+        }
+    }
+}
 
 /// Compression codec for Kafka record batches.
 ///
@@ -175,7 +322,7 @@ impl Compression {
                 Ok(CompressingWriter::Gzip(flate2::write::GzEncoder::new(writer, flate2_level)))
             },
             Self::Snappy => {
-                let encoder = snap::write::FrameEncoder::new(writer);
+                let encoder = XerialSnappyWriter::new(writer);
                 Ok(CompressingWriter::Snappy(Box::new(encoder)))
             },
             Self::Lz4 { .. } => {
@@ -213,7 +360,7 @@ impl Compression {
                 Ok(DecompressingReader::Gzip(decoder))
             },
             Self::Snappy => {
-                let decoder = snap::read::FrameDecoder::new(reader);
+                let decoder = XerialSnappyReader::new(reader);
                 Ok(DecompressingReader::Snappy(decoder))
             },
             Self::Lz4 { .. } => {
@@ -238,8 +385,8 @@ pub enum CompressingWriter<W: Write> {
     None(W),
     /// Gzip compression.
     Gzip(flate2::write::GzEncoder<W>),
-    /// Snappy compression (boxed to reduce enum size).
-    Snappy(Box<snap::write::FrameEncoder<W>>),
+    /// Snappy compression using xerial/snappy-java block format (boxed to reduce enum size).
+    Snappy(Box<XerialSnappyWriter<W>>),
     /// LZ4 compression.
     Lz4(lz4_flex::frame::FrameEncoder<W>),
     /// Zstd compression.
@@ -252,7 +399,7 @@ impl<W: Write> CompressingWriter<W> {
         match self {
             Self::None(w) => Ok(w),
             Self::Gzip(encoder) => encoder.finish(),
-            Self::Snappy(encoder) => encoder.into_inner().map_err(|e| io::Error::other(e.error().to_string())),
+            Self::Snappy(encoder) => encoder.finish(),
             Self::Lz4(encoder) => encoder.finish().map_err(|e| io::Error::other(e.to_string())),
             Self::Zstd(encoder) => encoder.finish(),
         }
@@ -287,8 +434,8 @@ pub enum DecompressingReader<R: Read> {
     None(R),
     /// Gzip decompression.
     Gzip(flate2::read::GzDecoder<R>),
-    /// Snappy decompression.
-    Snappy(snap::read::FrameDecoder<R>),
+    /// Snappy decompression using xerial/snappy-java block format.
+    Snappy(XerialSnappyReader<R>),
     /// LZ4 decompression.
     Lz4(lz4_flex::frame::FrameDecoder<R>),
     /// Zstd decompression.
