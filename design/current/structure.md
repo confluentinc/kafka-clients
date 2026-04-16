@@ -30,9 +30,10 @@ build.rs                # Build script that generates Rust code before compilati
 tests/
 ├── common/             # Mirrors org.apache.kafka.common
 │   ├── mod.rs          # Shared infra: re-exports library types for test-generated messages
-│   ├── cluster_config.rs   # ClusterConfig for integration tests
+│   ├── cluster_config.rs   # ClusterConfig + SecurityMode for integration tests
 │   ├── cluster_pool.rs     # Process-global pool of shared Kafka containers
-│   ├── kafka_cluster.rs    # Docker Kafka wrapper
+│   ├── kafka_cluster.rs    # Docker Kafka wrapper + SecureKafka custom image
+│   ├── test_certs.rs       # Certificate generation utility (rcgen)
 │   ├── test_context.rs     # Per-test isolation context
 │   ├── message/        # Tests for org.apache.kafka.common.message
 │   │   ├── main.rs
@@ -51,5 +52,6 @@ tests/
     ├── main.rs
     ├── connection_test.rs
     ├── api_versions_test.rs
-    └── metadata_test.rs
+    ├── metadata_test.rs
+    └── ssl_sasl_test.rs    # SSL and SASL PLAIN integration tests
 ```

@@ -375,7 +375,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 let addr = SocketAddr::new(address, node.port() as u16);
                 if let Err(e) = self
                     .selector
-                    .connect(node_connection_id, addr, self.socket_send_buffer, self.socket_receive_buffer)
+                    .connect(
+                        node_connection_id,
+                        addr,
+                        node.host(),
+                        self.socket_send_buffer,
+                        self.socket_receive_buffer,
+                    )
                     .await
                 {
                     warn!("Error connecting to node {}: {}", node, e);
@@ -613,7 +619,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                                         .await;
                                 },
                                 _ => {
-                                    // Other response types are not internal requests
+                                    // Other response types (e.g. SASL, Produce) are not internal requests;
+                                    // pass them through as completed responses.
+                                    responses.push(req.completed(Some(response), now));
                                 },
                             }
                         } else {

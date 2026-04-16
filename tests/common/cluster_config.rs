@@ -25,6 +25,11 @@ use std::collections::BTreeMap;
 /// Tests with identical `ClusterConfig` share one container.
 /// The `Hash` and `Eq` implementations ensure that identical
 /// configurations map to the same pool entry.
+///
+/// Every container exposes all four security protocols
+/// (PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL), so tests choose
+/// which listener to connect to rather than requesting a specific
+/// security mode.
 #[derive(Clone, Debug, Hash, Eq, PartialEq)]
 pub struct ClusterConfig {
     /// Number of brokers (default: 1).
@@ -36,6 +41,11 @@ pub struct ClusterConfig {
 }
 
 impl ClusterConfig {
+    /// Multi-broker cluster with no extra properties.
+    pub fn with_brokers(brokers: u16) -> Self {
+        Self { brokers, server_properties: BTreeMap::new() }
+    }
+
     /// Single broker with custom server properties.
     pub fn with_properties(props: BTreeMap<String, String>) -> Self {
         Self { brokers: 1, server_properties: props }

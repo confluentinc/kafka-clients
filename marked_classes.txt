@@ -25,6 +25,9 @@ org.apache.kafka.common.ClusterResourceListener
 org.apache.kafka.common.Node
 org.apache.kafka.common.TopicPartition
 org.apache.kafka.common.Uuid
+org.apache.kafka.common.config.SaslConfigs
+org.apache.kafka.common.config.SslClientAuth
+org.apache.kafka.common.config.SslConfigs
 org.apache.kafka.common.errors.ApiException
 org.apache.kafka.common.errors.UnsupportedVersionException
 org.apache.kafka.common.feature.BaseVersionRange
@@ -46,8 +49,12 @@ org.apache.kafka.common.network.KafkaChannel
 org.apache.kafka.common.network.ListenerName
 org.apache.kafka.common.network.NetworkReceive
 org.apache.kafka.common.network.NetworkSend
+org.apache.kafka.common.network.ChannelBuilders
 org.apache.kafka.common.network.PlaintextChannelBuilder
 org.apache.kafka.common.network.PlaintextTransportLayer
+org.apache.kafka.common.network.SaslChannelBuilder
+org.apache.kafka.common.network.SslChannelBuilder
+org.apache.kafka.common.network.SslTransportLayer
 org.apache.kafka.common.network.Receive
 org.apache.kafka.common.network.Selectable
 org.apache.kafka.common.network.Selector
@@ -76,6 +83,13 @@ org.apache.kafka.common.requests.RequestHeader
 org.apache.kafka.common.requests.RequestTestUtils
 org.apache.kafka.common.requests.RequestUtils
 org.apache.kafka.common.requests.ResponseHeader
+org.apache.kafka.common.requests.SaslAuthenticateRequest
+org.apache.kafka.common.requests.SaslAuthenticateResponse
+org.apache.kafka.common.requests.SaslHandshakeRequest
+org.apache.kafka.common.requests.SaslHandshakeResponse
+org.apache.kafka.common.security.auth.SecurityProtocol
+org.apache.kafka.common.security.authenticator.SaslClientAuthenticator
+org.apache.kafka.common.security.ssl.SslFactory
 org.apache.kafka.message.CodeBuffer
 org.apache.kafka.message.EntityType
 org.apache.kafka.message.FieldSpec

@@ -33,6 +33,8 @@ use super::metadata_response::MetadataResponse;
 use super::produce_response::ProduceResponse;
 use super::request_header::RequestHeader;
 use super::response_header::ResponseHeader;
+use super::sasl_authenticate_response::SaslAuthenticateResponse;
+use super::sasl_handshake_response::SaslHandshakeResponse;
 use super::send_builder::SendBuilder;
 
 /// Default throttle time in milliseconds.
@@ -52,6 +54,10 @@ pub enum ConcreteResponse {
     Metadata(MetadataResponse),
     /// A Produce response.
     Produce(ProduceResponse),
+    /// A SASL handshake response.
+    SaslHandshake(SaslHandshakeResponse),
+    /// A SASL authenticate response.
+    SaslAuthenticate(SaslAuthenticateResponse),
 }
 
 impl ConcreteResponse {
@@ -61,6 +67,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => r.api_key(),
             Self::Metadata(r) => r.api_key(),
             Self::Produce(r) => r.api_key(),
+            Self::SaslHandshake(r) => r.api_key(),
+            Self::SaslAuthenticate(r) => r.api_key(),
         }
     }
 
@@ -76,6 +84,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::Metadata(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::Produce(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -97,6 +107,12 @@ impl ConcreteResponse {
             Self::Produce(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
             },
+            Self::SaslHandshake(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
+            Self::SaslAuthenticate(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -112,6 +128,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => Self::serialize_body(r.data(), version),
             Self::Metadata(r) => Self::serialize_body(r.data(), version),
             Self::Produce(r) => Self::serialize_body(r.data(), version),
+            Self::SaslHandshake(r) => Self::serialize_body(r.data(), version),
+            Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), version),
         }
     }
 
@@ -131,6 +149,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => r.error_counts(),
             Self::Metadata(r) => r.error_counts(),
             Self::Produce(r) => r.error_counts(),
+            Self::SaslHandshake(r) => r.error_counts(),
+            Self::SaslAuthenticate(r) => r.error_counts(),
         }
     }
 
@@ -142,6 +162,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => r.throttle_time_ms(),
             Self::Metadata(r) => r.throttle_time_ms(),
             Self::Produce(r) => r.throttle_time_ms(),
+            Self::SaslHandshake(r) => r.throttle_time_ms(),
+            Self::SaslAuthenticate(r) => r.throttle_time_ms(),
         }
     }
 
@@ -152,6 +174,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::Metadata(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::Produce(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::SaslHandshake(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::SaslAuthenticate(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -161,6 +185,8 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => r.should_client_throttle(version),
             Self::Metadata(r) => r.should_client_throttle(version),
             Self::Produce(r) => r.should_client_throttle(version),
+            Self::SaslHandshake(r) => r.should_client_throttle(version),
+            Self::SaslAuthenticate(r) => r.should_client_throttle(version),
         }
     }
 
@@ -224,6 +250,14 @@ impl ConcreteResponse {
                 let response = ProduceResponse::parse(readable, version)?;
                 Ok(Self::Produce(response))
             },
+            ApiKeys::SASL_HANDSHAKE => {
+                let response = SaslHandshakeResponse::parse(readable, version)?;
+                Ok(Self::SaslHandshake(response))
+            },
+            ApiKeys::SASL_AUTHENTICATE => {
+                let response = SaslAuthenticateResponse::parse(readable, version)?;
+                Ok(Self::SaslAuthenticate(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -238,6 +272,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ApiVersions(r) => write!(f, "{r}"),
             Self::Metadata(r) => write!(f, "{r}"),
             Self::Produce(r) => write!(f, "{r}"),
+            Self::SaslHandshake(r) => write!(f, "{r}"),
+            Self::SaslAuthenticate(r) => write!(f, "{r}"),
         }
     }
 }

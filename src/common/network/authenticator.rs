@@ -21,8 +21,11 @@
 //! this would perform the SASL authentication.
 
 use super::network_receive::NetworkReceive;
+use super::transport_layer::TransportLayer;
 
+use std::future::Future;
 use std::io;
+use std::pin::Pin;
 
 /// Authentication interface for Kafka channels.
 ///
@@ -39,12 +42,18 @@ pub trait Authenticator: Send {
     /// For security protocols PLAINTEXT and SSL, this is a no-op.
     /// For SASL_PLAINTEXT and SASL_SSL, this performs the SASL authentication.
     ///
+    /// The `transport` parameter provides access to the underlying transport
+    /// layer for SASL authenticators that need to read/write during authentication.
+    ///
     /// # Errors
     ///
     /// Returns an error if authentication fails due to invalid credentials or
     /// other security configuration errors, or if read/write fails due to an
     /// I/O error.
-    fn authenticate(&mut self) -> io::Result<()>;
+    fn authenticate<'a>(
+        &'a mut self,
+        transport: &'a mut (dyn TransportLayer + Send),
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>>;
 
     /// Perform any processing related to authentication failure.
     ///
@@ -140,9 +149,11 @@ impl Default for PlaintextAuthenticator {
 }
 
 impl Authenticator for PlaintextAuthenticator {
-    fn authenticate(&mut self) -> io::Result<()> {
-        // no-op for plaintext
-        Ok(())
+    fn authenticate<'a>(
+        &'a mut self,
+        _transport: &'a mut (dyn TransportLayer + Send),
+    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
+        Box::pin(async { Ok(()) })
     }
 
     fn complete(&self) -> bool {

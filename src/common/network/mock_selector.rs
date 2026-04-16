@@ -205,6 +205,7 @@ impl super::selectable::Selectable for MockSelector {
         &mut self,
         id: &str,
         _address: SocketAddr,
+        _peer_host: &str,
         _send_buffer_size: i32,
         _receive_buffer_size: i32,
     ) -> impl std::future::Future<Output = io::Result<()>> + Send {

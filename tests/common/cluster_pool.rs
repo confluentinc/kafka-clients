@@ -57,14 +57,17 @@ fn register_cleanup_hook() {
         }
 
         extern "C" fn cleanup_containers() {
-            let container_ids: Vec<String> = {
-                let pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
-                pool.values()
-                    .filter_map(|cell| cell.get().map(|c| c.container_id().to_string()))
-                    .collect()
-            };
-            for id in &container_ids {
-                let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
+            let pool = CLUSTER_POOL.lock().expect("cluster pool lock poisoned");
+            let clusters: Vec<_> = pool.values().filter_map(|cell| cell.get().cloned()).collect();
+            drop(pool);
+
+            for cluster in &clusters {
+                for id in cluster.container_ids() {
+                    let _ = std::process::Command::new("docker").args(["rm", "-f", id]).output();
+                }
+                let _ = std::process::Command::new("docker")
+                    .args(["network", "rm", cluster.network_name()])
+                    .output();
             }
         }
 

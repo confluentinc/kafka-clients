@@ -1,6 +1,6 @@
-# Current Status: Milestone 1 Complete (Layers 1-8)
+# Current Status: Milestone 3 Complete (SSL + SASL Authentication)
 
-All 8 layers complete: core types, wire protocol, 197 generated message types, request/response framework, network transport, selector/channel, network client, and integration tests against a real Kafka 4.2.0 broker. 447 unit tests + 11 integration tests passing.
+Milestone 1 (8 layers) + Milestone 3 (6 phases) complete. SSL/TLS encryption and SASL PLAIN authentication fully implemented with integration tests against real Kafka 4.2.0 broker. 454+ unit tests + 16 integration tests passing.
 
 ## Completed Components
 
@@ -53,6 +53,38 @@ All 8 layers complete: core types, wire protocol, 197 generated message types, r
 - **NetworkClientUtils** (`clients/network_client_utils.rs`): Blocking utility functions
 - **MockSelector** (`common/network/mock_selector.rs`): Test-only mock for Selector
 
+### Milestone 3 — SSL + SASL Authentication (6 Phases) ✓
+
+#### Phase 1 — Security & Config Types ✓
+- **SecurityProtocol** (`common/security/auth/security_protocol.rs`): PLAINTEXT, SSL, SASL_PLAINTEXT, SASL_SSL
+- **SslConfig** (`common/config/ssl_configs.rs`): SSL/TLS configuration (truststore, keystore, PEM certs)
+- **SaslConfig** (`common/config/sasl_configs.rs`): SASL configuration (mechanism, JAAS, credentials)
+- **SslClientAuth** (`common/config/ssl_client_auth.rs`): Client auth mode enum
+- **ListenerName** (`common/network/listener_name.rs`): Listener name wrapper
+
+#### Phase 2 — SSL/TLS Transport ✓
+- **SslFactory** (`common/security/ssl/ssl_factory.rs`): TLS configuration factory using rustls
+- **SslTransportLayer** (`common/network/ssl_transport_layer.rs`): Async TLS transport via tokio-rustls
+- **SslChannelBuilder** (`common/network/ssl_channel_builder.rs`): TLS channel factory
+
+#### Phase 3 — SASL Handshake/Authenticate Request/Response ✓
+- **SaslHandshakeRequest/Response** (`common/requests/sasl_handshake_*.rs`): SASL mechanism negotiation
+- **SaslAuthenticateRequest/Response** (`common/requests/sasl_authenticate_*.rs`): SASL auth exchange
+
+#### Phase 4 — SASL Client Authenticator ✓
+- **SaslClientAuthenticator** (`common/security/authenticator/sasl_client_authenticator.rs`): Full SASL PLAIN authenticator state machine
+- **Authenticator trait refactored** to accept transport layer for SASL support
+
+#### Phase 5 — Integration & Wiring ✓
+- **ChannelBuilders** (`common/network/channel_builders.rs`): Factory function `client_channel_builder()` dispatching on SecurityProtocol
+- **SaslChannelBuilder** (`common/network/sasl_channel_builder.rs`): SASL channel factory (SASL_PLAINTEXT and SASL_SSL)
+
+#### Phase 6 — Integration Tests ✓
+- **SecureKafka** custom testcontainers image for SSL/SASL Docker containers
+- **test_certs** utility for programmatic certificate generation (rcgen)
+- **SecurityMode** enum for cluster configuration
+- 5 integration tests: SSL, SASL_PLAINTEXT, SASL_SSL, wrong credentials, unsupported mechanism
+
 ### Layer 8 — Integration Tests ✓
 - **Test infrastructure**: ClusterConfig, ClusterPool (shared containers), KafkaCluster (Docker wrapper), TestContext (per-test isolation)
 - **integration_connection_test.rs**: TCP connect, ApiVersions request/response, full connection flow (3 tests)
@@ -77,10 +109,11 @@ All 8 layers complete: core types, wire protocol, 197 generated message types, r
 - 3 test-only message types in `generator/test-messages/` (SimpleExampleMessage, NullableStructMessage, SimpleArraysMessage)
 
 ## Test Coverage
-- **447 unit tests** + **11 integration tests** (458 total) all passing
+- **579 unit tests** + **16 integration tests** (595 total) all passing
 - Integration tests run against Kafka 4.2.0 in Docker (feature-gated: `--features integration-tests`)
+- SSL/SASL integration tests use custom SecureKafka Docker image with JAAS config and PEM certificates
 - Comprehensive coverage matching Java test suites
-- 36 Critic review issues resolved across multiple review rounds
+- 36+ Critic review issues resolved across multiple review rounds
 
 ## Build System
 - `generator/messages/`: 197 production JSON message specs → `OUT_DIR/generated/`

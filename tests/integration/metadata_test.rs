@@ -58,7 +58,7 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
 /// Helper: connect and wait until connected.
 async fn connect_and_wait(selector: &mut Selector, addr: SocketAddr) {
     selector
-        .connect(NODE_ID, addr, USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
+        .connect(NODE_ID, addr, "localhost", USE_DEFAULT_BUFFER_SIZE, USE_DEFAULT_BUFFER_SIZE)
         .await
         .expect("Failed to connect");
 
