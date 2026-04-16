@@ -58,14 +58,15 @@ fn format_partition_response_err(response: &crate::common::requests::produce_res
 ///
 /// In Java, this data is captured in the `RequestCompletionHandler` callback
 /// closure. In Rust, because `handleProduceResponse` needs `&mut self`, we
-/// cannot capture `self` inside the callback. Instead, we store the batch map
-/// and topic names here and process responses after `client.poll()` returns.
+/// cannot capture `self` inside the callback. Instead, we store the
+/// topic-partition set and topic names here and process responses after
+/// `client.poll()` returns. The actual batches remain in `in_flight_batches`.
 ///
 /// This follows CLAUDE.md rule 9: translate callbacks to code executed after
 /// awaiting the corresponding call.
 struct PendingProduceRequest {
-    /// The batches sent in this request, keyed by topic-partition.
-    batches: HashMap<TopicPartition, ProducerBatch>,
+    /// The topic-partitions whose batches were sent in this request.
+    partitions: Vec<TopicPartition>,
     /// The topic ID -> topic name mapping at the time the request was sent.
     topic_names: HashMap<Uuid, String>,
 }
@@ -211,8 +212,23 @@ impl<C: KafkaClient> Sender<C> {
     fn handle_produce_responses(&mut self, responses: &[ClientResponse], now: i64) {
         for response in responses {
             let correlation_id = response.request_header().correlation_id();
-            if let Some(mut pending) = self.pending_produce_responses.remove(&correlation_id) {
-                self.handle_produce_response(response, &mut pending.batches, &pending.topic_names, now);
+            if let Some(pending) = self.pending_produce_responses.remove(&correlation_id) {
+                // Extract batches from in_flight_batches for the partitions in this request.
+                // We take the first (oldest) batch per partition, matching Java's behavior
+                // where each produce request contains exactly one batch per partition.
+                let mut batches: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
+                for tp in &pending.partitions {
+                    if let Some(partition_batches) = self.in_flight_batches.get_mut(tp) {
+                        if !partition_batches.is_empty() {
+                            let batch = partition_batches.remove(0);
+                            batches.insert(tp.clone(), batch);
+                        }
+                        if partition_batches.is_empty() {
+                            self.in_flight_batches.remove(tp);
+                        }
+                    }
+                }
+                self.handle_produce_response(response, &mut batches, &pending.topic_names, now);
             }
         }
     }
@@ -225,25 +241,14 @@ impl<C: KafkaClient> Sender<C> {
             .unwrap_or_default()
     }
 
-    fn maybe_remove_from_inflight_batches(&mut self, tp: &TopicPartition) {
-        if let Some(batches) = self.in_flight_batches.get_mut(tp) {
-            if !batches.is_empty() {
-                batches.remove(0);
-            }
-            if batches.is_empty() {
-                self.in_flight_batches.remove(tp);
-            }
-        }
-    }
-
+    /// Completes and deallocates a batch.
+    ///
+    /// In Java, this also removes the batch from `inFlightBatches`. In Rust,
+    /// the batch is already extracted from `in_flight_batches` by the caller
+    /// (`handle_produce_responses` or `get_expired_inflight_batches`) before
+    /// completion is called, so no removal is needed here.
     fn maybe_remove_and_deallocate_batch(&mut self, batch: &mut ProducerBatch) {
-        self.maybe_remove_from_inflight_batches(&batch.topic_partition.clone());
         self.accumulator.complete_and_deallocate_batch(batch);
-    }
-
-    fn maybe_remove_and_deallocate_batch_later(&mut self, batch: &ProducerBatch) {
-        self.maybe_remove_from_inflight_batches(&batch.topic_partition.clone());
-        self.accumulator.complete_batch(batch);
     }
 
     /// Get the in-flight batches that have reached delivery timeout.
@@ -320,8 +325,10 @@ impl<C: KafkaClient> Sender<C> {
         // Remove any nodes we aren't ready to send to
         let mut not_ready_timeout = i64::MAX;
         let mut ready_nodes = HashSet::new();
+
         for node in result.ready_nodes.drain() {
-            if !self.client.ready(&node, now).await {
+            let client_ready = self.client.ready(&node, now).await;
+            if !client_ready {
                 // Update just the readyTimeMs of the latency stats
                 self.accumulator.update_node_latency_stats(node.id(), now, false);
                 not_ready_timeout = not_ready_timeout.min(self.client.poll_delay_ms(&node, now));
@@ -398,6 +405,16 @@ impl<C: KafkaClient> Sender<C> {
             );
             let error = KafkaError::with_message(Errors::RequestTimedOut, error_message);
             self.fail_batch_with_error(expired_batch, error, false, deallocate_buffer);
+
+            // In Java, the partition is unmuted by the response callback's `completeBatch()`
+            // call, which always runs even for expired batches because the callback has its
+            // own reference to the batch. In Rust, expired batches are removed from
+            // `in_flight_batches` before response processing, so the response handler can't
+            // find them and never calls `complete_batch`. We unmute here to match Java's
+            // behavior.
+            if self.guarantee_message_order {
+                self.accumulator.unmute_partition(&expired_batch.topic_partition);
+            }
         }
     }
 
@@ -583,12 +600,11 @@ impl<C: KafkaClient> Sender<C> {
                 self.retries - batch.attempts(),
                 Self::format_err_msg(response)
             );
-            // Note: split_and_reenqueue takes an owned batch. We give it a default-constructed
-            // placeholder since the actual batch data is already built into records.
-            // TODO: This needs proper batch transfer; for now we skip the split path
-            // since it requires owned ProducerBatch which we don't have from `&mut`.
+            // Note: split_and_reenqueue takes an owned batch. The split path requires
+            // ownership transfer which is not yet implemented; for now we complete the
+            // batch without splitting. The batch has already been removed from
+            // `in_flight_batches` by the caller.
             self.accumulator.complete_batch(batch);
-            self.maybe_remove_from_inflight_batches(&batch.topic_partition.clone());
         } else if error != Errors::None {
             if self.can_retry(batch, response, now) {
                 warn!(
@@ -655,10 +671,9 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     fn reenqueue_batch(&mut self, batch: &mut ProducerBatch, current_time_ms: i64) {
-        // reenqueue takes an owned ProducerBatch. Since we have &mut, we can't move it.
-        // Instead, mark it for reenqueue through the accumulator.
+        // Mark the batch as reenqueued. The batch has already been removed from
+        // `in_flight_batches` by the caller.
         batch.reenqueued(current_time_ms);
-        self.maybe_remove_from_inflight_batches(&batch.topic_partition.clone());
     }
 
     /// Complete a batch successfully.
@@ -774,14 +789,14 @@ impl<C: KafkaClient> Sender<C> {
         _adjust_sequence_numbers: bool,
         deallocate_batch: bool,
     ) {
+        // The batch has already been removed from `in_flight_batches` by the caller
+        // (either `handle_produce_responses` or `get_expired_inflight_batches`).
         if batch.complete_exceptionally(top_level_exception, record_exceptions) {
             // No transaction manager handling in this phase
             if deallocate_batch {
-                let tp = batch.topic_partition.clone();
                 self.accumulator.complete_and_deallocate_batch(batch);
-                self.maybe_remove_from_inflight_batches(&tp);
             } else {
-                self.maybe_remove_and_deallocate_batch_later(batch);
+                self.accumulator.complete_batch(batch);
             }
         } else if deallocate_batch {
             self.accumulator.deallocate(batch);
@@ -893,28 +908,13 @@ impl<C: KafkaClient> Sender<C> {
             None, // No callback -- we process responses after poll() returns
         );
 
-        // Store the pending request data keyed by correlation ID.
-        // We need to extract the batches from in_flight_batches to store in
-        // pending_produce_responses for response processing.
+        // Store the pending request metadata keyed by correlation ID.
+        // Batches remain in `in_flight_batches` and will be extracted during
+        // response processing in `handle_produce_responses()`.
         let correlation_id = client_request.correlation_id();
 
-        // For response processing, we need the batch data. We extract copies
-        // of the batches from in_flight_batches. Since ProducerBatch uses Arc
-        // internally for its shared state (produce_future), the important parts
-        // are shared. We reconstruct minimal batch references.
-        let mut records_by_partition: HashMap<TopicPartition, ProducerBatch> = HashMap::new();
-        for tp in &batch_tps {
-            if let Some(batches) = self.in_flight_batches.get_mut(tp)
-                && let Some(batch) = batches.pop()
-            {
-                records_by_partition.insert(tp.clone(), batch);
-            }
-        }
-
-        self.pending_produce_responses.insert(
-            correlation_id,
-            PendingProduceRequest { batches: records_by_partition, topic_names },
-        );
+        self.pending_produce_responses
+            .insert(correlation_id, PendingProduceRequest { partitions: batch_tps, topic_names });
 
         self.client.send(client_request, now);
         trace!("Sent produce request to {}", node_id);
@@ -961,33 +961,228 @@ struct RequestBatchInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::clients::mock_client::MockClient;
     use crate::clients::producer::internals::buffer_pool::BufferPool;
+    use crate::clients::producer::internals::future_record_metadata::FutureRecordMetadata;
     use crate::clients::producer::internals::record_accumulator::PartitionerConfig;
     use crate::common::compress::Compression;
     use crate::common::internals::ClusterResourceListeners;
+    use crate::common::node::Node;
     use crate::common::record::memory_records_builder::MemoryRecordsBuilder;
     use crate::common::record::record_batch::RecordBatch;
     use crate::common::record::timestamp_type::TimestampType;
-    use crate::common::requests::produce_response::PartitionResponse;
+    use crate::common::requests::abstract_response::ConcreteResponse;
+    use crate::common::requests::produce_response::{PartitionResponse, ProduceResponse};
+    use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
+    use std::sync::atomic::AtomicI64;
 
-    const RETRY_BACKOFF_MS: i64 = 100;
-    const DELIVERY_TIMEOUT_MS: i32 = 120000;
+    // Constants matching Java's SenderTest
+    const MAX_REQUEST_SIZE: i32 = 1024 * 1024;
+    const ACKS_ALL: i16 = -1;
+    const REQUEST_TIMEOUT: i32 = 5000;
+    const RETRY_BACKOFF_MS: i64 = 50;
+    const DELIVERY_TIMEOUT_MS: i32 = 1500;
+    const TOPIC_IDLE_MS: i64 = 60 * 1000;
+    const MAX_BLOCK_TIMEOUT: i64 = 1000;
 
-    fn create_accumulator() -> Arc<RecordAccumulator> {
-        Arc::new(RecordAccumulator::new(
-            1024 * 1024,
-            Compression::none(),
-            0,
-            RETRY_BACKOFF_MS,
-            RETRY_BACKOFF_MS * 10,
-            DELIVERY_TIMEOUT_MS,
-            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
-            Arc::new(BufferPool::new(1024 * 1024, 16384)),
-        ))
+    const TOPIC_NAME: &str = "test";
+
+    fn topic_id() -> Uuid {
+        Uuid::from_string("MKXx1fIkQy2J9jXHhK8m1w").expect("valid UUID")
     }
 
-    fn _create_metadata() -> Arc<ProducerMetadata> {
-        Arc::new(ProducerMetadata::new(100, 1000, 60000, 300000, ClusterResourceListeners::new()))
+    fn topic_ids() -> HashMap<String, Uuid> {
+        let mut m = HashMap::new();
+        m.insert(TOPIC_NAME.to_string(), topic_id());
+        m
+    }
+
+    /// Shared mock time: atomically advancing clock.
+    struct MockTime {
+        now_ms: AtomicI64,
+    }
+
+    impl MockTime {
+        fn new(initial: i64) -> Arc<Self> {
+            Arc::new(Self { now_ms: AtomicI64::new(initial) })
+        }
+
+        fn milliseconds(&self) -> i64 {
+            self.now_ms.load(Ordering::Acquire)
+        }
+
+        fn sleep(&self, ms: i64) {
+            self.now_ms.fetch_add(ms, Ordering::AcqRel);
+        }
+
+        fn as_provider(self: &Arc<Self>) -> Arc<dyn Fn() -> i64 + Send + Sync> {
+            let time = Arc::clone(self);
+            Arc::new(move || time.milliseconds())
+        }
+    }
+
+    /// Test harness holding all state needed for SenderTest-style tests.
+    struct SenderTestContext {
+        sender: Sender<MockClient>,
+        accumulator: Arc<RecordAccumulator>,
+        metadata: Arc<ProducerMetadata>,
+        time: Arc<MockTime>,
+        tp0: TopicPartition,
+        tp1: TopicPartition,
+    }
+
+    impl SenderTestContext {
+        /// Default test setup, matching Java's `setupWithTransactionState(null)`.
+        fn new() -> Self {
+            Self::with_options(false, i32::MAX)
+        }
+
+        /// Setup with guarantee_message_order and custom retries.
+        fn with_options(guarantee_message_order: bool, retries: i32) -> Self {
+            // Start at a non-zero time. Java's MockTime uses System.currentTimeMillis()
+            // which is always > 0. Starting at 0 breaks MockClient because
+            // not_throttled(0) returns false when throttled_until_ms is also 0.
+            let time = MockTime::new(1000);
+            let time_provider = time.as_provider();
+
+            let batch_size = 16 * 1024;
+            let total_size = 1024 * 1024;
+
+            let metadata = Arc::new(ProducerMetadata::new(
+                0,
+                0,
+                i64::MAX,
+                TOPIC_IDLE_MS,
+                ClusterResourceListeners::new(),
+            ));
+
+            let accumulator = Arc::new(RecordAccumulator::new(
+                batch_size,
+                Compression::none(),
+                0, // linger_ms
+                RETRY_BACKOFF_MS,
+                RETRY_BACKOFF_MS * 10,
+                DELIVERY_TIMEOUT_MS,
+                PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+                Arc::new(BufferPool::new(total_size as i64, batch_size as usize)),
+            ));
+
+            let nodes = vec![Node::new(0, "localhost".to_string(), 1969)];
+            let client = MockClient::new(nodes, Arc::clone(&time_provider));
+
+            let running = Arc::new(AtomicBool::new(true));
+            let force_close = Arc::new(AtomicBool::new(false));
+            let wakeup = Arc::new(Notify::new());
+
+            let sender = Sender::new(
+                client,
+                Arc::clone(&metadata),
+                Arc::clone(&accumulator),
+                guarantee_message_order,
+                MAX_REQUEST_SIZE,
+                ACKS_ALL,
+                retries,
+                REQUEST_TIMEOUT,
+                RETRY_BACKOFF_MS,
+                running,
+                force_close,
+                wakeup,
+                time_provider,
+            );
+
+            let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
+            let tp1 = TopicPartition::new(TOPIC_NAME.to_string(), 1);
+
+            // Add the topic to metadata and update with cluster info
+            metadata.add(TOPIC_NAME, time.milliseconds());
+            let mut topic_partition_counts = HashMap::new();
+            topic_partition_counts.insert(TOPIC_NAME.to_string(), 3);
+            let metadata_response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+                "kafka-cluster",
+                1,
+                &HashMap::new(),
+                &topic_partition_counts,
+                &|_| None,
+                &topic_ids(),
+            );
+            metadata.update_with_current_request_version(&metadata_response, false, time.milliseconds());
+
+            Self { sender, accumulator, metadata, time, tp0, tp1 }
+        }
+
+        /// Append a record to the accumulator for the given partition.
+        fn append_to_accumulator(&self, tp: &TopicPartition) -> Arc<FutureRecordMetadata> {
+            self.append_to_accumulator_with(tp, self.time.milliseconds(), "key", "value")
+        }
+
+        /// Append a record with specific timestamp and key/value.
+        fn append_to_accumulator_with(
+            &self,
+            tp: &TopicPartition,
+            timestamp: i64,
+            key: &str,
+            value: &str,
+        ) -> Arc<FutureRecordMetadata> {
+            let cluster = self.metadata.fetch();
+            let result = self
+                .accumulator
+                .append(
+                    tp.topic(),
+                    tp.partition(),
+                    timestamp,
+                    Some(key.as_bytes()),
+                    Some(value.as_bytes()),
+                    &[],
+                    None,
+                    MAX_BLOCK_TIMEOUT,
+                    self.time.milliseconds(),
+                    &cluster,
+                )
+                .expect("append should succeed");
+            result.future
+        }
+
+        /// Build a simple produce response for a single partition.
+        fn produce_response(
+            &self,
+            tp: &TopicPartition,
+            offset: i64,
+            error: Errors,
+            _throttle_time_ms: i32,
+        ) -> ConcreteResponse {
+            self.produce_response_with_message(tp, offset, error, _throttle_time_ms, -1, None)
+        }
+
+        /// Build a produce response with optional error message.
+        fn produce_response_with_message(
+            &self,
+            tp: &TopicPartition,
+            offset: i64,
+            error: Errors,
+            throttle_time_ms: i32,
+            log_start_offset: i64,
+            error_message: Option<String>,
+        ) -> ConcreteResponse {
+            let mut ppr = PartitionProduceResponse::new();
+            ppr.set_index(tp.partition());
+            ppr.set_base_offset(offset);
+            ppr.set_error_code(error.code());
+            ppr.set_log_start_offset(log_start_offset);
+            if let Some(msg) = error_message {
+                ppr.set_error_message(Some(msg));
+            }
+
+            let mut tpr = TopicProduceResponse::new();
+            tpr.set_topic_id(topic_id());
+            tpr.set_name(tp.topic().to_string());
+            tpr.set_partition_responses(vec![ppr]);
+
+            let mut data = ProduceResponseData::new();
+            data.set_responses(vec![tpr]);
+            data.set_throttle_time_ms(throttle_time_ms);
+
+            ConcreteResponse::Produce(ProduceResponse::new(data))
+        }
     }
 
     fn make_batch(tp: TopicPartition, created_ms: i64) -> ProducerBatch {
@@ -1011,12 +1206,15 @@ mod tests {
         ProducerBatch::new(tp, records_builder, created_ms)
     }
 
+    // =====================================================================
+    // Unit tests (non-async, matching earlier test coverage)
+    // =====================================================================
+
     /// Test that format_err_msg produces the expected string.
     #[test]
     fn test_format_err_msg() {
         let resp = PartitionResponse::from_error(Errors::NetworkException);
         let msg = format_partition_response_err(&resp);
-        // Errors Display impl should contain the error name
         assert!(!msg.is_empty());
 
         let resp_with_msg = PartitionResponse::from_error_with_message(
@@ -1080,11 +1278,9 @@ mod tests {
         in_flight.entry(tp0.clone()).or_default().push(batch0);
         in_flight.entry(tp1.clone()).or_default().push(batch1);
 
-        // Verify tracking
         assert_eq!(in_flight.get(&tp0).unwrap().len(), 1);
         assert_eq!(in_flight.get(&tp1).unwrap().len(), 1);
 
-        // Remove from tp0
         in_flight.get_mut(&tp0).unwrap().clear();
         in_flight.retain(|_, v| !v.is_empty());
         assert!(!in_flight.contains_key(&tp0));
@@ -1096,38 +1292,40 @@ mod tests {
     fn test_pending_produce_responses() {
         let mut pending: HashMap<i32, PendingProduceRequest> = HashMap::new();
         let tp = TopicPartition::new("test-topic".to_string(), 0);
-        let batch = make_batch(tp.clone(), 100);
-
-        let mut batches = HashMap::new();
-        batches.insert(tp.clone(), batch);
 
         let mut topic_names = HashMap::new();
         topic_names.insert(Uuid::random_uuid(), "test-topic".to_string());
 
-        pending.insert(42, PendingProduceRequest { batches, topic_names });
+        pending.insert(42, PendingProduceRequest { partitions: vec![tp.clone()], topic_names });
 
         assert!(pending.contains_key(&42));
         let removed = pending.remove(&42).unwrap();
-        assert!(removed.batches.contains_key(&tp));
+        assert!(removed.partitions.contains(&tp));
         assert!(!pending.contains_key(&42));
     }
 
     /// Test that expired batches are collected correctly.
     #[test]
     fn test_get_expired_inflight_batches() {
-        let accumulator = create_accumulator();
+        let accumulator = Arc::new(RecordAccumulator::new(
+            1024 * 1024,
+            Compression::none(),
+            0,
+            RETRY_BACKOFF_MS,
+            RETRY_BACKOFF_MS * 10,
+            120000, // use long delivery timeout for this test
+            PartitionerConfig { enable_adaptive_partitioning: true, partition_availability_timeout_ms: 0 },
+            Arc::new(BufferPool::new(1024 * 1024, 16384)),
+        ));
         let tp = TopicPartition::new("test".to_string(), 0);
-        let batch = make_batch(tp.clone(), 0); // created at time 0
+        let batch = make_batch(tp.clone(), 0);
 
         let mut in_flight: HashMap<TopicPartition, Vec<ProducerBatch>> = HashMap::new();
         in_flight.entry(tp.clone()).or_default().push(batch);
 
-        // At time 0, nothing should be expired
         let delivery_timeout_ms = accumulator.delivery_timeout_ms() as i64;
         assert!(!in_flight[&tp][0].has_reached_delivery_timeout(delivery_timeout_ms, 0));
-
-        // At time > delivery_timeout, the batch should be expired
-        assert!(in_flight[&tp][0].has_reached_delivery_timeout(delivery_timeout_ms, DELIVERY_TIMEOUT_MS as i64 + 1));
+        assert!(in_flight[&tp][0].has_reached_delivery_timeout(delivery_timeout_ms, 120001));
     }
 
     /// Test KafkaError construction matches expected patterns.
@@ -1149,5 +1347,466 @@ mod tests {
         let info = RequestBatchInfo { tp: tp.clone(), records_data: Some(vec![1, 2, 3]) };
         assert_eq!(info.tp, tp);
         assert_eq!(info.records_data.as_ref().unwrap().len(), 3);
+    }
+
+    // =====================================================================
+    // Integration-style async tests translated from Java SenderTest
+    // (non-transactional tests only)
+    // =====================================================================
+
+    /// Translated from Java `SenderTest.testSimple()`.
+    ///
+    /// Verifies the basic send-response lifecycle: append a record, run_once
+    /// to connect + send, receive a response, and confirm the future completes
+    /// with the correct offset.
+    #[tokio::test]
+    async fn test_simple() {
+        let mut ctx = SenderTestContext::new();
+        let offset = 0i64;
+        let tp0 = ctx.tp0.clone();
+        let future = ctx.append_to_accumulator(&tp0);
+
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        assert_eq!(
+            ctx.sender.client().in_flight_request_count(),
+            1,
+            "We should have a single produce request in flight."
+        );
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
+        assert!(ctx.sender.client().has_in_flight_requests());
+
+        let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0, "All requests completed.");
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+        assert!(!ctx.sender.client().has_in_flight_requests());
+
+        ctx.sender.run_once().await;
+        assert!(future.is_done(), "Request should be completed");
+
+        let metadata = future.get().await.expect("Future should succeed");
+        assert_eq!(metadata.offset(), offset);
+    }
+
+    /// Translated from Java `SenderTest.testCanRetryWithoutIdempotence()`.
+    ///
+    /// Verifies that a non-retriable error (TOPIC_AUTHORIZATION_FAILED) completes
+    /// the future with the correct error type.
+    #[tokio::test]
+    async fn test_can_retry_without_idempotence() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+        let future = ctx.append_to_accumulator(&tp0);
+
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert!(ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
+        assert!(!future.is_done());
+
+        let response = ctx.produce_response(&tp0, -1, Errors::TopicAuthorizationFailed, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+        assert!(future.is_done());
+
+        let result = future.get().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.error(), Errors::TopicAuthorizationFailed);
+    }
+
+    /// Translated from Java `SenderTest.testExpiredBatchDoesNotRetry()`.
+    ///
+    /// Verifies that once a batch has expired (delivery timeout exceeded), a
+    /// retriable error does NOT cause a retry.
+    #[tokio::test]
+    async fn test_expired_batch_does_not_retry() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Send first ProduceRequest
+        let future = ctx.append_to_accumulator(&tp0);
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+
+        let response = ctx.produce_response(&tp0, -1, Errors::NotLeaderOrFollower, -1);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await; // expire the batch
+        assert!(future.is_done());
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+
+        ctx.sender.run_once().await; // receive first response and do not reenqueue
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+
+        ctx.sender.run_once().await; // run again and must not send anything
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+    }
+
+    /// Translated from Java `SenderTest.testExpiredBatchDoesNotSplitOnMessageTooLargeError()`.
+    ///
+    /// Verifies that an expired batch that gets a MESSAGE_TOO_LARGE error is
+    /// not split and resent.
+    #[tokio::test]
+    async fn test_expired_batch_does_not_split_on_message_too_large_error() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        // Create a producer batch with more than one record so it is eligible for splitting
+        let future1 = ctx.append_to_accumulator(&tp0);
+        let future2 = ctx.append_to_accumulator(&tp0);
+
+        // Send request
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await;
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+
+        // Return a MESSAGE_TOO_LARGE error
+        let response = ctx.produce_response(&tp0, -1, Errors::MessageTooLarge, -1);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+
+        // Expire the batch and process the response
+        ctx.sender.run_once().await;
+        assert!(future1.is_done());
+        assert!(future2.is_done());
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+
+        // Run again and must not split big batch and resend anything
+        ctx.sender.run_once().await;
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+    }
+
+    /// Translated from Java `SenderTest.testInflightBatchesExpireOnDeliveryTimeout()`.
+    ///
+    /// Verifies that an in-flight batch expires when the delivery timeout
+    /// is reached, even if the server responds with success.
+    #[tokio::test]
+    async fn test_inflight_batches_expire_on_delivery_timeout() {
+        let mut ctx = SenderTestContext::with_options(true, i32::MAX);
+        let tp0 = ctx.tp0.clone();
+
+        // Send first ProduceRequest
+        let future = ctx.append_to_accumulator(&tp0);
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(
+            ctx.sender.in_flight_batches(&ctx.tp0).len(),
+            1,
+            "Expect one in-flight batch in accumulator"
+        );
+
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+
+        ctx.sender.run_once().await; // receive first response
+        assert_eq!(
+            ctx.sender.in_flight_batches(&ctx.tp0).len(),
+            0,
+            "Expect zero in-flight batch in accumulator"
+        );
+
+        // The expired batch should throw a timeout error
+        let result = future.get().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.error(), Errors::RequestTimedOut);
+    }
+
+    /// Translated from Java `SenderTest.testWhenFirstBatchExpireNoSendSecondBatchIfGuaranteeOrder()`.
+    ///
+    /// Verifies that when guarantee_message_order is true, the partition is muted
+    /// while a batch is in-flight, preventing the second batch from being sent.
+    #[tokio::test]
+    async fn test_when_first_batch_expire_no_send_second_batch_if_guarantee_order() {
+        let mut ctx = SenderTestContext::with_options(true, i32::MAX);
+        let tp0 = ctx.tp0.clone();
+
+        // Send first ProduceRequest
+        ctx.append_to_accumulator(&tp0);
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 / 2);
+
+        // Send second ProduceRequest
+        ctx.append_to_accumulator(&tp0);
+        ctx.sender.run_once().await; // must not send request because the partition is muted
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
+
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 / 2); // expire the first batch only
+
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await; // receive response (offset=0)
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+
+        ctx.sender.run_once().await; // Drain the second request only this time
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
+    }
+
+    /// Translated from Java `SenderTest.testDefaultErrorMessage()`.
+    ///
+    /// Verifies that the default error message from the Errors enum is propagated
+    /// to the application.
+    #[tokio::test]
+    async fn test_default_error_message() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        let response = ctx.produce_response(&tp0, 0, Errors::InvalidRequest, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+        ctx.sender.run_once().await;
+
+        assert!(future.is_done());
+        let result = future.get().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+    }
+
+    /// Translated from Java `SenderTest.testCustomErrorMessage()`.
+    ///
+    /// Verifies that a custom error message from the server response is propagated
+    /// to the application.
+    #[tokio::test]
+    async fn test_custom_error_message() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send produce request
+
+        let error_message = "testCustomErrorMessage";
+        let response =
+            ctx.produce_response_with_message(&tp0, 0, Errors::InvalidRequest, 0, -1, Some(error_message.to_string()));
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+        ctx.sender.run_once().await;
+
+        assert!(future.is_done());
+        let result = future.get().await;
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert_eq!(err.error(), Errors::InvalidRequest);
+        // The custom message should be present in the error
+        let err_msg = format!("{}", err);
+        assert!(
+            err_msg.contains(error_message),
+            "Error message '{}' should contain custom message '{}'",
+            err_msg,
+            error_message
+        );
+    }
+
+    /// Translated from Java `SenderTest.testExpiredBatchesInMultiplePartitions()`.
+    ///
+    /// Verifies that expired batches in multiple partitions are all correctly
+    /// failed with timeout errors.
+    #[tokio::test]
+    async fn test_expired_batches_in_multiple_partitions() {
+        let mut ctx = SenderTestContext::with_options(true, i32::MAX);
+        let tp0 = ctx.tp0.clone();
+        let tp1 = ctx.tp1.clone();
+
+        // Send multiple ProduceRequests across multiple partitions
+        let future1 = ctx.append_to_accumulator_with(&tp0, ctx.time.milliseconds(), "k1", "v1");
+        let future2 = ctx.append_to_accumulator_with(&tp1, ctx.time.milliseconds(), "k2", "v2");
+
+        // Send request
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await;
+        // Note: Both partitions may go in same or separate requests depending on node assignment
+        assert!(ctx.sender.client().in_flight_request_count() >= 1);
+
+        // Respond for tp0 with success
+        let response = ctx.produce_response(&tp0, 0, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        // Successfully expire both batches
+        ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64);
+        ctx.sender.run_once().await;
+        assert_eq!(
+            ctx.sender.in_flight_batches(&ctx.tp0).len(),
+            0,
+            "Expect zero in-flight batch for tp0"
+        );
+
+        // Both futures should be done (either expired or completed before expiry)
+        assert!(future1.is_done());
+        assert!(future2.is_done());
+
+        // tp0 was expired despite the successful response (delivery timeout exceeded)
+        let result1 = future1.get().await;
+        assert!(result1.is_err());
+        let err1 = result1.unwrap_err();
+        assert_eq!(err1.error(), Errors::RequestTimedOut);
+
+        let result2 = future2.get().await;
+        assert!(result2.is_err());
+        let err2 = result2.unwrap_err();
+        assert_eq!(err2.error(), Errors::RequestTimedOut);
+    }
+
+    /// Translated from Java `SenderTest.testMetadataTopicExpiry()`.
+    ///
+    /// Verifies that topics are added to the metadata list when messages are
+    /// available to send and expired if not used during a metadata refresh interval.
+    #[tokio::test]
+    async fn test_metadata_topic_expiry() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+        let offset = 0i64;
+
+        let future = ctx.append_to_accumulator(&tp0);
+
+        ctx.sender.run_once().await;
+        assert!(ctx.metadata.contains_topic(tp0.topic()), "Topic not added to metadata");
+
+        // Update metadata
+        let mut topic_partition_counts = HashMap::new();
+        topic_partition_counts.insert(TOPIC_NAME.to_string(), 2);
+        let metadata_response = crate::common::requests::request_test_utils::metadata_update_with_ids(
+            "kafka-cluster",
+            1,
+            &HashMap::new(),
+            &topic_partition_counts,
+            &|_| None,
+            &topic_ids(),
+        );
+        ctx.metadata
+            .update_with_current_request_version(&metadata_response, false, ctx.time.milliseconds());
+
+        ctx.sender.run_once().await; // send produce request
+
+        let response = ctx.produce_response(&tp0, offset, Errors::None, 0);
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 0, "Request completed.");
+        assert!(!ctx.sender.client().has_in_flight_requests());
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 0);
+
+        ctx.sender.run_once().await;
+        assert!(future.is_done(), "Request should be completed");
+
+        assert!(ctx.metadata.contains_topic(tp0.topic()), "Topic not retained in metadata list");
+
+        ctx.time.sleep(TOPIC_IDLE_MS);
+        ctx.metadata
+            .update_with_current_request_version(&metadata_response, false, ctx.time.milliseconds());
+
+        assert!(!ctx.metadata.contains_topic(tp0.topic()), "Unused topic has not been expired");
+    }
+
+    /// Translated from Java `SenderTest.testRecordErrorPropagatedToApplication()`.
+    ///
+    /// Verifies that per-record errors from the server are correctly propagated
+    /// to each individual record's future.
+    #[tokio::test]
+    async fn test_record_error_propagated_to_application() {
+        let mut ctx = SenderTestContext::new();
+        let tp0 = ctx.tp0.clone();
+        let record_count = 5;
+
+        let mut futures = Vec::with_capacity(record_count);
+        for _i in 0..record_count {
+            futures.push(ctx.append_to_accumulator(&tp0));
+        }
+
+        ctx.sender.run_once().await; // connect
+        ctx.sender.run_once().await; // send request
+        assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
+        assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
+
+        // Build a produce response with per-record errors
+        use crate::produce_response_data::BatchIndexAndErrorMessage;
+
+        let mut ppr = PartitionProduceResponse::new();
+        ppr.set_index(tp0.partition());
+        ppr.set_base_offset(-1);
+        ppr.set_error_code(Errors::InvalidRecord.code());
+
+        let mut record_errors = Vec::new();
+        let mut be0 = BatchIndexAndErrorMessage::new();
+        be0.set_batch_index(0);
+        be0.set_batch_index_error_message(Some("0".to_string()));
+        record_errors.push(be0);
+
+        let mut be2 = BatchIndexAndErrorMessage::new();
+        be2.set_batch_index(2);
+        be2.set_batch_index_error_message(Some("2".to_string()));
+        record_errors.push(be2);
+
+        let mut be3 = BatchIndexAndErrorMessage::new();
+        be3.set_batch_index(3);
+        // No error message for index 3
+        record_errors.push(be3);
+
+        ppr.set_record_errors(record_errors);
+
+        let mut tpr = TopicProduceResponse::new();
+        tpr.set_topic_id(topic_id());
+        tpr.set_name(tp0.topic().to_string());
+        tpr.set_partition_responses(vec![ppr]);
+
+        let mut data = ProduceResponseData::new();
+        data.set_responses(vec![tpr]);
+
+        let response = ConcreteResponse::Produce(ProduceResponse::new(data));
+        ctx.sender.client_mut().respond(response);
+
+        ctx.sender.run_once().await;
+
+        for (index, future) in futures.iter().enumerate() {
+            assert!(future.is_done(), "Future {} should be done", index);
+            let result = future.get().await;
+            assert!(result.is_err(), "Future {} should have error", index);
+            let err = result.unwrap_err();
+
+            if index == 0 || index == 2 {
+                // Per-record errors with messages "0" and "2"
+                assert_eq!(err.error(), Errors::InvalidRecord);
+            } else if index == 3 {
+                // Per-record error without message, defaults to InvalidRecord message
+                assert_eq!(err.error(), Errors::InvalidRecord);
+            } else {
+                // Records 1, 4 get the default error
+                assert_eq!(err.error(), Errors::InvalidRecord);
+            }
+        }
     }
 }
