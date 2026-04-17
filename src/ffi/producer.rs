@@ -46,16 +46,20 @@
 // type names, which intentionally differs from Rust's snake_case convention.
 #![allow(non_snake_case, non_camel_case_types)]
 
+use std::collections::HashMap;
 use std::ffi::{CStr, CString, c_char};
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 use crate::common::KafkaError;
+use crate::common::KafkaFuture;
 use crate::common::protocol::Errors;
+use crate::common::serialization::ByteArraySerializer;
+use crate::producer::KafkaProducer;
 use crate::producer::MockProducer;
 use crate::producer::Producer;
+use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
-use crate::producer::internals::FutureRecordMetadata;
 
 // ---------------------------------------------------------------------------
 // Internal types
@@ -68,7 +72,42 @@ use crate::producer::internals::FutureRecordMetadata;
 /// as variants.
 enum ProducerKind {
     /// A mock producer for testing.
-    Mock(MockProducer<Vec<u8>, Vec<u8>>),
+    ///
+    /// The `Runtime` is stored alongside the producer so that async trait
+    /// methods (`send`, `flush`, `close`) can be driven via `runtime.block_on()`.
+    ///
+    /// Boxed to reduce enum size variance (MockProducer is much larger than KafkaProducer).
+    Mock(Box<MockProducer<Vec<u8>, Vec<u8>>>, tokio::runtime::Runtime),
+    /// A real Kafka producer connected to a cluster.
+    ///
+    /// The `Runtime` is stored alongside the producer so that:
+    /// 1. The sender background task (spawned by `from_config`) has a runtime to run on.
+    /// 2. Async trait methods (`send`, `flush`, `close`) are driven via `runtime.block_on()`.
+    ///
+    /// Drop order is left-to-right: the producer is dropped first (its `Drop`
+    /// impl calls `force_close()`), then the runtime is dropped (blocking until
+    /// the sender task exits).
+    Kafka(KafkaProducer<Vec<u8>, Vec<u8>>, tokio::runtime::Runtime),
+}
+
+impl ProducerKind {
+    /// Returns a reference to the tokio runtime associated with this producer.
+    fn runtime(&self) -> &tokio::runtime::Runtime {
+        match self {
+            ProducerKind::Mock(_, rt) | ProducerKind::Kafka(_, rt) => rt,
+        }
+    }
+}
+
+/// Internal wrapper that pairs a [`KafkaFuture<RecordMetadata>`] with the
+/// [`tokio::runtime::Handle`] of the producer that created it.
+///
+/// This allows [`kafka_producer_FutureRecordMetadata_get`] and
+/// [`kafka_producer_FutureRecordMetadata_get_all`] to call `handle.block_on()`
+/// instead of creating throwaway runtimes.
+struct FfiFuture {
+    future: KafkaFuture<RecordMetadata>,
+    runtime_handle: tokio::runtime::Handle,
 }
 
 /// Internal wrapper that pairs [`RecordMetadata`] with a [`CString`] for the
@@ -104,7 +143,7 @@ pub struct kafka_producer_Producer_t {
 
 /// Opaque future handle for a pending send result.
 ///
-/// Internally wraps a `Box<FutureRecordMetadata>`.
+/// Internally wraps a `Box<KafkaFuture<RecordMetadata>>`.
 #[repr(C)]
 pub struct kafka_producer_FutureRecordMetadata_t {
     _private: [u8; 0],
@@ -126,6 +165,17 @@ pub struct kafka_producer_RecordMetadata_t {
 /// A null `kafka_common_KafkaError_t` pointer means success (no error).
 #[repr(C)]
 pub struct kafka_common_KafkaError_t {
+    _private: [u8; 0],
+}
+
+/// Opaque properties handle for producer configuration.
+///
+/// Internally wraps a `Box<HashMap<String, String>>`. Properties are
+/// populated via [`kafka_producer_ProducerProperties_put`] or created
+/// in bulk with [`kafka_producer_ProducerProperties_from_configs`],
+/// then passed to [`kafka_producer_KafkaProducer_new`].
+#[repr(C)]
+pub struct kafka_producer_ProducerProperties_t {
     _private: [u8; 0],
 }
 
@@ -175,13 +225,13 @@ unsafe fn producer_ref(producer: *mut kafka_producer_Producer_t) -> &'static Mut
 }
 
 /// Casts a `*mut kafka_producer_FutureRecordMetadata_t` to a reference to
-/// `Arc<FutureRecordMetadata>`.
+/// [`FfiFuture`].
 ///
 /// # Safety
 ///
 /// The pointer must be non-null and must have been created by a send function.
-unsafe fn future_ref(future: *mut kafka_producer_FutureRecordMetadata_t) -> &'static Arc<FutureRecordMetadata> {
-    unsafe { &*(future as *const Arc<FutureRecordMetadata>) }
+unsafe fn future_ref(future: *mut kafka_producer_FutureRecordMetadata_t) -> &'static FfiFuture {
+    unsafe { &*(future as *const FfiFuture) }
 }
 
 /// Casts a `*const kafka_producer_RecordMetadata_t` to a reference to `RecordMetadataInner`.
@@ -194,13 +244,15 @@ unsafe fn metadata_ref(metadata: *const kafka_producer_RecordMetadata_t) -> &'st
     unsafe { &*(metadata as *const RecordMetadataInner) }
 }
 
-/// Calls `Producer::send` on the given `ProducerKind`.
+/// Calls `Producer::send` on the given `ProducerKind`, blocking on the async method.
 fn producer_send(
     kind: &ProducerKind,
     record: ProducerRecord<Vec<u8>, Vec<u8>>,
-) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
+) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+    let rt = kind.runtime();
     match kind {
-        ProducerKind::Mock(mock) => mock.send(record),
+        ProducerKind::Mock(mock, _) => rt.block_on(mock.send(record)),
+        ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record)),
     }
 }
 
@@ -219,6 +271,30 @@ fn box_error(error: KafkaError) -> *mut kafka_common_KafkaError_t {
 /// The pointer must be non-null and must have been created by [`box_error`].
 unsafe fn error_ref(error: *const kafka_common_KafkaError_t) -> &'static KafkaErrorInner {
     unsafe { &*(error as *const KafkaErrorInner) }
+}
+
+/// Casts a `*const kafka_producer_ProducerProperties_t` to a reference to
+/// `HashMap<String, String>`.
+///
+/// # Safety
+///
+/// The pointer must be non-null and must have been created by
+/// [`kafka_producer_ProducerProperties_new`] or
+/// [`kafka_producer_ProducerProperties_from_configs`].
+unsafe fn properties_ref(props: *const kafka_producer_ProducerProperties_t) -> &'static HashMap<String, String> {
+    unsafe { &*(props as *const HashMap<String, String>) }
+}
+
+/// Casts a `*mut kafka_producer_ProducerProperties_t` to a mutable reference
+/// to `HashMap<String, String>`.
+///
+/// # Safety
+///
+/// The pointer must be non-null and must have been created by
+/// [`kafka_producer_ProducerProperties_new`] or
+/// [`kafka_producer_ProducerProperties_from_configs`].
+unsafe fn properties_mut(props: *mut kafka_producer_ProducerProperties_t) -> &'static mut HashMap<String, String> {
+    unsafe { &mut *(props as *mut HashMap<String, String>) }
 }
 
 /// Builds a [`ProducerRecord`] from raw C FFI parameters.
@@ -266,9 +342,14 @@ unsafe fn build_record(
         .map_err(|e| KafkaError::illegal_argument(e.message()))
 }
 
-/// Wraps an `Arc<FutureRecordMetadata>` into a heap-allocated opaque pointer.
-fn box_future(future: Arc<FutureRecordMetadata>) -> *mut kafka_producer_FutureRecordMetadata_t {
-    Box::into_raw(Box::new(future)) as *mut kafka_producer_FutureRecordMetadata_t
+/// Wraps a `KafkaFuture<RecordMetadata>` and the producer's runtime handle
+/// into a heap-allocated opaque pointer.
+fn box_future(
+    future: KafkaFuture<RecordMetadata>,
+    runtime_handle: tokio::runtime::Handle,
+) -> *mut kafka_producer_FutureRecordMetadata_t {
+    let ffi_future = FfiFuture { future, runtime_handle };
+    Box::into_raw(Box::new(ffi_future)) as *mut kafka_producer_FutureRecordMetadata_t
 }
 
 /// Wraps a [`RecordMetadata`] into a heap-allocated opaque pointer, including
@@ -304,8 +385,218 @@ fn box_metadata(metadata: RecordMetadata) -> *mut kafka_producer_RecordMetadata_
 /// The returned handle must eventually be freed with [`kafka_producer_Producer_destroy`].
 #[unsafe(no_mangle)]
 pub extern "C" fn kafka_producer_MockProducer_new(auto_complete: bool) -> *mut kafka_producer_Producer_t {
-    let kind = ProducerKind::Mock(MockProducer::with_auto_complete(auto_complete));
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("failed to create tokio runtime for MockProducer");
+    let kind = ProducerKind::Mock(Box::new(MockProducer::with_auto_complete(auto_complete)), runtime);
     let boxed = Box::new(Mutex::new(kind));
+    Box::into_raw(boxed) as *mut kafka_producer_Producer_t
+}
+
+// ---------------------------------------------------------------------------
+// ProducerProperties
+// ---------------------------------------------------------------------------
+
+/// Creates an empty producer properties handle.
+///
+/// # Returns
+///
+/// A non-null opaque properties handle. The caller must free it with
+/// [`kafka_producer_ProducerProperties_destroy`].
+#[unsafe(no_mangle)]
+pub extern "C" fn kafka_producer_ProducerProperties_new() -> *mut kafka_producer_ProducerProperties_t {
+    let map: HashMap<String, String> = HashMap::new();
+    Box::into_raw(Box::new(map)) as *mut kafka_producer_ProducerProperties_t
+}
+
+/// Creates producer properties from a NULL-terminated flat array of C strings.
+///
+/// The array contains alternating key-value pairs terminated by a NULL pointer:
+/// `["key1", "val1", "key2", "val2", ..., NULL]`.
+///
+/// # Parameters
+///
+/// - `configs`: Pointer to a NULL-terminated array of null-terminated C strings.
+///   Entries are read in pairs (key, value) until a NULL pointer is encountered.
+///
+/// # Returns
+///
+/// A non-null opaque properties handle on success, or NULL if:
+/// - `configs` is NULL
+/// - An odd number of non-NULL entries is found (missing value for a key)
+///
+/// The caller must free a non-null handle with
+/// [`kafka_producer_ProducerProperties_destroy`].
+///
+/// # Safety
+///
+/// - `configs` must be NULL or point to a NULL-terminated array of valid,
+///   null-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_ProducerProperties_from_configs(
+    configs: *const *const c_char,
+) -> *mut kafka_producer_ProducerProperties_t {
+    if configs.is_null() {
+        return std::ptr::null_mut();
+    }
+
+    let mut map: HashMap<String, String> = HashMap::new();
+    let mut i = 0usize;
+    loop {
+        let key_ptr = unsafe { *configs.add(i) };
+        if key_ptr.is_null() {
+            break;
+        }
+        let val_ptr = unsafe { *configs.add(i + 1) };
+        if val_ptr.is_null() {
+            // Odd number of entries — missing value for the last key.
+            return std::ptr::null_mut();
+        }
+        let key = unsafe { CStr::from_ptr(key_ptr) }.to_string_lossy().to_string();
+        let val = unsafe { CStr::from_ptr(val_ptr) }.to_string_lossy().to_string();
+        map.insert(key, val);
+        i += 2;
+    }
+
+    Box::into_raw(Box::new(map)) as *mut kafka_producer_ProducerProperties_t
+}
+
+/// Adds or overwrites a configuration key-value pair.
+///
+/// # Parameters
+///
+/// - `props`: Non-null properties handle.
+/// - `key`: Non-null, null-terminated configuration key (e.g., `"bootstrap.servers"`).
+/// - `value`: Non-null, null-terminated configuration value.
+///
+/// No-op if any parameter is null.
+///
+/// # Safety
+///
+/// - `props` must be a valid handle from [`kafka_producer_ProducerProperties_new`]
+///   or [`kafka_producer_ProducerProperties_from_configs`].
+/// - `key` and `value` must be valid, null-terminated C strings.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_ProducerProperties_put(
+    props: *mut kafka_producer_ProducerProperties_t,
+    key: *const c_char,
+    value: *const c_char,
+) {
+    if props.is_null() || key.is_null() || value.is_null() {
+        return;
+    }
+    let map = unsafe { properties_mut(props) };
+    let k = unsafe { CStr::from_ptr(key) }.to_string_lossy().to_string();
+    let v = unsafe { CStr::from_ptr(value) }.to_string_lossy().to_string();
+    map.insert(k, v);
+}
+
+/// Destroys a properties handle, freeing all associated resources.
+///
+/// Safe to call with a null pointer (no-op).
+///
+/// # Safety
+///
+/// - `props` must be null or a valid handle from
+///   [`kafka_producer_ProducerProperties_new`] or
+///   [`kafka_producer_ProducerProperties_from_configs`].
+/// - After this call, the pointer is invalid and must not be used.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_ProducerProperties_destroy(props: *mut kafka_producer_ProducerProperties_t) {
+    if !props.is_null() {
+        unsafe {
+            drop(Box::from_raw(props as *mut HashMap<String, String>));
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// KafkaProducer
+// ---------------------------------------------------------------------------
+
+/// Creates a new Kafka producer connected to a real cluster.
+///
+/// Configuration is passed via a [`kafka_producer_ProducerProperties_t`]
+/// handle, mirroring Java's `new KafkaProducer(Properties)`. Keys use the
+/// standard Kafka config names (e.g., `"bootstrap.servers"`, `"batch.size"`).
+///
+/// # Parameters
+///
+/// - `props`: Non-null properties handle created via
+///   [`kafka_producer_ProducerProperties_new`] or
+///   [`kafka_producer_ProducerProperties_from_configs`]. The caller retains
+///   ownership and must free it separately.
+/// - `out_error`: Pointer where an error handle will be written on failure,
+///   or null if the caller does not need error details.
+///
+/// # Returns
+///
+/// A non-null producer handle on success, or null on failure.
+/// If `out_error` is non-null, `*out_error` is set to null on success or
+/// to a valid [`kafka_common_KafkaError_t`] handle on failure (caller must
+/// free it with [`kafka_common_KafkaError_destroy`]).
+///
+/// # Safety
+///
+/// - `props` must be a valid, non-null properties handle.
+/// - The returned handle must eventually be freed with
+///   [`kafka_producer_Producer_destroy`].
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
+    props: *const kafka_producer_ProducerProperties_t,
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_producer_Producer_t {
+    if props.is_null() {
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+        }
+        return std::ptr::null_mut();
+    }
+
+    let map = unsafe { properties_ref(props) };
+    let config = match ProducerConfig::from_properties(map) {
+        Ok(c) => c,
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            return std::ptr::null_mut();
+        },
+    };
+
+    // Create a multi-thread tokio runtime for the producer's background sender task.
+    let runtime = match tokio::runtime::Builder::new_multi_thread().enable_all().build() {
+        Ok(rt) => rt,
+        Err(_) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::illegal_state("failed to create tokio runtime")) };
+            }
+            return std::ptr::null_mut();
+        },
+    };
+
+    // Enter the runtime so that KafkaProducer::from_config can call tokio::task::spawn.
+    let _guard = runtime.enter();
+    let producer = match KafkaProducer::<Vec<u8>, Vec<u8>>::from_config(
+        config,
+        Box::new(ByteArraySerializer),
+        Box::new(ByteArraySerializer),
+    ) {
+        Ok(p) => p,
+        Err(e) => {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
+            }
+            return std::ptr::null_mut();
+        },
+    };
+
+    let kind = ProducerKind::Kafka(producer, runtime);
+    let boxed = Box::new(Mutex::new(kind));
+    if !out_error.is_null() {
+        unsafe { *out_error = std::ptr::null_mut() };
+    }
     Box::into_raw(boxed) as *mut kafka_producer_Producer_t
 }
 
@@ -344,13 +635,14 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
 /// - `key_len`: Key length in bytes, or `-1` for no key.
 /// - `value`: Pointer to value bytes, or null if `value_len` is `-1`.
 /// - `value_len`: Value length in bytes, or `-1` for no value.
-/// - `out_future`: Non-null pointer where the future handle will be written.
-///   On error, `*out_future` is set to null.
+/// - `out_error`: Pointer where an error handle will be written on failure,
+///   or null if the caller does not need error details.
 ///
 /// # Returns
 ///
-/// Null on success, or a non-null [`kafka_common_KafkaError_t`] handle on failure.
-/// The caller must free a non-null error with [`kafka_common_KafkaError_destroy`].
+/// A non-null future handle on success, or null on failure.
+/// If `out_error` is non-null, `*out_error` is set to null on success or
+/// to a valid [`kafka_common_KafkaError_t`] handle on failure.
 ///
 /// # Safety
 ///
@@ -358,7 +650,6 @@ pub unsafe extern "C" fn kafka_producer_Producer_destroy(producer: *mut kafka_pr
 /// - `topic` must be a valid C string.
 /// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
 /// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
-/// - `out_future` must be a valid, non-null pointer to a `*mut kafka_producer_FutureRecordMetadata_t`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_send(
     producer: *mut kafka_producer_Producer_t,
@@ -369,45 +660,40 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
     key_len: i32,
     value: *const u8,
     value_len: i32,
-    out_future: *mut *mut kafka_producer_FutureRecordMetadata_t,
-) -> *mut kafka_common_KafkaError_t {
-    // Check out_future first -- if null, we cannot write to it, just return error.
-    if out_future.is_null() {
-        return box_error(KafkaError::new(Errors::InvalidRequest));
-    }
-
-    // For remaining null checks, we can safely null the output before returning.
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_producer_FutureRecordMetadata_t {
     if producer.is_null() || topic.is_null() {
-        unsafe {
-            *out_future = std::ptr::null_mut();
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
         }
-        return box_error(KafkaError::new(Errors::InvalidRequest));
+        return std::ptr::null_mut();
     }
 
     let record = match unsafe { build_record(topic, partition, timestamp, key, key_len, value, value_len) } {
         Ok(r) => r,
         Err(e) => {
-            unsafe {
-                *out_future = std::ptr::null_mut();
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
             }
-            return box_error(e);
+            return std::ptr::null_mut();
         },
     };
 
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
+    let runtime_handle = guard.runtime().handle().clone();
     match producer_send(&guard, record) {
         Ok(future) => {
-            unsafe {
-                *out_future = box_future(future);
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
             }
-            std::ptr::null_mut()
+            box_future(future, runtime_handle)
         },
         Err(e) => {
-            unsafe {
-                *out_future = std::ptr::null_mut();
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
             }
-            box_error(e)
+            std::ptr::null_mut()
         },
     }
 }
@@ -442,6 +728,7 @@ unsafe fn send_batch_inner(
 
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
+    let runtime_handle = guard.runtime().handle().clone();
     let mut success_count: i32 = 0;
 
     for i in 0..count {
@@ -478,7 +765,7 @@ unsafe fn send_batch_inner(
 
         match producer_send(&guard, record) {
             Ok(future) => unsafe {
-                *out_futures.add(i) = box_future(future);
+                *out_futures.add(i) = box_future(future, runtime_handle.clone());
                 *out_errors.add(i) = std::ptr::null_mut();
                 success_count += 1;
             },
@@ -567,73 +854,53 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_is_done(
         return false;
     }
     let f = unsafe { future_ref(future) };
-    f.is_done()
+    f.future.is_done()
 }
 
-/// Blocks until the future resolves and writes the result to `*out_metadata`.
-///
-/// On success, `*out_metadata` is set to a valid [`kafka_producer_RecordMetadata_t`] handle
-/// that must be freed with [`kafka_producer_RecordMetadata_destroy`].
-///
-/// On failure, `*out_metadata` is set to null and an error handle is returned.
+/// Blocks until the future resolves and returns the record metadata.
 ///
 /// # Parameters
 ///
 /// - `future`: Non-null future handle.
-/// - `out_metadata`: Non-null pointer where the metadata handle will be written.
+/// - `out_error`: Pointer where an error handle will be written on failure,
+///   or null if the caller does not need error details.
 ///
 /// # Returns
 ///
-/// Null on success, or a non-null [`kafka_common_KafkaError_t`] handle on failure.
-/// The caller must free a non-null error with [`kafka_common_KafkaError_destroy`].
+/// A non-null [`kafka_producer_RecordMetadata_t`] handle on success (caller
+/// must free with [`kafka_producer_RecordMetadata_destroy`]), or null on
+/// failure. If `out_error` is non-null, `*out_error` is set to null on
+/// success or to a valid [`kafka_common_KafkaError_t`] handle on failure.
 ///
 /// # Safety
 ///
-/// - `future` must be a valid handle.
-/// - `out_metadata` must be a valid, non-null pointer.
+/// - `future` must be a valid handle, or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get(
     future: *mut kafka_producer_FutureRecordMetadata_t,
-    out_metadata: *mut *mut kafka_producer_RecordMetadata_t,
-) -> *mut kafka_common_KafkaError_t {
-    if out_metadata.is_null() {
-        return box_error(KafkaError::new(Errors::InvalidRequest));
-    }
-
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) -> *mut kafka_producer_RecordMetadata_t {
     if future.is_null() {
-        unsafe {
-            *out_metadata = std::ptr::null_mut();
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
         }
-        return box_error(KafkaError::new(Errors::InvalidRequest));
+        return std::ptr::null_mut();
     }
 
     let f = unsafe { future_ref(future) };
 
-    // Create a single-threaded tokio runtime to block on the async get().
-    // We use new_current_thread() which only requires the "rt" feature,
-    // not "rt-multi-thread".
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => {
-            unsafe {
-                *out_metadata = std::ptr::null_mut();
-            }
-            return box_error(KafkaError::illegal_state("failed to create tokio runtime"));
-        },
-    };
-
-    match rt.block_on(f.get()) {
+    match f.runtime_handle.block_on(f.future.get()) {
         Ok(metadata) => {
-            unsafe {
-                *out_metadata = box_metadata(metadata);
+            if !out_error.is_null() {
+                unsafe { *out_error = std::ptr::null_mut() };
             }
-            std::ptr::null_mut()
+            box_metadata(metadata)
         },
         Err(e) => {
-            unsafe {
-                *out_metadata = std::ptr::null_mut();
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(e) };
             }
-            box_error(e)
+            std::ptr::null_mut()
         },
     }
 }
@@ -685,21 +952,6 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
 
     let count = count as usize;
 
-    // Build a single-threaded tokio runtime shared across all futures.
-    let rt = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
-        Ok(rt) => rt,
-        Err(_) => {
-            let err = box_error(KafkaError::illegal_state("failed to create tokio runtime"));
-            for i in 0..count {
-                unsafe {
-                    *out_metadata.add(i) = std::ptr::null_mut();
-                    *out_errors.add(i) = err; // same error for all
-                }
-            }
-            return;
-        },
-    };
-
     for i in 0..count {
         let future_ptr = unsafe { *futures.add(i) };
         if future_ptr.is_null() {
@@ -711,7 +963,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_get_all(
         }
 
         let f = unsafe { future_ref(future_ptr) };
-        match rt.block_on(f.get()) {
+        match f.runtime_handle.block_on(f.future.get()) {
             Ok(metadata) => unsafe {
                 *out_metadata.add(i) = box_metadata(metadata);
                 *out_errors.add(i) = std::ptr::null_mut();
@@ -738,7 +990,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy(
 ) {
     if !future.is_null() {
         unsafe {
-            drop(Box::from_raw(future as *mut Arc<FutureRecordMetadata>));
+            drop(Box::from_raw(future as *mut FfiFuture));
         }
     }
 }
@@ -771,7 +1023,7 @@ pub unsafe extern "C" fn kafka_producer_FutureRecordMetadata_destroy_all(
         let future = unsafe { *futures.add(i) };
         if !future.is_null() {
             unsafe {
-                drop(Box::from_raw(future as *mut Arc<FutureRecordMetadata>));
+                drop(Box::from_raw(future as *mut FfiFuture));
             }
         }
     }
@@ -957,11 +1209,8 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut ka
 /// # Parameters
 ///
 /// - `producer`: Non-null producer handle.
-///
-/// # Returns
-///
-/// Null on success, or a non-null [`kafka_common_KafkaError_t`] handle on failure.
-/// The caller must free a non-null error with [`kafka_common_KafkaError_destroy`].
+/// - `out_error`: Pointer where an error handle will be written on failure,
+///   or null if the caller does not need error details.
 ///
 /// # Safety
 ///
@@ -969,18 +1218,29 @@ pub unsafe extern "C" fn kafka_producer_RecordMetadata_destroy(metadata: *mut ka
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_flush(
     producer: *mut kafka_producer_Producer_t,
-) -> *mut kafka_common_KafkaError_t {
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) {
     if producer.is_null() {
-        return box_error(KafkaError::new(Errors::InvalidRequest));
+        if !out_error.is_null() {
+            unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+        }
+        return;
     }
 
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
-    match &*guard {
-        ProducerKind::Mock(mock) => match mock.flush() {
-            Ok(()) => std::ptr::null_mut(),
-            Err(e) => box_error(e),
-        },
+    let rt = guard.runtime();
+    let result = match &*guard {
+        ProducerKind::Mock(mock, _) => rt.block_on(mock.flush()),
+        ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.flush()),
+    };
+    if !out_error.is_null() {
+        unsafe {
+            *out_error = match result {
+                Ok(()) => std::ptr::null_mut(),
+                Err(e) => box_error(e),
+            };
+        }
     }
 }
 
@@ -988,29 +1248,41 @@ pub unsafe extern "C" fn kafka_producer_Producer_flush(
 ///
 /// After closing, further send calls will fail.
 ///
-/// # Returns
+/// # Parameters
 ///
-/// Null on success, or a non-null [`kafka_common_KafkaError_t`] handle on failure.
-/// The caller must free a non-null error with [`kafka_common_KafkaError_destroy`].
+/// - `producer`: Producer handle, or null (no-op).
+/// - `out_error`: Pointer where an error handle will be written on failure,
+///   or null if the caller does not need error details.
 ///
 /// # Safety
 ///
-/// `producer` must be a valid handle, or null (no-op, returns null).
+/// `producer` must be a valid handle, or null.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn kafka_producer_Producer_close(
     producer: *mut kafka_producer_Producer_t,
-) -> *mut kafka_common_KafkaError_t {
+    out_error: *mut *mut kafka_common_KafkaError_t,
+) {
     if producer.is_null() {
-        return std::ptr::null_mut();
+        if !out_error.is_null() {
+            unsafe { *out_error = std::ptr::null_mut() };
+        }
+        return;
     }
 
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
-    match &*guard {
-        ProducerKind::Mock(mock) => match mock.close() {
-            Ok(()) => std::ptr::null_mut(),
-            Err(e) => box_error(e),
-        },
+    let rt = guard.runtime();
+    let result = match &*guard {
+        ProducerKind::Mock(mock, _) => rt.block_on(mock.close()),
+        ProducerKind::Kafka(kafka, _) => rt.block_on(kafka.close()),
+    };
+    if !out_error.is_null() {
+        unsafe {
+            *out_error = match result {
+                Ok(()) => std::ptr::null_mut(),
+                Err(e) => box_error(e),
+            };
+        }
     }
 }
 
@@ -1035,7 +1307,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_complete_next(producer: *mu
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
     match &*guard {
-        ProducerKind::Mock(mock) => mock.complete_next(),
+        ProducerKind::Mock(mock, _) => mock.complete_next(),
+        ProducerKind::Kafka(..) => false,
     }
 }
 
@@ -1077,7 +1350,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_error_next(
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
     match &*guard {
-        ProducerKind::Mock(mock) => mock.error_next(error),
+        ProducerKind::Mock(mock, _) => mock.error_next(error),
+        ProducerKind::Kafka(..) => false,
     }
 }
 
@@ -1103,11 +1377,12 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_history_count(producer: *co
     let producer_mtx = unsafe { &*(producer as *const Mutex<ProducerKind>) };
     let guard = producer_mtx.lock().unwrap();
     match &*guard {
-        ProducerKind::Mock(mock) => {
+        ProducerKind::Mock(mock, _) => {
             let count = mock.history().len();
             // Clamp to i32::MAX to avoid overflow (extremely unlikely in practice).
             count.min(i32::MAX as usize) as i32
         },
+        ProducerKind::Kafka(..) => 0,
     }
 }
 
@@ -1125,7 +1400,8 @@ pub unsafe extern "C" fn kafka_producer_MockProducer_clear(producer: *mut kafka_
     let producer_mtx = unsafe { producer_ref(producer) };
     let guard = producer_mtx.lock().unwrap();
     match &*guard {
-        ProducerKind::Mock(mock) => mock.clear(),
+        ProducerKind::Mock(mock, _) => mock.clear(),
+        ProducerKind::Kafka(..) => {},
     }
 }
 
@@ -1292,10 +1568,10 @@ mod tests {
         let topic = CString::new("test-topic").unwrap();
         let key = b"key";
         let value = b"value";
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -1304,7 +1580,7 @@ mod tests {
                 key.len() as i32,
                 value.as_ptr(),
                 value.len() as i32,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
             assert!(!future.is_null());
@@ -1319,10 +1595,10 @@ mod tests {
     fn test_send_manual_complete() {
         let producer = kafka_producer_MockProducer_new(false);
         let topic = CString::new("test-topic").unwrap();
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -1331,7 +1607,7 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
             assert!(!future.is_null());
@@ -1349,13 +1625,10 @@ mod tests {
     #[test]
     fn test_send_null_producer() {
         let topic = CString::new("topic").unwrap();
-        // Use a non-null sentinel to prove the function actively sets
-        // *out_future to null, rather than leaving it unchanged.
-        let sentinel = 0xDEAD_BEEF_usize as *mut kafka_producer_FutureRecordMetadata_t;
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = sentinel;
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 std::ptr::null_mut(),
                 topic.as_ptr(),
                 -1,
@@ -1364,23 +1637,20 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_error(err);
-            assert!(future.is_null(), "out_future should be set to null when producer is null");
+            assert!(future.is_null(), "future should be null when producer is null");
         }
     }
 
     #[test]
     fn test_send_null_topic() {
         let producer = kafka_producer_MockProducer_new(true);
-        // Use a non-null sentinel to prove the function actively sets
-        // *out_future to null, rather than leaving it unchanged.
-        let sentinel = 0xDEAD_BEEF_usize as *mut kafka_producer_FutureRecordMetadata_t;
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = sentinel;
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 std::ptr::null(),
                 -1,
@@ -1389,32 +1659,10 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_error(err);
-            assert!(future.is_null(), "out_future should be set to null when topic is null");
-            kafka_producer_Producer_destroy(producer);
-        }
-    }
-
-    #[test]
-    fn test_send_null_out_future() {
-        let producer = kafka_producer_MockProducer_new(true);
-        let topic = CString::new("topic").unwrap();
-
-        unsafe {
-            let err = kafka_producer_Producer_send(
-                producer,
-                topic.as_ptr(),
-                -1,
-                -1, // timestamp
-                std::ptr::null(),
-                -1,
-                std::ptr::null(),
-                -1,
-                std::ptr::null_mut(),
-            );
-            assert_error(err);
+            assert!(future.is_null(), "future should be null when topic is null");
             kafka_producer_Producer_destroy(producer);
         }
     }
@@ -1423,10 +1671,10 @@ mod tests {
     fn test_send_with_partition() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 3,
@@ -1435,13 +1683,13 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
 
             // Get metadata and verify partition
-            let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_FutureRecordMetadata_get(future, &mut metadata);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
             assert_success(err);
             assert!(!metadata.is_null());
             assert_eq!(kafka_producer_RecordMetadata_partition(metadata), 3);
@@ -1825,10 +2073,10 @@ mod tests {
     fn test_future_get_success() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("my-topic").unwrap();
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 0,
@@ -1837,12 +2085,12 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
 
-            let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_FutureRecordMetadata_get(future, &mut metadata);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
             assert_success(err);
             assert!(!metadata.is_null());
 
@@ -1865,10 +2113,10 @@ mod tests {
     fn test_future_get_error() {
         let producer = kafka_producer_MockProducer_new(false);
         let topic = CString::new("topic").unwrap();
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -1877,7 +2125,7 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
 
@@ -1888,8 +2136,8 @@ mod tests {
                 err_msg.as_ptr(),
             );
 
-            let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_FutureRecordMetadata_get(future, &mut metadata);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
             assert!(!err.is_null(), "Expected an error from future get");
             assert_eq!(kafka_common_KafkaError_code(err), i32::from(Errors::CorruptMessage.code()));
 
@@ -1915,9 +2163,10 @@ mod tests {
     #[test]
     fn test_future_get_null_params() {
         unsafe {
-            let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_FutureRecordMetadata_get(std::ptr::null_mut(), &mut metadata);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(std::ptr::null_mut(), &mut err);
             assert_error(err);
+            assert!(metadata.is_null());
         }
     }
 
@@ -1952,10 +2201,10 @@ mod tests {
     fn test_flush() {
         let producer = kafka_producer_MockProducer_new(false);
         let topic = CString::new("topic").unwrap();
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -1964,13 +2213,14 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
 
             assert!(!kafka_producer_FutureRecordMetadata_is_done(future));
 
-            let err = kafka_producer_Producer_flush(producer);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_flush(producer, &mut err);
             assert_success(err);
 
             assert!(kafka_producer_FutureRecordMetadata_is_done(future));
@@ -1983,7 +2233,8 @@ mod tests {
     #[test]
     fn test_flush_null() {
         unsafe {
-            let err = kafka_producer_Producer_flush(std::ptr::null_mut());
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_flush(std::ptr::null_mut(), &mut err);
             assert_error(err);
         }
     }
@@ -1994,11 +2245,12 @@ mod tests {
         let topic = CString::new("topic").unwrap();
 
         unsafe {
-            let err = kafka_producer_Producer_close(producer);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
             assert_success(err);
 
-            let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2007,9 +2259,10 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_error(err);
+            assert!(future.is_null());
 
             kafka_producer_Producer_destroy(producer);
         }
@@ -2018,7 +2271,8 @@ mod tests {
     #[test]
     fn test_close_null() {
         unsafe {
-            let err = kafka_producer_Producer_close(std::ptr::null_mut());
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(std::ptr::null_mut(), &mut err);
             assert_success(err);
         }
     }
@@ -2055,10 +2309,10 @@ mod tests {
     fn test_mock_error_next_null_message() {
         let producer = kafka_producer_MockProducer_new(false);
         let topic = CString::new("topic").unwrap();
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2067,7 +2321,7 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
 
@@ -2078,8 +2332,8 @@ mod tests {
                 std::ptr::null(),
             ));
 
-            let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_FutureRecordMetadata_get(future, &mut metadata);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
             assert_error(err);
             assert!(metadata.is_null());
 
@@ -2104,8 +2358,8 @@ mod tests {
         unsafe {
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 0);
 
-            let mut f1: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let f1 = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2114,12 +2368,12 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut f1,
+                &mut err,
             );
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 1);
 
-            let mut f2: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let f2 = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2128,7 +2382,7 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut f2,
+                &mut err,
             );
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 2);
 
@@ -2151,8 +2405,8 @@ mod tests {
         let topic = CString::new("topic").unwrap();
 
         unsafe {
-            let mut f: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let f = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2161,7 +2415,7 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut f,
+                &mut err,
             );
             assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 1);
 
@@ -2187,11 +2441,11 @@ mod tests {
         let producer = kafka_producer_MockProducer_new(true);
         unsafe {
             // Close and then try to send -- should produce an error handle
-            kafka_producer_Producer_close(producer);
+            kafka_producer_Producer_close(producer, std::ptr::null_mut());
 
             let topic = CString::new("topic").unwrap();
-            let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2200,9 +2454,10 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert!(!err.is_null());
+            assert!(future.is_null());
 
             // Verify we can get a code and message from the error handle
             let code = kafka_common_KafkaError_code(err);
@@ -2223,11 +2478,11 @@ mod tests {
         // Create an error by sending to a closed producer
         let producer = kafka_producer_MockProducer_new(true);
         unsafe {
-            kafka_producer_Producer_close(producer);
+            kafka_producer_Producer_close(producer, std::ptr::null_mut());
 
             let topic = CString::new("topic").unwrap();
-            let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let _future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2236,7 +2491,7 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert!(!err.is_null());
 
@@ -2271,8 +2526,8 @@ mod tests {
 
         unsafe {
             // Send
-            let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 2,
@@ -2281,13 +2536,13 @@ mod tests {
                 key.len() as i32,
                 value.as_ptr(),
                 value.len() as i32,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
 
             // Get metadata
-            let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-            let err = kafka_producer_FutureRecordMetadata_get(future, &mut metadata);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
             assert_success(err);
 
             // Verify metadata
@@ -2314,8 +2569,8 @@ mod tests {
 
         unsafe {
             for expected_offset in 0..3_i64 {
-                let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
-                let err = kafka_producer_Producer_send(
+                let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+                let future = kafka_producer_Producer_send(
                     producer,
                     topic.as_ptr(),
                     0,
@@ -2324,12 +2579,12 @@ mod tests {
                     -1,
                     std::ptr::null(),
                     -1,
-                    &mut future,
+                    &mut err,
                 );
                 assert_success(err);
 
-                let mut metadata: *mut kafka_producer_RecordMetadata_t = std::ptr::null_mut();
-                let err = kafka_producer_FutureRecordMetadata_get(future, &mut metadata);
+                let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+                let metadata = kafka_producer_FutureRecordMetadata_get(future, &mut err);
                 assert_success(err);
                 assert_eq!(kafka_producer_RecordMetadata_offset(metadata), expected_offset);
 
@@ -2347,14 +2602,12 @@ mod tests {
         let topic = CString::new("topic").unwrap();
 
         unsafe {
-            let err = kafka_producer_Producer_close(producer);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
             assert_success(err);
 
-            // Use a non-null sentinel to prove the function actively sets
-            // *out_future to null on error, rather than leaving it unchanged.
-            let sentinel = 0xDEAD_BEEF_usize as *mut kafka_producer_FutureRecordMetadata_t;
-            let mut future: *mut kafka_producer_FutureRecordMetadata_t = sentinel;
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2363,10 +2616,10 @@ mod tests {
                 -1,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_error(err);
-            assert!(future.is_null(), "Future should be set to null on error");
+            assert!(future.is_null(), "Future should be null on error");
 
             kafka_producer_Producer_destroy(producer);
         }
@@ -2377,10 +2630,12 @@ mod tests {
         let producer = kafka_producer_MockProducer_new(true);
 
         unsafe {
-            let err = kafka_producer_Producer_close(producer);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
             assert_success(err);
 
-            let err = kafka_producer_Producer_flush(producer);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_flush(producer, &mut err);
             assert_error(err);
 
             kafka_producer_Producer_destroy(producer);
@@ -2392,10 +2647,10 @@ mod tests {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let key = b"only-key";
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2404,7 +2659,7 @@ mod tests {
                 key.len() as i32,
                 std::ptr::null(),
                 -1,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
             assert!(kafka_producer_FutureRecordMetadata_is_done(future));
@@ -2414,15 +2669,211 @@ mod tests {
         }
     }
 
+    // -- ProducerProperties tests ---------------------------------------------
+
+    #[test]
+    fn test_properties_new_and_put() {
+        unsafe {
+            let props = kafka_producer_ProducerProperties_new();
+            assert!(!props.is_null());
+
+            let key = CString::new("bootstrap.servers").unwrap();
+            let val = CString::new("localhost:9092").unwrap();
+            kafka_producer_ProducerProperties_put(props, key.as_ptr(), val.as_ptr());
+
+            // Create a producer from the properties to verify they work.
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            assert_success(err);
+            assert!(!producer.is_null());
+
+            kafka_producer_ProducerProperties_destroy(props);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
+            assert_success(err);
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
+    #[test]
+    fn test_properties_from_configs() {
+        let k1 = CString::new("bootstrap.servers").unwrap();
+        let v1 = CString::new("localhost:9092").unwrap();
+        let k2 = CString::new("client.id").unwrap();
+        let v2 = CString::new("test-client").unwrap();
+
+        unsafe {
+            let configs = [k1.as_ptr(), v1.as_ptr(), k2.as_ptr(), v2.as_ptr(), std::ptr::null()];
+            let props = kafka_producer_ProducerProperties_from_configs(configs.as_ptr());
+            assert!(!props.is_null());
+
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            assert_success(err);
+            assert!(!producer.is_null());
+
+            kafka_producer_ProducerProperties_destroy(props);
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
+            assert_success(err);
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
+    #[test]
+    fn test_properties_from_configs_null() {
+        unsafe {
+            let props = kafka_producer_ProducerProperties_from_configs(std::ptr::null());
+            assert!(props.is_null());
+        }
+    }
+
+    #[test]
+    fn test_properties_from_configs_odd_count() {
+        let k1 = CString::new("bootstrap.servers").unwrap();
+        let v1 = CString::new("localhost:9092").unwrap();
+        let k2 = CString::new("client.id").unwrap();
+        // Missing value for k2 — odd number of entries before NULL.
+        unsafe {
+            let configs = [k1.as_ptr(), v1.as_ptr(), k2.as_ptr(), std::ptr::null()];
+            let props = kafka_producer_ProducerProperties_from_configs(configs.as_ptr());
+            assert!(props.is_null());
+        }
+    }
+
+    #[test]
+    fn test_properties_from_configs_empty() {
+        unsafe {
+            let configs = [std::ptr::null()];
+            let props = kafka_producer_ProducerProperties_from_configs(configs.as_ptr());
+            assert!(!props.is_null());
+            kafka_producer_ProducerProperties_destroy(props);
+        }
+    }
+
+    #[test]
+    fn test_properties_put_null_is_noop() {
+        let key = CString::new("key").unwrap();
+        let val = CString::new("val").unwrap();
+        unsafe {
+            // All null combinations are no-ops.
+            kafka_producer_ProducerProperties_put(std::ptr::null_mut(), key.as_ptr(), val.as_ptr());
+            let props = kafka_producer_ProducerProperties_new();
+            kafka_producer_ProducerProperties_put(props, std::ptr::null(), val.as_ptr());
+            kafka_producer_ProducerProperties_put(props, key.as_ptr(), std::ptr::null());
+            kafka_producer_ProducerProperties_destroy(props);
+        }
+    }
+
+    #[test]
+    fn test_properties_destroy_null() {
+        unsafe {
+            kafka_producer_ProducerProperties_destroy(std::ptr::null_mut());
+        }
+    }
+
+    // -- KafkaProducer lifecycle tests ----------------------------------------
+
+    /// Helper: creates a KafkaProducer via FFI with the given bootstrap servers.
+    unsafe fn create_kafka_producer(
+        bootstrap: &str,
+    ) -> (*mut kafka_producer_Producer_t, *mut kafka_common_KafkaError_t) {
+        let key = CString::new("bootstrap.servers").unwrap();
+        let val = CString::new(bootstrap).unwrap();
+        let configs = [key.as_ptr(), val.as_ptr(), std::ptr::null()];
+        let props = unsafe { kafka_producer_ProducerProperties_from_configs(configs.as_ptr()) };
+        let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+        let producer = unsafe { kafka_producer_KafkaProducer_new(props, &mut err) };
+        unsafe { kafka_producer_ProducerProperties_destroy(props) };
+        (producer, err)
+    }
+
+    #[test]
+    fn test_create_and_destroy_kafka_producer() {
+        unsafe {
+            let (producer, err) = create_kafka_producer("localhost:9092");
+            assert_success(err);
+            assert!(!producer.is_null());
+
+            // Close before destroy
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
+            assert_success(err);
+
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
+    #[test]
+    fn test_create_kafka_producer_null_props() {
+        unsafe {
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let producer = kafka_producer_KafkaProducer_new(std::ptr::null(), &mut err);
+            assert_error(err);
+            assert!(producer.is_null());
+        }
+    }
+
+    #[test]
+    fn test_create_kafka_producer_null_out_error() {
+        unsafe {
+            let key = CString::new("bootstrap.servers").unwrap();
+            let val = CString::new("localhost:9092").unwrap();
+            let props = kafka_producer_ProducerProperties_new();
+            kafka_producer_ProducerProperties_put(props, key.as_ptr(), val.as_ptr());
+            // Passing null for out_error means "don't care about error details".
+            let producer = kafka_producer_KafkaProducer_new(props, std::ptr::null_mut());
+            assert!(!producer.is_null());
+            kafka_producer_ProducerProperties_destroy(props);
+            kafka_producer_Producer_close(producer, std::ptr::null_mut());
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
+    #[test]
+    fn test_create_kafka_producer_invalid_config_value() {
+        let key = CString::new("batch.size").unwrap();
+        let val = CString::new("not-a-number").unwrap();
+        unsafe {
+            let configs = [key.as_ptr(), val.as_ptr(), std::ptr::null()];
+            let props = kafka_producer_ProducerProperties_from_configs(configs.as_ptr());
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let producer = kafka_producer_KafkaProducer_new(props, &mut err);
+            assert_error(err);
+            assert!(producer.is_null());
+            kafka_producer_ProducerProperties_destroy(props);
+        }
+    }
+
+    #[test]
+    fn test_kafka_producer_mock_ops_return_defaults() {
+        unsafe {
+            let (producer, err) = create_kafka_producer("localhost:9092");
+            assert_success(err);
+            assert!(!producer.is_null());
+
+            // Mock-specific operations should return no-op values for Kafka producer.
+            assert!(!kafka_producer_MockProducer_complete_next(producer));
+            assert!(!kafka_producer_MockProducer_error_next(producer, 2, std::ptr::null()));
+            assert_eq!(kafka_producer_MockProducer_history_count(producer as *const _), 0);
+            kafka_producer_MockProducer_clear(producer); // no-op
+
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            kafka_producer_Producer_close(producer, &mut err);
+            assert_success(err);
+            kafka_producer_Producer_destroy(producer);
+        }
+    }
+
     #[test]
     fn test_send_only_value() {
         let producer = kafka_producer_MockProducer_new(true);
         let topic = CString::new("topic").unwrap();
         let value = b"only-value";
-        let mut future: *mut kafka_producer_FutureRecordMetadata_t = std::ptr::null_mut();
 
         unsafe {
-            let err = kafka_producer_Producer_send(
+            let mut err: *mut kafka_common_KafkaError_t = std::ptr::null_mut();
+            let future = kafka_producer_Producer_send(
                 producer,
                 topic.as_ptr(),
                 -1,
@@ -2431,7 +2882,7 @@ mod tests {
                 -1,
                 value.as_ptr(),
                 value.len() as i32,
-                &mut future,
+                &mut err,
             );
             assert_success(err);
             assert!(kafka_producer_FutureRecordMetadata_is_done(future));

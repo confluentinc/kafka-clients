@@ -1,3 +1,6 @@
 [submodule "kafka"]
 	path = kafka
 	url = ./kafka
+[submodule "bindings/c/tests/unity"]
+	path = bindings/c/tests/unity
+	url = https://github.com/ThrowTheSwitch/Unity.git

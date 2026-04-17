@@ -17,7 +17,7 @@
 import time
 import pytest
 from producer import (
-    MockProducer, ProducerRecord, RecordMetadata, KafkaError
+    KafkaProducer, MockProducer, ProducerRecord, RecordMetadata, KafkaError
 )
 
 # Timeout in seconds for future.result() calls
@@ -242,3 +242,49 @@ def test_producer_record_invalid_topic_type():
 def test_producer_record_invalid_value_type():
     with pytest.raises(TypeError):
         ProducerRecord("t", "not bytes")
+
+
+# -- KafkaProducer lifecycle ---------------------------------------------------
+
+def test_create_kafka_producer():
+    p = KafkaProducer({"bootstrap.servers": "localhost:9092"})
+    assert p.c_producer is not None
+    p.close()
+
+
+def test_create_kafka_producer_context_manager():
+    with KafkaProducer({"bootstrap.servers": "localhost:9092"}) as p:
+        assert p.c_producer is not None
+    assert p.closed
+
+
+def test_kafka_producer_close_idempotent():
+    p = KafkaProducer({"bootstrap.servers": "localhost:9092"})
+    p.close()
+    p.close()
+
+
+def test_kafka_producer_send_after_close_raises():
+    p = KafkaProducer({"bootstrap.servers": "localhost:9092"})
+    p.close()
+    with pytest.raises(RuntimeError):
+        p.send(ProducerRecord("test-topic", b"v"))
+
+
+def test_kafka_producer_invalid_config():
+    with pytest.raises(RuntimeError):
+        KafkaProducer({"batch.size": "not-a-number"})
+
+
+def test_kafka_producer_config_not_dict():
+    with pytest.raises(TypeError):
+        KafkaProducer("bootstrap.servers=localhost:9092")
+
+
+def test_kafka_producer_multiple_configs():
+    p = KafkaProducer({
+        "bootstrap.servers": "localhost:9092",
+        "client.id": "python-test",
+        "batch.size": "32768",
+    })
+    p.close()

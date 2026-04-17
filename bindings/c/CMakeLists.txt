@@ -37,12 +37,28 @@ endif()
 message(STATUS "Using Rust library: ${CONFLUENT_KAFKA_RUST}")
 message(STATUS "Using Rust headers: ${RUST_INCLUDE_DIR}")
 
-# Test executable
+# Unity test framework
+add_subdirectory(tests/unity)
+
+# System libraries for static linking
+if(LINK_TYPE STREQUAL "shared")
+    set(SYSTEM_LIBS "")
+else()
+    set(SYSTEM_LIBS pthread dl m)
+endif()
+
+# Enable CTest
+enable_testing()
+
+# Test executables
 add_executable(test_mock_producer tests/test_mock_producer.c)
 target_include_directories(test_mock_producer PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_mock_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
 
-if(LINK_TYPE STREQUAL "shared")
-    target_link_libraries(test_mock_producer ${CONFLUENT_KAFKA_RUST})
-else()
-    target_link_libraries(test_mock_producer ${CONFLUENT_KAFKA_RUST} pthread dl m)
-endif()
+add_executable(test_kafka_producer tests/test_kafka_producer.c)
+target_include_directories(test_kafka_producer PRIVATE ${RUST_INCLUDE_DIR})
+target_link_libraries(test_kafka_producer unity::framework ${CONFLUENT_KAFKA_RUST} ${SYSTEM_LIBS})
+
+# Register tests with CTest
+add_test(NAME mock_producer COMMAND test_mock_producer)
+add_test(NAME kafka_producer COMMAND test_kafka_producer)

@@ -23,10 +23,13 @@
 //! its own record-specific metadata (batch index, timestamp, sizes). It waits for the
 //! `ProduceRequestResult` to complete, then constructs the `RecordMetadata`.
 
+use std::pin::Pin;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use crate::common::KafkaError;
 use crate::common::TopicPartition;
+use crate::common::kafka_future::KafkaFutureOps;
 use crate::common::record::RecordBatch;
 use crate::producer::RecordMetadata;
 use crate::producer::internals::ProduceRequestResult;
@@ -265,6 +268,23 @@ impl FutureRecordMetadata {
         } else {
             self.result.completed()
         }
+    }
+}
+
+impl KafkaFutureOps<RecordMetadata> for FutureRecordMetadata {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+        FutureRecordMetadata::get(self)
+    }
+
+    fn get_timeout(
+        &self,
+        timeout: Duration,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send + '_>> {
+        FutureRecordMetadata::get_timeout(self, timeout)
+    }
+
+    fn is_done(&self) -> bool {
+        FutureRecordMetadata::is_done(self)
     }
 }
 

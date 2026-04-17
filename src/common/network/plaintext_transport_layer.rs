@@ -184,6 +184,24 @@ impl TransportLayer for PlaintextTransportLayer {
         })
     }
 
+    fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            match &self.stream {
+                Some(stream) => stream.readable().await,
+                None => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+            }
+        })
+    }
+
+    fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            match &self.stream {
+                Some(stream) => stream.writable().await,
+                None => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+            }
+        })
+    }
+
     /// Reads data from this channel into the given buffer.
     ///
     /// Waits for the socket to become readable, then reads available data.

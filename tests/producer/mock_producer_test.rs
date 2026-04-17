@@ -48,7 +48,7 @@ async fn test_auto_complete_mock() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
     let record1 = make_record("topic", "key1", "value1");
 
-    let future = producer.send(record1.clone()).unwrap();
+    let future = producer.send(record1.clone()).await.unwrap();
     assert!(future.is_done(), "Send should be immediately complete");
 
     let metadata = future.get().await;
@@ -81,10 +81,10 @@ async fn test_manual_completion() {
     let record1 = make_record("topic", "key1", "value1");
     let record2 = make_record("topic", "key2", "value2");
 
-    let md1 = producer.send(record1.clone()).unwrap();
+    let md1 = producer.send(record1.clone()).await.unwrap();
     assert!(!md1.is_done(), "Send shouldn't have completed");
 
-    let md2 = producer.send(record2.clone()).unwrap();
+    let md2 = producer.send(record2.clone()).await.unwrap();
     assert!(!md2.is_done(), "Send shouldn't have completed");
 
     assert!(producer.complete_next(), "Complete the first request");
@@ -100,10 +100,10 @@ async fn test_manual_completion() {
     assert!(!producer.complete_next(), "No more requests to complete");
 
     // Test flush completes remaining sends
-    let md3 = producer.send(record1).unwrap();
-    let md4 = producer.send(record2).unwrap();
+    let md3 = producer.send(record1).await.unwrap();
+    let md4 = producer.send(record2).await.unwrap();
     assert!(!md3.is_done() && !md4.is_done(), "Requests should not be completed.");
-    producer.flush().unwrap();
+    producer.flush().await.unwrap();
     assert!(md3.is_done() && md4.is_done(), "Requests should be completed.");
 }
 
@@ -122,10 +122,10 @@ fn test_should_be_flushed_if_no_buffered_records() {
 /// Creates a MockProducer with `auto_complete=true`, sends a record, and
 /// verifies that `flushed()` is still `true` because auto-complete resolves
 /// sends immediately without leaving pending completions.
-#[test]
-fn test_should_be_flushed_with_auto_complete_if_buffered_records() {
+#[tokio::test]
+async fn test_should_be_flushed_with_auto_complete_if_buffered_records() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-    producer.send(make_record("topic", "key1", "value1")).unwrap();
+    producer.send(make_record("topic", "key1", "value1")).await.unwrap();
     assert!(producer.flushed());
 }
 
@@ -133,10 +133,10 @@ fn test_should_be_flushed_with_auto_complete_if_buffered_records() {
 ///
 /// Creates a MockProducer with `auto_complete=false`, sends a record, and
 /// verifies that `flushed()` returns `false` because the send is pending.
-#[test]
-fn test_should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
+#[tokio::test]
+async fn test_should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-    producer.send(make_record("topic", "key1", "value1")).unwrap();
+    producer.send(make_record("topic", "key1", "value1")).await.unwrap();
     assert!(!producer.flushed());
 }
 
@@ -148,12 +148,12 @@ fn test_should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
 ///
 /// Creates a MockProducer with `auto_complete=false`, sends a record,
 /// verifies not flushed, calls `flush()`, then verifies flushed.
-#[test]
-fn test_should_be_flushed_after_flush() {
+#[tokio::test]
+async fn test_should_be_flushed_after_flush() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-    producer.send(make_record("topic", "key1", "value1")).unwrap();
+    producer.send(make_record("topic", "key1", "value1")).await.unwrap();
     assert!(!producer.flushed(), "Should not be flushed with pending send");
-    producer.flush().unwrap();
+    producer.flush().await.unwrap();
     assert!(producer.flushed(), "Should be flushed after flush()");
 }
 
@@ -161,11 +161,11 @@ fn test_should_be_flushed_after_flush() {
 ///
 /// Creates a MockProducer, closes it, then sends a record and verifies
 /// the send returns `Err` with a message indicating the producer is closed.
-#[test]
-fn test_should_throw_on_send_if_producer_is_closed() {
+#[tokio::test]
+async fn test_should_throw_on_send_if_producer_is_closed() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-    producer.close().unwrap();
-    let result = producer.send(make_record("topic", "key1", "value1"));
+    producer.close().await.unwrap();
+    let result = producer.send(make_record("topic", "key1", "value1")).await;
     assert!(result.is_err());
     let err = result.err().unwrap();
     assert!(
@@ -179,11 +179,11 @@ fn test_should_throw_on_send_if_producer_is_closed() {
 ///
 /// Creates a MockProducer, closes it, then calls `flush()` and verifies
 /// it returns `Err` with a message indicating the producer is closed.
-#[test]
-fn test_should_throw_on_flush_if_producer_is_closed() {
+#[tokio::test]
+async fn test_should_throw_on_flush_if_producer_is_closed() {
     let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-    producer.close().unwrap();
-    let result = producer.flush();
+    producer.close().await.unwrap();
+    let result = producer.flush().await;
     assert!(result.is_err());
     assert!(
         result.unwrap_err().message().contains("MockProducer is already closed"),

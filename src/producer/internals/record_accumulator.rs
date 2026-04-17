@@ -284,93 +284,112 @@ impl RecordAccumulator {
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
     ) -> Result<RecordAppendResult, KafkaError> {
-        // Determine the effective partition.
-        let effective_partition = if partition == record_metadata::UNKNOWN_PARTITION {
-            let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
-            partitioner.peek_current_partition_info(cluster).partition()
-        } else {
-            partition
-        };
+        let mut callback = callback;
+        let mut buffer: Option<Vec<u8>> = None;
 
-        // Get or create the deque for this partition.
-        let dq_entry = topic_info
-            .batches
-            .entry(effective_partition)
-            .or_insert_with(|| Mutex::new(VecDeque::new()));
-        let dq = dq_entry.value();
-
-        // Try to append to an existing batch.
-        let callback = {
-            let mut deque = dq.lock().unwrap();
-            let (result, returned_callback) =
-                self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
-            if let Some(result) = result {
-                // Update partitioner info.
-                if partition == record_metadata::UNKNOWN_PARTITION {
-                    let enable_switch = Self::all_batches_full(&deque);
-                    let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
-                    partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
-                }
-                return Ok(result);
-            }
-            returned_callback
-        };
-
-        // Need a new batch. Allocate a buffer.
-        let estimated = abstract_records::estimate_size_in_bytes_upper_bound(
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            self.compression.compression_type(),
-            key,
-            value,
-            headers,
-        );
-        let size = self.batch_size.max(estimated);
-
-        trace!(
-            "Allocating a new {} byte message buffer for topic {} partition {}",
-            size, topic, effective_partition
-        );
-
-        let buffer = vec![0u8; size as usize];
-
-        // Try again under lock -- another thread might have created the batch.
-        {
-            let mut deque = dq.lock().unwrap();
-
-            let (result, returned_callback) =
-                self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
-            if let Some(result) = result {
-                // Someone else created the batch, use it.
-                self.free.deallocate(buffer);
-                if partition == record_metadata::UNKNOWN_PARTITION {
-                    let enable_switch = Self::all_batches_full(&deque);
-                    let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
-                    partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
-                }
-                return Ok(result);
-            }
-
-            // Create a new batch.
-            let result = self.append_new_batch(
-                topic,
-                effective_partition,
-                &mut deque,
-                timestamp,
-                key,
-                value,
-                headers,
-                returned_callback,
-                buffer,
-                now_ms,
-            );
-
-            if partition == record_metadata::UNKNOWN_PARTITION {
-                let enable_switch = Self::all_batches_full(&deque);
+        loop {
+            // Determine the effective partition.
+            let effective_partition = if partition == record_metadata::UNKNOWN_PARTITION {
                 let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
-                partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
+                partitioner.peek_current_partition_info(cluster).partition()
+            } else {
+                partition
+            };
+
+            // Get or create the deque for this partition.
+            let dq_entry = topic_info
+                .batches
+                .entry(effective_partition)
+                .or_insert_with(|| Mutex::new(VecDeque::new()));
+            let dq = dq_entry.value();
+
+            // Try to append to an existing batch.
+            {
+                let mut deque = dq.lock().unwrap();
+
+                // Check if we need to complete a previously disabled partition switch.
+                if partition == record_metadata::UNKNOWN_PARTITION
+                    && self.partition_changed(topic_info, &deque, cluster)
+                {
+                    continue;
+                }
+
+                let (result, returned_callback) =
+                    self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
+                if let Some(result) = result {
+                    if partition == record_metadata::UNKNOWN_PARTITION {
+                        let enable_switch = Self::all_batches_full(&deque);
+                        let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
+                        partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
+                    }
+                    return Ok(result);
+                }
+                callback = returned_callback;
             }
 
-            Ok(result)
+            // Need a new batch. Allocate a buffer (only once).
+            if buffer.is_none() {
+                let estimated = abstract_records::estimate_size_in_bytes_upper_bound(
+                    RecordBatch::CURRENT_MAGIC_VALUE,
+                    self.compression.compression_type(),
+                    key,
+                    value,
+                    headers,
+                );
+                let size = self.batch_size.max(estimated);
+
+                trace!(
+                    "Allocating a new {} byte message buffer for topic {} partition {}",
+                    size, topic, effective_partition
+                );
+
+                buffer = Some(vec![0u8; size as usize]);
+            }
+
+            // Try again under lock -- another thread might have created the batch.
+            {
+                let mut deque = dq.lock().unwrap();
+
+                if partition == record_metadata::UNKNOWN_PARTITION
+                    && self.partition_changed(topic_info, &deque, cluster)
+                {
+                    continue;
+                }
+
+                let (result, returned_callback) =
+                    self.try_append(timestamp, key, value, headers, callback, &mut deque, now_ms)?;
+                if let Some(result) = result {
+                    self.free.deallocate(buffer.take().unwrap());
+                    if partition == record_metadata::UNKNOWN_PARTITION {
+                        let enable_switch = Self::all_batches_full(&deque);
+                        let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
+                        partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
+                    }
+                    return Ok(result);
+                }
+
+                // Create a new batch.
+                let result = self.append_new_batch(
+                    topic,
+                    effective_partition,
+                    &mut deque,
+                    timestamp,
+                    key,
+                    value,
+                    headers,
+                    returned_callback,
+                    buffer.take().unwrap(),
+                    now_ms,
+                );
+
+                if partition == record_metadata::UNKNOWN_PARTITION {
+                    let enable_switch = Self::all_batches_full(&deque);
+                    let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
+                    partitioner.update_partition_info_with_switch(result.appended_bytes, cluster, enable_switch);
+                }
+
+                return Ok(result);
+            }
         }
     }
 
@@ -416,6 +435,23 @@ impl RecordAccumulator {
             TimestampType::CreateTime,
             0,
         )
+    }
+
+    /// Check if we need to complete a previously disabled partition switch.
+    /// If all batches are full (or the deque is empty after drain), try an
+    /// eager switch with `enable_switch = true` so the partitioner can move
+    /// to a new partition before we append the next record.
+    fn partition_changed(&self, topic_info: &TopicInfo, deque: &VecDeque<ProducerBatch>, cluster: &Cluster) -> bool {
+        if Self::all_batches_full(deque) {
+            let mut partitioner = topic_info.built_in_partitioner.lock().unwrap();
+            let old_partition = partitioner.peek_current_partition_info(cluster).partition();
+            partitioner.update_partition_info_with_switch(0, cluster, true);
+            let new_partition = partitioner.peek_current_partition_info(cluster).partition();
+            if new_partition != old_partition {
+                return true;
+            }
+        }
+        false
     }
 
     /// Check if all batches in the queue are full.
@@ -2741,15 +2777,15 @@ mod tests {
         let batch_size = 512;
         let val_size = 32;
         let n1 = node1();
-        let now: i64 = 0;
+        let n2 = node2();
 
         let accum = create_test_accumulator(batch_size, total_size, Compression::none(), 10);
-        let metadata =
-            make_metadata_snapshot(std::slice::from_ref(&n1), TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(0))]);
+        let metadata = make_metadata_snapshot(&[n1, n2], TOPIC, &[(0, Some(0)), (1, Some(0)), (2, Some(1))]);
         let cluster = metadata.cluster().clone();
 
         let v = vec![0u8; val_size];
 
+        let mut now: i64 = 0;
         for _ in 0..10 {
             // Produce about 2/3 of the batch size
             let rec_count = batch_size as usize * 2 / 3 / val_size;
@@ -2770,24 +2806,26 @@ mod tests {
                     .unwrap();
             }
 
-            // We should have ready batches after linger
-            let nodes = accum.ready(&metadata, now + 10 + 1).ready_nodes;
-            if nodes.is_empty() {
-                continue;
-            }
+            // Advance the time to make the batch ready (matches Java's time.sleep(10))
+            now += 10;
+
+            // We should have one batch ready.
+            let nodes = accum.ready(&metadata, now).ready_nodes;
+            assert_eq!(1, nodes.len(), "Should have 1 leader ready");
             let drained_map = accum.drain(&metadata, &nodes, i32::MAX, 0);
-            for batch_list in drained_map.values() {
-                for batch in batch_list {
-                    // Split batches are allocated outside the accumulator, so each batch
-                    // should be a reasonable size (not fractional)
-                    let estimated = batch.estimated_size_in_bytes() as i32;
-                    assert!(
-                        estimated > batch_size / 4,
-                        "Batch must be greater than quarter batch.size, got {}",
-                        estimated
-                    );
-                }
-            }
+            let batch_list = drained_map.values().next().unwrap();
+            assert_eq!(1, batch_list.len(), "Should have 1 batch ready");
+            let actual_batch_size = batch_list[0].estimated_size_in_bytes() as i32;
+            assert!(
+                actual_batch_size > batch_size / 2,
+                "Batch must be greater than half batch.size, got {}",
+                actual_batch_size
+            );
+            assert!(
+                actual_batch_size < batch_size,
+                "Batch must be less than batch.size, got {}",
+                actual_batch_size
+            );
         }
     }
 

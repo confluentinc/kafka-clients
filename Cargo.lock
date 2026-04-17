@@ -422,6 +422,7 @@ dependencies = [
  "crc32c",
  "dashmap",
  "flate2",
+ "futures-util",
  "generator",
  "indexmap 2.14.0",
  "log",

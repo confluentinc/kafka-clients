@@ -25,9 +25,9 @@
 //! - Error handling (invalid topic, record too large)
 //! - Flush and close semantics
 
+use std::collections::HashMap;
 use std::time::Duration;
 
-use confluent_kafka::common::compress::Compression;
 use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
@@ -39,17 +39,17 @@ use crate::common::test_context::TestContext;
 
 /// Create a ProducerConfig with the given bootstrap servers and optional overrides.
 fn make_config(bootstrap_servers: &str) -> ProducerConfig {
-    ProducerConfig {
-        bootstrap_servers: vec![bootstrap_servers.to_string()],
-        client_id: "integration-test-producer".to_string(),
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers.to_string()),
+        ("client.id".to_string(), "integration-test-producer".to_string()),
         // Use acks=all for reliability in integration tests.
-        acks: -1,
+        ("acks".to_string(), "all".to_string()),
         // Use a short max_block_ms so tests don't hang.
-        max_block_ms: 30_000,
+        ("max.block.ms".to_string(), "30000".to_string()),
         // Short linger to avoid waiting.
-        linger_ms: 0,
-        ..Default::default()
-    }
+        ("linger.ms".to_string(), "0".to_string()),
+    ]);
+    ProducerConfig::from_properties(&props).expect("Invalid test config")
 }
 
 /// Create a fully-wired KafkaProducer connected to a real broker using
@@ -59,20 +59,6 @@ fn make_config(bootstrap_servers: &str) -> ProducerConfig {
 fn create_producer_from_config(config: ProducerConfig) -> KafkaProducer<String, String> {
     KafkaProducer::from_config(config, Box::new(StringSerializer), Box::new(StringSerializer))
         .expect("Failed to create producer from config")
-}
-
-/// Create a fully-wired KafkaProducer with an explicit compression override.
-///
-/// Uses [`KafkaProducer::from_config_with_compression`] for tests that need
-/// a specific compression codec (e.g., the compression test).
-fn create_producer_with_compression(config: ProducerConfig, compression: Compression) -> KafkaProducer<String, String> {
-    KafkaProducer::from_config_with_compression(
-        config,
-        Box::new(StringSerializer),
-        Box::new(StringSerializer),
-        Some(compression),
-    )
-    .expect("Failed to create producer with compression")
 }
 
 /// Test: Create a KafkaProducer, send a single record with key and value,
@@ -88,7 +74,7 @@ async fn test_produce_single_record() {
     let producer = create_producer_from_config(config);
 
     let record = ProducerRecord::with_key(topic.clone(), Some("test-key".to_string()), Some("test-value".to_string()));
-    let future = producer.send(record).expect("send should succeed");
+    let future = producer.send(record).await.expect("send should succeed");
 
     // Wait for the record to be acknowledged
     let metadata = future
@@ -104,7 +90,7 @@ async fn test_produce_single_record() {
     assert_eq!(metadata.topic(), topic, "Topic should match");
     assert!(metadata.partition() >= 0, "Partition should be non-negative");
 
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 }
 
 /// Test: Send records with a specific key, verify they go to the same partition.
@@ -126,7 +112,7 @@ async fn test_produce_with_key() {
 
     for i in 0..5 {
         let record = ProducerRecord::with_key(topic.clone(), Some(key.clone()), Some(format!("value-{}", i)));
-        let future = producer.send(record).expect("send should succeed");
+        let future = producer.send(record).await.expect("send should succeed");
         let metadata = future
             .get_timeout(Duration::from_secs(30))
             .await
@@ -144,7 +130,7 @@ async fn test_produce_with_key() {
         );
     }
 
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 }
 
 /// Test: Send multiple records to the same partition, verify offsets are sequential.
@@ -168,7 +154,7 @@ async fn test_produce_multiple_records_ordering() {
             Some(format!("value-{}", i)),
         )
         .expect("record creation should succeed");
-        let future = producer.send(record).expect("send should succeed");
+        let future = producer.send(record).await.expect("send should succeed");
         let metadata = future
             .get_timeout(Duration::from_secs(30))
             .await
@@ -188,7 +174,7 @@ async fn test_produce_multiple_records_ordering() {
         );
     }
 
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 }
 
 /// Test: Verify each compression type produces successfully.
@@ -197,27 +183,30 @@ async fn test_produce_multiple_records_ordering() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_produce_with_compression() {
     let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    let config = make_config(ctx.bootstrap_servers());
+    let bootstrap = ctx.bootstrap_servers().to_string();
 
-    let compressions: Vec<(&str, Compression)> = vec![
-        ("none", Compression::none()),
-        ("gzip", Compression::gzip()),
-        ("snappy", Compression::snappy()),
-        ("lz4", Compression::lz4()),
-        ("zstd", Compression::zstd()),
-    ];
+    let compression_types = ["none", "gzip", "snappy", "lz4", "zstd"];
 
-    for (name, compression) in compressions {
+    for name in compression_types {
         let topic = ctx.topic(&format!("compress_{}", name));
 
-        let producer = create_producer_with_compression(config.clone(), compression);
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), bootstrap.clone()),
+            ("client.id".to_string(), "integration-test-producer".to_string()),
+            ("acks".to_string(), "all".to_string()),
+            ("max.block.ms".to_string(), "30000".to_string()),
+            ("linger.ms".to_string(), "0".to_string()),
+            ("compression.type".to_string(), name.to_string()),
+        ]);
+        let config = ProducerConfig::from_properties(&props).expect("Invalid test config");
+        let producer = create_producer_from_config(config);
 
         let record = ProducerRecord::with_key(
             topic.clone(),
             Some("key".to_string()),
             Some(format!("value-compressed-with-{}", name)),
         );
-        let future = producer.send(record).expect("send should succeed");
+        let future = producer.send(record).await.expect("send should succeed");
 
         let metadata = future
             .get_timeout(Duration::from_secs(30))
@@ -232,7 +221,7 @@ async fn test_produce_with_compression() {
         );
         assert_eq!(metadata.topic(), topic, "Topic should match for compression '{}'", name);
 
-        producer.close().expect("close should succeed");
+        producer.close().await.expect("close should succeed");
     }
 }
 
@@ -253,7 +242,7 @@ async fn test_produce_to_invalid_topic() {
     let invalid_topic = "topic with spaces!@#$".to_string();
     let record = ProducerRecord::with_value(invalid_topic, Some("value".to_string()));
 
-    let future = producer.send(record).expect("send returns Ok with a failed future");
+    let future = producer.send(record).await.expect("send returns Ok with a failed future");
 
     // The future should complete with an error (InvalidTopic or similar)
     let result = future.get_timeout(Duration::from_secs(30)).await;
@@ -263,7 +252,7 @@ async fn test_produce_to_invalid_topic() {
         result
     );
 
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 }
 
 /// Test: Send a record larger than max.request.size, expect RecordTooLarge error.
@@ -272,17 +261,23 @@ async fn test_produce_to_invalid_topic() {
 #[tokio::test(flavor = "multi_thread")]
 async fn test_produce_record_too_large() {
     let ctx = TestContext::new(ClusterConfig::default()).await;
-    let mut config = make_config(ctx.bootstrap_servers());
-    // Set a very small max request size to trigger the error
-    config.max_request_size = 100;
-
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+        ("client.id".to_string(), "integration-test-producer".to_string()),
+        ("acks".to_string(), "all".to_string()),
+        ("max.block.ms".to_string(), "30000".to_string()),
+        ("linger.ms".to_string(), "0".to_string()),
+        // Set a very small max request size to trigger the error
+        ("max.request.size".to_string(), "100".to_string()),
+    ]);
+    let config = ProducerConfig::from_properties(&props).expect("Invalid test config");
     let producer = create_producer_from_config(config);
 
     // Create a record larger than 100 bytes
     let large_value = "x".repeat(200);
     let record = ProducerRecord::with_value("too-large-topic".to_string(), Some(large_value));
 
-    let future = producer.send(record).expect("send returns Ok with a failed future");
+    let future = producer.send(record).await.expect("send returns Ok with a failed future");
 
     // The future should be immediately done with a RecordTooLarge error
     assert!(future.is_done(), "RecordTooLarge future should be immediately done");
@@ -295,7 +290,7 @@ async fn test_produce_record_too_large() {
         err
     );
 
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 }
 
 /// Test: Send records, call flush(), verify all futures are complete after flush returns.
@@ -313,12 +308,12 @@ async fn test_flush_sends_pending_records() {
     let mut futures = Vec::new();
     for i in 0..5 {
         let record = ProducerRecord::with_key(topic.clone(), Some(format!("key-{}", i)), Some(format!("value-{}", i)));
-        let future = producer.send(record).expect("send should succeed");
+        let future = producer.send(record).await.expect("send should succeed");
         futures.push(future);
     }
 
     // Flush to ensure all records are sent
-    producer.flush().expect("flush should succeed");
+    producer.flush().await.expect("flush should succeed");
 
     // After flush, all futures should be complete
     for (i, future) in futures.iter().enumerate() {
@@ -330,7 +325,7 @@ async fn test_flush_sends_pending_records() {
         assert!(metadata.offset() >= 0, "Record {} should have a valid offset", i);
     }
 
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 }
 
 /// Test: Send records, call close(), verify records were delivered.
@@ -348,12 +343,12 @@ async fn test_close_flushes_pending() {
     let mut futures = Vec::new();
     for i in 0..3 {
         let record = ProducerRecord::with_key(topic.clone(), Some(format!("key-{}", i)), Some(format!("value-{}", i)));
-        let future = producer.send(record).expect("send should succeed");
+        let future = producer.send(record).await.expect("send should succeed");
         futures.push(future);
     }
 
     // Close should flush pending records
-    producer.close().expect("close should succeed");
+    producer.close().await.expect("close should succeed");
 
     // After close, all futures should be complete
     for (i, future) in futures.iter().enumerate() {

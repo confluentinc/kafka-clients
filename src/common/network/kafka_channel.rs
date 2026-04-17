@@ -34,8 +34,10 @@ use super::channel_state::State;
 use super::{ChannelState, channel_state};
 use super::{InterestOps, TransportLayer};
 
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 
 /// Minimum interval between re-authentication attempts: 1 second in nanoseconds.
 const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: u64 = 1_000_000_000;
@@ -418,6 +420,14 @@ impl KafkaChannel {
         }
     }
 
+    pub(crate) fn transport_readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        self.transport_layer.readable()
+    }
+
+    pub(crate) fn transport_writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        self.transport_layer.writable()
+    }
+
     /// Reads data from the transport layer into the current receive buffer.
     ///
     /// Creates a new `NetworkReceive` if there is no current receive.
@@ -759,6 +769,14 @@ mod tests {
 
         fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             self.open = false;
+            Box::pin(async { Ok(()) })
+        }
+
+        fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 

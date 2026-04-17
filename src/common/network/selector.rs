@@ -25,8 +25,8 @@
 //! Per CLAUDE.md rule 8: single Selector for multiple TCP connections.
 //! The `poll()` method:
 //! 1. Iterates all channels, attempts non-blocking I/O (connect/read/write)
-//! 2. If no progress and timeout > 0, uses `tokio::time::sleep` + `tokio::sync::Notify`
-//!    for wakeup
+//! 2. If no progress and timeout > 0, waits for I/O readiness on any channel
+//!    via `select_all` + `tokio::sync::Notify` for wakeup
 //! 3. Matches Java's sequential iteration over selectedKeys
 //!
 //! # Thread safety
@@ -43,14 +43,17 @@ use super::Selectable;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
 
+use futures_util::future::select_all;
 use indexmap::IndexMap;
 use log::{debug, error, trace};
 use tokio::net::TcpSocket;
 use tokio::sync::Notify;
 
 use std::collections::{HashMap, HashSet, LinkedList};
+use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -554,6 +557,23 @@ impl Selector {
         }
         self.channels.values().next()
     }
+    /// Collect readiness futures for channels interested in I/O.
+    fn collect_readiness_futures(&self) -> Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> {
+        let mut futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> = Vec::new();
+        for (id, channel) in &self.channels {
+            let want_read = channel.ready()
+                && (channel.has_bytes_buffered() || !channel.is_muted())
+                && !self.has_completed_receive(id)
+                && !self.explicitly_muted_channels.contains(id);
+            if want_read {
+                futs.push(channel.transport_readable());
+            }
+            if channel.has_send() && channel.ready() {
+                futs.push(channel.transport_writable());
+            }
+        }
+        futs
+    }
 }
 
 impl Selectable for Selector {
@@ -738,17 +758,29 @@ impl Selectable for Selector {
                 break;
             }
 
-            // No progress — check if we should keep waiting
+            // No progress — wait for I/O readiness on any channel, wakeup,
+            // or deadline. This replaces the former 1ms busy-poll with
+            // proper event-driven readiness, matching Java NIO's
+            // Selector.select(timeout) which uses epoll/kqueue.
             match deadline {
                 Some(dl) if tokio::time::Instant::now() < dl => {
-                    // Yield to let the tokio reactor process I/O events, then
-                    // retry. Sleep 1ms to avoid busy-spinning while still
-                    // responding quickly to data arrival.
+                    let readiness_futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> =
+                        self.collect_readiness_futures();
+
                     let notify = self.notify.clone();
-                    tokio::select! {
-                        biased;
-                        _ = notify.notified() => {},
-                        _ = tokio::time::sleep(std::time::Duration::from_millis(1)) => {},
+                    if readiness_futs.is_empty() {
+                        tokio::select! {
+                            biased;
+                            _ = notify.notified() => {},
+                            _ = tokio::time::sleep_until(dl) => {},
+                        }
+                    } else {
+                        tokio::select! {
+                            biased;
+                            _ = notify.notified() => {},
+                            _ = select_all(readiness_futs) => {},
+                            _ = tokio::time::sleep_until(dl) => {},
+                        }
                     }
                 },
                 _ => break,

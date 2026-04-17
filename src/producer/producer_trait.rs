@@ -18,14 +18,14 @@
 //!
 //! Transactional methods are not included in this phase.
 
-use std::sync::Arc;
 use std::time::Duration;
 
 use crate::common::KafkaError;
+use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::producer::ProducerRecord;
+use crate::producer::RecordMetadata;
 use crate::producer::internals::Callback;
-use crate::producer::internals::FutureRecordMetadata;
 
 /// The interface for the [`KafkaProducer`](super::kafka_producer::KafkaProducer).
 ///
@@ -34,18 +34,20 @@ use crate::producer::internals::FutureRecordMetadata;
 /// Transactional methods (`init_transactions`, `begin_transaction`,
 /// `commit_transaction`, `abort_transaction`, `send_offsets_to_transaction`)
 /// are not included in this phase.
+#[allow(async_fn_in_trait)]
 pub trait Producer<K, V> {
     /// Asynchronously send a record to a topic. Equivalent to
     /// `send_with_callback(record, None)`.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    fn send(&self, record: ProducerRecord<K, V>) -> Result<Arc<FutureRecordMetadata>, KafkaError>;
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError>;
 
     /// Asynchronously send a record to a topic and invoke the provided callback
     /// when the send has been acknowledged.
     ///
     /// The send is asynchronous and this method will return immediately once the record
-    /// has been stored in the buffer of records waiting to be sent.
+    /// has been stored in the buffer of records waiting to be sent. It may block
+    /// waiting for metadata or buffer space.
     ///
     /// # Arguments
     ///
@@ -59,19 +61,19 @@ pub trait Producer<K, V> {
     /// - The producer has already been closed ([`IllegalState`](KafkaError::IllegalState))
     /// - The key or value cannot be serialized ([`Serialization`](KafkaError::Serialization))
     /// - A Kafka-related error occurs
-    fn send_with_callback(
+    async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<Arc<FutureRecordMetadata>, KafkaError>;
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError>;
 
     /// Invoking this method makes all buffered records immediately available to send
-    /// and blocks on the completion of the requests associated with these records.
+    /// and awaits the completion of the requests associated with these records.
     ///
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during flushing.
-    fn flush(&self) -> Result<(), KafkaError>;
+    async fn flush(&self) -> Result<(), KafkaError>;
 
     /// Get the partition metadata for the given topic.
     ///
@@ -82,15 +84,15 @@ pub trait Producer<K, V> {
     /// Returns `Err` if:
     /// - The topic cannot be found within `max.block.ms` ([`Timeout`](KafkaError::Timeout))
     /// - The producer has been closed
-    fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError>;
 
-    /// Close this producer. This method blocks until all previously sent requests
+    /// Close this producer. This method awaits until all previously sent requests
     /// complete.
     ///
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    fn close(&self) -> Result<(), KafkaError>;
+    async fn close(&self) -> Result<(), KafkaError>;
 
     /// Close this producer, waiting up to the given timeout for pending requests
     /// to complete.
@@ -102,5 +104,5 @@ pub trait Producer<K, V> {
     /// # Errors
     ///
     /// Returns `Err` if an error occurs during closing.
-    fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError>;
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError>;
 }

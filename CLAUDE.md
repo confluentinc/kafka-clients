@@ -49,9 +49,10 @@ translate javadoc to rustdoc. Never change the contract of public API.
     Copyright holder for Apache licensed code is Confluent Inc.
 8. **Non-blocking IO**: Use non-blocking IO (Tokio) with a single Selector for multiple TCP connections, as with Java Selector class.
 9. **Concurrency**: 
-    1. Translate callbacks you find in Java client to code that is executed 
+    1. If a method is blocking in Java it should async in Rust
+    2. Translate callbacks you find in Java client to code that is executed 
        after awaiting the corresponding call in Rust.
-    2. In case the original method isn't blocking to await the callback response (for example awaiting a CompletableFuture), use Tokio `task::spawn` to create a coroutine that is detached from current flow.
+    3. In case the original method isn't blocking to await the callback response (for example awaiting a CompletableFuture), use Tokio `task::spawn` to create a coroutine that is detached from current flow.
 10. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.

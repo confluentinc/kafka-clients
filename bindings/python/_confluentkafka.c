@@ -482,6 +482,84 @@ static PyObject* py_Producer_new(PyObject* self, PyObject* args) {
     return PyLong_FromVoidPtr(producer);
 }
 
+static PyObject* py_KafkaProducer_new(PyObject* self, PyObject* args) {
+    PyObject *config_dict;
+    PyObject *producer_obj;
+
+    if (!PyArg_ParseTuple(args, "OO", &config_dict, &producer_obj)) {
+        return NULL;
+    }
+
+    if (!PyDict_Check(config_dict)) {
+        PyErr_SetString(PyExc_TypeError, "config must be a dict");
+        return NULL;
+    }
+
+    kafka_producer_ProducerProperties_t *props =
+        kafka_producer_ProducerProperties_new();
+    if (props == NULL) {
+        PyErr_SetString(PyExc_RuntimeError, "Failed to create ProducerProperties");
+        return NULL;
+    }
+
+    PyObject *key, *value;
+    Py_ssize_t pos = 0;
+    while (PyDict_Next(config_dict, &pos, &key, &value)) {
+        const char *k = PyUnicode_AsUTF8(key);
+        const char *v = PyUnicode_AsUTF8(value);
+        if (k == NULL || v == NULL) {
+            kafka_producer_ProducerProperties_destroy(props);
+            PyErr_SetString(PyExc_TypeError, "config keys and values must be strings");
+            return NULL;
+        }
+        kafka_producer_ProducerProperties_put(props, k, v);
+    }
+
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_t *kafka_producer =
+        kafka_producer_KafkaProducer_new(props, &err);
+    kafka_producer_ProducerProperties_destroy(props);
+
+    if (kafka_producer == NULL) {
+        if (err != NULL) {
+            const char *msg = kafka_common_KafkaError_message(err);
+            PyErr_SetString(PyExc_RuntimeError, msg ? msg : "Failed to create KafkaProducer");
+            kafka_common_KafkaError_destroy(err);
+        } else {
+            PyErr_SetString(PyExc_RuntimeError, "Failed to create KafkaProducer");
+        }
+        return NULL;
+    }
+
+    Producer* producer = (Producer*)PyMem_Malloc(sizeof(Producer));
+    if (!producer) {
+        kafka_producer_Producer_close(kafka_producer, NULL);
+        kafka_producer_Producer_destroy(kafka_producer);
+        return PyErr_NoMemory();
+    }
+
+    memset(producer, 0, sizeof(Producer));
+    producer->closed = 0;
+
+    mtx_init(&producer->record_batches_mutex, mtx_plain);
+    cnd_init(&producer->record_batches_new_record_cnd);
+
+    mtx_init(&producer->pending_batches_mutex, mtx_plain);
+    cnd_init(&producer->pending_batches_available_cnd);
+    producer->next_batches_to_send = NULL;
+    producer->last_accumulating_batch = NULL;
+    producer->next_pending_batch = NULL;
+    producer->last_pending_batch = NULL;
+    producer->py_producer = producer_obj;
+    Py_INCREF(producer->py_producer);
+
+    producer->producer = kafka_producer;
+
+    thrd_create(&producer->send_thread, Producer_send_thread, producer);
+
+    return PyLong_FromVoidPtr(producer);
+}
+
 static PyObject* py_Producer_send(PyObject* self, PyObject* args) {
     unsigned long long producer_ptr;
     PyObject *record_obj, *complete_cb;
@@ -565,7 +643,7 @@ static PyObject* py_Producer_close(PyObject* self, PyObject* args) {
     cnd_destroy(&producer->pending_batches_available_cnd);
     mtx_destroy(&producer->pending_batches_mutex);
     Py_DECREF(producer->py_producer);
-    kafka_producer_Producer_close(producer->producer);
+    kafka_producer_Producer_close(producer->producer, NULL);
     kafka_producer_Producer_destroy(producer->producer);
     PyMem_Free(producer);
 
@@ -632,7 +710,8 @@ static PyObject* py_Producer_flush(PyObject* self, PyObject* args) {
     }
 
     Producer* producer = (Producer*)producer_ptr;
-    kafka_common_KafkaError_t *err = kafka_producer_Producer_flush(producer->producer);
+    kafka_common_KafkaError_t *err = NULL;
+    kafka_producer_Producer_flush(producer->producer, &err);
     if (err != NULL) {
         return PyLong_FromUnsignedLongLong((unsigned long long)(uintptr_t)err);
     }
@@ -720,7 +799,8 @@ static PyObject* py_KafkaError_destroy(PyObject* self, PyObject* args) {
 
 // Method definitions
 static PyMethodDef ProducerNativeMethods[] = {
-    {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching producer"},
+    {"Producer_new", py_Producer_new, METH_VARARGS, "Create batching mock producer"},
+    {"KafkaProducer_new", py_KafkaProducer_new, METH_VARARGS, "Create batching Kafka producer"},
     {"Producer_send", py_Producer_send, METH_VARARGS, "Send record to batch"},
     {"Producer_close", py_Producer_close, METH_VARARGS, "Close batching producer"},
     {"Producer_flush", py_Producer_flush, METH_VARARGS, "Flush producer"},

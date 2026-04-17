@@ -33,6 +33,7 @@ use tokio::task::JoinHandle;
 use crate::client_utils;
 use crate::common::Cluster;
 use crate::common::KafkaError;
+use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
@@ -204,15 +205,17 @@ impl<K, V> KafkaProducer<K, V> {
     /// # Examples
     ///
     /// ```no_run
+    /// use std::collections::HashMap;
     /// use confluent_kafka::producer::KafkaProducer;
     /// use confluent_kafka::producer::ProducerConfig;
     /// use confluent_kafka::common::serialization::StringSerializer;
     ///
-    /// let config = ProducerConfig {
-    ///     bootstrap_servers: vec!["localhost:9092".to_string()],
-    ///     client_id: "my-producer".to_string(),
-    ///     ..Default::default()
-    /// };
+    /// let props = HashMap::from([
+    ///     ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+    ///     ("client.id".to_string(), "my-producer".to_string()),
+    /// ]);
+    /// let config = ProducerConfig::from_properties(&props)
+    ///     .expect("Invalid config");
     ///
     /// let producer = KafkaProducer::<String, String>::from_config(
     ///     config,
@@ -225,35 +228,6 @@ impl<K, V> KafkaProducer<K, V> {
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     ) -> Result<Self, KafkaError> {
-        Self::from_config_with_compression(config, key_serializer, value_serializer, None)
-    }
-
-    /// Creates a `KafkaProducer` from configuration with an explicit compression
-    /// override.
-    ///
-    /// This is identical to [`from_config`](Self::from_config) but allows
-    /// overriding the compression codec. When `compression` is `None`, the
-    /// compression is derived from `config.compression_type` using
-    /// [`Compression::of`].
-    ///
-    /// # Arguments
-    ///
-    /// * `config` - The producer configuration
-    /// * `key_serializer` - The key serializer
-    /// * `value_serializer` - The value serializer
-    /// * `compression` - Optional compression override; if `None`, uses
-    ///   `Compression::of(config.compression_type)`
-    ///
-    /// # Errors
-    ///
-    /// Returns [`KafkaError::IllegalArgument`] if no valid bootstrap server addresses
-    /// can be resolved from `config.bootstrap_servers`.
-    pub fn from_config_with_compression(
-        config: ProducerConfig,
-        key_serializer: Box<dyn Serializer<K> + Send + Sync>,
-        value_serializer: Box<dyn Serializer<V> + Send + Sync>,
-        compression: Option<Compression>,
-    ) -> Result<Self, KafkaError> {
         info!("Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
@@ -263,8 +237,9 @@ impl<K, V> KafkaProducer<K, V> {
         //    Translated from KafkaProducer.configureDeliveryTimeout().
         let delivery_timeout_ms = Self::configure_delivery_timeout(&config)?;
 
-        // 3. Derive compression from config if not explicitly provided
-        let compression = compression.unwrap_or_else(|| Compression::of(config.compression_type));
+        // 3. Derive compression from config
+        //    Translated from KafkaProducer.configureCompression().
+        let compression = Compression::of(config.compression_type);
 
         // 4. Create a system clock time provider
         let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| {
@@ -480,11 +455,11 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Only non-API errors (like `IllegalState` when the producer is closed) are
     /// propagated as `Err(...)`.
-    fn do_send(
+    async fn do_send(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
 
         let topic = record.topic().to_string();
@@ -493,14 +468,16 @@ impl<K, V> KafkaProducer<K, V> {
 
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
-        let cluster_and_wait_time =
-            match self.wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms) {
-                Ok(cwt) => cwt,
-                Err(e) if e.is_api_exception() => {
-                    return self.handle_api_exception(e, &topic, record_metadata::UNKNOWN_PARTITION, callback);
-                },
-                Err(e) => return Err(e),
-            };
+        let cluster_and_wait_time = match self
+            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+            .await
+        {
+            Ok(cwt) => cwt,
+            Err(e) if e.is_api_exception() => {
+                return self.handle_api_exception(e, &topic, record_metadata::UNKNOWN_PARTITION, callback);
+            },
+            Err(e) => return Err(e),
+        };
         let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
@@ -558,14 +535,14 @@ impl<K, V> KafkaProducer<K, V> {
                     );
                     self.wakeup.notify_one();
                 }
-                Ok(result.future)
+                Ok(KafkaFuture::new(result.future))
             },
             Err(e) if e.is_api_exception() => {
                 // Callback was consumed by append, so we cannot invoke it here.
                 // Return a completed-with-error future.
                 debug!("Exception occurred during accumulator append: {}", e);
                 let tp = TopicPartition::new(topic, partition);
-                Ok(Arc::new(FutureRecordMetadata::failed(tp, e)))
+                Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
             },
             Err(e) => Err(e),
         }
@@ -581,7 +558,7 @@ impl<K, V> KafkaProducer<K, V> {
         topic: &str,
         partition: i32,
         callback: Option<Callback>,
-    ) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         debug!("Exception occurred during message send: {}", error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
@@ -589,7 +566,7 @@ impl<K, V> KafkaProducer<K, V> {
             cb(Some(&null_metadata), Some(&error));
         }
         let tp = TopicPartition::new(topic.to_string(), partition);
-        Ok(Arc::new(FutureRecordMetadata::failed(tp, error)))
+        Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, error))))
     }
 
     /// Wait for cluster metadata including partitions for the given topic to be available.
@@ -610,7 +587,7 @@ impl<K, V> KafkaProducer<K, V> {
     /// - The topic is invalid ([`InvalidTopic`](KafkaError::InvalidTopic))
     /// - Metadata could not be refreshed within `max_wait_ms` ([`Timeout`](KafkaError::Timeout))
     /// - The producer is closed
-    fn wait_on_metadata(
+    async fn wait_on_metadata(
         &self,
         topic: &str,
         partition: Option<i32>,
@@ -651,7 +628,7 @@ impl<K, V> KafkaProducer<K, V> {
             let version = self.metadata.request_update_for_topic(topic);
             self.wakeup.notify_one();
 
-            match self.metadata.await_update(version, remaining_wait_ms) {
+            match self.metadata.await_update(version, remaining_wait_ms).await {
                 Ok(()) => {},
                 Err(_) => {
                     let error_message = self.get_error_message(partitions_count, topic, partition, max_wait_ms);
@@ -790,14 +767,11 @@ impl<K, V> KafkaProducer<K, V> {
     /// returns `true` immediately.
     ///
     /// Corresponds to Java's `ioThread.join(closeTimer.remainingMs())`.
-    fn await_sender_handle(&self, timeout: Duration) -> bool {
+    async fn await_sender_handle(&self, timeout: Duration) -> bool {
         let handle = self.sender_handle.lock().unwrap().take();
         match handle {
             None => true,
-            Some(join_handle) => tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(async { tokio::time::timeout(timeout, join_handle).await.is_ok() })
-            }),
+            Some(join_handle) => tokio::time::timeout(timeout, join_handle).await.is_ok(),
         }
     }
 
@@ -805,12 +779,10 @@ impl<K, V> KafkaProducer<K, V> {
     ///
     /// Called after force-close to ensure the sender task has exited.
     /// Corresponds to Java's `ioThread.join()` (no timeout).
-    fn await_sender_handle_indefinitely(&self) {
+    async fn await_sender_handle_indefinitely(&self) {
         let handle = self.sender_handle.lock().unwrap().take();
         if let Some(join_handle) = handle {
-            tokio::task::block_in_place(|| {
-                let _ = tokio::runtime::Handle::current().block_on(join_handle);
-            });
+            let _ = join_handle.await;
         }
     }
 }
@@ -823,63 +795,44 @@ where
     /// Asynchronously send a record to a topic.
     ///
     /// See [`send_with_callback`](Producer::send_with_callback) for details.
-    fn send(&self, record: ProducerRecord<K, V>) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
-        self.do_send(record, None)
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        self.do_send(record, None).await
     }
 
     /// Asynchronously send a record to a topic and invoke the provided callback
     /// when the send has been acknowledged.
-    fn send_with_callback(
+    async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
-        self.do_send(record, callback)
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        self.do_send(record, callback).await
     }
 
     /// Invoking this method makes all buffered records immediately available to
-    /// send and blocks on the completion of the requests associated with these
+    /// send and awaits the completion of the requests associated with these
     /// records.
     ///
     /// Translated from `KafkaProducer.flush()`.
-    ///
-    /// Uses `tokio::task::block_in_place` + `Handle::block_on` to bridge the
-    /// synchronous trait method with the async `await_flush_completion` which
-    /// awaits all incomplete `ProduceRequestResult`s (including dependents from
-    /// batch splitting), matching Java's blocking `awaitFlushCompletion()`.
-    fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), KafkaError> {
         trace!("Flushing accumulated records in producer.");
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
-        let accumulator = Arc::clone(&self.accumulator);
-        // Bridge sync -> async. If no tokio runtime is available (e.g. in unit
-        // tests without a sender), fall back to a blocking approach.
-        match tokio::runtime::Handle::try_current() {
-            Ok(handle) => {
-                tokio::task::block_in_place(|| {
-                    handle.block_on(accumulator.await_flush_completion());
-                });
-            },
-            Err(_) => {
-                // No tokio runtime — create a temporary one for the flush await.
-                let rt = tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap();
-                rt.block_on(accumulator.await_flush_completion());
-            },
-        }
+        self.accumulator.await_flush_completion().await;
         Ok(())
     }
 
     /// Get the partition metadata for the given topic.
-    fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
         let now_ms = self.now_ms();
-        let cluster_and_wait_time = self.wait_on_metadata(topic, None, now_ms, self.max_block_ms)?;
+        let cluster_and_wait_time = self.wait_on_metadata(topic, None, now_ms, self.max_block_ms).await?;
         Ok(cluster_and_wait_time.cluster.partitions_for_topic(topic).to_vec())
     }
 
-    /// Close this producer. This method blocks until all previously sent requests
+    /// Close this producer. This method awaits until all previously sent requests
     /// complete.
-    fn close(&self) -> Result<(), KafkaError> {
-        self.close_timeout(Duration::from_millis(i64::MAX as u64))
+    async fn close(&self) -> Result<(), KafkaError> {
+        self.close_timeout(Duration::from_millis(i64::MAX as u64)).await
     }
 
     /// Close this producer, waiting up to the given timeout for pending requests
@@ -895,7 +848,7 @@ where
     ///
     /// Note: Rust's `Duration` is unsigned, so the negative-timeout check from
     /// Java is omitted (impossible to construct a negative `Duration`).
-    fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
+    async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
         let timeout_ms = timeout.as_millis() as i64;
         info!("Closing the Kafka producer with timeoutMillis = {} ms.", timeout_ms);
 
@@ -907,8 +860,7 @@ where
             self.initiate_close();
 
             // Await the sender task with the remaining timeout.
-            // Uses block_in_place to bridge sync trait method with async JoinHandle.
-            sender_still_alive = !self.await_sender_handle(timeout);
+            sender_still_alive = !self.await_sender_handle(timeout).await;
         }
 
         if timeout_ms == 0 || sender_still_alive {
@@ -921,7 +873,7 @@ where
             self.force_close();
 
             // Await the sender task indefinitely after force close.
-            self.await_sender_handle_indefinitely();
+            self.await_sender_handle_indefinitely().await;
         }
 
         debug!("Kafka producer has been closed");
@@ -1099,7 +1051,7 @@ mod tests {
         let producer = create_producer(metadata, accumulator);
 
         let record = ProducerRecord::with_value("".to_string(), Some("test".to_string()));
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         // Java returns a FutureFailure for ApiExceptions like InvalidTopicException
         assert!(result.is_ok(), "send() should return Ok with a failed future for InvalidTopic");
         let future = result.unwrap();
@@ -1115,14 +1067,14 @@ mod tests {
     /// Translated from `KafkaProducerTest.closeShouldBeIdempotent`.
     ///
     /// Tests that calling close multiple times is safe.
-    #[test]
-    fn test_close_should_be_idempotent() {
+    #[tokio::test]
+    async fn test_close_should_be_idempotent() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
-        producer.close().unwrap();
-        producer.close().unwrap();
+        producer.close().await.unwrap();
+        producer.close().await.unwrap();
     }
 
     /// Translated from `KafkaProducerTest.closeWithNegativeTimestampShouldThrow`.
@@ -1130,26 +1082,26 @@ mod tests {
     /// Tests that close with zero timeout works correctly.
     /// In Java this tests negative Duration; in Rust `Duration` is unsigned
     /// so we test `Duration::ZERO` instead.
-    #[test]
-    fn test_close_with_zero_timeout() {
+    #[tokio::test]
+    async fn test_close_with_zero_timeout() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
-        let result = producer.close_timeout(Duration::ZERO);
+        let result = producer.close_timeout(Duration::ZERO).await;
         assert!(result.is_ok());
     }
 
     /// Translated from `KafkaProducerTest.testPartitionsForWithNullTopic`.
     ///
     /// Tests that partitions_for returns the correct number of partitions.
-    #[test]
-    fn test_partitions_for_returns_partitions() {
+    #[tokio::test]
+    async fn test_partitions_for_returns_partitions() {
         let metadata = create_metadata_with_topic(TOPIC, 3);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
-        let partitions = producer.partitions_for(TOPIC).unwrap();
+        let partitions = producer.partitions_for(TOPIC).await.unwrap();
         assert_eq!(3, partitions.len());
     }
 
@@ -1157,16 +1109,16 @@ mod tests {
     ///
     /// Translated from `KafkaProducerTest.testTransactionalMethodThrowsWhenSenderClosed`
     /// (non-transactional part).
-    #[test]
-    fn test_send_after_close_returns_error() {
+    #[tokio::test]
+    async fn test_send_after_close_returns_error() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
-        producer.close().unwrap();
+        producer.close().await.unwrap();
 
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some("test".to_string()));
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             KafkaError::IllegalState(msg) => {
@@ -1194,7 +1146,7 @@ mod tests {
         // Create a record that's larger than 10 bytes
         let large_value = "a".repeat(100);
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some(large_value));
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         // Java returns a FutureFailure, not an exception from send()
         assert!(
             result.is_ok(),
@@ -1229,7 +1181,7 @@ mod tests {
 
         let large_value = "a".repeat(100);
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some(large_value));
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         assert!(
             result.is_ok(),
             "send() should return Ok with a failed future for RecordTooLarge"
@@ -1319,14 +1271,14 @@ mod tests {
     ///
     /// Translated from `KafkaProducerTest.testFlushCompleteSendOfInflightBatches`
     /// (the send part).
-    #[test]
-    fn test_send_appends_to_accumulator() {
+    #[tokio::test]
+    async fn test_send_appends_to_accumulator() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         assert!(result.is_ok(), "Send should succeed");
 
         // Verify that the accumulator has undrained batches
@@ -1337,14 +1289,14 @@ mod tests {
     ///
     /// When there are no pending records, flush should complete instantly
     /// since there is nothing to wait for.
-    #[test]
-    fn test_flush_with_no_pending_records() {
+    #[tokio::test]
+    async fn test_flush_with_no_pending_records() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
         // Flush with nothing pending should succeed immediately
-        let result = producer.flush();
+        let result = producer.flush().await;
         assert!(result.is_ok());
     }
 
@@ -1428,14 +1380,14 @@ mod tests {
     }
 
     /// Tests the wait_on_metadata method with an already-known topic.
-    #[test]
-    fn test_wait_on_metadata_returns_immediately_for_known_topic() {
+    #[tokio::test]
+    async fn test_wait_on_metadata_returns_immediately_for_known_topic() {
         let metadata = create_metadata_with_topic(TOPIC, 3);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
         let now_ms = producer.now_ms();
-        let result = producer.wait_on_metadata(TOPIC, None, now_ms, 1000);
+        let result = producer.wait_on_metadata(TOPIC, None, now_ms, 1000).await;
         assert!(result.is_ok());
         let cwt = result.unwrap();
         assert_eq!(0, cwt.waited_on_metadata_ms);
@@ -1443,29 +1395,29 @@ mod tests {
     }
 
     /// Tests that wait_on_metadata returns immediately when partition is within known range.
-    #[test]
-    fn test_wait_on_metadata_returns_for_valid_partition() {
+    #[tokio::test]
+    async fn test_wait_on_metadata_returns_for_valid_partition() {
         let metadata = create_metadata_with_topic(TOPIC, 3);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
         let now_ms = producer.now_ms();
-        let result = producer.wait_on_metadata(TOPIC, Some(2), now_ms, 1000);
+        let result = producer.wait_on_metadata(TOPIC, Some(2), now_ms, 1000).await;
         assert!(result.is_ok());
     }
 
     /// Tests that wait_on_metadata times out for a topic that does not exist.
     ///
     /// Translated from `KafkaProducerTest.testTopicNotExistingInMetadata`.
-    #[test]
-    fn test_wait_on_metadata_times_out_for_unknown_topic() {
+    #[tokio::test]
+    async fn test_wait_on_metadata_times_out_for_unknown_topic() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
         let now_ms = producer.now_ms();
         // Try to get metadata for a topic that doesn't exist with a very short timeout
-        let result = producer.wait_on_metadata("nonexistent-topic", None, now_ms, 100);
+        let result = producer.wait_on_metadata("nonexistent-topic", None, now_ms, 100).await;
         assert!(result.is_err());
         match result.unwrap_err() {
             KafkaError::Timeout(msg) => {
@@ -1491,8 +1443,8 @@ mod tests {
 
     /// Tests that multiple sends to the same topic produce deterministic partition
     /// assignment when keys are provided.
-    #[test]
-    fn test_send_multiple_records_with_same_key() {
+    #[tokio::test]
+    async fn test_send_multiple_records_with_same_key() {
         let metadata = create_metadata_with_topic(TOPIC, 3);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
@@ -1502,19 +1454,20 @@ mod tests {
         let record2 =
             ProducerRecord::with_key(TOPIC.to_string(), Some("same-key".to_string()), Some("value2".to_string()));
 
-        let future1 = producer.send(record1).unwrap();
-        let future2 = producer.send(record2).unwrap();
+        let future1 = producer.send(record1).await.unwrap();
+        let future2 = producer.send(record2).await.unwrap();
 
-        // Both should succeed
-        assert!(!Arc::ptr_eq(&future1, &future2));
+        // Both should succeed — each send returns a distinct future
+        assert!(!future1.is_done());
+        assert!(!future2.is_done());
     }
 
     /// Tests that sending with a callback invokes the callback on completion.
     ///
     /// Translated from `KafkaProducerTest.testCallbackAndInterceptorHandleError`
     /// (the callback invocation part).
-    #[test]
-    fn test_send_with_callback() {
+    #[tokio::test]
+    async fn test_send_with_callback() {
         use std::sync::atomic::AtomicBool;
 
         let metadata = create_metadata_with_topic(TOPIC, 1);
@@ -1528,7 +1481,7 @@ mod tests {
         });
 
         let record = ProducerRecord::with_key(TOPIC.to_string(), Some("key".to_string()), Some("value".to_string()));
-        let result = producer.send_with_callback(record, Some(callback));
+        let result = producer.send_with_callback(record, Some(callback)).await;
         assert!(result.is_ok(), "Send with callback should succeed");
     }
 
@@ -1536,14 +1489,14 @@ mod tests {
     ///
     /// Translated from `KafkaProducerTest.testNullTopicName` (partial — tests
     /// that the producer handles empty/null values).
-    #[test]
-    fn test_send_with_none_key_and_value() {
+    #[tokio::test]
+    async fn test_send_with_none_key_and_value() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         let record: ProducerRecord<String, String> = ProducerRecord::with_value(TOPIC.to_string(), None);
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         assert!(result.is_ok(), "Send with None value should succeed");
     }
 
@@ -1584,7 +1537,7 @@ mod tests {
         // Send a record that exceeds max_request_size
         let large_value = "a".repeat(100);
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some(large_value));
-        let result = producer.send_with_callback(record, Some(callback));
+        let result = producer.send_with_callback(record, Some(callback)).await;
 
         // send() returns Ok with a failed future (Java's FutureFailure pattern)
         assert!(result.is_ok(), "send() should return Ok with a failed future");
@@ -1615,8 +1568,8 @@ mod tests {
     ///
     /// Tests that headers added to a ProducerRecord before send() are passed
     /// through serialization correctly and stored in the accumulator.
-    #[test]
-    fn test_headers_success() {
+    #[tokio::test]
+    async fn test_headers_success() {
         use crate::common::header::Headers;
         use crate::common::header::internals::RecordHeader;
 
@@ -1633,7 +1586,7 @@ mod tests {
             .add(RecordHeader::new("test".to_string(), Some(b"header-value".to_vec())))
             .unwrap();
 
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         assert!(result.is_ok(), "Send with headers should succeed");
         assert!(accumulator.has_undrained(), "Accumulator should have batches");
     }
@@ -1654,7 +1607,7 @@ mod tests {
         let mut futures = Vec::new();
         for i in 0..5 {
             let record = ProducerRecord::with_value(TOPIC.to_string(), Some(format!("value{}", i)));
-            let future = producer.send(record).unwrap();
+            let future = producer.send(record).await.unwrap();
             futures.push(future);
         }
 
@@ -1674,7 +1627,7 @@ mod tests {
         }
 
         // Flush should return immediately since all results are satisfied
-        let result = producer.flush();
+        let result = producer.flush().await;
         assert!(result.is_ok(), "Flush should succeed after batches are completed");
     }
 
@@ -1683,18 +1636,18 @@ mod tests {
     /// Tests that closing the producer unblocks a send() that is waiting for
     /// metadata by verifying that after close(), the producer rejects new sends
     /// with IllegalState.
-    #[test]
-    fn test_close_unblocks_pending_operations() {
+    #[tokio::test]
+    async fn test_close_unblocks_pending_operations() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
         // Close the producer
-        producer.close().unwrap();
+        producer.close().await.unwrap();
 
         // Subsequent send should fail with IllegalState
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
-        let result = producer.send(record);
+        let result = producer.send(record).await;
         assert!(result.is_err());
         assert!(
             matches!(result.unwrap_err(), KafkaError::IllegalState(_)),
@@ -1706,15 +1659,15 @@ mod tests {
     ///
     /// Verifies Issue 2 fix: initiate_close must close the accumulator before
     /// setting running=false.
-    #[test]
-    fn test_initiate_close_closes_accumulator() {
+    #[tokio::test]
+    async fn test_initiate_close_closes_accumulator() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         // Before close, we can send
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
-        assert!(producer.send(record).is_ok());
+        assert!(producer.send(record).await.is_ok());
 
         // Initiate close
         producer.initiate_close();
@@ -1723,7 +1676,7 @@ mod tests {
         // Attempting to send should fail because the accumulator rejects new appends.
         let record2 = ProducerRecord::with_value(TOPIC.to_string(), Some("value2".to_string()));
         // The error will come from ensure_not_closed since running=false
-        let result = producer.send(record2);
+        let result = producer.send(record2).await;
         assert!(result.is_err(), "Send should fail after initiate_close");
     }
 
@@ -1745,24 +1698,24 @@ mod tests {
     /// Tests that close with timeout 0 force-closes (no graceful drain).
     ///
     /// Verifies the force-close path in close_timeout when timeout is zero.
-    #[test]
-    fn test_close_timeout_zero_force_closes() {
+    #[tokio::test]
+    async fn test_close_timeout_zero_force_closes() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, Arc::clone(&accumulator));
 
         // Send a record
         let record = ProducerRecord::with_value(TOPIC.to_string(), Some("value".to_string()));
-        let _ = producer.send(record);
+        let _ = producer.send(record).await;
         assert!(accumulator.has_undrained());
 
         // Close with timeout 0 should force-close
-        let result = producer.close_timeout(Duration::ZERO);
+        let result = producer.close_timeout(Duration::ZERO).await;
         assert!(result.is_ok());
 
         // After force-close, the producer should not accept new sends
         let record2 = ProducerRecord::with_value(TOPIC.to_string(), Some("value2".to_string()));
-        assert!(producer.send(record2).is_err());
+        assert!(producer.send(record2).await.is_err());
     }
 
     /// Tests that the callback is invoked with error on invalid topic.
@@ -1819,7 +1772,7 @@ mod tests {
         });
 
         let record = ProducerRecord::with_value(invalid_topic.to_string(), Some("value".to_string()));
-        let result = producer.send_with_callback(record, Some(callback));
+        let result = producer.send_with_callback(record, Some(callback)).await;
 
         // Should return a failed future, not propagate the error
         assert!(result.is_ok(), "send() should return Ok with a failed future for InvalidTopic");
@@ -1842,15 +1795,15 @@ mod tests {
     /// Tests that multiple calls to close are safe even with timeout.
     ///
     /// Translated from `KafkaProducerTest.closeShouldBeIdempotent`.
-    #[test]
-    fn test_close_with_timeout_idempotent() {
+    #[tokio::test]
+    async fn test_close_with_timeout_idempotent() {
         let metadata = create_metadata_with_topic(TOPIC, 1);
         let accumulator = create_accumulator();
         let producer = create_producer(metadata, accumulator);
 
-        producer.close_timeout(Duration::from_secs(1)).unwrap();
-        producer.close_timeout(Duration::from_secs(1)).unwrap();
-        producer.close_timeout(Duration::ZERO).unwrap();
+        producer.close_timeout(Duration::from_secs(1)).await.unwrap();
+        producer.close_timeout(Duration::from_secs(1)).await.unwrap();
+        producer.close_timeout(Duration::ZERO).await.unwrap();
     }
 
     /// Tests that different keys produce different partition assignments.

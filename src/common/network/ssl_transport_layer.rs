@@ -277,6 +277,32 @@ impl TransportLayer for SslTransportLayer {
         })
     }
 
+    fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            match &self.state {
+                SslState::Ready(tls_stream) => {
+                    let conn: &rustls::ClientConnection = tls_stream.get_ref().1;
+                    if !conn.wants_read() {
+                        return Ok(());
+                    }
+                    tls_stream.get_ref().0.readable().await
+                },
+                SslState::Handshaking { stream: Some(s), .. } => s.readable().await,
+                _ => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+            }
+        })
+    }
+
+    fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            match &self.state {
+                SslState::Ready(tls_stream) => tls_stream.get_ref().0.writable().await,
+                SslState::Handshaking { stream: Some(s), .. } => s.writable().await,
+                _ => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+            }
+        })
+    }
+
     /// Reads decrypted data from the TLS stream.
     ///
     /// Uses `AsyncReadExt::read()` since `TlsStream` doesn't expose

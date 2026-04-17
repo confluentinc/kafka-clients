@@ -11,7 +11,7 @@ from threading import Thread
 
 from performance_common import Metrics
 from concurrent.futures import CancelledError, Future
-from producer import (Producer, ProducerRecord, RecordMetadata)
+from producer import (KafkaProducer, ProducerRecord, RecordMetadata)
 from confluent_kafka import Producer as CKProducer, Message as CKMessage
 
 
@@ -246,7 +246,8 @@ def print_configuration(conf):
 def v3_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=False)
     print_configuration(conf)
-    return Producer()
+    conf = {k: str(v) for k, v in conf.items()}
+    return KafkaProducer(conf)
 
 def v2_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)

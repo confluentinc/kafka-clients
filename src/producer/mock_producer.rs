@@ -38,6 +38,7 @@ use super::internals::FutureRecordMetadata;
 use super::internals::ProduceRequestResult;
 use crate::common::Cluster;
 use crate::common::KafkaError;
+use crate::common::KafkaFuture;
 use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::record::RecordBatch;
@@ -96,8 +97,7 @@ impl Completion {
     fn complete(&self, error: Option<KafkaError>) {
         if let Some(e) = error {
             let tp = self.topic_partition.clone();
-            let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> =
-                Arc::new(move |_| Some(e.clone()));
+            let error_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(move |_| Some(e.clone()));
             self.result.set(-1, RecordBatch::NO_TIMESTAMP, Some(error_fn));
             // In Java, callback is invoked here with error metadata.
             // Callbacks are out of scope for now.
@@ -286,15 +286,15 @@ impl<K, V> Default for MockProducer<K, V> {
 }
 
 impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
-    fn send(&self, record: ProducerRecord<K, V>) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
-        self.send_with_callback(record, None)
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        self.send_with_callback(record, None).await
     }
 
-    fn send_with_callback(
+    async fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Callback>,
-    ) -> Result<Arc<FutureRecordMetadata>, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.closed {
@@ -333,10 +333,10 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
             inner.completions.push_back(completion);
         }
 
-        Ok(future)
+        Ok(KafkaFuture::new(future))
     }
 
-    fn flush(&self) -> Result<(), KafkaError> {
+    async fn flush(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
 
         if inner.closed {
@@ -354,7 +354,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
+    async fn partitions_for(&self, topic: &str) -> Result<Vec<PartitionInfo>, KafkaError> {
         let inner = self.inner.lock().unwrap();
 
         if let Some(err) = inner.partitions_for_error.as_ref() {
@@ -364,7 +364,7 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(inner.cluster.partitions_for_topic(topic).to_vec())
     }
 
-    fn close(&self) -> Result<(), KafkaError> {
+    async fn close(&self) -> Result<(), KafkaError> {
         let mut inner = self.inner.lock().unwrap();
 
         if let Some(err) = inner.close_error.as_ref() {
@@ -375,8 +375,8 @@ impl<K: Send + Sync, V: Send + Sync> Producer<K, V> for MockProducer<K, V> {
         Ok(())
     }
 
-    fn close_timeout(&self, _timeout: Duration) -> Result<(), KafkaError> {
-        self.close()
+    async fn close_timeout(&self, _timeout: Duration) -> Result<(), KafkaError> {
+        self.close().await
     }
 }
 
@@ -423,7 +423,7 @@ mod tests {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         let record1 = make_record("topic", "key1", "value1");
 
-        let future = producer.send(record1.clone()).unwrap();
+        let future = producer.send(record1.clone()).await.unwrap();
         assert!(future.is_done(), "Send should be immediately complete");
 
         let metadata = future.get().await;
@@ -470,13 +470,13 @@ mod tests {
             Some("value".to_string()),
         )
         .unwrap();
-        let future = producer.send(record).unwrap();
+        let future = producer.send(record).await.unwrap();
         let md = future.get().await.unwrap();
         assert_eq!(1, md.partition(), "Partition should be correct");
 
         producer.clear();
         assert_eq!(0, producer.history().len(), "Clear should erase our history");
-        producer.close().unwrap();
+        producer.close().await.unwrap();
     }
 
     /// Translated from `MockProducerTest.testManualCompletion`.
@@ -486,10 +486,10 @@ mod tests {
         let record1 = make_record("topic", "key1", "value1");
         let record2 = make_record("topic", "key2", "value2");
 
-        let md1 = producer.send(record1.clone()).unwrap();
+        let md1 = producer.send(record1.clone()).await.unwrap();
         assert!(!md1.is_done(), "Send shouldn't have completed");
 
-        let md2 = producer.send(record2.clone()).unwrap();
+        let md2 = producer.send(record2.clone()).await.unwrap();
         assert!(!md2.is_done(), "Send shouldn't have completed");
 
         assert!(producer.complete_next(), "Complete the first request");
@@ -507,10 +507,10 @@ mod tests {
         assert!(!producer.complete_next(), "No more requests to complete");
 
         // Test flush completes remaining sends
-        let md3 = producer.send(record1).unwrap();
-        let md4 = producer.send(record2).unwrap();
+        let md3 = producer.send(record1).await.unwrap();
+        let md4 = producer.send(record2).await.unwrap();
         assert!(!md3.is_done() && !md4.is_done(), "Requests should not be completed.");
-        producer.flush().unwrap();
+        producer.flush().await.unwrap();
         assert!(md3.is_done() && md4.is_done(), "Requests should be completed.");
     }
 
@@ -581,22 +581,22 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Translated from `MockProducerTest.shouldThrowOnSendIfProducerIsClosed`.
-    #[test]
-    fn should_throw_on_send_if_producer_is_closed() {
+    #[tokio::test]
+    async fn should_throw_on_send_if_producer_is_closed() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.close().unwrap();
-        let result = producer.send(make_record("topic", "key1", "value1"));
+        producer.close().await.unwrap();
+        let result = producer.send(make_record("topic", "key1", "value1")).await;
         assert!(result.is_err());
         let err = result.err().unwrap();
         assert!(err.message().contains("MockProducer is already closed"));
     }
 
     /// Translated from `MockProducerTest.shouldThrowOnFlushProducerIfProducerIsClosed`.
-    #[test]
-    fn should_throw_on_flush_if_producer_is_closed() {
+    #[tokio::test]
+    async fn should_throw_on_flush_if_producer_is_closed() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.close().unwrap();
-        let result = producer.flush();
+        producer.close().await.unwrap();
+        let result = producer.flush().await;
         assert!(result.is_err());
         assert!(result.unwrap_err().message().contains("MockProducer is already closed"));
     }
@@ -609,18 +609,18 @@ mod tests {
     }
 
     /// Translated from `MockProducerTest.shouldBeFlushedWithAutoCompleteIfBufferedRecords`.
-    #[test]
-    fn should_be_flushed_with_auto_complete_if_buffered_records() {
+    #[tokio::test]
+    async fn should_be_flushed_with_auto_complete_if_buffered_records() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.send(make_record("topic", "key1", "value1")).unwrap();
+        producer.send(make_record("topic", "key1", "value1")).await.unwrap();
         assert!(producer.flushed());
     }
 
     /// Translated from `MockProducerTest.shouldNotBeFlushedWithNoAutoCompleteIfBufferedRecords`.
-    #[test]
-    fn should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
+    #[tokio::test]
+    async fn should_not_be_flushed_with_no_auto_complete_if_buffered_records() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-        producer.send(make_record("topic", "key1", "value1")).unwrap();
+        producer.send(make_record("topic", "key1", "value1")).await.unwrap();
         assert!(!producer.flushed());
     }
 
@@ -629,11 +629,11 @@ mod tests {
     /// Note: The Java test name is misleading — it tests that after flush,
     /// `flushed()` returns `true` (not `false`). The Rust version matches the
     /// actual Java assertion: `assertTrue(producer.flushed())`.
-    #[test]
-    fn should_be_flushed_after_flush() {
+    #[tokio::test]
+    async fn should_be_flushed_after_flush() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
-        producer.send(make_record("topic", "key1", "value1")).unwrap();
-        producer.flush().unwrap();
+        producer.send(make_record("topic", "key1", "value1")).await.unwrap();
+        producer.flush().await.unwrap();
         assert!(producer.flushed());
     }
 
@@ -647,7 +647,7 @@ mod tests {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(false);
         let record2 = make_record("topic", "key2", "value2");
 
-        let future = producer.send(record2).unwrap();
+        let future = producer.send(record2).await.unwrap();
         let e = KafkaError::illegal_argument("dummy exception");
         assert!(producer.error_next(e), "Complete the request with an error");
 
@@ -660,14 +660,14 @@ mod tests {
     // -----------------------------------------------------------------------
 
     /// Tests that `Default` creates a producer with `auto_complete=false`.
-    #[test]
-    fn test_default() {
+    #[tokio::test]
+    async fn test_default() {
         let producer: MockProducer<String, String> = MockProducer::default();
         assert!(!producer.closed());
         assert!(producer.flushed());
 
         // auto_complete=false means sends don't complete immediately
-        let future = producer.send(make_record("topic", "k", "v")).unwrap();
+        let future = producer.send(make_record("topic", "k", "v")).await.unwrap();
         assert!(!future.is_done());
     }
 
@@ -676,9 +676,9 @@ mod tests {
     #[tokio::test]
     async fn test_incrementing_offsets() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        let f0 = producer.send(make_record("t", "k", "v0")).unwrap();
-        let f1 = producer.send(make_record("t", "k", "v1")).unwrap();
-        let f2 = producer.send(make_record("t", "k", "v2")).unwrap();
+        let f0 = producer.send(make_record("t", "k", "v0")).await.unwrap();
+        let f1 = producer.send(make_record("t", "k", "v1")).await.unwrap();
+        let f2 = producer.send(make_record("t", "k", "v2")).await.unwrap();
 
         assert_eq!(0, f0.get().await.unwrap().offset());
         assert_eq!(1, f1.get().await.unwrap().offset());
@@ -692,9 +692,9 @@ mod tests {
         let r1 = ProducerRecord::with_value("t1".to_string(), Some("k".to_string()));
         let r2 = ProducerRecord::with_value("t2".to_string(), Some("k".to_string()));
 
-        let f1 = producer.send(r1.clone()).unwrap();
-        let f2 = producer.send(r2.clone()).unwrap();
-        let f3 = producer.send(r1).unwrap();
+        let f1 = producer.send(r1.clone()).await.unwrap();
+        let f2 = producer.send(r2.clone()).await.unwrap();
+        let f3 = producer.send(r1).await.unwrap();
 
         assert_eq!(0, f1.get().await.unwrap().offset());
         assert_eq!(0, f2.get().await.unwrap().offset());
@@ -705,21 +705,21 @@ mod tests {
     ///
     /// Matches Java behavior: `sendException` is a field that persists until
     /// manually set to `null`.
-    #[test]
-    fn test_set_send_error() {
+    #[tokio::test]
+    async fn test_set_send_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         producer.set_send_error(Some(KafkaError::new(Errors::CorruptMessage)));
 
-        let result = producer.send(make_record("t", "k", "v"));
+        let result = producer.send(make_record("t", "k", "v")).await;
         assert!(result.is_err());
 
         // Error persists — second send also fails
-        let result = producer.send(make_record("t", "k", "v"));
+        let result = producer.send(make_record("t", "k", "v")).await;
         assert!(result.is_err(), "Error should persist until cleared");
 
         // Clear the error — next send succeeds
         producer.set_send_error(None);
-        let result = producer.send(make_record("t", "k", "v"));
+        let result = producer.send(make_record("t", "k", "v")).await;
         assert!(result.is_ok(), "Send should succeed after clearing error");
     }
 
@@ -727,21 +727,21 @@ mod tests {
     ///
     /// Matches Java behavior: `flushException` is a field that persists until
     /// manually set to `null`.
-    #[test]
-    fn test_set_flush_error() {
+    #[tokio::test]
+    async fn test_set_flush_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         producer.set_flush_error(Some(KafkaError::new(Errors::CorruptMessage)));
 
-        let result = producer.flush();
+        let result = producer.flush().await;
         assert!(result.is_err());
 
         // Error persists — second flush also fails
-        let result = producer.flush();
+        let result = producer.flush().await;
         assert!(result.is_err(), "Error should persist until cleared");
 
         // Clear the error — next flush succeeds
         producer.set_flush_error(None);
-        let result = producer.flush();
+        let result = producer.flush().await;
         assert!(result.is_ok(), "Flush should succeed after clearing error");
     }
 
@@ -749,21 +749,21 @@ mod tests {
     ///
     /// Matches Java behavior: `partitionsForException` is a field that persists
     /// until manually set to `null`.
-    #[test]
-    fn test_set_partitions_for_error() {
+    #[tokio::test]
+    async fn test_set_partitions_for_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         producer.set_partitions_for_error(Some(KafkaError::new(Errors::UnknownTopicOrPartition)));
 
-        let result = producer.partitions_for("t");
+        let result = producer.partitions_for("t").await;
         assert!(result.is_err());
 
         // Error persists — second call also fails
-        let result = producer.partitions_for("t");
+        let result = producer.partitions_for("t").await;
         assert!(result.is_err(), "Error should persist until cleared");
 
         // Clear the error — next call succeeds
         producer.set_partitions_for_error(None);
-        let result = producer.partitions_for("t");
+        let result = producer.partitions_for("t").await;
         assert!(result.is_ok());
     }
 
@@ -771,29 +771,29 @@ mod tests {
     ///
     /// Matches Java behavior: `closeException` is a field that persists until
     /// manually set to `null`.
-    #[test]
-    fn test_set_close_error() {
+    #[tokio::test]
+    async fn test_set_close_error() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         producer.set_close_error(Some(KafkaError::new(Errors::UnknownServerError)));
 
-        let result = producer.close();
+        let result = producer.close().await;
         assert!(result.is_err());
 
         // Error persists — second close also fails
-        let result = producer.close();
+        let result = producer.close().await;
         assert!(result.is_err(), "Error should persist until cleared");
         assert!(!producer.closed(), "Producer should not be closed when error persists");
 
         // Clear the error — close now succeeds
         producer.set_close_error(None);
-        let result = producer.close();
+        let result = producer.close().await;
         assert!(result.is_ok(), "Close should succeed after clearing error");
         assert!(producer.closed());
     }
 
     /// Tests `partitions_for` with cluster metadata.
-    #[test]
-    fn test_partitions_for() {
+    #[tokio::test]
+    async fn test_partitions_for() {
         let node = crate::common::Node::new(0, "localhost".to_string(), 9092);
         let pi0 = PartitionInfo::new("topic".to_string(), 0, Some(node.clone()), vec![], vec![]);
         let pi1 = PartitionInfo::new("topic".to_string(), 1, Some(node), vec![], vec![]);
@@ -810,22 +810,22 @@ mod tests {
         );
         let producer: MockProducer<String, String> = MockProducer::new(cluster, true);
 
-        let partitions = producer.partitions_for("topic").unwrap();
+        let partitions = producer.partitions_for("topic").await.unwrap();
         assert_eq!(2, partitions.len());
         assert_eq!(0, partitions[0].partition());
         assert_eq!(1, partitions[1].partition());
 
         // Unknown topic returns empty
-        let partitions = producer.partitions_for("unknown").unwrap();
+        let partitions = producer.partitions_for("unknown").await.unwrap();
         assert!(partitions.is_empty());
     }
 
     /// Tests `close_timeout` behaves like `close`.
-    #[test]
-    fn test_close_timeout() {
+    #[tokio::test]
+    async fn test_close_timeout() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         assert!(!producer.closed());
-        producer.close_timeout(Duration::from_secs(5)).unwrap();
+        producer.close_timeout(Duration::from_secs(5)).await.unwrap();
         assert!(producer.closed());
     }
 
@@ -836,12 +836,12 @@ mod tests {
     #[tokio::test]
     async fn test_clear_preserves_offsets() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
-        producer.send(make_record("t", "k", "v")).unwrap();
-        producer.send(make_record("t", "k", "v")).unwrap();
+        producer.send(make_record("t", "k", "v")).await.unwrap();
+        producer.send(make_record("t", "k", "v")).await.unwrap();
 
         producer.clear();
 
-        let future = producer.send(make_record("t", "k", "v")).unwrap();
+        let future = producer.send(make_record("t", "k", "v")).await.unwrap();
         assert_eq!(
             2,
             future.get().await.unwrap().offset(),
@@ -864,11 +864,11 @@ mod tests {
     }
 
     /// Tests that `history` returns a clone (modifications don't affect internal state).
-    #[test]
-    fn test_history_returns_clone() {
+    #[tokio::test]
+    async fn test_history_returns_clone() {
         let producer: MockProducer<String, String> = MockProducer::with_auto_complete(true);
         let record = make_record("t", "k", "v");
-        producer.send(record).unwrap();
+        producer.send(record).await.unwrap();
 
         let mut history = producer.history();
         assert_eq!(1, history.len());

@@ -92,10 +92,16 @@ class RecordMetadata:
 
 class Producer:
 
-    def __init__(self, auto_complete=True):
+    def __init__(self):
         self.futures = set()
         self.closed = False
+        self.c_producer = None
+
+    def _init_mock(self, auto_complete=True):
         self.c_producer = _lib.Producer_new(auto_complete, self)
+
+    def _init_kafka(self, config):
+        self.c_producer = _lib.KafkaProducer_new(config, self)
 
     def __enter__(self):
         return self
@@ -176,10 +182,26 @@ class Producer:
         _lib.Producer_close(self.c_producer)
 
 
+class KafkaProducer(Producer):
+    """A Kafka producer connected to a real cluster.
+
+    Args:
+        config: A dict of configuration properties. At minimum,
+            ``bootstrap.servers`` must be provided.
+    """
+
+    def __init__(self, config):
+        super().__init__()
+        if not isinstance(config, dict):
+            raise TypeError("config must be a dict")
+        self._init_kafka(config)
+
+
 class MockProducer(Producer):
 
     def __init__(self, auto_complete=True):
-        super().__init__(auto_complete)
+        super().__init__()
+        self._init_mock(auto_complete)
 
     def complete_next(self):
         """Complete the next pending send successfully.

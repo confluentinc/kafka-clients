@@ -26,7 +26,10 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::{Condvar, Mutex};
+use std::sync::Mutex;
+use std::time::Duration;
+
+use tokio::sync::Notify;
 
 use log::{debug, error, info, trace};
 
@@ -99,11 +102,11 @@ pub struct Metadata {
     // Java uses `volatile` for this field; in Rust we protect all mutable state
     // behind the mutex for correctness.
     inner: Mutex<MetadataInner>,
-    /// Condition variable for waiting on metadata updates.
+    /// Async notification for waiting on metadata updates.
     ///
     /// Corresponds to Java's `Object.wait()/notifyAll()` on the Metadata instance.
-    /// Used by `await_update()` to block until the metadata version changes.
-    update_condvar: Condvar,
+    /// Used by `await_update()` to asynchronously wait until the metadata version changes.
+    update_notify: Notify,
     /// Optional custom retain topic function. When set, this overrides
     /// the default `retain_topic_default` behavior.
     ///
@@ -280,7 +283,7 @@ impl Metadata {
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
-            update_condvar: Condvar::new(),
+            update_notify: Notify::new(),
             retain_topic_fn: None,
             enable_partial_updates: false,
             request_builder_fn: None,
@@ -338,7 +341,7 @@ impl Metadata {
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
-            update_condvar: Condvar::new(),
+            update_notify: Notify::new(),
             retain_topic_fn: overrides.retain_topic_fn,
             enable_partial_updates: overrides.enable_partial_updates,
             request_builder_fn: overrides.request_builder_fn,
@@ -676,9 +679,9 @@ impl Metadata {
             post_update(response, is_partial_update, now_ms);
         }
 
-        // Notify all threads waiting on metadata updates.
+        // Notify all tasks waiting on metadata updates.
         // Corresponds to Java's notifyAll() at the end of Metadata.update().
-        self.update_condvar.notify_all();
+        self.update_notify.notify_waiters();
     }
 
     /// Updates the partition-leadership info in the metadata.
@@ -1112,14 +1115,22 @@ impl Metadata {
     /// # Errors
     /// Returns a `KafkaError::Timeout` if the metadata version is not updated within
     /// the given timeout.
-    pub fn await_update(&self, last_version: i32, timeout_ms: i64) -> Result<(), KafkaError> {
-        use std::time::{Duration, Instant};
+    pub async fn await_update(&self, last_version: i32, timeout_ms: i64) -> Result<(), KafkaError> {
+        let deadline = tokio::time::Instant::now() + Duration::from_millis(timeout_ms as u64);
 
-        let deadline = Instant::now() + Duration::from_millis(timeout_ms as u64);
-        let mut inner = self.inner.lock().unwrap();
+        loop {
+            // Create the notified future BEFORE checking the condition to avoid
+            // missing a notification between the check and the await.
+            let notified = self.update_notify.notified();
 
-        while inner.update_version <= last_version {
-            let remaining = deadline.saturating_duration_since(Instant::now());
+            {
+                let inner = self.inner.lock().unwrap();
+                if inner.update_version > last_version {
+                    return Ok(());
+                }
+            }
+
+            let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
             if remaining.is_zero() {
                 return Err(KafkaError::timeout(format!(
                     "Failed to update metadata after {} ms.",
@@ -1127,18 +1138,18 @@ impl Metadata {
                 )));
             }
 
-            let (guard, wait_result) = self.update_condvar.wait_timeout(inner, remaining).unwrap();
-            inner = guard;
-
-            if wait_result.timed_out() && inner.update_version <= last_version {
+            if tokio::time::timeout(remaining, notified).await.is_err() {
+                // Timed out — check once more under the lock.
+                let inner = self.inner.lock().unwrap();
+                if inner.update_version > last_version {
+                    return Ok(());
+                }
                 return Err(KafkaError::timeout(format!(
                     "Failed to update metadata after {} ms.",
                     timeout_ms
                 )));
             }
         }
-
-        Ok(())
     }
 
     /// Returns the current metadata update version.
@@ -1157,10 +1168,10 @@ impl Metadata {
     pub fn close(&self) {
         let mut inner = self.inner.lock().unwrap();
         inner.is_closed = true;
-        // Wake up any threads waiting for metadata updates so they can detect the close.
+        // Wake up any tasks waiting for metadata updates so they can detect the close.
         inner.update_version += 1;
         drop(inner);
-        self.update_condvar.notify_all();
+        self.update_notify.notify_waiters();
     }
 
     /// Check if this metadata instance has been closed.

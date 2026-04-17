@@ -18,7 +18,5 @@ Every change must at least pass all of the following before it is considered com
 
 8. Are there any TODO or FIXME left in the code? In case finish everything that should be done before considering the change done.
 
-9. `cargo build` succeeds
-10. `cargo test --features integration-tests,ffi` passes
-11. `cargo xtask format-check` passes (run `cargo xtask format` to fix)
-12. `cargo xtask lint` passes (run `cargo xtask lint-fix` to auto-fix, then fix remaining issues manually)
+9. Are unit tests, integration tests, Python, C tests passing?
+   Use `make verify` to run all tests and format checks and lint checks. If there are any failing test or check fix them before considering the change done.
