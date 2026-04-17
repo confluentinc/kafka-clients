@@ -855,8 +855,7 @@ impl RecordAccumulator {
 
             let mut batch = batch;
             batch.close();
-            // Use actual size from built records, not estimated size.
-            size += batch.records().size_in_bytes() as i32;
+            size += batch.estimated_size_in_bytes() as i32;
             batch.drained(now);
             ready.push(batch);
 

@@ -38,6 +38,7 @@ use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
 use crate::common::header::Headers;
+use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::network::PlaintextChannelBuilder;
 use crate::common::network::Selector;
@@ -464,8 +465,6 @@ impl<K, V> KafkaProducer<K, V> {
 
         let topic = record.topic().to_string();
 
-        // --- Phase 1: Validation (API errors invoke callback + return failed future) ---
-
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
@@ -482,66 +481,109 @@ impl<K, V> KafkaProducer<K, V> {
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
+        // Destructure the record to take ownership of key/value for zero-copy serialization
+        let (record_topic, partition_opt, timestamp_opt, record_headers, key, value) = record.into_parts();
+
         let serialized_key = self
             .key_serializer
-            .serialize_with_headers(record.topic(), record.headers(), record.key())
+            .serialize_owned_with_headers(&record_topic, &record_headers, key)
             .map_err(|e| KafkaError::serialization(format!("Failed to serialize key: {}", e)))?;
 
         let serialized_value = self
             .value_serializer
-            .serialize_with_headers(record.topic(), record.headers(), record.value())
+            .serialize_owned_with_headers(&record_topic, &record_headers, value)
             .map_err(|e| KafkaError::serialization(format!("Failed to serialize value: {}", e)))?;
 
-        // Calculate partition
-        let partition = self.partition(&record, serialized_key.as_deref(), serialized_value.as_deref(), &cluster);
+        let headers = record_headers.to_array();
 
-        let headers = record.headers().to_array();
-
-        let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            self.compression_type,
-            serialized_key.as_deref(),
-            serialized_value.as_deref(),
-            headers,
-        );
-        if let Err(err) = self.ensure_valid_record_size(serialized_size) {
-            return self.handle_api_exception(err, &topic, partition, callback);
-        }
-
-        let timestamp = record.timestamp().unwrap_or(now_ms);
-
-        // --- Phase 2: Append (callback is moved into the accumulator) ---
-        //
-        // If append fails, the callback has been consumed. We still return a
-        // failed future so the caller can observe the error, matching the
-        // Java contract as closely as possible.
-        match self.accumulator.append(
-            record.topic(),
-            partition,
-            timestamp,
+        self.do_send_bytes(
+            &topic,
+            partition_opt,
+            timestamp_opt,
             serialized_key.as_deref(),
             serialized_value.as_deref(),
             headers,
             callback,
+            now_ms,
+            remaining_wait_ms,
+            &cluster,
+        )
+        .await
+    }
+
+    /// Common send path for already-serialized key/value bytes.
+    ///
+    /// Both [`do_send`](Self::do_send) (after serialization) and
+    /// [`send`](KafkaProducer::<Vec<u8>, Vec<u8>>::send) (zero-copy borrowed path)
+    /// delegate here for partition calculation, size validation, and accumulator
+    /// append.
+    #[allow(clippy::too_many_arguments)]
+    async fn do_send_bytes(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        timestamp: Option<i64>,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+        callback: Option<Callback>,
+        now_ms: i64,
+        remaining_wait_ms: i64,
+        cluster: &Cluster,
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        let partition = if let Some(p) = partition {
+            p
+        } else if let Some(k) = key
+            && !self.partitioner_ignore_keys
+        {
+            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
+            if num_partitions > 0 {
+                BuiltInPartitioner::partition_for_key(k, num_partitions)
+            } else {
+                record_metadata::UNKNOWN_PARTITION
+            }
+        } else {
+            record_metadata::UNKNOWN_PARTITION
+        };
+
+        let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            self.compression_type,
+            key,
+            value,
+            headers,
+        );
+        if let Err(err) = self.ensure_valid_record_size(serialized_size) {
+            return self.handle_api_exception(err, topic, partition, callback);
+        }
+
+        let timestamp = timestamp.unwrap_or(now_ms);
+
+        match self.accumulator.append(
+            topic,
+            partition,
+            timestamp,
+            key,
+            value,
+            headers,
+            callback,
             remaining_wait_ms,
             now_ms,
-            &cluster,
+            cluster,
         ) {
             Ok(result) => {
                 if result.batch_is_full || result.new_batch_created {
                     trace!(
                         "Waking up the sender since topic {} is either full or getting a new batch",
-                        record.topic()
+                        topic
                     );
                     self.wakeup.notify_one();
                 }
                 Ok(KafkaFuture::new(result.future))
             },
             Err(e) if e.is_api_exception() => {
-                // Callback was consumed by append, so we cannot invoke it here.
-                // Return a completed-with-error future.
                 debug!("Exception occurred during accumulator append: {}", e);
-                let tp = TopicPartition::new(topic, partition);
+                let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
             },
             Err(e) => Err(e),
@@ -726,7 +768,6 @@ impl<K, V> KafkaProducer<K, V> {
         if let Some(key) = serialized_key
             && !self.partitioner_ignore_keys
         {
-            // Hash the key bytes to choose a partition
             let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
             if num_partitions > 0 {
                 return BuiltInPartitioner::partition_for_key(key, num_partitions);
@@ -784,6 +825,53 @@ impl<K, V> KafkaProducer<K, V> {
         if let Some(join_handle) = handle {
             let _ = join_handle.await;
         }
+    }
+}
+
+impl KafkaProducer<Vec<u8>, Vec<u8>> {
+    /// Send a record with borrowed byte-slice key/value, bypassing serialization.
+    ///
+    /// This is the zero-copy path for callers that already have `&[u8]` data
+    /// (e.g. the C FFI layer). The slices are passed directly through to the
+    /// accumulator's batch buffer without any intermediate allocation.
+    pub async fn send(
+        &self,
+        record: ProducerRecord<&[u8], &[u8]>,
+        callback: Option<Callback>,
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        self.ensure_not_closed()?;
+
+        let topic = record.topic().to_string();
+        let now_ms = self.now_ms();
+        let cluster_and_wait_time = match self
+            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+            .await
+        {
+            Ok(cwt) => cwt,
+            Err(e) if e.is_api_exception() => {
+                return self.handle_api_exception(e, &topic, record_metadata::UNKNOWN_PARTITION, callback);
+            },
+            Err(e) => return Err(e),
+        };
+        let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
+        let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
+        let cluster = cluster_and_wait_time.cluster;
+
+        let (_topic, partition, timestamp, _headers, key, value) = record.into_parts();
+
+        self.do_send_bytes(
+            &topic,
+            partition,
+            timestamp,
+            key,
+            value,
+            RecordBatch::EMPTY_HEADERS,
+            callback,
+            now_ms,
+            remaining_wait_ms,
+            &cluster,
+        )
+        .await
     }
 }
 

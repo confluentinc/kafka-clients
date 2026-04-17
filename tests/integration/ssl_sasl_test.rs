@@ -150,7 +150,7 @@ async fn poll_until_disconnected(selector: &mut Selector) {
 
 /// Helper: build a NetworkSend for a request.
 fn build_request_send(
-    builder: &dyn RequestBuilder,
+    builder: &mut dyn RequestBuilder,
     client_id: &str,
     correlation_id: i32,
     destination: &str,
@@ -190,8 +190,8 @@ async fn test_ssl_connection() {
     poll_until_ready(&mut selector, NODE_ID).await;
 
     // Send ApiVersions to verify data flows over TLS
-    let builder = ApiVersionsRequestBuilder::new();
-    let (send, header) = build_request_send(&builder, "ssl-test", 1, NODE_ID);
+    let mut builder = ApiVersionsRequestBuilder::new();
+    let (send, header) = build_request_send(&mut builder, "ssl-test", 1, NODE_ID);
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;
 
@@ -222,8 +222,8 @@ async fn test_sasl_plaintext_connection() {
     poll_until_ready(&mut selector, NODE_ID).await;
 
     // Verify with an ApiVersionsRequest
-    let builder = ApiVersionsRequestBuilder::new();
-    let (send, header) = build_request_send(&builder, "sasl-test", 1, NODE_ID);
+    let mut builder = ApiVersionsRequestBuilder::new();
+    let (send, header) = build_request_send(&mut builder, "sasl-test", 1, NODE_ID);
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;
 
@@ -254,8 +254,8 @@ async fn test_sasl_ssl_connection() {
     poll_until_ready(&mut selector, NODE_ID).await;
 
     // Verify with an ApiVersionsRequest
-    let builder = ApiVersionsRequestBuilder::new();
-    let (send, header) = build_request_send(&builder, "sasl-ssl-test", 1, NODE_ID);
+    let mut builder = ApiVersionsRequestBuilder::new();
+    let (send, header) = build_request_send(&mut builder, "sasl-ssl-test", 1, NODE_ID);
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;
 

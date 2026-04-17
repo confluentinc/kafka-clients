@@ -2286,7 +2286,7 @@ mod tests {
 
         // For versions < 9, leader epochs should not be reliable
         for version in ApiKeys::METADATA.oldest_version()..9 {
-            let mut readable = message_util::to_byte_buffer_accessor(&data, version).unwrap();
+            let mut readable = message_util::to_byte_buffer_accessor(&mut data, version).unwrap();
             let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
             assert!(
                 !response.has_reliable_leader_epochs(),
@@ -2306,7 +2306,7 @@ mod tests {
 
         // For versions >= 9, leader epochs should be reliable
         for version in 9..=ApiKeys::METADATA.latest_version() {
-            let mut readable = message_util::to_byte_buffer_accessor(&data, version).unwrap();
+            let mut readable = message_util::to_byte_buffer_accessor(&mut data, version).unwrap();
             let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
             assert!(
                 response.has_reliable_leader_epochs(),

@@ -984,7 +984,7 @@ fn generate_message_impl(
     writeln!(file)?;
     writeln!(
         file,
-        "    fn write(&self, writable: &mut dyn Writable, _cache: &ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
+        "    fn write(&mut self, writable: &mut dyn Writable, _cache: &ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
     )?;
     writeln!(file, "        {}::write(self, writable, version)", struct_name)?;
     writeln!(file, "    }}")?;
@@ -1219,8 +1219,11 @@ fn generate_field_add_size(
         FieldType::String => {
             generate_string_add_size(file, &accessor, flexible_versions, ind, false)?;
         },
-        FieldType::Bytes | FieldType::Records => {
-            generate_bytes_add_size(file, &accessor, flexible_versions, ind)?;
+        FieldType::Bytes => {
+            generate_bytes_add_size(file, &accessor, flexible_versions, ind, false)?;
+        },
+        FieldType::Records => {
+            generate_bytes_add_size(file, &accessor, flexible_versions, ind, true)?;
         },
         FieldType::Array(element_type) => {
             generate_array_add_size(file, &accessor, element_type, flexible_versions, ind)?;
@@ -1374,12 +1377,18 @@ fn generate_string_add_size(
 }
 
 /// Generate size calculation for a bytes/records field.
+///
+/// When `zero_copy` is true (Records fields), the data size is tracked via
+/// `add_zero_copy_bytes` so the SendBuilder allocates the main buffer without
+/// it and handles the records via scatter-gather I/O.
 fn generate_bytes_add_size(
     file: &mut fs::File,
     accessor: &str,
     flexible_versions: Versions,
     indent: &str,
+    zero_copy: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let add_data_fn = if zero_copy { "add_zero_copy_bytes" } else { "add_bytes" };
     writeln!(file, "{}{{", indent)?;
     writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
     if !flexible_versions.empty() {
@@ -1413,7 +1422,7 @@ fn generate_bytes_add_size(
     } else {
         writeln!(file, "{}    size.add_bytes(4); // i32 length prefix", indent)?;
     }
-    writeln!(file, "{}    size.add_bytes(bytes_len as i32);", indent)?;
+    writeln!(file, "{}    size.{}(bytes_len as i32);", indent, add_data_fn)?;
     writeln!(file, "{}}}", indent)?;
     Ok(())
 }
@@ -2497,6 +2506,12 @@ fn generate_tagged_field_write(
                 } else {
                     format!("self.{}", field_name)
                 };
+                // Mutable accessor for write() calls (which take &mut self)
+                let tagged_accessor_mut = if nullable {
+                    format!("self.{}.as_mut().unwrap()", field_name)
+                } else {
+                    format!("self.{}", field_name)
+                };
                 // For Copy types (bool, int, float), nullable needs * deref, non-nullable doesn't
                 let tagged_copy_accessor = if nullable {
                     format!("*self.{}.as_ref().unwrap()", field_name)
@@ -2653,8 +2668,8 @@ fn generate_tagged_field_write(
                             FieldType::Uuid => {
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    size_accessor.write_uuid(element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
@@ -2662,8 +2677,8 @@ fn generate_tagged_field_write(
                             FieldType::Int8 => {
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    size_accessor.write_byte(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
@@ -2671,8 +2686,8 @@ fn generate_tagged_field_write(
                             FieldType::Int16 => {
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    size_accessor.write_short(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
@@ -2680,8 +2695,8 @@ fn generate_tagged_field_write(
                             FieldType::Int32 => {
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    size_accessor.write_int(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
@@ -2689,8 +2704,8 @@ fn generate_tagged_field_write(
                             FieldType::Int64 => {
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    size_accessor.write_long(*element)?;", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
@@ -2698,8 +2713,8 @@ fn generate_tagged_field_write(
                             FieldType::String => {
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    let bytes = element.as_bytes();", indent)?;
                                 writeln!(
@@ -2714,8 +2729,8 @@ fn generate_tagged_field_write(
                                 // For structs and other complex types, assume they have a write method
                                 writeln!(
                                     file,
-                                    "{}                for element in {}.iter() {{",
-                                    indent, tagged_accessor
+                                    "{}                for element in {}.iter_mut() {{",
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(
                                     file,
@@ -2837,7 +2852,7 @@ fn generate_tagged_field_write(
                                 writeln!(
                                     file,
                                     "{}                    {}.write(&mut size_accessor, version)?;",
-                                    indent, tagged_accessor
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
                                 writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
@@ -2867,7 +2882,7 @@ fn generate_tagged_field_write(
                                 writeln!(
                                     file,
                                     "{}                {}.write(&mut size_accessor, version)?;",
-                                    indent, tagged_accessor
+                                    indent, tagged_accessor_mut
                                 )?;
                                 writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
                                 writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
@@ -2888,7 +2903,7 @@ fn generate_tagged_field_write(
                             writeln!(
                                 file,
                                 "{}                {}.write(&mut size_accessor, version)?;",
-                                indent, tagged_accessor
+                                indent, tagged_accessor_mut
                             )?;
                             writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
                             writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
@@ -3048,7 +3063,7 @@ fn generate_write_method(
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         file,
-        "    pub fn write(&self, writable: &mut dyn Writable, version: i16) -> std::io::Result<()> {{"
+        "    pub fn write(&mut self, writable: &mut dyn Writable, version: i16) -> std::io::Result<()> {{"
     )?;
 
     let lowest = struct_spec.versions().lowest();
@@ -3745,9 +3760,15 @@ fn generate_field_write(
         }
     }
 
-    // For nullable fields, wrap in if let Some/None
+    // Records fields use .take() for zero-copy ownership transfer;
+    // all other nullable fields use ref mut for mutable access.
+    let is_records = matches!(field.field_type(), FieldType::Records);
     let (inner_indent, accessor) = if nullable {
-        writeln!(file, "{}if let Some(ref _nv) = self.{} {{", indent, field_name)?;
+        if is_records {
+            writeln!(file, "{}if let Some(_nv) = self.{}.take() {{", indent, field_name)?;
+        } else {
+            writeln!(file, "{}if let Some(ref mut _nv) = self.{} {{", indent, field_name)?;
+        }
         let extra = format!("{}    ", indent);
         (extra, "_nv".to_string())
     } else {
@@ -3811,35 +3832,24 @@ fn generate_field_write(
             }
             writeln!(file, "{}writable.write_bytes(bytes)?;", ind)?;
         },
-        FieldType::Bytes | FieldType::Records => {
-            if !flexible_versions.empty() {
-                if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", ind, accessor)?;
-                } else {
-                    if flexible_versions.highest() == i16::MAX {
-                        writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
-                    } else {
-                        writeln!(
-                            file,
-                            "{}if version >= {} && version <= {} {{",
-                            ind,
-                            flexible_versions.lowest(),
-                            flexible_versions.highest()
-                        )?;
-                    }
-                    writeln!(
-                        file,
-                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
-                        ind, accessor
-                    )?;
-                    writeln!(file, "{}}} else {{", ind)?;
-                    writeln!(file, "{}    writable.write_int({}.len() as i32)?;", ind, accessor)?;
-                    writeln!(file, "{}}}", ind)?;
-                }
-            } else {
-                writeln!(file, "{}writable.write_int({}.len() as i32)?;", ind, accessor)?;
-            }
+        FieldType::Bytes => {
+            generate_bytes_length_prefix_write(file, &accessor, flexible_versions, ind)?;
             writeln!(file, "{}writable.write_bytes(&{})?;", ind, accessor)?;
+        },
+        FieldType::Records => {
+            // Records use write_records for zero-copy scatter-gather I/O.
+            // The length prefix is written into the main buffer; the data
+            // is moved into a separate scatter-gather buffer.
+            if nullable {
+                // accessor is _nv (owned Vec<u8> from .take())
+                generate_bytes_length_prefix_write(file, &accessor, flexible_versions, ind)?;
+                writeln!(file, "{}writable.write_records({})?;", ind, accessor)?;
+            } else {
+                // Non-nullable: take ownership first, then write length prefix + data
+                writeln!(file, "{}let _records_data = std::mem::take(&mut {});", ind, accessor)?;
+                generate_bytes_length_prefix_write(file, "_records_data", flexible_versions, ind)?;
+                writeln!(file, "{}writable.write_records(_records_data)?;", ind)?;
+            }
         },
         FieldType::Array(element_type) => {
             if !flexible_versions.empty() {
@@ -3869,7 +3879,7 @@ fn generate_field_write(
             } else {
                 writeln!(file, "{}writable.write_int({}.len() as i32)?;", ind, accessor)?;
             }
-            writeln!(file, "{}for element in {}.iter() {{", ind, accessor)?;
+            writeln!(file, "{}for element in {}.iter_mut() {{", ind, accessor)?;
             generate_array_element_write(file, element_type.as_ref(), flexible_versions)?;
             writeln!(file, "{}}}", ind)?;
         },
@@ -3925,6 +3935,46 @@ fn generate_field_write(
     }
     writeln!(file)?;
 
+    Ok(())
+}
+
+/// Generate the length prefix for a bytes/records field write.
+///
+/// The `accessor` is an expression that has `.len()` (e.g. `_nv` for `Vec<u8>`,
+/// or `_records_len` for a pre-computed length variable).
+fn generate_bytes_length_prefix_write(
+    file: &mut fs::File,
+    accessor: &str,
+    flexible_versions: Versions,
+    indent: &str,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !flexible_versions.empty() {
+        if flexible_versions.lowest() == 0 {
+            writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", indent, accessor)?;
+        } else {
+            if flexible_versions.highest() == i16::MAX {
+                writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;
+            } else {
+                writeln!(
+                    file,
+                    "{}if version >= {} && version <= {} {{",
+                    indent,
+                    flexible_versions.lowest(),
+                    flexible_versions.highest()
+                )?;
+            }
+            writeln!(
+                file,
+                "{}    writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                indent, accessor
+            )?;
+            writeln!(file, "{}}} else {{", indent)?;
+            writeln!(file, "{}    writable.write_int({}.len() as i32)?;", indent, accessor)?;
+            writeln!(file, "{}}}", indent)?;
+        }
+    } else {
+        writeln!(file, "{}writable.write_int({}.len() as i32)?;", indent, accessor)?;
+    }
     Ok(())
 }
 
