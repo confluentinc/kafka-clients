@@ -37,8 +37,12 @@ const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 
 /// State of the append stream.
 enum AppendState<W: Write> {
-    /// Stream is open for appending records.
-    Open(CompressingWriter<W>),
+    /// No compression — records are written directly into the main buffer,
+    /// eliminating one full copy of the record bytes.
+    Direct,
+    /// Compression — records go through a `CompressingWriter` into a separate
+    /// buffer, then the compressed output is appended to the main buffer on close.
+    Compressed(CompressingWriter<W>),
     /// Stream has been closed (records cannot be appended).
     Closed,
 }
@@ -142,11 +146,18 @@ impl MemoryRecordsBuilder {
             buffer.resize(header_end, 0);
         }
 
-        // Create the append stream (compression wraps a separate Vec<u8>)
-        let append_buf = Vec::new();
-        let append_writer = compression
-            .wrap_for_output(append_buf, magic)
-            .expect("Failed to create compression writer");
+        let append_stream = if compression.compression_type() == CompressionType::None {
+            // Truncate to header_end so Write::write_all appends records
+            // right after the header placeholder.
+            buffer.truncate(header_end);
+            AppendState::Direct
+        } else {
+            let append_buf = Vec::new();
+            let writer = compression
+                .wrap_for_output(append_buf, magic)
+                .expect("Failed to create compression writer");
+            AppendState::Compressed(writer)
+        };
 
         let has_delete_horizon = magic >= RecordBatch::MAGIC_VALUE_V2 && delete_horizon_ms >= 0;
         let base_timestamp = if has_delete_horizon {
@@ -169,7 +180,7 @@ impl MemoryRecordsBuilder {
             batch_header_size_in_bytes: batch_header_size,
             delete_horizon_ms,
             estimated_compression_ratio: 1.0,
-            append_stream: AppendState::Open(append_writer),
+            append_stream,
             is_transactional,
             producer_id,
             producer_epoch,
@@ -290,7 +301,7 @@ impl MemoryRecordsBuilder {
     /// calls return `None`. Avoids cloning the batch buffer.
     pub fn take_built_records(&mut self) -> Option<MemoryRecords> {
         if self.closed && self.built_records.is_none() && self.num_records > 0 {
-            let batch_data = self.buffer[self.initial_position..].to_vec();
+            let batch_data = self.take_batch_data();
             self.built_records = Some(MemoryRecords::new(batch_data));
         }
         self.close();
@@ -367,10 +378,12 @@ impl MemoryRecordsBuilder {
     ///
     /// After this method is called, it's only possible to update the RecordBatch header.
     pub fn close_for_record_appends(&mut self) {
-        if let AppendState::Open(writer) = std::mem::replace(&mut self.append_stream, AppendState::Closed) {
-            match writer.finish() {
+        match std::mem::replace(&mut self.append_stream, AppendState::Closed) {
+            AppendState::Direct => {
+                // Records already written directly into self.buffer — nothing to copy.
+            },
+            AppendState::Compressed(writer) => match writer.finish() {
                 Ok(compressed_data) => {
-                    // Append the compressed data to the buffer
                     let header_end = self.initial_position + self.batch_header_size_in_bytes;
                     self.buffer.truncate(header_end);
                     self.buffer.extend_from_slice(&compressed_data);
@@ -378,7 +391,8 @@ impl MemoryRecordsBuilder {
                 Err(e) => {
                     panic!("Failed to finish compression: {}", e);
                 },
-            }
+            },
+            AppendState::Closed => {},
         }
     }
 
@@ -432,14 +446,22 @@ impl MemoryRecordsBuilder {
             let written_compressed = self.write_default_batch_header();
             self.actual_compression_ratio = written_compressed as f32 / self.uncompressed_records_size_in_bytes as f32;
 
-            let batch_data = self.buffer[self.initial_position..].to_vec();
+            let batch_data = self.take_batch_data();
             self.built_records = Some(MemoryRecords::new(batch_data));
         } else {
             // Legacy format not supported
-            let batch_data = self.buffer[self.initial_position..].to_vec();
+            let batch_data = self.take_batch_data();
             self.built_records = Some(MemoryRecords::new(batch_data));
         }
         self.closed = true;
+    }
+
+    fn take_batch_data(&mut self) -> Vec<u8> {
+        if self.initial_position == 0 {
+            std::mem::take(&mut self.buffer)
+        } else {
+            self.buffer[self.initial_position..].to_vec()
+        }
     }
 
     fn validate_producer_state(&self) {
@@ -667,7 +689,12 @@ impl MemoryRecordsBuilder {
         headers: &[RecordHeader],
     ) -> io::Result<usize> {
         match &mut self.append_stream {
-            AppendState::Open(writer) => {
+            AppendState::Direct => {
+                let size =
+                    DefaultRecord::write_to(&mut self.buffer, offset_delta, timestamp_delta, key, value, headers)?;
+                Ok(size as usize)
+            },
+            AppendState::Compressed(writer) => {
                 let size = DefaultRecord::write_to(writer, offset_delta, timestamp_delta, key, value, headers)?;
                 Ok(size as usize)
             },
