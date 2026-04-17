@@ -84,6 +84,8 @@ pub struct MemoryRecordsBuilder {
     base_timestamp: Option<i64>,
 
     built_records: Option<MemoryRecords>,
+    built_size: Option<usize>,
+    closed: bool,
     aborted: bool,
 }
 
@@ -180,6 +182,8 @@ impl MemoryRecordsBuilder {
             last_offset: None,
             base_timestamp,
             built_records: None,
+            built_size: None,
+            closed: false,
             aborted: false,
         }
     }
@@ -280,6 +284,23 @@ impl MemoryRecordsBuilder {
         self.built_records.clone().expect("build() called but no records built")
     }
 
+    /// Take the built records, consuming them from the builder.
+    ///
+    /// Unlike [`build`](Self::build), this can only be called once — subsequent
+    /// calls return `None`. Avoids cloning the batch buffer.
+    pub fn take_built_records(&mut self) -> Option<MemoryRecords> {
+        if self.closed && self.built_records.is_none() && self.num_records > 0 {
+            let batch_data = self.buffer[self.initial_position..].to_vec();
+            self.built_records = Some(MemoryRecords::new(batch_data));
+        }
+        self.close();
+        let records = self.built_records.take();
+        if let Some(ref r) = records {
+            self.built_size = Some(r.size_in_bytes());
+        }
+        records
+    }
+
     /// Returns info about the records (max timestamp and shallow offset).
     ///
     /// Corresponds to Java's `MemoryRecordsBuilder.info()`.
@@ -336,7 +357,7 @@ impl MemoryRecordsBuilder {
     ///
     /// Panics if the records have already been built.
     pub fn override_last_offset(&mut self, last_offset: i64) {
-        if self.built_records.is_some() {
+        if self.closed {
             panic!("Cannot override the last offset after the records have been built");
         }
         self.last_offset = Some(last_offset);
@@ -380,6 +401,8 @@ impl MemoryRecordsBuilder {
             panic!("Should not reopen a batch which is already aborted.");
         }
         self.built_records = None;
+        self.built_size = None;
+        self.closed = false;
         self.producer_id = producer_id;
         self.producer_epoch = producer_epoch;
         self.base_sequence = base_sequence;
@@ -394,7 +417,7 @@ impl MemoryRecordsBuilder {
             panic!("Cannot close MemoryRecordsBuilder as it has already been aborted");
         }
 
-        if self.built_records.is_some() {
+        if self.closed {
             return;
         }
 
@@ -416,6 +439,7 @@ impl MemoryRecordsBuilder {
             let batch_data = self.buffer[self.initial_position..].to_vec();
             self.built_records = Some(MemoryRecords::new(batch_data));
         }
+        self.closed = true;
     }
 
     fn validate_producer_state(&self) {
@@ -760,7 +784,7 @@ impl MemoryRecordsBuilder {
 
     /// Returns whether the builder has been closed (records have been built).
     pub fn is_closed(&self) -> bool {
-        self.built_records.is_some()
+        self.closed
     }
 
     /// Returns whether the batch is full.
@@ -774,9 +798,12 @@ impl MemoryRecordsBuilder {
     /// The returned value is exactly correct if the record set is not compressed
     /// or if the builder has been closed.
     pub fn estimated_size_in_bytes(&self) -> usize {
-        match &self.built_records {
-            Some(records) => records.size_in_bytes(),
-            None => self.estimated_bytes_written(),
+        if let Some(records) = &self.built_records {
+            records.size_in_bytes()
+        } else if let Some(size) = self.built_size {
+            size
+        } else {
+            self.estimated_bytes_written()
         }
     }
 
@@ -811,7 +838,7 @@ impl MemoryRecordsBuilder {
 impl Drop for MemoryRecordsBuilder {
     fn drop(&mut self) {
         // Ensure resources are released
-        if !self.aborted && self.built_records.is_none() {
+        if !self.aborted && !self.closed {
             // Try to close gracefully, but don't panic in Drop
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.close_for_record_appends();

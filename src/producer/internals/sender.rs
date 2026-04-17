@@ -391,7 +391,7 @@ impl<C: KafkaClient> Sender<C> {
             for batch in batch_list.iter_mut() {
                 let tp = batch.topic_partition.clone();
                 let records = batch.records();
-                infos.push(RequestBatchInfo { tp, records_data: Some(records.buffer().to_vec()) });
+                infos.push(RequestBatchInfo { tp, records_data: Some(records.into_buffer()) });
             }
             request_data.push((*destination, infos));
         }

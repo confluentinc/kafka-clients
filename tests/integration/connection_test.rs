@@ -93,7 +93,7 @@ async fn poll_until_connected(selector: &mut Selector) {
 /// Uses version 0 for maximum broker compatibility. Real clients would negotiate
 /// versions via ApiVersions first, then use the broker-supported version.
 fn build_request_send(
-    builder: &dyn RequestBuilder,
+    builder: &mut dyn RequestBuilder,
     client_id: &str,
     correlation_id: i32,
     destination: &str,
@@ -154,8 +154,8 @@ async fn test_api_versions_request_response() {
     poll_until_connected(&mut selector).await;
 
     // Build and send ApiVersionsRequest
-    let builder = ApiVersionsRequestBuilder::new();
-    let (send, req_header) = build_request_send(&builder, "integration-test", 1, NODE_ID);
+    let mut builder = ApiVersionsRequestBuilder::new();
+    let (send, req_header) = build_request_send(&mut builder, "integration-test", 1, NODE_ID);
 
     selector.send(send).expect("Failed to queue send");
     poll_until_receive(&mut selector).await;
@@ -211,8 +211,8 @@ async fn test_full_connection_flow() {
     poll_until_connected(&mut selector).await;
 
     // Step 2: Send ApiVersionsRequest
-    let api_versions_builder = ApiVersionsRequestBuilder::new();
-    let (send, api_versions_header) = build_request_send(&api_versions_builder, "integration-test", 1, NODE_ID);
+    let mut api_versions_builder = ApiVersionsRequestBuilder::new();
+    let (send, api_versions_header) = build_request_send(&mut api_versions_builder, "integration-test", 1, NODE_ID);
 
     selector.send(send).expect("Failed to queue ApiVersions send");
     poll_until_receive(&mut selector).await;
@@ -233,8 +233,8 @@ async fn test_full_connection_flow() {
     let metadata_version = metadata_version_info.max_version;
 
     // Step 4: Send MetadataRequest (for all topics)
-    let metadata_builder = MetadataRequestBuilder::new_with_version(None, true, metadata_version);
-    let (send, metadata_header) = build_request_send(&metadata_builder, "integration-test", 2, NODE_ID);
+    let mut metadata_builder = MetadataRequestBuilder::new_with_version(None, true, metadata_version);
+    let (send, metadata_header) = build_request_send(&mut metadata_builder, "integration-test", 2, NODE_ID);
 
     selector.send(send).expect("Failed to queue Metadata send");
     poll_until_receive(&mut selector).await;

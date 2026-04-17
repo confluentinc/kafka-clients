@@ -61,7 +61,7 @@ fn parse_bootstrap_addr(bootstrap_servers: &str) -> SocketAddr {
 /// The broker always supports ApiVersions v0; higher versions may be unsupported
 /// if our client's message spec is newer than the broker.
 async fn send_api_versions_request(selector: &mut Selector) -> ApiVersionsResponse {
-    let builder = ApiVersionsRequestBuilder::new();
+    let mut builder = ApiVersionsRequestBuilder::new();
     let api_key = builder.api_key();
     // Use oldest allowed version for the initial handshake — maximum broker compatibility.
     let version = builder.oldest_allowed_version();

@@ -14,30 +14,30 @@
 
 //! Builds a [`ByteBufferSend`] from header + body for network transmission.
 //!
-//! This is a simplified version of the Java `SendBuilder` that handles only
-//! the contiguous-buffer path (no zero-copy records). The Java version lives
-//! in `org.apache.kafka.common.protocol.SendBuilder`.
+//! Translated from `org.apache.kafka.common.protocol.SendBuilder` in Java.
 //!
-//! For requests/responses without record sets (i.e. everything except
-//! ProduceRequest/FetchResponse), the header and body are serialized into a
-//! single contiguous buffer with a 4-byte big-endian size prefix.
+//! Supports zero-copy records via scatter-gather I/O: record bytes are moved
+//! into separate buffers instead of being copied into the main serialization
+//! buffer. The resulting [`ByteBufferSend`] uses vectored writes to send all
+//! buffers efficiently in a single system call.
 
 use std::io;
 
 use crate::common::network::ByteBufferSend;
-use crate::common::protocol::ByteBufferAccessor;
 use crate::common::protocol::Message;
 use crate::common::protocol::MessageSizeAccumulator;
 use crate::common::protocol::ObjectSerializationCache;
 use crate::common::protocol::Writable;
+use crate::common::protocol::varint;
+use crate::common::Uuid;
 
 use super::RequestHeader;
 use super::ResponseHeader;
 
 /// Builds network `Send` objects from protocol messages.
 ///
-/// Only the simple contiguous-buffer path is supported (no zero-copy records).
-/// Serializes header + body into a single buffer with a 4-byte big-endian size prefix.
+/// Serializes header + body into a size-prefixed buffer, with zero-copy
+/// support for record fields via scatter-gather I/O.
 pub struct SendBuilder;
 
 impl SendBuilder {
@@ -46,7 +46,10 @@ impl SendBuilder {
     /// # Errors
     ///
     /// Returns an error if size calculation or serialization fails.
-    pub fn build_request_send(header: &RequestHeader, api_request: &impl Message) -> io::Result<ByteBufferSend> {
+    pub fn build_request_send(
+        header: &RequestHeader,
+        api_request: &mut impl Message,
+    ) -> io::Result<ByteBufferSend> {
         Self::build_send(header.data(), header.header_version(), api_request, header.api_version())
     }
 
@@ -57,7 +60,7 @@ impl SendBuilder {
     /// Returns an error if size calculation or serialization fails.
     pub fn build_response_send(
         header: &ResponseHeader,
-        api_response: &impl Message,
+        api_response: &mut impl Message,
         api_version: i16,
     ) -> io::Result<ByteBufferSend> {
         Self::build_send(header.data(), header.header_version(), api_response, api_version)
@@ -69,8 +72,7 @@ impl SendBuilder {
     /// ```text
     /// [4-byte big-endian total_size][header bytes][api message bytes]
     /// ```
-    ///
-    /// This matches the Java `SendBuilder.buildSend` method for the contiguous-buffer path.
+    /// Record fields are split into separate buffers for zero-copy scatter-gather I/O.
     ///
     /// # Errors
     ///
@@ -78,7 +80,7 @@ impl SendBuilder {
     fn build_send(
         header: &impl Message,
         header_version: i16,
-        api_message: &impl Message,
+        api_message: &mut impl Message,
         api_version: i16,
     ) -> io::Result<ByteBufferSend> {
         let mut cache = ObjectSerializationCache::new();
@@ -90,12 +92,97 @@ impl SendBuilder {
         let total_size = message_size.total_size();
         let buffer_size = (message_size.size_excluding_zero_copy() + 4) as usize;
 
-        let mut buffer = ByteBufferAccessor::new(buffer_size);
-        buffer.write_int(total_size)?;
-        header.write(&mut buffer, &cache, header_version)?;
-        api_message.write(&mut buffer, &cache, api_version)?;
+        let mut writable = SendBuilderWritable::new(buffer_size);
+        writable.write_int(total_size)?;
+        // Header never has records fields, so &mut is unused here but harmless.
+        // We write through the trait method which requires &mut self on Message.
+        let mut header_clone = header.clone();
+        header_clone.write(&mut writable, &cache, header_version)?;
+        api_message.write(&mut writable, &cache, api_version)?;
 
-        Ok(ByteBufferSend::new(vec![buffer.buffer().to_vec()]))
+        Ok(ByteBufferSend::new(writable.into_buffers()))
+    }
+}
+
+/// A [`Writable`] that supports scatter-gather I/O for zero-copy records.
+///
+/// Regular writes accumulate into a main buffer. When [`write_records`] is called,
+/// the current main buffer segment is flushed and the record bytes are stored as
+/// a separate buffer, matching Java's `SendBuilder` behavior.
+struct SendBuilderWritable {
+    current_buffer: Vec<u8>,
+    completed_buffers: Vec<Vec<u8>>,
+}
+
+impl SendBuilderWritable {
+    fn new(capacity: usize) -> Self {
+        Self { current_buffer: Vec::with_capacity(capacity), completed_buffers: Vec::new() }
+    }
+
+    fn into_buffers(mut self) -> Vec<Vec<u8>> {
+        if !self.current_buffer.is_empty() {
+            self.completed_buffers.push(self.current_buffer);
+        }
+        self.completed_buffers
+    }
+}
+
+impl Writable for SendBuilderWritable {
+    fn write_byte(&mut self, val: i8) -> io::Result<()> {
+        self.current_buffer.push(val as u8);
+        Ok(())
+    }
+
+    fn write_short(&mut self, val: i16) -> io::Result<()> {
+        self.current_buffer.extend_from_slice(&val.to_be_bytes());
+        Ok(())
+    }
+
+    fn write_int(&mut self, val: i32) -> io::Result<()> {
+        self.current_buffer.extend_from_slice(&val.to_be_bytes());
+        Ok(())
+    }
+
+    fn write_long(&mut self, val: i64) -> io::Result<()> {
+        self.current_buffer.extend_from_slice(&val.to_be_bytes());
+        Ok(())
+    }
+
+    fn write_double(&mut self, val: f64) -> io::Result<()> {
+        self.current_buffer.extend_from_slice(&val.to_be_bytes());
+        Ok(())
+    }
+
+    fn write_byte_array(&mut self, arr: &[u8]) -> io::Result<()> {
+        self.current_buffer.extend_from_slice(arr);
+        Ok(())
+    }
+
+    fn write_unsigned_varint(&mut self, val: u32) -> io::Result<()> {
+        varint::write_unsigned_varint(val, &mut self.current_buffer)
+    }
+
+    fn write_varint(&mut self, val: i32) -> io::Result<()> {
+        varint::write_varint(val, &mut self.current_buffer)
+    }
+
+    fn write_varlong(&mut self, val: i64) -> io::Result<()> {
+        varint::write_varlong(val, &mut self.current_buffer)
+    }
+
+    fn write_uuid(&mut self, uuid: &Uuid) -> io::Result<()> {
+        self.write_long(uuid.most_sig_bits() as i64)?;
+        self.write_long(uuid.least_sig_bits() as i64)?;
+        Ok(())
+    }
+
+    fn write_records(&mut self, data: Vec<u8>) -> io::Result<()> {
+        if !self.current_buffer.is_empty() {
+            let flushed = std::mem::take(&mut self.current_buffer);
+            self.completed_buffers.push(flushed);
+        }
+        self.completed_buffers.push(data);
+        Ok(())
     }
 }
 
@@ -111,9 +198,9 @@ mod tests {
         let header =
             RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.latest_version(), "test-client", 42).unwrap();
 
-        let body = MetadataRequestData::new();
+        let mut body = MetadataRequestData::new();
 
-        let send = SendBuilder::build_request_send(&header, &body).unwrap();
+        let send = SendBuilder::build_request_send(&header, &mut body).unwrap();
         // The send should have a positive size (4-byte prefix + header + body)
         assert!(send.size() > 4);
     }

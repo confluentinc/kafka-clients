@@ -474,7 +474,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         };
 
         // Build the request at the determined version
-        match client_request.request_builder().build_version(version) {
+        match client_request.request_builder_mut().build_version(version) {
             Ok(request) => {
                 self.do_send_with_request(&mut client_request, is_internal_request, now, request);
             },
@@ -516,7 +516,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         client_request: &mut ClientRequest,
         is_internal_request: bool,
         now: i64,
-        request: ConcreteRequest,
+        mut request: ConcreteRequest,
     ) {
         let destination = client_request.destination().to_string();
         let header = client_request
@@ -550,8 +550,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         // The InFlightRequest now owns the original NetworkSend. The selector
         // needs a separate send object for the actual I/O. We re-serialize
         // to create the send for the selector.
-        let last_sent = self.in_flight_requests.last_sent(&destination);
-        let selector_send = if let Some(ref req) = last_sent.request {
+        let last_sent = self.in_flight_requests.last_sent_mut(&destination);
+        let selector_send = if let Some(ref mut req) = last_sent.request {
             let send_buf = req
                 .to_send(&last_sent.header)
                 .expect("Failed to serialize request for selector");
@@ -1736,11 +1736,11 @@ mod tests {
     fn serialize_response_with_header(
         api_key: &ApiKeys,
         api_version: i16,
-        response_data: &impl Message,
+        response_data: &mut impl Message,
         correlation_id: i32,
     ) -> Vec<u8> {
         let header_version = api_key.response_header_version(api_version);
-        let header = ResponseHeader::new(correlation_id, header_version);
+        let mut header = ResponseHeader::new(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(header.data(), &mut cache, header_version).expect("header size");
@@ -1748,7 +1748,7 @@ mod tests {
         let total = (header_size + body_size) as usize;
 
         let mut buf = ByteBufferAccessor::new(total);
-        Message::write(header.data(), &mut buf, &cache, header_version).expect("write header");
+        Message::write(header.data_mut(), &mut buf, &cache, header_version).expect("write header");
         Message::write(response_data, &mut buf, &cache, api_version).expect("write body");
         buf.flip();
         buf.buffer().to_vec()
@@ -1763,20 +1763,20 @@ mod tests {
         node: &Node,
         correlation_id: i32,
         version: i16,
-        response: &ApiVersionsResponse,
+        response: &mut ApiVersionsResponse,
     ) {
-        let bytes = serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data(), correlation_id);
+        let bytes = serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data_mut(), correlation_id);
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         selector.delayed_receive(DelayedReceive::new(node.id_string(), receive));
     }
 
     fn set_expected_api_versions_response(selector: &mut MockSelector, node: &Node) {
-        let response = default_api_versions_response();
+        let mut response = default_api_versions_response();
         let api_versions_response_version = response
             .api_version(ApiKeys::API_VERSIONS.id())
             .map(|v| v.max_version)
             .unwrap_or(ApiKeys::API_VERSIONS.latest_version());
-        delayed_api_versions_response(selector, node, 0, api_versions_response_version, &response);
+        delayed_api_versions_response(selector, node, 0, api_versions_response_version, &mut response);
     }
 
     // ---------------------------------------------------------------------------
@@ -1831,11 +1831,11 @@ mod tests {
         assert!(client.has_in_flight_requests());
 
         // Provide a metadata response so the in-flight request can complete
-        let response_data = MetadataResponseData::new();
+        let mut response_data = MetadataResponseData::new();
         let bytes = serialize_response_with_header(
             &ApiKeys::METADATA,
             ApiKeys::METADATA.latest_version(),
-            &response_data,
+            &mut response_data,
             correlation_id,
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
@@ -2040,13 +2040,13 @@ mod tests {
         assert!(client.has_in_flight_requests_for_node(node.id_string()));
 
         // Prepare response
-        let response = default_api_versions_response();
+        let mut response = default_api_versions_response();
         delayed_api_versions_response(
             client.selector_mut(),
             &node,
             0,
             ApiKeys::API_VERSIONS.latest_version(),
-            &response,
+            &mut response,
         );
 
         // Handle completed receives
@@ -2082,14 +2082,14 @@ mod tests {
         let mut error_data = ApiVersionsResponseData::new();
         error_data.set_error_code(Errors::InvalidRequest.code());
         error_data.set_throttle_time_ms(0);
-        let error_response = ApiVersionsResponse::new(error_data);
+        let mut error_response = ApiVersionsResponse::new(error_data);
 
         delayed_api_versions_response(
             client.selector_mut(),
             &node,
             0,
             ApiKeys::API_VERSIONS.latest_version(),
-            &error_response,
+            &mut error_response,
         );
 
         // Handle completed receives
@@ -2163,10 +2163,10 @@ mod tests {
         assert_eq!(1, client.in_flight_request_count());
 
         // Prepare a metadata response
-        let response_data = MetadataResponseData::new();
+        let mut response_data = MetadataResponseData::new();
         let response_version = ApiKeys::METADATA.latest_version();
         let bytes =
-            serialize_response_with_header(&ApiKeys::METADATA, response_version, &response_data, correlation_id);
+            serialize_response_with_header(&ApiKeys::METADATA, response_version, &mut response_data, correlation_id);
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         client.selector_mut().complete_receive(receive);
 
@@ -2256,7 +2256,7 @@ mod tests {
         let bytes = serialize_response_with_header(
             &ApiKeys::METADATA,
             ApiKeys::METADATA.latest_version(),
-            &response_data,
+            &mut response_data,
             correlation_id,
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
@@ -2696,11 +2696,11 @@ mod tests {
             *now += request_timeout_ms as i64 + 1;
         } else {
             // Provide a response
-            let response_data = MetadataResponseData::new();
+            let mut response_data = MetadataResponseData::new();
             let bytes = serialize_response_with_header(
                 &ApiKeys::METADATA,
                 ApiKeys::METADATA.latest_version(),
-                &response_data,
+                &mut response_data,
                 correlation_id,
             );
             let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
@@ -2833,7 +2833,7 @@ mod tests {
         let bytes = serialize_response_with_header(
             &ApiKeys::METADATA,
             ApiKeys::METADATA.latest_version(),
-            &response_data,
+            &mut response_data,
             r1_correlation_id,
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
@@ -2896,7 +2896,7 @@ mod tests {
         let bytes = serialize_response_with_header(
             &ApiKeys::METADATA,
             ApiKeys::METADATA.latest_version(),
-            &response_data,
+            &mut response_data,
             correlation_id,
         );
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
@@ -3196,14 +3196,14 @@ mod tests {
         let initial_update_version = metadata.update_version();
 
         // Construct a metadata response with brokers so it's not ignored as empty
-        let response =
+        let mut response =
             crate::common::requests::request_test_utils::metadata_update_with(2, &std::collections::HashMap::new());
         let response_version = ApiKeys::METADATA.latest_version();
 
         // We need to match the correlation_id. Since the internal metadata request
         // has a specific correlation_id, we'll try a range.
         // The safer approach: use delayed_receive which matches on completed sends.
-        let bytes = serialize_response_with_header(&ApiKeys::METADATA, response_version, response.data(), 0);
+        let bytes = serialize_response_with_header(&ApiKeys::METADATA, response_version, response.data_mut(), 0);
         let receive = NetworkReceive::with_buffer(node1.id_string(), bytes);
         client
             .selector_mut()
@@ -3466,12 +3466,12 @@ mod tests {
 
         // Connection to new node should work.
         // Use explicit correlation_id 0 since this is the first ApiVersionsRequest.
-        let response = default_api_versions_response();
+        let mut response = default_api_versions_response();
         let api_versions_response_version = response
             .api_version(ApiKeys::API_VERSIONS.id())
             .map(|v| v.max_version)
             .unwrap_or(ApiKeys::API_VERSIONS.latest_version());
-        delayed_api_versions_response(client.selector_mut(), node1, 0, api_versions_response_version, &response);
+        delayed_api_versions_response(client.selector_mut(), node1, 0, api_versions_response_version, &mut response);
         let mut tries = 0;
         while !client.ready(node1, now).await {
             client.poll(1, now).await;
@@ -3484,8 +3484,8 @@ mod tests {
         // New connection to node closed earlier should work.
         // After close_connection, backoff is removed, so we can connect immediately.
         // Use correlation_id 1 since one ApiVersionsRequest was already sent for node1.
-        let response = default_api_versions_response();
-        delayed_api_versions_response(client.selector_mut(), node0, 1, api_versions_response_version, &response);
+        let mut response = default_api_versions_response();
+        delayed_api_versions_response(client.selector_mut(), node0, 1, api_versions_response_version, &mut response);
         tries = 0;
         while !client.ready(node0, now).await {
             client.poll(1, now).await;
@@ -3563,9 +3563,9 @@ mod tests {
         api_version.set_min_version(0);
         api_version.set_max_version(2);
         error_data.set_api_keys(vec![api_version]);
-        let error_response = ApiVersionsResponse::new(error_data);
+        let mut error_response = ApiVersionsResponse::new(error_data);
 
-        delayed_api_versions_response(client.selector_mut(), &node, 0, 0, &error_response);
+        delayed_api_versions_response(client.selector_mut(), &node, 0, 0, &mut error_response);
 
         // Handle ApiVersionResponse, initiate second ApiVersionRequest
         client.poll(0, now).await;
@@ -3591,8 +3591,8 @@ mod tests {
         );
 
         // Prepare a success response for the retry (correlation_id = 1)
-        let success_response = default_api_versions_response();
-        delayed_api_versions_response(client.selector_mut(), &node, 1, 0, &success_response);
+        let mut success_response = default_api_versions_response();
+        delayed_api_versions_response(client.selector_mut(), &node, 1, 0, &mut success_response);
 
         // Handle completed receives
         client.poll(0, now).await;
@@ -3639,9 +3639,9 @@ mod tests {
         let mut error_data = ApiVersionsResponseData::new();
         error_data.set_error_code(Errors::UnsupportedVersion.code());
         // No api_keys set — this means no version info from broker
-        let error_response = ApiVersionsResponse::new(error_data);
+        let mut error_response = ApiVersionsResponse::new(error_data);
 
-        delayed_api_versions_response(client.selector_mut(), &node, 0, 0, &error_response);
+        delayed_api_versions_response(client.selector_mut(), &node, 0, 0, &mut error_response);
 
         // Handle ApiVersionResponse, initiate second ApiVersionRequest
         client.poll(0, now).await;
@@ -3667,8 +3667,8 @@ mod tests {
         );
 
         // Prepare a success response for the retry (correlation_id = 1)
-        let success_response = default_api_versions_response();
-        delayed_api_versions_response(client.selector_mut(), &node, 1, 0, &success_response);
+        let mut success_response = default_api_versions_response();
+        delayed_api_versions_response(client.selector_mut(), &node, 1, 0, &mut success_response);
 
         // Handle completed receives
         client.poll(0, now).await;

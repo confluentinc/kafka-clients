@@ -281,7 +281,7 @@ impl SaslClientAuthenticator {
             data.set_auth_bytes(sasl_token);
             let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
             let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
-            let concrete = ConcreteRequest::SaslAuthenticate(request);
+            let mut concrete = ConcreteRequest::SaslAuthenticate(request);
             let byte_buffer_send = concrete.to_send(&header)?;
             Box::new(byte_buffer_send)
         };
@@ -487,8 +487,8 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let builder = ApiVersionsRequestBuilder::for_version(0);
-                let request = builder.build()?;
+                let mut builder = ApiVersionsRequestBuilder::for_version(0);
+                let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
                 self.send_request(send, transport).await?;
@@ -577,7 +577,7 @@ impl SaslClientAuthenticator {
         data.set_mechanism(self.mechanism.clone());
         let request = SaslHandshakeRequest::new(data, self.sasl_handshake_version);
         let header = self.next_request_header(&ApiKeys::SASL_HANDSHAKE, request.version())?;
-        let concrete = ConcreteRequest::SaslHandshake(request);
+        let mut concrete = ConcreteRequest::SaslHandshake(request);
         let send = Box::new(concrete.to_send(&header)?);
         self.send_request(send, transport).await
     }
@@ -767,7 +767,7 @@ mod tests {
         data.set_api_keys(vec![hs_version, auth_version]);
 
         // Serialize header + body
-        let response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
+        let mut response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
@@ -775,8 +775,9 @@ mod tests {
 
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, 0).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, 0).unwrap();
         buf.buffer().to_vec()
     }
 
@@ -793,7 +794,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_HANDSHAKE;
         let header_version = api_key.response_header_version(version);
-        let response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -802,8 +803,9 @@ mod tests {
 
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, version).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, version).unwrap();
         buf.buffer().to_vec()
     }
 
@@ -822,7 +824,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_AUTHENTICATE;
         let header_version = api_key.response_header_version(version);
-        let response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -831,8 +833,9 @@ mod tests {
 
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, version).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, version).unwrap();
         buf.buffer().to_vec()
     }
 
@@ -1087,15 +1090,16 @@ mod tests {
 
         data.set_api_keys(vec![hs_version]);
 
-        let response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
+        let mut response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
         let total_size = header_size + body_size;
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, 0).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, 0).unwrap();
         transport.enqueue_read_data(buf.buffer());
         transport.write_data.clear();
 

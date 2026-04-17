@@ -88,7 +88,7 @@ fn hash_of<T: Hash>(val: &T) -> u64 {
 /// Test round-trip: size → write → read → compare
 fn test_byte_buffer_round_trip<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display>(
     version: i16,
-    message: &T,
+    message: &mut T,
     expected: &T,
 ) {
     let mut cache = ObjectSerializationCache::new();
@@ -113,26 +113,28 @@ fn test_byte_buffer_round_trip<T: Message + PartialEq + Hash + std::fmt::Debug +
     );
 }
 
-fn test_equivalent_message_round_trip<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display>(
+fn test_equivalent_message_round_trip<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
     version: i16,
     message: &T,
 ) {
-    test_byte_buffer_round_trip(version, message, message);
+    let expected = message.clone();
+    let mut message = message.clone();
+    test_byte_buffer_round_trip(version, &mut message, &expected);
 }
 
-fn test_duplication<T: Message + PartialEq + Hash + std::fmt::Debug>(message: &T) {
+fn test_duplication<T: Message + PartialEq + Hash + std::fmt::Debug + Clone>(message: &T) {
     let duplicate = message.duplicate();
     assert_eq!(&duplicate, message);
     assert_eq!(message, &duplicate);
     assert_eq!(hash_of(&duplicate), hash_of(message));
 }
 
-fn test_all_message_round_trips<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display>(message: &T) {
+fn test_all_message_round_trips<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(message: &T) {
     test_duplication(message);
     test_all_message_round_trips_from_version(message.lowest_supported_version(), message);
 }
 
-fn test_all_message_round_trips_from_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display>(
+fn test_all_message_round_trips_from_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
     from_version: i16,
     message: &T,
 ) {
@@ -142,7 +144,7 @@ fn test_all_message_round_trips_from_version<T: Message + PartialEq + Hash + std
 }
 
 #[allow(dead_code)]
-fn test_all_message_round_trips_until_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display>(
+fn test_all_message_round_trips_until_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
     until_version: i16,
     message: &T,
 ) {
@@ -152,19 +154,20 @@ fn test_all_message_round_trips_until_version<T: Message + PartialEq + Hash + st
 }
 
 #[allow(dead_code)]
-fn test_all_message_round_trips_before_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display>(
+fn test_all_message_round_trips_before_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
     before_version: i16,
     message: &T,
     expected: &T,
 ) {
     for version in 0..before_version {
-        test_byte_buffer_round_trip(version, message, expected);
+        let mut msg = message.clone();
+        test_byte_buffer_round_trip(version, &mut msg, expected);
     }
 }
 
 #[allow(dead_code)]
 fn test_all_message_round_trips_between_versions<
-    T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display,
+    T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
 >(
     start_version: i16,
     end_version: i16,
@@ -172,11 +175,13 @@ fn test_all_message_round_trips_between_versions<
     expected: &T,
 ) {
     for version in start_version..end_version {
-        test_byte_buffer_round_trip(version, message, expected);
+        let mut msg = message.clone();
+        test_byte_buffer_round_trip(version, &mut msg, expected);
     }
 }
 
-fn verify_write_raises_uve<T: Message + std::fmt::Debug>(version: i16, problem_text: &str, message: &T) {
+fn verify_write_raises_uve<T: Message + std::fmt::Debug + Clone>(version: i16, problem_text: &str, message: &T) {
+    let mut message = message.clone();
     let mut cache = ObjectSerializationCache::new();
     // Java's assertThrows wraps both size() and write(), so an UnsupportedVersionException
     // from either call is caught. We handle size() errors the same way.
@@ -193,7 +198,7 @@ fn verify_write_raises_uve<T: Message + std::fmt::Debug>(version: i16, problem_t
     }
     let size = size_result.unwrap();
     let mut buf = ByteBufferAccessor::new(size as usize * 2);
-    let result = Message::write(message, &mut buf, &cache, version);
+    let result = Message::write(&mut message, &mut buf, &cache, version);
     assert!(result.is_err(), "Expected write to fail for version {}", version);
     let err_msg = result.unwrap_err().to_string();
     assert!(
@@ -204,11 +209,12 @@ fn verify_write_raises_uve<T: Message + std::fmt::Debug>(version: i16, problem_t
     );
 }
 
-fn verify_write_succeeds<T: Message + std::fmt::Debug>(version: i16, message: &T) {
+fn verify_write_succeeds<T: Message + std::fmt::Debug + Clone>(version: i16, message: &T) {
+    let mut message = message.clone();
     let mut cache = ObjectSerializationCache::new();
     let size = message.size(&mut cache, version).unwrap();
     let mut buf = ByteBufferAccessor::new(size as usize * 2);
-    Message::write(message, &mut buf, &cache, version).unwrap();
+    Message::write(&mut message, &mut buf, &cache, version).unwrap();
     assert_eq!(
         size as usize,
         buf.len(),
@@ -347,7 +353,7 @@ fn test_default_value_should_be_writable() {
     for version in
         SimpleExampleMessageData::LOWEST_SUPPORTED_VERSION..=SimpleExampleMessageData::HIGHEST_SUPPORTED_VERSION
     {
-        let acc = to_byte_buffer_accessor(&SimpleExampleMessageData::new(), version).unwrap();
+        let acc = to_byte_buffer_accessor(&mut SimpleExampleMessageData::new(), version).unwrap();
         assert!(!acc.buffer().is_empty());
     }
 }
@@ -389,7 +395,7 @@ fn test_long_tagged_string() {
     let version: i16 = 1;
     let size = message.size(&mut cache, version).unwrap();
     let mut buf = ByteBufferAccessor::new(size as usize);
-    Message::write(&message, &mut buf, &cache, version).unwrap();
+    Message::write(&mut message, &mut buf, &cache, version).unwrap();
     assert_eq!(size as usize, buf.len());
 }
 
@@ -1222,7 +1228,7 @@ fn test_offset_for_leader_epoch_versions() {
 #[test]
 fn test_offset_commit_request_versions() {
     for version in ApiKeys::OFFSET_COMMIT.oldest_version()..=ApiKeys::OFFSET_COMMIT.latest_version() {
-        let request = OffsetCommitRequestData::new()
+        let mut request = OffsetCommitRequestData::new()
             .set_group_id("groupId".to_string())
             .set_member_id("memberId".to_string())
             .set_generation_id_or_member_epoch(if version >= 1 { 10 } else { -1 })
@@ -1256,14 +1262,15 @@ fn test_offset_commit_request_versions() {
             ])
             .clone();
 
-        test_byte_buffer_round_trip(version, &request, &request);
+        let expected = request.clone();
+        test_byte_buffer_round_trip(version, &mut request, &expected);
     }
 }
 
 #[test]
 fn test_offset_commit_response_versions() {
     for version in ApiKeys::OFFSET_COMMIT.oldest_version()..=ApiKeys::OFFSET_COMMIT.latest_version() {
-        let response = OffsetCommitResponseData::new()
+        let mut response = OffsetCommitResponseData::new()
             .set_throttle_time_ms(if version >= 3 { 20 } else { 0 })
             .set_topics(vec![
                 OffsetCommitResponseTopic::new()
@@ -1287,7 +1294,8 @@ fn test_offset_commit_response_versions() {
             ])
             .clone();
 
-        test_byte_buffer_round_trip(version, &response, &response);
+        let expected = response.clone();
+        test_byte_buffer_round_trip(version, &mut response, &expected);
     }
 }
 
@@ -1389,7 +1397,7 @@ fn test_txn_offset_commit_response_versions() {
 #[test]
 fn test_offset_fetch_request_versions() {
     for version in ApiKeys::OFFSET_FETCH.oldest_version()..=ApiKeys::OFFSET_FETCH.latest_version() {
-        let request = if version < 8 {
+        let mut request = if version < 8 {
             OffsetFetchRequestData::new()
                 .set_group_id("groupId".to_string())
                 .set_require_stable(version == 7)
@@ -1428,14 +1436,15 @@ fn test_offset_fetch_request_versions() {
                 .clone()
         };
 
-        test_byte_buffer_round_trip(version, &request, &request);
+        let expected = request.clone();
+        test_byte_buffer_round_trip(version, &mut request, &expected);
     }
 }
 
 #[test]
 fn test_offset_fetch_response_versions() {
     for version in ApiKeys::OFFSET_FETCH.oldest_version()..=ApiKeys::OFFSET_FETCH.latest_version() {
-        let response = if version < 8 {
+        let mut response = if version < 8 {
             OffsetFetchResponseData::new()
                 .set_throttle_time_ms(if version >= 3 { 1000 } else { 0 })
                 .set_error_code(if version >= 2 { Errors::InvalidGroupId.code() } else { 0 })
@@ -1485,7 +1494,8 @@ fn test_offset_fetch_response_versions() {
                 .clone()
         };
 
-        test_byte_buffer_round_trip(version, &response, &response);
+        let expected = response.clone();
+        test_byte_buffer_round_trip(version, &mut response, &expected);
     }
 }
 
