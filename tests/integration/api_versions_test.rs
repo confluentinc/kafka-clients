@@ -65,7 +65,7 @@ async fn send_api_versions_request(selector: &mut Selector) -> ApiVersionsRespon
     let api_key = builder.api_key();
     // Use oldest allowed version for the initial handshake — maximum broker compatibility.
     let version = builder.oldest_allowed_version();
-    let request = builder.build_version(version).expect("Failed to build request");
+    let mut request = builder.build_version(version).expect("Failed to build request");
 
     let header = RequestHeader::new(api_key, version, "api-versions-test", 1).expect("Failed to create request header");
 

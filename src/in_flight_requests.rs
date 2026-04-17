@@ -301,11 +301,6 @@ impl InFlightRequests {
         reqs.front().expect("Queue should not be empty")
     }
 
-    pub fn last_sent_mut(&mut self, node: &str) -> &mut InFlightRequest {
-        let reqs = self.request_queue_mut(node).unwrap_or_else(|e| panic!("{e}"));
-        reqs.front_mut().expect("Queue should not be empty")
-    }
-
     /// Marks the last request sent to the given node as send-completed.
     ///
     /// In Java, the same `Send` object is shared between `InFlightRequest` and
