@@ -1765,7 +1765,8 @@ mod tests {
         version: i16,
         response: &mut ApiVersionsResponse,
     ) {
-        let bytes = serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data_mut(), correlation_id);
+        let bytes =
+            serialize_response_with_header(&ApiKeys::API_VERSIONS, version, response.data_mut(), correlation_id);
         let receive = NetworkReceive::with_buffer(node.id_string(), bytes);
         selector.delayed_receive(DelayedReceive::new(node.id_string(), receive));
     }

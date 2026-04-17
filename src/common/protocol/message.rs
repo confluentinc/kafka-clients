@@ -207,7 +207,12 @@ mod tests {
             self.inner.add_size(size, cache, version)
         }
 
-        fn write(&mut self, writable: &mut dyn Writable, cache: &ObjectSerializationCache, version: i16) -> io::Result<()> {
+        fn write(
+            &mut self,
+            writable: &mut dyn Writable,
+            cache: &ObjectSerializationCache,
+            version: i16,
+        ) -> io::Result<()> {
             self.inner.write(writable, cache, version)
         }
 
