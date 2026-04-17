@@ -3950,7 +3950,11 @@ fn generate_bytes_length_prefix_write(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !flexible_versions.empty() {
         if flexible_versions.lowest() == 0 {
-            writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", indent, accessor)?;
+            writeln!(
+                file,
+                "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                indent, accessor
+            )?;
         } else {
             if flexible_versions.highest() == i16::MAX {
                 writeln!(file, "{}if version >= {} {{", indent, flexible_versions.lowest())?;

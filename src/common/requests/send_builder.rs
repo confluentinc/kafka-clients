@@ -23,13 +23,13 @@
 
 use std::io;
 
+use crate::common::Uuid;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::MessageSizeAccumulator;
 use crate::common::protocol::ObjectSerializationCache;
 use crate::common::protocol::Writable;
 use crate::common::protocol::varint;
-use crate::common::Uuid;
 
 use super::RequestHeader;
 use super::ResponseHeader;
@@ -46,10 +46,7 @@ impl SendBuilder {
     /// # Errors
     ///
     /// Returns an error if size calculation or serialization fails.
-    pub fn build_request_send(
-        header: &RequestHeader,
-        api_request: &mut impl Message,
-    ) -> io::Result<ByteBufferSend> {
+    pub fn build_request_send(header: &RequestHeader, api_request: &mut impl Message) -> io::Result<ByteBufferSend> {
         Self::build_send(header.data(), header.header_version(), api_request, header.api_version())
     }
 

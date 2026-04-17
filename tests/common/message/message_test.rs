@@ -129,12 +129,16 @@ fn test_duplication<T: Message + PartialEq + Hash + std::fmt::Debug + Clone>(mes
     assert_eq!(hash_of(&duplicate), hash_of(message));
 }
 
-fn test_all_message_round_trips<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(message: &T) {
+fn test_all_message_round_trips<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
+    message: &T,
+) {
     test_duplication(message);
     test_all_message_round_trips_from_version(message.lowest_supported_version(), message);
 }
 
-fn test_all_message_round_trips_from_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
+fn test_all_message_round_trips_from_version<
+    T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
+>(
     from_version: i16,
     message: &T,
 ) {
@@ -144,7 +148,9 @@ fn test_all_message_round_trips_from_version<T: Message + PartialEq + Hash + std
 }
 
 #[allow(dead_code)]
-fn test_all_message_round_trips_until_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
+fn test_all_message_round_trips_until_version<
+    T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
+>(
     until_version: i16,
     message: &T,
 ) {
@@ -154,7 +160,9 @@ fn test_all_message_round_trips_until_version<T: Message + PartialEq + Hash + st
 }
 
 #[allow(dead_code)]
-fn test_all_message_round_trips_before_version<T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone>(
+fn test_all_message_round_trips_before_version<
+    T: Message + PartialEq + Hash + std::fmt::Debug + std::fmt::Display + Clone,
+>(
     before_version: i16,
     message: &T,
     expected: &T,
