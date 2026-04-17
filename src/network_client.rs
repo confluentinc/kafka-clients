@@ -534,32 +534,24 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         let send = request.to_send(&header).expect("Failed to serialize request");
 
-        // Create the NetworkSend from the serialized request.
-        let network_send = NetworkSend::new(&destination, Box::new(send));
+        // The selector gets the serialized send for actual I/O.
+        let selector_send = NetworkSend::new(&destination, Box::new(send));
+
+        // InFlightRequest stores a placeholder send — the real send is owned
+        // by the selector. The `send` field is not read after construction.
+        let placeholder_send =
+            NetworkSend::new(&destination, Box::new(crate::common::network::ByteBufferSend::new(Vec::new())));
 
         let in_flight_request = InFlightRequest::from_client_request(
             client_request,
             header,
             is_internal_request,
             Some(request),
-            network_send,
+            placeholder_send,
             now,
         );
         self.in_flight_requests.add(in_flight_request);
 
-        // The InFlightRequest now owns the original NetworkSend. The selector
-        // needs a separate send object for the actual I/O. We re-serialize
-        // to create the send for the selector.
-        let last_sent = self.in_flight_requests.last_sent_mut(&destination);
-        let selector_send = if let Some(ref mut req) = last_sent.request {
-            let send_buf = req
-                .to_send(&last_sent.header)
-                .expect("Failed to serialize request for selector");
-            NetworkSend::new(&destination, Box::new(send_buf))
-        } else {
-            // Fallback: empty send (should not happen in practice)
-            NetworkSend::new(&destination, Box::new(crate::common::network::ByteBufferSend::new(Vec::new())))
-        };
         let _ = self.selector.send(selector_send);
     }
 

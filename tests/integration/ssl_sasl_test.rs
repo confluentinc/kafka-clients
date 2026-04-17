@@ -157,7 +157,7 @@ fn build_request_send(
 ) -> (NetworkSend, RequestHeader) {
     let api_key = builder.api_key();
     let version = builder.oldest_allowed_version();
-    let request = builder.build_version(version).expect("Failed to build request");
+    let mut request = builder.build_version(version).expect("Failed to build request");
 
     let header =
         RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
