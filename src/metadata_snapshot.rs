@@ -23,6 +23,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 
 use crate::common::Cluster;
 use crate::common::ClusterResource;
@@ -47,7 +48,7 @@ pub struct MetadataSnapshot {
     metadata_by_partition: HashMap<TopicPartition, PartitionMetadata>,
     topic_ids: HashMap<String, Uuid>,
     topic_names: HashMap<Uuid, String>,
-    cluster_instance: Cluster,
+    cluster_instance: Arc<Cluster>,
 }
 
 impl MetadataSnapshot {
@@ -98,7 +99,7 @@ impl MetadataSnapshot {
             metadata_by_partition.insert(p.topic_partition.clone(), p);
         }
 
-        let cluster_instance = cluster_instance.unwrap_or_else(|| {
+        let cluster_instance = Arc::new(cluster_instance.unwrap_or_else(|| {
             Self::compute_cluster_view(
                 &cluster_id,
                 &nodes,
@@ -109,7 +110,7 @@ impl MetadataSnapshot {
                 &controller,
                 &topic_ids,
             )
-        });
+        }));
 
         Self {
             cluster_id,
@@ -128,6 +129,11 @@ impl MetadataSnapshot {
     /// Returns the cached cluster instance.
     pub fn cluster(&self) -> &Cluster {
         &self.cluster_instance
+    }
+
+    /// Returns a shared reference to the cached cluster instance.
+    pub fn cluster_arc(&self) -> Arc<Cluster> {
+        Arc::clone(&self.cluster_instance)
     }
 
     /// Returns the partition metadata for the given topic partition.

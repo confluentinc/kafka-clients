@@ -339,21 +339,7 @@ impl TransportLayer for SslTransportLayer {
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async move {
             match &mut self.state {
-                SslState::Ready(tls_stream) => {
-                    // TlsStream supports vectored writes via AsyncWrite
-                    let mut total = 0;
-                    for src in srcs {
-                        if src.is_empty() {
-                            continue;
-                        }
-                        let written = tls_stream.write(src).await?;
-                        total += written;
-                        if written < src.len() {
-                            break; // Partial write — don't continue to next buffer
-                        }
-                    }
-                    Ok(total)
-                },
+                SslState::Ready(tls_stream) => tls_stream.write_vectored(srcs).await,
                 SslState::Handshaking { .. } => {
                     Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"))
                 },
