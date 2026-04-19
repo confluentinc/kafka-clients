@@ -463,8 +463,6 @@ impl<K, V> KafkaProducer<K, V> {
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
 
-        let topic = record.topic().to_string();
-
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
@@ -473,7 +471,7 @@ impl<K, V> KafkaProducer<K, V> {
         {
             Ok(cwt) => cwt,
             Err(e) if e.is_api_exception() => {
-                return self.handle_api_exception(e, &topic, record_metadata::UNKNOWN_PARTITION, callback);
+                return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
         };
@@ -497,7 +495,7 @@ impl<K, V> KafkaProducer<K, V> {
         let headers = record_headers.to_array();
 
         self.do_send_bytes(
-            &topic,
+            &record_topic,
             partition_opt,
             timestamp_opt,
             serialized_key.as_deref(),
@@ -845,7 +843,6 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
 
-        let topic = record.topic().to_string();
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
             .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
@@ -853,7 +850,7 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         {
             Ok(cwt) => cwt,
             Err(e) if e.is_api_exception() => {
-                return self.handle_api_exception(e, &topic, record_metadata::UNKNOWN_PARTITION, callback);
+                return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
         };
@@ -861,10 +858,10 @@ impl KafkaProducer<Vec<u8>, Vec<u8>> {
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
-        let (_topic, partition, timestamp, _headers, key, value) = record.into_parts();
+        let (record_topic, partition, timestamp, _headers, key, value) = record.into_parts();
 
         self.do_send_bytes(
-            &topic,
+            &record_topic,
             partition,
             timestamp,
             key,

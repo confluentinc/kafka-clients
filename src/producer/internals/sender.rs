@@ -979,13 +979,13 @@ impl<C: KafkaClient> Sender<C> {
         trace!("Sent produce request to {}", node_id);
     }
 
-    fn topic_ids_for_partitions(&self, batch_infos: &[RequestBatchInfo]) -> HashMap<String, Uuid> {
+    fn topic_ids_for_partitions(&self, batch_infos: &[RequestBatchInfo]) -> HashMap<Arc<str>, Uuid> {
         let metadata_topic_ids = self.metadata.topic_ids();
         let mut result = HashMap::new();
         for info in batch_infos {
-            let topic = info.tp.topic().to_string();
-            let topic_id = metadata_topic_ids.get(&topic).copied().unwrap_or(Uuid::ZERO_UUID);
-            result.insert(topic, topic_id);
+            let topic_arc = info.tp.topic_arc().clone();
+            let topic_id = metadata_topic_ids.get(&*topic_arc).copied().unwrap_or(Uuid::ZERO_UUID);
+            result.insert(topic_arc, topic_id);
         }
         result
     }

@@ -87,7 +87,7 @@ pub struct ReadyCheckResult {
     /// The time in ms until the next check is needed.
     pub next_ready_check_delay_ms: i64,
     /// Topics whose leader is unknown.
-    pub unknown_leader_topics: HashSet<String>,
+    pub unknown_leader_topics: HashSet<Arc<str>>,
 }
 
 /// Callbacks passed into append.
@@ -149,7 +149,7 @@ pub struct RecordAccumulator {
     partition_availability_timeout_ms: i64,
     enable_adaptive_partitioning: bool,
     free: Arc<BufferPool>,
-    topic_info_map: DashMap<String, Arc<TopicInfo>>,
+    topic_info_map: DashMap<Arc<str>, Arc<TopicInfo>>,
     node_stats: DashMap<i32, NodeLatencyStats>,
     incomplete: IncompleteBatches,
     /// Only accessed by the sender thread, so no synchronization needed.
@@ -248,13 +248,13 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
     ) -> Result<RecordAppendResult, KafkaError> {
-        let topic_info = self.get_or_create_topic_info(topic);
+        let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
 
         let result = self
             .append_inner(
-                topic,
+                &topic_arc,
                 partition,
                 timestamp,
                 key,
@@ -276,7 +276,7 @@ impl RecordAccumulator {
     #[allow(clippy::too_many_arguments)]
     async fn append_inner(
         &self,
-        topic: &str,
+        topic: &Arc<str>,
         partition: i32,
         timestamp: i64,
         key: Option<&[u8]>,
@@ -405,7 +405,7 @@ impl RecordAccumulator {
     #[allow(clippy::too_many_arguments)]
     fn append_new_batch(
         &self,
-        topic: &str,
+        topic: &Arc<str>,
         partition: i32,
         deque: &mut VecDeque<ProducerBatch>,
         timestamp: i64,
@@ -419,7 +419,7 @@ impl RecordAccumulator {
         debug_assert!(partition != record_metadata::UNKNOWN_PARTITION);
 
         let records_builder = self.records_builder(buffer);
-        let tp = TopicPartition::new(topic.to_string(), partition);
+        let tp = TopicPartition::new(Arc::clone(topic), partition);
         let mut batch = ProducerBatch::new(tp, records_builder, now_ms);
 
         let future = batch
@@ -573,7 +573,7 @@ impl RecordAccumulator {
     pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
-        let topic_info = self.get_or_create_topic_info(tp.topic());
+        let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
         let dq_entry = topic_info
             .batches
             .entry(tp.partition())
@@ -624,11 +624,11 @@ impl RecordAccumulator {
         &self,
         metadata_snapshot: &MetadataSnapshot,
         now_ms: i64,
-        topic: &str,
+        topic: &Arc<str>,
         topic_info: &TopicInfo,
         mut next_ready_check_delay_ms: i64,
         ready_nodes: &mut HashSet<Node>,
-        unknown_leader_topics: &mut HashSet<String>,
+        unknown_leader_topics: &mut HashSet<Arc<str>>,
     ) -> i64 {
         let cluster = metadata_snapshot.cluster();
         let mut queue_sizes: Option<Vec<i32>> = None;
@@ -646,7 +646,7 @@ impl RecordAccumulator {
         for entry in topic_info.batches.iter() {
             let partition = *entry.key();
             let deque_mutex = entry.value();
-            let part = TopicPartition::new(topic.to_string(), partition);
+            let part = TopicPartition::new(Arc::clone(topic), partition);
 
             let leader = cluster.leader_for(&part);
             if leader.is_some() && queue_sizes.is_some() {
@@ -703,7 +703,7 @@ impl RecordAccumulator {
                     ready_nodes,
                 );
             } else {
-                unknown_leader_topics.insert(part.topic().to_string());
+                unknown_leader_topics.insert(part.topic_arc().clone());
             }
         }
 
@@ -792,7 +792,7 @@ impl RecordAccumulator {
 
         loop {
             let part = &parts[drain_index];
-            let tp = TopicPartition::new(part.topic().to_string(), part.partition());
+            let tp = TopicPartition::new(part.topic(), part.partition());
 
             self.update_drain_index(node.id_string(), drain_index);
             drain_index = (drain_index + 1) % parts.len();
@@ -939,12 +939,16 @@ impl RecordAccumulator {
     }
 
     /// Get batches for a topic-partition. Used in drain logic.
-    fn get_or_create_topic_info(&self, topic: &str) -> Arc<TopicInfo> {
+    fn get_or_create_topic_info(&self, topic: &str) -> (Arc<str>, Arc<TopicInfo>) {
+        if let Some(entry) = self.topic_info_map.get(topic) {
+            return (entry.key().clone(), Arc::clone(entry.value()));
+        }
+        let topic_arc: Arc<str> = Arc::from(topic);
         let entry = self
             .topic_info_map
-            .entry(topic.to_string())
-            .or_insert_with(|| Arc::new(TopicInfo::new(BuiltInPartitioner::new(topic, self.batch_size))));
-        Arc::clone(entry.value())
+            .entry(Arc::clone(&topic_arc))
+            .or_insert_with(|| Arc::new(TopicInfo::new(BuiltInPartitioner::new(&topic_arc, self.batch_size))));
+        (entry.key().clone(), Arc::clone(entry.value()))
     }
 
     /// Deallocate the batch buffer back to the pool.
@@ -1132,7 +1136,7 @@ impl RecordAccumulator {
         let num_split_batches = sub_batches.len();
         let tp = big_batch.topic_partition.clone();
 
-        let topic_info = self.get_or_create_topic_info(tp.topic());
+        let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
         let dq_entry = topic_info
             .batches
             .entry(tp.partition())
