@@ -525,11 +525,15 @@ impl<C: KafkaClient> Sender<C> {
             }
         } else if response.version_mismatch().is_some() {
             warn!(
-                "Cancelled request {} due to a version mismatch with node {}",
+                "Cancelled request {} due to a version mismatch with node {}: {}",
                 response,
-                response.destination()
+                response.destination(),
+                response.version_mismatch().unwrap_or("unknown")
             );
-            let part_resp = PartitionResponse::from_error(Errors::UnsupportedVersion);
+            let part_resp = PartitionResponse::from_error_with_message(
+                Errors::UnsupportedVersion,
+                response.version_mismatch().map(|s| s.to_string()),
+            );
             for (tp, batch) in batches.iter_mut() {
                 let action = self.complete_batch(batch, &part_resp, correlation_id, now, None);
                 deferred_actions.push((tp.clone(), action));
