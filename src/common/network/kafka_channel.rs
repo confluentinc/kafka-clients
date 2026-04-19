@@ -480,7 +480,20 @@ impl KafkaChannel {
         self.mid_write = true;
         let transport = &mut *self.transport_layer;
         let send = self.send.as_mut().unwrap();
-        send.write_to(transport).await
+        match send.try_write_to(transport) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Transport doesn't support sync writes (SSL) or socket
+                // buffer is full. Fall back to async with zero timeout to
+                // avoid blocking.
+                match tokio::time::timeout(std::time::Duration::ZERO, send.write_to(transport)).await {
+                    Ok(Ok(n)) => Ok(n),
+                    Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+                    Ok(Err(e)) => Err(e),
+                    Err(_elapsed) => Ok(0),
+                }
+            },
+            result => result,
+        }
     }
 
     /// Accumulates network thread time for this channel.

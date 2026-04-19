@@ -128,6 +128,44 @@ impl KafkaSend for ByteBufferSend {
         })
     }
 
+    fn try_write_to(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize> {
+        let mut slices_buf = [io::IoSlice::new(&[]); 8];
+        let mut count = 0;
+        for (data, offset) in &self.buffers {
+            if *offset < data.len() && count < slices_buf.len() {
+                slices_buf[count] = io::IoSlice::new(&data[*offset..]);
+                count += 1;
+            }
+        }
+
+        if count == 0 {
+            return Ok(0);
+        }
+
+        // Propagate WouldBlock so the caller can fall back to async.
+        let written = channel.try_write_vectored(&slices_buf[..count])?;
+
+        if written == 0 {
+            self.pending = channel.has_pending_writes();
+            return Ok(0);
+        }
+
+        let mut to_consume = written;
+        for (data, offset) in &mut self.buffers {
+            if to_consume == 0 {
+                break;
+            }
+            let available = data.len() - *offset;
+            let consumed = to_consume.min(available);
+            *offset += consumed;
+            to_consume -= consumed;
+        }
+
+        self.remaining -= written;
+        self.pending = channel.has_pending_writes();
+        Ok(written)
+    }
+
     fn size(&self) -> usize {
         self.size
     }

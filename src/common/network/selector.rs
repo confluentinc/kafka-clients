@@ -443,13 +443,10 @@ impl Selector {
     /// partial writes where a full `NetworkSend` has not yet completed).
     async fn write_channel(&mut self, channel_id: &str) -> io::Result<bool> {
         let channel = self.channels.get_mut(channel_id).unwrap();
-        // Use timeout to avoid blocking on this channel's writability.
-        let write_result = tokio::time::timeout(std::time::Duration::ZERO, channel.write()).await;
-        let bytes_sent = match write_result {
-            Ok(Ok(b)) => b,
-            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
-            Ok(Err(e)) => return Err(e),
-            Err(_elapsed) => 0, // timeout = not ready
+        let bytes_sent = match channel.write().await {
+            Ok(b) => b,
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+            Err(e) => return Err(e),
         };
         let send = channel.maybe_complete_send();
         if (bytes_sent > 0 || send.is_some())
