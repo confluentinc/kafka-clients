@@ -629,9 +629,7 @@ impl ProducerBatch {
 
     /// Take the built memory records, moving ownership without copying.
     pub fn records(&mut self) -> MemoryRecords {
-        self.records_builder
-            .take_built_records()
-            .expect("records() called but no records built")
+        self.records_builder.build()
     }
 
     /// The estimated size in bytes of the batch.
