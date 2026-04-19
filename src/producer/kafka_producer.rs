@@ -72,7 +72,7 @@ pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
 #[derive(Debug)]
 struct ClusterAndWaitTime {
     /// The cluster metadata.
-    cluster: Cluster,
+    cluster: Arc<Cluster>,
     /// Time in ms spent waiting for metadata.
     waited_on_metadata_ms: i64,
 }
@@ -559,18 +559,22 @@ impl<K, V> KafkaProducer<K, V> {
 
         let timestamp = timestamp.unwrap_or(now_ms);
 
-        match self.accumulator.append(
-            topic,
-            partition,
-            timestamp,
-            key,
-            value,
-            headers,
-            callback,
-            remaining_wait_ms,
-            now_ms,
-            cluster,
-        ) {
+        match self
+            .accumulator
+            .append(
+                topic,
+                partition,
+                timestamp,
+                key,
+                value,
+                headers,
+                callback,
+                remaining_wait_ms,
+                now_ms,
+                cluster,
+            )
+            .await
+        {
             Ok(result) => {
                 if result.batch_is_full || result.new_batch_created {
                     trace!(

@@ -87,6 +87,7 @@ pub struct MemoryRecordsBuilder {
     last_offset: Option<i64>,
     base_timestamp: Option<i64>,
 
+    initial_buffer_capacity: usize,
     built_records: Option<MemoryRecords>,
     built_size: Option<usize>,
     closed: bool,
@@ -139,6 +140,7 @@ impl MemoryRecordsBuilder {
         }
 
         let batch_header_size = record_batch_header_size_in_bytes(magic, compression.compression_type());
+        let initial_buffer_capacity = buffer.capacity();
 
         // Ensure the buffer is large enough for the header
         let header_end = initial_position + batch_header_size;
@@ -192,6 +194,7 @@ impl MemoryRecordsBuilder {
             offset_of_max_timestamp: -1,
             last_offset: None,
             base_timestamp,
+            initial_buffer_capacity,
             built_records: None,
             built_size: None,
             closed: false,
@@ -248,7 +251,7 @@ impl MemoryRecordsBuilder {
 
     /// Returns the initial capacity of the buffer.
     pub fn initial_capacity(&self) -> usize {
-        self.buffer.capacity()
+        self.initial_buffer_capacity
     }
 
     /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.

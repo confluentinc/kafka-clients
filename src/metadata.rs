@@ -26,7 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Notify;
@@ -151,7 +151,7 @@ struct MetadataInner {
     fatal_err: Option<KafkaError>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
-    metadata_snapshot: MetadataSnapshot,
+    metadata_snapshot: Arc<MetadataSnapshot>,
     need_full_update: bool,
     need_partial_update: bool,
     equivalent_response_count: i64,
@@ -279,7 +279,7 @@ impl Metadata {
                 last_seen_leader_epochs: HashMap::new(),
                 invalid_topics: HashSet::new(),
                 unauthorized_topics: HashSet::new(),
-                metadata_snapshot: MetadataSnapshot::empty(),
+                metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
@@ -337,7 +337,7 @@ impl Metadata {
                 last_seen_leader_epochs: HashMap::new(),
                 invalid_topics: HashSet::new(),
                 unauthorized_topics: HashSet::new(),
-                metadata_snapshot: MetadataSnapshot::empty(),
+                metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
@@ -351,15 +351,15 @@ impl Metadata {
     }
 
     /// Gets the current cluster info without blocking.
-    pub fn fetch(&self) -> Cluster {
+    pub fn fetch(&self) -> Arc<Cluster> {
         let inner = self.inner.lock().unwrap();
-        inner.metadata_snapshot.cluster().clone()
+        inner.metadata_snapshot.cluster_arc()
     }
 
     /// Gets the current metadata snapshot.
-    pub fn fetch_metadata_snapshot(&self) -> MetadataSnapshot {
+    pub fn fetch_metadata_snapshot(&self) -> Arc<MetadataSnapshot> {
         let inner = self.inner.lock().unwrap();
-        inner.metadata_snapshot.clone()
+        Arc::clone(&inner.metadata_snapshot)
     }
 
     /// Returns the time until the cluster info can be updated (i.e., backoff time has elapsed).
@@ -584,7 +584,7 @@ impl Metadata {
         let mut inner = self.inner.lock().unwrap();
         inner.need_full_update = true;
         inner.update_version += 1;
-        inner.metadata_snapshot = MetadataSnapshot::bootstrap(&addresses);
+        inner.metadata_snapshot = Arc::new(MetadataSnapshot::bootstrap(&addresses));
         inner.bootstrap_addresses = addresses;
     }
 
@@ -595,7 +595,7 @@ impl Metadata {
         info!("Rebootstrapping with {:?}", addresses);
         inner.need_full_update = true;
         inner.update_version += 1;
-        inner.metadata_snapshot = MetadataSnapshot::bootstrap(&addresses);
+        inner.metadata_snapshot = Arc::new(MetadataSnapshot::bootstrap(&addresses));
     }
 
     /// Updates metadata assuming the current request version.
@@ -649,10 +649,15 @@ impl Metadata {
             }
         };
 
-        inner.metadata_snapshot =
-            Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms, &retain);
+        inner.metadata_snapshot = Arc::new(Self::handle_metadata_response(
+            &mut inner,
+            response,
+            is_partial_update,
+            now_ms,
+            &retain,
+        ));
 
-        let cluster = inner.metadata_snapshot.cluster().clone();
+        let cluster = inner.metadata_snapshot.cluster_arc();
         Self::maybe_set_metadata_error(&mut inner, &cluster);
 
         // Remove epochs for topics we no longer retain
@@ -788,7 +793,7 @@ impl Metadata {
         let cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
         let controller = inner.metadata_snapshot.cluster().controller().cloned();
 
-        inner.metadata_snapshot = inner.metadata_snapshot.merge_with(
+        inner.metadata_snapshot = Arc::new(inner.metadata_snapshot.merge_with(
             cluster_id,
             new_nodes,
             update_partition_metadata,
@@ -798,7 +803,7 @@ impl Metadata {
             controller,
             topic_ids_for_updated,
             |_topic, _is_internal| true,
-        );
+        ));
 
         let cluster_resource = inner.metadata_snapshot.cluster_resource();
         inner.cluster_resource_listeners.on_update(&cluster_resource);
@@ -2943,7 +2948,7 @@ mod tests {
         let snapshot = metadata.fetch_metadata_snapshot();
         let cluster = metadata.fetch();
         // Validate metadata snapshot & cluster are setup as expected.
-        assert_eq!(&cluster, snapshot.cluster());
+        assert_eq!(cluster.as_ref(), snapshot.cluster());
         assert_eq!(old_node_count as usize, snapshot.cluster().nodes().len());
         assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic1));
         assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic2));
@@ -2954,8 +2959,8 @@ mod tests {
         let num_threads = 6;
         let barrier = Arc::new(std::sync::Barrier::new(num_threads));
         let at_least_updated = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let new_snapshot: Arc<Mutex<Option<MetadataSnapshot>>> = Arc::new(Mutex::new(None));
-        let new_cluster: Arc<Mutex<Option<Cluster>>> = Arc::new(Mutex::new(None));
+        let new_snapshot: Arc<Mutex<Option<Arc<MetadataSnapshot>>>> = Arc::new(Mutex::new(None));
+        let new_cluster: Arc<Mutex<Option<Arc<Cluster>>>> = Arc::new(Mutex::new(None));
 
         let mut handles = Vec::new();
         for i in 0..num_threads {

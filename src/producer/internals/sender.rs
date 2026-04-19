@@ -1166,12 +1166,13 @@ mod tests {
         }
 
         /// Append a record to the accumulator for the given partition.
-        fn append_to_accumulator(&self, tp: &TopicPartition) -> Arc<FutureRecordMetadata> {
+        async fn append_to_accumulator(&self, tp: &TopicPartition) -> Arc<FutureRecordMetadata> {
             self.append_to_accumulator_with(tp, self.time.milliseconds(), "key", "value")
+                .await
         }
 
         /// Append a record with specific timestamp and key/value.
-        fn append_to_accumulator_with(
+        async fn append_to_accumulator_with(
             &self,
             tp: &TopicPartition,
             timestamp: i64,
@@ -1193,6 +1194,7 @@ mod tests {
                     self.time.milliseconds(),
                     &cluster,
                 )
+                .await
                 .expect("append should succeed");
             result.future
         }
@@ -1419,7 +1421,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let offset = 0i64;
         let tp0 = ctx.tp0.clone();
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
 
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
@@ -1455,7 +1457,7 @@ mod tests {
     async fn test_can_retry_without_idempotence() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
 
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
@@ -1487,7 +1489,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -1521,8 +1523,8 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Create a producer batch with more than one record so it is eligible for splitting
-        let future1 = ctx.append_to_accumulator(&tp0);
-        let future2 = ctx.append_to_accumulator(&tp0);
+        let future1 = ctx.append_to_accumulator(&tp0).await;
+        let future2 = ctx.append_to_accumulator(&tp0).await;
 
         // Send request
         ctx.sender.run_once().await; // connect
@@ -1558,7 +1560,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -1597,7 +1599,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        ctx.append_to_accumulator(&tp0);
+        ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -1606,7 +1608,7 @@ mod tests {
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 / 2);
 
         // Send second ProduceRequest
-        ctx.append_to_accumulator(&tp0);
+        ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // must not send request because the partition is muted
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
@@ -1634,7 +1636,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
 
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -1660,7 +1662,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
 
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -1698,8 +1700,8 @@ mod tests {
         let tp1 = ctx.tp1.clone();
 
         // Send multiple ProduceRequests across multiple partitions
-        let future1 = ctx.append_to_accumulator_with(&tp0, ctx.time.milliseconds(), "k1", "v1");
-        let future2 = ctx.append_to_accumulator_with(&tp1, ctx.time.milliseconds(), "k2", "v2");
+        let future1 = ctx.append_to_accumulator_with(&tp0, ctx.time.milliseconds(), "k1", "v1").await;
+        let future2 = ctx.append_to_accumulator_with(&tp1, ctx.time.milliseconds(), "k2", "v2").await;
 
         // Send request
         ctx.sender.run_once().await; // connect
@@ -1746,7 +1748,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
         let offset = 0i64;
 
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
 
         ctx.sender.run_once().await;
         assert!(ctx.metadata.contains_topic(tp0.topic()), "Topic not added to metadata");
@@ -1799,7 +1801,7 @@ mod tests {
 
         let mut futures = Vec::with_capacity(record_count);
         for _i in 0..record_count {
-            futures.push(ctx.append_to_accumulator(&tp0));
+            futures.push(ctx.append_to_accumulator(&tp0).await);
         }
 
         ctx.sender.run_once().await; // connect
@@ -1878,7 +1880,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // --- Successful retry ---
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -1933,7 +1935,7 @@ mod tests {
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
 
         // --- Unsuccessful retry (exhausted retries) ---
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // send produce request
         assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
 
@@ -1994,7 +1996,7 @@ mod tests {
             .update_with_current_request_version(&metadata_response, false, ctx.time.milliseconds());
 
         // Send the first message to tp1.
-        ctx.append_to_accumulator_with(&tp1, 0, "key1", "value1");
+        ctx.append_to_accumulator_with(&tp1, 0, "key1", "value1").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -2004,7 +2006,7 @@ mod tests {
 
         ctx.time.sleep(900);
         // Now send another message to tp1
-        ctx.append_to_accumulator_with(&tp1, 0, "key2", "value2");
+        ctx.append_to_accumulator_with(&tp1, 0, "key2", "value2").await;
 
         // With guarantee_message_order, the second message should not be sent
         // because tp1 is muted.
@@ -2035,7 +2037,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
@@ -2066,7 +2068,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
 
-        ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
 
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
@@ -2168,6 +2170,7 @@ mod tests {
                 time.milliseconds(),
                 &cluster,
             )
+            .await
             .expect("append should succeed");
 
         sender.run_once().await; // connect
@@ -2221,6 +2224,7 @@ mod tests {
                 time.milliseconds(),
                 &cluster,
             )
+            .await
             .expect("append should succeed");
         sender.run_once().await;
         assert_eq!(
