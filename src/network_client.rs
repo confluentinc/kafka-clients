@@ -478,12 +478,15 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             Ok(request) => {
                 self.do_send_with_request(&mut client_request, is_internal_request, now, request);
             },
-            Err(_e) => {
-                debug!(
-                    "Version mismatch when attempting to send {} with correlation id {} to {}",
+            Err(e) => {
+                let error_msg = format!("UnsupportedVersionError: {}", e);
+                warn!(
+                    "Failed to build {} v{} with correlation id {} to {}: {}",
                     client_request.request_builder().api_key().name(),
+                    version,
                     client_request.correlation_id(),
-                    client_request.destination()
+                    client_request.destination(),
+                    e
                 );
                 let header = client_request
                     .make_header(client_request.request_builder().latest_allowed_version())
@@ -495,17 +498,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     now,
                     now,
                     false,
-                    Some("UnsupportedVersionError".to_string()),
+                    Some(error_msg.clone()),
                     None,
                     None,
                 );
                 if !is_internal_request {
                     self.aborted_sends.push(client_response);
                 } else if *client_request.api_key() == ApiKeys::METADATA {
-                    self.handle_failed_request(
-                        now,
-                        Some(KafkaError::fatal(Errors::UnsupportedVersion, "UnsupportedVersionError")),
-                    );
+                    self.handle_failed_request(now, Some(KafkaError::fatal(Errors::UnsupportedVersion, &error_msg)));
                 }
             },
         }
