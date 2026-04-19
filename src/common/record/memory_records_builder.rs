@@ -460,11 +460,7 @@ impl MemoryRecordsBuilder {
     }
 
     fn take_batch_data(&mut self) -> Vec<u8> {
-        if self.initial_position == 0 {
-            std::mem::take(&mut self.buffer)
-        } else {
-            self.buffer[self.initial_position..].to_vec()
-        }
+        self.buffer[self.initial_position..].to_vec()
     }
 
     fn validate_producer_state(&self) {
