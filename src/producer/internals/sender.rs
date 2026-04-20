@@ -42,6 +42,8 @@ use crate::kafka_client::KafkaClient;
 use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, ProduceRequestData, TopicProduceData};
 
+use crate::common::utils::LogContext;
+
 use super::ProducerBatch;
 use super::ProducerMetadata;
 use super::RecordAccumulator;
@@ -125,6 +127,10 @@ pub struct Sender<C: KafkaClient> {
     pending_produce_responses: HashMap<i32, PendingProduceRequest>,
     /// Provider of current wall-clock time in milliseconds (epoch).
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `Sender`.
+    log_context: LogContext,
 }
 
 impl<C: KafkaClient> Sender<C> {
@@ -144,6 +150,7 @@ impl<C: KafkaClient> Sender<C> {
         force_close: Arc<AtomicBool>,
         wakeup: Arc<Notify>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        log_context: LogContext,
     ) -> Self {
         Self {
             client,
@@ -161,6 +168,7 @@ impl<C: KafkaClient> Sender<C> {
             in_flight_batches: HashMap::new(),
             pending_produce_responses: HashMap::new(),
             time_provider,
+            log_context,
         }
     }
 
@@ -1147,6 +1155,7 @@ mod tests {
                 force_close,
                 wakeup,
                 time_provider,
+                LogContext::empty(),
             );
 
             let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
@@ -2141,6 +2150,7 @@ mod tests {
             force_close,
             wakeup,
             time_provider,
+            LogContext::empty(),
         );
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);

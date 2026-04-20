@@ -45,6 +45,7 @@ use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
 use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::LogContext;
 
 use super::MetadataSnapshot;
 use super::common_client_configs;
@@ -137,6 +138,11 @@ pub struct Metadata {
     /// (e.g., `ProducerMetadata.update()`) to perform additional work after the base
     /// update completes.
     post_update_fn: Option<Box<PostUpdateFn>>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `Metadata`.
+    #[allow(dead_code)]
+    log_context: LogContext,
 }
 
 /// Inner mutable state of `Metadata`, protected by a mutex.
@@ -254,6 +260,33 @@ impl Metadata {
         metadata_expire_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
     ) -> Self {
+        Self::with_log_context(
+            refresh_backoff_ms,
+            refresh_backoff_max_ms,
+            metadata_expire_ms,
+            cluster_resource_listeners,
+            LogContext::empty(),
+        )
+    }
+
+    /// Creates a new `Metadata` instance with a `LogContext`.
+    ///
+    /// # Arguments
+    /// * `refresh_backoff_ms` - The minimum amount of time between metadata refreshes
+    ///   to avoid busy polling
+    /// * `refresh_backoff_max_ms` - The maximum amount of time to wait between metadata
+    ///   refreshes
+    /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
+    ///   without refresh
+    /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    /// * `log_context` - Contextual log message prefix
+    pub fn with_log_context(
+        refresh_backoff_ms: i64,
+        refresh_backoff_max_ms: i64,
+        metadata_expire_ms: i64,
+        cluster_resource_listeners: ClusterResourceListeners,
+        log_context: LogContext,
+    ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
             common_client_configs::RETRY_BACKOFF_EXP_BASE,
@@ -289,6 +322,7 @@ impl Metadata {
             request_builder_fn: None,
             new_topics_request_builder_fn: None,
             post_update_fn: None,
+            log_context,
         }
     }
 
@@ -311,6 +345,7 @@ impl Metadata {
         metadata_expire_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
         overrides: MetadataOverrides,
+        log_context: LogContext,
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
@@ -347,6 +382,7 @@ impl Metadata {
             request_builder_fn: overrides.request_builder_fn,
             new_topics_request_builder_fn: overrides.new_topics_request_builder_fn,
             post_update_fn: overrides.post_update_fn,
+            log_context,
         }
     }
 
@@ -2403,6 +2439,7 @@ mod tests {
             METADATA_EXPIRE_MS,
             ClusterResourceListeners::new(),
             MetadataOverrides { enable_partial_updates: true, ..MetadataOverrides::default() },
+            LogContext::empty(),
         );
 
         assert!(!metadata.update_requested());
@@ -2635,6 +2672,7 @@ mod tests {
                 })),
                 ..MetadataOverrides::default()
             },
+            LogContext::empty(),
         );
 
         // Initialize a metadata instance with two topic variants "old" and "keep". Both will be retained.
@@ -2837,6 +2875,7 @@ mod tests {
                 })),
                 ..MetadataOverrides::default()
             },
+            LogContext::empty(),
         );
 
         // Initialize a metadata instance with two topics. Both will be retained.

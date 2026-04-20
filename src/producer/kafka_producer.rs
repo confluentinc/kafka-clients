@@ -31,6 +31,7 @@ use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::client_utils;
+use crate::common::utils::LogContext;
 use crate::common::Cluster;
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
@@ -126,6 +127,10 @@ pub struct KafkaProducer<K, V> {
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Provider of current wall-clock time in milliseconds.
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `KafkaProducer`.
+    log_context: LogContext,
 }
 
 impl<K, V> KafkaProducer<K, V> {
@@ -160,6 +165,7 @@ impl<K, V> KafkaProducer<K, V> {
         sender_handle: Option<JoinHandle<()>>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         Self {
             client_id: config.client_id.clone(),
             key_serializer,
@@ -176,6 +182,7 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(sender_handle),
             time_provider,
+            log_context,
         }
     }
 
@@ -229,6 +236,8 @@ impl<K, V> KafkaProducer<K, V> {
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     ) -> Result<Self, KafkaError> {
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
+
         info!("Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
@@ -251,12 +260,13 @@ impl<K, V> KafkaProducer<K, V> {
         });
 
         // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
-        let metadata = Arc::new(ProducerMetadata::new(
+        let metadata = Arc::new(ProducerMetadata::with_log_context(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
             config.metadata_max_age_ms,
             config.metadata_max_idle_ms,
             ClusterResourceListeners::new(),
+            log_context.clone(),
         ));
         metadata.bootstrap(addresses);
 
@@ -267,7 +277,8 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 7. Create Selector + NetworkClient
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let selector = Selector::with_defaults(config.connections_max_idle_ms, channel_builder);
+        let selector =
+            Selector::with_defaults_and_log_context(config.connections_max_idle_ms, channel_builder, log_context.clone());
         let api_versions = Arc::new(ApiVersions::new());
 
         let client = NetworkClient::with_metadata(
@@ -294,7 +305,7 @@ impl<K, V> KafkaProducer<K, V> {
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
         let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize));
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
             config.linger_ms as i32,
@@ -306,6 +317,7 @@ impl<K, V> KafkaProducer<K, V> {
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
             buffer_pool,
+            log_context.clone(),
         ));
 
         // 9. Wire up the Sender and spawn the I/O background task
@@ -338,6 +350,7 @@ impl<K, V> KafkaProducer<K, V> {
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
         let wakeup = Arc::new(Notify::new());
@@ -360,6 +373,7 @@ impl<K, V> KafkaProducer<K, V> {
             Arc::clone(&force_close),
             Arc::clone(&wakeup),
             Arc::clone(&time_provider),
+            log_context.clone(),
         );
 
         let io_thread_name = format!("{} | {}", NETWORK_THREAD_PREFIX, config.client_id);
@@ -386,6 +400,7 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(Some(sender_handle)),
             time_provider,
+            log_context,
         }
     }
 

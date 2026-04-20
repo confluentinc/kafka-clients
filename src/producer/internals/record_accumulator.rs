@@ -41,6 +41,7 @@ use crate::common::record::RecordBatch;
 use crate::common::record::TimestampType;
 use crate::common::record::abstract_records;
 use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::LogContext;
 use crate::metadata_snapshot::MetadataSnapshot;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
@@ -157,6 +158,10 @@ pub struct RecordAccumulator {
     /// Only accessed by the sender thread.
     nodes_drain_index: Mutex<HashMap<String, usize>>,
     next_batch_expiry_time_ms: Mutex<i64>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `RecordAccumulator`.
+    log_context: LogContext,
 }
 
 impl RecordAccumulator {
@@ -185,6 +190,46 @@ impl RecordAccumulator {
         partitioner_config: PartitionerConfig,
         buffer_pool: Arc<BufferPool>,
     ) -> Self {
+        Self::with_log_context(
+            batch_size,
+            compression,
+            linger_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            delivery_timeout_ms,
+            partitioner_config,
+            buffer_pool,
+            LogContext::empty(),
+        )
+    }
+
+    /// Create a new record accumulator with a `LogContext`.
+    ///
+    /// # Arguments
+    /// * `batch_size` - The size to use when allocating `MemoryRecords` instances
+    /// * `compression` - The compression codec for the records
+    /// * `linger_ms` - An artificial delay time to add before declaring a records
+    ///   instance that isn't full ready for sending
+    /// * `retry_backoff_ms` - An artificial delay time to retry the produce request
+    ///   upon receiving an error
+    /// * `retry_backoff_max_ms` - The upper bound of the retry backoff time
+    /// * `delivery_timeout_ms` - An upper bound on the time to report success or
+    ///   failure on record delivery
+    /// * `partitioner_config` - Partitioner configuration
+    /// * `buffer_pool` - The buffer pool
+    /// * `log_context` - Contextual log message prefix
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_log_context(
+        batch_size: i32,
+        compression: crate::common::compress::Compression,
+        linger_ms: i32,
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        delivery_timeout_ms: i32,
+        partitioner_config: PartitionerConfig,
+        buffer_pool: Arc<BufferPool>,
+        log_context: LogContext,
+    ) -> Self {
         let retry_backoff = ExponentialBackoff::new(
             retry_backoff_ms,
             crate::common_client_configs::RETRY_BACKOFF_EXP_BASE,
@@ -211,6 +256,7 @@ impl RecordAccumulator {
             muted: Mutex::new(HashSet::new()),
             nodes_drain_index: Mutex::new(HashMap::new()),
             next_batch_expiry_time_ms: Mutex::new(i64::MAX),
+            log_context,
         }
     }
 

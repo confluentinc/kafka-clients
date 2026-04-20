@@ -57,6 +57,7 @@ use super::MetadataUpdater;
 use super::{ApiVersions, NodeApiVersions, RequestCompletionHandler};
 use super::{InFlightRequest, InFlightRequests};
 use crate::common::KafkaError;
+use crate::common::utils::LogContext;
 
 /// Returns current wall-clock time in milliseconds since the Unix epoch.
 /// This is the default time provider, equivalent to Java's `SystemTime`.
@@ -136,6 +137,11 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     /// For the default (system clock) provider this is unused.
     poll_time_store: Arc<AtomicI64>,
 
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `NetworkClient`.
+    log_context: LogContext,
+
     // --- DefaultMetadataUpdater state (inlined from inner class) ---
     /// The metadata instance, or `None` if using an external MetadataUpdater.
     metadata: Option<Arc<Metadata>>,
@@ -214,6 +220,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             last_poll_time_ms: 0,
             time_provider: Arc::new(system_time_ms),
             poll_time_store: Arc::new(AtomicI64::new(0)),
+            log_context: LogContext::empty(),
             metadata: Some(metadata),
             external_metadata_updater: None,
             in_progress: None,
@@ -285,6 +292,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             last_poll_time_ms: 0,
             time_provider: Arc::new(system_time_ms),
             poll_time_store: Arc::new(AtomicI64::new(0)),
+            log_context: LogContext::empty(),
             metadata: None,
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
