@@ -49,6 +49,8 @@ use log::{debug, error, trace};
 use tokio::net::TcpSocket;
 use tokio::sync::Notify;
 
+use crate::common::utils::LogContext;
+
 use std::collections::{HashMap, HashSet, LinkedList};
 use std::future::Future;
 use std::io;
@@ -120,6 +122,10 @@ pub struct Selector {
     notify: Arc<Notify>,
     /// Whether progress was made reading in the last poll.
     made_read_progress_last_poll: bool,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `Selector`.
+    log_context: LogContext,
 }
 
 impl Selector {
@@ -133,6 +139,25 @@ impl Selector {
     ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     pub fn new(max_receive_size: i32, connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
+        Self::with_log_context(max_receive_size, connection_max_idle_ms, channel_builder, LogContext::empty())
+    }
+
+    /// Create a new selector with a `LogContext`.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_receive_size` - Max size in bytes of a single network receive
+    ///   (use `UNLIMITED` for no limit)
+    /// * `connection_max_idle_ms` - Max idle connection time
+    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    /// * `channel_builder` - Channel builder for every new connection
+    /// * `log_context` - Contextual log message prefix
+    pub fn with_log_context(
+        max_receive_size: i32,
+        connection_max_idle_ms: i64,
+        channel_builder: Box<dyn ChannelBuilder>,
+        log_context: LogContext,
+    ) -> Self {
         Self {
             channels: HashMap::new(),
             explicitly_muted_channels: HashSet::new(),
@@ -153,12 +178,27 @@ impl Selector {
             },
             notify: Arc::new(Notify::new()),
             made_read_progress_last_poll: true,
+            log_context,
         }
     }
 
     /// Convenience constructor matching the common Java pattern.
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self::new(super::network_receive::UNLIMITED, connection_max_idle_ms, channel_builder)
+    }
+
+    /// Create a new selector with default max receive size and a `LogContext`.
+    pub fn with_defaults_and_log_context(
+        connection_max_idle_ms: i64,
+        channel_builder: Box<dyn ChannelBuilder>,
+        log_context: LogContext,
+    ) -> Self {
+        Self::with_log_context(
+            super::network_receive::UNLIMITED,
+            connection_max_idle_ms,
+            channel_builder,
+            log_context,
+        )
     }
 
     fn ensure_not_registered(&self, id: &str) -> Result<(), String> {

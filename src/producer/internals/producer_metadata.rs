@@ -30,6 +30,7 @@ use crate::common::internals::ClusterResourceListeners;
 use crate::common::protocol::Errors;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
+use crate::common::utils::LogContext;
 use crate::metadata::Metadata;
 
 /// Producer-specific inner state, protected by its own mutex.
@@ -82,6 +83,34 @@ impl ProducerMetadata {
         metadata_expire_ms: i64,
         metadata_idle_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
+    ) -> Self {
+        Self::with_log_context(
+            refresh_backoff_ms,
+            refresh_backoff_max_ms,
+            metadata_expire_ms,
+            metadata_idle_ms,
+            cluster_resource_listeners,
+            LogContext::empty(),
+        )
+    }
+
+    /// Creates a new `ProducerMetadata` with a `LogContext`.
+    ///
+    /// # Arguments
+    /// * `refresh_backoff_ms` - The minimum amount of time between metadata refreshes
+    /// * `refresh_backoff_max_ms` - The maximum amount of time to wait between metadata
+    ///   refreshes
+    /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
+    /// * `metadata_idle_ms` - The idle time after which an unused topic is removed
+    /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    /// * `log_context` - Contextual log message prefix
+    pub fn with_log_context(
+        refresh_backoff_ms: i64,
+        refresh_backoff_max_ms: i64,
+        metadata_expire_ms: i64,
+        metadata_idle_ms: i64,
+        cluster_resource_listeners: ClusterResourceListeners,
+        log_context: LogContext,
     ) -> Self {
         let inner = Arc::new(Mutex::new(ProducerMetadataInner {
             topics: HashMap::new(),
@@ -157,6 +186,7 @@ impl ProducerMetadata {
                 new_topics_request_builder_fn: Some(new_topics_request_builder_fn),
                 post_update_fn: Some(post_update_fn),
             },
+            log_context,
         ));
 
         Self { metadata, inner }
