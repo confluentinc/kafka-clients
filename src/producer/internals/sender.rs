@@ -176,7 +176,7 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Translated from `Sender.run()`.
     pub async fn run(&mut self) {
-        kafka_debug!(self.log_context, "Starting Kafka producer I/O thread.");
+        kafka_debug!(self.log_context, "Starting Kafka producer I/O task.");
 
         // Main loop, runs until close is called
         while self.running.load(Ordering::Acquire) {
@@ -185,7 +185,7 @@ impl<C: KafkaClient> Sender<C> {
 
         kafka_debug!(
             self.log_context,
-            "Beginning shutdown of Kafka producer I/O thread, sending remaining records."
+            "Beginning shutdown of Kafka producer I/O task, sending remaining records."
         );
 
         // We stopped accepting requests but there may still be requests in the
@@ -203,7 +203,7 @@ impl<C: KafkaClient> Sender<C> {
 
         self.client.close().await;
 
-        kafka_debug!(self.log_context, "Shutdown of Kafka producer I/O thread has completed.");
+        kafka_debug!(self.log_context, "Shutdown of Kafka producer I/O task has completed.");
     }
 
     /// Run a single iteration of sending.
@@ -728,6 +728,16 @@ impl<C: KafkaClient> Sender<C> {
                 );
             }
 
+            if error == Errors::NotLeaderOrFollower || error == Errors::FencedLeaderEpoch {
+                kafka_debug!(
+                    self.log_context,
+                    "For {}, received error {}, with leaderIdAndEpoch {:?}",
+                    batch.topic_partition,
+                    error,
+                    response.current_leader
+                );
+            }
+
             if (error == Errors::NotLeaderOrFollower || error == Errors::FencedLeaderEpoch)
                 && response.current_leader.leader_id != -1
                 && response.current_leader.leader_epoch != -1
@@ -980,6 +990,13 @@ impl<C: KafkaClient> Sender<C> {
 
         let request_builder = ProduceRequestBuilder::new(data);
 
+        // Capture debug representation before request_builder is moved into Box.
+        let request_debug = if log::log_enabled!(log::Level::Trace) {
+            format!("{:?}", request_builder)
+        } else {
+            String::new()
+        };
+
         // Fetch topic names from metadata outside the response path, since topic
         // IDs may change during the response (e.g. if a topic is recreated).
         let topic_names = self.metadata.topic_names();
@@ -1003,7 +1020,7 @@ impl<C: KafkaClient> Sender<C> {
             .insert(correlation_id, PendingProduceRequest { partitions: batch_tps, topic_names });
 
         self.client.send(client_request, now);
-        kafka_trace!(self.log_context, "Sent produce request to {}", node_id);
+        kafka_trace!(self.log_context, "Sent produce request to {}: {}", node_id, request_debug);
     }
 
     fn topic_ids_for_partitions(&self, batch_infos: &[RequestBatchInfo]) -> HashMap<Arc<str>, Uuid> {

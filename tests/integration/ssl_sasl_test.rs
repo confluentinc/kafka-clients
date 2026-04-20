@@ -34,6 +34,7 @@ use confluent_kafka::common::requests::ConcreteResponse;
 use confluent_kafka::common::requests::{ApiVersionsRequestBuilder, RequestBuilder, RequestHeader};
 use confluent_kafka::common::security::SecurityProtocol;
 use confluent_kafka::common::security::SslFactory;
+use confluent_kafka::common::utils::LogContext;
 
 use crate::common::cluster_config::ClusterConfig;
 use crate::common::kafka_cluster::{SASL_PASSWORD, SASL_USERNAME};
@@ -76,8 +77,15 @@ fn create_sasl_plaintext_selector(username: &str, password: &str) -> Selector {
         password: Some(password.to_string()),
         ..SaslConfig::default()
     };
-    let channel_builder =
-        SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "integration-test").unwrap();
+    let channel_builder = SaslChannelBuilder::new(
+        SecurityProtocol::SaslPlaintext,
+        sasl_config,
+        None,
+        None,
+        "integration-test",
+        LogContext::empty(),
+    )
+    .unwrap();
     Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
 }
 
@@ -101,6 +109,7 @@ fn create_sasl_ssl_selector(username: &str, password: &str, ca_cert_pem: &str) -
         Some(ssl_factory),
         None,
         "integration-test",
+        LogContext::empty(),
     )
     .unwrap();
     Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder))
@@ -304,8 +313,15 @@ async fn test_sasl_unsupported_mechanism() {
         password: Some(SASL_PASSWORD.to_string()),
         ..SaslConfig::default()
     };
-    let channel_builder =
-        SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "integration-test").unwrap();
+    let channel_builder = SaslChannelBuilder::new(
+        SecurityProtocol::SaslPlaintext,
+        sasl_config,
+        None,
+        None,
+        "integration-test",
+        LogContext::empty(),
+    )
+    .unwrap();
     let mut selector = Selector::with_defaults(NO_IDLE_TIMEOUT_MS, Box::new(channel_builder));
     let addr = parse_bootstrap_addr(ctx.sasl_plaintext_bootstrap_servers());
 

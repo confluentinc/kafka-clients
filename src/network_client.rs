@@ -174,6 +174,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `host_resolver` - Host resolver implementation
     /// * `rebootstrap_trigger_ms` - Rebootstrap trigger timeout in milliseconds
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
+    /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
     pub fn with_metadata(
         selector: S,
@@ -192,6 +193,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         host_resolver: H,
         rebootstrap_trigger_ms: i64,
         metadata_recovery_strategy: MetadataRecoveryStrategy,
+        log_context: LogContext,
     ) -> Self {
         Self {
             selector,
@@ -200,7 +202,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 reconnect_backoff_max_ms,
                 connection_setup_timeout_ms,
                 connection_setup_timeout_max_ms,
-                LogContext::empty(),
+                log_context.clone(),
                 host_resolver,
             ),
             in_flight_requests: InFlightRequests::new(max_in_flight_requests_per_connection),
@@ -221,7 +223,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             last_poll_time_ms: 0,
             time_provider: Arc::new(system_time_ms),
             poll_time_store: Arc::new(AtomicI64::new(0)),
-            log_context: LogContext::empty(),
+            log_context,
             metadata: Some(metadata),
             external_metadata_updater: None,
             in_progress: None,
@@ -248,6 +250,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     /// * `api_versions` - API versions instance
     /// * `host_resolver` - Host resolver implementation
     /// * `metadata_recovery_strategy` - Metadata recovery strategy
+    /// * `log_context` - Contextual log prefix
     #[allow(clippy::too_many_arguments)]
     pub fn with_metadata_updater(
         selector: S,
@@ -265,6 +268,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         api_versions: Arc<ApiVersions>,
         host_resolver: H,
         metadata_recovery_strategy: MetadataRecoveryStrategy,
+        log_context: LogContext,
     ) -> Self {
         Self {
             selector,
@@ -273,7 +277,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 reconnect_backoff_max_ms,
                 connection_setup_timeout_ms,
                 connection_setup_timeout_max_ms,
-                LogContext::empty(),
+                log_context.clone(),
                 host_resolver,
             ),
             in_flight_requests: InFlightRequests::new(max_in_flight_requests_per_connection),
@@ -294,7 +298,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             last_poll_time_ms: 0,
             time_provider: Arc::new(system_time_ms),
             poll_time_store: Arc::new(AtomicI64::new(0)),
-            log_context: LogContext::empty(),
+            log_context,
             metadata: None,
             external_metadata_updater: Some(metadata_updater),
             in_progress: None,
@@ -831,12 +835,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     }
 
     /// Complete all responses by invoking their callbacks.
-    fn complete_responses(responses: &mut [ClientResponse]) {
+    fn complete_responses(responses: &mut [ClientResponse], log_context: &LogContext) {
         for response in responses.iter_mut() {
             if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 response.on_complete();
             })) {
-                log::error!("Uncaught error in request completion: {:?}", e);
+                kafka_error!(log_context, "Uncaught error in request completion: {:?}", e);
             }
         }
     }
@@ -1266,7 +1270,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         if !self.aborted_sends.is_empty() {
             let mut responses = Vec::new();
             self.handle_aborted_sends(&mut responses);
-            Self::complete_responses(&mut responses);
+            Self::complete_responses(&mut responses, &self.log_context);
             return responses;
         }
 
@@ -1290,7 +1294,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.handle_timed_out_connections(&mut responses, updated_now).await;
         self.handle_timed_out_requests(&mut responses, updated_now).await;
         self.handle_rebootstrap(&mut responses, updated_now).await;
-        Self::complete_responses(&mut responses);
+        Self::complete_responses(&mut responses, &self.log_context);
 
         responses
     }
@@ -1678,6 +1682,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -1703,6 +1708,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -1728,6 +1734,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -1756,6 +1763,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -1787,6 +1795,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -2708,6 +2717,7 @@ mod tests {
             TestHostResolver::new(),
             i64::MAX,
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -2733,6 +2743,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             FailingHostResolver,
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         client
@@ -2871,6 +2882,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         // This test is in progress by another actor - skip for now to unblock compilation
     }
@@ -3036,6 +3048,7 @@ mod tests {
             TestHostResolver::new(),
             rebootstrap_trigger_ms,
             MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
         );
         client.set_mock_time();
 
@@ -3128,6 +3141,7 @@ mod tests {
             TestHostResolver::new(),
             rebootstrap_trigger_ms,
             MetadataRecoveryStrategy::Rebootstrap,
+            LogContext::empty(),
         );
         client.set_mock_time();
         let mut now = 0_i64;
@@ -3330,6 +3344,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             mock_host_resolver.clone(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         let mut now = 0_i64;
@@ -3394,6 +3409,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             mock_host_resolver.clone(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         let mut now = 0_i64;
@@ -3454,6 +3470,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             mock_host_resolver.clone(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         let mut now = 0_i64;
@@ -3522,6 +3539,7 @@ mod tests {
             Arc::new(ApiVersions::new()),
             TestHostResolver::new(),
             MetadataRecoveryStrategy::None,
+            LogContext::empty(),
         );
         client.set_mock_time();
         let now = 0_i64;
