@@ -712,7 +712,7 @@ impl Metadata {
 
         let new_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
         if previous_cluster_id != new_cluster_id {
-            kafka_info!(self.log_context, "Cluster ID: {:?}", new_cluster_id);
+            kafka_info!(self.log_context, "Cluster ID: {}", new_cluster_id.as_deref().unwrap_or("null"));
         }
         let cluster_resource = inner.metadata_snapshot.cluster_resource();
         inner.cluster_resource_listeners.on_update(&cluster_resource);

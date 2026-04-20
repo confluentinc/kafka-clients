@@ -814,22 +814,18 @@ impl RecordAccumulator {
         let should_backoff = !has_leader_changed && should_wait_more;
         if log::log_enabled!(log::Level::Trace) {
             if should_backoff {
-                kafka_trace!(self.log_context, "For batch {:?}, will backoff", batch.topic_partition);
+                kafka_trace!(self.log_context, "For {}, will backoff", batch);
             } else {
                 kafka_trace!(
                     self.log_context,
-                    "For batch {:?}, will not backoff, should_wait_more {}, has_leader_changed {}",
-                    batch.topic_partition,
+                    "For {}, will not backoff, should_wait_more {}, has_leader_changed {}",
+                    batch,
                     should_wait_more,
                     has_leader_changed
                 );
             }
         } else if log::log_enabled!(log::Level::Debug) && has_leader_changed {
-            kafka_debug!(
-                self.log_context,
-                "For batch {:?}, leader has changed, hence skipping backoff.",
-                batch.topic_partition
-            );
+            kafka_debug!(self.log_context, "For {}, leader has changed, hence skipping backoff.", batch);
         }
         should_backoff
     }
