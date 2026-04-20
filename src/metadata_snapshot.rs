@@ -239,12 +239,12 @@ impl MetadataSnapshot {
         )
     }
 
-    /// Creates a bootstrap metadata snapshot from a list of addresses.
-    pub fn bootstrap(addresses: &[SocketAddr]) -> Self {
+    /// Creates a bootstrap metadata snapshot from a list of (hostname, address) pairs.
+    pub fn bootstrap(addresses: &[(String, SocketAddr)]) -> Self {
         let mut nodes = HashMap::new();
         let mut node_id: i32 = -1;
-        for address in addresses {
-            nodes.insert(node_id, Node::new(node_id, address.ip().to_string(), address.port() as i32));
+        for (host, address) in addresses {
+            nodes.insert(node_id, Node::new(node_id, host.clone(), address.port() as i32));
             node_id -= 1;
         }
         Self::new_with_cluster(

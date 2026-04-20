@@ -163,7 +163,7 @@ struct MetadataInner {
     cluster_resource_listeners: ClusterResourceListeners,
     is_closed: bool,
     last_seen_leader_epochs: HashMap<TopicPartition, i32>,
-    bootstrap_addresses: Vec<SocketAddr>,
+    bootstrap_addresses: Vec<(String, SocketAddr)>,
 }
 
 /// Result of `new_metadata_request_and_version`.
@@ -625,8 +625,8 @@ impl Metadata {
         }
     }
 
-    /// Bootstraps the metadata with the given addresses.
-    pub fn bootstrap(&self, addresses: Vec<SocketAddr>) {
+    /// Bootstraps the metadata with the given (hostname, address) pairs.
+    pub fn bootstrap(&self, addresses: Vec<(String, SocketAddr)>) {
         let mut inner = self.inner.lock().unwrap();
         inner.need_full_update = true;
         inner.update_version += 1;
@@ -1435,7 +1435,7 @@ mod tests {
             ClusterResourceListeners::new(),
         );
         let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
-        metadata.bootstrap(vec![addr]);
+        metadata.bootstrap(vec![("127.0.0.1".to_string(), addr)]);
 
         assert_eq!(0, metadata.time_to_allow_update(now));
         assert_eq!(0, metadata.time_to_next_update(now));
@@ -1554,7 +1554,7 @@ mod tests {
         let metadata = Metadata::new(REFRESH_BACKOFF_MS, REFRESH_BACKOFF_MAX_MS, METADATA_EXPIRE_MS, listeners);
 
         let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
-        metadata.bootstrap(vec![addr]);
+        metadata.bootstrap(vec![("127.0.0.1".to_string(), addr)]);
         assert!(
             !on_update_called.load(Ordering::SeqCst),
             "ClusterResourceListener should not be called when metadata is updated with bootstrap Cluster"
@@ -1987,8 +1987,9 @@ mod tests {
 
         // Sentinel instances
         let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let from_metadata = MetadataSnapshot::bootstrap(&[address]).cluster().clone();
-        let from_cluster = Cluster::bootstrap(&[address]);
+        let bootstrap_addr = ("127.0.0.1".to_string(), address);
+        let from_metadata = MetadataSnapshot::bootstrap(&[bootstrap_addr.clone()]).cluster().clone();
+        let from_cluster = Cluster::bootstrap(&[bootstrap_addr]);
         assert_eq!(from_metadata, from_cluster);
 
         let from_metadata_empty = MetadataSnapshot::empty().cluster().clone();
