@@ -39,8 +39,8 @@ use crate::common::compress::Compression;
 use crate::common::header::Headers;
 use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::network::PlaintextChannelBuilder;
 use crate::common::network::Selector;
+use crate::common::network::channel_builders;
 use crate::common::record::CompressionType;
 use crate::common::record::RecordBatch;
 use crate::common::record::abstract_records;
@@ -276,7 +276,15 @@ impl<K, V> KafkaProducer<K, V> {
         let shared_metadata = metadata.metadata_arc();
 
         // 7. Create Selector + NetworkClient
-        let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
+        let channel_builder = channel_builders::client_channel_builder(
+            config.security_protocol,
+            Some(&config.ssl_config),
+            Some(&config.sasl_config),
+            None,
+            &config.client_id,
+            log_context.clone(),
+        )
+        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
         let selector = Selector::with_defaults_and_log_context(
             config.connections_max_idle_ms,
             channel_builder,

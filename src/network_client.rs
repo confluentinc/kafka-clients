@@ -3035,7 +3035,10 @@ mod tests {
             5000,
             crate::common::internals::ClusterResourceListeners::new(),
         ));
-        metadata.bootstrap(vec![std::net::SocketAddr::from(([127, 0, 0, 1], 9999))]);
+        metadata.bootstrap(vec![(
+            "127.0.0.1".to_string(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
+        )]);
 
         let mut client = NetworkClient::with_metadata(
             MockSelector::new(),
@@ -3122,7 +3125,10 @@ mod tests {
             5000,
             crate::common::internals::ClusterResourceListeners::new(),
         ));
-        metadata.bootstrap(vec![std::net::SocketAddr::from(([127, 0, 0, 1], 9999))]);
+        metadata.bootstrap(vec![(
+            "127.0.0.1".to_string(),
+            std::net::SocketAddr::from(([127, 0, 0, 1], 9999)),
+        )]);
         let metadata_response =
             crate::common::requests::request_test_utils::metadata_update_with(2, &std::collections::HashMap::new());
         metadata.update_with_current_request_version(&metadata_response, false, 0);
