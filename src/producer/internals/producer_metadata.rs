@@ -24,13 +24,12 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use log::debug;
-
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::protocol::Errors;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
 use crate::common::utils::LogContext;
+use crate::kafka_debug;
 use crate::metadata::Metadata;
 
 /// Producer-specific inner state, protected by its own mutex.
@@ -121,6 +120,7 @@ impl ProducerMetadata {
 
         // Closure for retain_topic_fn: checks the topics map and removes expired entries
         let retain_inner = Arc::clone(&inner);
+        let retain_log_context = log_context.clone();
         let retain_topic_fn = Box::new(move |topic: &str, _is_internal: bool, now_ms: i64| -> bool {
             let mut state = retain_inner.lock().unwrap();
             let expire_ms = state.topics.get(topic).copied();
@@ -128,9 +128,12 @@ impl ProducerMetadata {
                 None => false,
                 Some(_) if state.new_topics.contains(topic) => true,
                 Some(expiry) if expiry <= now_ms => {
-                    debug!(
+                    kafka_debug!(
+                        retain_log_context,
                         "Removing unused topic {} from the metadata list, expiryMs {} now {}",
-                        topic, expiry, now_ms
+                        topic,
+                        expiry,
+                        now_ms
                     );
                     state.topics.remove(topic);
                     false

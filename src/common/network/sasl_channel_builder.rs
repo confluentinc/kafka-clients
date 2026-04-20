@@ -34,6 +34,7 @@ use crate::common::config::SaslConfig;
 use crate::common::security::SaslClientAuthenticator;
 use crate::common::security::SecurityProtocol;
 use crate::common::security::SslFactory;
+use crate::common::utils::LogContext;
 
 use std::io;
 
@@ -165,6 +166,7 @@ impl ChannelBuilder for SaslChannelBuilder {
             id,
             peer_host,
             &self.client_id,
+            LogContext::empty(),
         ));
 
         Ok(KafkaChannel::new(

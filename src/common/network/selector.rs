@@ -45,11 +45,11 @@ use super::{ChannelState, channel_state};
 
 use futures_util::future::select_all;
 use indexmap::IndexMap;
-use log::{debug, error, trace};
 use tokio::net::TcpSocket;
 use tokio::sync::Notify;
 
 use crate::common::utils::LogContext;
+use crate::{kafka_debug, kafka_error, kafka_trace};
 
 use std::collections::{HashMap, HashSet, LinkedList};
 use std::future::Future;
@@ -338,7 +338,7 @@ impl Selector {
             if is_immediately_connected || !channel.is_connected() {
                 if channel.finish_connect().await? {
                     self.connected.push(channel_id.to_string());
-                    debug!("Connected to node {}", channel_id);
+                    kafka_debug!(self.log_context, "Connected to node {}", channel_id);
                 } else {
                     return Ok(());
                 }
@@ -417,9 +417,9 @@ impl Selector {
 
             if e.kind() == io::ErrorKind::Other || e.kind() == io::ErrorKind::InvalidInput {
                 // Authentication error
-                error!("Failed authentication with {} ({})", desc, e);
+                kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, e);
             } else {
-                debug!("Connection with {} disconnected: {}", desc, e);
+                kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, e);
             }
 
             let close_mode = if send_failed {
@@ -562,7 +562,11 @@ impl Selector {
         if let Some((connection_id, _last_active)) = mgr.poll_expired_connection(current_time_nanos)
             && self.channels.contains_key(&connection_id)
         {
-            trace!("About to close the idle connection from {} due to being idle", connection_id);
+            kafka_trace!(
+                self.log_context,
+                "About to close the idle connection from {} due to being idle",
+                connection_id
+            );
             if let Some(channel) = self.channels.get_mut(&connection_id) {
                 channel.set_state(channel_state::EXPIRED.clone());
             }
@@ -726,9 +730,11 @@ impl Selectable for Selector {
                         }
                     }
 
-                    error!(
+                    kafka_error!(
+                        self.log_context,
                         "Unexpected error during send, closing connection {} and returning error: {}",
-                        connection_id, e
+                        connection_id,
+                        e
                     );
                     return Err(e);
                 },

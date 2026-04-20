@@ -28,7 +28,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use log::{debug, error, info, trace, warn};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 use rand::Rng;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
@@ -200,6 +200,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 reconnect_backoff_max_ms,
                 connection_setup_timeout_ms,
                 connection_setup_timeout_max_ms,
+                LogContext::empty(),
                 host_resolver,
             ),
             in_flight_requests: InFlightRequests::new(max_in_flight_requests_per_connection),
@@ -272,6 +273,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 reconnect_backoff_max_ms,
                 connection_setup_timeout_ms,
                 connection_setup_timeout_max_ms,
+                LogContext::empty(),
                 host_resolver,
             ),
             in_flight_requests: InFlightRequests::new(max_in_flight_requests_per_connection),
@@ -380,7 +382,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         self.connection_states.connecting(node_connection_id, now, node.host());
         match self.connection_states.current_address(node_connection_id).await {
             Ok(address) => {
-                debug!("Initiating connection to node {} using address {}", node, address);
+                kafka_debug!(
+                    self.log_context,
+                    "Initiating connection to node {} using address {}",
+                    node,
+                    address
+                );
                 let addr = SocketAddr::new(address, node.port() as u16);
                 if let Err(e) = self
                     .selector
@@ -393,13 +400,13 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                     )
                     .await
                 {
-                    warn!("Error connecting to node {}: {}", node, e);
+                    kafka_warn!(self.log_context, "Error connecting to node {}: {}", node, e);
                     self.connection_states.disconnected(node_connection_id, now);
                     self.handle_server_disconnect(now, node_connection_id, None);
                 }
             },
             Err(e) => {
-                warn!("Error connecting to node {}: {}", node, e);
+                kafka_warn!(self.log_context, "Error connecting to node {}: {}", node, e);
                 self.connection_states.disconnected(node_connection_id, now);
                 self.handle_server_disconnect(now, node_connection_id, None);
             },
@@ -436,7 +443,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             ) {
                 Ok(v) => v,
                 Err(_e) => {
-                    debug!(
+                    kafka_debug!(
+                        self.log_context,
                         "Version mismatch when attempting to send {} with correlation id {} to {}",
                         client_request.request_builder().api_key().name(),
                         client_request.correlation_id(),
@@ -469,8 +477,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             }
         } else {
             let latest = client_request.request_builder().latest_allowed_version();
-            if self.discover_broker_versions {
-                trace!(
+            if self.discover_broker_versions && log::log_enabled!(log::Level::Trace) {
+                kafka_trace!(
+                    self.log_context,
                     "No version information found when sending {} with correlation id {} to node {}. Assuming version {}.",
                     client_request.api_key().name(),
                     client_request.correlation_id(),
@@ -488,7 +497,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             },
             Err(e) => {
                 let error_msg = format!("UnsupportedVersionError: {}", e);
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Failed to build {} v{} with correlation id {} to {}: {}",
                     client_request.request_builder().api_key().name(),
                     version,
@@ -531,14 +541,17 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             .make_header(request.version())
             .expect("Failed to create header for send");
 
-        debug!(
-            "Sending {} request with header {} and timeout {} to node {}: {}",
-            client_request.api_key().name(),
-            header,
-            client_request.request_timeout_ms(),
-            destination,
-            request,
-        );
+        if log::log_enabled!(log::Level::Debug) {
+            kafka_debug!(
+                self.log_context,
+                "Sending {} request with header {} and timeout {} to node {}: {}",
+                client_request.api_key().name(),
+                header,
+                client_request.request_timeout_ms(),
+                destination,
+                request,
+            );
+        }
 
         let send = request.to_send(&header).expect("Failed to serialize request");
 
@@ -630,7 +643,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                         }
                     },
                     Err(e) => {
-                        error!("Error parsing response from node {}: {}", source, e);
+                        kafka_error!(self.log_context, "Error parsing response from node {}: {}", source, e);
                         // Treat as disconnection
                         responses.push(req.disconnected(now));
                     },
@@ -654,7 +667,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         if api_versions_response.data().error_code != Errors::None.code() {
             let request_version = req.request.as_ref().map(|r| r.version()).unwrap_or(0);
             if request_version == 0 || api_versions_response.data().error_code != Errors::UnsupportedVersion.code() {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Received error {:?} from node {} when making an ApiVersionsRequest with correlation id {}. Disconnecting.",
                     Errors::for_code(api_versions_response.data().error_code),
                     node,
@@ -695,7 +709,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         );
         self.api_versions.update(&node, node_version_info);
         self.connection_states.ready(&node);
-        debug!(
+        kafka_debug!(
+            self.log_context,
             "Node {} has finalized features epoch: {}, API versions updated.",
             node,
             api_versions_response.data().finalized_features_epoch,
@@ -714,9 +729,9 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
         for (node, channel_state) in disconnected {
             if channel_state == channel_state::EXPIRED {
-                debug!("Idle connection to node {} disconnected.", node);
+                kafka_debug!(self.log_context, "Idle connection to node {} disconnected.", node);
             } else {
-                info!("Node {} disconnected.", node);
+                kafka_info!(self.log_context, "Node {} disconnected.", node);
             }
             self.process_disconnection(responses, &node, now, channel_state, false);
         }
@@ -729,10 +744,14 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             if self.discover_broker_versions {
                 self.nodes_needing_api_versions_fetch
                     .insert(node.clone(), ApiVersionsRequestBuilder::new());
-                debug!("Completed connection to node {}. Fetching API versions.", node);
+                kafka_debug!(
+                    self.log_context,
+                    "Completed connection to node {}. Fetching API versions.",
+                    node
+                );
             } else {
                 self.connection_states.ready(&node);
-                debug!("Completed connection to node {}. Ready.", node);
+                kafka_debug!(self.log_context, "Completed connection to node {}. Ready.", node);
             }
         }
     }
@@ -747,7 +766,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             .collect();
 
         for (node, builder) in ready_nodes {
-            debug!("Initiating API versions fetch from node {}.", node);
+            kafka_debug!(self.log_context, "Initiating API versions fetch from node {}.", node);
             self.connection_states.checking_api_versions(&node);
             let client_request = self.new_client_request(&node, Box::new(builder), now, true);
             self.do_send(client_request, true, now);
@@ -760,7 +779,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let nodes = self.connection_states.nodes_with_connection_setup_timeout(now);
         for node_id in nodes {
             self.selector.close_channel(&node_id).await;
-            info!(
+            kafka_info!(
+                self.log_context,
                 "Disconnecting from node {} due to socket connection setup timeout. The timeout value is {} ms.",
                 node_id,
                 self.connection_states.connection_setup_timeout_ms(&node_id)
@@ -774,7 +794,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         let node_ids = self.in_flight_requests.nodes_with_timed_out_requests(now);
         for node_id in node_ids {
             self.selector.close_channel(&node_id).await;
-            info!("Disconnecting from node {} due to request timeout.", node_id);
+            kafka_info!(self.log_context, "Disconnecting from node {} due to request timeout.", node_id);
             self.process_timeout_disconnection(responses, &node_id, now);
         }
     }
@@ -792,7 +812,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             for node_id in node_ids {
                 self.selector.close_channel(&node_id).await;
                 if self.connection_states.is_connecting(&node_id) || self.connection_states.is_connected(&node_id) {
-                    info!("Disconnecting from node {} due to client rebootstrap.", node_id);
+                    kafka_info!(
+                        self.log_context,
+                        "Disconnecting from node {} due to client rebootstrap.",
+                        node_id
+                    );
                     self.process_disconnection(
                         responses,
                         &node_id,
@@ -812,7 +836,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             if let Err(e) = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 response.on_complete();
             })) {
-                error!("Uncaught error in request completion: {:?}", e);
+                log::error!("Uncaught error in request completion: {:?}", e);
             }
         }
     }
@@ -825,7 +849,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             self.in_flight_requests
                 .increment_throttle_time(node_id, throttle_time_ms as i64);
             self.connection_states.throttle(node_id, now + throttle_time_ms as i64);
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Connection to node {} is throttled for {} ms until timestamp {}",
                 node_id,
                 throttle_time_ms,
@@ -851,7 +876,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             channel_state::State::AuthenticationFailed => {
                 let auth_err = disconnect_state.error().unwrap_or("unknown").to_string();
                 self.connection_states.authentication_failed(node_id, now, auth_err.clone());
-                error!(
+                kafka_error!(
+                    self.log_context,
                     "Connection to node {} ({}) failed authentication due to: {}",
                     node_id,
                     disconnect_state.remote_address().unwrap_or("unknown"),
@@ -859,7 +885,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 );
             },
             channel_state::State::Authenticate => {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Connection to node {} ({}) terminated during authentication. This may happen \
                      due to any of the following reasons: (1) Firewall blocking Kafka TLS \
                      traffic (eg it may only allow HTTPS traffic), (2) Transient network issue.",
@@ -868,7 +895,8 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 );
             },
             channel_state::State::NotConnected => {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Connection to node {} ({}) could not be established. Node may not be available.",
                     node_id,
                     disconnect_state.remote_address().unwrap_or("unknown"),
@@ -908,18 +936,36 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
     ) {
         let mut in_flight_requests = self.in_flight_requests.clear_all(node_id);
         for request in &mut in_flight_requests {
-            debug!(
-                "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
-                 (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
-                 throttle time: {}ms, request timeout: {}ms)",
-                request.header.api_key().name(),
-                request.header.correlation_id(),
-                node_id,
-                request.time_elapsed_since_create_ms(now),
-                request.time_elapsed_since_send_ms(now),
-                request.throttle_time_ms(),
-                request.request_timeout_ms,
-            );
+            if log::log_enabled!(log::Level::Debug) {
+                kafka_debug!(
+                    self.log_context,
+                    "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
+                     (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
+                     throttle time: {}ms, request timeout: {}ms): {:?}",
+                    request.header.api_key().name(),
+                    request.header.correlation_id(),
+                    node_id,
+                    request.time_elapsed_since_create_ms(now),
+                    request.time_elapsed_since_send_ms(now),
+                    request.throttle_time_ms(),
+                    request.request_timeout_ms,
+                    request.request,
+                );
+            } else {
+                kafka_info!(
+                    self.log_context,
+                    "Cancelled in-flight {} request with correlation id {} due to node {} being disconnected \
+                     (elapsed time since creation: {}ms, elapsed time since send: {}ms, \
+                     throttle time: {}ms, request timeout: {}ms)",
+                    request.header.api_key().name(),
+                    request.header.correlation_id(),
+                    node_id,
+                    request.time_elapsed_since_create_ms(now),
+                    request.time_elapsed_since_send_ms(now),
+                    request.throttle_time_ms(),
+                    request.request_timeout_ms,
+                );
+            }
 
             if !request.is_internal_request {
                 if let Some(ref mut resp) = responses {
@@ -1015,7 +1061,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             // Re-evaluate after rebootstrap
             let least_loaded = self.least_loaded_node(now);
             if least_loaded.node().is_none() {
-                debug!("Give up sending metadata request since no node is available");
+                kafka_debug!(self.log_context, "Give up sending metadata request since no node is available");
                 return self.reconnect_backoff_ms;
             }
             let node = least_loaded.node().unwrap().clone();
@@ -1023,7 +1069,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
 
         if least_loaded.node().is_none() {
-            debug!("Give up sending metadata request since no node is available");
+            kafka_debug!(self.log_context, "Give up sending metadata request since no node is available");
             return self.reconnect_backoff_ms;
         }
 
@@ -1039,7 +1085,12 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             let metadata = self.metadata.as_ref().unwrap().clone();
             let request_and_version = metadata.new_metadata_request_and_version(now);
             let metadata_request = request_and_version.request_builder;
-            debug!("Sending metadata request {:?} to node {}", metadata_request, node);
+            kafka_debug!(
+                self.log_context,
+                "Sending metadata request {:?} to node {}",
+                metadata_request,
+                node
+            );
             self.send_internal_metadata_request(metadata_request, node_connection_id, now);
             self.in_progress = Some(InProgressData {
                 request_version: request_and_version.request_version,
@@ -1053,7 +1104,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
         }
 
         if self.connection_states.can_connect(node_connection_id, now) {
-            debug!("Initialize connection to node {} for sending metadata request", node);
+            kafka_debug!(
+                self.log_context,
+                "Initialize connection to node {} for sending metadata request",
+                node
+            );
             self.initiate_connect(node, now).await;
             return self.reconnect_backoff_ms;
         }
@@ -1074,10 +1129,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             if self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
                 && response.top_level_error() == Errors::RebootstrapRequired
             {
-                info!("Rebootstrap requested by server.");
+                kafka_info!(self.log_context, "Rebootstrap requested by server.");
                 self.metadata_attempt_start_ms = Some(0); // Force rebootstrap
             } else if response.brokers_by_id().is_empty() {
-                trace!(
+                kafka_trace!(
+                    self.log_context,
                     "Ignoring empty metadata response with correlation id {}.",
                     request_header.correlation_id()
                 );
@@ -1114,7 +1170,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
                 && let Ok(node_id_int) = node_id.parse::<i32>()
                 && let Some(node) = cluster.node_by_id(node_id_int)
             {
-                warn!("Bootstrap broker {} disconnected", node);
+                kafka_warn!(self.log_context, "Bootstrap broker {} disconnected", node);
             }
 
             if self.is_update_due(now) {
@@ -1241,14 +1297,15 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     async fn disconnect(&mut self, node_id: &str) {
         if self.connection_states.is_disconnected(node_id) {
-            debug!(
+            kafka_debug!(
+                self.log_context,
                 "Client requested disconnect from node {}, which is already disconnected",
                 node_id
             );
             return;
         }
 
-        info!("Client requested disconnect from node {}", node_id);
+        kafka_info!(self.log_context, "Client requested disconnect from node {}", node_id);
         self.selector.close_channel(node_id).await;
         let now = self.last_poll_time_ms;
         let mut aborted = Vec::new();
@@ -1258,7 +1315,7 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
     }
 
     async fn close_connection(&mut self, node_id: &str) {
-        info!("Client requested connection close from node {}", node_id);
+        kafka_info!(self.log_context, "Client requested connection close from node {}", node_id);
         self.selector.close_channel(node_id).await;
         let now = self.last_poll_time_ms;
         self.cancel_in_flight_requests(node_id, now, None, false);
@@ -1294,7 +1351,11 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
             if self.can_send_request(node.id_string(), now) {
                 let curr_inflight = self.in_flight_requests.count_for_node(node.id_string());
                 if curr_inflight == 0 {
-                    trace!("Found least loaded node {} connected with no in-flight requests", node);
+                    kafka_trace!(
+                        self.log_context,
+                        "Found least loaded node {} connected with no in-flight requests",
+                        node
+                    );
                     return LeastLoadedNode::new(Some(node.clone()), true);
                 } else if curr_inflight < inflight {
                     inflight = curr_inflight;
@@ -1312,7 +1373,8 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
                     found_can_connect = Some(node.clone());
                 }
             } else {
-                trace!(
+                kafka_trace!(
+                    self.log_context,
                     "Removing node {} from least loaded node selection since it is neither ready for sending or connecting",
                     node
                 );
@@ -1320,16 +1382,25 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         }
 
         if let Some(ready) = found_ready {
-            trace!("Found least loaded node {} with {} inflight requests", ready, inflight);
+            kafka_trace!(
+                self.log_context,
+                "Found least loaded node {} with {} inflight requests",
+                ready,
+                inflight
+            );
             LeastLoadedNode::new(Some(ready), at_least_one_connection_ready)
         } else if let Some(connecting) = found_connecting {
-            trace!("Found least loaded connecting node {}", connecting);
+            kafka_trace!(self.log_context, "Found least loaded connecting node {}", connecting);
             LeastLoadedNode::new(Some(connecting), at_least_one_connection_ready)
         } else if let Some(can_connect) = found_can_connect {
-            trace!("Found least loaded node {} with no active connection", can_connect);
+            kafka_trace!(
+                self.log_context,
+                "Found least loaded node {} with no active connection",
+                can_connect
+            );
             LeastLoadedNode::new(Some(can_connect), at_least_one_connection_ready)
         } else {
-            trace!("Least loaded node selection failed to find an available node");
+            kafka_trace!(self.log_context, "Least loaded node selection failed to find an available node");
             LeastLoadedNode::new(None, at_least_one_connection_ready)
         }
     }
@@ -1424,7 +1495,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
                 updater.close();
             }
         } else {
-            warn!("Attempting to close NetworkClient that has already been closed.");
+            kafka_warn!(
+                self.log_context,
+                "Attempting to close NetworkClient that has already been closed."
+            );
         }
     }
 }

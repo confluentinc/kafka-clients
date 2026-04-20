@@ -26,12 +26,10 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, info, trace, warn};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
 use crate::client_utils;
-use crate::common::utils::LogContext;
 use crate::common::Cluster;
 use crate::common::KafkaError;
 use crate::common::KafkaFuture;
@@ -47,6 +45,7 @@ use crate::common::record::CompressionType;
 use crate::common::record::RecordBatch;
 use crate::common::record::abstract_records;
 use crate::common::serialization::Serializer;
+use crate::common::utils::LogContext;
 use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
@@ -62,6 +61,7 @@ use crate::producer::internals::Sender;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
+use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
 
 /// Network thread name prefix.
 pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
@@ -238,7 +238,7 @@ impl<K, V> KafkaProducer<K, V> {
     ) -> Result<Self, KafkaError> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
-        info!("Starting the Kafka producer");
+        kafka_info!(log_context, "Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
         let addresses = client_utils::parse_and_validate_addresses(&config.bootstrap_servers)?;
@@ -277,8 +277,11 @@ impl<K, V> KafkaProducer<K, V> {
 
         // 7. Create Selector + NetworkClient
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let selector =
-            Selector::with_defaults_and_log_context(config.connections_max_idle_ms, channel_builder, log_context.clone());
+        let selector = Selector::with_defaults_and_log_context(
+            config.connections_max_idle_ms,
+            channel_builder,
+            log_context.clone(),
+        );
         let api_versions = Arc::new(ApiVersions::new());
 
         let client = NetworkClient::with_metadata(
@@ -377,12 +380,13 @@ impl<K, V> KafkaProducer<K, V> {
         );
 
         let io_thread_name = format!("{} | {}", NETWORK_THREAD_PREFIX, config.client_id);
+        let task_log_context = log_context.clone();
         let sender_handle = tokio::task::spawn(async move {
-            debug!("Starting {} I/O task", io_thread_name);
+            kafka_debug!(task_log_context, "Starting {} I/O task", io_thread_name);
             sender.run().await;
         });
 
-        debug!("Kafka producer started");
+        kafka_debug!(log_context, "Kafka producer started");
 
         Self {
             client_id: config.client_id.clone(),
@@ -590,7 +594,8 @@ impl<K, V> KafkaProducer<K, V> {
         {
             Ok(result) => {
                 if result.batch_is_full || result.new_batch_created {
-                    trace!(
+                    kafka_trace!(
+                        self.log_context,
                         "Waking up the sender since topic {} is either full or getting a new batch",
                         topic
                     );
@@ -599,7 +604,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Ok(KafkaFuture::new(result.future))
             },
             Err(e) if e.is_api_exception() => {
-                debug!("Exception occurred during accumulator append: {}", e);
+                kafka_debug!(self.log_context, "Exception occurred during accumulator append: {}", e);
                 let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
             },
@@ -618,7 +623,7 @@ impl<K, V> KafkaProducer<K, V> {
         partition: i32,
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
-        debug!("Exception occurred during message send: {}", error);
+        kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
             let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
@@ -679,9 +684,14 @@ impl<K, V> KafkaProducer<K, V> {
         // requested partition, or until max_wait_ms is exceeded.
         loop {
             if let Some(p) = partition {
-                trace!("Requesting metadata update for partition {} of topic {}.", p, topic);
+                kafka_trace!(
+                    self.log_context,
+                    "Requesting metadata update for partition {} of topic {}.",
+                    p,
+                    topic
+                );
             } else {
-                trace!("Requesting metadata update for topic {}.", topic);
+                kafka_trace!(self.log_context, "Requesting metadata update for topic {}.", topic);
             }
             self.metadata.add(topic, now_ms + elapsed);
             let version = self.metadata.request_update_for_topic(topic);
@@ -919,7 +929,7 @@ where
     ///
     /// Translated from `KafkaProducer.flush()`.
     async fn flush(&self) -> Result<(), KafkaError> {
-        trace!("Flushing accumulated records in producer.");
+        kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
         self.accumulator.await_flush_completion().await;
@@ -954,7 +964,11 @@ where
     /// Java is omitted (impossible to construct a negative `Duration`).
     async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
         let timeout_ms = timeout.as_millis() as i64;
-        info!("Closing the Kafka producer with timeoutMillis = {} ms.", timeout_ms);
+        kafka_info!(
+            self.log_context,
+            "Closing the Kafka producer with timeoutMillis = {} ms.",
+            timeout_ms
+        );
 
         // Track whether the sender is still alive after the graceful close attempt.
         let mut sender_still_alive = false;
@@ -969,7 +983,8 @@ where
 
         if timeout_ms == 0 || sender_still_alive {
             // Force close if timeout is 0 or sender is still alive after timeout
-            info!(
+            kafka_info!(
+                self.log_context,
                 "Proceeding to force close the producer since pending requests could not be \
                  completed within timeout {} ms.",
                 timeout_ms
@@ -980,7 +995,7 @@ where
             self.await_sender_handle_indefinitely().await;
         }
 
-        debug!("Kafka producer has been closed");
+        kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
     }
 }
@@ -988,7 +1003,10 @@ where
 impl<K, V> Drop for KafkaProducer<K, V> {
     fn drop(&mut self) {
         if self.running.load(Ordering::Acquire) {
-            warn!("KafkaProducer was not closed before being dropped. Call close() to avoid resource leaks.");
+            kafka_warn!(
+                self.log_context,
+                "KafkaProducer was not closed before being dropped. Call close() to avoid resource leaks."
+            );
             self.force_close();
         }
     }

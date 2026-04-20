@@ -27,10 +27,10 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use log::trace;
-
 use crate::common::Cluster;
+use crate::common::utils::LogContext;
 use crate::common::utils::{murmur2, to_positive};
+use crate::kafka_trace;
 
 /// Information for the current sticky partition.
 ///
@@ -82,6 +82,8 @@ pub struct BuiltInPartitioner {
     sticky_batch_size: i32,
     partition_load_stats: Option<PartitionLoadStats>,
     sticky_partition_info: Option<StickyPartitionInfo>,
+    /// Contextual log message prefix.
+    log_context: LogContext,
 }
 
 impl BuiltInPartitioner {
@@ -94,6 +96,11 @@ impl BuiltInPartitioner {
     /// # Panics
     /// Panics if `sticky_batch_size` is less than 1.
     pub fn new(topic: &Arc<str>, sticky_batch_size: i32) -> Self {
+        Self::with_log_context(topic, sticky_batch_size, LogContext::empty())
+    }
+
+    /// Creates a new `BuiltInPartitioner` with a `LogContext`.
+    pub fn with_log_context(topic: &Arc<str>, sticky_batch_size: i32, log_context: LogContext) -> Self {
         assert!(
             sticky_batch_size >= 1,
             "sticky_batch_size must be >= 1 but got {}",
@@ -104,6 +111,7 @@ impl BuiltInPartitioner {
             sticky_batch_size,
             partition_load_stats: None,
             sticky_partition_info: None,
+            log_context,
         }
     }
 
@@ -146,7 +154,7 @@ impl BuiltInPartitioner {
             }
         };
 
-        trace!("Switching to partition {} in topic {}", partition, self.topic);
+        kafka_trace!(self.log_context, "Switching to partition {} in topic {}", partition, self.topic);
         partition
     }
 
@@ -236,9 +244,12 @@ impl BuiltInPartitioner {
         // but doing so may hinder batching because partition switch may happen while batch isn't
         // ready to send.
         if produced_bytes >= self.sticky_batch_size * 2 {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Produced {} bytes, exceeding twice the batch size of {} bytes, with switching set to {}",
-                produced_bytes, self.sticky_batch_size, enable_switch
+                produced_bytes,
+                self.sticky_batch_size,
+                enable_switch
             );
         }
 
@@ -265,7 +276,7 @@ impl BuiltInPartitioner {
         let queue_sizes = match queue_sizes {
             Some(qs) => qs,
             None => {
-                trace!("No load stats for topic {}, not using adaptive", self.topic);
+                kafka_trace!(self.log_context, "No load stats for topic {}, not using adaptive", self.topic);
                 self.partition_load_stats = None;
                 return;
             },
@@ -276,7 +287,8 @@ impl BuiltInPartitioner {
         // The queue_sizes.len() represents the number of all partitions in the topic and if we have
         // less than 2 partitions, there is no need to do adaptive logic.
         if length < 1 || queue_sizes.len() < 2 {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "The number of partitions is too small: available={}, all={}, not using adaptive for topic {}",
                 length,
                 queue_sizes.len(),
@@ -302,7 +314,11 @@ impl BuiltInPartitioner {
         if all_equal && length == queue_sizes.len() {
             // No need to have complex probability logic when all queue sizes are the same,
             // and we didn't exclude partitions that experience high latencies.
-            trace!("All queue lengths are the same, not using adaptive for topic {}", self.topic);
+            kafka_trace!(
+                self.log_context,
+                "All queue lengths are the same, not using adaptive for topic {}",
+                self.topic
+            );
             self.partition_load_stats = None;
             return;
         }
@@ -312,7 +328,8 @@ impl BuiltInPartitioner {
         for i in 1..length {
             queue_sizes[i] = max_size_plus1 - queue_sizes[i] + queue_sizes[i - 1];
         }
-        trace!(
+        kafka_trace!(
+            self.log_context,
             "Partition load stats for topic {}: CFT={:?}, IDs={:?}, length={}",
             self.topic,
             &queue_sizes[..length],
