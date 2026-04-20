@@ -21,3 +21,4 @@
 - [Milestone 4 Phase 1 patterns](review_milestone4_phase1.md) — Ownership-consuming async methods break Java retry patterns, panic vs Result
 - [MockProducer patterns](review_mockproducer_patterns.md) — Option::take() changes error injection from persistent to one-shot; Mutex reentrance
 - [FFI Producer patterns](review_ffi_producer_patterns.md) — Out-parameter null-init on error paths, batch partial-failure cleanup
+- [Data path copy analysis](review_data_path_copies.md) — Only 2 actual memcpy in zero-copy path: record write_all into batch, writev to kernel

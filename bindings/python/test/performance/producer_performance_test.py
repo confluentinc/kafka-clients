@@ -345,6 +345,7 @@ def main(v2=False):
             start_recording_completed_calls(produce_calls)
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
+            next_check_time = first_message_time + 1_000_000_000
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -364,6 +365,13 @@ def main(v2=False):
                     produce_call = producer.send(next_message)
                     produce_calls.put((produce_call, start_time))
                     messages_sent += 1
+                    limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
+                    if limit_rps_reached:
+                        now = time.time_ns()
+                        if now < next_check_time:
+                            time_to_wait_s = (next_check_time - now) / 1e9
+                            time.sleep(time_to_wait_s)
+                        next_check_time = next_check_time + 1_000_000_000
                     if messages_sent % 10000 == 0:
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
