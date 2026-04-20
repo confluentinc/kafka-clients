@@ -684,6 +684,10 @@ impl Selectable for Selector {
         self.notify.notify_one();
     }
 
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        self.notify.clone()
+    }
+
     async fn close(&mut self) {
         let ids: Vec<String> = self.channels.keys().cloned().collect();
         for id in ids {
@@ -814,15 +818,15 @@ impl Selectable for Selector {
                     if readiness_futs.is_empty() {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => {},
-                            _ = tokio::time::sleep_until(dl) => {},
+                            _ = notify.notified() => { break; },
+                            _ = tokio::time::sleep_until(dl) => { break; },
                         }
                     } else {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => {},
+                            _ = notify.notified() => { break; },
                             _ = select_all(readiness_futs) => {},
-                            _ = tokio::time::sleep_until(dl) => {},
+                            _ = tokio::time::sleep_until(dl) => { break; },
                         }
                     }
                 },

@@ -27,7 +27,6 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
-use tokio::sync::Notify;
 
 use crate::client_response::ClientResponse;
 use crate::common::KafkaError;
@@ -119,8 +118,6 @@ pub struct Sender<C: KafkaClient> {
     running: Arc<AtomicBool>,
     /// True when the caller wants to ignore all unsent/inflight messages and force close.
     force_close: Arc<AtomicBool>,
-    /// Wakeup notification for the sender task.
-    wakeup: Arc<Notify>,
     /// A per-partition queue of batches ordered by creation time for tracking in-flight batches.
     in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
@@ -148,7 +145,6 @@ impl<C: KafkaClient> Sender<C> {
         retry_backoff_ms: i64,
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
-        wakeup: Arc<Notify>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
         log_context: LogContext,
     ) -> Self {
@@ -164,7 +160,6 @@ impl<C: KafkaClient> Sender<C> {
             retry_backoff_ms,
             running,
             force_close,
-            wakeup,
             in_flight_batches: HashMap::new(),
             pending_produce_responses: HashMap::new(),
             time_provider,
@@ -220,11 +215,7 @@ impl<C: KafkaClient> Sender<C> {
         let current_time_ms = (self.time_provider)();
         let poll_timeout = self.send_producer_data(current_time_ms).await;
 
-        // Use tokio::select to allow wakeup interruption during poll
-        let responses = tokio::select! {
-            responses = self.client.poll(poll_timeout, current_time_ms) => responses,
-            _ = self.wakeup.notified() => Vec::new(),
-        };
+        let responses = self.client.poll(poll_timeout, current_time_ms).await;
 
         // Process any produce responses (equivalent to Java's callback-based
         // handleProduceResponse invoked from within poll/completeResponses)
@@ -1175,7 +1166,6 @@ mod tests {
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
-            let wakeup = Arc::new(Notify::new());
 
             let sender = Sender::new(
                 client,
@@ -1189,7 +1179,6 @@ mod tests {
                 RETRY_BACKOFF_MS,
                 running,
                 force_close,
-                wakeup,
                 time_provider,
                 LogContext::empty(),
             );
@@ -2170,7 +2159,6 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
-        let wakeup = Arc::new(Notify::new());
 
         let mut sender = Sender::new(
             client,
@@ -2184,7 +2172,6 @@ mod tests {
             1000,
             running,
             force_close,
-            wakeup,
             time_provider,
             LogContext::empty(),
         );

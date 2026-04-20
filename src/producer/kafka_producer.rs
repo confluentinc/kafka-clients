@@ -357,7 +357,7 @@ impl<K, V> KafkaProducer<K, V> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
-        let wakeup = Arc::new(Notify::new());
+        let wakeup = client.wakeup_notify();
 
         let guarantee_message_order = config.max_in_flight_requests_per_connection == 1;
         let acks = config.acks;
@@ -375,7 +375,6 @@ impl<K, V> KafkaProducer<K, V> {
             config.retry_backoff_ms,
             Arc::clone(&running),
             Arc::clone(&force_close),
-            Arc::clone(&wakeup),
             Arc::clone(&time_provider),
             log_context.clone(),
         );
