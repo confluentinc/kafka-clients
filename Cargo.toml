@@ -8,7 +8,7 @@ edition = "2024"
 
 [features]
 integration-tests = []
-ffi = ["dep:cbindgen"]
+ffi = ["dep:cbindgen", "dep:env_logger"]
 
 [lib]
 name = "confluent_kafka"
@@ -28,6 +28,7 @@ rustls-pemfile = "2"
 webpki-roots = "0.26"
 indexmap = "2"
 log = "0.4"
+env_logger = { version = "0.11", optional = true }
 flate2 = "1"
 snap = "1"
 lz4_flex = "0.11"

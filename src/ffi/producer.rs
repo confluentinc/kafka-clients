@@ -61,6 +61,17 @@ use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
 
+/// Initialize the default stderr log backend if RUST_LOG is set.
+/// Idempotent: succeeds once, silently no-ops on subsequent calls.
+/// A custom log backend (e.g. Python logging bridge) can be set before
+/// the first producer is created to override this default.
+fn init_default_logger() {
+    #[cfg(feature = "ffi")]
+    {
+        let _ = env_logger::try_init();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -520,6 +531,8 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     props: *const kafka_producer_ProducerProperties_t,
     out_error: *mut *mut kafka_common_KafkaError_t,
 ) -> *mut kafka_producer_Producer_t {
+    init_default_logger();
+
     if props.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
