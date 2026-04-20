@@ -238,7 +238,7 @@ impl<K, V> KafkaProducer<K, V> {
     ) -> Result<Self, KafkaError> {
         let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
 
-        kafka_info!(log_context, "Starting the Kafka producer");
+        kafka_trace!(log_context, "Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
         let addresses = client_utils::parse_and_validate_addresses(&config.bootstrap_servers)?;
@@ -604,7 +604,7 @@ impl<K, V> KafkaProducer<K, V> {
                 Ok(KafkaFuture::new(result.future))
             },
             Err(e) if e.is_api_exception() => {
-                kafka_debug!(self.log_context, "Exception occurred during accumulator append: {}", e);
+                kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
                 let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
             },
