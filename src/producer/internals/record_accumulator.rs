@@ -393,10 +393,11 @@ impl RecordAccumulator {
 
                 kafka_trace!(
                     self.log_context,
-                    "Allocating a new {} byte message buffer for topic {} partition {}",
+                    "Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms",
                     size,
                     topic,
-                    effective_partition
+                    effective_partition,
+                    max_time_to_block
                 );
 
                 buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);

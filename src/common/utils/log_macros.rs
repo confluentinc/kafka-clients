@@ -27,7 +27,7 @@
 //! use confluent_kafka::common::utils::LogContext;
 //!
 //! let ctx = LogContext::new("[Producer clientId=my-producer] ");
-//! kafka_debug!(ctx, "Starting Kafka producer I/O thread.");
+//! kafka_debug!(ctx, "Starting Kafka producer I/O task.");
 //! kafka_warn!(ctx, "Error connecting to node {}: {}", node_id, err);
 //! ```
 

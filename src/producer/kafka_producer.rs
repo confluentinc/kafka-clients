@@ -301,6 +301,7 @@ impl<K, V> KafkaProducer<K, V> {
             DefaultHostResolver::new(),
             config.metadata_max_age_ms, // rebootstrap_trigger_ms
             MetadataRecoveryStrategy::None,
+            log_context.clone(),
         );
 
         // 8. Create BufferPool and RecordAccumulator
