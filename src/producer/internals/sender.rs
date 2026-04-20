@@ -26,7 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use log::{debug, error, trace, warn};
+use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
 use tokio::sync::Notify;
 
 use crate::client_response::ClientResponse;
@@ -176,14 +176,17 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Translated from `Sender.run()`.
     pub async fn run(&mut self) {
-        debug!("Starting Kafka producer I/O task.");
+        kafka_debug!(self.log_context, "Starting Kafka producer I/O thread.");
 
         // Main loop, runs until close is called
         while self.running.load(Ordering::Acquire) {
             self.run_once().await;
         }
 
-        debug!("Beginning shutdown of Kafka producer I/O task, sending remaining records.");
+        kafka_debug!(
+            self.log_context,
+            "Beginning shutdown of Kafka producer I/O thread, sending remaining records."
+        );
 
         // We stopped accepting requests but there may still be requests in the
         // accumulator or waiting for acknowledgment. Wait until these are completed.
@@ -194,13 +197,13 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         if self.force_close.load(Ordering::Acquire) {
-            debug!("Aborting incomplete batches due to forced shutdown");
+            kafka_debug!(self.log_context, "Aborting incomplete batches due to forced shutdown");
             self.accumulator.abort_incomplete_batches();
         }
 
         self.client.close().await;
 
-        debug!("Shutdown of Kafka producer I/O task has completed.");
+        kafka_debug!(self.log_context, "Shutdown of Kafka producer I/O thread has completed.");
     }
 
     /// Run a single iteration of sending.
@@ -360,7 +363,8 @@ impl<C: KafkaClient> Sender<C> {
             for topic in &result.unknown_leader_topics {
                 self.metadata.add(topic, now);
             }
-            debug!(
+            kafka_debug!(
+                self.log_context,
                 "Requesting metadata update due to unknown leader topics from the batched records: {:?}",
                 result.unknown_leader_topics
             );
@@ -429,7 +433,7 @@ impl<C: KafkaClient> Sender<C> {
         poll_timeout = poll_timeout.max(0);
 
         if !result.ready_nodes.is_empty() {
-            trace!("Nodes with data ready to send: {:?}", result.ready_nodes);
+            kafka_trace!(self.log_context, "Nodes with data ready to send: {:?}", result.ready_nodes);
             poll_timeout = 0;
         }
 
@@ -439,7 +443,7 @@ impl<C: KafkaClient> Sender<C> {
 
     fn fail_expired_batches(&mut self, expired_batches: &mut [ProducerBatch], now: i64, deallocate_buffer: bool) {
         if !expired_batches.is_empty() {
-            trace!("Expired {} batches in accumulator", expired_batches.len());
+            kafka_trace!(self.log_context, "Expired {} batches in accumulator", expired_batches.len());
         }
         for expired_batch in expired_batches.iter_mut() {
             let error_message = format!(
@@ -504,7 +508,8 @@ impl<C: KafkaClient> Sender<C> {
         let mut deferred_actions: Vec<(TopicPartition, BatchAction)> = Vec::new();
 
         if response.was_timed_out() {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Cancelled request with header {} due to the last request to node {} timed out",
                 request_header,
                 response.destination()
@@ -518,7 +523,8 @@ impl<C: KafkaClient> Sender<C> {
                 deferred_actions.push((tp.clone(), action));
             }
         } else if response.was_disconnected() {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Cancelled request with header {} due to node {} being disconnected",
                 request_header,
                 response.destination()
@@ -532,7 +538,8 @@ impl<C: KafkaClient> Sender<C> {
                 deferred_actions.push((tp.clone(), action));
             }
         } else if response.version_mismatch().is_some() {
-            warn!(
+            kafka_warn!(
+                self.log_context,
                 "Cancelled request {} due to a version mismatch with node {}: {}",
                 response,
                 response.destination(),
@@ -547,7 +554,8 @@ impl<C: KafkaClient> Sender<C> {
                 deferred_actions.push((tp.clone(), action));
             }
         } else {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Received produce response from node {} with correlation id {}",
                 response.destination(),
                 correlation_id
@@ -594,9 +602,13 @@ impl<C: KafkaClient> Sender<C> {
                                 );
                                 deferred_actions.push((tp, action));
                             } else {
-                                error!(
+                                kafka_error!(
+                                    self.log_context,
                                     "Can't find batch created for topic id {} topic name {} partition {} using {:?}",
-                                    topic_resp.topic_id, topic_resp.name, partition_resp.index, topic_names
+                                    topic_resp.topic_id,
+                                    topic_resp.name,
+                                    partition_resp.index,
+                                    topic_names
                                 );
                             }
                         }
@@ -615,8 +627,10 @@ impl<C: KafkaClient> Sender<C> {
                             .metadata
                             .update_partition_leadership(&partitions_with_updated_leader_info, &leader_nodes);
 
-                        for part in &updated_partitions {
-                            debug!("For {} leader was updated.", part);
+                        if log::log_enabled!(log::Level::Trace) {
+                            for part in &updated_partitions {
+                                kafka_debug!(self.log_context, "For {} leader was updated.", part);
+                            }
                         }
                     }
                 }
@@ -659,7 +673,8 @@ impl<C: KafkaClient> Sender<C> {
             // Signal the caller to split the batch and reenqueue the sub-batches.
             // The caller owns the batch and will pass it to
             // `accumulator.split_and_reenqueue()`.
-            warn!(
+            kafka_warn!(
+                self.log_context,
                 "Got error produce response in correlation id {} on topic-partition {}, splitting and retrying ({} attempts left). Error: {}",
                 correlation_id,
                 batch.topic_partition,
@@ -669,7 +684,8 @@ impl<C: KafkaClient> Sender<C> {
             BatchAction::SplitAndReenqueue
         } else if error != Errors::None {
             if self.can_retry(batch, response, now) {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Got error produce response with correlation id {} on topic-partition {}, retrying ({} attempts left). Error: {}",
                     correlation_id,
                     batch.topic_partition,
@@ -696,16 +712,19 @@ impl<C: KafkaClient> Sender<C> {
 
         if error != Errors::None && error.is_invalid_metadata() {
             if error == Errors::UnknownTopicOrPartition {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Received unknown topic or partition error in produce request on partition {}. \
                      The topic-partition may not exist or the user may not have Describe access to it",
                     batch.topic_partition
                 );
             } else {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Received invalid metadata error in produce request on partition {} due to {}. \
                      Going to request metadata update now",
-                    batch.topic_partition, error
+                    batch.topic_partition,
+                    error
                 );
             }
 
@@ -984,7 +1003,7 @@ impl<C: KafkaClient> Sender<C> {
             .insert(correlation_id, PendingProduceRequest { partitions: batch_tps, topic_names });
 
         self.client.send(client_request, now);
-        trace!("Sent produce request to {}", node_id);
+        kafka_trace!(self.log_context, "Sent produce request to {}", node_id);
     }
 
     fn topic_ids_for_partitions(&self, batch_infos: &[RequestBatchInfo]) -> HashMap<Arc<str>, Uuid> {

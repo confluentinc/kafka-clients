@@ -25,8 +25,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
-use log::{trace, warn};
 
 use crate::common::Cluster;
 use crate::common::KafkaError;
@@ -391,9 +391,12 @@ impl RecordAccumulator {
                 );
                 let size = self.batch_size.max(estimated);
 
-                trace!(
+                kafka_trace!(
+                    self.log_context,
                     "Allocating a new {} byte message buffer for topic {} partition {}",
-                    size, topic, effective_partition
+                    size,
+                    topic,
+                    effective_partition
                 );
 
                 buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
@@ -578,10 +581,12 @@ impl RecordAccumulator {
             let mut next = self.next_batch_expiry_time_ms.lock().unwrap();
             *next = (*next).min(expiry);
         } else {
-            warn!(
+            kafka_warn!(
+                self.log_context,
                 "Skipping next batch expiry time update due to addition overflow: \
                  batch.created_ms={}, delivery_timeout_ms={}",
-                batch.created_ms, self.delivery_timeout_ms
+                batch.created_ms,
+                self.delivery_timeout_ms
             );
         }
     }
@@ -807,12 +812,23 @@ impl RecordAccumulator {
         let attempts = batch.attempts();
         let should_wait_more = attempts > 0 && waited_time_ms < self.retry_backoff.backoff(attempts as i64 - 1);
         let should_backoff = !has_leader_changed && should_wait_more;
-        if should_backoff {
-            trace!("For batch {:?}, will backoff", batch.topic_partition);
-        } else {
-            trace!(
-                "For batch {:?}, will not backoff, should_wait_more {}, has_leader_changed {}",
-                batch.topic_partition, should_wait_more, has_leader_changed
+        if log::log_enabled!(log::Level::Trace) {
+            if should_backoff {
+                kafka_trace!(self.log_context, "For batch {:?}, will backoff", batch.topic_partition);
+            } else {
+                kafka_trace!(
+                    self.log_context,
+                    "For batch {:?}, will not backoff, should_wait_more {}, has_leader_changed {}",
+                    batch.topic_partition,
+                    should_wait_more,
+                    has_leader_changed
+                );
+            }
+        } else if log::log_enabled!(log::Level::Debug) && has_leader_changed {
+            kafka_debug!(
+                self.log_context,
+                "For batch {:?}, leader has changed, hence skipping backoff.",
+                batch.topic_partition
             );
         }
         should_backoff
@@ -990,10 +1006,13 @@ impl RecordAccumulator {
             return (entry.key().clone(), Arc::clone(entry.value()));
         }
         let topic_arc: Arc<str> = Arc::from(topic);
-        let entry = self
-            .topic_info_map
-            .entry(Arc::clone(&topic_arc))
-            .or_insert_with(|| Arc::new(TopicInfo::new(BuiltInPartitioner::new(&topic_arc, self.batch_size))));
+        let entry = self.topic_info_map.entry(Arc::clone(&topic_arc)).or_insert_with(|| {
+            Arc::new(TopicInfo::new(BuiltInPartitioner::with_log_context(
+                &topic_arc,
+                self.batch_size,
+                self.log_context.clone(),
+            )))
+        });
         (entry.key().clone(), Arc::clone(entry.value()))
     }
 
@@ -1009,10 +1028,12 @@ impl RecordAccumulator {
         // are allocated outside the buffer pool.
         if !batch.is_split_batch() {
             if batch.is_buffer_deallocated() {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Skipping deallocating a batch that has already been deallocated. \
                      Batch is {}, created time is {}",
-                    batch, batch.created_ms
+                    batch,
+                    batch.created_ms
                 );
             } else {
                 batch.mark_buffer_deallocated();

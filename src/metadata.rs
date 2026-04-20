@@ -31,7 +31,7 @@ use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use log::{debug, error, info, trace};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
 use crate::common::Cluster;
 use crate::common::ClusterResource;
@@ -141,7 +141,6 @@ pub struct Metadata {
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `Metadata`.
-    #[allow(dead_code)]
     log_context: LogContext,
 }
 
@@ -510,31 +509,42 @@ impl Metadata {
         let mut inner = self.inner.lock().unwrap();
         let old_epoch = inner.last_seen_leader_epochs.get(topic_partition).copied();
 
-        trace!(
+        kafka_trace!(
+            self.log_context,
             "Determining if we should replace existing epoch {:?} with new epoch {} for partition {}",
-            old_epoch, leader_epoch, topic_partition
+            old_epoch,
+            leader_epoch,
+            topic_partition
         );
 
         let updated = match old_epoch {
             None => {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "Not replacing null epoch with new epoch {} for partition {}",
-                    leader_epoch, topic_partition
+                    leader_epoch,
+                    topic_partition
                 );
                 false
             },
             Some(old) if leader_epoch > old => {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "Updating last seen epoch from {} to {} for partition {}",
-                    old, leader_epoch, topic_partition
+                    old,
+                    leader_epoch,
+                    topic_partition
                 );
                 inner.last_seen_leader_epochs.insert(topic_partition.clone(), leader_epoch);
                 true
             },
             Some(old) => {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "Not replacing existing epoch {} with new epoch {} for partition {}",
-                    old, leader_epoch, topic_partition
+                    old,
+                    leader_epoch,
+                    topic_partition
                 );
                 false
             },
@@ -628,7 +638,7 @@ impl Metadata {
     pub fn rebootstrap(&self) {
         let mut inner = self.inner.lock().unwrap();
         let addresses = inner.bootstrap_addresses.clone();
-        info!("Rebootstrapping with {:?}", addresses);
+        kafka_info!(self.log_context, "Rebootstrapping with {:?}", addresses);
         inner.need_full_update = true;
         inner.update_version += 1;
         inner.metadata_snapshot = Arc::new(MetadataSnapshot::bootstrap(&addresses));
@@ -691,24 +701,27 @@ impl Metadata {
             is_partial_update,
             now_ms,
             &retain,
+            &self.log_context,
         ));
 
         let cluster = inner.metadata_snapshot.cluster_arc();
-        Self::maybe_set_metadata_error(&mut inner, &cluster);
+        Self::maybe_set_metadata_error(&mut inner, &cluster, &self.log_context);
 
         // Remove epochs for topics we no longer retain
         inner.last_seen_leader_epochs.retain(|tp, _| retain(tp.topic(), false, now_ms));
 
         let new_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
         if previous_cluster_id != new_cluster_id {
-            info!("Cluster ID: {:?}", new_cluster_id);
+            kafka_info!(self.log_context, "Cluster ID: {:?}", new_cluster_id);
         }
         let cluster_resource = inner.metadata_snapshot.cluster_resource();
         inner.cluster_resource_listeners.on_update(&cluster_resource);
 
-        debug!(
+        kafka_debug!(
+            self.log_context,
             "Updated cluster metadata updateVersion {} to {}",
-            inner.update_version, inner.metadata_snapshot
+            inner.update_version,
+            inner.metadata_snapshot
         );
 
         // Release the inner lock before calling the post-update callback to avoid
@@ -760,7 +773,12 @@ impl Metadata {
             };
 
             if new_leader.epoch.is_none() || new_leader.leader_id.is_none() {
-                debug!("For {}, incoming leader information is incomplete {}", partition, new_leader);
+                kafka_debug!(
+                    self.log_context,
+                    "For {}, incoming leader information is incomplete {}",
+                    partition,
+                    new_leader
+                );
                 continue;
             }
 
@@ -768,27 +786,35 @@ impl Metadata {
             if let Some(current_epoch) = current_leader.epoch
                 && new_epoch <= current_epoch
             {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "For {}, incoming leader({}) is not-newer than the one in the existing metadata {}, so ignoring.",
-                    partition, new_leader, current_leader
+                    partition,
+                    new_leader,
+                    current_leader
                 );
                 continue;
             }
 
             let new_leader_id = new_leader.leader_id.unwrap();
             if !new_nodes.contains_key(&new_leader_id) {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "For {}, incoming leader({}), the corresponding node information for node-id {} is missing, so ignoring.",
-                    partition, new_leader, new_leader_id
+                    partition,
+                    new_leader,
+                    new_leader_id
                 );
                 continue;
             }
 
             let existing_metadata = inner.metadata_snapshot.partition_metadata(partition);
             if existing_metadata.is_none() {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "For {}, incoming leader({}), partition metadata is no longer cached, ignoring.",
-                    partition, new_leader
+                    partition,
+                    new_leader
                 );
                 continue;
             }
@@ -809,7 +835,7 @@ impl Metadata {
         }
 
         if update_partition_metadata.is_empty() {
-            debug!("No relevant metadata updates.");
+            kafka_debug!(self.log_context, "No relevant metadata updates.");
             return HashSet::new();
         }
 
@@ -847,22 +873,30 @@ impl Metadata {
         updated_partitions
     }
 
-    fn maybe_set_metadata_error(inner: &mut MetadataInner, cluster: &Cluster) {
+    fn maybe_set_metadata_error(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         Self::clear_recoverable_errors(inner);
-        Self::check_invalid_topics(inner, cluster);
-        Self::check_unauthorized_topics(inner, cluster);
+        Self::check_invalid_topics(inner, cluster, log_context);
+        Self::check_unauthorized_topics(inner, cluster, log_context);
     }
 
-    fn check_invalid_topics(inner: &mut MetadataInner, cluster: &Cluster) {
+    fn check_invalid_topics(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         if !cluster.invalid_topics().is_empty() {
-            error!("Metadata response reported invalid topics {:?}", cluster.invalid_topics());
+            kafka_error!(
+                log_context,
+                "Metadata response reported invalid topics {:?}",
+                cluster.invalid_topics()
+            );
             inner.invalid_topics = cluster.invalid_topics().clone();
         }
     }
 
-    fn check_unauthorized_topics(inner: &mut MetadataInner, cluster: &Cluster) {
+    fn check_unauthorized_topics(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         if !cluster.unauthorized_topics().is_empty() {
-            error!("Topic authorization failed for topics {:?}", cluster.unauthorized_topics());
+            kafka_error!(
+                log_context,
+                "Topic authorization failed for topics {:?}",
+                cluster.unauthorized_topics()
+            );
             inner.unauthorized_topics = cluster.unauthorized_topics().clone();
         }
     }
@@ -874,6 +908,7 @@ impl Metadata {
         is_partial_update: bool,
         now_ms: i64,
         retain_topic: &dyn Fn(&str, bool, i64) -> bool,
+        log_context: &LogContext,
     ) -> MetadataSnapshot {
         // All encountered topics
         let mut topics = HashSet::new();
@@ -921,14 +956,17 @@ impl Metadata {
                         metadata_response.has_reliable_leader_epochs(),
                         effective_topic_id,
                         old_topic_id,
+                        log_context,
                     ) {
                         partitions.push(pm);
                     }
 
                     if Self::is_invalid_metadata_error(partition_metadata.error) {
-                        debug!(
+                        kafka_debug!(
+                            log_context,
                             "Requesting metadata update for partition {} due to error {:?}",
-                            partition_metadata.topic_partition, partition_metadata.error
+                            partition_metadata.topic_partition,
+                            partition_metadata.error
                         );
                         inner.need_full_update = true;
                         if inner.equivalent_response_count > 0 {
@@ -938,7 +976,8 @@ impl Metadata {
                 }
             } else {
                 if Self::is_invalid_metadata_error(metadata.error()) {
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Requesting metadata update for topic {} due to error {:?}",
                         topic_name,
                         metadata.error()
@@ -990,6 +1029,7 @@ impl Metadata {
         has_reliable_leader_epoch: bool,
         topic_id: Option<Uuid>,
         old_topic_id: Option<Uuid>,
+        log_context: &LogContext,
     ) -> Option<PartitionMetadata> {
         let tp = &partition_metadata.topic_partition;
         if let Some(new_epoch) = partition_metadata.leader_epoch.filter(|_| has_reliable_leader_epoch) {
@@ -998,9 +1038,11 @@ impl Metadata {
             match current_epoch {
                 None => {
                     // No previous info, insert new epoch
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Setting the last seen epoch of partition {} to {} since the last known epoch was undefined.",
-                        tp, new_epoch
+                        tp,
+                        new_epoch
                     );
                     inner.last_seen_leader_epochs.insert(tp.clone(), new_epoch);
                     inner.equivalent_response_count = 0;
@@ -1008,18 +1050,25 @@ impl Metadata {
                 },
                 Some(_) if topic_id.is_some() && topic_id != old_topic_id => {
                     // Topic ID changed (topic deleted and re-created)
-                    info!(
+                    kafka_info!(
+                        log_context,
                         "Resetting the last seen epoch of partition {} to {} since the associated topicId changed from {:?} to {:?}",
-                        tp, new_epoch, old_topic_id, topic_id
+                        tp,
+                        new_epoch,
+                        old_topic_id,
+                        topic_id
                     );
                     inner.last_seen_leader_epochs.insert(tp.clone(), new_epoch);
                     inner.equivalent_response_count = 0;
                     Some(partition_metadata.clone())
                 },
                 Some(current) if new_epoch >= current => {
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Updating last seen epoch for partition {} from {} to epoch {} from new metadata",
-                        tp, current, new_epoch
+                        tp,
+                        current,
+                        new_epoch
                     );
                     inner.last_seen_leader_epochs.insert(tp.clone(), new_epoch);
                     if new_epoch > current {
@@ -1029,9 +1078,12 @@ impl Metadata {
                 },
                 Some(current) => {
                     // Old epoch, ignore
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Got metadata for an older epoch {} (current is {}) for partition {}, not updating",
-                        new_epoch, current, tp
+                        new_epoch,
+                        current,
+                        tp
                     );
                     inner.metadata_snapshot.partition_metadata(tp).cloned()
                 },
