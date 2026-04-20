@@ -28,6 +28,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use tokio::sync::Notify;
+
 use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace, kafka_warn};
 use rand::Rng;
 use rand::SeedableRng;
@@ -1431,6 +1433,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn wakeup(&self) {
         self.selector.wakeup();
+    }
+
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        self.selector.wakeup_notify()
     }
 
     fn new_client_request(
