@@ -463,6 +463,49 @@ impl KafkaChannel {
         Ok(bytes_received)
     }
 
+    /// Whether the underlying transport implements a synchronous `try_read`.
+    ///
+    /// Plaintext returns `true`; SSL returns `false` and goes through the
+    /// async `read` path because rustls must drive its I/O state machine
+    /// through the async TLS stream.
+    pub fn supports_try_read(&self) -> bool {
+        self.transport_layer.supports_try_read()
+    }
+
+    /// Synchronous, non-blocking mirror of [`read`](Self::read).
+    ///
+    /// Calls [`NetworkReceive::try_read_from`] instead of awaiting
+    /// [`Receive::read_from`], which in turn calls
+    /// [`TransportLayer::try_read`] directly without `Box::pin(async {…})`,
+    /// without `tokio::time::timeout(Duration::ZERO, …)` and without any
+    /// timer-driver registration. Used by `Selector::attempt_read`.
+    ///
+    /// On `WouldBlock` from the transport, returns `Ok(0)` (handled inside
+    /// `try_read_from`); the caller treats that as "no progress this tick"
+    /// and retries on the next selector iteration.
+    pub fn try_read(&mut self) -> io::Result<usize> {
+        if self.receive.is_none() {
+            self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, &self.id));
+        }
+
+        let bytes_received = {
+            let receive = self.receive.as_mut().unwrap();
+            let transport = &mut *self.transport_layer;
+            receive.try_read_from(transport)?
+        };
+
+        // Check if we should mute due to memory pressure
+        if let Some(ref recv) = self.receive
+            && recv.required_memory_amount_known()
+            && !recv.memory_allocated()
+            && self.is_in_mutable_state()
+        {
+            self.mute();
+        }
+
+        Ok(bytes_received)
+    }
+
     /// Returns the current in-progress receive, if any.
     pub fn current_receive(&self) -> Option<&NetworkReceive> {
         self.receive.as_ref()
