@@ -282,14 +282,21 @@ impl TransportLayer for SslTransportLayer {
 
     fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
         Box::pin(async {
+            // Always wait on the underlying TCP socket for fresh ciphertext.
+            //
+            // The previous early-return when `!conn.wants_read()` (rustls had
+            // unprocessed buffered ciphertext) caused the outer `select_all`
+            // in `Selector::poll` to fire immediately without waiting on the
+            // kernel. The poll loop then iterated, but `attempt_read` may not
+            // produce a complete `NetworkReceive` (partial response), leaving
+            // `made_progress = false`. We would re-enter `select_all` and
+            // wake again on the same stale buffered-ciphertext signal,
+            // spinning instead of waiting for the next broker packet to
+            // arrive on TCP. Any already-buffered plaintext is drained by
+            // `attempt_read`'s actual read call, so we don't need a wakeup
+            // signal for it.
             match &self.state {
-                SslState::Ready(tls_stream) => {
-                    let conn: &rustls::ClientConnection = tls_stream.get_ref().1;
-                    if !conn.wants_read() {
-                        return Ok(());
-                    }
-                    tls_stream.get_ref().0.readable().await
-                },
+                SslState::Ready(tls_stream) => tls_stream.get_ref().0.readable().await,
                 SslState::Handshaking { stream: Some(s), .. } => s.readable().await,
                 _ => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
             }
