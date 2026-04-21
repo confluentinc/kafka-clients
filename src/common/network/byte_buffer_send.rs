@@ -139,6 +139,10 @@ impl KafkaSend for ByteBufferSend {
         }
 
         if count == 0 {
+            if self.pending {
+                let _ = channel.try_write_vectored(&[]);
+                self.pending = channel.has_pending_writes();
+            }
             return Ok(0);
         }
 

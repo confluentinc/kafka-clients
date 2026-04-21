@@ -156,7 +156,7 @@ pub struct RecordAccumulator {
     /// Only accessed by the sender thread, so no synchronization needed.
     muted: Mutex<HashSet<TopicPartition>>,
     /// Only accessed by the sender thread.
-    nodes_drain_index: Mutex<HashMap<String, usize>>,
+    nodes_drain_index: Mutex<HashMap<i32, usize>>,
     next_batch_expiry_time_ms: Mutex<i64>,
     /// Contextual log message prefix.
     ///
@@ -710,9 +710,7 @@ impl RecordAccumulator {
                 }
             }
 
-            let leader_epoch = metadata_snapshot.leader_epoch_for(&part);
             let mut deque = deque_mutex.lock().unwrap();
-
             let deque_size = deque.len();
 
             let batch = match deque.front_mut() {
@@ -720,6 +718,7 @@ impl RecordAccumulator {
                 None => continue,
             };
 
+            let leader_epoch = metadata_snapshot.leader_epoch_for(&part);
             let waited_time_ms = batch.waited_time_ms(now_ms);
             batch.maybe_update_leader_epoch(leader_epoch);
             let backing_off =
@@ -845,7 +844,7 @@ impl RecordAccumulator {
             return ready;
         }
 
-        let mut drain_index = self.get_drain_index(node.id_string());
+        let mut drain_index = self.get_drain_index(node.id());
         drain_index %= parts.len();
         let start = drain_index;
 
@@ -853,7 +852,6 @@ impl RecordAccumulator {
             let part = &parts[drain_index];
             let tp = TopicPartition::new(part.topic(), part.partition());
 
-            self.update_drain_index(node.id_string(), drain_index);
             drain_index = (drain_index + 1) % parts.len();
 
             if self.is_muted(&tp) {
@@ -930,17 +928,18 @@ impl RecordAccumulator {
                 break;
             }
         }
+        self.update_drain_index(node.id(), drain_index);
         ready
     }
 
-    fn get_drain_index(&self, id_string: &str) -> usize {
+    fn get_drain_index(&self, node_id: i32) -> usize {
         let map = self.nodes_drain_index.lock().unwrap();
-        map.get(id_string).copied().unwrap_or(0)
+        map.get(&node_id).copied().unwrap_or(0)
     }
 
-    fn update_drain_index(&self, id_string: &str, drain_index: usize) {
+    fn update_drain_index(&self, node_id: i32, drain_index: usize) {
         let mut map = self.nodes_drain_index.lock().unwrap();
-        map.insert(id_string.to_string(), drain_index);
+        map.insert(node_id, drain_index);
     }
 
     /// Drain all the data for the given nodes and collate them into a list of

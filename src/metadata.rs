@@ -1988,7 +1988,9 @@ mod tests {
         // Sentinel instances
         let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
         let bootstrap_addr = ("127.0.0.1".to_string(), address);
-        let from_metadata = MetadataSnapshot::bootstrap(&[bootstrap_addr.clone()]).cluster().clone();
+        let from_metadata = MetadataSnapshot::bootstrap(std::slice::from_ref(&bootstrap_addr))
+            .cluster()
+            .clone();
         let from_cluster = Cluster::bootstrap(&[bootstrap_addr]);
         assert_eq!(from_metadata, from_cluster);
 

@@ -325,7 +325,12 @@ impl Selector {
     /// was selected (i.e., has ready I/O) in `pollSelectionKeys`. This
     /// includes partial reads/writes where bytes were transferred but a
     /// full `NetworkReceive`/`NetworkSend` was not yet completed.
-    async fn poll_channel(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: u64) {
+    async fn poll_channel(
+        &mut self,
+        channel_id: &str,
+        is_immediately_connected: bool,
+        current_time_nanos: u64,
+    ) -> bool {
         let mut send_failed = false;
         let mut had_bytes_transferred = false;
 
@@ -429,6 +434,7 @@ impl Selector {
             };
             self.close_channel_internal(channel_id, close_mode).await;
         }
+        had_bytes_transferred
     }
 
     /// Attempt to read from a channel.
@@ -451,14 +457,12 @@ impl Selector {
 
         if should_read {
             let channel = self.channels.get_mut(channel_id).unwrap();
-            // Use timeout to avoid blocking on this channel's readability.
-            // If not ready, we skip and retry on the next poll() iteration.
             let read_result = tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await;
             let bytes = match read_result {
                 Ok(Ok(b)) => b,
                 Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
                 Ok(Err(e)) => return Err(e),
-                Err(_elapsed) => 0, // timeout = not ready
+                Err(_elapsed) => 0,
             };
             if bytes != 0 {
                 self.made_read_progress_last_poll = true;
@@ -776,12 +780,14 @@ impl Selectable for Selector {
         // progress or the timeout expires. This matches Java NIO's
         // nioSelector.select(timeout) which blocks until I/O or timeout.
         loop {
+            let mut had_partial_io = false;
+
             // Process channels with buffered data
             if data_in_buffers {
                 let buffered_ids: Vec<String> = self.channels_with_buffered_read.drain().collect();
                 for id in buffered_ids {
-                    if self.channels.contains_key(&id) {
-                        self.poll_channel(&id, false, start_select).await;
+                    if self.channels.contains_key(&id) && self.poll_channel(&id, false, start_select).await {
+                        had_partial_io = true;
                     }
                 }
             }
@@ -791,7 +797,9 @@ impl Selectable for Selector {
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(id);
-                    self.poll_channel(id, is_immediately, start_select).await;
+                    if self.poll_channel(id, is_immediately, start_select).await {
+                        had_partial_io = true;
+                    }
                 }
             }
             self.immediately_connected_keys.clear();
@@ -803,6 +811,14 @@ impl Selectable for Selector {
 
             if made_progress {
                 break;
+            }
+
+            // Bytes were transferred but no send/receive completed yet.
+            // When we have a deadline (non-zero timeout), skip the full
+            // select!/readiness-future overhead and retry I/O directly.
+            if had_partial_io && deadline.is_some_and(|dl| tokio::time::Instant::now() < dl) {
+                tokio::task::yield_now().await;
+                continue;
             }
 
             // No progress — wait for I/O readiness on any channel, wakeup,
