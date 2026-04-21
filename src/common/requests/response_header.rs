@@ -20,8 +20,8 @@ use std::fmt;
 use std::io;
 
 use crate::common::protocol::ByteBufferAccessor;
-use crate::common::protocol::message::Message;
-use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+use crate::common::protocol::Message;
+use crate::common::protocol::ObjectSerializationCache;
 use crate::response_header_data::ResponseHeaderData;
 
 /// Sentinel value indicating that the cached size has not been computed yet.

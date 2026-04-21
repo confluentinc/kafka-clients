@@ -190,6 +190,21 @@ pub trait TransportLayer: Send {
     /// Returns an error if the write fails.
     fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
+    /// Returns a future that resolves when the transport is ready for reading.
+    ///
+    /// Used by the Selector to wait for I/O readiness across all channels,
+    /// replacing busy-polling. The future does not perform any I/O itself.
+    ///
+    /// Takes `&self` (not `&mut self`) so multiple channels can be polled
+    /// simultaneously.
+    fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+
+    /// Returns a future that resolves when the transport is ready for writing.
+    ///
+    /// Takes `&self` (not `&mut self`) so multiple channels can be polled
+    /// simultaneously.
+    fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+
     /// Writes data from multiple buffers to this channel (scatter-gather write).
     ///
     /// # Arguments

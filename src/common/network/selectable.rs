@@ -16,9 +16,9 @@
 //!
 //! Translated from `org.apache.kafka.common.network.Selectable`.
 
-use super::channel_state::ChannelState;
-use super::network_receive::NetworkReceive;
-use super::network_send::NetworkSend;
+use super::ChannelState;
+use super::NetworkReceive;
+use super::NetworkSend;
 
 use std::collections::HashMap;
 use std::io;

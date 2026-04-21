@@ -24,10 +24,12 @@ pub mod api_versions_request;
 pub mod api_versions_response;
 pub mod metadata_request;
 pub mod metadata_response;
+pub mod produce_request;
+pub mod produce_response;
 pub mod request_and_size;
 pub mod request_header;
-pub mod request_test_utils;
-pub mod request_utils;
+pub(crate) mod request_test_utils;
+pub(crate) mod request_utils;
 pub mod response_header;
 pub mod sasl_authenticate_request;
 pub mod sasl_authenticate_response;
@@ -40,10 +42,11 @@ pub use abstract_response::ConcreteResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
-pub use metadata_response::MetadataResponse;
+pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
+pub use produce_request::{ProduceRequest, ProduceRequestBuilder};
+pub use produce_response::{PartitionResponse, ProduceResponse, RecordError};
 pub use request_and_size::RequestAndSize;
 pub use request_header::RequestHeader;
-pub use request_utils::serialize;
 pub use response_header::ResponseHeader;
 pub use sasl_authenticate_request::{SaslAuthenticateRequest, SaslAuthenticateRequestBuilder};
 pub use sasl_authenticate_response::SaslAuthenticateResponse;
@@ -53,5 +56,5 @@ pub use send_builder::SendBuilder;
 
 /// Sentinel value indicating that the partition leader epoch is unknown or not set.
 ///
-/// Corresponds to `RecordBatch.NO_PARTITION_LEADER_EPOCH` in Java.
-pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
+/// Corresponds to `RecordBatch.RECORD_BATCH_NO_PARTITION_LEADER_EPOCH` in Java.
+pub const RECORD_BATCH_NO_PARTITION_LEADER_EPOCH: i32 = -1;

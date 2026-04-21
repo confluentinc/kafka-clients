@@ -16,7 +16,7 @@
 
 use std::fmt;
 
-use super::node::Node;
+use super::Node;
 
 /// This is used to describe per-partition state in the MetadataResponse.
 #[derive(Clone, Debug)]

@@ -16,24 +16,32 @@
 
 pub mod cluster;
 pub mod cluster_resource;
+pub mod cluster_resource_listener;
+pub mod compress;
 pub mod config;
 pub mod feature;
-pub mod internals;
+pub mod header;
+pub(crate) mod internals;
 pub mod kafka_error;
+pub mod kafka_future;
 pub mod memory;
 pub mod network;
 pub mod node;
 pub mod partition_info;
 pub mod protocol;
+pub mod record;
 pub mod requests;
 pub mod security;
+pub mod serialization;
 pub mod topic_partition;
 pub mod utils;
 pub mod uuid;
 
 pub use cluster::Cluster;
 pub use cluster_resource::ClusterResource;
-pub use kafka_error::KafkaError;
+pub use cluster_resource_listener::ClusterResourceListener;
+pub use kafka_error::{KafkaError, KafkaGenericError};
+pub use kafka_future::KafkaFuture;
 pub use node::Node;
 pub use partition_info::PartitionInfo;
 pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};

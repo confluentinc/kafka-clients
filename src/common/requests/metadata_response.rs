@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! Metadata response handling.
 //!
 //! Corresponds to `org.apache.kafka.common.requests.MetadataResponse`.
@@ -30,12 +31,12 @@ use std::collections::HashMap;
 use std::collections::HashSet;
 use std::sync::OnceLock;
 
-use crate::common::cluster::Cluster;
-use crate::common::node::Node;
-use crate::common::partition_info::PartitionInfo;
+use crate::common::Cluster;
+use crate::common::Node;
+use crate::common::PartitionInfo;
+use crate::common::TopicPartition;
+use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::topic_partition::TopicPartition;
-use crate::common::uuid::Uuid;
 use crate::metadata_response_data::{MetadataResponseBroker, MetadataResponseData, MetadataResponseTopic};
 
 use super::abstract_response::update_error_counts;

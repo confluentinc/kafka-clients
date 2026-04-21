@@ -12,7 +12,11 @@ Every change must at least pass all of the following before it is considered com
 
 5. Are all unit and integration tests passing? If there are any failing test fix them before considering the change done.
 
-6. `cargo build` succeeds
-7. `cargo test --features integration-tests` passes
-8. `cargo xtask format-check` passes (run `cargo xtask format` to fix)
-9. `cargo xtask lint` passes (run `cargo xtask lint-fix` to auto-fix, then fix remaining issues manually)
+6. Are there duplicated classes that were translated twice? In case remove the duplicated code and keep only one implementation.
+
+7. Are there structs or traits that aren't present in Java codebase? Avoid adding new structs or traits that aren't present in Java codebase. In case they are needed to implement the Rust client, explain why they are needed and how they are used.
+
+8. Are there any TODO or FIXME left in the code? In case finish everything that should be done before considering the change done.
+
+9. Are unit tests, integration tests, Python, C tests passing?
+   Use `make verify` to run all tests and format checks and lint checks. If there are any failing test or check fix them before considering the change done.

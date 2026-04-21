@@ -19,8 +19,8 @@
 //! Metadata about a channel is provided in various places in the network stack.
 //! This registry is used as a common place to collect them.
 
-use super::cipher_information::CipherInformation;
-use super::client_information::ClientInformation;
+use super::CipherInformation;
+use super::ClientInformation;
 
 /// A registry for collecting channel metadata such as cipher and client information.
 ///

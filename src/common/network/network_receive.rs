@@ -17,9 +17,9 @@
 //!
 //! Translated from `org.apache.kafka.common.network.NetworkReceive`.
 
-use super::invalid_receive_error::InvalidReceiveError;
-use super::receive::Receive;
-use super::transport_layer::TransportLayer;
+use super::InvalidReceiveError;
+use super::Receive;
+use super::TransportLayer;
 
 use log::trace;
 
@@ -254,7 +254,7 @@ impl Receive for NetworkReceive {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::network::transport_layer::InterestOps;
+    use crate::common::network::InterestOps;
 
     use std::io;
     use std::net::SocketAddr;
@@ -332,6 +332,14 @@ mod tests {
         }
 
         fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 

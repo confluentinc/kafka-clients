@@ -36,22 +36,22 @@
 //! 3. Returns `Ok(())` if I/O would block (partial read/write)
 //! 4. Stores partial reads in `net_in_buffer` for the next call
 
-use crate::common::network::authenticator::Authenticator;
-use crate::common::network::byte_buffer_send::ByteBufferSend;
-use crate::common::network::network_receive::NetworkReceive;
-use crate::common::network::receive::Receive;
-use crate::common::network::send::KafkaSend;
-use crate::common::network::transport_layer::{InterestOps, TransportLayer};
+use crate::common::network::Authenticator;
+use crate::common::network::ByteBufferSend;
+use crate::common::network::KafkaSend;
+use crate::common::network::NetworkReceive;
+use crate::common::network::Receive;
+use crate::common::network::{InterestOps, TransportLayer};
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use crate::common::requests::abstract_request::ConcreteRequest;
-use crate::common::requests::abstract_request::RequestBuilder;
-use crate::common::requests::abstract_response::ConcreteResponse;
-use crate::common::requests::api_versions_request::ApiVersionsRequestBuilder;
-use crate::common::requests::api_versions_response::ApiVersionsResponse;
-use crate::common::requests::request_header::RequestHeader;
-use crate::common::requests::sasl_authenticate_request::SaslAuthenticateRequest;
-use crate::common::requests::sasl_handshake_request::SaslHandshakeRequest;
-use crate::common::requests::sasl_handshake_response::SaslHandshakeResponse;
+use crate::common::requests::ApiVersionsRequestBuilder;
+use crate::common::requests::ApiVersionsResponse;
+use crate::common::requests::ConcreteRequest;
+use crate::common::requests::ConcreteResponse;
+use crate::common::requests::RequestBuilder;
+use crate::common::requests::RequestHeader;
+use crate::common::requests::SaslAuthenticateRequest;
+use crate::common::requests::SaslHandshakeRequest;
+use crate::common::requests::SaslHandshakeResponse;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
@@ -70,17 +70,18 @@ const DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER: i16 = -1;
 /// The reserved range of correlation IDs for SASL requests ensures that SASL
 /// requests are separated from those used in `NetworkClient` for Kafka requests.
 /// This prevents mismatched correlation IDs during re-authentication.
-pub const MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
+pub const SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
 
 /// The minimum reserved correlation ID for SASL requests.
 ///
 /// Only one request is expected in-flight at a time during authentication,
 /// so the small range (8 values) is sufficient.
-pub const MIN_RESERVED_CORRELATION_ID: i32 = MAX_RESERVED_CORRELATION_ID - 7;
+pub const SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID: i32 =
+    SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID - 7;
 
 /// Returns `true` if the correlation ID is reserved for SASL requests.
 pub fn is_reserved(correlation_id: i32) -> bool {
-    correlation_id >= MIN_RESERVED_CORRELATION_ID
+    correlation_id >= SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
 }
 
 /// Internal state transitions for SASL client authentication.
@@ -209,7 +210,7 @@ impl SaslClientAuthenticator {
     /// Allocates the next correlation ID from the reserved range.
     fn next_correlation_id(&mut self) -> i32 {
         if !is_reserved(self.correlation_id) {
-            self.correlation_id = MIN_RESERVED_CORRELATION_ID;
+            self.correlation_id = SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
         }
         let id = self.correlation_id;
         self.correlation_id = self.correlation_id.wrapping_add(1);
@@ -603,11 +604,11 @@ impl Authenticator for SaslClientAuthenticator {
 mod tests {
     use super::*;
     use crate::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
-    use crate::common::network::transport_layer::InterestOps;
-    use crate::common::protocol::message::Message;
-    use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
-    use crate::common::protocol::writable::Writable;
-    use crate::common::requests::response_header::ResponseHeader;
+    use crate::common::network::InterestOps;
+    use crate::common::protocol::Message;
+    use crate::common::protocol::ObjectSerializationCache;
+    use crate::common::protocol::Writable;
+    use crate::common::requests::ResponseHeader;
     use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
     use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
 
@@ -696,6 +697,14 @@ mod tests {
         }
 
         fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+
+        fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
         }
 
@@ -853,18 +862,18 @@ mod tests {
         let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
         let id1 = auth.next_correlation_id();
         assert!(is_reserved(id1));
-        assert_eq!(id1, MIN_RESERVED_CORRELATION_ID);
+        assert_eq!(id1, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
 
         let id2 = auth.next_correlation_id();
         assert!(is_reserved(id2));
-        assert_eq!(id2, MIN_RESERVED_CORRELATION_ID + 1);
+        assert_eq!(id2, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1);
     }
 
     /// Test 3b: Correlation ID wraps correctly when reserved range is exhausted.
     ///
     /// Java's `int` wraps silently on overflow (`Integer.MAX_VALUE + 1` becomes
     /// `Integer.MIN_VALUE`). After wrapping, `isReserved()` returns false, so
-    /// `nextCorrelationId()` resets to `MIN_RESERVED_CORRELATION_ID`. This test
+    /// `nextCorrelationId()` resets to `SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID`. This test
     /// ensures the Rust implementation matches this wrapping behavior in both
     /// debug and release builds.
     #[test]
@@ -873,23 +882,23 @@ mod tests {
         // Exhaust all 8 reserved IDs
         for i in 0..8 {
             let id = auth.next_correlation_id();
-            assert_eq!(id, MIN_RESERVED_CORRELATION_ID + i);
+            assert_eq!(id, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + i);
             assert!(is_reserved(id));
         }
         // At this point correlation_id has wrapped past i32::MAX.
         // The 9th call should detect that the ID is no longer reserved and
-        // reset to MIN_RESERVED_CORRELATION_ID.
+        // reset to SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID.
         let id = auth.next_correlation_id();
-        assert_eq!(id, MIN_RESERVED_CORRELATION_ID);
+        assert_eq!(id, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
         assert!(is_reserved(id));
     }
 
     /// Test 4: is_reserved boundary conditions.
     #[test]
     fn test_is_reserved() {
-        assert!(is_reserved(MAX_RESERVED_CORRELATION_ID));
-        assert!(is_reserved(MIN_RESERVED_CORRELATION_ID));
-        assert!(!is_reserved(MIN_RESERVED_CORRELATION_ID - 1));
+        assert!(is_reserved(SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID));
+        assert!(is_reserved(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID));
+        assert!(!is_reserved(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID - 1));
         assert!(!is_reserved(0));
         assert!(!is_reserved(-1));
     }
@@ -935,7 +944,7 @@ mod tests {
 
         // Step 2: Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            MIN_RESERVED_CORRELATION_ID,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -948,7 +957,7 @@ mod tests {
 
         // Step 3: Receive SaslHandshakeResponse
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 1,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::None,
             vec!["PLAIN".to_string()],
             auth.sasl_handshake_version(),
@@ -965,7 +974,7 @@ mod tests {
         // The client goes directly to Complete (no CLIENT_COMPLETE intermediate
         // state, since PLAIN has no challenge-response cycle).
         let sasl_auth_bytes = build_sasl_authenticate_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 2,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
             &Errors::None,
             None,
             &[],
@@ -989,7 +998,7 @@ mod tests {
 
         // Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            MIN_RESERVED_CORRELATION_ID,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -999,7 +1008,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse with UNSUPPORTED_SASL_MECHANISM
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 1,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::UnsupportedSaslMechanism,
             vec!["SCRAM-SHA-256".to_string()],
             auth.sasl_handshake_version(),
@@ -1023,7 +1032,7 @@ mod tests {
 
         // Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            MIN_RESERVED_CORRELATION_ID,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -1033,7 +1042,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse (success)
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 1,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::None,
             vec!["PLAIN".to_string()],
             auth.sasl_handshake_version(),
@@ -1044,7 +1053,7 @@ mod tests {
 
         // Receive SaslAuthenticateResponse with error
         let sasl_auth_bytes = build_sasl_authenticate_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 2,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
             &Errors::SaslAuthenticationFailed,
             Some("Authentication failed: Invalid credentials"),
             &[],
@@ -1078,7 +1087,7 @@ mod tests {
 
         data.set_api_keys(vec![hs_version]);
 
-        let response_header = ResponseHeader::new(MIN_RESERVED_CORRELATION_ID, 0);
+        let response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
@@ -1096,7 +1105,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 1,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::None,
             vec!["PLAIN".to_string()],
             0,
@@ -1129,7 +1138,7 @@ mod tests {
 
         // Receive ApiVersionsResponse
         let api_versions_bytes = build_api_versions_response_bytes(
-            MIN_RESERVED_CORRELATION_ID,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
             ApiKeys::SASL_HANDSHAKE.latest_version(),
             ApiKeys::SASL_AUTHENTICATE.latest_version(),
         );
@@ -1139,7 +1148,7 @@ mod tests {
 
         // Receive SaslHandshakeResponse with ILLEGAL_SASL_STATE
         let handshake_bytes = build_sasl_handshake_response_bytes(
-            MIN_RESERVED_CORRELATION_ID + 1,
+            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
             &Errors::IllegalSaslState,
             vec!["PLAIN".to_string()],
             auth.sasl_handshake_version(),

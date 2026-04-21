@@ -19,15 +19,15 @@
 use std::collections::HashSet;
 use std::io;
 
+use crate::common::Uuid;
 use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::common::uuid::Uuid;
 use crate::metadata_request_data::{MetadataRequestData, MetadataRequestTopic};
 use crate::metadata_response_data::{MetadataResponseData, MetadataResponseTopic};
 
 use super::ConcreteRequest;
-use super::abstract_request::RequestBuilder;
-use super::abstract_response::ConcreteResponse;
-use super::metadata_response::MetadataResponse;
+use super::ConcreteResponse;
+use super::MetadataResponse;
+use super::RequestBuilder;
 
 /// A Metadata request.
 ///

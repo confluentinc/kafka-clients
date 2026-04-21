@@ -26,13 +26,13 @@ use std::io;
 
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::ByteBufferAccessor;
-use crate::common::protocol::message::Message;
-use crate::common::protocol::message_size_accumulator::MessageSizeAccumulator;
-use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
-use crate::common::protocol::writable::Writable;
+use crate::common::protocol::Message;
+use crate::common::protocol::MessageSizeAccumulator;
+use crate::common::protocol::ObjectSerializationCache;
+use crate::common::protocol::Writable;
 
-use super::request_header::RequestHeader;
-use super::response_header::ResponseHeader;
+use super::RequestHeader;
+use super::ResponseHeader;
 
 /// Builds network `Send` objects from protocol messages.
 ///
@@ -102,7 +102,7 @@ impl SendBuilder {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::network::send::KafkaSend;
+    use crate::common::network::KafkaSend;
     use crate::common::protocol::ApiKeys;
     use crate::metadata_request_data::MetadataRequestData;
 

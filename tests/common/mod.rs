@@ -23,8 +23,8 @@
 // Re-export library types that the generated code references via `crate::common::*`.
 // In integration tests, `crate::common` resolves to this module, so we must
 // provide `protocol` and `Uuid` here to satisfy those paths.
-pub use confluent_kafka_rust::common::Uuid;
-pub use confluent_kafka_rust::common::protocol;
+pub use confluent_kafka::common::Uuid;
+pub use confluent_kafka::common::protocol;
 
 #[allow(dead_code, clippy::all)]
 mod test_generated {

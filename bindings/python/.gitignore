@@ -1,0 +1,6 @@
+*.so
+*.egg-info
+build/
+__pycache__/
+dist/
+*.jsonl

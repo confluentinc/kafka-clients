@@ -31,9 +31,9 @@ use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
 
 use super::ConcreteRequest;
-use super::abstract_request::RequestBuilder;
-use super::abstract_response::ConcreteResponse;
-use super::sasl_authenticate_response::SaslAuthenticateResponse;
+use super::ConcreteResponse;
+use super::RequestBuilder;
+use super::SaslAuthenticateResponse;
 
 /// A SASL authenticate request.
 ///

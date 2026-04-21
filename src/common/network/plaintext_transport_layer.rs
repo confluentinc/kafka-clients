@@ -20,7 +20,7 @@
 //! In Rust, this wraps a `tokio::net::TcpStream` for async non-blocking I/O,
 //! per CLAUDE.md rule 8.
 
-use super::transport_layer::{InterestOps, TransportLayer};
+use super::{InterestOps, TransportLayer};
 
 use std::future::Future;
 use std::io;
@@ -181,6 +181,24 @@ impl TransportLayer for PlaintextTransportLayer {
             }
             self.connected = false;
             Ok(())
+        })
+    }
+
+    fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            match &self.stream {
+                Some(stream) => stream.readable().await,
+                None => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+            }
+        })
+    }
+
+    fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+        Box::pin(async {
+            match &self.stream {
+                Some(stream) => stream.writable().await,
+                None => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
+            }
         })
     }
 

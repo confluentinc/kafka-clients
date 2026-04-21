@@ -99,4 +99,30 @@ fn main() {
     eprintln!("Formatting generated files...");
     format_generated_dir(&generated_dir);
     eprintln!("Generated files formatted.");
+
+    // Generate C header when the ffi feature is enabled
+    #[cfg(feature = "ffi")]
+    {
+        println!("cargo:rerun-if-changed=src/");
+        println!("cargo:rerun-if-changed=cbindgen.toml");
+
+        let crate_dir = env::var("CARGO_MANIFEST_DIR").unwrap();
+        let header_path = Path::new(&crate_dir).join("target/include/confluent_kafka.h");
+
+        if let Some(parent) = header_path.parent() {
+            fs::create_dir_all(parent).expect("Failed to create target/include/");
+        }
+
+        let config = cbindgen::Config::from_file("cbindgen.toml").expect("Failed to read cbindgen.toml");
+
+        match cbindgen::Builder::new().with_crate(&crate_dir).with_config(config).generate() {
+            Ok(bindings) => {
+                bindings.write_to_file(&header_path);
+                eprintln!("C header generated: {}", header_path.display());
+            },
+            Err(e) => {
+                eprintln!("Warning: cbindgen failed: {}", e);
+            },
+        }
+    }
 }

@@ -16,8 +16,8 @@
 //!
 //! Translated from `org.apache.kafka.common.network.ByteBufferSend`.
 
-use super::send::KafkaSend;
-use super::transport_layer::TransportLayer;
+use super::KafkaSend;
+use super::TransportLayer;
 
 use std::fmt;
 use std::future::Future;

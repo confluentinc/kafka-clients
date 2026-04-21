@@ -13,12 +13,33 @@ Suggestions for changes are possible through the process highlighted in [agent-r
        keep the same licence: GPL + Classpath Exception (important).
 2. **Naming Conventions**:
    - Java package `org.apache.kafka.message` → Rust module `message`
-   - Java package `org.apache.kafka.clients.consumer` → Rust module `clients::consumer`
+   - Java package `org.apache.kafka.clients.consumer` → Rust module `consumer`. `clients` MUST NOT appear in folder name or Rust module.
    - Java class names (PascalCase) → Rust struct/enum names (PascalCase)
    - Java method names (camelCase) → Rust function names (snake_case)
+   - Java const CommonClientConfigs.RETRY_BACKOFF_EXP_BASE → Rust `common_client_configs::RETRY_BACKOFF_EXP_BASE`
+   - Each Java class MUST be in its own file, but internal imports for the struct MUST use the parent module re-export, not the file module path. For example,
+   `ProducerRecord` is defined in `producer_record.rs` but imported preferably as
+   `use crate::producer::ProducerRecord;` not `use crate::producer::producer_record::ProducerRecord;`. Externally it's possible to use both
+   - Constant MUST be exported only by the file defining them. E.g.:
+     `GROUP_METADATA_TOPIC_NAME` is accessible through
+     `::common::internals::topic::GROUP_METADATA_TOPIC_NAME`
+   - Static functions MUST be exported only by the file defining them. E.g:
+     `to_byte_buffer_accessor` is accessible through `::common::protocol::message_util::to_byte_buffer_accessor`
+   - Classes whose package contains `internal` MUST  use only `pub(crate)`
    - Java `Exception` → Rust `Error` (e.g. `TopicAuthorizationException` → `TopicAuthorizationError`)
    - Java `throws` / `throw` → Rust `return Err(...)` (e.g. `maybeThrowAnyException` → `maybe_return_any_error`)
    - Preserve original architecture and logical structure
+3. **C FFI Conventions**:
+    - Always define types ending with '_t' for opaque or public structures
+    - `org.apache.kafka.common.KafkaException` -> `kafka_common_KafkaError_t`.
+    - `is_retriable` -> `kafka_common_KafkaError_is_retriable`.
+    - preserve Java namespaces in first part of the function name, skipping `clients`:
+      - `org.apache.kafka.clients.producer.KafkaProducer` -> `kafka_producer_KafkaProducer_t`
+      - `org.apache.kafka.clients.producer.MockProducer` -> `kafka_producer_MockProducer_t`
+    - Don't check for failing programming preconditions like NULLs on required parameters
+      or parameters not following the function parameters preconditions.
+
+
 3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
 4. **Comments and documentation**: Keep similar comments as the Java source,
 translate javadoc to rustdoc. Never change the contract of public API.
@@ -28,9 +49,10 @@ translate javadoc to rustdoc. Never change the contract of public API.
     Copyright holder for Apache licensed code is Confluent Inc.
 8. **Non-blocking IO**: Use non-blocking IO (Tokio) with a single Selector for multiple TCP connections, as with Java Selector class.
 9. **Concurrency**: 
-    1. Translate callbacks you find in Java client to code that is executed 
+    1. If a method is blocking in Java it should async in Rust
+    2. Translate callbacks you find in Java client to code that is executed 
        after awaiting the corresponding call in Rust.
-    2. In case the original method isn't blocking to await the callback response (for example awaiting a CompletableFuture), use Tokio `task::spawn` to create a coroutine that is detached from current flow.
+    3. In case the original method isn't blocking to await the callback response (for example awaiting a CompletableFuture), use Tokio `task::spawn` to create a coroutine that is detached from current flow.
 10. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.
@@ -64,3 +86,10 @@ Java source in `kafka/` directory (Apache Kafka 4.2)
 
 ## Definition of Done
 Follow the DoD described in [definition-of-done.md](.claude/rules/definition-of-done.md).
+
+## Compact Instructions
+Auto compact when reaching 60% of the maximum context and continue the running task
+
+## Permissions
+Read from `.claude/settings.local.json` the auto approved commands and always use those
+unless it's not possible.

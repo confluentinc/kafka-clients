@@ -25,7 +25,7 @@ use crate::api_versions_response_data::{
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
 
 /// Unknown finalized features epoch sentinel.
-pub const UNKNOWN_FINALIZED_FEATURES_EPOCH: i64 = -1;
+pub const API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH: i64 = -1;
 
 /// Possible error codes:
 /// - [`Errors::UnsupportedVersion`]
@@ -261,7 +261,7 @@ impl ApiVersionsResponse {
             ))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build()
     }
 }
@@ -514,7 +514,7 @@ mod tests {
         assert!(default_response.data().supported_features.is_empty());
         assert!(default_response.data().finalized_features.is_empty());
         assert_eq!(
-            UNKNOWN_FINALIZED_FEATURES_EPOCH,
+            API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH,
             default_response.data().finalized_features_epoch
         );
     }
@@ -565,7 +565,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
 
         let broker_apis: HashSet<ApiKeys> =
@@ -577,7 +577,10 @@ mod tests {
         );
         assert!(response.data().supported_features.is_empty());
         assert!(response.data().finalized_features.is_empty());
-        assert_eq!(UNKNOWN_FINALIZED_FEATURES_EPOCH, response.data().finalized_features_epoch);
+        assert_eq!(
+            API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH,
+            response.data().finalized_features_epoch
+        );
     }
 
     /// Translated from `ApiVersionsResponseTest.shouldCreateApiResponseWithTelemetryWhenEnabled`.
@@ -588,7 +591,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
         verify_api_keys_for_telemetry(&response, 2);
     }
@@ -601,7 +604,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, false))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
         verify_api_keys_for_telemetry(&response, 0);
     }
@@ -614,7 +617,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(Vec::new())
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .build();
 
         let exposed = api_keys_in_response(&response);
@@ -705,7 +708,7 @@ mod tests {
             .set_api_versions(ApiVersionsResponse::filter_apis(ListenerType::Broker, true, true))
             .set_supported_features(vec![feature])
             .set_finalized_features(HashMap::new())
-            .set_finalized_features_epoch(UNKNOWN_FINALIZED_FEATURES_EPOCH)
+            .set_finalized_features_epoch(API_VERSIONS_RESPONSE_UNKNOWN_FINALIZED_FEATURES_EPOCH)
             .set_alter_feature_level0(alter_v0_features)
             .build();
 

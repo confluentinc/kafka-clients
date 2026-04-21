@@ -119,7 +119,7 @@ impl std::fmt::Display for SaslAuthenticateResponse {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::requests::abstract_response::ConcreteResponse;
+    use crate::common::requests::ConcreteResponse;
 
     #[test]
     fn test_error() {

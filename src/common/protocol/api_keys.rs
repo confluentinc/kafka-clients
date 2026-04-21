@@ -14,9 +14,7 @@
 
 //! Identifiers for all the Kafka APIs.
 
-#[cfg(not(feature = "skip-generated"))]
 use crate::api_message_type::{ApiMessageType, ListenerType};
-#[cfg(not(feature = "skip-generated"))]
 use crate::api_versions_response_data::ApiVersion;
 
 /// Identifiers for all the Kafka APIs.
@@ -25,7 +23,6 @@ use crate::api_versions_response_data::ApiVersion;
 /// version ranges, header version logic, and listener information.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ApiKeys {
-    #[cfg(not(feature = "skip-generated"))]
     message_type: ApiMessageType,
     cluster_action: bool,
     forwardable: bool,
@@ -34,10 +31,8 @@ pub struct ApiKeys {
 // Versions 0-2 were removed in Apache Kafka 4.0, version 3 is the new baseline.
 // Due to a bug in librdkafka, version `0` has to be included in the api versions response
 // (see KAFKA-18659).
-#[cfg(not(feature = "skip-generated"))]
 pub const PRODUCE_API_VERSIONS_RESPONSE_MIN_VERSION: i16 = 0;
 
-#[cfg(not(feature = "skip-generated"))]
 impl ApiKeys {
     const fn new(message_type: ApiMessageType) -> Self {
         Self { message_type, cluster_action: false, forwardable: false }
@@ -422,7 +417,6 @@ impl ApiKeys {
 }
 
 #[cfg(test)]
-#[cfg(not(feature = "skip-generated"))]
 mod tests {
     use super::*;
 

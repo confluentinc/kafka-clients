@@ -20,13 +20,13 @@
 
 use std::net::SocketAddr;
 
-use confluent_kafka_rust::common::network::NetworkSend;
-use confluent_kafka_rust::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
-use confluent_kafka_rust::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
-use confluent_kafka_rust::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
-use confluent_kafka_rust::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use confluent_kafka_rust::common::requests::abstract_response::ConcreteResponse;
-use confluent_kafka_rust::common::requests::{
+use confluent_kafka::common::network::NetworkSend;
+use confluent_kafka::common::network::PlaintextChannelBuilder;
+use confluent_kafka::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+use confluent_kafka::common::network::selector::{NO_IDLE_TIMEOUT_MS, Selector};
+use confluent_kafka::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
+use confluent_kafka::common::requests::ConcreteResponse;
+use confluent_kafka::common::requests::{
     ApiVersionsRequestBuilder, MetadataRequestBuilder, MetadataResponse, RequestBuilder, RequestHeader,
 };
 

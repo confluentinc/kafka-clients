@@ -12,6 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
+#![allow(dead_code)]
 //! SSL/TLS configuration for Kafka connections.
 //!
 //! Translated from `org.apache.kafka.common.config.SslConfigs`.

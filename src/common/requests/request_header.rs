@@ -19,12 +19,12 @@
 use std::fmt;
 use std::io;
 
-use crate::common::protocol::message::Message;
-use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+use crate::common::protocol::Message;
+use crate::common::protocol::ObjectSerializationCache;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::request_header_data::RequestHeaderData;
 
-use super::response_header::ResponseHeader;
+use super::ResponseHeader;
 
 /// Sentinel value indicating that the cached size has not been computed yet.
 const SIZE_NOT_INITIALIZED: i32 = -1;
@@ -246,7 +246,7 @@ impl fmt::Display for RequestHeader {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::writable::Writable;
+    use crate::common::protocol::Writable;
 
     /// Helper: serializes a RequestHeader into a ByteBufferAccessor for parsing tests.
     /// Equivalent to Java's `RequestTestUtils.serializeRequestHeader`.
