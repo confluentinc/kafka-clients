@@ -89,6 +89,8 @@ pub struct SslTransportLayer {
     interest_ops: InterestOps,
     /// Cached peer address from the underlying TCP stream.
     peer_addr: Option<SocketAddr>,
+    /// Reusable buffer for coalescing IoSlice data before TLS encryption.
+    write_buf: Vec<u8>,
 }
 
 impl SslTransportLayer {
@@ -108,6 +110,7 @@ impl SslTransportLayer {
             connected: true,
             interest_ops: InterestOps::OP_READ,
             peer_addr,
+            write_buf: Vec::new(),
         }
     }
 }
@@ -332,20 +335,86 @@ impl TransportLayer for SslTransportLayer {
         })
     }
 
-    /// Writes data from multiple buffers to the TLS stream (scatter-gather write).
+    /// Writes data from multiple buffers to the TLS stream.
+    ///
+    /// Coalesces `IoSlice` buffers into a single contiguous write so that
+    /// rustls produces efficient TLS records instead of one per buffer.
+    /// Limits coalescing to `MAX_TLS_COALESCE` bytes to avoid copying
+    /// megabytes of data when the TCP window only accepts a fraction per
+    /// round trip (important for real-network latency).
     fn write_vectored<'a>(
         &'a mut self,
         srcs: &'a [io::IoSlice<'a>],
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
         Box::pin(async move {
             match &mut self.state {
-                SslState::Ready(tls_stream) => tls_stream.write_vectored(srcs).await,
+                SslState::Ready(tls_stream) => {
+                    if srcs.len() <= 1 {
+                        if srcs.is_empty() {
+                            return Ok(0);
+                        }
+                        return tls_stream.write(&srcs[0]).await;
+                    }
+                    let total: usize = srcs.iter().map(|s| s.len()).sum();
+                    let coalesce_limit = total.min(Self::MAX_TLS_COALESCE);
+                    self.write_buf.clear();
+                    self.write_buf.reserve(coalesce_limit);
+                    let mut budget = coalesce_limit;
+                    for src in srcs {
+                        if budget == 0 {
+                            break;
+                        }
+                        let n = src.len().min(budget);
+                        self.write_buf.extend_from_slice(&src[..n]);
+                        budget -= n;
+                    }
+                    tls_stream.write(&self.write_buf).await
+                },
                 SslState::Handshaking { .. } => {
                     Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"))
                 },
                 SslState::Closed => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
             }
         })
+    }
+
+    fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let total: usize = srcs.iter().map(|s| s.len()).sum();
+        if total == 0 {
+            if let SslState::Ready(tls_stream) = &mut self.state {
+                let (tcp, conn) = tls_stream.get_mut();
+                Self::flush_tls(tcp, conn);
+            }
+            return Ok(0);
+        }
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+}
+
+impl SslTransportLayer {
+    const MAX_TLS_COALESCE: usize = 256 * 1024;
+
+    fn flush_tls(tcp: &TcpStream, conn: &mut rustls::ClientConnection) {
+        while conn.wants_write() {
+            match conn.write_tls(&mut TryWriteAdapter(tcp)) {
+                Ok(0) => break,
+                Ok(_) => continue,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
+                Err(_) => break,
+            }
+        }
+    }
+}
+
+struct TryWriteAdapter<'a>(&'a TcpStream);
+
+impl io::Write for TryWriteAdapter<'_> {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0.try_write(buf)
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
     }
 }
 
@@ -489,5 +558,38 @@ mod tests {
         // Before handshake (Handshaking state), has_bytes_buffered() returns false.
         assert!(!transport.has_bytes_buffered());
         assert!(!transport.has_pending_writes());
+    }
+
+    #[tokio::test]
+    async fn test_try_write_vectored_before_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let factory = create_test_factory();
+        let connector = factory.create_tls_connector();
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+
+        let mut transport = SslTransportLayer::new(stream, connector, domain);
+        let data = b"hello";
+        let slices = [io::IoSlice::new(data)];
+        let result = transport.try_write_vectored(&slices);
+        assert!(result.is_err());
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::WouldBlock);
+    }
+
+    #[tokio::test]
+    async fn test_try_write_vectored_empty_before_handshake() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+
+        let stream = TcpStream::connect(addr).await.unwrap();
+        let factory = create_test_factory();
+        let connector = factory.create_tls_connector();
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+
+        let mut transport = SslTransportLayer::new(stream, connector, domain);
+        let result = transport.try_write_vectored(&[]);
+        assert_eq!(result.unwrap(), 0);
     }
 }
