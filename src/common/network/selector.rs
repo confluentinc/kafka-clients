@@ -325,20 +325,20 @@ impl Selector {
     /// was selected (i.e., has ready I/O) in `pollSelectionKeys`. This
     /// includes partial reads/writes where bytes were transferred but a
     /// full `NetworkReceive`/`NetworkSend` was not yet completed.
-    async fn poll_channel(
+    /// Read-phase of channel polling: connect, prepare, read.
+    ///
+    /// Handles everything except writes, which are done concurrently
+    /// in `poll_channels_write_concurrent`.
+    async fn poll_channel_reads(
         &mut self,
         channel_id: &str,
         is_immediately_connected: bool,
         current_time_nanos: u64,
-    ) -> bool {
-        let mut send_failed = false;
+    ) {
         let mut had_bytes_transferred = false;
-
-        // Track pre-poll state to detect if any I/O activity occurred
         let pre_connected = self.connected.len();
 
         let result: io::Result<()> = async {
-            // Complete any connections that have finished their handshake
             let channel = self.channels.get_mut(channel_id).unwrap();
             if is_immediately_connected || !channel.is_connected() {
                 if channel.finish_connect().await? {
@@ -349,7 +349,6 @@ impl Selector {
                 }
             }
 
-            // If channel is not ready, finish prepare
             let channel = self.channels.get_mut(channel_id).unwrap();
             if channel.is_connected() && !channel.ready() {
                 channel.prepare().await?;
@@ -360,54 +359,24 @@ impl Selector {
                 channel.set_state(channel_state::READY.clone());
             }
 
-            // Handle re-authentication responses
             let channel = self.channels.get_mut(channel_id).unwrap();
             if let Some(receive) = channel.poll_response_received_during_reauthentication() {
                 self.add_to_completed_receives(receive);
             }
 
-            // Read if ready and not muted and no completed receive yet
             if self.attempt_read(channel_id).await? {
                 had_bytes_transferred = true;
             }
 
-            // Track buffered read state
             let channel = self.channels.get(channel_id).unwrap();
             if channel.has_bytes_buffered() && !self.explicitly_muted_channels.contains(channel_id) {
                 self.channels_with_buffered_read.insert(channel_id.to_string());
-            }
-
-            // Write if ready and has send
-            let channel = self.channels.get_mut(channel_id).unwrap();
-            if channel.has_send() && channel.ready() {
-                let now_nanos = current_time_nanos;
-                let should_write = !channel.maybe_begin_client_reauthentication(|| now_nanos)?;
-                if should_write {
-                    match self.write_channel(channel_id).await {
-                        Ok(bytes_written) => {
-                            if bytes_written {
-                                had_bytes_transferred = true;
-                            }
-                        },
-                        Err(e) => {
-                            send_failed = true;
-                            return Err(e);
-                        },
-                    }
-                }
             }
 
             Ok(())
         }
         .await;
 
-        // Update idle expiry if actual I/O activity occurred on this channel.
-        // This matches Java's behavior where `idleExpiryManager.update` is
-        // called unconditionally for every channel with a ready NIO selection
-        // key in `pollSelectionKeys` (line 525-526). In Java, NIO naturally
-        // filters to only channels with ready I/O. In Rust, we poll all
-        // channels, so we track whether bytes were actually transferred
-        // (including partial reads/writes) or a connection was established.
         let had_activity = had_bytes_transferred || self.connected.len() > pre_connected;
         if had_activity && let Some(ref mut mgr) = self.idle_expiry_manager {
             mgr.update(channel_id, current_time_nanos);
@@ -421,20 +390,77 @@ impl Selector {
             };
 
             if e.kind() == io::ErrorKind::Other || e.kind() == io::ErrorKind::InvalidInput {
-                // Authentication error
                 kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, e);
             } else {
                 kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, e);
             }
 
-            let close_mode = if send_failed {
-                CloseMode::NotifyOnly
-            } else {
-                CloseMode::Graceful
-            };
-            self.close_channel_internal(channel_id, close_mode).await;
+            self.close_channel_internal(channel_id, CloseMode::Graceful).await;
         }
-        had_bytes_transferred
+    }
+
+    /// Write-phase: extract channels with pending sends and write concurrently.
+    ///
+    /// Channels are temporarily removed from the HashMap so each can be
+    /// borrowed independently by `join_all`. While one channel's TLS write
+    /// awaits TCP readiness, other channels' writes can proceed.
+    async fn poll_channels_write_concurrent(
+        &mut self,
+        channel_ids: &[String],
+        current_time_nanos: u64,
+    ) {
+        let mut extracted: Vec<(String, KafkaChannel)> = Vec::new();
+        for id in channel_ids {
+            if let Some(channel) = self.channels.get(id)
+                && channel.has_send()
+                && channel.ready()
+                && let Some(channel) = self.channels.remove(id)
+            {
+                extracted.push((id.clone(), channel));
+            }
+        }
+
+        if extracted.is_empty() {
+            return;
+        }
+
+        let results: Vec<ChannelWriteResult> = futures_util::future::join_all(
+            extracted
+                .iter_mut()
+                .map(|(_, channel)| do_channel_write(channel, current_time_nanos)),
+        )
+        .await;
+
+        for ((id, channel), result) in extracted.into_iter().zip(results) {
+            self.channels.insert(id.clone(), channel);
+
+            if (result.bytes_written > 0 || result.completed_send.is_some())
+                && let Some(ref mut mgr) = self.idle_expiry_manager
+            {
+                mgr.update(&id, current_time_nanos);
+            }
+
+            if let Some(send) = result.completed_send {
+                self.completed_sends.push(send);
+            }
+
+            if let Some((error, send_failed)) = result.error {
+                let desc = if let Some(ch) = self.channels.get(&id) {
+                    format!("{} (channelId={})", ch.socket_description(), ch.id())
+                } else {
+                    format!("unknown (channelId={id})")
+                };
+
+                if error.kind() == io::ErrorKind::Other || error.kind() == io::ErrorKind::InvalidInput {
+                    kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, error);
+                } else {
+                    kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, error);
+                }
+
+                let close_mode = if send_failed { CloseMode::NotifyOnly } else { CloseMode::Graceful };
+                self.close_channel_internal(&id, close_mode).await;
+            }
+        }
     }
 
     /// Attempt to read from a channel.
@@ -446,7 +472,6 @@ impl Selector {
     /// Uses a zero-duration timeout to make the read non-blocking from the
     /// selector's perspective, matching Java NIO's non-blocking channel reads.
     async fn attempt_read(&mut self, channel_id: &str) -> io::Result<bool> {
-        // Check conditions with immutable borrows first
         let should_read = {
             let channel = self.channels.get(channel_id).unwrap();
             channel.ready()
@@ -479,26 +504,6 @@ impl Selector {
             return Ok(bytes != 0);
         }
         Ok(false)
-    }
-
-    /// Write to a channel.
-    ///
-    /// Returns `true` if bytes were actually written to the channel (including
-    /// partial writes where a full `NetworkSend` has not yet completed).
-    async fn write_channel(&mut self, channel_id: &str) -> io::Result<bool> {
-        let channel = self.channels.get_mut(channel_id).unwrap();
-        let bytes_sent = match channel.write().await {
-            Ok(b) => b,
-            Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
-            Err(e) => return Err(e),
-        };
-        let send = channel.maybe_complete_send();
-        if (bytes_sent > 0 || send.is_some())
-            && let Some(send) = send
-        {
-            self.completed_sends.push(send);
-        }
-        Ok(bytes_sent > 0)
     }
 
     /// Begin closing a channel.
@@ -603,17 +608,25 @@ impl Selector {
         self.channels.values().next()
     }
     /// Collect readiness futures for channels interested in I/O.
+    ///
+    /// Channels mid-handshake (TLS or SASL) also register interest so that the
+    /// outer `select_all` wakes the poll loop when handshake bytes arrive or the
+    /// socket becomes writable for outgoing handshake data. Without this, at
+    /// low throughput the handshake response can sit unread in the TCP buffer
+    /// until the connection-setup timeout expires (matching Java NIO, which
+    /// registers OP_READ | OP_WRITE based on SSLEngine / SASL state).
     fn collect_readiness_futures(&self) -> Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> {
         let mut futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> = Vec::new();
         for (id, channel) in &self.channels {
+            let in_handshake = channel.is_connected() && !channel.ready();
             let want_read = channel.ready()
                 && (channel.has_bytes_buffered() || !channel.is_muted())
                 && !self.has_completed_receive(id)
                 && !self.explicitly_muted_channels.contains(id);
-            if want_read {
+            if want_read || in_handshake {
                 futs.push(channel.transport_readable());
             }
-            if channel.has_send() && channel.ready() {
+            if (channel.has_send() && channel.ready()) || in_handshake {
                 futs.push(channel.transport_writable());
             }
         }
@@ -780,29 +793,29 @@ impl Selectable for Selector {
         // progress or the timeout expires. This matches Java NIO's
         // nioSelector.select(timeout) which blocks until I/O or timeout.
         loop {
-            let mut had_partial_io = false;
-
-            // Process channels with buffered data
+            // Process channels with buffered data (reads only)
             if data_in_buffers {
                 let buffered_ids: Vec<String> = self.channels_with_buffered_read.drain().collect();
-                for id in buffered_ids {
-                    if self.channels.contains_key(&id) && self.poll_channel(&id, false, start_select).await {
-                        had_partial_io = true;
+                for id in &buffered_ids {
+                    if self.channels.contains_key(id) {
+                        self.poll_channel_reads(id, false, start_select).await;
                     }
                 }
+                self.poll_channels_write_concurrent(&buffered_ids, start_select).await;
             }
 
-            // Process all active channels with non-blocking I/O (try_read/try_write).
+            // Pass 1: Connect + Read all channels (sequential, fast)
             let channel_ids: Vec<String> = self.channels.keys().cloned().collect();
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(id);
-                    if self.poll_channel(id, is_immediately, start_select).await {
-                        had_partial_io = true;
-                    }
+                    self.poll_channel_reads(id, is_immediately, start_select).await;
                 }
             }
             self.immediately_connected_keys.clear();
+
+            // Pass 2: Write all channels concurrently
+            self.poll_channels_write_concurrent(&channel_ids, start_select).await;
 
             let made_progress = !self.completed_sends.is_empty()
                 || !self.completed_receives.is_empty()
@@ -811,14 +824,6 @@ impl Selectable for Selector {
 
             if made_progress {
                 break;
-            }
-
-            // Bytes were transferred but no send/receive completed yet.
-            // When we have a deadline (non-zero timeout), skip the full
-            // select!/readiness-future overhead and retry I/O directly.
-            if had_partial_io && deadline.is_some_and(|dl| tokio::time::Instant::now() < dl) {
-                tokio::task::yield_now().await;
-                continue;
             }
 
             // No progress — wait for I/O readiness on any channel, wakeup,
@@ -929,6 +934,38 @@ impl Selectable for Selector {
 
     fn is_channel_ready(&self, id: &str) -> bool {
         self.channels.get(id).is_some_and(|c| c.ready())
+    }
+}
+
+/// Result of a single channel write operation.
+struct ChannelWriteResult {
+    bytes_written: usize,
+    completed_send: Option<NetworkSend>,
+    error: Option<(io::Error, bool)>,
+}
+
+/// Standalone write I/O on a single extracted channel — no Selector state access.
+async fn do_channel_write(channel: &mut KafkaChannel, current_time_nanos: u64) -> ChannelWriteResult {
+    if !channel.has_send() || !channel.ready() {
+        return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
+    }
+
+    let should_write = match channel.maybe_begin_client_reauthentication(|| current_time_nanos) {
+        Ok(reauth) => !reauth,
+        Err(e) => {
+            return ChannelWriteResult { bytes_written: 0, completed_send: None, error: Some((e, false)) };
+        },
+    };
+    if !should_write {
+        return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
+    }
+
+    match channel.write_concurrent().await {
+        Ok(bytes) => {
+            let send = channel.maybe_complete_send();
+            ChannelWriteResult { bytes_written: bytes, completed_send: send, error: None }
+        },
+        Err(e) => ChannelWriteResult { bytes_written: 0, completed_send: None, error: Some((e, true)) },
     }
 }
 
