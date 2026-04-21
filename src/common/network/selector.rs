@@ -480,12 +480,25 @@ impl Selector {
 
         if should_read {
             let channel = self.channels.get_mut(channel_id).unwrap();
-            let read_result = tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await;
+            // Fix A (read-path bottleneck): use the synchronous `try_read` path
+            // when the transport supports it. The previous
+            // `tokio::time::timeout(Duration::ZERO, channel.read()).await`
+            // wrapper paid ~546us per call to register/deregister a Sleep on
+            // the timer driver, capping single-Sender throughput at ~12K msg/s.
+            // SSL transports keep the async fallback because rustls's I/O state
+            // machine is driven through the async TLS stream.
+            let read_result = if channel.supports_try_read() {
+                channel.try_read()
+            } else {
+                match tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await {
+                    Ok(r) => r,
+                    Err(_elapsed) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                }
+            };
             let bytes = match read_result {
-                Ok(Ok(b)) => b,
-                Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
-                Ok(Err(e)) => return Err(e),
-                Err(_elapsed) => 0,
+                Ok(b) => b,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(e) => return Err(e),
             };
             if bytes != 0 {
                 self.made_read_progress_last_poll = true;
@@ -862,7 +875,17 @@ impl Selectable for Selector {
                         }
                     }
                 },
-                _ => break,
+                _ => {
+                    // Fix A companion: with the read path now fully sync
+                    // (no `timeout(ZERO, …).await`), a `poll(0)` sweep can
+                    // contain no `.await` points at all. Callers that
+                    // busy-loop `poll(0)` would then starve the Tokio I/O
+                    // reactor — OS readiness never reaches the channel and
+                    // idle expiry trips with a spurious disconnect. Yield
+                    // once before breaking so the reactor gets a tick.
+                    tokio::task::yield_now().await;
+                    break;
+                },
             }
         }
 
