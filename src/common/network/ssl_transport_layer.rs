@@ -306,8 +306,9 @@ impl TransportLayer for SslTransportLayer {
             match current {
                 SslState::Ready(mut c) => {
                     // Send close_notify and flush whatever ciphertext rustls produces.
+                    // Best-effort: ignore flush errors since the socket is being torn down.
                     c.conn.send_close_notify();
-                    Self::flush_tls(&c.tcp, &mut c.conn);
+                    let _ = Self::flush_tls(&c.tcp, &mut c.conn);
                     let _ = c.tcp.shutdown().await;
                 },
                 SslState::Handshaking(mut c) => {
@@ -423,7 +424,7 @@ impl TransportLayer for SslTransportLayer {
                 SslState::Ready(c) => {
                     let to_write = src.len().min(MAX_TLS_COALESCE);
                     let accepted = c.conn.writer().write(&src[..to_write])?;
-                    Self::flush_tls(&c.tcp, &mut c.conn);
+                    Self::flush_tls(&c.tcp, &mut c.conn)?;
                     Ok(accepted)
                 },
                 SslState::Handshaking(_) => {
@@ -446,14 +447,14 @@ impl TransportLayer for SslTransportLayer {
             match &mut self.state {
                 SslState::Ready(c) => {
                     if srcs.is_empty() {
-                        Self::flush_tls(&c.tcp, &mut c.conn);
+                        Self::flush_tls(&c.tcp, &mut c.conn)?;
                         return Ok(0);
                     }
                     if srcs.len() == 1 {
                         let buf = &srcs[0];
                         let to_write = buf.len().min(MAX_TLS_COALESCE);
                         let accepted = c.conn.writer().write(&buf[..to_write])?;
-                        Self::flush_tls(&c.tcp, &mut c.conn);
+                        Self::flush_tls(&c.tcp, &mut c.conn)?;
                         return Ok(accepted);
                     }
                     let total: usize = srcs.iter().map(|s| s.len()).sum();
@@ -470,7 +471,7 @@ impl TransportLayer for SslTransportLayer {
                         budget -= n;
                     }
                     let accepted = c.conn.writer().write(&self.write_buf)?;
-                    Self::flush_tls(&c.tcp, &mut c.conn);
+                    Self::flush_tls(&c.tcp, &mut c.conn)?;
                     Ok(accepted)
                 },
                 SslState::Handshaking(_) => {
@@ -488,14 +489,14 @@ impl TransportLayer for SslTransportLayer {
         match &mut self.state {
             SslState::Ready(c) => {
                 if srcs.is_empty() {
-                    Self::flush_tls(&c.tcp, &mut c.conn);
+                    Self::flush_tls(&c.tcp, &mut c.conn)?;
                     return Ok(0);
                 }
                 if srcs.len() == 1 {
                     let buf = &srcs[0];
                     let to_write = buf.len().min(MAX_TLS_COALESCE);
                     let accepted = c.conn.writer().write(&buf[..to_write])?;
-                    Self::flush_tls(&c.tcp, &mut c.conn);
+                    Self::flush_tls(&c.tcp, &mut c.conn)?;
                     return Ok(accepted);
                 }
                 let total: usize = srcs.iter().map(|s| s.len()).sum();
@@ -512,7 +513,7 @@ impl TransportLayer for SslTransportLayer {
                     budget -= n;
                 }
                 let accepted = c.conn.writer().write(&self.write_buf)?;
-                Self::flush_tls(&c.tcp, &mut c.conn);
+                Self::flush_tls(&c.tcp, &mut c.conn)?;
                 Ok(accepted)
             },
             SslState::Handshaking(_) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
@@ -524,20 +525,27 @@ impl TransportLayer for SslTransportLayer {
 impl SslTransportLayer {
     /// Pushes pending ciphertext from rustls's output buffer to the TCP socket
     /// without ever awaiting. Stops at the first `WouldBlock` (kernel buffer
-    /// full) or when rustls has nothing more to send. Other errors are
-    /// swallowed because this is only ever called from non-fallible paths
-    /// (write fast-path / close); the next caller of `write_tls` will re-raise
-    /// any persistent failure.
-    fn flush_tls(tcp: &TcpStream, conn: &mut rustls::ClientConnection) {
+    /// full) or when rustls has nothing more to send.
+    ///
+    /// Returns:
+    /// - `Ok(())` on success or `WouldBlock` (the latter means "leave the
+    ///   remainder buffered; the selector will retry when the socket is
+    ///   writable again").
+    /// - `Err(e)` for any other I/O error (e.g. `BrokenPipe`,
+    ///   `ConnectionReset`, `ConnectionAborted`). Data-path callers must
+    ///   propagate this so the channel can be closed by the selector.
+    ///   `close()` may swallow it via `let _ = ...` (best-effort shutdown).
+    fn flush_tls(tcp: &TcpStream, conn: &mut rustls::ClientConnection) -> io::Result<()> {
         while conn.wants_write() {
             let mut adapter = TryWriteAdapter(tcp);
             match conn.write_tls(&mut adapter) {
                 Ok(0) => break,
                 Ok(_) => continue,
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                Err(_) => break,
+                Err(e) => return Err(e),
             }
         }
+        Ok(())
     }
 }
 
