@@ -237,7 +237,14 @@ impl TransportLayer for SslTransportLayer {
                 match boxed.conn.read_tls(&mut adapter) {
                     Ok(0) => {
                         // EOF mid-handshake — peer closed the TCP connection.
-                        if boxed.conn.is_handshaking() {
+                        // Mirror the loop top exit condition: we're only "done" if
+                        // both is_handshaking() is false AND there is nothing left
+                        // in rustls's output buffer to flush. In TLS 1.3, the
+                        // server's Finished can be processed and is_handshaking()
+                        // can clear before the client's Finished has actually been
+                        // delivered to the peer; treating that EOF window as a
+                        // success would silently corrupt the handshake.
+                        if boxed.conn.is_handshaking() || boxed.conn.wants_write() {
                             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TLS handshake EOF"));
                         }
                         self.state = SslState::Ready(boxed);
