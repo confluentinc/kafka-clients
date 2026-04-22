@@ -319,6 +319,13 @@ impl TransportLayer for SslTransportLayer {
                     let _ = c.tcp.shutdown().await;
                 },
                 SslState::Handshaking(mut c) => {
+                    // Java's SslTransportLayer.close() runs close-notify whenever
+                    // prevState != NOT_INITIALIZED, which includes any handshaking
+                    // state. rustls's send_close_notify() is allowed mid-handshake;
+                    // best-effort flush so the peer sees a TLS-level close instead
+                    // of just a TCP FIN.
+                    c.conn.send_close_notify();
+                    let _ = Self::flush_tls(&c.tcp, &mut c.conn);
                     let _ = c.tcp.shutdown().await;
                 },
                 SslState::Closed => {},
