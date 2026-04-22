@@ -482,9 +482,8 @@ impl KafkaChannel {
         let send = self.send.as_mut().unwrap();
         match send.try_write_to(transport) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Transport doesn't support sync writes (SSL) or socket
-                // buffer is full. Fall back to async with zero timeout to
-                // avoid blocking.
+                // Socket buffer is full. Fall back to async with zero timeout
+                // to avoid blocking.
                 match tokio::time::timeout(std::time::Duration::ZERO, send.write_to(transport)).await {
                     Ok(Ok(n)) => Ok(n),
                     Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
@@ -512,13 +511,13 @@ impl KafkaChannel {
         let send = self.send.as_mut().unwrap();
         match send.try_write_to(transport) {
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                // Bound the await so the caller (and the read pass on the
-                // next poll iteration) can make progress. With a single
-                // channel, an unbounded await deadlocks the test echo server
-                // because the client never re-enters its read pass to drain
-                // the response data, which back-pressures the server's reads.
-                // For SSL with multiple channels, a small budget still
-                // permits useful overlap of one channel's TCP wait with
+                // Socket buffer is full. Bound the await so the caller (and
+                // the read pass on the next poll iteration) can make progress.
+                // With a single channel, an unbounded await deadlocks the
+                // test echo server because the client never re-enters its
+                // read pass to drain the response data, which back-pressures
+                // the server's reads. With multiple channels, a small budget
+                // still permits useful overlap of one channel's TCP wait with
                 // another channel's encrypt+write.
                 match tokio::time::timeout(std::time::Duration::from_millis(1), send.write_to(transport)).await {
                     Ok(Ok(n)) => Ok(n),
