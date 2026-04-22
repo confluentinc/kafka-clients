@@ -329,12 +329,7 @@ impl Selector {
     ///
     /// Handles everything except writes, which are done concurrently
     /// in `poll_channels_write_concurrent`.
-    async fn poll_channel_reads(
-        &mut self,
-        channel_id: &str,
-        is_immediately_connected: bool,
-        current_time_nanos: u64,
-    ) {
+    async fn poll_channel_reads(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: u64) {
         let mut had_bytes_transferred = false;
         let pre_connected = self.connected.len();
 
@@ -404,11 +399,7 @@ impl Selector {
     /// Channels are temporarily removed from the HashMap so each can be
     /// borrowed independently by `join_all`. While one channel's TLS write
     /// awaits TCP readiness, other channels' writes can proceed.
-    async fn poll_channels_write_concurrent(
-        &mut self,
-        channel_ids: &[String],
-        current_time_nanos: u64,
-    ) {
+    async fn poll_channels_write_concurrent(&mut self, channel_ids: &[String], current_time_nanos: u64) {
         let mut extracted: Vec<(String, KafkaChannel)> = Vec::new();
         for id in channel_ids {
             if let Some(channel) = self.channels.get(id)
@@ -457,7 +448,11 @@ impl Selector {
                     kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, error);
                 }
 
-                let close_mode = if send_failed { CloseMode::NotifyOnly } else { CloseMode::Graceful };
+                let close_mode = if send_failed {
+                    CloseMode::NotifyOnly
+                } else {
+                    CloseMode::Graceful
+                };
                 self.close_channel_internal(&id, close_mode).await;
             }
         }

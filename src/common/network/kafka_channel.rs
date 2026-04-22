@@ -520,12 +520,7 @@ impl KafkaChannel {
                 // For SSL with multiple channels, a small budget still
                 // permits useful overlap of one channel's TCP wait with
                 // another channel's encrypt+write.
-                match tokio::time::timeout(
-                    std::time::Duration::from_millis(1),
-                    send.write_to(transport),
-                )
-                .await
-                {
+                match tokio::time::timeout(std::time::Duration::from_millis(1), send.write_to(transport)).await {
                     Ok(Ok(n)) => Ok(n),
                     Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
                     Ok(Err(e)) => Err(e),
