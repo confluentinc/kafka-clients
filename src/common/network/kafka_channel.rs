@@ -392,6 +392,14 @@ impl KafkaChannel {
         self.send.is_some()
     }
 
+    /// Returns `true` if the transport layer has buffered ciphertext or other
+    /// pending bytes that need to be flushed to the socket. Used by the
+    /// selector to decide whether to register write-interest for a handshaking
+    /// channel.
+    pub(crate) fn has_pending_writes(&self) -> bool {
+        self.transport_layer.has_pending_writes()
+    }
+
     /// Sets the send for this channel.
     ///
     /// # Errors

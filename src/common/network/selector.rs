@@ -621,7 +621,20 @@ impl Selector {
             if want_read || in_handshake {
                 futs.push(channel.transport_readable());
             }
-            if (channel.has_send() && channel.ready()) || in_handshake {
+            // Register write-interest only when there is actual outgoing data
+            // to push to the socket. For ready channels that means a queued
+            // send; for handshaking channels (TLS or SASL) it means the
+            // transport has buffered ciphertext that has not been fully
+            // flushed (e.g. rustls's `wants_write()`).
+            //
+            // Blanket-registering write-interest for all handshaking channels
+            // makes the writable future fire immediately whenever the TCP
+            // socket buffer is non-full, which is almost always — the
+            // outer `select_all` would then return without ever giving the
+            // kernel a chance to deliver readable bytes, busy-spinning the
+            // poll loop while a SASL response sits in the kernel buffer.
+            let want_write = (channel.has_send() && channel.ready()) || (in_handshake && channel.has_pending_writes());
+            if want_write {
                 futs.push(channel.transport_writable());
             }
         }
