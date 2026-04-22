@@ -37,6 +37,7 @@ use crate::common::security::SslFactory;
 use crate::common::utils::LogContext;
 
 use std::io;
+use std::sync::Arc;
 
 use tokio::net::TcpStream;
 
@@ -154,9 +155,10 @@ impl ChannelBuilder for SaslChannelBuilder {
         let transport_layer: Box<dyn crate::common::network::TransportLayer> =
             if self.security_protocol == SecurityProtocol::SaslSsl {
                 let ssl_factory = self.ssl_factory.as_ref().unwrap();
-                let connector = ssl_factory.create_tls_connector();
                 let domain = SslFactory::create_server_name(peer_host)?;
-                Box::new(SslTransportLayer::new(stream, connector, domain))
+                let conn = rustls::ClientConnection::new(Arc::clone(ssl_factory.client_config()), domain.clone())
+                    .map_err(|e| io::Error::other(format!("Failed to construct TLS client connection: {e}")))?;
+                Box::new(SslTransportLayer::new(stream, conn, domain))
             } else {
                 Box::new(PlaintextTransportLayer::new(stream))
             };
