@@ -22,7 +22,6 @@ generator = { path = "generator" }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
 tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
-tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["logging", "std", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
@@ -41,6 +40,7 @@ futures-util = "0.3"
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
+tokio-rustls = "0.26"
 
 [[test]]
 name = "common"
