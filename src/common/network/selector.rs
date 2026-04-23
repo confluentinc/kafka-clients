@@ -345,13 +345,16 @@ impl Selector {
             }
 
             let channel = self.channels.get_mut(channel_id).unwrap();
+            let was_ready = channel.ready();
             if channel.is_connected() && !channel.ready() {
                 channel.prepare().await?;
             }
 
             let channel = self.channels.get_mut(channel_id).unwrap();
-            if channel.ready() && channel.state() == &channel_state::NOT_CONNECTED {
-                channel.set_state(channel_state::READY.clone());
+            // Signal the post-handshake (TLS/SASL) ready transition so poll() exits and
+            // handle_initiate_api_version_requests fires without waiting for an external event.
+            if !was_ready && channel.ready() {
+                self.connected.push(channel_id.to_string());
             }
 
             let channel = self.channels.get_mut(channel_id).unwrap();
