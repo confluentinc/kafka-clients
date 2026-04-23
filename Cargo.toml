@@ -41,6 +41,7 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
+env_logger = "0.11"
 
 [[test]]
 name = "common"
