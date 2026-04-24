@@ -295,19 +295,23 @@ class ProducerServiceImpl final : public ProducerService::Service {
 
   // Best-effort variant inference from a C error message. The C FFI
   // doesn't carry a structured variant tag (it's all KafkaError on the
-  // C side), so we fall back to substring matching for the variants the
-  // integration tests assert on.
+  // C side), so we fall back to substring matching for the variants
+  // the integration tests assert on. Keep the patterns in sync with
+  // the Python server's _guess_variant().
   static int guess_variant_from_message(kafka_common_KafkaError_t* err) {
     if (err == nullptr) return VARIANT_GENERIC;
     const char* msg = kafka_common_KafkaError_message(err);
     if (msg == nullptr) return VARIANT_GENERIC;
     const std::string s(msg);
-    if (s.find("too large") != std::string::npos ||
+    if (s.find("max.request.size") != std::string::npos ||
+        s.find("is larger than") != std::string::npos ||
+        s.find("too large") != std::string::npos ||
         s.find("TooLarge") != std::string::npos) {
       return VARIANT_RECORD_TOO_LARGE;
     }
     if (s.find("timed out") != std::string::npos ||
-        s.find("Timeout") != std::string::npos) {
+        s.find("Timeout") != std::string::npos ||
+        s.find("expired") != std::string::npos) {
       return VARIANT_TIMEOUT;
     }
     return VARIANT_GENERIC;

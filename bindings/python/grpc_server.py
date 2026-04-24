@@ -65,20 +65,46 @@ RECORD_TOO_LARGE = 8
 SERIALIZATION = 9
 
 
+def _guess_variant(message):
+    """Infer the proto KafkaError.Variant from a KafkaError message.
+
+    The C FFI doesn't surface the Rust-side enum discriminator — only
+    the integer code, the message string, and the retriable/fatal
+    flags. Map the messages we know about to specific variants so the
+    Rust client's `matches!(err, KafkaError::Foo(_))` assertions hold.
+    """
+    if not message:
+        return GENERIC
+    lowered = message.lower()
+    if "max.request.size" in lowered or "is larger than" in lowered or "too large" in lowered:
+        return RECORD_TOO_LARGE
+    if "buffer is full" in lowered or "buffer.memory" in lowered:
+        return BUFFER_EXHAUSTED
+    if "timed out" in lowered or "expired" in lowered:
+        return TIMEOUT
+    if "topic authorization" in lowered:
+        return TOPIC_AUTHORIZATION
+    if "invalid topic" in lowered:
+        return INVALID_TOPIC
+    if "group authorization" in lowered:
+        return GROUP_AUTHORIZATION
+    if "illegal state" in lowered or "already been closed" in lowered:
+        return ILLEGAL_STATE
+    if "serialization" in lowered or "failed to serialize" in lowered:
+        return SERIALIZATION
+    return GENERIC
+
+
 def _kafka_error_to_proto(err):
     """Translate a producer.py KafkaError (or generic Exception) into a
-    proto KafkaError. KafkaError exposes code, message, is_retriable,
-    is_fatal. We map the message to a variant heuristically; the Rust
-    client cares mostly about variant + message."""
+    proto KafkaError. The C FFI doesn't expose the structured variant
+    discriminator (it's all KafkaError on the C side), so we infer the
+    variant heuristically from the message — it has to round-trip
+    through the wire because the Rust client matches on variant."""
     if isinstance(err, kp.KafkaError):
         message = err.message or ""
-        # Best-effort variant inference from the message prefix. The C FFI
-        # surfaces RecordTooLarge / Timeout / IllegalState directly via
-        # the KafkaError code field; for now we surface everything as
-        # GENERIC and let the client read the message. The code field
-        # carries the Rust Errors enum value.
         return pb.KafkaError(
-            variant=GENERIC,
+            variant=_guess_variant(message),
             code=err.code,
             message=message,
             is_retriable=err.is_retriable,
