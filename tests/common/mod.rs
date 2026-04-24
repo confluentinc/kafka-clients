@@ -60,4 +60,7 @@ pub mod test_context;
 pub mod backend_factory;
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
+pub mod backend_pool;
+#[cfg(feature = "multilanguage-tests")]
+#[allow(dead_code)]
 pub mod multilanguage_producer;
