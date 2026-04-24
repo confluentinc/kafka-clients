@@ -34,7 +34,7 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex, Once};
 use std::time::Duration;
 
-use testcontainers::core::{ContainerPort, Host, IntoContainerPort, WaitFor};
+use testcontainers::core::{ContainerPort, IntoContainerPort, WaitFor};
 use testcontainers::{ContainerAsync, GenericImage, ImageExt, runners::AsyncRunner};
 use tokio::sync::OnceCell;
 use tonic::transport::{Channel, Endpoint};
@@ -115,9 +115,14 @@ static CLEANUP_REGISTERED: Once = Once::new();
 /// Get or start the requested backend, returning a shared handle.
 ///
 /// First caller for a given `kind` triggers a `docker run`; subsequent
-/// callers share the same `BackendHandle`. The container is removed at
-/// process exit by the atexit hook below.
-pub async fn get_or_start(kind: BackendKind) -> Arc<BackendHandle> {
+/// callers share the same `BackendHandle`. The container is attached
+/// to `broker_network` so it can reach the Kafka broker via the
+/// CONTAINER listener (`<broker_container_name>:9099`). The container
+/// is removed at process exit by the atexit hook below.
+///
+/// Caller (the `multilanguage_test!` macro) must ensure the broker
+/// network exists — typically by creating the `TestContext` first.
+pub async fn get_or_start(kind: BackendKind, broker_network: &str) -> Arc<BackendHandle> {
     register_cleanup_hook();
 
     let cell = {
@@ -125,26 +130,31 @@ pub async fn get_or_start(kind: BackendKind) -> Arc<BackendHandle> {
         pool.entry(kind).or_insert_with(|| Arc::new(OnceCell::new())).clone()
     };
 
-    cell.get_or_init(|| async move { Arc::new(start_container(kind).await) })
+    let network = broker_network.to_string();
+    cell.get_or_init(|| async move { Arc::new(start_container(kind, network).await) })
         .await
         .clone()
 }
 
-async fn start_container(kind: BackendKind) -> BackendHandle {
+async fn start_container(kind: BackendKind, broker_network: String) -> BackendHandle {
     let internal_port: u16 = kind.internal_port();
     let internal: ContainerPort = internal_port.tcp();
 
     let image = GenericImage::new(kind.image_repository(), "dev")
         .with_exposed_port(internal)
         .with_wait_for(WaitFor::message_on_stderr("listening"))
-        .with_host("host.docker.internal", Host::HostGateway);
+        // Join the broker's user-defined bridge network so the gRPC
+        // server inside this container can reach the broker by its
+        // container hostname.
+        .with_network(broker_network.clone());
 
     let container = image.start().await.unwrap_or_else(|e| {
         panic!(
-            "failed to start {} gRPC backend container (image {}:dev): {e}\n\
+            "failed to start {} gRPC backend container (image {}:dev) on network {}: {e}\n\
              Build it with `make build-grpc-images`.",
             kind.label(),
             kind.image_repository(),
+            broker_network,
         )
     });
 

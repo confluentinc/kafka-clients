@@ -43,32 +43,49 @@ macro_rules! multilanguage_test {
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
+                let mut ctx = $crate::common::test_context::TestContext::new(
+                    $crate::common::cluster_config::ClusterConfig::default(),
+                )
+                .await;
                 let factory = $crate::common::backend_factory::RustNativeFactory;
-                $body(&factory).await;
+                $body(&mut ctx, &factory).await;
             }
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ python>]() {
+                // Create the TestContext first so the broker network
+                // exists before we attempt to attach the python
+                // container to it.
+                let mut ctx = $crate::common::test_context::TestContext::new(
+                    $crate::common::cluster_config::ClusterConfig::default(),
+                )
+                .await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::Python,
+                    ctx.broker_network_name(),
                 )
                 .await;
                 let factory =
                     $crate::common::backend_factory::PythonGrpcFactory::new(handle.channel().await);
-                $body(&factory).await;
+                $body(&mut ctx, &factory).await;
             }
 
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ c>]() {
+                let mut ctx = $crate::common::test_context::TestContext::new(
+                    $crate::common::cluster_config::ClusterConfig::default(),
+                )
+                .await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,
+                    ctx.broker_network_name(),
                 )
                 .await;
                 let factory =
                     $crate::common::backend_factory::CGrpcFactory::new(handle.channel().await);
-                $body(&factory).await;
+                $body(&mut ctx, &factory).await;
             }
         }
     };

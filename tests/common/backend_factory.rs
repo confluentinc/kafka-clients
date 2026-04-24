@@ -56,6 +56,16 @@ pub trait ProducerBackendFactory {
 
     /// Short backend label used in test names and log messages.
     fn name(&self) -> &'static str;
+
+    /// Whether this backend needs the container-internal bootstrap
+    /// addresses (true for the gRPC backends, since the broker's
+    /// host-loopback addresses aren't reachable from inside their
+    /// containers). Tests pick between
+    /// [`TestContext::bootstrap_servers`] and
+    /// [`TestContext::container_bootstrap_servers`] based on this.
+    fn needs_container_bootstrap(&self) -> bool {
+        false
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -107,11 +117,17 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
-            MultilanguageProducer::new(self.channel.clone(), rewrite_for_container(config), "python").await
+            // Caller is responsible for passing a container-reachable
+            // bootstrap — see TestContext::container_bootstrap_servers.
+            MultilanguageProducer::new(self.channel.clone(), config, "python").await
         }
 
         fn name(&self) -> &'static str {
             "python"
+        }
+
+        fn needs_container_bootstrap(&self) -> bool {
+            true
         }
     }
 
@@ -132,43 +148,16 @@ mod grpc_backends {
         type Producer = MultilanguageProducer;
 
         async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
-            MultilanguageProducer::new(self.channel.clone(), rewrite_for_container(config), "c").await
+            MultilanguageProducer::new(self.channel.clone(), config, "c").await
         }
 
         fn name(&self) -> &'static str {
             "c"
         }
-    }
 
-    /// Rewrite the `bootstrap.servers` entry so it's reachable from
-    /// inside the gRPC client container.
-    ///
-    /// The Rust test process holds host addresses like `127.0.0.1:32781`
-    /// (the random host port testcontainers mapped to the broker
-    /// container). Inside a sibling client container, `127.0.0.1` is the
-    /// container itself; the reachable name for the host is
-    /// `host.docker.internal`, exposed via the
-    /// `--add-host=host.docker.internal:host-gateway` flag attached by
-    /// the backend pool.
-    fn rewrite_for_container(mut config: HashMap<String, String>) -> HashMap<String, String> {
-        if let Some(bootstrap) = config.get("bootstrap.servers").cloned() {
-            let rewritten = bootstrap
-                .split(',')
-                .map(|hp| {
-                    let trimmed = hp.trim();
-                    if let Some(port) = trimmed.strip_prefix("127.0.0.1:") {
-                        format!("host.docker.internal:{port}")
-                    } else if let Some(port) = trimmed.strip_prefix("localhost:") {
-                        format!("host.docker.internal:{port}")
-                    } else {
-                        trimmed.to_string()
-                    }
-                })
-                .collect::<Vec<_>>()
-                .join(",");
-            config.insert("bootstrap.servers".to_string(), rewritten);
+        fn needs_container_bootstrap(&self) -> bool {
+            true
         }
-        config
     }
 }
 

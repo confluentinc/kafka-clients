@@ -18,13 +18,6 @@
 //! - `org.apache.kafka.clients.producer.ProducerCompressionTest`
 //! - `org.apache.kafka.clients.producer.ProducerFailureHandlingTest`
 //!
-//! These tests verify end-to-end produce functionality including:
-//! - Single and multiple record production
-//! - Key-based partitioning
-//! - Compression types
-//! - Error handling (invalid topic, record too large)
-//! - Flush and close semantics
-//!
 //! When the `multilanguage-tests` feature is enabled, each test is
 //! instantiated three times via [`multilanguage_test!`] — once per
 //! backend (rust / python / c). Test bodies are generic over
@@ -41,7 +34,6 @@ use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerRecord;
 
 use crate::common::backend_factory::ProducerBackendFactory;
-use crate::common::cluster_config::ClusterConfig;
 use crate::common::test_context::TestContext;
 
 // ---------------------------------------------------------------------------
@@ -62,6 +54,17 @@ fn make_config(bootstrap_servers: &str) -> HashMap<String, String> {
     ])
 }
 
+/// Pick the bootstrap address the factory's backend can actually reach.
+/// gRPC backends run in containers and need the broker's CONTAINER
+/// listener; native rust uses the host loopback.
+fn bootstrap_for<F: ProducerBackendFactory>(factory: &F, ctx: &TestContext) -> String {
+    if factory.needs_container_bootstrap() {
+        ctx.container_bootstrap_servers().to_string()
+    } else {
+        ctx.bootstrap_servers().to_string()
+    }
+}
+
 fn b(s: &str) -> Vec<u8> {
     s.as_bytes().to_vec()
 }
@@ -72,13 +75,10 @@ fn b(s: &str) -> Vec<u8> {
 
 /// Test: Create a producer, send a single record with key and value, verify
 /// the future completes successfully with valid RecordMetadata.
-///
-/// Translated from `ProducerCompressionTest` — basic produce path.
-async fn produce_single_record_inner<F: ProducerBackendFactory>(factory: &F) {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+async fn produce_single_record_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("single_record");
     let producer = factory
-        .create(make_config(ctx.bootstrap_servers()))
+        .create(make_config(&bootstrap_for(factory, ctx)))
         .await
         .expect("Failed to create producer");
 
@@ -103,14 +103,10 @@ async fn produce_single_record_inner<F: ProducerBackendFactory>(factory: &F) {
 
 /// Test: Send records with a specific key, verify they go to the same
 /// partition.
-///
-/// Key-based partitioning should be deterministic: all records with the
-/// same key must go to the same partition.
-async fn produce_with_key_inner<F: ProducerBackendFactory>(factory: &F) {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+async fn produce_with_key_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("with_key");
     let producer = factory
-        .create(make_config(ctx.bootstrap_servers()))
+        .create(make_config(&bootstrap_for(factory, ctx)))
         .await
         .expect("Failed to create producer");
 
@@ -140,11 +136,10 @@ async fn produce_with_key_inner<F: ProducerBackendFactory>(factory: &F) {
 
 /// Test: Send multiple records to the same partition, verify offsets are
 /// sequential.
-async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(factory: &F) {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("ordering");
     let producer = factory
-        .create(make_config(ctx.bootstrap_servers()))
+        .create(make_config(&bootstrap_for(factory, ctx)))
         .await
         .expect("Failed to create producer");
 
@@ -179,11 +174,8 @@ async fn produce_multiple_records_ordering_inner<F: ProducerBackendFactory>(fact
 }
 
 /// Test: Verify each compression type produces successfully.
-///
-/// Translated from `ProducerCompressionTest.testCompressedMessages`.
-async fn produce_with_compression_inner<F: ProducerBackendFactory>(factory: &F) {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
-    let bootstrap = ctx.bootstrap_servers().to_string();
+async fn produce_with_compression_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let bootstrap = bootstrap_for(factory, ctx);
 
     for name in ["none", "gzip", "snappy", "lz4", "zstd"] {
         let topic = ctx.topic(&format!("compress_{name}"));
@@ -213,10 +205,9 @@ async fn produce_with_compression_inner<F: ProducerBackendFactory>(factory: &F) 
 }
 
 /// Test: Try to produce to a topic with invalid characters, expect an error.
-async fn produce_to_invalid_topic_inner<F: ProducerBackendFactory>(factory: &F) {
-    let ctx = TestContext::new(ClusterConfig::default()).await;
+async fn produce_to_invalid_topic_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let producer = factory
-        .create(make_config(ctx.bootstrap_servers()))
+        .create(make_config(&bootstrap_for(factory, ctx)))
         .await
         .expect("Failed to create producer");
 
@@ -235,9 +226,8 @@ async fn produce_to_invalid_topic_inner<F: ProducerBackendFactory>(factory: &F) 
 }
 
 /// Test: Send a record larger than max.request.size, expect RecordTooLarge.
-async fn produce_record_too_large_inner<F: ProducerBackendFactory>(factory: &F) {
-    let ctx = TestContext::new(ClusterConfig::default()).await;
-    let mut config = make_config(ctx.bootstrap_servers());
+async fn produce_record_too_large_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
+    let mut config = make_config(&bootstrap_for(factory, ctx));
     // Set a very small max request size to trigger the error
     config.insert("max.request.size".to_string(), "100".to_string());
     let producer = factory.create(config).await.expect("Failed to create producer");
@@ -261,11 +251,10 @@ async fn produce_record_too_large_inner<F: ProducerBackendFactory>(factory: &F) 
 
 /// Test: Send records, call flush(), verify all futures are complete after
 /// flush returns.
-async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(factory: &F) {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("flush_test");
     let producer = factory
-        .create(make_config(ctx.bootstrap_servers()))
+        .create(make_config(&bootstrap_for(factory, ctx)))
         .await
         .expect("Failed to create producer");
 
@@ -292,11 +281,10 @@ async fn flush_sends_pending_records_inner<F: ProducerBackendFactory>(factory: &
 }
 
 /// Test: Send records, call close(), verify records were delivered.
-async fn close_flushes_pending_inner<F: ProducerBackendFactory>(factory: &F) {
-    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+async fn close_flushes_pending_inner<F: ProducerBackendFactory>(ctx: &mut TestContext, factory: &F) {
     let topic = ctx.topic("close_flush");
     let producer = factory
-        .create(make_config(ctx.bootstrap_servers()))
+        .create(make_config(&bootstrap_for(factory, ctx)))
         .await
         .expect("Failed to create producer");
 
@@ -324,10 +312,9 @@ async fn close_flushes_pending_inner<F: ProducerBackendFactory>(factory: &F) {
 // Test instantiations
 // ---------------------------------------------------------------------------
 //
-// When the `multilanguage-tests` feature is enabled, each test fans out to
-// rust/python/c backends via the multilanguage_test! macro. Otherwise we
-// only run the rust variant — the macro/factories aren't available without
-// the feature.
+// Under multilanguage-tests, each scenario fans out to rust/python/c via
+// the macro. Otherwise the rust_only_fallback module instantiates each
+// scenario manually against RustNativeFactory.
 
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_produce_single_record, produce_single_record_inner);
@@ -346,46 +333,46 @@ crate::multilanguage_test!(test_flush_sends_pending_records, flush_sends_pending
 #[cfg(feature = "multilanguage-tests")]
 crate::multilanguage_test!(test_close_flushes_pending, close_flushes_pending_inner);
 
-// Fallback: with only `integration-tests`, run each test against the
-// native Rust backend so existing CI behavior is preserved. The macro is
-// only available under multilanguage-tests; here we instantiate manually
-// using the always-available RustNativeFactory.
-
 #[cfg(all(feature = "integration-tests", not(feature = "multilanguage-tests")))]
 mod rust_only_fallback {
     use super::*;
     use crate::common::backend_factory::RustNativeFactory;
+    use crate::common::cluster_config::ClusterConfig;
+
+    async fn ctx() -> TestContext {
+        TestContext::new(ClusterConfig::default()).await
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_single_record() {
-        produce_single_record_inner(&RustNativeFactory).await;
+        produce_single_record_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_with_key() {
-        produce_with_key_inner(&RustNativeFactory).await;
+        produce_with_key_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_multiple_records_ordering() {
-        produce_multiple_records_ordering_inner(&RustNativeFactory).await;
+        produce_multiple_records_ordering_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_with_compression() {
-        produce_with_compression_inner(&RustNativeFactory).await;
+        produce_with_compression_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_to_invalid_topic() {
-        produce_to_invalid_topic_inner(&RustNativeFactory).await;
+        produce_to_invalid_topic_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_produce_record_too_large() {
-        produce_record_too_large_inner(&RustNativeFactory).await;
+        produce_record_too_large_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_flush_sends_pending_records() {
-        flush_sends_pending_records_inner(&RustNativeFactory).await;
+        flush_sends_pending_records_inner(&mut ctx().await, &RustNativeFactory).await;
     }
     #[tokio::test(flavor = "multi_thread")]
     async fn test_close_flushes_pending() {
-        close_flushes_pending_inner(&RustNativeFactory).await;
+        close_flushes_pending_inner(&mut ctx().await, &RustNativeFactory).await;
     }
 }
