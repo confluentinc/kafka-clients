@@ -31,7 +31,7 @@ init:
 	@python3 -m venv venv
 	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
 
-test: test-integration test-c test-python
+test: test-multilanguage test-c test-python
 
 test-rust:
 	cargo test
