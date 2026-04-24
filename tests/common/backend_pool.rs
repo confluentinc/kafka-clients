@@ -107,18 +107,23 @@ impl BackendHandle {
 
 type BackendCell = Arc<OnceCell<Arc<BackendHandle>>>;
 
-static BACKEND_POOL: std::sync::LazyLock<Mutex<HashMap<BackendKind, BackendCell>>> =
+/// Pool key includes the broker network — a gRPC client container is
+/// pinned to one Docker network at start time, so tests using
+/// different `ClusterConfig`s (which spawn brokers on different
+/// networks) need their own backend container.
+static BACKEND_POOL: std::sync::LazyLock<Mutex<HashMap<(BackendKind, String), BackendCell>>> =
     std::sync::LazyLock::new(|| Mutex::new(HashMap::new()));
 
 static CLEANUP_REGISTERED: Once = Once::new();
 
 /// Get or start the requested backend, returning a shared handle.
 ///
-/// First caller for a given `kind` triggers a `docker run`; subsequent
-/// callers share the same `BackendHandle`. The container is attached
-/// to `broker_network` so it can reach the Kafka broker via the
-/// CONTAINER listener (`<broker_container_name>:9099`). The container
-/// is removed at process exit by the atexit hook below.
+/// Pool entries are keyed by `(kind, broker_network)`. First caller for
+/// a given pair triggers a `docker run`; subsequent callers share the
+/// same `BackendHandle`. The container is attached to `broker_network`
+/// so it can reach the Kafka broker via the CONTAINER listener
+/// (`<broker_container_name>:9099`). The container is removed at
+/// process exit by the atexit hook below.
 ///
 /// Caller (the `multilanguage_test!` macro) must ensure the broker
 /// network exists — typically by creating the `TestContext` first.
@@ -127,7 +132,9 @@ pub async fn get_or_start(kind: BackendKind, broker_network: &str) -> Arc<Backen
 
     let cell = {
         let mut pool = BACKEND_POOL.lock().expect("backend pool lock poisoned");
-        pool.entry(kind).or_insert_with(|| Arc::new(OnceCell::new())).clone()
+        pool.entry((kind, broker_network.to_string()))
+            .or_insert_with(|| Arc::new(OnceCell::new()))
+            .clone()
     };
 
     let network = broker_network.to_string();

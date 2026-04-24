@@ -34,19 +34,28 @@
 /// Expand a generic test body into three `#[tokio::test]` wrappers — one
 /// per backend (rust / python / c). See module docs for the expected
 /// signature of `$body`.
+///
+/// Two forms are supported:
+///   - `multilanguage_test!(name, body)` — uses `ClusterConfig::default()`
+///   - `multilanguage_test!(name, body, cfg_expr)` — uses the given
+///     `ClusterConfig` expression (e.g. for tests that need a broker
+///     with `auto.create.topics.enable=false`).
+///
+/// Two-arg form delegates to three-arg with the default config; existing
+/// callers don't change.
 #[macro_export]
 macro_rules! multilanguage_test {
     ($name:ident, $body:ident) => {
+        $crate::multilanguage_test!($name, $body, $crate::common::cluster_config::ClusterConfig::default());
+    };
+    ($name:ident, $body:ident, $cluster_config:expr) => {
         ::paste::paste! {
             // Double underscore is intentional so backend labels are
             // easy to grep in cargo test output, hence non_snake_case.
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
-                let mut ctx = $crate::common::test_context::TestContext::new(
-                    $crate::common::cluster_config::ClusterConfig::default(),
-                )
-                .await;
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let factory = $crate::common::backend_factory::RustNativeFactory;
                 $body(&mut ctx, &factory).await;
             }
@@ -57,10 +66,7 @@ macro_rules! multilanguage_test {
                 // Create the TestContext first so the broker network
                 // exists before we attempt to attach the python
                 // container to it.
-                let mut ctx = $crate::common::test_context::TestContext::new(
-                    $crate::common::cluster_config::ClusterConfig::default(),
-                )
-                .await;
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::Python,
                     ctx.broker_network_name(),
@@ -74,10 +80,7 @@ macro_rules! multilanguage_test {
             #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ c>]() {
-                let mut ctx = $crate::common::test_context::TestContext::new(
-                    $crate::common::cluster_config::ClusterConfig::default(),
-                )
-                .await;
+                let mut ctx = $crate::common::test_context::TestContext::new($cluster_config).await;
                 let handle = $crate::common::backend_pool::get_or_start(
                     $crate::common::backend_pool::BackendKind::C,
                     ctx.broker_network_name(),

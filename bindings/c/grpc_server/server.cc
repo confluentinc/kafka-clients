@@ -311,7 +311,8 @@ class ProducerServiceImpl final : public ProducerService::Service {
     }
     if (s.find("timed out") != std::string::npos ||
         s.find("Timeout") != std::string::npos ||
-        s.find("expired") != std::string::npos) {
+        s.find("expired") != std::string::npos ||
+        s.find("not present in metadata") != std::string::npos) {
       return VARIANT_TIMEOUT;
     }
     return VARIANT_GENERIC;

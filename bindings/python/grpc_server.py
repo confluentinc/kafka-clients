@@ -80,7 +80,7 @@ def _guess_variant(message):
         return RECORD_TOO_LARGE
     if "buffer is full" in lowered or "buffer.memory" in lowered:
         return BUFFER_EXHAUSTED
-    if "timed out" in lowered or "expired" in lowered:
+    if "timed out" in lowered or "expired" in lowered or "not present in metadata" in lowered:
         return TIMEOUT
     if "topic authorization" in lowered:
         return TOPIC_AUTHORIZATION
