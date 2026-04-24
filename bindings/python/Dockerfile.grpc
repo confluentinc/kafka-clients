@@ -27,38 +27,36 @@ RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libc6-dev && \
     rm -rf /var/lib/apt/lists/*
 
-WORKDIR /build
+WORKDIR /workspace
 
-# Bring in the prebuilt Rust artifacts and the Python wrapper sources.
-COPY target/release/libconfluent_kafka.so /build/lib/libconfluent_kafka.so
-COPY target/include/confluent_kafka.h /build/include/confluent_kafka.h
-COPY bindings/python/_confluentkafka.c /build/python/_confluentkafka.c
-COPY bindings/python/setup.py /build/python/setup.py
-COPY bindings/python/pyproject.toml /build/python/pyproject.toml
-COPY bindings/python/producer.py /build/python/producer.py
+# Recreate the project layout that setup.py expects: setup.py lives at
+# bindings/python/ and computes project_root = ../../, looking for the
+# Rust header at target/include/confluent_kafka.h and the shared lib
+# under target/release/.
+COPY target/release/libconfluent_kafka.so /workspace/target/release/libconfluent_kafka.so
+COPY target/include/confluent_kafka.h /workspace/target/include/confluent_kafka.h
+COPY bindings/python/_confluentkafka.c /workspace/bindings/python/_confluentkafka.c
+COPY bindings/python/setup.py /workspace/bindings/python/setup.py
+COPY bindings/python/pyproject.toml /workspace/bindings/python/pyproject.toml
+COPY bindings/python/producer.py /workspace/bindings/python/producer.py
 
-# The proto file the gRPC server's stubs are generated from. Copying
-# from the workspace member guarantees a single source of truth — the
-# Rust client and this server always speak the same schema.
-COPY multilanguage-test-server/proto/producer_service.proto /build/proto/producer_service.proto
+# Single source of truth for the wire schema: the proto crate.
+COPY multilanguage-test-server/proto/producer_service.proto /workspace/proto/producer_service.proto
 
 # Build _confluentkafka.so. setup.py reads CONFLUENT_KAFKA_LIB_DIR for
-# the Rust shared lib location and looks for the header in
-# ../../target/include (relative to the Python dir).
-ENV CONFLUENT_KAFKA_LIB_DIR=/build/lib
-RUN mkdir -p /build/target/include && \
-    cp /build/include/confluent_kafka.h /build/target/include/confluent_kafka.h && \
-    cd /build/python && \
+# the Rust shared lib location.
+ENV CONFLUENT_KAFKA_LIB_DIR=/workspace/target/release
+RUN cd /workspace/bindings/python && \
     pip install --no-cache-dir setuptools wheel && \
     python setup.py build_ext --inplace
 
 # Generate proto stubs (producer_service_pb2.py + _pb2_grpc.py).
 RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
-    cd /build && \
+    cd /workspace && \
     python -m grpc_tools.protoc \
         -Iproto \
-        --python_out=/build/python \
-        --grpc_python_out=/build/python \
+        --python_out=/workspace/bindings/python \
+        --grpc_python_out=/workspace/bindings/python \
         proto/producer_service.proto
 
 # ---------------------------------------------------------------------------
@@ -66,17 +64,19 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
 # ---------------------------------------------------------------------------
 FROM python:3.11-slim AS runtime
 
-RUN pip install --no-cache-dir grpcio==1.66.*
+# protobuf is needed by the generated stubs at runtime; grpcio doesn't
+# pull it in transitively.
+RUN pip install --no-cache-dir grpcio==1.66.* "protobuf>=4.0,<6.0"
 
 WORKDIR /app
 
 # Rust shared library next to the Python extension so the runtime
 # loader resolves it via the rpath setup.py embedded.
-COPY --from=builder /build/lib/libconfluent_kafka.so /app/libconfluent_kafka.so
-COPY --from=builder /build/python/_confluentkafka*.so /app/
-COPY --from=builder /build/python/producer.py /app/producer.py
-COPY --from=builder /build/python/producer_service_pb2.py /app/producer_service_pb2.py
-COPY --from=builder /build/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
+COPY --from=builder /workspace/target/release/libconfluent_kafka.so /app/libconfluent_kafka.so
+COPY --from=builder /workspace/bindings/python/_confluentkafka*.so /app/
+COPY --from=builder /workspace/bindings/python/producer.py /app/producer.py
+COPY --from=builder /workspace/bindings/python/producer_service_pb2.py /app/producer_service_pb2.py
+COPY --from=builder /workspace/bindings/python/producer_service_pb2_grpc.py /app/producer_service_pb2_grpc.py
 COPY bindings/python/grpc_server.py /app/grpc_server.py
 
 # The Python extension was linked with rpath pointing at the original

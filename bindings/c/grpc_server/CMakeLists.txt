@@ -26,8 +26,11 @@ set(RUST_LIB_DIR "${CMAKE_CURRENT_SOURCE_DIR}/lib" CACHE PATH "libconfluent_kafk
 set(RUST_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/include" CACHE PATH "C FFI header dir")
 set(PROTO_FILE "${CMAKE_CURRENT_SOURCE_DIR}/proto/producer_service.proto" CACHE PATH "Proto source")
 
-find_package(Protobuf CONFIG REQUIRED)
-find_package(gRPC CONFIG REQUIRED)
+# Use module-mode find_package since Debian's libprotobuf-dev /
+# libgrpc++-dev packages don't ship CMake config files.
+find_package(Protobuf REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(GRPCPP REQUIRED grpc++)
 
 # Generate proto + grpc stubs at configure time.
 get_filename_component(PROTO_DIR "${PROTO_FILE}" DIRECTORY)
@@ -40,9 +43,9 @@ set(PROTO_HDRS "${GENERATED_DIR}/${PROTO_NAME}.pb.h")
 set(GRPC_SRCS "${GENERATED_DIR}/${PROTO_NAME}.grpc.pb.cc")
 set(GRPC_HDRS "${GENERATED_DIR}/${PROTO_NAME}.grpc.pb.h")
 
-# Locate the gRPC C++ plugin (system protoc + the gRPC plugin from
-# grpc::grpc_cpp_plugin imported target).
-get_target_property(GRPC_CPP_PLUGIN_PATH gRPC::grpc_cpp_plugin LOCATION)
+# The grpc_cpp_plugin binary is shipped alongside protoc by
+# protobuf-compiler-grpc on Debian.
+find_program(GRPC_CPP_PLUGIN_PATH grpc_cpp_plugin REQUIRED)
 
 add_custom_command(
     OUTPUT ${PROTO_SRCS} ${PROTO_HDRS} ${GRPC_SRCS} ${GRPC_HDRS}
@@ -71,9 +74,12 @@ target_include_directories(kafka_grpc_server PRIVATE
 )
 
 # Link the static Rust lib + grpc++ + protobuf + system libs.
+target_include_directories(kafka_grpc_server PRIVATE ${GRPCPP_INCLUDE_DIRS})
 target_link_libraries(kafka_grpc_server PRIVATE
     "${RUST_LIB_DIR}/libconfluent_kafka.a"
-    gRPC::grpc++
-    protobuf::libprotobuf
+    ${GRPCPP_LIBRARIES}
+    ${Protobuf_LIBRARIES}
     pthread dl m
 )
+target_compile_options(kafka_grpc_server PRIVATE ${GRPCPP_CFLAGS_OTHER})
+target_link_directories(kafka_grpc_server PRIVATE ${GRPCPP_LIBRARY_DIRS})

@@ -25,12 +25,13 @@
 # Stage 1: Compile kafka_grpc_server statically against libconfluent_kafka.a
 # and the system grpc++ / protobuf packages.
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS builder
+FROM debian:trixie-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
         build-essential cmake pkg-config \
-        libgrpc++-dev libprotobuf-dev protobuf-compiler-grpc \
+        libgrpc++-dev libprotobuf-dev \
+        protobuf-compiler protobuf-compiler-grpc \
         ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
@@ -49,11 +50,15 @@ RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — debian-slim with the grpc++ runtime libs.
 # ---------------------------------------------------------------------------
-FROM debian:bookworm-slim AS runtime
+FROM debian:trixie-slim AS runtime
 
+# Install libgrpc++-dev rather than the bare runtime SOname package,
+# because Debian renames lib*N (e.g. libgrpc++1.51 → libgrpc++1.62)
+# between releases and the dev meta-package always pulls in whichever
+# runtime is current. Costs a few MB of header files.
 RUN apt-get update && \
     apt-get install -y --no-install-recommends \
-        libgrpc++1.51 libprotobuf32 ca-certificates && \
+        libgrpc++-dev libprotobuf-dev ca-certificates && \
     rm -rf /var/lib/apt/lists/*
 
 COPY --from=builder /build/build/kafka_grpc_server /usr/local/bin/kafka_grpc_server
