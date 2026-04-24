@@ -57,4 +57,7 @@ pub mod test_context;
 // design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
+pub mod backend_factory;
+#[cfg(feature = "multilanguage-tests")]
+#[allow(dead_code)]
 pub mod multilanguage_producer;
