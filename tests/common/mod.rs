@@ -55,9 +55,14 @@ pub mod test_context;
 // Multilanguage integration test harness — Producer impl that tunnels over
 // gRPC to a Python or C++ server. See
 // design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
-#[cfg(feature = "multilanguage-tests")]
+// Backend factory abstraction — the trait + RustNativeFactory are
+// available with just integration-tests so existing tests can be
+// parameterized without requiring the gRPC machinery. The gRPC-backed
+// factories (PythonGrpcFactory, CGrpcFactory) are gated below.
+#[cfg(feature = "integration-tests")]
 #[allow(dead_code)]
 pub mod backend_factory;
+
 #[cfg(feature = "multilanguage-tests")]
 #[allow(dead_code)]
 pub mod backend_pool;

@@ -30,8 +30,10 @@ use confluent_kafka::common::serialization::ByteArraySerializer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
+#[cfg(feature = "multilanguage-tests")]
 use tonic::transport::Channel;
 
+#[cfg(feature = "multilanguage-tests")]
 use crate::common::multilanguage_producer::MultilanguageProducer;
 
 /// Abstraction over a `Producer<Vec<u8>, Vec<u8>>` source.
@@ -80,85 +82,96 @@ impl ProducerBackendFactory for RustNativeFactory {
 
 // ---------------------------------------------------------------------------
 // PythonGrpc / CGrpc — both wrap a MultilanguageProducer pointed at their
-// respective gRPC backend container.
+// respective gRPC backend container. Gated on multilanguage-tests since
+// they pull in tonic + the proto crate.
 // ---------------------------------------------------------------------------
 
-/// Backend that drives bindings/python/producer.py through a gRPC server
-/// running in the `confluent-kafka-rust/python-grpc-server:dev` Docker
-/// image.
-pub struct PythonGrpcFactory {
-    channel: Channel,
-}
+#[cfg(feature = "multilanguage-tests")]
+mod grpc_backends {
+    use super::*;
 
-impl PythonGrpcFactory {
-    pub fn new(channel: Channel) -> Self {
-        Self { channel }
+    /// Backend that drives bindings/python/producer.py through a gRPC
+    /// server running in the
+    /// `confluent-kafka-rust/python-grpc-server:dev` Docker image.
+    pub struct PythonGrpcFactory {
+        channel: Channel,
+    }
+
+    impl PythonGrpcFactory {
+        pub fn new(channel: Channel) -> Self {
+            Self { channel }
+        }
+    }
+
+    impl ProducerBackendFactory for PythonGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+            MultilanguageProducer::new(self.channel.clone(), rewrite_for_container(config), "python").await
+        }
+
+        fn name(&self) -> &'static str {
+            "python"
+        }
+    }
+
+    /// Backend that drives the public C FFI through a gRPC server running
+    /// in the `confluent-kafka-rust/c-grpc-server:dev` Docker image (a
+    /// thin grpc++ wrapper that calls `kafka_producer_*`).
+    pub struct CGrpcFactory {
+        channel: Channel,
+    }
+
+    impl CGrpcFactory {
+        pub fn new(channel: Channel) -> Self {
+            Self { channel }
+        }
+    }
+
+    impl ProducerBackendFactory for CGrpcFactory {
+        type Producer = MultilanguageProducer;
+
+        async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
+            MultilanguageProducer::new(self.channel.clone(), rewrite_for_container(config), "c").await
+        }
+
+        fn name(&self) -> &'static str {
+            "c"
+        }
+    }
+
+    /// Rewrite the `bootstrap.servers` entry so it's reachable from
+    /// inside the gRPC client container.
+    ///
+    /// The Rust test process holds host addresses like `127.0.0.1:32781`
+    /// (the random host port testcontainers mapped to the broker
+    /// container). Inside a sibling client container, `127.0.0.1` is the
+    /// container itself; the reachable name for the host is
+    /// `host.docker.internal`, exposed via the
+    /// `--add-host=host.docker.internal:host-gateway` flag attached by
+    /// the backend pool.
+    fn rewrite_for_container(mut config: HashMap<String, String>) -> HashMap<String, String> {
+        if let Some(bootstrap) = config.get("bootstrap.servers").cloned() {
+            let rewritten = bootstrap
+                .split(',')
+                .map(|hp| {
+                    let trimmed = hp.trim();
+                    if let Some(port) = trimmed.strip_prefix("127.0.0.1:") {
+                        format!("host.docker.internal:{port}")
+                    } else if let Some(port) = trimmed.strip_prefix("localhost:") {
+                        format!("host.docker.internal:{port}")
+                    } else {
+                        trimmed.to_string()
+                    }
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            config.insert("bootstrap.servers".to_string(), rewritten);
+        }
+        config
     }
 }
 
-impl ProducerBackendFactory for PythonGrpcFactory {
-    type Producer = MultilanguageProducer;
-
-    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
-        MultilanguageProducer::new(self.channel.clone(), rewrite_for_container(config), "python").await
-    }
-
-    fn name(&self) -> &'static str {
-        "python"
-    }
-}
-
-/// Backend that drives the public C FFI through a gRPC server running in
-/// the `confluent-kafka-rust/c-grpc-server:dev` Docker image (a thin
-/// grpc++ wrapper that calls `kafka_producer_*`).
-pub struct CGrpcFactory {
-    channel: Channel,
-}
-
-impl CGrpcFactory {
-    pub fn new(channel: Channel) -> Self {
-        Self { channel }
-    }
-}
-
-impl ProducerBackendFactory for CGrpcFactory {
-    type Producer = MultilanguageProducer;
-
-    async fn create(&self, config: HashMap<String, String>) -> Result<Self::Producer, KafkaError> {
-        MultilanguageProducer::new(self.channel.clone(), rewrite_for_container(config), "c").await
-    }
-
-    fn name(&self) -> &'static str {
-        "c"
-    }
-}
-
-/// Rewrite the `bootstrap.servers` entry so it's reachable from inside the
-/// gRPC client container.
-///
-/// The Rust test process holds host addresses like `127.0.0.1:32781` (the
-/// random host port testcontainers mapped to the broker container). Inside
-/// a sibling client container, `127.0.0.1` is the container itself; the
-/// reachable name for the host is `host.docker.internal`, exposed via the
-/// `--add-host=host.docker.internal:host-gateway` flag attached by the
-/// backend pool.
-fn rewrite_for_container(mut config: HashMap<String, String>) -> HashMap<String, String> {
-    if let Some(bootstrap) = config.get("bootstrap.servers").cloned() {
-        let rewritten = bootstrap
-            .split(',')
-            .map(|hp| {
-                let trimmed = hp.trim();
-                if let Some(port) = trimmed.strip_prefix("127.0.0.1:") {
-                    format!("host.docker.internal:{port}")
-                } else if let Some(port) = trimmed.strip_prefix("localhost:") {
-                    format!("host.docker.internal:{port}")
-                } else {
-                    trimmed.to_string()
-                }
-            })
-            .collect::<Vec<_>>()
-            .join(",");
-        config.insert("bootstrap.servers".to_string(), rewritten);
-    }
-    config
-}
+#[cfg(feature = "multilanguage-tests")]
+#[allow(unused_imports)] // Used only by the `integration` test binary
+pub use grpc_backends::{CGrpcFactory, PythonGrpcFactory};

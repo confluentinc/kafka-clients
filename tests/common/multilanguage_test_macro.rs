@@ -38,12 +38,16 @@
 macro_rules! multilanguage_test {
     ($name:ident, $body:ident) => {
         ::paste::paste! {
+            // Double underscore is intentional so backend labels are
+            // easy to grep in cargo test output, hence non_snake_case.
+            #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ rust>]() {
                 let factory = $crate::common::backend_factory::RustNativeFactory;
                 $body(&factory).await;
             }
 
+            #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ python>]() {
                 let handle = $crate::common::backend_pool::get_or_start(
@@ -55,6 +59,7 @@ macro_rules! multilanguage_test {
                 $body(&factory).await;
             }
 
+            #[allow(non_snake_case)]
             #[tokio::test(flavor = "multi_thread")]
             async fn [<$name __ c>]() {
                 let handle = $crate::common::backend_pool::get_or_start(
