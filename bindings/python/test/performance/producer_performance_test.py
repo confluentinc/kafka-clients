@@ -254,9 +254,10 @@ def _verifier_consumer_config(bootstrap_servers, group_id):
     conf = {
         'bootstrap.servers': bootstrap_servers,
         'group.id': group_id,
-        'enable.auto.commit': False,
+        'enable.auto.commit': 'false',
         'auto.offset.reset': 'earliest',
-        'session.timeout.ms': 10000,
+        'session.timeout.ms': '10000',
+        'check.crcs': 'true'
     }
     conf.update(sasl_config_from_env(v2=True))
     return conf
