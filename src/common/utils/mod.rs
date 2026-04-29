@@ -17,6 +17,8 @@
 pub mod byte_utils;
 pub mod crc32c;
 pub mod exit;
+pub mod exponential_backoff;
+pub mod exponential_backoff_manager;
 pub mod mock_time;
 pub mod producer_id_and_epoch;
 pub mod system_time;
@@ -24,6 +26,8 @@ pub mod time;
 pub mod timer;
 
 pub use crc32c::Crc32C;
+pub use exponential_backoff::ExponentialBackoff;
+pub use exponential_backoff_manager::ExponentialBackoffManager;
 pub use mock_time::MockTime;
 pub use producer_id_and_epoch::ProducerIdAndEpoch;
 pub use system_time::SystemTime;
