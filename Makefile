@@ -14,6 +14,14 @@ devel-build:
 	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" PROFILE=debug devel-build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
+# One-shot setup for a fresh clone or worktree: pulls down the git
+# submodules (kafka source reference + Unity for the C unit tests).
+# Run this before `make build` on a new checkout.
+init:
+	@git submodule update --init --recursive
+	@python3 -m venv venv
+	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
+
 test: test-integration test-c test-python
 
 test-rust:
