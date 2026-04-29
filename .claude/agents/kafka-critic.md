@@ -1,7 +1,7 @@
 ---
 name: "kafka-critic"
 description: "Use this agent when a Critic role is needed to review Actor commits in the Kafka Rust translation project. This agent is reviewing new commits for bugs, wrong tests, design flaws, and deviations from the Java client behavior.\\n\\nExamples:\\n\\n- user: \"Start reviewing Actor 1's work\"\\n  assistant: \"I'll launch the kafka-critic agent to begin the review loop for Actor 1's commits.\"\\n  <uses Agent tool to launch kafka-critic>\\n\\n- user: \"Review the latest changes from Actor 0\"\\n  assistant: \"I'll use the kafka-critic agent to review the latest commits from Actor 0.\"\\n  <uses Agent tool to launch kafka-critic>\\n\\n- user: \"Start the critic for agent number 2\"\\n  assistant: \"I'll launch the kafka-critic agent assigned as Critic number 2 to begin reviewing.\"\\n  <uses Agent tool to launch kafka-critic>"
-model: opus
+model: claude-opus-4-7
 color: red
 memory: project
 ---

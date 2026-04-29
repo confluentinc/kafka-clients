@@ -1,7 +1,7 @@
 ---
 name: "actor-executor"
 description: "Use this agent when the user needs to execute a code translation or implementation task following the Actor role defined in the project's agent-roles.md. This includes generating Rust code translated from Java, running builds and tests, fixing reviewer comments, and committing changes. Examples:\\n\\n- user: \"Translate the KafkaConsumer class from Java to Rust\"\\n  assistant: \"I'll use the Actor agent to translate the KafkaConsumer class, verify it builds and passes tests, and commit the changes.\"\\n  <commentary>Since the user wants code translated and verified, use the Agent tool to launch the actor-executor agent to handle the full workflow.</commentary>\\n\\n- user: \"Implement the Message trait with read/write methods\"\\n  assistant: \"I'll use the Actor agent to implement the Message trait, ensure all tests pass, and commit incrementally.\"\\n  <commentary>Since the user wants new code implemented following the project's translation rules, use the Agent tool to launch the actor-executor agent.</commentary>\\n\\n- user: \"Fix the issues from the reviewer and continue with the next task\"\\n  assistant: \"I'll use the Actor agent to check COMMENTS.N.md, fix the issues, move resolved comments to COMMENTS.DONE.N.md, and continue.\"\\n  <commentary>Since the user wants reviewer comments addressed following the Actor workflow, use the Agent tool to launch the actor-executor agent.</commentary>"
-model: opus
+model: claude-opus-4-7
 color: green
 memory: project
 ---

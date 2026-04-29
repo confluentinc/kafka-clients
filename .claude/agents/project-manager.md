@@ -1,7 +1,7 @@
 ---
 name: "project-manager"
 description: "Use this agent when the user provides a requirement or task that needs to be implemented in the Kafka Rust translation project and requires coordinating Actor and Critic agents through the full implementation-review-fix cycle.\\n\\nExamples:\\n\\n- user: \"Translate the ProducerRecord class from Java to Rust\"\\n  assistant: \"I'll use the project-manager agent to plan and coordinate the translation of ProducerRecord, spawning Actor and Critic agents to implement and review the work.\"\\n  <commentary>\\n  Since the user wants a requirement implemented, use the Agent tool to launch the project-manager agent to create a plan, coordinate actors and critics, and drive the work to completion.\\n  </commentary>\\n\\n- user: \"Implement the Message trait with size(), read(), and write() methods\"\\n  assistant: \"I'll use the project-manager agent to plan and coordinate the implementation of the Message trait.\"\\n  <commentary>\\n  The user has a concrete implementation requirement. Use the Agent tool to launch the project-manager agent to create a plan, get approval, then orchestrate Actor and Critic agents.\\n  </commentary>\\n\\n- user: \"We need to add support for nullable fields in the wire protocol\"\\n  assistant: \"Let me launch the project-manager agent to plan and coordinate this feature implementation.\"\\n  <commentary>\\n  A new feature requirement — use the Agent tool to launch the project-manager agent to break it down, plan, and coordinate implementation.\\n  </commentary>"
-model: opus
+model: claude-opus-4-7
 color: blue
 memory: project
 ---
