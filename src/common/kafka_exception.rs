@@ -12,14 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fail on warnings in development
-#![deny(warnings)]
-
-//! Confluent Kafka Rust — translation of the Apache Kafka 4.2 Java client.
+//! Re-export shim for `org.apache.kafka.common.KafkaException`.
 //!
-//! Phase 1 surfaces only the foundational utilities (errors, time, headers,
-//! configuration, UUID, byte/varint encoding, CRC, exponential backoff,
-//! topic-name validation). Higher-level types (records, network, producer)
-//! are added in subsequent phases.
+//! In Java, `KafkaException` is the parent of every `*Exception` thrown by the
+//! Kafka client. We collapse the entire hierarchy into [`crate::common::errors::KafkaError`];
+//! this module exposes [`KafkaException`] as a type alias so existing reference
+//! sites in translated code continue to read naturally.
 
-pub mod common;
+pub use crate::common::errors::KafkaError as KafkaException;

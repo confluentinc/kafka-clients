@@ -12,14 +12,4 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fail on warnings in development
-#![deny(warnings)]
-
-//! Confluent Kafka Rust — translation of the Apache Kafka 4.2 Java client.
-//!
-//! Phase 1 surfaces only the foundational utilities (errors, time, headers,
-//! configuration, UUID, byte/varint encoding, CRC, exponential backoff,
-//! topic-name validation). Higher-level types (records, network, producer)
-//! are added in subsequent phases.
-
-pub mod common;
+//! Translation of `org.apache.kafka.common.config`.
