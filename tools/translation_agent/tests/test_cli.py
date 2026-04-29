@@ -62,17 +62,20 @@ def test_pr_mode_missing_returns_1(tmp_path):
     assert rc == 1
 
 
-def test_pr_status_check_prints_row(tmp_path, capsys):
-    db_path = str(tmp_path / "t.db")
+def _insert_pr_at_status(db_path, pr_number, ak_commit, status,
+                         rust_branch="master", ak_branch="trunk"):
     conn = db.connect(db_path)
     db.migrate(conn)
-    conn.execute(
-        "INSERT INTO pr_commit (pr_number, rust_branch, ak_commit, status) "
-        "VALUES (?, ?, ?, ?)",
-        (42, "master", "abc123", db.STATUS_PLAN_CREATED),
-    )
+    db.insert_pr_commit(conn, pr_number, rust_branch, ak_branch, ak_commit)
+    conn.execute("UPDATE pr_commit SET status = ? WHERE pr_number = ?",
+                 (status, pr_number))
     conn.commit()
     conn.close()
+
+
+def test_pr_status_check_prints_row(tmp_path, capsys):
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc123", db.STATUS_PLAN_CREATED)
     rc = _run("--pr", "42", db_path=db_path)
     assert rc == 0
     captured = capsys.readouterr()
@@ -80,36 +83,56 @@ def test_pr_status_check_prints_row(tmp_path, capsys):
     assert f"status: {db.STATUS_PLAN_CREATED}" in captured.out
 
 
-def test_pr_plan_approve_transitions_2_to_3(tmp_path):
+def test_pr_plan_approve_transitions_2_to_3_and_runs_impl(tmp_path):
     db_path = str(tmp_path / "t.db")
-    conn = db.connect(db_path)
-    db.migrate(conn)
-    conn.execute(
-        "INSERT INTO pr_commit (pr_number, rust_branch, ak_commit, status) "
-        "VALUES (?, ?, ?, ?)",
-        (42, "master", "abc", db.STATUS_PLAN_CREATED),
-    )
-    conn.commit()
-    conn.close()
-    rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.fetch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_new_sha"):
+        rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
     assert rc == 0
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 42").fetchone())
+    assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
+    bc = dict(conn.execute(
+        "SELECT * FROM branch_commit WHERE rust_commit = 'rust_new_sha'"
+    ).fetchone())
+    assert bc["ak_commit"] == "abc"
+    assert bc["ak_branch"] == "trunk"
+
+
+def test_pr_plan_approve_dry_run_only_flips_status(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+    with patch("translation_agent.cli.streaming.run_with_prefix") as mstream:
+        rc = _run("--pr", "42", "--plan-approve", "--dry-run", db_path=db_path)
+    assert rc == 0
+    mstream.assert_not_called()
     conn = db.connect(db_path)
     assert conn.execute(
         "SELECT status FROM pr_commit WHERE pr_number = 42"
     ).fetchone()[0] == db.STATUS_PLAN_APPROVED
 
 
+def test_pr_plan_approve_impl_failure_persists_last_error(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(2, "boom")):
+        rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
+    assert rc == 1
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 42").fetchone())
+    # Status remains 3 (plan_approved) so a re-run can retry.
+    assert pr["status"] == db.STATUS_PLAN_APPROVED
+    assert "rc=2" in pr["last_error"]
+
+
 def test_pr_plan_approve_wrong_status_returns_1(tmp_path):
     db_path = str(tmp_path / "t.db")
-    conn = db.connect(db_path)
-    db.migrate(conn)
-    conn.execute(
-        "INSERT INTO pr_commit (pr_number, rust_branch, ak_commit, status) "
-        "VALUES (?, ?, ?, ?)",
-        (42, "master", "abc", db.STATUS_NO_PLAN),
-    )
-    conn.commit()
-    conn.close()
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_NO_PLAN)
     rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
     assert rc == 1
 
@@ -272,6 +295,10 @@ def test_sweep_dep_eval_out_of_batch_dep_treated_as_none(tmp_path):
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     bogus_json = '{"plan_dependency": "not_in_batch_sha", "implementation_dependency": null}'
+    # streaming.run_with_prefix is called both for dep-eval AND for the plan
+    # generation that immediately follows in the same sweep (status 1 -> 2,
+    # since plan_dep is None after the out-of-batch coercion). Both succeed
+    # with empty stdout.
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
@@ -279,7 +306,7 @@ def test_sweep_dep_eval_out_of_batch_dep_treated_as_none(tmp_path):
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
-               return_value=(0, bogus_json)):
+               side_effect=[(0, bogus_json), (0, "")]):
         rc = _run(
             "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
             "--rust-branch", "master",
@@ -288,8 +315,9 @@ def test_sweep_dep_eval_out_of_batch_dep_treated_as_none(tmp_path):
     assert rc == 0
     conn = db.connect(db_path)
     row = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 101").fetchone())
+    # Out-of-batch dep coerced to None; plan then generated (status 1 -> 2).
     assert row["plan_dependency"] is None
-    assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    assert row["status"] == db.STATUS_PLAN_CREATED
 
 
 def test_sweep_dep_eval_failure_persists_last_error(tmp_path):
@@ -352,6 +380,110 @@ def test_sweep_dep_eval_dry_run_skips_r2(tmp_path):
         )
     assert rc == 0
     mstream.assert_not_called()
+
+
+# --- plan + implementation flow (sweep step 6 + 8) --------------------------
+
+def test_sweep_plan_step_transitions_status_1_to_2(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    # Pre-populate a status-1 row that needs a plan generated.
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 50, "master", "trunk", "ak_x")
+    db.update_dependencies(conn, 50, None, None)
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 50").fetchone())
+    assert pr["status"] == db.STATUS_PLAN_CREATED
+
+
+def test_sweep_impl_step_transitions_status_3_to_4_and_updates_branch_commit(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 60, "master", "trunk", "ak_y")
+    conn.execute("UPDATE pr_commit SET status = ? WHERE pr_number = 60",
+                 (db.STATUS_PLAN_APPROVED,))
+    conn.commit()
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.fetch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_y_sha"):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 60").fetchone())
+    assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_y"
+    assert bc["rust_commit"] == "rust_y_sha"
+
+
+def test_sweep_plan_blocked_by_unapproved_dep_skipped(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    # PR 70 has ak_a (status 1, not approved). PR 71 depends on ak_a.
+    db.insert_pr_commit(conn, 70, "master", "trunk", "ak_a")
+    db.update_dependencies(conn, 70, None, None)
+    db.insert_pr_commit(conn, 71, "master", "trunk", "ak_b")
+    db.update_dependencies(conn, 71, "ak_a", None)
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    # Only PR 70 should have been planned (status 1->2). PR 71's plan_dep ak_a
+    # is still at status 1 (not >= 3), so it stays at status 1 this sweep.
+    assert mstream.call_count == 1
+    conn = db.connect(db_path)
+    pr70 = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 70").fetchone())
+    pr71 = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 71").fetchone())
+    assert pr70["status"] == db.STATUS_PLAN_CREATED
+    assert pr71["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+
+
+def test_sweep_plan_failure_persists_last_error_keeps_status_1(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 80, "master", "trunk", "ak_z")
+    db.update_dependencies(conn, 80, None, None)
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(7, "boom")):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 80").fetchone())
+    assert pr["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # unchanged
+    assert "rc=7" in pr["last_error"]
 
 
 def test_sweep_continues_after_gh_error_on_one_commit(tmp_path):

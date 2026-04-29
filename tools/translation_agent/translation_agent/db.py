@@ -72,6 +72,7 @@ _SCHEMA = [
     CREATE TABLE IF NOT EXISTS pr_commit (
         pr_number                  INTEGER PRIMARY KEY,
         rust_branch                TEXT NOT NULL,
+        ak_branch                  TEXT,
         ak_commit                  TEXT NOT NULL,
         plan_dependency            TEXT,
         implementation_dependency  TEXT,
@@ -205,6 +206,7 @@ def insert_pr_commit(
     conn: sqlite3.Connection,
     pr_number: int,
     rust_branch: str,
+    ak_branch: str,
     ak_commit: str,
 ) -> bool:
     """Insert a status-0 row for a newly created PR.
@@ -215,10 +217,85 @@ def insert_pr_commit(
     with conn:
         cursor = conn.execute(
             "INSERT OR IGNORE INTO pr_commit "
-            "(pr_number, rust_branch, ak_commit, status) VALUES (?, ?, ?, ?)",
-            (pr_number, rust_branch, ak_commit, STATUS_NO_PLAN),
+            "(pr_number, rust_branch, ak_branch, ak_commit, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (pr_number, rust_branch, ak_branch, ak_commit, STATUS_NO_PLAN),
         )
         return cursor.rowcount > 0
+
+
+def get_unblocked_for_status(
+    conn: sqlite3.Connection,
+    status: int,
+    blocking_status_min: int,
+    dep_column: str,
+    rust_branch: Optional[str] = None,
+) -> list:
+    """Return `pr_commit` rows in `status` whose dep_column is unblocked.
+
+    Unblocked means any of:
+    - `dep_column` IS NULL (no dependency declared)
+    - the dependency SHA is not present in pr_commit at all (out of batch)
+    - the dependency row's status is >= blocking_status_min
+
+    For step 6 (plan generation), use `dep_column="plan_dependency"` and
+    `blocking_status_min=STATUS_PLAN_APPROVED` (3).
+
+    For step 8 (implementation), use `dep_column="implementation_dependency"`
+    and `blocking_status_min=STATUS_IMPLEMENTATION_DONE` (4).
+    """
+    if dep_column not in ("plan_dependency", "implementation_dependency"):
+        raise ValueError(f"invalid dep_column: {dep_column!r}")
+    parts = ["SELECT * FROM pr_commit p WHERE p.status = ?"]
+    params: list = [status]
+    if rust_branch is not None:
+        parts.append("AND p.rust_branch = ?")
+        params.append(rust_branch)
+    parts.append(
+        f"AND (p.{dep_column} IS NULL "
+        f"OR NOT EXISTS (SELECT 1 FROM pr_commit d WHERE d.ak_commit = p.{dep_column}) "
+        f"OR EXISTS (SELECT 1 FROM pr_commit d WHERE d.ak_commit = p.{dep_column} "
+        f"AND d.status >= ?))"
+    )
+    params.append(blocking_status_min)
+    parts.append("ORDER BY p.pr_number")
+    rows = conn.execute(" ".join(parts), params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_plan_created(conn: sqlite3.Connection, pr_number: int) -> None:
+    """Status 1 -> 2."""
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET status = ?, last_error = NULL WHERE pr_number = ?",
+            (STATUS_PLAN_CREATED, pr_number),
+        )
+
+
+def mark_implementation_done(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    ak_branch: str,
+    ak_commit: str,
+    rust_branch: str,
+    rust_commit: str,
+) -> None:
+    """Status 3 -> 4 AND insert the new branch_commit correspondence row.
+
+    Single sqlite transaction so the two writes are atomic -- avoids the
+    risk of advancing the PR status without recording the new cursor.
+    """
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET status = ?, last_error = NULL WHERE pr_number = ?",
+            (STATUS_IMPLEMENTATION_DONE, pr_number),
+        )
+        conn.execute(
+            "INSERT OR IGNORE INTO branch_commit "
+            "(ak_branch, ak_commit, rust_branch, rust_commit) "
+            "VALUES (?, ?, ?, ?)",
+            (ak_branch, ak_commit, rust_branch, rust_commit),
+        )
 
 
 def mark_plan_approved(conn: sqlite3.Connection, pr_number: int) -> None:
