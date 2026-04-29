@@ -31,7 +31,7 @@ from typing import Sequence
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import db, git_ops, github, prompts, semaphore, streaming
+from . import db, git_ops, github, prompts, semaphore, streaming, worktree
 
 
 log = logging.getLogger(__name__)
@@ -420,15 +420,21 @@ def _run_plan_one(args, row):
         branch_name=branch_name,
     )
     try:
-        rc, _ = streaming.run_with_prefix(
-            ["r2", "sandbox", "claude", "-p", prompt], pr_number=pr_number,
-        )
-    except FileNotFoundError as e:
-        return f"r2 not on PATH: {e}", None
-    except Exception as e:
-        return f"r2 plan invocation crashed: {e}", None
-    if rc != 0:
-        return f"r2 plan failed (rc={rc})", None
+        with worktree.worktree_for_branch(args.rust_repo_path, branch_name) as wt:
+            try:
+                rc, _ = streaming.run_with_prefix(
+                    ["r2", "sandbox", "claude", "-p", prompt],
+                    pr_number=pr_number,
+                    cwd=str(wt),
+                )
+            except FileNotFoundError as e:
+                return f"r2 not on PATH: {e}", None
+            except Exception as e:
+                return f"r2 plan invocation crashed: {e}", None
+            if rc != 0:
+                return f"r2 plan failed (rc={rc})", None
+    except worktree.WorktreeError as e:
+        return f"worktree setup failed: {e}", None
     return None, None
 
 
@@ -444,21 +450,29 @@ def _run_impl_one(args, row):
         branch_name=branch_name,
     )
     try:
-        rc, _ = streaming.run_with_prefix(
-            ["r2", "sandbox", "claude", "-p", prompt], pr_number=pr_number,
-        )
-    except FileNotFoundError as e:
-        return f"r2 not on PATH: {e}", None
-    except Exception as e:
-        return f"r2 impl invocation crashed: {e}", None
-    if rc != 0:
-        return f"r2 impl failed (rc={rc})", None
-    # Capture the new rust commit so we can update branch_commit.
-    try:
-        git_ops.fetch(args.rust_repo_path, branch_name)
-        sha = git_ops.rev_parse(args.rust_repo_path, f"origin/{branch_name}")
-    except git_ops.GitError as e:
-        return f"failed to read new rust commit on {branch_name}: {e}", None
+        with worktree.worktree_for_branch(args.rust_repo_path, branch_name) as wt:
+            try:
+                rc, _ = streaming.run_with_prefix(
+                    ["r2", "sandbox", "claude", "-p", prompt],
+                    pr_number=pr_number,
+                    cwd=str(wt),
+                )
+            except FileNotFoundError as e:
+                return f"r2 not on PATH: {e}", None
+            except Exception as e:
+                return f"r2 impl invocation crashed: {e}", None
+            if rc != 0:
+                return f"r2 impl failed (rc={rc})", None
+            # Capture the new rust commit so we can update branch_commit.
+            # Done inside the `with` so a failed rev-parse still triggers
+            # worktree cleanup.
+            try:
+                git_ops.fetch(args.rust_repo_path, branch_name)
+                sha = git_ops.rev_parse(args.rust_repo_path, f"origin/{branch_name}")
+            except git_ops.GitError as e:
+                return f"failed to read new rust commit on {branch_name}: {e}", None
+    except worktree.WorktreeError as e:
+        return f"worktree setup failed: {e}", None
     return None, sha
 
 
