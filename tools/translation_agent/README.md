@@ -121,6 +121,18 @@ within a single sweep — they share one `ThreadPoolExecutor`. The
 unblocked predicate keeps work dependency-safe, so no two-pass scan is
 needed.
 
+Each plan and implementation task runs in **its own temporary git
+worktree** on the Rust repo (created from `origin/<branch_name>`,
+which Phase B already pushed). The inner Claude commits and pushes
+inside the worktree, then the worktree is removed on context exit
+(success or failure). This makes parallel runs safe regardless of the
+runner: the real Semaphore `r2 sandbox` provides container-level
+isolation, but even local runs via `dev-bin/r2` cannot clobber each
+other's edits because the worktrees physically separate them.
+
+Dep-eval (step 4) does NOT use a worktree -- it's read-only and emits
+JSON to stdout, so isolation buys nothing.
+
 Each agent's stdout (merged with stderr) is line-buffered and flushed
 every 100 lines, prefixed with `>>>>> From agent #<pr_number>` so
 operators can demultiplex the parallel streams.
@@ -193,8 +205,11 @@ translation_agent/
   r2.py              # non-streaming r2 sandbox claude wrapper
   semaphore.py       # Semaphore artifact push
   streaming.py       # line-buffered Popen wrapper with per-PR prefix
+  worktree.py        # per-PR git worktree context manager
+dev-bin/
+  r2                 # local-development emulation wrapper for r2 sandbox claude
 tests/
-  test_*.py          # 95 unit + integration tests
+  test_*.py          # 100 unit + integration tests
 pyproject.toml       # pytest + setuptools config + dev deps
 README.md
 ```

@@ -12,11 +12,31 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from contextlib import contextmanager
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from translation_agent import cli, db
+
+
+@pytest.fixture(autouse=True)
+def _patch_worktree(monkeypatch):
+    """Replace the real worktree context manager with a no-op for cli tests.
+
+    The plan/impl flow wraps `r2 sandbox claude` in `worktree.worktree_for_branch`
+    which would try real `git worktree add` against `args.rust_repo_path` and
+    fail (no such repo, no such branch). Since we already mock streaming for
+    every cli test, the worktree itself is incidental -- short-circuit it.
+    """
+    @contextmanager
+    def fake_wt(repo_path, branch_name):
+        yield Path("/fake/worktree") / branch_name.replace("/", "_")
+
+    monkeypatch.setattr(
+        "translation_agent.cli.worktree.worktree_for_branch", fake_wt
+    )
 
 
 def _run(*argv, db_path=None):
