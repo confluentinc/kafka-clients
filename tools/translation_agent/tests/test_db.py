@@ -88,6 +88,35 @@ def test_mark_plan_approved_missing_pr_raises(conn):
         db.mark_plan_approved(conn, 999)
 
 
+def test_get_latest_correspondence_none_when_empty(conn):
+    assert db.get_latest_correspondence(conn, "master") is None
+
+
+def test_get_latest_correspondence_returns_most_recent_for_branch(conn):
+    db.seed_correspondence(conn, "trunk", "ak1", "master", "rust1")
+    db.seed_correspondence(conn, "trunk", "ak2", "master", "rust2")
+    db.seed_correspondence(conn, "trunk", "ak3", "feature", "rust3")
+    row = db.get_latest_correspondence(conn, "master")
+    assert row["ak_commit"] == "ak2"
+    assert row["rust_commit"] == "rust2"
+    row2 = db.get_latest_correspondence(conn, "feature")
+    assert row2["ak_commit"] == "ak3"
+
+
+def test_insert_pr_commit_sets_status_zero(conn):
+    assert db.insert_pr_commit(conn, 42, "master", "akabc") is True
+    row = db.get_pr(conn, 42)
+    assert row["status"] == db.STATUS_NO_PLAN
+    assert row["rust_branch"] == "master"
+    assert row["ak_commit"] == "akabc"
+
+
+def test_insert_pr_commit_idempotent(conn):
+    assert db.insert_pr_commit(conn, 42, "master", "akabc") is True
+    assert db.insert_pr_commit(conn, 42, "master", "akabc") is False
+    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 1
+
+
 def test_mark_plan_approved_wrong_status_raises(conn):
     conn.execute(
         "INSERT INTO pr_commit (pr_number, rust_branch, ak_commit, status) "

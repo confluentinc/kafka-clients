@@ -129,6 +129,43 @@ def get_pr(conn: sqlite3.Connection, pr_number: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_latest_correspondence(
+    conn: sqlite3.Connection, rust_branch: str
+) -> Optional[dict]:
+    """Return the most recently inserted `branch_commit` row for `rust_branch`.
+
+    Used by the sweep mode (design step 2) to find the AK commit
+    corresponding to the current Rust-branch cursor. Ordering is by sqlite's
+    implicit rowid DESC, so the most recent INSERT wins. Returns None if the
+    Rust branch has never been seeded or translated to.
+    """
+    row = conn.execute(
+        "SELECT * FROM branch_commit WHERE rust_branch = ? ORDER BY rowid DESC LIMIT 1",
+        (rust_branch,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_pr_commit(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    rust_branch: str,
+    ak_commit: str,
+) -> bool:
+    """Insert a status-0 row for a newly created PR.
+
+    Idempotent on `pr_number`: returns True if a new row was inserted, False
+    if a row already existed for the PR.
+    """
+    with conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO pr_commit "
+            "(pr_number, rust_branch, ak_commit, status) VALUES (?, ?, ?, ?)",
+            (pr_number, rust_branch, ak_commit, STATUS_NO_PLAN),
+        )
+        return cursor.rowcount > 0
+
+
 def mark_plan_approved(conn: sqlite3.Connection, pr_number: int) -> None:
     """Transition a pr_commit row from status 2 (plan_created) to 3 (plan_approved).
 

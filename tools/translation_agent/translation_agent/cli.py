@@ -29,7 +29,7 @@ import logging
 import sys
 from typing import Sequence
 
-from . import db
+from . import db, git_ops, github
 
 
 log = logging.getLogger(__name__)
@@ -79,6 +79,10 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--ak-repo-path", help="Path to a local clone of the AK repo.")
     parser.add_argument("--ak-branch", help="AK branch to follow.")
     parser.add_argument("--rust-branch", help="Rust branch to write PRs against.")
+    parser.add_argument(
+        "--rust-repo-path", default=".",
+        help="Path to a local checkout of the Rust repo (default: %(default)s).",
+    )
     parser.add_argument(
         "--max-parallel", type=int, default=4,
         help="Max parallel r2 sandbox invocations (default: %(default)s).",
@@ -137,8 +141,126 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
 
 
 def _run_sweep(args: argparse.Namespace, conn) -> int:
-    log.info("Sweep mode not yet implemented -- Phases B/C/D/E pending")
+    required = ("ak_repo_path", "ak_branch", "rust_branch")
+    missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
+    if missing:
+        log.error("sweep mode requires: %s", ", ".join(missing))
+        return 2
+
+    # Step 2: find the AK cursor for this Rust branch.
+    cursor = db.get_latest_correspondence(conn, args.rust_branch)
+    if cursor is None:
+        log.error(
+            "No branch_commit row for rust_branch=%s. Use --seed to bootstrap.",
+            args.rust_branch,
+        )
+        return 1
+    log.info(
+        "Cursor: rust=%s/%s -> AK=%s/%s",
+        cursor["rust_branch"], cursor["rust_commit"],
+        cursor["ak_branch"], cursor["ak_commit"],
+    )
+    if cursor["ak_branch"] != args.ak_branch:
+        log.warning(
+            "Cursor's ak_branch=%s differs from --ak-branch=%s; using --ak-branch.",
+            cursor["ak_branch"], args.ak_branch,
+        )
+
+    # Step 3: get the next 10 AK commits.
+    try:
+        ak_commits = git_ops.next_commits(
+            args.ak_repo_path, since=cursor["ak_commit"], branch=args.ak_branch, n=10,
+        )
+    except git_ops.GitError as e:
+        log.error("Failed to read AK commits: %s", e)
+        return 1
+    if not ak_commits:
+        log.info("No new AK commits to translate.")
+        return 0
+    log.info("Found %d new AK commit(s) on %s", len(ak_commits), args.ak_branch)
+
+    # Step 3 (cont): create branches + draft PRs, insert into pr_commit.
+    new_pr_count = 0
+    for ak_commit in ak_commits:
+        rc = _create_pr_for_ak_commit(args, conn, ak_commit)
+        if rc:
+            new_pr_count += 1
+
+    log.info("Sweep done. Created %d new PR(s).", new_pr_count)
+    log.info(
+        "Phase C/D (deps eval, plan, implementation) not yet wired -- pending phases"
+    )
     return 0
+
+
+def _create_pr_for_ak_commit(
+    args: argparse.Namespace, conn, ak_commit: str,
+) -> bool:
+    """Create the branch + draft PR + pr_commit row for a single AK commit.
+
+    Returns True if a new pr_commit row was inserted, False otherwise (PR
+    already existed, or an error occurred and was logged). Errors here
+    don't abort the sweep -- we log and move on so other commits aren't
+    blocked by a single failure.
+    """
+    branch_name = github.branch_name_for_ak(ak_commit)
+    try:
+        subject = git_ops.commit_subject(args.ak_repo_path, ak_commit)
+    except git_ops.GitError as e:
+        log.error("Failed to read AK commit %s subject: %s", ak_commit[:12], e)
+        return False
+    title = github.pr_title_for_ak(ak_commit, subject)
+    body = github.pr_body_for_ak(ak_commit, subject)
+
+    if args.dry_run:
+        log.info(
+            "[dry-run] would push %s to branch %s and create draft PR %r",
+            f"origin/{args.rust_branch}", branch_name, title,
+        )
+        return False
+
+    try:
+        git_ops.push_new_branch(
+            args.rust_repo_path,
+            source_ref=f"origin/{args.rust_branch}",
+            target_branch=branch_name,
+        )
+    except git_ops.GitError as e:
+        log.error("Failed to push branch %s: %s", branch_name, e)
+        return False
+
+    try:
+        pr_number = github.create_draft_pr(
+            args.rust_repo_path,
+            base_branch=args.rust_branch,
+            head_branch=branch_name,
+            title=title, body=body,
+        )
+    except github.GhPrAlreadyExists:
+        # Idempotent re-run: recover the existing PR number so we can
+        # ensure pr_commit has a row for it.
+        try:
+            existing = github.find_pr_number_for_branch(
+                args.rust_repo_path, branch_name,
+            )
+        except github.GhError as e:
+            log.error("Failed to look up existing PR for %s: %s", branch_name, e)
+            return False
+        if existing is None:
+            log.error("PR reportedly exists for %s but lookup found none", branch_name)
+            return False
+        pr_number = existing
+        log.info("PR #%d already exists for %s -- not duplicating", pr_number, branch_name)
+    except github.GhError as e:
+        log.error("Failed to create PR for %s: %s", branch_name, e)
+        return False
+
+    inserted = db.insert_pr_commit(conn, pr_number, args.rust_branch, ak_commit)
+    if inserted:
+        log.info("Created PR #%d for AK commit %s", pr_number, ak_commit[:12])
+    else:
+        log.info("PR #%d already in pr_commit -- left unchanged", pr_number)
+    return inserted
 
 
 def main(argv: Sequence[str] | None = None) -> int:
