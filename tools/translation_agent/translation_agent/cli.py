@@ -200,9 +200,6 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         if not args.dry_run:
             db.set_last_error(conn, args.pr, err)
         return 1
-    if args.dry_run:
-        log.info("[dry-run] PR #%d impl completed -- DB status unchanged", args.pr)
-        return 0
     db.mark_implementation_done(
         conn, args.pr,
         ak_branch=pr["ak_branch"],
@@ -210,9 +207,10 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         rust_branch=pr["rust_branch"],
         rust_commit=sha,
     )
+    label = " [dry-run]" if args.dry_run else ""
     log.info(
-        "PR #%d -> status %d (implementation_done) rust_commit=%s",
-        args.pr, db.STATUS_IMPLEMENTATION_DONE, sha[:12],
+        "PR #%d -> status %d (implementation_done) rust_commit=%s%s",
+        args.pr, db.STATUS_IMPLEMENTATION_DONE, sha[:12], label,
     )
     return 0
 
@@ -445,17 +443,18 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                 if not args.dry_run:
                     db.set_last_error(conn, pr_number, err)
                 continue
-            if args.dry_run:
-                log.info(
-                    "[dry-run] PR #%d (%s) completed -- DB status unchanged",
-                    pr_number, kind,
-                )
-                continue
+            # Persist the status transition AND (for impl) the
+            # branch_commit row -- in both real and dry-run mode. Dry-run
+            # doesn't push to origin or to the Semaphore artifact, so the
+            # write stays purely local; the operator can clean up via
+            # `DELETE FROM pr_commit WHERE pr_number < 0` if they later
+            # want to switch this DB path to a real run.
+            label = " [dry-run]" if args.dry_run else ""
             if kind == "plan":
                 db.mark_plan_created(conn, pr_number)
                 log.info(
-                    "PR #%d -> status %d (plan_created)",
-                    pr_number, db.STATUS_PLAN_CREATED,
+                    "PR #%d -> status %d (plan_created)%s",
+                    pr_number, db.STATUS_PLAN_CREATED, label,
                 )
             else:
                 # impl: row["ak_branch"] should be populated by the sweep.
@@ -468,9 +467,9 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                     rust_commit=sha,
                 )
                 log.info(
-                    "PR #%d -> status %d (implementation_done) rust_commit=%s",
+                    "PR #%d -> status %d (implementation_done) rust_commit=%s%s",
                     pr_number, db.STATUS_IMPLEMENTATION_DONE,
-                    sha[:12] if sha else "??",
+                    sha[:12] if sha else "??", label,
                 )
 
 
@@ -525,8 +524,8 @@ def _run_impl_one(args, row):
     """Returns (err, new_rust_commit_sha).
 
     In dry-run mode: prompt augmented with "do not push", worktree
-    preserved on disk, no post-r2 fetch/rev-parse (nothing was pushed),
-    sha returned as None.
+    preserved on disk; SHA is read from the **local** branch ref
+    (claude's commits there) since nothing was pushed to origin.
     """
     pr_number = row["pr_number"]
     ak_commit = row["ak_commit"]
@@ -564,10 +563,20 @@ def _run_impl_one(args, row):
                     "[dry-run] PR #%d impl worktree preserved at %s",
                     pr_number, wt,
                 )
-                return None, None
-            # Capture the new rust commit so we can update branch_commit.
-            # Done inside the `with` so a failed rev-parse still triggers
-            # worktree cleanup.
+                # Read the LOCAL branch tip (no push happened, so
+                # origin/<branch> is stale). The local branch was
+                # advanced by claude's commits in the worktree.
+                try:
+                    sha = git_ops.rev_parse(args.rust_repo_path, branch_name)
+                except git_ops.GitError as e:
+                    return (
+                        f"failed to read local commit on {branch_name}: {e}",
+                        None,
+                    )
+                return None, sha
+            # Real run: capture the new rust commit from origin so we can
+            # update branch_commit. Done inside the `with` so a failed
+            # rev-parse still triggers worktree cleanup.
             try:
                 git_ops.fetch(args.rust_repo_path, branch_name)
                 sha = git_ops.rev_parse(args.rust_repo_path, f"origin/{branch_name}")

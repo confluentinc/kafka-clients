@@ -165,22 +165,29 @@ def test_pr_plan_approve_dry_run_no_r2_only_flips_status(tmp_path):
     ).fetchone()[0] == db.STATUS_PLAN_APPROVED
 
 
-def test_pr_plan_approve_dry_run_r2_present_runs_impl_no_status_advance(tmp_path):
+def test_pr_plan_approve_dry_run_r2_present_runs_impl_advances_status_locally(tmp_path):
     """With r2: --plan-approve --dry-run flips 2 -> 3, runs impl claude
-    in a worktree, but does NOT advance to 4 (no push -> no real commit)."""
+    in a preserved worktree, then advances to 4 + inserts branch_commit
+    -- all locally. Real `git push` and Semaphore artifact push are still
+    skipped, so the side effect doesn't escape the local DB."""
     db_path = str(tmp_path / "t.db")
     _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
     with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "ok")) as mstream, \
-         patch("translation_agent.cli._r2_available", return_value=True):
+         patch("translation_agent.cli._r2_available", return_value=True), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="local_dry_run_sha"):
         rc = _run("--pr", "42", "--plan-approve", "--dry-run", db_path=db_path)
     assert rc == 0
     mstream.assert_called_once()  # impl r2 ran
     conn = db.connect(db_path)
     pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 42").fetchone())
-    assert pr["status"] == db.STATUS_PLAN_APPROVED  # NOT advanced to 4
-    # branch_commit should be empty (no real commit pushed)
-    assert conn.execute("SELECT count(*) FROM branch_commit").fetchone()[0] == 0
+    assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
+    # branch_commit gets a row pointing at the local dry-run SHA.
+    bc = dict(conn.execute(
+        "SELECT * FROM branch_commit WHERE rust_commit = 'local_dry_run_sha'"
+    ).fetchone())
+    assert bc["ak_commit"] == "abc"
 
 
 def test_pr_plan_approve_impl_failure_persists_last_error(tmp_path):
@@ -607,8 +614,8 @@ def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
     """When --dry-run AND r2 is on PATH, dep-eval is invoked for real
     (read-only). The dep result is persisted, transitioning the synthetic
     row 0 -> 1. Then the plan phase ALSO runs (since r2 is available and
-    the row is now at status 1, unblocked) -- but the plan does NOT
-    advance the row to status 2 (dry-run preserves DB at 1)."""
+    the row is now at status 1, unblocked) AND advances status 1 -> 2
+    locally."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     json_resp = '{"plan_dependency": null, "implementation_dependency": null}'
@@ -629,16 +636,16 @@ def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
     conn = db.connect(db_path)
     row = dict(conn.execute("SELECT * FROM pr_commit").fetchone())
     assert row["pr_number"] < 0  # synthetic
-    assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # NOT advanced past 1
+    assert row["status"] == db.STATUS_PLAN_CREATED  # advanced 0 -> 1 -> 2
     assert row["plan_dependency"] is None
 
 
 # --- plan + implementation flow (sweep step 6 + 8) --------------------------
 
-def test_sweep_dry_run_plan_runs_when_r2_present_no_status_advance(tmp_path):
+def test_sweep_dry_run_plan_runs_when_r2_present_advances_status_locally(tmp_path):
     """With --dry-run + r2 + a status-1 row, the sweep invokes claude
-    for plan generation in a preserved worktree but does NOT advance
-    status to 2."""
+    for plan generation in a preserved worktree AND advances DB status
+    1 -> 2 (locally only -- no push, no artifact upload)."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     conn = db.connect(db_path)
@@ -658,7 +665,7 @@ def test_sweep_dry_run_plan_runs_when_r2_present_no_status_advance(tmp_path):
     mstream.assert_called_once()
     conn = db.connect(db_path)
     pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 90").fetchone())
-    assert pr["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # NOT advanced
+    assert pr["status"] == db.STATUS_PLAN_CREATED  # advanced 1 -> 2 locally
 
 
 def test_sweep_dry_run_plan_skipped_when_r2_absent(tmp_path):
