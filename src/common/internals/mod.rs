@@ -13,3 +13,5 @@
 // limitations under the License.
 
 //! Translation of `org.apache.kafka.common.internals`.
+
+pub mod topic;

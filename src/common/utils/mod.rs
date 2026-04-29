@@ -19,15 +19,22 @@ pub mod crc32c;
 pub mod exit;
 pub mod exponential_backoff;
 pub mod exponential_backoff_manager;
+pub mod log_context;
 pub mod mock_time;
 pub mod producer_id_and_epoch;
 pub mod system_time;
 pub mod time;
 pub mod timer;
+// `utils.rs` mirrors Java's `Utils.java` (the static-helpers grab-bag).
+// Clippy's `module_inception` lint flags the parent/child name match — we
+// keep it per CLAUDE.md rule 2 (each Java class lives in its own file).
+#[allow(clippy::module_inception)]
+pub mod utils;
 
 pub use crc32c::Crc32C;
 pub use exponential_backoff::ExponentialBackoff;
 pub use exponential_backoff_manager::ExponentialBackoffManager;
+pub use log_context::LogContext;
 pub use mock_time::MockTime;
 pub use producer_id_and_epoch::ProducerIdAndEpoch;
 pub use system_time::SystemTime;
