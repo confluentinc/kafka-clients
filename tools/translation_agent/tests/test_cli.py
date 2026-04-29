@@ -12,6 +12,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from unittest.mock import patch
+
 import pytest
 
 from translation_agent import cli, db
@@ -121,3 +123,140 @@ def test_help_runs():
     with pytest.raises(SystemExit) as exc:
         cli.main(["--help"])
     assert exc.value.code == 0
+
+
+# --- sweep mode -------------------------------------------------------------
+
+def _seed_db(db_path, ak_commit="ak0", rust_commit="r0"):
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.seed_correspondence(conn, "trunk", ak_commit, "master", rust_commit)
+    conn.close()
+
+
+def test_sweep_missing_args_returns_2(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    rc = _run("--ak-branch", "trunk", db_path=db_path)
+    assert rc == 2
+
+
+def test_sweep_no_seed_returns_1(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    rc = _run(
+        "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+        "--rust-branch", "master",
+        db_path=db_path,
+    )
+    assert rc == 1
+
+
+def test_sweep_no_new_commits_returns_0(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+
+
+def test_sweep_creates_prs_for_new_commits(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a", "ak_b"]), \
+         patch("translation_agent.cli.git_ops.commit_subject",
+               side_effect=lambda repo, c: f"subj for {c}"), \
+         patch("translation_agent.cli.git_ops.push_new_branch") as mpush, \
+         patch("translation_agent.cli.github.create_draft_pr",
+               side_effect=[101, 102]) as mcreate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    assert mpush.call_count == 2
+    assert mcreate.call_count == 2
+
+    conn = db.connect(db_path)
+    rows = {r["pr_number"]: dict(r) for r in
+            conn.execute("SELECT * FROM pr_commit ORDER BY pr_number").fetchall()}
+    assert set(rows) == {101, 102}
+    assert rows[101]["ak_commit"] == "ak_a"
+    assert rows[102]["ak_commit"] == "ak_b"
+    assert rows[101]["status"] == db.STATUS_NO_PLAN
+
+
+def test_sweep_dry_run_creates_no_prs(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="subj"), \
+         patch("translation_agent.cli.git_ops.push_new_branch") as mpush, \
+         patch("translation_agent.cli.github.create_draft_pr") as mcreate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master", "--dry-run",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mpush.assert_not_called()
+    mcreate.assert_not_called()
+    conn = db.connect(db_path)
+    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 0
+
+
+def test_sweep_recovers_pr_number_on_already_exists(tmp_path):
+    from translation_agent import github as gh
+
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               side_effect=gh.GhPrAlreadyExists("already exists")), \
+         patch("translation_agent.cli.github.find_pr_number_for_branch",
+               return_value=77):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    row = conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 77"
+    ).fetchone()
+    assert row is not None
+    assert row["ak_commit"] == "ak_a"
+
+
+def test_sweep_continues_after_gh_error_on_one_commit(tmp_path):
+    """One commit fails with GhError, the next still succeeds."""
+    from translation_agent import github as gh
+
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a", "ak_b"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               side_effect=[gh.GhError("boom"), 200]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    rows = conn.execute("SELECT pr_number, ak_commit FROM pr_commit").fetchall()
+    assert len(rows) == 1
+    assert dict(rows[0]) == {"pr_number": 200, "ak_commit": "ak_b"}
+
