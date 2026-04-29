@@ -94,6 +94,10 @@ impl CloseMode {
 pub struct Selector {
     /// Active channels indexed by connection ID.
     channels: HashMap<String, KafkaChannel>,
+    /// Cached IDs of `channels`, maintained in sync with insert/remove sites.
+    /// Lets `poll()` iterate without allocating a fresh `Vec<String>` and
+    /// cloning every key on every iteration.
+    cached_channel_ids: Vec<String>,
     /// Channels that have been explicitly muted.
     explicitly_muted_channels: HashSet<String>,
     /// Channels that have data buffered in intermediate buffers.
@@ -160,6 +164,7 @@ impl Selector {
     ) -> Self {
         Self {
             channels: HashMap::new(),
+            cached_channel_ids: Vec::new(),
             explicitly_muted_channels: HashSet::new(),
             channels_with_buffered_read: HashSet::new(),
             immediately_connected_keys: HashSet::new(),
@@ -523,6 +528,9 @@ impl Selector {
             Some(c) => c,
             None => return,
         };
+        if let Some(pos) = self.cached_channel_ids.iter().position(|x| x == id) {
+            self.cached_channel_ids.swap_remove(pos);
+        }
 
         channel.disconnect();
 
@@ -713,6 +721,7 @@ impl Selectable for Selector {
         // The connection completed immediately (Tokio connect is async but resolves when done)
         self.immediately_connected_keys.insert(id.to_string());
         self.channels.insert(id.to_string(), channel);
+        self.cached_channel_ids.push(id.to_string());
 
         if let Some(ref mut mgr) = self.idle_expiry_manager {
             mgr.update(id, nanos_now());
@@ -767,6 +776,9 @@ impl Selectable for Selector {
 
                     // Remove and close the channel
                     if let Some(mut ch) = self.channels.remove(&connection_id) {
+                        if let Some(pos) = self.cached_channel_ids.iter().position(|x| x == &connection_id) {
+                            self.cached_channel_ids.swap_remove(pos);
+                        }
                         ch.disconnect();
                         self.connected.retain(|c| c != &connection_id);
                         self.do_close(ch, false);
@@ -812,6 +824,15 @@ impl Selectable for Selector {
             None
         };
 
+        // Take ownership of the cached channel-ID list for the duration of
+        // this poll. Avoids re-allocating a `Vec<String>` and re-cloning every
+        // key on every loop iteration. The cache is maintained at the three
+        // permanent insert/remove sites (`connect()`, `close_channel_internal`,
+        // `send()` failure path), so in the steady state this is just a swap.
+        // We reconcile at the end in case `poll_channel_reads` triggered a
+        // close while we held the cache out.
+        let mut channel_ids = std::mem::take(&mut self.cached_channel_ids);
+
         // Poll loop: try non-blocking I/O on all channels, then yield to let
         // the tokio reactor deliver readiness events, repeating until we make
         // progress or the timeout expires. This matches Java NIO's
@@ -829,7 +850,6 @@ impl Selectable for Selector {
             }
 
             // Pass 1: Connect + Read all channels (sequential, fast)
-            let channel_ids: Vec<String> = self.channels.keys().cloned().collect();
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(id);
@@ -896,6 +916,27 @@ impl Selectable for Selector {
         {
             self.made_read_progress_last_poll = true; // no work is also "progress"
         }
+
+        // Restore cached channel IDs. In the steady state (no concurrent
+        // close/connect during this poll), `self.cached_channel_ids` is still
+        // empty from the `mem::take` above and the local `channel_ids` is
+        // already correct, so this is a single move. If a channel was closed
+        // via `close_channel_internal` during a `poll_channel_reads` await,
+        // its entry has already been removed from `self.cached_channel_ids`
+        // (which was empty, so a no-op there) but is still present in our
+        // local copy — drop it. If a channel was added via `connect` during
+        // the poll, its entry is in `self.cached_channel_ids` — merge it back.
+        if !self.cached_channel_ids.is_empty() {
+            channel_ids.retain(|id| self.channels.contains_key(id));
+            for new_id in std::mem::take(&mut self.cached_channel_ids) {
+                if !channel_ids.contains(&new_id) {
+                    channel_ids.push(new_id);
+                }
+            }
+        } else if channel_ids.len() != self.channels.len() {
+            channel_ids.retain(|id| self.channels.contains_key(id));
+        }
+        self.cached_channel_ids = channel_ids;
 
         let end_time = nanos_now();
 

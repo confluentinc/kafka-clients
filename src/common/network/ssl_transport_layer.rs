@@ -365,61 +365,12 @@ impl TransportLayer for SslTransportLayer {
 
     /// Reads decrypted plaintext from the TLS layer.
     ///
-    /// Pulls fresh ciphertext from the TCP socket via `read_tls`, advances the
-    /// rustls state machine via `process_new_packets`, then drains buffered
-    /// plaintext from `conn.reader()` into `dst`. `WouldBlock` on the TCP read
-    /// is normal — we still drain whatever plaintext is already buffered.
-    /// Returns `Ok(0)` only on TLS EOF (matching Tokio's `AsyncRead` contract).
+    /// Delegates to the synchronous [`Self::try_read`]: every step rustls needs
+    /// (`read_tls`, `process_new_packets`, `reader().read`) is non-blocking and
+    /// drives the TLS state machine entirely from in-memory buffers, so the
+    /// trait's async signature is satisfied by a no-await body.
     fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-        Box::pin(async {
-            let c = match &mut self.state {
-                SslState::Ready(c) => c,
-                SslState::Handshaking(_) => {
-                    return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"));
-                },
-                SslState::Closed => {
-                    return Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed"));
-                },
-            };
-
-            // Step 1: pull fresh ciphertext from the socket (non-blocking).
-            let mut tcp_eof = false;
-            let mut adapter = TryReadAdapter(&c.tcp);
-            match c.conn.read_tls(&mut adapter) {
-                Ok(0) => tcp_eof = true,
-                Ok(_) => {},
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {},
-                Err(e) => return Err(e),
-            }
-
-            // Step 2: drive the TLS state machine.
-            if let Err(e) = c.conn.process_new_packets() {
-                return Err(io::Error::other(format!("TLS error: {e}")));
-            }
-
-            // Step 3: drain buffered plaintext.
-            match c.conn.reader().read(dst) {
-                Ok(n) => {
-                    if n == 0 && tcp_eof {
-                        // Plaintext drained AND socket closed -> propagate EOF.
-                        Ok(0)
-                    } else if n == 0 {
-                        // No plaintext yet; ask caller to come back later.
-                        Err(io::Error::from(io::ErrorKind::WouldBlock))
-                    } else {
-                        Ok(n)
-                    }
-                },
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    if tcp_eof {
-                        Ok(0)
-                    } else {
-                        Err(e)
-                    }
-                },
-                Err(e) => Err(e),
-            }
-        })
+        Box::pin(async move { self.try_read(dst) })
     }
 
     /// Writes plaintext into the TLS layer (encrypted by rustls before being
@@ -533,6 +484,73 @@ impl TransportLayer for SslTransportLayer {
             SslState::Handshaking(_) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
             SslState::Closed => Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")),
         }
+    }
+
+    /// Synchronous fast path for reads — no `await`, no boxed future.
+    ///
+    /// rustls drives its read state machine entirely from in-memory buffers
+    /// (`read_tls` pulls ciphertext via the sync `TryReadAdapter` over
+    /// `TcpStream::try_read`; `process_new_packets` is sync; `reader().read`
+    /// drains decrypted plaintext sync). So unlike most TLS stacks, the SSL
+    /// read path has no inherent async dependency — the only reason the trait
+    /// `read` returned a `Future` was to share a signature with transports
+    /// that do (none in this codebase).
+    ///
+    /// Lets `Selector::attempt_read` skip the `tokio::time::timeout(ZERO, …)`
+    /// timer-driver overhead for SSL channels, mirroring the win the
+    /// plaintext path got from `try_read` in the original `fff28c5` commit.
+    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+        let c = match &mut self.state {
+            SslState::Ready(c) => c,
+            SslState::Handshaking(_) => {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"));
+            },
+            SslState::Closed => {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed"));
+            },
+        };
+
+        // Step 1: pull fresh ciphertext from the socket (non-blocking).
+        let mut tcp_eof = false;
+        let mut adapter = TryReadAdapter(&c.tcp);
+        match c.conn.read_tls(&mut adapter) {
+            Ok(0) => tcp_eof = true,
+            Ok(_) => {},
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {},
+            Err(e) => return Err(e),
+        }
+
+        // Step 2: drive the TLS state machine.
+        if let Err(e) = c.conn.process_new_packets() {
+            return Err(io::Error::other(format!("TLS error: {e}")));
+        }
+
+        // Step 3: drain buffered plaintext.
+        match c.conn.reader().read(dst) {
+            Ok(n) => {
+                if n == 0 && tcp_eof {
+                    // Plaintext drained AND socket closed -> propagate EOF.
+                    Ok(0)
+                } else if n == 0 {
+                    // No plaintext yet; ask caller to come back later.
+                    Err(io::Error::from(io::ErrorKind::WouldBlock))
+                } else {
+                    Ok(n)
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                if tcp_eof {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        }
+    }
+
+    fn supports_try_read(&self) -> bool {
+        true
     }
 }
 

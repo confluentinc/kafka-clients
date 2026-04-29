@@ -40,6 +40,7 @@ use crate::common::record::MemoryRecordsBuilder;
 use crate::common::record::RecordBatch;
 use crate::common::record::TimestampType;
 use crate::common::record::abstract_records;
+use crate::common::utils::CopyOnWriteMap;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::metadata_snapshot::MetadataSnapshot;
@@ -124,14 +125,23 @@ impl NodeLatencyStats {
 /// Translated from `RecordAccumulator.TopicInfo`.
 struct TopicInfo {
     /// Map from partition id to the per-partition batch deque.
-    batches: DashMap<i32, Mutex<VecDeque<ProducerBatch>>>,
+    ///
+    /// Translated from Java's `ConcurrentMap<Integer, Deque<ProducerBatch>>`
+    /// backed by `CopyOnWriteMap`. Reads (`ready`, `expired_batches`, `drain`)
+    /// take a lock-free snapshot via `snapshot()` and iterate without per-shard
+    /// locking. Writes (only on first record per partition, after warmup
+    /// essentially never) clone the inner HashMap and atomically swap.
+    batches: CopyOnWriteMap<i32, Arc<Mutex<VecDeque<ProducerBatch>>>>,
     /// The built-in partitioner for this topic.
     built_in_partitioner: Mutex<BuiltInPartitioner>,
 }
 
 impl TopicInfo {
     fn new(built_in_partitioner: BuiltInPartitioner) -> Self {
-        Self { batches: DashMap::new(), built_in_partitioner: Mutex::new(built_in_partitioner) }
+        Self {
+            batches: CopyOnWriteMap::new(),
+            built_in_partitioner: Mutex::new(built_in_partitioner),
+        }
     }
 }
 
@@ -346,18 +356,16 @@ impl RecordAccumulator {
                 partition
             };
 
-            // Ensure the deque for this partition exists, then drop the DashMap guard
-            // before any potential .await to avoid holding the shard lock across
-            // an await point (which would block ready()/drain() from iterating).
-            topic_info
+            // Ensure the deque for this partition exists. CopyOnWriteMap's
+            // compute_if_absent returns the Arc<Mutex<...>> directly so there's
+            // no shard guard held across any potential .await below.
+            let dq_arc = topic_info
                 .batches
-                .entry(effective_partition)
-                .or_insert_with(|| Mutex::new(VecDeque::new()));
+                .compute_if_absent(&effective_partition, || Arc::new(Mutex::new(VecDeque::new())));
 
             // Try to append to an existing batch.
             {
-                let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
-                let mut deque = dq_ref.lock().unwrap();
+                let mut deque = dq_arc.lock().unwrap();
 
                 // Check if we need to complete a previously disabled partition switch.
                 if partition == record_metadata::UNKNOWN_PARTITION
@@ -405,8 +413,7 @@ impl RecordAccumulator {
 
             // Try again under lock -- another thread might have created the batch.
             {
-                let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
-                let mut deque = dq_ref.lock().unwrap();
+                let mut deque = dq_arc.lock().unwrap();
 
                 if partition == record_metadata::UNKNOWN_PARTITION
                     && self.partition_changed(topic_info, &deque, cluster)
@@ -598,8 +605,11 @@ impl RecordAccumulator {
         let mut expired = Vec::new();
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
-            for deque_ref in topic_info.batches.iter() {
-                let deque_mutex = deque_ref.value();
+            // Lock-free snapshot of the partition→deque map. The Arc snapshot
+            // remains valid for the duration of this iteration even if other
+            // tasks insert new partitions concurrently.
+            let batches_snapshot = topic_info.batches.snapshot();
+            for deque_mutex in batches_snapshot.values() {
                 let mut deque = deque_mutex.lock().unwrap();
                 while let Some(batch) = deque.front() {
                     if batch.has_reached_delivery_timeout(self.delivery_timeout_ms as i64, now) {
@@ -626,11 +636,10 @@ impl RecordAccumulator {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
         let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
-        let dq_entry = topic_info
+        let dq_arc = topic_info
             .batches
-            .entry(tp.partition())
-            .or_insert_with(|| Mutex::new(VecDeque::new()));
-        let mut deque = dq_entry.value().lock().unwrap();
+            .compute_if_absent(&tp.partition(), || Arc::new(Mutex::new(VecDeque::new())));
+        let mut deque = dq_arc.lock().unwrap();
         deque.push_front(batch);
     }
 
@@ -686,8 +695,14 @@ impl RecordAccumulator {
         let mut queue_sizes: Option<Vec<i32>> = None;
         let mut partition_ids: Option<Vec<i32>> = None;
 
-        if self.enable_adaptive_partitioning && topic_info.batches.len() >= cluster.partitions_for_topic(topic).len() {
-            let len = topic_info.batches.len();
+        // Lock-free snapshot of the partition→deque map. Iterating the snapshot
+        // costs nothing per-partition (no per-shard locking like DashMap); we
+        // only acquire the per-deque mutex when we actually need to inspect
+        // its front batch.
+        let batches_snapshot = topic_info.batches.snapshot();
+
+        if self.enable_adaptive_partitioning && batches_snapshot.len() >= cluster.partitions_for_topic(topic).len() {
+            let len = batches_snapshot.len();
             queue_sizes = Some(vec![0; len]);
             partition_ids = Some(vec![0; len]);
         }
@@ -695,9 +710,8 @@ impl RecordAccumulator {
         let mut queue_sizes_index: i32 = -1;
         let exhausted = self.free.queued() > 0;
 
-        for entry in topic_info.batches.iter() {
-            let partition = *entry.key();
-            let deque_mutex = entry.value();
+        for (partition_id, deque_mutex) in batches_snapshot.iter() {
+            let partition = *partition_id;
             let part = TopicPartition::new(Arc::clone(topic), partition);
 
             let leader = cluster.leader_for(&part);
@@ -798,8 +812,9 @@ impl RecordAccumulator {
     pub fn has_undrained(&self) -> bool {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
-            for deque_ref in topic_info.batches.iter() {
-                let deque = deque_ref.value().lock().unwrap();
+            let batches_snapshot = topic_info.batches.snapshot();
+            for deque_mutex in batches_snapshot.values() {
+                let deque = deque_mutex.lock().unwrap();
                 if !deque.is_empty() {
                     return true;
                 }
@@ -871,7 +886,7 @@ impl RecordAccumulator {
                 },
             };
 
-            let deque_ref = match topic_info.batches.get(&tp.partition()) {
+            let deque_arc = match topic_info.batches.get(&tp.partition()) {
                 Some(dr) => dr,
                 None => {
                     if start == drain_index {
@@ -884,7 +899,7 @@ impl RecordAccumulator {
             let leader_epoch = metadata_snapshot.leader_epoch_for(&tp);
 
             let batch = {
-                let mut deque = deque_ref.lock().unwrap();
+                let mut deque = deque_arc.lock().unwrap();
                 let first = match deque.front_mut() {
                     Some(b) => b,
                     None => {
@@ -1087,8 +1102,9 @@ impl RecordAccumulator {
     fn abort_batches(&self) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
-            for deque_ref in topic_info.batches.iter() {
-                let mut deque = deque_ref.value().lock().unwrap();
+            let batches_snapshot = topic_info.batches.snapshot();
+            for deque_mutex in batches_snapshot.values() {
+                let mut deque = deque_mutex.lock().unwrap();
                 while let Some(mut batch) = deque.pop_front() {
                     batch.abort_record_appends();
                     let reason = KafkaError::with_message(Errors::UnknownServerError, "Producer is closed forcefully.");
@@ -1159,8 +1175,9 @@ impl RecordAccumulator {
     pub fn abort_undrained_batches(&self, reason: KafkaError) {
         for topic_info_ref in self.topic_info_map.iter() {
             let topic_info = topic_info_ref.value();
-            for deque_ref in topic_info.batches.iter() {
-                let mut deque = deque_ref.value().lock().unwrap();
+            let batches_snapshot = topic_info.batches.snapshot();
+            for deque_mutex in batches_snapshot.values() {
+                let mut deque = deque_mutex.lock().unwrap();
                 // Abort only batches that haven't been drained (i.e., not closed).
                 let mut i = 0;
                 while i < deque.len() {
@@ -1200,11 +1217,10 @@ impl RecordAccumulator {
         let tp = big_batch.topic_partition.clone();
 
         let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
-        let dq_entry = topic_info
+        let dq_arc = topic_info
             .batches
-            .entry(tp.partition())
-            .or_insert_with(|| Mutex::new(VecDeque::new()));
-        let mut deque = dq_entry.value().lock().unwrap();
+            .compute_if_absent(&tp.partition(), || Arc::new(Mutex::new(VecDeque::new())));
+        let mut deque = dq_arc.lock().unwrap();
 
         while let Some(batch) = sub_batches.pop_back() {
             self.incomplete.add(Arc::clone(&batch.produce_future));

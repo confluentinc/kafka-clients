@@ -14,11 +14,13 @@
 
 //! Common utility classes (org.apache.kafka.common.utils)
 
+pub mod copy_on_write_map;
 pub mod exponential_backoff;
 pub mod log_context;
 #[macro_use]
 pub mod log_macros;
 
+pub use copy_on_write_map::CopyOnWriteMap;
 pub use exponential_backoff::ExponentialBackoff;
 pub use log_context::LogContext;
 
