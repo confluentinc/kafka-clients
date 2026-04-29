@@ -59,6 +59,8 @@ def worktree_for_branch(
     *,
     cleanup: bool = True,
     base_remote_branch: Optional[str] = None,
+    ak_commit: Optional[str] = None,
+    ak_branch: str = "trunk",
 ) -> Iterator[Path]:
     """Create a temporary git worktree checked out at `branch_name`.
 
@@ -73,6 +75,13 @@ def worktree_for_branch(
     Phase B skips the push in dry-run, so `origin/<branch_name>` doesn't
     exist yet -- we fall back to the rust-branch tip (the same starting
     point Phase B's push *would have* used).
+
+    Pass `ak_commit=<sha>` to bootstrap the worktree for plan/impl agent
+    work: the orchestrator runs `make init` (initializes submodules and
+    creates the python venv), checks out `ak_commit` in the `kafka/`
+    submodule, and commits the submodule pointer bump as its own commit
+    BEFORE the agent runs. The agent's subsequent commits (e.g. "Design
+    document") sit on top of the bump commit.
 
     Commits made inside the worktree advance the local `branch_name` ref;
     a `git push` from inside also advances `origin/<branch_name>`. With
@@ -99,6 +108,9 @@ def worktree_for_branch(
             f"origin/{base}",
         )
         created = True
+        if ak_commit is not None:
+            _make_init(worktree_dir)
+            _bump_kafka_submodule(worktree_dir, ak_commit, ak_branch)
         yield worktree_dir
     finally:
         if cleanup:
@@ -115,3 +127,47 @@ def worktree_for_branch(
                     pass
             if worktree_dir.exists():
                 shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def _make_init(worktree_dir: Path) -> None:
+    """Run `make init` inside the worktree to populate submodules and venv.
+
+    Slow (typically 30-60 seconds): clones the kafka submodule into the
+    worktree (mostly using cached objects from the main repo), creates a
+    python venv, and pip-installs the project's dev deps. Required so
+    the spawned agent can read AK source under `kafka/` and run python
+    tests if needed.
+    """
+    proc = subprocess.run(
+        ["make", "init"],
+        cwd=str(worktree_dir),
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        raise WorktreeError(
+            f"make init in {worktree_dir} failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip()}"
+        )
+
+
+def _bump_kafka_submodule(
+    worktree_dir: Path, ak_commit: str, ak_branch: str = "trunk",
+) -> None:
+    """Check out `ak_commit` in `kafka/` and commit the submodule bump.
+
+    Fetches `ak_branch` from origin first to make sure `ak_commit` is
+    locally available (it may not be in the cached objects from the main
+    repo if the main repo's submodule pointer is at a different commit).
+    Then `git add kafka` + `git commit` records the pointer change as a
+    standalone commit, BEFORE the spawned agent does its own work. The
+    agent's subsequent commit (e.g. "Design document") sits on top.
+    """
+    kafka_dir = str(worktree_dir / "kafka")
+    _git(kafka_dir, "fetch", "origin", ak_branch)
+    _git(kafka_dir, "checkout", ak_commit)
+    _git(str(worktree_dir), "add", "kafka")
+    _git(
+        str(worktree_dir), "commit",
+        "-m", f"Bump kafka submodule to {ak_commit}",
+    )

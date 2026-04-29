@@ -31,7 +31,8 @@ def _patch_worktree(monkeypatch):
     every cli test, the worktree itself is incidental -- short-circuit it.
     """
     @contextmanager
-    def fake_wt(repo_path, branch_name, *, cleanup=True, base_remote_branch=None):
+    def fake_wt(repo_path, branch_name, *, cleanup=True,
+                base_remote_branch=None, ak_commit=None, ak_branch="trunk"):
         yield Path("/fake/worktree") / branch_name.replace("/", "_")
 
     monkeypatch.setattr(
