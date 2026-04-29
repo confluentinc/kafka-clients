@@ -31,7 +31,7 @@ from typing import Sequence
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import db, git_ops, github, prompts, streaming
+from . import db, git_ops, github, prompts, semaphore, streaming
 
 
 log = logging.getLogger(__name__)
@@ -57,6 +57,11 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--no-artifact-push", action="store_true",
         help="Skip the Semaphore artifact push at the end of the run.",
+    )
+    parser.add_argument(
+        "--artifact-name", default="translation_agent_db",
+        help="Semaphore project-artifact name for the sqlite DB "
+             "(default: %(default)s).",
     )
 
     # Mode flags. Mutually exclusive so we can keep the spec wording literal:
@@ -538,14 +543,33 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     conn = db.connect(args.db_path)
     db.migrate(conn)
+    # State-mutating modes push the DB back to Semaphore at the end (in a
+    # try/finally so partial work is still persisted). --seed mutates state
+    # too; --pr (status check, no --plan-approve) does not.
+    push_artifact = (
+        not args.no_artifact_push and not args.dry_run
+        and (args.seed or args.plan_approve or
+             (args.pr is None))  # sweep mode
+    )
+    rc = 1
     try:
         if args.seed:
-            return _run_seed(args, conn)
-        if args.pr is not None:
-            return _run_pr_mode(args, conn)
-        return _run_sweep(args, conn)
+            rc = _run_seed(args, conn)
+        elif args.pr is not None:
+            rc = _run_pr_mode(args, conn)
+        else:
+            rc = _run_sweep(args, conn)
     finally:
+        # Close the connection BEFORE pushing to flush WAL etc.
         conn.close()
+        if push_artifact:
+            try:
+                semaphore.push_project_artifact(args.artifact_name, args.db_path)
+            except FileNotFoundError as e:
+                log.error("Artifact push skipped: %s", e)
+            except Exception as e:
+                log.error("Artifact push failed: %s", e)
+    return rc
 
 
 if __name__ == "__main__":

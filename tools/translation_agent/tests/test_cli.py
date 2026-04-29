@@ -142,6 +142,125 @@ def test_mutually_exclusive_seed_and_pr():
         cli.main(["--seed", "--pr", "1"])
 
 
+# --- artifact push wiring (Phase E) -----------------------------------------
+
+def test_seed_pushes_artifact(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+        rc = _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
+                  "--rust-branch", "master", "--rust-commit", "r",
+                  db_path=db_path)
+    assert rc == 0
+    mpush.assert_called_once_with("translation_agent_db", db_path)
+
+
+def test_no_artifact_push_skips(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+        rc = _run("--no-artifact-push",
+                  "--seed", "--ak-branch", "trunk", "--ak-commit", "a",
+                  "--rust-branch", "master", "--rust-commit", "r",
+                  db_path=db_path)
+    assert rc == 0
+    mpush.assert_not_called()
+
+
+def test_pr_status_check_does_not_push(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+        rc = _run("--pr", "42", db_path=db_path)
+    assert rc == 0
+    # --pr <N> alone is read-only; no need to push.
+    mpush.assert_not_called()
+
+
+def test_dry_run_does_not_push(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+        rc = _run("--dry-run",
+                  "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+                  "--rust-branch", "master",
+                  db_path=db_path)
+    assert rc == 0
+    mpush.assert_not_called()
+
+
+def test_artifact_push_failure_does_not_crash(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    with patch("translation_agent.cli.semaphore.push_project_artifact",
+               side_effect=Exception("artifact server down")):
+        rc = _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
+                  "--rust-branch", "master", "--rust-commit", "r",
+                  db_path=db_path)
+    # Seed succeeded; artifact push failed but logged. RC reflects the seed.
+    assert rc == 0
+
+
+def test_artifact_push_runs_even_when_sweep_fails(tmp_path):
+    """If the sweep itself returns non-zero, we still push so the partial
+    state is captured."""
+    db_path = str(tmp_path / "t.db")
+    # No seed -> sweep returns 1.
+    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+        rc = _run("--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+                  "--rust-branch", "master",
+                  db_path=db_path)
+    assert rc == 1
+    mpush.assert_called_once()
+
+
+# --- end-to-end integration -------------------------------------------------
+
+def test_end_to_end_full_lifecycle(tmp_path):
+    """One sweep + one --plan-approve drives a row through 0 -> 1 -> 2 -> 3 -> 4."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path, ak_commit="ak_seed", rust_commit="rust_seed")
+
+    # Sweep run: creates PR for ak_a, dep-evals, plans it. Stops at status 2
+    # (no auto plan-approve).
+    dep_eval_json = '{"plan_dependency": null, "implementation_dependency": null}'
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               side_effect=[100]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=[(0, dep_eval_json), (0, "")]), \
+         patch("translation_agent.cli.semaphore.push_project_artifact") as mpush_sweep:
+        rc = _run("--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+                  "--rust-branch", "master",
+                  db_path=db_path)
+    assert rc == 0
+    mpush_sweep.assert_called_once()
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 100").fetchone())
+    assert pr["status"] == db.STATUS_PLAN_CREATED
+    assert pr["ak_branch"] == "trunk"
+    conn.close()
+
+    # Plan-approve run: 2 -> 3 -> 4, branch_commit updated.
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.fetch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_a_sha"), \
+         patch("translation_agent.cli.semaphore.push_project_artifact") as mpush_appr:
+        rc = _run("--pr", "100", "--plan-approve", db_path=db_path)
+    assert rc == 0
+    mpush_appr.assert_called_once()
+
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 100").fetchone())
+    assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_a"
+    assert bc["rust_commit"] == "rust_a_sha"
+
+
 def test_help_runs():
     with pytest.raises(SystemExit) as exc:
         cli.main(["--help"])
