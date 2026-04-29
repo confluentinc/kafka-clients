@@ -100,6 +100,14 @@ the commits are pushed.
 """
 
 
+DRY_RUN_NOTE = """\
+NOTE: This is a dry run. After committing locally, do NOT run `git push`.
+The worktree and your commits will be preserved on disk for inspection
+but will not be pushed to origin. The orchestrator will not advance the
+PR's status in its sqlite DB. A subsequent real run will re-do this work.
+"""
+
+
 # Match a brace-block that contains both expected keys, lenient about
 # whitespace/order. Anchored on the keys, not the braces, so we tolerate
 # the inner Claude printing log lines around the JSON.

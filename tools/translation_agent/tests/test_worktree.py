@@ -92,6 +92,26 @@ def test_worktree_for_branch_swallows_cleanup_failure():
                 raise ValueError("boom")
 
 
+def test_worktree_for_branch_cleanup_false_preserves_dir():
+    """With cleanup=False the worktree is left on disk for inspection."""
+    calls = []
+
+    def record(args, **kwargs):
+        calls.append(args[3:])
+        return _completed(0)
+
+    with patch.object(worktree.subprocess, "run", side_effect=record):
+        with worktree.worktree_for_branch("/repo", "br", cleanup=False) as wt:
+            yielded = wt
+    # No worktree-remove call should have been made.
+    assert not any(a[:3] == ["worktree", "remove", "--force"] for a in calls)
+    # The yielded path is still on disk.
+    assert yielded.exists()
+    # Manual cleanup so the test doesn't pollute /tmp.
+    import shutil
+    shutil.rmtree(yielded, ignore_errors=True)
+
+
 def test_worktree_branch_name_with_slash_sanitized_in_temp_prefix():
     """Branch names with slashes must produce valid temp-dir paths."""
     seen_prefix = []

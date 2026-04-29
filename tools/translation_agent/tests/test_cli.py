@@ -31,11 +31,37 @@ def _patch_worktree(monkeypatch):
     every cli test, the worktree itself is incidental -- short-circuit it.
     """
     @contextmanager
-    def fake_wt(repo_path, branch_name):
+    def fake_wt(repo_path, branch_name, *, cleanup=True):
         yield Path("/fake/worktree") / branch_name.replace("/", "_")
 
     monkeypatch.setattr(
         "translation_agent.cli.worktree.worktree_for_branch", fake_wt
+    )
+
+
+@pytest.fixture(autouse=True)
+def _patch_r2_default_absent(monkeypatch):
+    """Default `_r2_available()` to False for all CLI tests.
+
+    Without this, tests that don't explicitly mock streaming would
+    invoke real `r2 sandbox claude` if the developer happened to have
+    `dev-bin/` on PATH (which the README recommends). Tests that need
+    r2 available re-patch this to True.
+    """
+    monkeypatch.setattr("translation_agent.cli._r2_available", lambda: False)
+
+
+@pytest.fixture(autouse=True)
+def _patch_streaming_default_fnf(monkeypatch):
+    """Default streaming.run_with_prefix to raise FileNotFoundError so
+    no test accidentally invokes real r2 even in non-dry-run paths
+    (which don't gate on _r2_available). Tests that exercise the
+    streaming path patch this explicitly with their own behavior.
+    """
+    def fake(*args, **kwargs):
+        raise FileNotFoundError("r2 not on PATH (test default)")
+    monkeypatch.setattr(
+        "translation_agent.cli.streaming.run_with_prefix", fake
     )
 
 
@@ -123,10 +149,13 @@ def test_pr_plan_approve_transitions_2_to_3_and_runs_impl(tmp_path):
     assert bc["ak_branch"] == "trunk"
 
 
-def test_pr_plan_approve_dry_run_only_flips_status(tmp_path):
+def test_pr_plan_approve_dry_run_no_r2_only_flips_status(tmp_path):
+    """Without r2: --plan-approve --dry-run flips 2 -> 3 in DB but does
+    not invoke claude for impl."""
     db_path = str(tmp_path / "t.db")
     _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
-    with patch("translation_agent.cli.streaming.run_with_prefix") as mstream:
+    with patch("translation_agent.cli.streaming.run_with_prefix") as mstream, \
+         patch("translation_agent.cli._r2_available", return_value=False):
         rc = _run("--pr", "42", "--plan-approve", "--dry-run", db_path=db_path)
     assert rc == 0
     mstream.assert_not_called()
@@ -134,6 +163,24 @@ def test_pr_plan_approve_dry_run_only_flips_status(tmp_path):
     assert conn.execute(
         "SELECT status FROM pr_commit WHERE pr_number = 42"
     ).fetchone()[0] == db.STATUS_PLAN_APPROVED
+
+
+def test_pr_plan_approve_dry_run_r2_present_runs_impl_no_status_advance(tmp_path):
+    """With r2: --plan-approve --dry-run flips 2 -> 3, runs impl claude
+    in a worktree, but does NOT advance to 4 (no push -> no real commit)."""
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "ok")) as mstream, \
+         patch("translation_agent.cli._r2_available", return_value=True):
+        rc = _run("--pr", "42", "--plan-approve", "--dry-run", db_path=db_path)
+    assert rc == 0
+    mstream.assert_called_once()  # impl r2 ran
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 42").fetchone())
+    assert pr["status"] == db.STATUS_PLAN_APPROVED  # NOT advanced to 4
+    # branch_commit should be empty (no real commit pushed)
+    assert conn.execute("SELECT count(*) FROM branch_commit").fetchone()[0] == 0
 
 
 def test_pr_plan_approve_impl_failure_persists_last_error(tmp_path):
@@ -558,8 +605,10 @@ def test_sweep_dep_eval_dry_run_skips_r2_when_r2_absent(tmp_path):
 
 def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
     """When --dry-run AND r2 is on PATH, dep-eval is invoked for real
-    (it's read-only) and the resulting deps are persisted, transitioning
-    the synthetic row 0 -> 1."""
+    (read-only). The dep result is persisted, transitioning the synthetic
+    row 0 -> 1. Then the plan phase ALSO runs (since r2 is available and
+    the row is now at status 1, unblocked) -- but the plan does NOT
+    advance the row to status 2 (dry-run preserves DB at 1)."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     json_resp = '{"plan_dependency": null, "implementation_dependency": null}'
@@ -567,7 +616,7 @@ def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
          patch("translation_agent.cli.streaming.run_with_prefix",
-               return_value=(0, json_resp)) as mstream, \
+               side_effect=[(0, json_resp), (0, "")]) as mstream, \
          patch("translation_agent.cli._r2_available", return_value=True):
         rc = _run(
             "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
@@ -575,15 +624,61 @@ def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
             db_path=db_path,
         )
     assert rc == 0
-    mstream.assert_called_once()  # r2 dep-eval ran
+    # 1 dep-eval call + 1 plan call (cascade after dep-eval transitioned to 1).
+    assert mstream.call_count == 2
     conn = db.connect(db_path)
     row = dict(conn.execute("SELECT * FROM pr_commit").fetchone())
     assert row["pr_number"] < 0  # synthetic
-    assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # NOT advanced past 1
     assert row["plan_dependency"] is None
 
 
 # --- plan + implementation flow (sweep step 6 + 8) --------------------------
+
+def test_sweep_dry_run_plan_runs_when_r2_present_no_status_advance(tmp_path):
+    """With --dry-run + r2 + a status-1 row, the sweep invokes claude
+    for plan generation in a preserved worktree but does NOT advance
+    status to 2."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 90, "master", "trunk", "ak_z")
+    db.update_dependencies(conn, 90, None, None)
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli._r2_available", return_value=True):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master", "--dry-run",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstream.assert_called_once()
+    conn = db.connect(db_path)
+    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 90").fetchone())
+    assert pr["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # NOT advanced
+
+
+def test_sweep_dry_run_plan_skipped_when_r2_absent(tmp_path):
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 91, "master", "trunk", "ak_w")
+    db.update_dependencies(conn, 91, None, None)
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix") as mstream, \
+         patch("translation_agent.cli._r2_available", return_value=False):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master", "--dry-run",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstream.assert_not_called()
+
 
 def test_sweep_plan_step_transitions_status_1_to_2(tmp_path):
     db_path = str(tmp_path / "t.db")

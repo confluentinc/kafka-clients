@@ -182,15 +182,27 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         )
         return 1
 
-    if args.dry_run:
-        log.info("[dry-run] would implement PR #%d", args.pr)
+    if args.dry_run and not _r2_available():
+        log.info(
+            "[dry-run] would implement PR #%d -- r2 not on PATH, skipping",
+            args.pr,
+        )
         return 0
+    if args.dry_run:
+        log.info(
+            "[dry-run] r2 is on PATH -- running impl (no push, worktree "
+            "preserved, DB status unchanged)"
+        )
 
     err, sha = _run_impl_one(args, pr)
     if err:
         log.error("PR #%d implementation failed: %s", args.pr, err)
-        db.set_last_error(conn, args.pr, err)
+        if not args.dry_run:
+            db.set_last_error(conn, args.pr, err)
         return 1
+    if args.dry_run:
+        log.info("[dry-run] PR #%d impl completed -- DB status unchanged", args.pr)
+        return 0
     db.mark_implementation_done(
         conn, args.pr,
         ak_branch=pr["ak_branch"],
@@ -390,12 +402,28 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
         len(plan_rows), len(impl_rows), args.max_parallel,
     )
 
-    if args.dry_run:
+    # Extended dry-run: with r2 on PATH we DO run plan/impl r2 calls
+    # inside per-PR worktrees (which are preserved for inspection), but
+    # the prompt tells claude not to push and we don't advance DB status
+    # or update branch_commit. Without r2 we just log "would ..." like
+    # before.
+    if args.dry_run and not _r2_available():
         for r in plan_rows:
-            log.info("[dry-run] would generate plan for PR #%d", r["pr_number"])
+            log.info(
+                "[dry-run] would generate plan for PR #%d -- r2 not on PATH, skipping",
+                r["pr_number"],
+            )
         for r in impl_rows:
-            log.info("[dry-run] would implement PR #%d", r["pr_number"])
+            log.info(
+                "[dry-run] would implement PR #%d -- r2 not on PATH, skipping",
+                r["pr_number"],
+            )
         return
+    if args.dry_run:
+        log.info(
+            "[dry-run] r2 is on PATH -- running plan/impl tasks (no push, "
+            "worktree preserved, DB status unchanged)"
+        )
 
     with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
         futures = {}
@@ -414,7 +442,14 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                 sha = None
             if err:
                 log.error("PR #%d (%s): %s", pr_number, kind, err)
-                db.set_last_error(conn, pr_number, err)
+                if not args.dry_run:
+                    db.set_last_error(conn, pr_number, err)
+                continue
+            if args.dry_run:
+                log.info(
+                    "[dry-run] PR #%d (%s) completed -- DB status unchanged",
+                    pr_number, kind,
+                )
                 continue
             if kind == "plan":
                 db.mark_plan_created(conn, pr_number)
@@ -440,7 +475,11 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
 
 
 def _run_plan_one(args, row):
-    """Returns (err, None). err is None on success."""
+    """Returns (err, None). err is None on success.
+
+    In dry-run mode the worktree is preserved on disk for inspection and
+    the prompt is augmented with a "do not push" suffix.
+    """
     pr_number = row["pr_number"]
     ak_commit = row["ak_commit"]
     branch_name = github.branch_name_for_ak(ak_commit)
@@ -450,8 +489,12 @@ def _run_plan_one(args, row):
         pr_number=pr_number,
         branch_name=branch_name,
     )
+    if args.dry_run:
+        prompt = prompt + "\n" + prompts.DRY_RUN_NOTE
     try:
-        with worktree.worktree_for_branch(args.rust_repo_path, branch_name) as wt:
+        with worktree.worktree_for_branch(
+            args.rust_repo_path, branch_name, cleanup=not args.dry_run,
+        ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
                     ["r2", "sandbox", "claude", "-p", prompt],
@@ -464,13 +507,23 @@ def _run_plan_one(args, row):
                 return f"r2 plan invocation crashed: {e}", None
             if rc != 0:
                 return f"r2 plan failed (rc={rc})", None
+            if args.dry_run:
+                log.info(
+                    "[dry-run] PR #%d plan worktree preserved at %s",
+                    pr_number, wt,
+                )
     except worktree.WorktreeError as e:
         return f"worktree setup failed: {e}", None
     return None, None
 
 
 def _run_impl_one(args, row):
-    """Returns (err, new_rust_commit_sha)."""
+    """Returns (err, new_rust_commit_sha).
+
+    In dry-run mode: prompt augmented with "do not push", worktree
+    preserved on disk, no post-r2 fetch/rev-parse (nothing was pushed),
+    sha returned as None.
+    """
     pr_number = row["pr_number"]
     ak_commit = row["ak_commit"]
     branch_name = github.branch_name_for_ak(ak_commit)
@@ -480,8 +533,12 @@ def _run_impl_one(args, row):
         pr_number=pr_number,
         branch_name=branch_name,
     )
+    if args.dry_run:
+        prompt = prompt + "\n" + prompts.DRY_RUN_NOTE
     try:
-        with worktree.worktree_for_branch(args.rust_repo_path, branch_name) as wt:
+        with worktree.worktree_for_branch(
+            args.rust_repo_path, branch_name, cleanup=not args.dry_run,
+        ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
                     ["r2", "sandbox", "claude", "-p", prompt],
@@ -494,6 +551,12 @@ def _run_impl_one(args, row):
                 return f"r2 impl invocation crashed: {e}", None
             if rc != 0:
                 return f"r2 impl failed (rc={rc})", None
+            if args.dry_run:
+                log.info(
+                    "[dry-run] PR #%d impl worktree preserved at %s",
+                    pr_number, wt,
+                )
+                return None, None
             # Capture the new rust commit so we can update branch_commit.
             # Done inside the `with` so a failed rev-parse still triggers
             # worktree cleanup.

@@ -147,22 +147,37 @@ pytest
 
 ## Dry-run mode
 
-`--dry-run` skips all destructive remote operations (`git push`,
-`gh pr create`, `r2` plan/impl invocations, the Semaphore artifact push)
-and any commit-creating worktree work, but it DOES:
+`--dry-run` skips destructive remote operations (`git push`,
+`gh pr create`, the Semaphore artifact push) and remote-mutating DB
+state changes (no `mark_plan_created` / `mark_implementation_done`,
+no `branch_commit` insert), but DOES:
 
 - Insert `pr_commit` rows with **synthetic negative `pr_number`s** derived
   from a sha1 of the AK commit (deterministic across re-runs, so the
   insert is idempotent). Real GitHub PR numbers are positive, so the
   sign distinguishes them unambiguously.
-- Run dep-eval `r2 sandbox claude` calls and persist the resulting
-  dependencies (status 0 → 1) **iff `r2` is on PATH**. Dep-eval is
-  read-only — it just emits JSON — so it's safe to run.
+- **If `r2` is on PATH**, run all three claude phases for real:
+  - **Dep-eval** (read-only — emits JSON): persists deps and transitions
+    rows 0 → 1.
+  - **Plan generation**: runs in a per-PR worktree (preserved on disk
+    for inspection), with the prompt augmented to tell claude NOT to
+    `git push`. DB status stays at 1.
+  - **Implementation**: same — runs in a preserved per-PR worktree, no
+    push, DB status stays at 3 (or stays at 2 → 3 → stuck-at-3 in the
+    `--plan-approve` cascade).
 
-Plan generation and implementation r2 calls remain skipped in dry-run
-because they make commits and push them.
+If `r2` is **not** on PATH, all three phases just log "would ...".
 
-To clean up synthetic rows after dry-run testing:
+The preserved worktrees live at `/tmp/translation-agent-<branch>-XXXXXX`
+so the operator can `cd` into them and inspect what claude produced.
+Clean up with:
+
+```bash
+rm -rf /tmp/translation-agent-*
+git -C <rust-repo> worktree prune
+```
+
+To clean up synthetic `pr_commit` rows after dry-run testing:
 
 ```bash
 sqlite3 ./translation_agent.db "DELETE FROM pr_commit WHERE pr_number < 0"
