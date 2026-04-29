@@ -13,3 +13,15 @@
 // limitations under the License.
 
 //! Translation of `org.apache.kafka.common.config`.
+
+pub mod abstract_config;
+pub mod config_def;
+pub mod config_exception;
+pub mod sasl_configs;
+pub mod ssl_configs;
+pub mod topic_config;
+
+pub use abstract_config::AbstractConfig;
+pub use config_def::{
+    ConfigDef, ConfigKey, ConfigValue, Importance, NonNullValidator, Password, Range, Type, ValidString, Validator,
+};
