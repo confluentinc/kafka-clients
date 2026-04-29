@@ -56,23 +56,25 @@ PLAN_GENERATION_PROMPT_TEMPLATE = """\
 You are the Manager agent for the Confluent Kafka Rust translation
 project, following the workflow in `.claude/rules/agent-roles.md`.
 
-Your task: write a translation plan for Apache Kafka commit {ak_commit}
-into Rust. Save the plan to:
+Write a translation design document for the Apache Kafka commit listed
+below. The document must be saved at the file path below using the
+Write tool. After writing, commit it and push it.
 
-    ./design/history/{pr_number}_description/plan.md
-
-After writing the plan, commit it with the message "Design document"
-and push it to the branch `{branch_name}`.
+File to write: ./design/history/{pr_number}_description/plan.md
+Commit message: "Design document"
+Push target: branch `{branch_name}`
 
 Inputs:
-- Target AK commit: {ak_commit}
-- AK branch:        {ak_branch}
-- PR number:        #{pr_number}
-- Rust branch:      {branch_name}
-- Rust repo root:   the current working directory
+- AK commit:       {ak_commit}
+- AK branch:       {ak_branch}
+- PR number:       #{pr_number}
+- Rust branch:     {branch_name}
+- Rust repo root:  current working directory
 
-Do NOT begin implementation. Only the plan, the commit, and the push.
-Exit 0 on success.
+IMPORTANT: do NOT enter plan mode. Use the Write tool directly to
+create the file, then `git add`, `git commit -m "Design document"`,
+and `git push`. Do not propose, do not ask for approval, do not call
+ExitPlanMode. Just write, commit, push. Exit 0 on success.
 """
 
 
@@ -80,23 +82,24 @@ IMPLEMENTATION_PROMPT_TEMPLATE = """\
 You are the Manager agent for the Confluent Kafka Rust translation
 project, following the workflow in `.claude/rules/agent-roles.md`.
 
-Your task: execute the existing translation plan at:
+Execute the translation task described in the design document at:
 
     ./design/history/{pr_number}_description/plan.md
 
-Spawn the Actor agent to implement the changes; spawn the Critic agent
-to review them; iterate through the comment/fix loop until no comments
-remain. Push all generated commits to the branch `{branch_name}`.
+Spawn the Actor agent to implement the changes the document describes;
+spawn the Critic agent to review them; iterate through the comment/fix
+loop until no comments remain. Push all commits to `{branch_name}`.
 
 Inputs:
-- Target AK commit: {ak_commit}
-- AK branch:        {ak_branch}
-- PR number:        #{pr_number}
-- Rust branch:      {branch_name}
-- Rust repo root:   the current working directory
+- AK commit:       {ak_commit}
+- AK branch:       {ak_branch}
+- PR number:       #{pr_number}
+- Rust branch:     {branch_name}
+- Rust repo root:  current working directory
 
-Exit 0 only when the implementation is complete, all tests pass, and
-the commits are pushed.
+IMPORTANT: do NOT enter plan mode. Read the design document and
+execute it directly. Exit 0 only when the implementation is complete,
+all tests pass, and the commits are pushed.
 """
 
 
