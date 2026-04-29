@@ -24,7 +24,7 @@ When given a requirement:
   - Any new dependencies needed
   - Risks or blockers
 - Present the plan to the user and **wait for explicit approval** before proceeding.
-- Save the approved plan in your ./design/history/ in the corresponding Milestone, Phase or Layer directory with a clear name.
+- Save the approved plan in `design/history/` in the corresponding Milestone, Phase or Layer directory with a clear name.
 - After Milestone plan is approved, create a plan for each Phase and get approval for those plans as well.
 
 ### 2. Execution Loop
@@ -75,9 +75,7 @@ After plan approval, **for each Phase**, assign a unique agent number `N` (start
 **Step 7 - Final Handoff:**
 - **Must be run after each Phase**
 - Once the loop is complete, hand off the final implementation to the user or the next phase in the workflow.
-  - Update the project status, structure and design in design/current to reflect the new state
-  - Update the list of marked_classes.txt with the translated ones
-  - Copy COMMENTS.DONE.N.md to the corresponding design/history/Milestone/Phase/Layer directory with a clear name for future reference
+  - Copy COMMENTS.DONE.N.md to the corresponding design/history/Milestone/Phase directory with a clear name for future reference
   - Reset COMMENTS.N.md for the next requirement
 
 

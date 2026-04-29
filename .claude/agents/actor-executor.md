@@ -45,6 +45,8 @@ Before committing, review your own code for:
 - Proper rustdoc translated from javadoc
 - No unnecessary heap allocations (stack when possible)
 - Public API: most general borrowed form for inputs, immutable returns, no unnecessary copying of key/value/header byte arrays
+- **If the translated class is on the send path**: audit for per-message heap allocations (intermediate copy buffers, `String` clones for identifiers, `Box<dyn Future>` per send, per-message `tokio::spawn`). Verify wire sends use `IoSlice`/`write_vectored`, not a single assembled buffer.
+- **Tokio pitfalls**: check any `select!` arms for cancellation safety; ensure no `MutexGuard` is held across an `.await`
 
 ### 5. Commit
 - Commit with a clear, descriptive message explaining what was done.
@@ -55,13 +57,15 @@ Before committing, review your own code for:
 - Continue until the task is fully complete and all checks pass.
 
 ## Key Translation Rules (Summary)
-- Java packages → Rust modules (e.g., `org.apache.kafka.clients.consumer` → `clients::consumer`)
+- Java packages → Rust modules (e.g., `org.apache.kafka.clients.consumer` → `consumer`; `clients` must NOT appear in module or folder names)
 - PascalCase class names preserved, camelCase methods → snake_case
 - Exceptions → `Result<T, KafkaError>` with `is_retriable()`, `is_fatal()`, `txn_requires_abort()`
 - No `panic!` in public API except unrecoverable errors (OOM, division by zero)
-- Callbacks → await after async call; non-blocking callbacks → `tokio::task::spawn`
+- Callbacks → await after async call; non-blocking callbacks → `tokio::task::spawn`; callback obligation survives async translation — fire at the same lifecycle point
+- `tokio::select!` cancels the losing branch mid-execution — never put side-effectful operations in a `select!` arm unless the future is cancellation-safe
 - Non-blocking IO with Tokio, single Selector pattern
 - Big-endian wire protocol, varint encoding per wire-protocol.md
+- Zero-copy through the full write path: serialize directly into the batch buffer, no finalization copies, use `IoSlice`/`write_vectored` for wire sends
 
 ## Update your agent memory
 As you discover codepaths, module locations, architectural decisions, test patterns, common pitfalls, and translation edge cases in this codebase, update your agent memory. Write concise notes about what you found and where.
