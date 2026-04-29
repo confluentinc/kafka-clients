@@ -4,16 +4,22 @@
 # Translates the orchestrator's invocation:
 #     r2 sandbox claude -p "<prompt>"
 # into a direct call to the local Claude Code CLI:
-#     claude -p "<prompt>"
+#     claude --allowedTools <list> -p "<prompt>"
 #
-# Note: the local claude will prompt the operator for permission on each
-# tool call. That makes it slow and noisy compared to the real Semaphore
-# r2 sandbox (which runs Claude fully autonomously inside an isolated
-# container), but it's far safer for local development -- you stay in
-# the loop on every filesystem write, commit, and push.
+# The pre-approved tool list lets headless claude actually do dep
+# analysis (read AK source, query git in the kafka submodule) and, in
+# plan/impl mode, commit and push from within the per-PR worktree the
+# orchestrator created. Without these, headless `claude -p` denies its
+# own tool calls and degrades to "I cannot complete the analysis".
+#
+# Note: this list is broader than claude's default deny-everything floor
+# but narrower than `--dangerously-skip-permissions`. The blast radius
+# is bounded by the per-PR worktree (for plan/impl) and by the
+# operator's filesystem permissions (for dep-eval, which only reads).
+# Edit the ALLOWED_TOOLS array below if your prompts need more.
 #
 # Usage:
-#   1. Add this directory to PATH for the shell that will run translation-agent:
+#   1. Add this directory to PATH:
 #        export PATH="$(git rev-parse --show-toplevel)/tools/translation_agent/dev-bin:$PATH"
 #   2. Run translation-agent normally; r2 invocations are intercepted by
 #      this wrapper and dispatched to the local `claude` CLI.
@@ -31,4 +37,30 @@ if ! command -v claude >/dev/null 2>&1; then
     exit 127
 fi
 
-exec claude "$@"
+# Tool allow-list. Covers both dep-eval (read AK + git inspect) and
+# plan/impl (commit + push from the per-PR worktree).
+ALLOWED_TOOLS=(
+    Read
+    Edit
+    Write
+    "Bash(git *)"
+    "Bash(cargo *)"
+    "Bash(ls *)"
+    "Bash(cat *)"
+    "Bash(grep *)"
+    "Bash(find *)"
+    "Bash(head *)"
+    "Bash(tail *)"
+    "Bash(wc *)"
+    "Bash(sed *)"
+    "Bash(awk *)"
+    "Bash(make *)"
+    "Bash(cmake *)"
+    "Bash(rustup *)"
+    "Bash(rustc *)"
+    "Bash(mkdir *)"
+    "Bash(pytest *)"
+    "Bash(python3 *)"
+)
+
+exec claude --allowedTools "${ALLOWED_TOOLS[@]}" "$@"
