@@ -43,6 +43,12 @@ ALLOWED_TOOLS=(
     Read
     Edit
     Write
+    # ExitPlanMode is needed because the prompt for plan generation
+    # contains the word "plan" which auto-triggers Claude Code's plan
+    # mode. Without this in the allow-list, claude writes the plan
+    # file but can't commit it (still in plan mode). With it, claude
+    # can exit plan mode itself and proceed with `git add` + `git commit`.
+    ExitPlanMode
     "Bash(git *)"
     "Bash(cargo *)"
     "Bash(ls *)"
