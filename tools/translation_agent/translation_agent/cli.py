@@ -493,7 +493,11 @@ def _run_plan_one(args, row):
         prompt = prompt + "\n" + prompts.DRY_RUN_NOTE
     try:
         with worktree.worktree_for_branch(
-            args.rust_repo_path, branch_name, cleanup=not args.dry_run,
+            args.rust_repo_path, branch_name,
+            cleanup=not args.dry_run,
+            base_remote_branch=(
+                args.rust_branch if args.dry_run else None
+            ),
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
@@ -537,7 +541,11 @@ def _run_impl_one(args, row):
         prompt = prompt + "\n" + prompts.DRY_RUN_NOTE
     try:
         with worktree.worktree_for_branch(
-            args.rust_repo_path, branch_name, cleanup=not args.dry_run,
+            args.rust_repo_path, branch_name,
+            cleanup=not args.dry_run,
+            base_remote_branch=(
+                args.rust_branch if args.dry_run else None
+            ),
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(

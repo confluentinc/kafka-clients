@@ -31,7 +31,7 @@ import subprocess
 import tempfile
 from contextlib import contextmanager
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Optional
 
 
 class WorktreeError(RuntimeError):
@@ -54,13 +54,25 @@ def _git(repo_path: str, *args: str) -> str:
 
 @contextmanager
 def worktree_for_branch(
-    repo_path: str, branch_name: str, *, cleanup: bool = True,
+    repo_path: str,
+    branch_name: str,
+    *,
+    cleanup: bool = True,
+    base_remote_branch: Optional[str] = None,
 ) -> Iterator[Path]:
     """Create a temporary git worktree checked out at `branch_name`.
 
-    Yields the worktree path. The local `branch_name` ref is reset to
-    `origin/<branch_name>` (which must already exist -- the orchestrator's
-    Phase B sweep pushes these branches before plan/impl work begins).
+    Yields the worktree path.
+
+    By default the local `branch_name` ref is reset to `origin/<branch_name>`
+    (which must already exist -- the real-run flow where Phase B has
+    already pushed the branch).
+
+    Pass `base_remote_branch="<other-branch>"` to base the worktree on
+    `origin/<other-branch>` instead. The dry-run flow uses this because
+    Phase B skips the push in dry-run, so `origin/<branch_name>` doesn't
+    exist yet -- we fall back to the rust-branch tip (the same starting
+    point Phase B's push *would have* used).
 
     Commits made inside the worktree advance the local `branch_name` ref;
     a `git push` from inside also advances `origin/<branch_name>`. With
@@ -73,17 +85,18 @@ def worktree_for_branch(
     safe_name = branch_name.replace("/", "_")
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"translation-agent-{safe_name}-"))
     created = False
+    base = base_remote_branch if base_remote_branch is not None else branch_name
     try:
-        # Refresh origin/<branch_name>; safe even with the branch checked
-        # out in another worktree because we don't use the colon refspec.
-        _git(repo_path, "fetch", "origin", branch_name)
-        # `-B` creates or resets the local branch to origin's tip, which
-        # makes setup idempotent if a previous run left the ref behind.
+        # Refresh origin/<base>; safe even with that branch checked out in
+        # another worktree because we don't use the colon refspec.
+        _git(repo_path, "fetch", "origin", base)
+        # `-B` creates or resets the local branch to origin's tip of `base`,
+        # which makes setup idempotent if a previous run left the ref behind.
         _git(
             repo_path, "worktree", "add",
             "-B", branch_name,
             str(worktree_dir),
-            f"origin/{branch_name}",
+            f"origin/{base}",
         )
         created = True
         yield worktree_dir
