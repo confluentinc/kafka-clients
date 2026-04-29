@@ -12,16 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Translation of `org.apache.kafka.common.header`.
+//! Translation of `org.apache.kafka.common.header.internals`.
+//!
+//! Per CLAUDE.md rule 2 ("Classes whose package contains `internal` MUST use
+//! only `pub(crate)`"), every type in this module is crate-private at the
+//! file level, with public re-exports through the parent `header` module
+//! when needed by external code (e.g. `ProducerRecord::headers()` returns a
+//! reference to a `RecordHeaders`).
 
-// CLAUDE.md rule 2 mandates each Java class lives in its own file (so
-// `Header` lives in `header/header.rs`). Clippy's `module_inception` lint
-// would otherwise flag the same-name child module.
-#[allow(clippy::module_inception)]
-pub mod header;
-pub mod headers;
-pub mod internals;
+pub mod record_header;
+pub mod record_headers;
 
-pub use header::Header;
-pub use headers::Headers;
-pub use internals::{RecordHeader, RecordHeaders, RecordHeadersError};
+pub use record_header::RecordHeader;
+pub use record_headers::{RecordHeaders, RecordHeadersError};
