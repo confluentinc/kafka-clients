@@ -52,6 +52,54 @@ be at most one plan_dependency and at most one implementation_dependency
 """
 
 
+PLAN_GENERATION_PROMPT_TEMPLATE = """\
+You are the Manager agent for the Confluent Kafka Rust translation
+project, following the workflow in `.claude/rules/agent-roles.md`.
+
+Your task: write a translation plan for Apache Kafka commit {ak_commit}
+into Rust. Save the plan to:
+
+    ./design/history/{pr_number}_description/plan.md
+
+After writing the plan, commit it with the message "Design document"
+and push it to the branch `{branch_name}`.
+
+Inputs:
+- Target AK commit: {ak_commit}
+- AK branch:        {ak_branch}
+- PR number:        #{pr_number}
+- Rust branch:      {branch_name}
+- Rust repo root:   the current working directory
+
+Do NOT begin implementation. Only the plan, the commit, and the push.
+Exit 0 on success.
+"""
+
+
+IMPLEMENTATION_PROMPT_TEMPLATE = """\
+You are the Manager agent for the Confluent Kafka Rust translation
+project, following the workflow in `.claude/rules/agent-roles.md`.
+
+Your task: execute the existing translation plan at:
+
+    ./design/history/{pr_number}_description/plan.md
+
+Spawn the Actor agent to implement the changes; spawn the Critic agent
+to review them; iterate through the comment/fix loop until no comments
+remain. Push all generated commits to the branch `{branch_name}`.
+
+Inputs:
+- Target AK commit: {ak_commit}
+- AK branch:        {ak_branch}
+- PR number:        #{pr_number}
+- Rust branch:      {branch_name}
+- Rust repo root:   the current working directory
+
+Exit 0 only when the implementation is complete, all tests pass, and
+the commits are pushed.
+"""
+
+
 # Match a brace-block that contains both expected keys, lenient about
 # whitespace/order. Anchored on the keys, not the braces, so we tolerate
 # the inner Claude printing log lines around the JSON.

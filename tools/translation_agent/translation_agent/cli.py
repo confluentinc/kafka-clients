@@ -132,13 +132,45 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         for k, v in pr.items():
             print(f"{k}: {v}")
         return 0
+
+    # Step 7: flip 2 -> 3, then cascade into step 8 for this PR.
     try:
         db.mark_plan_approved(conn, args.pr)
     except ValueError as e:
         log.error("%s", e)
         return 1
     log.info("PR %d marked plan_approved (status %d)", args.pr, db.STATUS_PLAN_APPROVED)
-    log.info("Step-8 (implementation) cascade not yet wired -- Phase D pending")
+
+    pr = db.get_pr(conn, args.pr)
+    if pr["ak_branch"] is None:
+        log.error(
+            "PR %d has no ak_branch recorded -- cannot record correspondence "
+            "after implementation. This row predates the schema with ak_branch; "
+            "re-create it via a sweep.",
+            args.pr,
+        )
+        return 1
+
+    if args.dry_run:
+        log.info("[dry-run] would implement PR #%d", args.pr)
+        return 0
+
+    err, sha = _run_impl_one(args, pr)
+    if err:
+        log.error("PR #%d implementation failed: %s", args.pr, err)
+        db.set_last_error(conn, args.pr, err)
+        return 1
+    db.mark_implementation_done(
+        conn, args.pr,
+        ak_branch=pr["ak_branch"],
+        ak_commit=pr["ak_commit"],
+        rust_branch=pr["rust_branch"],
+        rust_commit=sha,
+    )
+    log.info(
+        "PR #%d -> status %d (implementation_done) rust_commit=%s",
+        args.pr, db.STATUS_IMPLEMENTATION_DONE, sha[:12],
+    )
     return 0
 
 
@@ -177,9 +209,9 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
         log.error("Failed to read AK commits: %s", e)
         return 1
     if not ak_commits:
-        log.info("No new AK commits to translate.")
-        return 0
-    log.info("Found %d new AK commit(s) on %s", len(ak_commits), args.ak_branch)
+        log.info("No new AK commits to translate; will still process existing rows.")
+    else:
+        log.info("Found %d new AK commit(s) on %s", len(ak_commits), args.ak_branch)
 
     # Step 3 (cont): create branches + draft PRs, insert into pr_commit.
     new_pr_count = 0
@@ -188,12 +220,16 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
         if rc:
             new_pr_count += 1
 
-    log.info("Sweep done step 3. Created %d new PR(s).", new_pr_count)
+    log.info("Sweep step 3 done. Created %d new PR(s).", new_pr_count)
 
     # Steps 4-5: dependency evaluation for all status-0 rows.
     _run_dep_eval(args, conn)
 
-    log.info("Phase D (plan + implementation) not yet wired -- pending Phase D")
+    # Steps 6 + 8: plan generation and implementation, dispatched concurrently
+    # to a single shared executor (per design step 9). The unblocked predicate
+    # keeps the two task types dependency-safe.
+    _run_plan_and_impl(args, conn)
+
     return 0
 
 
@@ -293,6 +329,134 @@ def _dep_eval_one(args, row, batch_aks):
     return parsed[0], parsed[1], None
 
 
+def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
+    """Sweep steps 6 + 8: plan generation and implementation in parallel."""
+    plan_rows = db.get_unblocked_for_status(
+        conn,
+        status=db.STATUS_DEPENDENCIES_EVALUATED,
+        blocking_status_min=db.STATUS_PLAN_APPROVED,
+        dep_column="plan_dependency",
+        rust_branch=args.rust_branch,
+    )
+    impl_rows = db.get_unblocked_for_status(
+        conn,
+        status=db.STATUS_PLAN_APPROVED,
+        blocking_status_min=db.STATUS_IMPLEMENTATION_DONE,
+        dep_column="implementation_dependency",
+        rust_branch=args.rust_branch,
+    )
+    if not plan_rows and not impl_rows:
+        log.info("No unblocked plan or implementation work this sweep.")
+        return
+    log.info(
+        "Dispatching %d plan-generation task(s) and %d implementation task(s) "
+        "(max_parallel=%d)",
+        len(plan_rows), len(impl_rows), args.max_parallel,
+    )
+
+    if args.dry_run:
+        for r in plan_rows:
+            log.info("[dry-run] would generate plan for PR #%d", r["pr_number"])
+        for r in impl_rows:
+            log.info("[dry-run] would implement PR #%d", r["pr_number"])
+        return
+
+    with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
+        futures = {}
+        for r in plan_rows:
+            futures[pool.submit(_run_plan_one, args, r)] = ("plan", r)
+        for r in impl_rows:
+            futures[pool.submit(_run_impl_one, args, r)] = ("impl", r)
+
+        for fut in as_completed(futures):
+            kind, row = futures[fut]
+            pr_number = row["pr_number"]
+            try:
+                err, sha = fut.result()
+            except Exception as e:
+                err = f"{kind} worker crashed: {e}"
+                sha = None
+            if err:
+                log.error("PR #%d (%s): %s", pr_number, kind, err)
+                db.set_last_error(conn, pr_number, err)
+                continue
+            if kind == "plan":
+                db.mark_plan_created(conn, pr_number)
+                log.info(
+                    "PR #%d -> status %d (plan_created)",
+                    pr_number, db.STATUS_PLAN_CREATED,
+                )
+            else:
+                # impl: row["ak_branch"] should be populated by the sweep.
+                ak_branch = row["ak_branch"] or args.ak_branch
+                db.mark_implementation_done(
+                    conn, pr_number,
+                    ak_branch=ak_branch,
+                    ak_commit=row["ak_commit"],
+                    rust_branch=row["rust_branch"],
+                    rust_commit=sha,
+                )
+                log.info(
+                    "PR #%d -> status %d (implementation_done) rust_commit=%s",
+                    pr_number, db.STATUS_IMPLEMENTATION_DONE,
+                    sha[:12] if sha else "??",
+                )
+
+
+def _run_plan_one(args, row):
+    """Returns (err, None). err is None on success."""
+    pr_number = row["pr_number"]
+    ak_commit = row["ak_commit"]
+    branch_name = github.branch_name_for_ak(ak_commit)
+    prompt = prompts.PLAN_GENERATION_PROMPT_TEMPLATE.format(
+        ak_commit=ak_commit,
+        ak_branch=row["ak_branch"] or args.ak_branch or "(unknown)",
+        pr_number=pr_number,
+        branch_name=branch_name,
+    )
+    try:
+        rc, _ = streaming.run_with_prefix(
+            ["r2", "sandbox", "claude", "-p", prompt], pr_number=pr_number,
+        )
+    except FileNotFoundError as e:
+        return f"r2 not on PATH: {e}", None
+    except Exception as e:
+        return f"r2 plan invocation crashed: {e}", None
+    if rc != 0:
+        return f"r2 plan failed (rc={rc})", None
+    return None, None
+
+
+def _run_impl_one(args, row):
+    """Returns (err, new_rust_commit_sha)."""
+    pr_number = row["pr_number"]
+    ak_commit = row["ak_commit"]
+    branch_name = github.branch_name_for_ak(ak_commit)
+    prompt = prompts.IMPLEMENTATION_PROMPT_TEMPLATE.format(
+        ak_commit=ak_commit,
+        ak_branch=row["ak_branch"] or args.ak_branch or "(unknown)",
+        pr_number=pr_number,
+        branch_name=branch_name,
+    )
+    try:
+        rc, _ = streaming.run_with_prefix(
+            ["r2", "sandbox", "claude", "-p", prompt], pr_number=pr_number,
+        )
+    except FileNotFoundError as e:
+        return f"r2 not on PATH: {e}", None
+    except Exception as e:
+        return f"r2 impl invocation crashed: {e}", None
+    if rc != 0:
+        return f"r2 impl failed (rc={rc})", None
+    # Capture the new rust commit so we can update branch_commit.
+    try:
+        git_ops.fetch(args.rust_repo_path, branch_name)
+        sha = git_ops.rev_parse(args.rust_repo_path, f"origin/{branch_name}")
+    except git_ops.GitError as e:
+        return f"failed to read new rust commit on {branch_name}: {e}", None
+    return None, sha
+
+
 def _create_pr_for_ak_commit(
     args: argparse.Namespace, conn, ak_commit: str,
 ) -> bool:
@@ -355,7 +519,9 @@ def _create_pr_for_ak_commit(
         log.error("Failed to create PR for %s: %s", branch_name, e)
         return False
 
-    inserted = db.insert_pr_commit(conn, pr_number, args.rust_branch, ak_commit)
+    inserted = db.insert_pr_commit(
+        conn, pr_number, args.rust_branch, args.ak_branch, ak_commit,
+    )
     if inserted:
         log.info("Created PR #%d for AK commit %s", pr_number, ak_commit[:12])
     else:
