@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Local-development emulation of the Semaphore `r2 sandbox claude` runner.
+#
+# Translates the orchestrator's invocation:
+#     r2 sandbox claude -p "<prompt>"
+# into a direct call to the local Claude Code CLI:
+#     claude -p "<prompt>"
+#
+# Note: the local claude will prompt the operator for permission on each
+# tool call. That makes it slow and noisy compared to the real Semaphore
+# r2 sandbox (which runs Claude fully autonomously inside an isolated
+# container), but it's far safer for local development -- you stay in
+# the loop on every filesystem write, commit, and push.
+#
+# Usage:
+#   1. Add this directory to PATH for the shell that will run translation-agent:
+#        export PATH="$(git rev-parse --show-toplevel)/tools/translation_agent/dev-bin:$PATH"
+#   2. Run translation-agent normally; r2 invocations are intercepted by
+#      this wrapper and dispatched to the local `claude` CLI.
+
+set -euo pipefail
+
+if [ "${1:-}" != "sandbox" ] || [ "${2:-}" != "claude" ]; then
+    echo "r2 (local emulation): expected 'sandbox claude' as first two args; got '${1:-}' '${2:-}'" >&2
+    exit 2
+fi
+shift 2
+
+if ! command -v claude >/dev/null 2>&1; then
+    echo "r2 (local emulation): \`claude\` CLI not on PATH. Install Claude Code first." >&2
+    exit 127
+fi
+
+exec claude "$@"

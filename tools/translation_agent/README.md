@@ -133,6 +133,29 @@ pytest
 
 (or `python -m pytest` if pytest is not on PATH after install).
 
+## Local development without Semaphore
+
+For end-to-end testing on a developer workstation (no `r2` runner, no
+`artifact` CLI), use the `dev-bin/r2` wrapper:
+
+```bash
+export PATH="$(git rev-parse --show-toplevel)/tools/translation_agent/dev-bin:$PATH"
+translation-agent --no-artifact-push --db-path /tmp/ta_local.db ...
+```
+
+The wrapper translates `r2 sandbox claude -p "<prompt>"` into a direct
+`claude -p "<prompt>"` call against the locally-installed Claude Code
+CLI. Unlike the real Semaphore r2 runner (which runs Claude fully
+autonomously inside an isolated container), the local claude prompts
+the operator for permission on every tool call -- slower and noisier
+but safer because you stay in the loop on every filesystem write,
+commit, and push.
+
+`--no-artifact-push` is recommended for local runs since the Semaphore
+`artifact` CLI isn't installed; without it the orchestrator will log a
+"binary not found on PATH" warning at the end (the inner work still
+succeeds).
+
 ## Semaphore CI integration
 
 The orchestrator is invoked from a single CI pipeline plus a
