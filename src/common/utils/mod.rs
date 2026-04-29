@@ -13,3 +13,16 @@
 // limitations under the License.
 
 //! Translation of `org.apache.kafka.common.utils`.
+
+pub mod exit;
+pub mod mock_time;
+pub mod producer_id_and_epoch;
+pub mod system_time;
+pub mod time;
+pub mod timer;
+
+pub use mock_time::MockTime;
+pub use producer_id_and_epoch::ProducerIdAndEpoch;
+pub use system_time::SystemTime;
+pub use time::Time;
+pub use timer::Timer;
