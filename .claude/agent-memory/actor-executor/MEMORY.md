@@ -1,0 +1,2 @@
+- [Phase 1 lint gotchas](phase1_lint_gotchas.md) — clippy patterns I hit repeatedly during foundation translation
+- [Module name collisions](module_inception_pattern.md) — `header/header.rs`, `utils/utils.rs` need `#[allow(clippy::module_inception)]`
