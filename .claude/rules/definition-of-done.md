@@ -6,7 +6,11 @@ Every change must at least pass all of the following before it is considered com
 
 2. Are all methods from the translated classes implemented?
 
-3. Are all test using those classes translated? Never skip a test that is present in the Java codebase except if there are tests that are present in the Java codebase but not translated and they are not relevant to the Rust codebase, explain why they are not relevant and why they can be skipped.
+3. Are all test using those classes translated? Never skip a test that is present in the Java codebase except if there are tests that are present in the Java codebase but not translated and they are not relevant to the Rust codebase, explain why they are not relevant and why they can be skipped. When translating tests also verify:
+   - Dedicated per-message-type test files beyond the main `*Test.java` (e.g. `SimpleExampleMessageTest`, `NullableStructMessageTest`) are not missed
+   - `@RepeatedTest(N)` annotations become loops in Rust, not single invocations
+   - Error message content is asserted, not just `is_err()` — error messages are part of the behavioral contract
+   - Wire protocol types have byte-level encoding tests against known vectors, not just round-trip tests — a consistently wrong encoding passes round-trips but is wire-incompatible with Java
 
 4. Are there blockers for doing that? In case implement the needed classes as well.
 

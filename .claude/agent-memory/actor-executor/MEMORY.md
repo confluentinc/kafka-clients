@@ -1,5 +1,0 @@
-- [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
-- [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
-- [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
-- [SSL/TLS Transport](ssl_tls_transport.md) — rustls patterns, ChannelBuilder refactor, NoHostnameVerifier, Box<TlsStream> for enum size
-- [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN goes INTERMEDIATE->COMPLETE directly, CLIENT_COMPLETE is for SCRAM only

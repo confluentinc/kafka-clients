@@ -63,6 +63,9 @@ For each commit, check:
 - Memory safety (unnecessary clones, lifetime issues)
 - API design that deviates from Rust idioms while CLAUDE.md requires it
 - Performance issues compared to Java (unnecessary allocations, copies)
+- **Lifecycle tracking completeness**: verify that lifecycle management objects have all sides wired — add, remove, and query. A structure where `has_incomplete()` is always false because `add()` was never called compiles and passes unit tests but is silently broken.
+- **Resource pool return-paths**: watch for pool `deallocate`/`release` implementations that allocate a new object instead of returning the original. This compiles but wastes memory and defeats the pool.
+- **Ownership transfer in retry paths**: when Java passes an object to multiple consumers (e.g. a batch to both a callback and a collection), verify the Rust ownership model supports all the same operations. A `&mut T` reference cannot be moved into an owning collection — this silently drops records instead of re-enqueuing them.
 
 ## Comment Format
 
