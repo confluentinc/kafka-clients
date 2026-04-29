@@ -112,6 +112,57 @@ def test_worktree_for_branch_cleanup_false_preserves_dir():
     shutil.rmtree(yielded, ignore_errors=True)
 
 
+def test_worktree_with_ak_commit_runs_make_init_and_bumps_submodule():
+    """When `ak_commit` is provided, the worktree runs `make init`,
+    fetches AK in kafka/, checks out the AK commit, and commits the
+    submodule pointer bump -- all BEFORE yielding to the caller."""
+    calls = []
+
+    def record(args, **kwargs):
+        # Record the full argv for git calls; for `make init` record the
+        # tool name only so we can spot it in the sequence.
+        if args[0] == "make":
+            calls.append(("make", tuple(args[1:])))
+        elif args[0] == "git":
+            # args[2] is the value for `-C` (the git path arg)
+            calls.append(("git", args[2], tuple(args[3:])))
+        return _completed(0)
+
+    with patch.object(worktree.subprocess, "run", side_effect=record):
+        with worktree.worktree_for_branch(
+            "/repo", "kafka-translate/abc",
+            ak_commit="ak123", ak_branch="trunk",
+        ):
+            pass
+
+    # Verify ordered sequence:
+    #  1. git -C /repo fetch origin kafka-translate/abc  (base fetch)
+    #  2. git -C /repo worktree add ...                  (create worktree)
+    #  3. make init                                      (in worktree)
+    #  4. git -C <wt>/kafka fetch origin trunk           (refresh AK ref)
+    #  5. git -C <wt>/kafka checkout ak123               (point at target)
+    #  6. git -C <wt> add kafka                          (stage submodule bump)
+    #  7. git -C <wt> commit -m "Bump kafka submodule to ak123"
+    #  8. git -C /repo worktree remove --force ...       (cleanup)
+    kinds = [c[0] for c in calls]
+    assert kinds[2] == "make", f"make init should be 3rd call, got {kinds}"
+    assert calls[2][1] == ("init",)
+
+    # Find the kafka submodule operations.
+    kafka_calls = [c for c in calls if c[0] == "git" and c[1].endswith("/kafka")]
+    assert any(c[2][:2] == ("fetch", "origin") and c[2][2] == "trunk"
+               for c in kafka_calls), kafka_calls
+    assert any(c[2][:2] == ("checkout", "ak123") for c in kafka_calls), kafka_calls
+
+    # Find the worktree-level git add kafka + commit.
+    wt_calls = [c for c in calls if c[0] == "git" and not c[1].endswith("/kafka")
+                and c[1] != "/repo"]
+    assert any(c[2][:2] == ("add", "kafka") for c in wt_calls), wt_calls
+    commit_call = [c for c in wt_calls if c[2][:1] == ("commit",)]
+    assert commit_call, wt_calls
+    assert "Bump kafka submodule to ak123" in commit_call[0][2]
+
+
 def test_worktree_branch_name_with_slash_sanitized_in_temp_prefix():
     """Branch names with slashes must produce valid temp-dir paths."""
     seen_prefix = []

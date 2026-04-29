@@ -497,6 +497,8 @@ def _run_plan_one(args, row):
             base_remote_branch=(
                 args.rust_branch if args.dry_run else None
             ),
+            ak_commit=ak_commit,
+            ak_branch=row["ak_branch"] or args.ak_branch or "trunk",
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
@@ -545,6 +547,8 @@ def _run_impl_one(args, row):
             base_remote_branch=(
                 args.rust_branch if args.dry_run else None
             ),
+            ak_commit=ak_commit,
+            ak_branch=row["ak_branch"] or args.ak_branch or "trunk",
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
