@@ -14,7 +14,11 @@
 
 //! Translation of `org.apache.kafka.common.utils`.
 
+pub mod buffer_supplier;
+pub mod byte_buffer_input_stream;
+pub mod byte_buffer_output_stream;
 pub mod byte_utils;
+pub mod chunked_bytes_stream;
 pub mod crc32c;
 pub mod exit;
 pub mod exponential_backoff;
@@ -31,6 +35,10 @@ pub mod timer;
 #[allow(clippy::module_inception)]
 pub mod utils;
 
+pub use buffer_supplier::BufferSupplier;
+pub use byte_buffer_input_stream::ByteBufferInputStream;
+pub use byte_buffer_output_stream::ByteBufferOutputStream;
+pub use chunked_bytes_stream::ChunkedBytesStream;
 pub use crc32c::Crc32C;
 pub use exponential_backoff::ExponentialBackoff;
 pub use exponential_backoff_manager::ExponentialBackoffManager;
