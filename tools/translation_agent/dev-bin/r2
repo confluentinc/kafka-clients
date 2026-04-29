@@ -69,4 +69,11 @@ ALLOWED_TOOLS=(
     "Bash(python3 *)"
 )
 
-exec claude --allowedTools "${ALLOWED_TOOLS[@]}" "$@"
+# --verbose makes claude emit per-tool-call events into the output
+# stream. The streaming wrapper merges stderr -> stdout, so these
+# events show up in the orchestrator's captured output. Critical for
+# diagnosing hangs: without --verbose, "claude is silent" can mean
+# either "claude is thinking" or "claude is in an invisible
+# permission-denial retry loop". With --verbose, the loop becomes
+# visible (each denial logs a line).
+exec claude --verbose --allowedTools "${ALLOWED_TOOLS[@]}" "$@"
