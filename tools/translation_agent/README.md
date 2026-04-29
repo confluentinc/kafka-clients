@@ -135,25 +135,26 @@ pytest
 
 ## Semaphore CI integration
 
-The orchestrator is designed to be invoked from two Semaphore pipelines:
+The orchestrator is invoked from a single CI pipeline plus a
+manually-triggered Task, defined under `.semaphore/` at the repo root:
 
-1. **Main sweep pipeline** (periodic):
-   - `artifact pull project translation_agent_db || true`
-   - `translation-agent --ak-repo-path ... --ak-branch ... --rust-branch ...`
-   - The orchestrator pushes the artifact at the end.
+| File | Trigger | What it runs |
+|---|---|---|
+| `.semaphore/semaphore.yml` | every push / PR | Sweep on the configured `${MAIN_BRANCH}` (default `master`); `--pr <N>` status check on PR builds; no-op otherwise. |
+| `.semaphore/plan-approve.yml` | manual promotion from a PR build | `translation-agent --pr <N> --plan-approve` (flips status 2→3 and cascades into implementation for that PR). |
+| `.semaphore/seed.yml` | manual Task in the Semaphore project's Tasks tab | `translation-agent --seed ...` to bootstrap `branch_commit` on first use. Required Task parameters: `AK_COMMIT`, `RUST_COMMIT`; optional: `AK_BRANCH`, `RUST_BRANCH`. |
 
-2. **Per-PR plan-approval pipeline** (manual promotion):
-   - `artifact pull project translation_agent_db`
-   - `translation-agent --pr <N> --plan-approve`
-   - The orchestrator pushes the artifact at the end.
-
-The pipeline is responsible for `artifact pull` before invocation; the
-orchestrator handles `artifact push project <name> <db-path>` itself in
-a `try/finally` so the DB is persisted on both success and failure of
-the inner work.
+Each pipeline:
+- runs `artifact pull project translation_agent_db || true` in its
+  prologue (the `|| true` lets first-ever runs proceed before the
+  artifact exists);
+- delegates `artifact push` to the orchestrator itself (in a
+  `try/finally` so partial state is persisted on inner failures).
 
 The artifact name is configurable via `--artifact-name`
-(default: `translation_agent_db`).
+(default: `translation_agent_db`). The mainline branch is configurable
+via the `MAIN_BRANCH` env var on the main pipeline (set in the project's
+Environment Variables tab to follow a non-`master` branch).
 
 ## Layout
 

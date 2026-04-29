@@ -1,0 +1,45 @@
+version: v1.0
+name: Seed translation_agent DB
+
+# Run as a Semaphore Task (configured in the project's Tasks tab).
+# Inserts the initial branch_commit correspondence row so the first
+# sweep has a cursor to walk from.
+#
+# Required Task parameters (set when triggering the Task):
+#   AK_COMMIT     -- full SHA in the AK repo
+#   RUST_COMMIT   -- full SHA in the Rust repo
+# Optional (defaults below match the main pipeline):
+#   AK_BRANCH     -- defaults to trunk
+#   RUST_BRANCH   -- defaults to master
+
+agent:
+  machine:
+    type: e1-standard-2
+    os_image: ubuntu2204
+
+blocks:
+  - name: Seed correspondence
+    task:
+      env_vars:
+        - name: AK_BRANCH
+          value: trunk
+        - name: RUST_BRANCH
+          value: master
+      jobs:
+        - name: seed
+          commands:
+            - checkout
+            - sem-version python 3.10
+            - cd tools/translation_agent
+            - pip install -e '.[dev]'
+            # First-ever seed has no artifact yet; subsequent re-seeds do.
+            - artifact pull project translation_agent_db || true
+            - |
+              : "${AK_COMMIT:?AK_COMMIT must be set as a Task parameter}"
+              : "${RUST_COMMIT:?RUST_COMMIT must be set as a Task parameter}"
+            - |
+              translation-agent --seed \
+                --ak-branch "${AK_BRANCH}" \
+                --ak-commit "${AK_COMMIT}" \
+                --rust-branch "${RUST_BRANCH}" \
+                --rust-commit "${RUST_COMMIT}"
