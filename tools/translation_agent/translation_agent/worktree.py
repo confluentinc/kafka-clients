@@ -54,7 +54,7 @@ def _git(repo_path: str, *args: str) -> str:
 
 @contextmanager
 def worktree_for_branch(
-    repo_path: str, branch_name: str,
+    repo_path: str, branch_name: str, *, cleanup: bool = True,
 ) -> Iterator[Path]:
     """Create a temporary git worktree checked out at `branch_name`.
 
@@ -63,9 +63,12 @@ def worktree_for_branch(
     Phase B sweep pushes these branches before plan/impl work begins).
 
     Commits made inside the worktree advance the local `branch_name` ref;
-    a `git push` from inside also advances `origin/<branch_name>`. The
-    worktree is removed on context exit (success OR failure); the local
-    branch ref is left in place so the next sweep can read it.
+    a `git push` from inside also advances `origin/<branch_name>`. With
+    `cleanup=True` (default), the worktree is removed on context exit
+    regardless of success/failure; the local branch ref is left in place
+    so the next sweep can read it. With `cleanup=False`, both the
+    worktree directory and the local ref are preserved -- useful for
+    dry-run inspection.
     """
     safe_name = branch_name.replace("/", "_")
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"translation-agent-{safe_name}-"))
@@ -85,16 +88,17 @@ def worktree_for_branch(
         created = True
         yield worktree_dir
     finally:
-        if created:
-            try:
-                _git(
-                    repo_path, "worktree", "remove",
-                    "--force", str(worktree_dir),
-                )
-            except WorktreeError:
-                # Best-effort: a stale .git/worktrees entry is recoverable
-                # via `git worktree prune` later; don't mask the original
-                # exception (if any) by raising here.
-                pass
-        if worktree_dir.exists():
-            shutil.rmtree(worktree_dir, ignore_errors=True)
+        if cleanup:
+            if created:
+                try:
+                    _git(
+                        repo_path, "worktree", "remove",
+                        "--force", str(worktree_dir),
+                    )
+                except WorktreeError:
+                    # Best-effort: a stale .git/worktrees entry is recoverable
+                    # via `git worktree prune` later; don't mask the original
+                    # exception (if any) by raising here.
+                    pass
+            if worktree_dir.exists():
+                shutil.rmtree(worktree_dir, ignore_errors=True)
