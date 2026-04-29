@@ -25,13 +25,39 @@ Three invocation modes per the design:
 """
 
 import argparse
+import hashlib
 import logging
+import shutil
 import sys
 from typing import Sequence
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from . import db, git_ops, github, prompts, semaphore, streaming, worktree
+
+
+def _r2_available() -> bool:
+    """True iff the `r2` binary is on PATH. Cheap, can be called per-sweep."""
+    return shutil.which("r2") is not None
+
+
+def _synthetic_pr_number(ak_commit: str) -> int:
+    """Deterministic negative integer for dry-run pr_commit rows.
+
+    Real GitHub PR numbers are positive sequential integers, so negative
+    values are unambiguously synthetic. Derived from a sha1 of the AK
+    commit (rather than parsing the AK SHA's hex directly) so the
+    function works on any input string -- helpful for tests that pass
+    synthetic AK identifiers.
+
+    Idempotency: re-running dry-run on the same AK commit hits the
+    same synthetic pr_number, so INSERT OR IGNORE preserves prior dep-
+    eval results. Cleanup is one SQL: `DELETE FROM pr_commit WHERE
+    pr_number < 0`.
+    """
+    h = hashlib.sha1(ak_commit.encode()).hexdigest()
+    n = int(h[:7], 16)
+    return -(n or 1)
 
 
 log = logging.getLogger(__name__)
@@ -249,13 +275,18 @@ def _run_dep_eval(args: argparse.Namespace, conn) -> None:
 
     batch_aks = [r["ak_commit"] for r in rows]
 
-    if args.dry_run:
+    # Extended dry-run: if r2 is on PATH we DO run dep-eval (it's read-only,
+    # produces JSON only) and DO persist the resulting deps. If r2 is absent
+    # we just log what would happen.
+    if args.dry_run and not _r2_available():
         for r in rows:
             log.info(
-                "[dry-run] would dep-eval PR #%d (AK %s)",
+                "[dry-run] would dep-eval PR #%d (AK %s) -- r2 not on PATH, skipping",
                 r["pr_number"], r["ak_commit"][:12],
             )
         return
+    if args.dry_run:
+        log.info("[dry-run] r2 is on PATH -- running dep-eval on %d row(s)", len(rows))
 
     with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
         futures = {
@@ -485,6 +516,10 @@ def _create_pr_for_ak_commit(
     already existed, or an error occurred and was logged). Errors here
     don't abort the sweep -- we log and move on so other commits aren't
     blocked by a single failure.
+
+    In dry-run mode the git push and gh-pr-create are skipped, but the
+    pr_commit row IS inserted with a synthetic negative pr_number derived
+    from the AK SHA -- so subsequent dry-run dep-eval can read it.
     """
     branch_name = github.branch_name_for_ak(ak_commit)
     try:
@@ -496,55 +531,56 @@ def _create_pr_for_ak_commit(
     body = github.pr_body_for_ak(ak_commit, subject)
 
     if args.dry_run:
+        pr_number = _synthetic_pr_number(ak_commit)
         log.info(
-            "[dry-run] would push %s to branch %s and create draft PR %r",
-            f"origin/{args.rust_branch}", branch_name, title,
+            "[dry-run] would push %s to branch %s and create draft PR %r "
+            "(synthetic pr_number=%d)",
+            f"origin/{args.rust_branch}", branch_name, title, pr_number,
         )
-        return False
-
-    try:
-        git_ops.push_new_branch(
-            args.rust_repo_path,
-            source_ref=f"origin/{args.rust_branch}",
-            target_branch=branch_name,
-        )
-    except git_ops.GitError as e:
-        log.error("Failed to push branch %s: %s", branch_name, e)
-        return False
-
-    try:
-        pr_number = github.create_draft_pr(
-            args.rust_repo_path,
-            base_branch=args.rust_branch,
-            head_branch=branch_name,
-            title=title, body=body,
-        )
-    except github.GhPrAlreadyExists:
-        # Idempotent re-run: recover the existing PR number so we can
-        # ensure pr_commit has a row for it.
+    else:
         try:
-            existing = github.find_pr_number_for_branch(
-                args.rust_repo_path, branch_name,
+            git_ops.push_new_branch(
+                args.rust_repo_path,
+                source_ref=f"origin/{args.rust_branch}",
+                target_branch=branch_name,
             )
+        except git_ops.GitError as e:
+            log.error("Failed to push branch %s: %s", branch_name, e)
+            return False
+        try:
+            pr_number = github.create_draft_pr(
+                args.rust_repo_path,
+                base_branch=args.rust_branch,
+                head_branch=branch_name,
+                title=title, body=body,
+            )
+        except github.GhPrAlreadyExists:
+            # Idempotent re-run: recover the existing PR number so we can
+            # ensure pr_commit has a row for it.
+            try:
+                existing = github.find_pr_number_for_branch(
+                    args.rust_repo_path, branch_name,
+                )
+            except github.GhError as e:
+                log.error("Failed to look up existing PR for %s: %s", branch_name, e)
+                return False
+            if existing is None:
+                log.error("PR reportedly exists for %s but lookup found none", branch_name)
+                return False
+            pr_number = existing
+            log.info("PR #%d already exists for %s -- not duplicating", pr_number, branch_name)
         except github.GhError as e:
-            log.error("Failed to look up existing PR for %s: %s", branch_name, e)
+            log.error("Failed to create PR for %s: %s", branch_name, e)
             return False
-        if existing is None:
-            log.error("PR reportedly exists for %s but lookup found none", branch_name)
-            return False
-        pr_number = existing
-        log.info("PR #%d already exists for %s -- not duplicating", pr_number, branch_name)
-    except github.GhError as e:
-        log.error("Failed to create PR for %s: %s", branch_name, e)
-        return False
 
     inserted = db.insert_pr_commit(
         conn, pr_number, args.rust_branch, args.ak_branch, ak_commit,
     )
+    label = "[dry-run] " if args.dry_run else ""
     if inserted:
-        log.info("Created PR #%d for AK commit %s", pr_number, ak_commit[:12])
+        log.info("%sCreated PR #%d for AK commit %s", label, pr_number, ak_commit[:12])
     else:
-        log.info("PR #%d already in pr_commit -- left unchanged", pr_number)
+        log.info("%sPR #%d already in pr_commit -- left unchanged", label, pr_number)
     return inserted
 
 

@@ -352,14 +352,18 @@ def test_sweep_creates_prs_for_new_commits(tmp_path):
     assert rows[101]["status"] == db.STATUS_NO_PLAN
 
 
-def test_sweep_dry_run_creates_no_prs(tmp_path):
+def test_sweep_dry_run_skips_remote_but_inserts_synthetic_row(tmp_path):
+    """Dry-run skips git push and gh-pr-create but DOES insert a pr_commit
+    row with a negative synthetic pr_number, so subsequent dry-run dep-eval
+    has something to read."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="subj"), \
          patch("translation_agent.cli.git_ops.push_new_branch") as mpush, \
-         patch("translation_agent.cli.github.create_draft_pr") as mcreate:
+         patch("translation_agent.cli.github.create_draft_pr") as mcreate, \
+         patch("translation_agent.cli._r2_available", return_value=False):
         rc = _run(
             "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
             "--rust-branch", "master", "--dry-run",
@@ -369,7 +373,37 @@ def test_sweep_dry_run_creates_no_prs(tmp_path):
     mpush.assert_not_called()
     mcreate.assert_not_called()
     conn = db.connect(db_path)
-    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 0
+    rows = conn.execute("SELECT * FROM pr_commit").fetchall()
+    assert len(rows) == 1
+    assert rows[0]["pr_number"] < 0  # synthetic
+    assert rows[0]["ak_commit"] == "ak_a"
+    assert rows[0]["status"] == db.STATUS_NO_PLAN
+
+
+def test_sweep_dry_run_synthetic_pr_number_is_idempotent(tmp_path):
+    """Re-running dry-run on the same AK commit hits the same synthetic
+    pr_number (no duplicate rows)."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    common = dict(side_effects={})
+    args = dict(db_path=db_path)
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="subj"), \
+         patch("translation_agent.cli._r2_available", return_value=False):
+        _run("--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+             "--rust-branch", "master", "--dry-run", **args)
+        _run("--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+             "--rust-branch", "master", "--dry-run", **args)
+    conn = db.connect(db_path)
+    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 1
+
+
+def test_synthetic_pr_number_is_deterministic_and_negative():
+    n1 = cli._synthetic_pr_number("abc")
+    n2 = cli._synthetic_pr_number("abc")
+    assert n1 == n2 < 0
+    assert cli._synthetic_pr_number("abc") != cli._synthetic_pr_number("def")
 
 
 def test_sweep_recovers_pr_number_on_already_exists(tmp_path):
@@ -505,13 +539,14 @@ def test_sweep_dep_eval_unparseable_json_persists_last_error(tmp_path):
     assert "could not parse" in row["last_error"]
 
 
-def test_sweep_dep_eval_dry_run_skips_r2(tmp_path):
+def test_sweep_dep_eval_dry_run_skips_r2_when_r2_absent(tmp_path):
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.streaming.run_with_prefix") as mstream:
+         patch("translation_agent.cli.streaming.run_with_prefix") as mstream, \
+         patch("translation_agent.cli._r2_available", return_value=False):
         rc = _run(
             "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
             "--rust-branch", "master", "--dry-run",
@@ -519,6 +554,33 @@ def test_sweep_dep_eval_dry_run_skips_r2(tmp_path):
         )
     assert rc == 0
     mstream.assert_not_called()
+
+
+def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
+    """When --dry-run AND r2 is on PATH, dep-eval is invoked for real
+    (it's read-only) and the resulting deps are persisted, transitioning
+    the synthetic row 0 -> 1."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    json_resp = '{"plan_dependency": null, "implementation_dependency": null}'
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, json_resp)) as mstream, \
+         patch("translation_agent.cli._r2_available", return_value=True):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master", "--dry-run",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstream.assert_called_once()  # r2 dep-eval ran
+    conn = db.connect(db_path)
+    row = dict(conn.execute("SELECT * FROM pr_commit").fetchone())
+    assert row["pr_number"] < 0  # synthetic
+    assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    assert row["plan_dependency"] is None
 
 
 # --- plan + implementation flow (sweep step 6 + 8) --------------------------

@@ -145,6 +145,29 @@ pytest
 
 (or `python -m pytest` if pytest is not on PATH after install).
 
+## Dry-run mode
+
+`--dry-run` skips all destructive remote operations (`git push`,
+`gh pr create`, `r2` plan/impl invocations, the Semaphore artifact push)
+and any commit-creating worktree work, but it DOES:
+
+- Insert `pr_commit` rows with **synthetic negative `pr_number`s** derived
+  from a sha1 of the AK commit (deterministic across re-runs, so the
+  insert is idempotent). Real GitHub PR numbers are positive, so the
+  sign distinguishes them unambiguously.
+- Run dep-eval `r2 sandbox claude` calls and persist the resulting
+  dependencies (status 0 → 1) **iff `r2` is on PATH**. Dep-eval is
+  read-only — it just emits JSON — so it's safe to run.
+
+Plan generation and implementation r2 calls remain skipped in dry-run
+because they make commits and push them.
+
+To clean up synthetic rows after dry-run testing:
+
+```bash
+sqlite3 ./translation_agent.db "DELETE FROM pr_commit WHERE pr_number < 0"
+```
+
 ## Local development without Semaphore
 
 For end-to-end testing on a developer workstation (no `r2` runner, no
