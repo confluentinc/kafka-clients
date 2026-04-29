@@ -41,13 +41,6 @@ testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
 
-[[test]]
-name = "common"
-path = "tests/main.rs"
-
-[[test]]
-name = "producer"
-path = "tests/producer/main.rs"
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }
