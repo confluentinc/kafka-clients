@@ -29,7 +29,9 @@ import logging
 import sys
 from typing import Sequence
 
-from . import db, git_ops, github
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+from . import db, git_ops, github, prompts, streaming
 
 
 log = logging.getLogger(__name__)
@@ -186,11 +188,109 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
         if rc:
             new_pr_count += 1
 
-    log.info("Sweep done. Created %d new PR(s).", new_pr_count)
-    log.info(
-        "Phase C/D (deps eval, plan, implementation) not yet wired -- pending phases"
-    )
+    log.info("Sweep done step 3. Created %d new PR(s).", new_pr_count)
+
+    # Steps 4-5: dependency evaluation for all status-0 rows.
+    _run_dep_eval(args, conn)
+
+    log.info("Phase D (plan + implementation) not yet wired -- pending Phase D")
     return 0
+
+
+def _run_dep_eval(args: argparse.Namespace, conn) -> None:
+    """Step 4-5: for each status-0 row, run r2 dep-eval in parallel, transition 0 -> 1."""
+    rows = db.get_pr_commits_by_status(
+        conn, db.STATUS_NO_PLAN, rust_branch=args.rust_branch
+    )
+    if not rows:
+        return
+    log.info("Evaluating dependencies for %d status-0 PR(s)", len(rows))
+
+    batch_aks = [r["ak_commit"] for r in rows]
+
+    if args.dry_run:
+        for r in rows:
+            log.info(
+                "[dry-run] would dep-eval PR #%d (AK %s)",
+                r["pr_number"], r["ak_commit"][:12],
+            )
+        return
+
+    with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
+        futures = {
+            pool.submit(_dep_eval_one, args, r, batch_aks): r for r in rows
+        }
+        valid_aks = set(batch_aks)
+        for fut in as_completed(futures):
+            row = futures[fut]
+            pr_number = row["pr_number"]
+            try:
+                plan_dep, impl_dep, err = fut.result()
+            except Exception as e:
+                err = f"dep-eval worker crashed: {e}"
+                plan_dep = impl_dep = None
+            if err:
+                log.error("PR #%d: %s", pr_number, err)
+                db.set_last_error(conn, pr_number, err)
+                continue
+            # Out-of-batch deps are treated as None (per spec: dep must be
+            # "among those in the table").
+            if plan_dep and plan_dep not in valid_aks:
+                log.warning(
+                    "PR #%d plan_dep %s not in batch -- treating as None",
+                    pr_number, plan_dep[:12],
+                )
+                plan_dep = None
+            if impl_dep and impl_dep not in valid_aks:
+                log.warning(
+                    "PR #%d impl_dep %s not in batch -- treating as None",
+                    pr_number, impl_dep[:12],
+                )
+                impl_dep = None
+            db.update_dependencies(conn, pr_number, plan_dep, impl_dep)
+            log.info(
+                "PR #%d -> status %d (plan_dep=%s, impl_dep=%s)",
+                pr_number,
+                db.STATUS_DEPENDENCIES_EVALUATED,
+                (plan_dep[:12] if plan_dep else None),
+                (impl_dep[:12] if impl_dep else None),
+            )
+
+
+def _dep_eval_one(args, row, batch_aks):
+    """Run r2 sandbox claude for dep-eval on one commit.
+
+    Returns `(plan_dep, impl_dep, err)`. On success err is None and the deps
+    may each be a SHA string or None. On failure plan_dep and impl_dep are
+    both None and err is a non-empty error message.
+    """
+    pr_number = row["pr_number"]
+    ak_commit = row["ak_commit"]
+    other = [sha for sha in batch_aks if sha != ak_commit]
+    batch_listing = (
+        "\n".join(f"- {sha}" for sha in other)
+        if other else "(no other commits in this batch)"
+    )
+    prompt = prompts.DEPENDENCY_EVAL_PROMPT_TEMPLATE.format(
+        ak_commit=ak_commit,
+        ak_repo_path=args.ak_repo_path,
+        batch_listing=batch_listing,
+    )
+    try:
+        rc, captured = streaming.run_with_prefix(
+            ["r2", "sandbox", "claude", "-p", prompt],
+            pr_number=pr_number,
+        )
+    except FileNotFoundError as e:
+        return None, None, f"r2 not on PATH: {e}"
+    except Exception as e:
+        return None, None, f"r2 invocation crashed: {e}"
+    if rc != 0:
+        return None, None, f"r2 dep-eval failed (rc={rc})"
+    parsed = prompts.parse_dep_eval_json(captured)
+    if parsed is None:
+        return None, None, "could not parse dep-eval JSON from r2 output"
+    return parsed[0], parsed[1], None
 
 
 def _create_pr_for_ak_commit(
