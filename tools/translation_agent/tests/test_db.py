@@ -88,6 +88,42 @@ def test_mark_plan_approved_missing_pr_raises(conn):
         db.mark_plan_approved(conn, 999)
 
 
+def test_get_pr_commits_by_status_filters(conn):
+    db.insert_pr_commit(conn, 1, "master", "ak1")
+    db.insert_pr_commit(conn, 2, "master", "ak2")
+    db.insert_pr_commit(conn, 3, "feature", "ak3")
+    conn.execute("UPDATE pr_commit SET status = 1 WHERE pr_number = 2")
+    conn.commit()
+    s0 = db.get_pr_commits_by_status(conn, db.STATUS_NO_PLAN)
+    assert {r["pr_number"] for r in s0} == {1, 3}
+    s0_master = db.get_pr_commits_by_status(conn, db.STATUS_NO_PLAN, "master")
+    assert {r["pr_number"] for r in s0_master} == {1}
+
+
+def test_update_dependencies_transitions_to_status_1(conn):
+    db.insert_pr_commit(conn, 42, "master", "ak42")
+    db.update_dependencies(conn, 42, "depA", "depB")
+    row = db.get_pr(conn, 42)
+    assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    assert row["plan_dependency"] == "depA"
+    assert row["implementation_dependency"] == "depB"
+
+
+def test_update_dependencies_clears_last_error(conn):
+    db.insert_pr_commit(conn, 42, "master", "ak42")
+    db.set_last_error(conn, 42, "old")
+    db.update_dependencies(conn, 42, None, None)
+    assert db.get_pr(conn, 42)["last_error"] is None
+
+
+def test_set_last_error_does_not_change_status(conn):
+    db.insert_pr_commit(conn, 42, "master", "ak42")
+    db.set_last_error(conn, 42, "boom")
+    row = db.get_pr(conn, 42)
+    assert row["last_error"] == "boom"
+    assert row["status"] == db.STATUS_NO_PLAN
+
+
 def test_get_latest_correspondence_none_when_empty(conn):
     assert db.get_latest_correspondence(conn, "master") is None
 

@@ -129,6 +129,61 @@ def get_pr(conn: sqlite3.Connection, pr_number: int) -> Optional[dict]:
     return dict(row) if row else None
 
 
+def get_pr_commits_by_status(
+    conn: sqlite3.Connection,
+    status: int,
+    rust_branch: Optional[str] = None,
+) -> list:
+    """Return all `pr_commit` rows in `status`, optionally filtered by Rust branch.
+
+    Ordered by pr_number for deterministic test/log output.
+    """
+    if rust_branch is None:
+        rows = conn.execute(
+            "SELECT * FROM pr_commit WHERE status = ? ORDER BY pr_number",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM pr_commit WHERE status = ? AND rust_branch = ? "
+            "ORDER BY pr_number",
+            (status, rust_branch),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_dependencies(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    plan_dependency: Optional[str],
+    implementation_dependency: Optional[str],
+) -> None:
+    """Set the two dependency columns and transition status 0 -> 1."""
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET plan_dependency = ?, "
+            "implementation_dependency = ?, status = ?, last_error = NULL "
+            "WHERE pr_number = ?",
+            (
+                plan_dependency,
+                implementation_dependency,
+                STATUS_DEPENDENCIES_EVALUATED,
+                pr_number,
+            ),
+        )
+
+
+def set_last_error(
+    conn: sqlite3.Connection, pr_number: int, error: str
+) -> None:
+    """Persist a failure message on the row without changing status."""
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET last_error = ? WHERE pr_number = ?",
+            (error, pr_number),
+        )
+
+
 def get_latest_correspondence(
     conn: sqlite3.Connection, rust_branch: str
 ) -> Optional[dict]:
