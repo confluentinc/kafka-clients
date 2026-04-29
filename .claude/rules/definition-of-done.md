@@ -24,3 +24,5 @@ Every change must at least pass all of the following before it is considered com
 
 9. Are unit tests, integration tests, Python, C tests passing?
    Use `make verify` to run all tests and format checks and lint checks. If there are any failing test or check fix them before considering the change done.
+
+10. **Hot-path allocation audit**: For any class that sits on the producer send path, verify there are no avoidable per-message heap allocations: no intermediate copy buffers, no identifier `String` clones, no `Box<dyn Future>` per send. If the translated class is not on the send path, this check can be skipped.

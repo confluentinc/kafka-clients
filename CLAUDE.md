@@ -58,17 +58,26 @@ translate javadoc to rustdoc. Never change the contract of public API.
     3. In case the original method isn't blocking to await the callback response (for example awaiting a CompletableFuture), use Tokio `task::spawn` to create a coroutine that is detached from current flow.
     4. When Java uses `thread.join()` or `Future.get()` to block until completion, the Rust translation must actually `.await` the corresponding handle — setting a flag or dropping a channel is not equivalent to joining.
     5. Translating a Java callback to async does not eliminate the callback obligation. If Java guarantees exactly-once callback invocation per record at a specific lifecycle point (e.g. `completeFutureAndFireCallbacks`), the Rust translation must invoke the equivalent at the same point — not defer it or silently drop it.
+    6. **Tokio-specific pitfalls** (no Java equivalent — Java threads do not have cancellation semantics):
+       - `tokio::select!` cancels the losing branch's future mid-execution. Never put operations with side effects (incrementing a counter, sending on a channel, writing to a buffer) inside a `select!` arm unless the future is cancellation-safe. Use `biased;` when ordering matters.
+       - Holding a `MutexGuard` across an `.await` point deadlocks the async runtime — always drop locks before awaiting.
 10. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.
     2. Return a `Result` when Java code throws an exception even if unchecked but recoverable.
     3. Use a `KafkaError` similar to the librdkafka one with functions `is_retriable` or `is_fatal` or `txn_requires_abort()` and 
        an error code that corresponds to the Java Kafka exceptions.
-11. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack.
+11. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack. On hot paths (send path, batch drain, wire framing), also account for costs Java's JIT/GC masks but Rust makes explicit:
+    - Identifiers cloned on every message (topic names, client IDs): prefer `Arc<str>` over `String` to make clones cheap
+    - A single numeric field shared across tasks: prefer `AtomicI64`/`AtomicU64` over `Mutex<i64>` to avoid lock contention
+    - Hot-path async dispatch: avoid `Pin<Box<dyn Future>>` per call — prefer concrete `async fn` return types
+    - Per-message `tokio::spawn` on the send path: avoid — use a shared completion task with a channel instead
+
+    Outside hot paths, prefer the simpler type (`String`, `Mutex`) unless profiling shows otherwise.
 12. **Parameters and return values of public API**: Accept the most general borrowed form for input parameters. Borrow immutably, and return immutable values.
     Return a borrowed reference in case the data is still owned by the original struct (getter for example).
     When ownership is transferred to the caller prefer returning the struct (making use of RVO) over Box or Rc or Arc.
-    Don't copy byte arrays holding the key, value or headers passed to ProduceRecord or received in ConsumeRecord.
+    Don't copy byte arrays holding the key, value or headers passed to ProducerRecord or received in ConsumerRecord. This zero-copy requirement extends through the entire write path: serialized bytes must be written directly into the batch buffer (no intermediate buffer), batch finalization must not copy already-serialized bytes, and wire sends must use vectored I/O (`IoSlice` / `write_vectored`) so the framing header and payload are sent without assembling a single contiguous buffer.
 
 ## Agent Role
 
