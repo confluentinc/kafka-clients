@@ -537,17 +537,32 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
     write_license_header(&mut file)?;
 
     // Write generated code
-    writeln!(file, "//! Generated from {}.json", file_name)?;
+    // Plain comments (not `//!`) because the file is included via
+    // `include!()` inside a `mod { ... }` block, where inner doc comments
+    // would attach to the wrong item.
+    writeln!(file, "// Generated from {}.json", file_name)?;
     writeln!(file)?;
-    writeln!(file, "#![allow(unused_imports)]")?;
-    writeln!(file, "#![allow(dead_code)]")?;
-    writeln!(file)?;
+    // Each `use` is separately gated with `#[allow(unused_imports)]` because
+    // the runtime types they refer to may or may not be referenced depending
+    // on which fields a particular message has. Inner attributes
+    // (`#![allow(...)]`) cannot be used here because the file is included via
+    // `include!()` inside a `mod { ... }` block.
+    writeln!(file, "#[allow(unused_imports)]")?;
     writeln!(
         file,
-        "use crate::common::protocol::{{Field, Readable, Schema, SchemaType, Writable, RawTaggedField, Message, ApiMessage, ObjectSerializationCache, MessageSizeAccumulator, ByteBufferAccessor}};"
+        "use crate::common::protocol::{{ApiMessage, ByteBufferAccessor, Message, MessageSizeAccumulator, ObjectSerializationCache, RawTaggedField, Readable, Writable}};"
     )?;
+    writeln!(file, "#[allow(unused_imports)]")?;
+    writeln!(file, "use crate::common::protocol::types::{{Field, Schema, Type}};")?;
+    writeln!(file, "#[allow(unused_imports)]")?;
+    writeln!(file, "use crate::common::errors::KafkaError;")?;
+    writeln!(file, "#[allow(unused_imports)]")?;
+    writeln!(file, "use crate::common::utils::byte_utils;")?;
+    writeln!(file, "#[allow(unused_imports)]")?;
     writeln!(file, "use crate::common::Uuid;")?;
+    writeln!(file, "#[allow(unused_imports)]")?;
     writeln!(file, "use std::fmt;")?;
+    writeln!(file, "#[allow(unused_imports)]")?;
     writeln!(file, "use std::hash::{{Hash, Hasher}};")?;
     writeln!(file)?;
 
@@ -605,6 +620,20 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     writeln!(file, "}}")?;
     writeln!(file)?;
 
+    // The generator's emit shape triggers a few clippy lints that are
+    // stylistic rather than substantive — silenced at the impl-block level
+    // so the affected methods can preserve their idiomatic shape:
+    //
+    // - `manual_range_contains`: emit code uses `version < lo || version > hi`
+    //   for version validation, mirroring Java's generated range checks.
+    // - `vec_init_then_push`: `schema()` builds `fields` with a `Vec::new()`
+    //   then `.push(...)` because some fields are pushed under a `if version
+    //   >= N` guard.
+    // - `new_without_default`: every generated `Data` struct has a `new()`
+    //   constructor; deriving `Default` would duplicate it.
+    writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
+    writeln!(file, "#[allow(clippy::vec_init_then_push)]")?;
+    writeln!(file, "#[allow(clippy::new_without_default)]")?;
     // Generate impl block
     writeln!(file, "impl {} {{", data_class_name)?;
 
@@ -730,6 +759,11 @@ fn generate_nested_struct(
     writeln!(file, "}}")?;
     writeln!(file)?;
 
+    // See the matching annotation block on the top-level data struct for
+    // why these clippy lints are silenced here.
+    writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
+    writeln!(file, "#[allow(clippy::vec_init_then_push)]")?;
+    writeln!(file, "#[allow(clippy::new_without_default)]")?;
     // Generate impl for nested struct with new(), read(), and write()
     writeln!(file, "impl {} {{", struct_name)?;
     writeln!(file, "    pub fn new() -> Self {{")?;
@@ -815,6 +849,11 @@ fn generate_common_struct(
     writeln!(file, "}}")?;
     writeln!(file)?;
 
+    // See the matching annotation block on the top-level data struct for
+    // why these clippy lints are silenced here.
+    writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
+    writeln!(file, "#[allow(clippy::vec_init_then_push)]")?;
+    writeln!(file, "#[allow(clippy::new_without_default)]")?;
     // Generate impl with new(), read(), and write()
     writeln!(file, "impl {} {{", struct_name)?;
     writeln!(file, "    pub fn new() -> Self {{")?;
@@ -974,14 +1013,14 @@ fn generate_message_impl(
     writeln!(file)?;
     writeln!(
         file,
-        "    fn write(&self, writable: &mut dyn Writable, _cache: &ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
+        "    fn write(&self, writable: &mut dyn Writable, _cache: &ObjectSerializationCache, version: i16) -> Result<(), KafkaError> {{"
     )?;
     writeln!(file, "        {}::write(self, writable, version)", struct_name)?;
     writeln!(file, "    }}")?;
     writeln!(file)?;
     writeln!(
         file,
-        "    fn read(&mut self, readable: &mut dyn Readable, version: i16) -> std::io::Result<()> {{"
+        "    fn read(&mut self, readable: &mut dyn Readable, version: i16) -> Result<(), KafkaError> {{"
     )?;
     writeln!(file, "        *self = {}::read(readable, version)?;", struct_name)?;
     writeln!(file, "        Ok(())")?;
@@ -1011,7 +1050,7 @@ fn generate_add_size_body(
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         file,
-        "    fn add_size(&self, size: &mut MessageSizeAccumulator, cache: &mut ObjectSerializationCache, version: i16) -> std::io::Result<()> {{"
+        "    fn add_size(&self, size: &mut MessageSizeAccumulator, cache: &mut ObjectSerializationCache, version: i16) {{"
     )?;
     // Suppress unused variable warnings — these may or may not be used depending on fields
     writeln!(file, "        let _ = cache;")?;
@@ -1078,19 +1117,19 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(field.tag() as u32) as i32);",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(field.size() as u32) as i32);",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(num_tagged_fields) as i32);",
                 indent
             )?;
             writeln!(file, "        }}")?;
@@ -1100,25 +1139,24 @@ fn generate_add_size_body(
             writeln!(file, "{}for field in &self.unknown_tagged_fields {{", indent)?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.tag()));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(field.tag() as u32) as i32);",
                 indent
             )?;
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(field.size() as u32));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(field.size() as u32) as i32);",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(field.size() as i32);", indent)?;
             writeln!(file, "{}}}", indent)?;
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(num_tagged_fields));",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(num_tagged_fields) as i32);",
                 indent
             )?;
         }
     }
 
-    writeln!(file, "        Ok(())")?;
     writeln!(file, "    }}")?;
 
     Ok(())
@@ -1331,7 +1369,7 @@ fn generate_string_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                 indent
             )?;
         } else {
@@ -1348,7 +1386,7 @@ fn generate_string_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1376,7 +1414,7 @@ fn generate_bytes_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                 indent
             )?;
         } else {
@@ -1393,7 +1431,7 @@ fn generate_bytes_add_size(
             }
             writeln!(
                 file,
-                "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                 indent
             )?;
             writeln!(file, "{}    }} else {{", indent)?;
@@ -1421,7 +1459,7 @@ fn generate_array_add_size(
         if flexible_versions.lowest() == 0 {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint({}.len() as u32 + 1) as i32);",
                 indent, accessor
             )?;
         } else {
@@ -1438,7 +1476,7 @@ fn generate_array_add_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1));",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint({}.len() as u32 + 1) as i32);",
                 indent, accessor
             )?;
             writeln!(file, "{}}} else {{", indent)?;
@@ -1488,7 +1526,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                         indent
                     )?;
                 } else {
@@ -1505,7 +1543,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1523,7 +1561,7 @@ fn generate_array_element_add_size(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                         indent
                     )?;
                 } else {
@@ -1540,7 +1578,7 @@ fn generate_array_element_add_size(
                     }
                     writeln!(
                         file,
-                        "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1));",
+                        "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(bytes_len + 1) as i32);",
                         indent
                     )?;
                     writeln!(file, "{}    }} else {{", indent)?;
@@ -1607,7 +1645,7 @@ fn generate_tagged_field_add_size(
     writeln!(file, "{}num_tagged_fields += 1;", inner)?;
     writeln!(
         file,
-        "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint({}));",
+        "{}size.add_bytes(byte_utils::size_of_unsigned_varint({}) as i32);",
         inner, tag
     )?;
     generate_tagged_field_content_size(file, field, &field_name, flexible_versions, &inner)?;
@@ -1716,7 +1754,7 @@ fn generate_tagged_field_content_size(
         FieldType::Bool | FieldType::Int8 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(1) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(1);", indent)?;
@@ -1724,7 +1762,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int16 | FieldType::Uint16 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(2)); // size prefix",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(2) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(2);", indent)?;
@@ -1732,7 +1770,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int32 | FieldType::Uint32 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(4)); // size prefix",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(4) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(4);", indent)?;
@@ -1740,7 +1778,7 @@ fn generate_tagged_field_content_size(
         FieldType::Int64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(8) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -1748,7 +1786,7 @@ fn generate_tagged_field_content_size(
         FieldType::Float64 => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(8)); // size prefix",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(8) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(8);", indent)?;
@@ -1756,7 +1794,7 @@ fn generate_tagged_field_content_size(
         FieldType::Uuid => {
             writeln!(
                 file,
-                "{}size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(16)); // size prefix",
+                "{}size.add_bytes(byte_utils::size_of_unsigned_varint(16) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}size.add_bytes(16);", indent)?;
@@ -1770,7 +1808,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let string_prefix_size = byte_utils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(
@@ -1780,7 +1818,7 @@ fn generate_tagged_field_content_size(
                 )?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(inner_size as u32) as i32);",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -1788,7 +1826,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(1) as i32); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -1797,13 +1835,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let string_prefix_size = byte_utils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = string_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(inner_size as u32) as i32); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -1817,13 +1855,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}        let bytes_len = val.len() as u32;", indent)?;
                 writeln!(
                     file,
-                    "{}        let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}        let bytes_prefix_size = byte_utils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}        let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32));",
+                    "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(inner_size as u32) as i32);",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(inner_size);", indent)?;
@@ -1831,7 +1869,7 @@ fn generate_tagged_field_content_size(
                 // null encoding: varint(0) = 1 byte, so inner_size = 1
                 writeln!(
                     file,
-                    "{}        size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for null",
+                    "{}        size.add_bytes(byte_utils::size_of_unsigned_varint(1) as i32); // size prefix for null",
                     indent
                 )?;
                 writeln!(file, "{}        size.add_bytes(1); // varint(0) for null", indent)?;
@@ -1840,13 +1878,13 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let bytes_len = {}.len() as u32;", indent, accessor)?;
                 writeln!(
                     file,
-                    "{}    let bytes_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint(bytes_len + 1);",
+                    "{}    let bytes_prefix_size = byte_utils::size_of_unsigned_varint(bytes_len + 1);",
                     indent
                 )?;
                 writeln!(file, "{}    let inner_size = bytes_prefix_size + bytes_len as i32;", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(inner_size as u32)); // size prefix",
+                    "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(inner_size as u32) as i32); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(inner_size);", indent)?;
@@ -1860,7 +1898,7 @@ fn generate_tagged_field_content_size(
             // Array length prefix (varint(len+1))
             writeln!(
                 file,
-                "{}    array_size += crate::common::protocol::varint::size_of_unsigned_varint({}.len() as u32 + 1);",
+                "{}    array_size += byte_utils::size_of_unsigned_varint({}.len() as u32 + 1) as i32;",
                 indent, accessor
             )?;
             // Element sizes
@@ -1874,7 +1912,7 @@ fn generate_tagged_field_content_size(
                         writeln!(file, "{}        let elem_len = element.len() as u32;", indent)?;
                         writeln!(
                             file,
-                            "{}        array_size += crate::common::protocol::varint::size_of_unsigned_varint(elem_len + 1);",
+                            "{}        array_size += byte_utils::size_of_unsigned_varint(elem_len + 1) as i32;",
                             indent
                         )?;
                         writeln!(file, "{}        array_size += elem_len as i32;", indent)?;
@@ -1890,7 +1928,7 @@ fn generate_tagged_field_content_size(
             }
             writeln!(
                 file,
-                "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(array_size as u32)); // size prefix",
+                "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(array_size as u32) as i32); // size prefix",
                 indent
             )?;
             writeln!(file, "{}    size.add_bytes(array_size);", indent)?;
@@ -1916,7 +1954,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(content_size as u32) as i32); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -1934,7 +1972,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(content_size as u32)); // size prefix",
+                        "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(content_size as u32) as i32); // size prefix",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(content_size);", indent)?;
@@ -1946,7 +1984,7 @@ fn generate_tagged_field_content_size(
                     )?;
                     writeln!(
                         file,
-                        "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(1)); // size prefix for 1 byte",
+                        "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(1) as i32); // size prefix for 1 byte",
                         indent
                     )?;
                     writeln!(file, "{}    size.add_bytes(1); // varint(0) null indicator", indent)?;
@@ -1959,7 +1997,7 @@ fn generate_tagged_field_content_size(
                 writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                 writeln!(
                     file,
-                    "{}    size.add_bytes(crate::common::protocol::varint::size_of_unsigned_varint(struct_size as u32)); // size prefix",
+                    "{}    size.add_bytes(byte_utils::size_of_unsigned_varint(struct_size as u32) as i32); // size prefix",
                     indent
                 )?;
                 writeln!(file, "{}    size.add_bytes(struct_size);", indent)?;
@@ -2026,7 +2064,11 @@ fn generate_tagged_field_read(
                             "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        bytes = readable.read_array(bytes.len())?;",
+                            indent
+                        )?;
                         writeln!(
                             file,
                             "{}                        result.{} = Some(String::from_utf8(bytes)",
@@ -2034,7 +2076,7 @@ fn generate_tagged_field_read(
                         )?;
                         writeln!(
                             file,
-                            "{}                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                            "{}                            .map_err(|e| KafkaError::Generic(e.to_string()))?);",
                             indent
                         )?;
                         writeln!(file, "{}                    }}", indent)?;
@@ -2047,7 +2089,11 @@ fn generate_tagged_field_read(
                             "{}                        let mut bytes = vec![0u8; (length - 1) as usize];",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        bytes = readable.read_array(bytes.len())?;",
+                            indent
+                        )?;
                         writeln!(
                             file,
                             "{}                        result.{} = String::from_utf8(bytes)",
@@ -2055,7 +2101,7 @@ fn generate_tagged_field_read(
                         )?;
                         writeln!(
                             file,
-                            "{}                            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?;",
+                            "{}                            .map_err(|e| KafkaError::Generic(e.to_string()))?;",
                             indent
                         )?;
                         writeln!(file, "{}                    }}", indent)?;
@@ -2131,11 +2177,7 @@ fn generate_tagged_field_read(
                             "{}                        if length as usize > readable.remaining() {{",
                             indent
                         )?;
-                        writeln!(
-                            file,
-                            "{}                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
-                            indent
-                        )?;
+                        writeln!(file, "{}                            return Err(KafkaError::Generic(", indent)?;
                         writeln!(
                             file,
                             "{}                                format!(\"Tried to allocate a collection of size {{}}, but there are only {{}} bytes remaining.\", length, readable.remaining())));",
@@ -2158,11 +2200,7 @@ fn generate_tagged_field_read(
                             "{}                        if length as usize > readable.remaining() {{",
                             indent
                         )?;
-                        writeln!(
-                            file,
-                            "{}                            return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
-                            indent
-                        )?;
+                        writeln!(file, "{}                            return Err(KafkaError::Generic(", indent)?;
                         writeln!(
                             file,
                             "{}                                format!(\"Tried to allocate a collection of size {{}}, but there are only {{}} bytes remaining.\", length, readable.remaining())));",
@@ -2205,7 +2243,7 @@ fn generate_tagged_field_read(
                             )?;
                             writeln!(
                                 file,
-                                "{}                                readable.read_bytes(&mut bytes)?;",
+                                "{}                                bytes = readable.read_array(bytes.len())?;",
                                 indent
                             )?;
                             writeln!(
@@ -2215,7 +2253,7 @@ fn generate_tagged_field_read(
                             )?;
                             writeln!(
                                 file,
-                                "{}                                    .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                                "{}                                    .map_err(|e| KafkaError::Generic(e.to_string()))?);",
                                 indent
                             )?;
                             writeln!(file, "{}                            }}", indent)?;
@@ -2316,7 +2354,11 @@ fn generate_tagged_field_read(
                             "{}                    let mut struct_bytes = vec![0u8; size as usize];",
                             indent
                         )?;
-                        writeln!(file, "{}                    readable.read_bytes(&mut struct_bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                    struct_bytes = readable.read_array(struct_bytes.len())?;",
+                            indent
+                        )?;
                         writeln!(
                             file,
                             "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::from_bytes(struct_bytes);",
@@ -2353,7 +2395,11 @@ fn generate_tagged_field_read(
                             "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        bytes = readable.read_array(bytes.len())?;",
+                            indent
+                        )?;
                         writeln!(file, "{}                        result.{} = Some(bytes);", indent, field_name)?;
                         writeln!(file, "{}                    }}", indent)?;
                     } else {
@@ -2363,7 +2409,11 @@ fn generate_tagged_field_read(
                             "{}                        let mut bytes = vec![0u8; (len - 1) as usize];",
                             indent
                         )?;
-                        writeln!(file, "{}                        readable.read_bytes(&mut bytes)?;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                        bytes = readable.read_array(bytes.len())?;",
+                            indent
+                        )?;
                         writeln!(file, "{}                        result.{} = bytes;", indent, field_name)?;
                         writeln!(file, "{}                    }} else {{", indent)?;
                         writeln!(file, "{}                        result.{} = Vec::new();", indent, field_name)?;
@@ -2377,7 +2427,11 @@ fn generate_tagged_field_read(
                         "{}                    let mut skip_bytes = vec![0u8; size as usize];",
                         indent
                     )?;
-                    writeln!(file, "{}                    readable.read_bytes(&mut skip_bytes)?;", indent)?;
+                    writeln!(
+                        file,
+                        "{}                    skip_bytes = readable.read_array(skip_bytes.len())?;",
+                        indent
+                    )?;
                 },
             }
 
@@ -2398,7 +2452,7 @@ fn generate_tagged_field_read(
     )?;
     writeln!(
         file,
-        "{}                    result.unknown_tagged_fields.push(RawTaggedField::new(tag, data));",
+        "{}                    result.unknown_tagged_fields.push(RawTaggedField::new(tag as i32, data));",
         indent
     )?;
     writeln!(file, "{}                }}", indent)?;
@@ -2454,7 +2508,7 @@ fn generate_tagged_field_write(
         "{}        num_tagged_fields += self.unknown_tagged_fields.len() as u32;",
         indent
     )?;
-    writeln!(file, "{}        writable.write_unsigned_varint(num_tagged_fields)?;", indent)?;
+    writeln!(file, "{}        writable.write_unsigned_varint(num_tagged_fields);", indent)?;
 
     // Now write each tagged field
     for field in tagged_fields {
@@ -2497,7 +2551,7 @@ fn generate_tagged_field_write(
                 writeln!(file, "{}            if {} {{", indent, should_write)?;
                 writeln!(
                     file,
-                    "{}                writable.write_unsigned_varint({})?; // tag",
+                    "{}                writable.write_unsigned_varint({}); // tag",
                     indent, tag
                 )?;
 
@@ -2509,7 +2563,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    let bytes = val.as_bytes();", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                    let string_prefix_size = byte_utils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -2517,31 +2571,27 @@ fn generate_tagged_field_write(
                                 "{}                    let size = (string_prefix_size + bytes.len() as i32) as u32;",
                                 indent
                             )?;
-                            writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(file, "{}                    writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
-                                "{}                    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;",
+                                "{}                    writable.write_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
-                            writeln!(file, "{}                    writable.write_bytes(bytes)?;", indent)?;
+                            writeln!(file, "{}                    writable.write_byte_array(bytes);", indent)?;
                             writeln!(file, "{}                }} else {{", indent)?;
                             // null encoding: size = 1 (varint(0))
                             writeln!(
                                 file,
-                                "{}                    writable.write_unsigned_varint(1)?; // size for null",
+                                "{}                    writable.write_unsigned_varint(1); // size for null",
                                 indent
                             )?;
-                            writeln!(
-                                file,
-                                "{}                    writable.write_unsigned_varint(0)?; // null",
-                                indent
-                            )?;
+                            writeln!(file, "{}                    writable.write_unsigned_varint(0); // null", indent)?;
                             writeln!(file, "{}                }}", indent)?;
                         } else {
                             writeln!(file, "{}                let bytes = {}.as_bytes();", indent, tagged_accessor)?;
                             writeln!(
                                 file,
-                                "{}                let string_prefix_size = crate::common::protocol::varint::size_of_unsigned_varint((bytes.len() as u32) + 1);",
+                                "{}                let string_prefix_size = byte_utils::size_of_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
                             writeln!(
@@ -2549,78 +2599,70 @@ fn generate_tagged_field_write(
                                 "{}                let size = (string_prefix_size + bytes.len() as i32) as u32;",
                                 indent
                             )?;
-                            writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
-                                "{}                writable.write_unsigned_varint((bytes.len() as u32) + 1)?;",
+                                "{}                writable.write_unsigned_varint((bytes.len() as u32) + 1);",
                                 indent
                             )?;
-                            writeln!(file, "{}                writable.write_bytes(bytes)?;", indent)?;
+                            writeln!(file, "{}                writable.write_byte_array(bytes);", indent)?;
                         }
                     },
                     FieldType::Bool => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(1)?; // size = 1 byte",
+                            "{}                writable.write_unsigned_varint(1); // size = 1 byte",
                             indent
                         )?;
                         writeln!(
                             file,
-                            "{}                writable.write_byte(if {} {{ 1 }} else {{ 0 }})?;",
+                            "{}                writable.write_byte(if {} {{ 1 }} else {{ 0 }});",
                             indent, tagged_copy_accessor
                         )?;
                     },
                     FieldType::Int8 => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(1)?; // size = 1 byte",
+                            "{}                writable.write_unsigned_varint(1); // size = 1 byte",
                             indent
                         )?;
-                        writeln!(
-                            file,
-                            "{}                writable.write_byte({})?;",
-                            indent, tagged_copy_accessor
-                        )?;
+                        writeln!(file, "{}                writable.write_byte({});", indent, tagged_copy_accessor)?;
                     },
                     FieldType::Int16 => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(2)?; // size = 2 bytes",
+                            "{}                writable.write_unsigned_varint(2); // size = 2 bytes",
                             indent
                         )?;
                         writeln!(
                             file,
-                            "{}                writable.write_short({})?;",
+                            "{}                writable.write_short({});",
                             indent, tagged_copy_accessor
                         )?;
                     },
                     FieldType::Int32 => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(4)?; // size = 4 bytes",
+                            "{}                writable.write_unsigned_varint(4); // size = 4 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_int({})?;", indent, tagged_copy_accessor)?;
+                        writeln!(file, "{}                writable.write_int({});", indent, tagged_copy_accessor)?;
                     },
                     FieldType::Int64 => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(8)?; // size = 8 bytes",
+                            "{}                writable.write_unsigned_varint(8); // size = 8 bytes",
                             indent
                         )?;
-                        writeln!(
-                            file,
-                            "{}                writable.write_long({})?;",
-                            indent, tagged_copy_accessor
-                        )?;
+                        writeln!(file, "{}                writable.write_long({});", indent, tagged_copy_accessor)?;
                     },
                     FieldType::Uuid => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(16)?; // size = 16 bytes",
+                            "{}                writable.write_unsigned_varint(16); // size = 16 bytes",
                             indent
                         )?;
-                        writeln!(file, "{}                writable.write_uuid(&{})?;", indent, tagged_accessor)?;
+                        writeln!(file, "{}                writable.write_uuid(&{});", indent, tagged_accessor)?;
                     },
                     FieldType::Array(element_type) => {
                         // For arrays, we need to calculate the size first by writing to a temp buffer
@@ -2633,7 +2675,7 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                // Write array length", indent)?;
                         writeln!(
                             file,
-                            "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                            "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1);",
                             indent, tagged_accessor
                         )?;
                         writeln!(file, "{}                // Write array elements", indent)?;
@@ -2646,7 +2688,7 @@ fn generate_tagged_field_write(
                                     "{}                for element in {}.iter() {{",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                    size_accessor.write_uuid(element)?;", indent)?;
+                                writeln!(file, "{}                    size_accessor.write_uuid(element);", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int8 => {
@@ -2655,7 +2697,7 @@ fn generate_tagged_field_write(
                                     "{}                for element in {}.iter() {{",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                    size_accessor.write_byte(*element)?;", indent)?;
+                                writeln!(file, "{}                    size_accessor.write_byte(*element);", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int16 => {
@@ -2664,7 +2706,7 @@ fn generate_tagged_field_write(
                                     "{}                for element in {}.iter() {{",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                    size_accessor.write_short(*element)?;", indent)?;
+                                writeln!(file, "{}                    size_accessor.write_short(*element);", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int32 => {
@@ -2673,7 +2715,7 @@ fn generate_tagged_field_write(
                                     "{}                for element in {}.iter() {{",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                    size_accessor.write_int(*element)?;", indent)?;
+                                writeln!(file, "{}                    size_accessor.write_int(*element);", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::Int64 => {
@@ -2682,7 +2724,7 @@ fn generate_tagged_field_write(
                                     "{}                for element in {}.iter() {{",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                    size_accessor.write_long(*element)?;", indent)?;
+                                writeln!(file, "{}                    size_accessor.write_long(*element);", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             FieldType::String => {
@@ -2694,10 +2736,10 @@ fn generate_tagged_field_write(
                                 writeln!(file, "{}                    let bytes = element.as_bytes();", indent)?;
                                 writeln!(
                                     file,
-                                    "{}                    size_accessor.write_unsigned_varint((bytes.len() as u32) + 1)?;",
+                                    "{}                    size_accessor.write_unsigned_varint((bytes.len() as u32) + 1);",
                                     indent
                                 )?;
-                                writeln!(file, "{}                    size_accessor.write_bytes(bytes)?;", indent)?;
+                                writeln!(file, "{}                    size_accessor.write_byte_array(bytes);", indent)?;
                                 writeln!(file, "{}                }}", indent)?;
                             },
                             _ => {
@@ -2717,18 +2759,22 @@ fn generate_tagged_field_write(
                         }
 
                         writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
-                        writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
-                        writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                        writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
+                        writeln!(
+                            file,
+                            "{}                writable.write_byte_array(size_accessor.buffer());",
+                            indent
+                        )?;
                     },
                     FieldType::Float64 => {
                         writeln!(
                             file,
-                            "{}                writable.write_unsigned_varint(8)?; // size = 8 bytes",
+                            "{}                writable.write_unsigned_varint(8); // size = 8 bytes",
                             indent
                         )?;
                         writeln!(
                             file,
-                            "{}                writable.write_double({})?;",
+                            "{}                writable.write_double({});",
                             indent, tagged_copy_accessor
                         )?;
                     },
@@ -2743,29 +2789,25 @@ fn generate_tagged_field_write(
                             )?;
                             writeln!(
                                 file,
-                                "{}                    size_accessor.write_unsigned_varint((val.len() as u32) + 1)?;",
+                                "{}                    size_accessor.write_unsigned_varint((val.len() as u32) + 1);",
                                 indent
                             )?;
-                            writeln!(file, "{}                    size_accessor.write_bytes(val)?;", indent)?;
+                            writeln!(file, "{}                    size_accessor.write_byte_array(val);", indent)?;
                             writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
-                            writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
+                            writeln!(file, "{}                    writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
-                                "{}                    writable.write_bytes(size_accessor.buffer())?;",
+                                "{}                    writable.write_byte_array(size_accessor.buffer());",
                                 indent
                             )?;
                             writeln!(file, "{}                }} else {{", indent)?;
                             // null encoding: size = 1 (varint(0))
                             writeln!(
                                 file,
-                                "{}                    writable.write_unsigned_varint(1)?; // size for null",
+                                "{}                    writable.write_unsigned_varint(1); // size for null",
                                 indent
                             )?;
-                            writeln!(
-                                file,
-                                "{}                    writable.write_unsigned_varint(0)?; // null",
-                                indent
-                            )?;
+                            writeln!(file, "{}                    writable.write_unsigned_varint(0); // null", indent)?;
                             writeln!(file, "{}                }}", indent)?;
                         } else {
                             writeln!(file, "{}                // Calculate bytes size", indent)?;
@@ -2776,17 +2818,21 @@ fn generate_tagged_field_write(
                             )?;
                             writeln!(
                                 file,
-                                "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                                "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1);",
                                 indent, tagged_accessor
                             )?;
                             writeln!(
                                 file,
-                                "{}                size_accessor.write_bytes(&*{})?;",
+                                "{}                size_accessor.write_byte_array(&*{});",
                                 indent, tagged_accessor
                             )?;
                             writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
-                            writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
-                            writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                            writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
+                            writeln!(
+                                file,
+                                "{}                writable.write_byte_array(size_accessor.buffer());",
+                                indent
+                            )?;
                         }
                     },
                     FieldType::Struct(_) => {
@@ -2800,12 +2846,12 @@ fn generate_tagged_field_write(
                                 writeln!(file, "{}                if self.{}.is_none() {{", indent, field_name)?;
                                 writeln!(
                                     file,
-                                    "{}                    writable.write_unsigned_varint(1)?; // size = 1 byte",
+                                    "{}                    writable.write_unsigned_varint(1); // size = 1 byte",
                                     indent
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                    writable.write_unsigned_varint(0)?; // null presence indicator",
+                                    "{}                    writable.write_unsigned_varint(0); // null presence indicator",
                                     indent
                                 )?;
                                 writeln!(file, "{}                }} else {{", indent)?;
@@ -2821,7 +2867,7 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                    size_accessor.write_unsigned_varint(1)?; // non-null presence indicator",
+                                    "{}                    size_accessor.write_unsigned_varint(1); // non-null presence indicator",
                                     indent
                                 )?;
                                 writeln!(
@@ -2830,10 +2876,10 @@ fn generate_tagged_field_write(
                                     indent, tagged_accessor
                                 )?;
                                 writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
-                                writeln!(file, "{}                    writable.write_unsigned_varint(size)?;", indent)?;
+                                writeln!(file, "{}                    writable.write_unsigned_varint(size);", indent)?;
                                 writeln!(
                                     file,
-                                    "{}                    writable.write_bytes(size_accessor.buffer())?;",
+                                    "{}                    writable.write_byte_array(size_accessor.buffer());",
                                     indent
                                 )?;
                                 writeln!(file, "{}                }}", indent)?;
@@ -2851,7 +2897,7 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                size_accessor.write_unsigned_varint(1)?; // non-null presence indicator",
+                                    "{}                size_accessor.write_unsigned_varint(1); // non-null presence indicator",
                                     indent
                                 )?;
                                 writeln!(
@@ -2860,10 +2906,10 @@ fn generate_tagged_field_write(
                                     indent, tagged_accessor
                                 )?;
                                 writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
-                                writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
+                                writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                                 writeln!(
                                     file,
-                                    "{}                writable.write_bytes(size_accessor.buffer())?;",
+                                    "{}                writable.write_byte_array(size_accessor.buffer());",
                                     indent
                                 )?;
                             }
@@ -2881,8 +2927,12 @@ fn generate_tagged_field_write(
                                 indent, tagged_accessor
                             )?;
                             writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
-                            writeln!(file, "{}                writable.write_unsigned_varint(size)?;", indent)?;
-                            writeln!(file, "{}                writable.write_bytes(size_accessor.buffer())?;", indent)?;
+                            writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
+                            writeln!(
+                                file,
+                                "{}                writable.write_byte_array(size_accessor.buffer());",
+                                indent
+                            )?;
                         }
                     },
                     _ => {
@@ -2904,13 +2954,17 @@ fn generate_tagged_field_write(
     // Write unknown tagged fields
     writeln!(file, "{}        // Write unknown tagged fields", indent)?;
     writeln!(file, "{}        for field in &self.unknown_tagged_fields {{", indent)?;
-    writeln!(file, "{}            writable.write_unsigned_varint(field.tag())?;", indent)?;
     writeln!(
         file,
-        "{}            writable.write_unsigned_varint(field.size() as u32)?;",
+        "{}            writable.write_unsigned_varint(field.tag() as u32);",
         indent
     )?;
-    writeln!(file, "{}            writable.write_bytes(field.data())?;", indent)?;
+    writeln!(
+        file,
+        "{}            writable.write_unsigned_varint(field.size() as u32);",
+        indent
+    )?;
+    writeln!(file, "{}            writable.write_byte_array(field.data());", indent)?;
     writeln!(file, "{}        }}", indent)?;
 
     Ok(())
@@ -2924,7 +2978,7 @@ fn generate_read_method(
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         file,
-        "    pub fn read(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {{"
+        "    pub fn read(readable: &mut dyn Readable, version: i16) -> Result<Self, KafkaError> {{"
     )?;
 
     let lowest = struct_spec.versions().lowest();
@@ -2937,8 +2991,7 @@ fn generate_read_method(
         writeln!(file, "        if version < {} || version > {} {{", lowest, highest)?;
     }
 
-    writeln!(file, "            return Err(std::io::Error::new(")?;
-    writeln!(file, "                std::io::ErrorKind::InvalidData,")?;
+    writeln!(file, "            return Err(KafkaError::Generic(")?;
     writeln!(
         file,
         "                format!(\"Invalid version {{}} for {}\", version),",
@@ -2995,7 +3048,7 @@ fn generate_read_method(
             writeln!(file, "            let data = readable.read_array(size as usize)?;")?;
             writeln!(
                 file,
-                "            result.unknown_tagged_fields.push(RawTaggedField::new(tag, data));"
+                "            result.unknown_tagged_fields.push(RawTaggedField::new(tag as i32, data));"
             )?;
             writeln!(file, "        }}")?;
         } else {
@@ -3017,7 +3070,7 @@ fn generate_read_method(
             writeln!(file, "                let data = readable.read_array(size as usize)?;")?;
             writeln!(
                 file,
-                "                result.unknown_tagged_fields.push(RawTaggedField::new(tag, data));"
+                "                result.unknown_tagged_fields.push(RawTaggedField::new(tag as i32, data));"
             )?;
             writeln!(file, "            }}")?;
             writeln!(file, "        }}")?;
@@ -3038,7 +3091,7 @@ fn generate_write_method(
 ) -> Result<(), Box<dyn std::error::Error>> {
     writeln!(
         file,
-        "    pub fn write(&self, writable: &mut dyn Writable, version: i16) -> std::io::Result<()> {{"
+        "    pub fn write(&self, writable: &mut dyn Writable, version: i16) -> Result<(), KafkaError> {{"
     )?;
 
     let lowest = struct_spec.versions().lowest();
@@ -3051,8 +3104,7 @@ fn generate_write_method(
         writeln!(file, "        if version < {} || version > {} {{", lowest, highest)?;
     }
 
-    writeln!(file, "            return Err(std::io::Error::new(")?;
-    writeln!(file, "                std::io::ErrorKind::InvalidData,")?;
+    writeln!(file, "            return Err(KafkaError::Generic(")?;
     writeln!(
         file,
         "                format!(\"Invalid version {{}} for {}\", version),",
@@ -3092,8 +3144,7 @@ fn generate_write_method(
             }
             generate_tagged_field_write(file, &tagged_fields, flexible_versions, true)?;
             writeln!(file, "        }} else if !self.unknown_tagged_fields.is_empty() {{")?;
-            writeln!(file, "            return Err(std::io::Error::new(")?;
-            writeln!(file, "                std::io::ErrorKind::InvalidData,")?;
+            writeln!(file, "            return Err(KafkaError::Generic(")?;
             writeln!(
                 file,
                 "                format!(\"Tagged fields were set, but version {{}} of this message does not support them.\", version),"
@@ -3108,12 +3159,12 @@ fn generate_write_method(
             writeln!(file, "        // Write tagged fields (flexible version)")?;
             writeln!(
                 file,
-                "        writable.write_unsigned_varint(self.unknown_tagged_fields.len() as u32)?;"
+                "        writable.write_unsigned_varint(self.unknown_tagged_fields.len() as u32);"
             )?;
             writeln!(file, "        for field in &self.unknown_tagged_fields {{")?;
-            writeln!(file, "            writable.write_unsigned_varint(field.tag())?;")?;
-            writeln!(file, "            writable.write_unsigned_varint(field.size() as u32)?;")?;
-            writeln!(file, "            writable.write_bytes(field.data())?;")?;
+            writeln!(file, "            writable.write_unsigned_varint(field.tag() as u32);")?;
+            writeln!(file, "            writable.write_unsigned_varint(field.size() as u32);")?;
+            writeln!(file, "            writable.write_byte_array(field.data());")?;
             writeln!(file, "        }}")?;
         } else {
             if flexible_versions.highest() == i16::MAX {
@@ -3129,16 +3180,15 @@ fn generate_write_method(
             writeln!(file, "            // Write tagged fields (flexible version)")?;
             writeln!(
                 file,
-                "            writable.write_unsigned_varint(self.unknown_tagged_fields.len() as u32)?;"
+                "            writable.write_unsigned_varint(self.unknown_tagged_fields.len() as u32);"
             )?;
             writeln!(file, "            for field in &self.unknown_tagged_fields {{")?;
-            writeln!(file, "                writable.write_unsigned_varint(field.tag())?;")?;
-            writeln!(file, "                writable.write_unsigned_varint(field.size() as u32)?;")?;
-            writeln!(file, "                writable.write_bytes(field.data())?;")?;
+            writeln!(file, "                writable.write_unsigned_varint(field.tag() as u32);")?;
+            writeln!(file, "                writable.write_unsigned_varint(field.size() as u32);")?;
+            writeln!(file, "                writable.write_byte_array(field.data());")?;
             writeln!(file, "            }}")?;
             writeln!(file, "        }} else if !self.unknown_tagged_fields.is_empty() {{")?;
-            writeln!(file, "            return Err(std::io::Error::new(")?;
-            writeln!(file, "                std::io::ErrorKind::InvalidData,")?;
+            writeln!(file, "            return Err(KafkaError::Generic(")?;
             writeln!(
                 file,
                 "                format!(\"Tagged fields were set, but version {{}} of this message does not support them.\", version),"
@@ -3287,12 +3337,12 @@ fn generate_string_read(
     let null_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null string not allowed\"));".to_string()
+        "return Err(KafkaError::Generic( \"Null string not allowed\"));".to_string()
     };
     let neg_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative string length\"));".to_string()
+        "return Err(KafkaError::Generic( \"Negative string length\"));".to_string()
     };
 
     if !flexible_versions.empty() {
@@ -3304,7 +3354,7 @@ fn generate_string_read(
             writeln!(file, "{}}} else {{", indent)?;
             writeln!(file, "{}    let length = len - 1;", indent)?;
             writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(
                 file,
                 "{}    result.{} = {}String::from_utf8(bytes)",
@@ -3312,7 +3362,7 @@ fn generate_string_read(
             )?;
             writeln!(
                 file,
-                "{}        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+                "{}        .map_err(|e| KafkaError::Generic(e.to_string()))?{};",
                 indent, some_close
             )?;
             writeln!(file, "{}}}", indent)?;
@@ -3335,7 +3385,7 @@ fn generate_string_read(
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let length = len - 1;", indent)?;
             writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(
                 file,
                 "{}        result.{} = {}String::from_utf8(bytes)",
@@ -3343,7 +3393,7 @@ fn generate_string_read(
             )?;
             writeln!(
                 file,
-                "{}            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+                "{}            .map_err(|e| KafkaError::Generic(e.to_string()))?{};",
                 indent, some_close
             )?;
             writeln!(file, "{}    }}", indent)?;
@@ -3353,7 +3403,7 @@ fn generate_string_read(
             writeln!(file, "{}        {}", indent, neg_action)?;
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(
                 file,
                 "{}        result.{} = {}String::from_utf8(bytes)",
@@ -3361,7 +3411,7 @@ fn generate_string_read(
             )?;
             writeln!(
                 file,
-                "{}            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+                "{}            .map_err(|e| KafkaError::Generic(e.to_string()))?{};",
                 indent, some_close
             )?;
             writeln!(file, "{}    }}", indent)?;
@@ -3374,7 +3424,7 @@ fn generate_string_read(
         writeln!(file, "{}    {}", indent, neg_action)?;
         writeln!(file, "{}}} else {{", indent)?;
         writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
-        writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+        writeln!(file, "{}    bytes = readable.read_array(bytes.len())?;", indent)?;
         writeln!(
             file,
             "{}    result.{} = {}String::from_utf8(bytes)",
@@ -3382,7 +3432,7 @@ fn generate_string_read(
         )?;
         writeln!(
             file,
-            "{}        .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?{};",
+            "{}        .map_err(|e| KafkaError::Generic(e.to_string()))?{};",
             indent, some_close
         )?;
         writeln!(file, "{}}}", indent)?;
@@ -3420,13 +3470,13 @@ fn generate_bytes_read(
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let length = len - 1;", indent)?;
             writeln!(file, "{}        let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}    }}", indent)?;
         } else {
             writeln!(file, "{}    let length = if len == 0 {{ 0 }} else {{ len - 1 }};", indent)?;
             writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
         }
         writeln!(file, "{}}} else {{", indent)?;
@@ -3436,13 +3486,13 @@ fn generate_bytes_read(
             writeln!(file, "{}        result.{} = None;", indent, field_name)?;
             writeln!(file, "{}    }} else {{", indent)?;
             writeln!(file, "{}        let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}        readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}        bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(file, "{}        result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}    }}", indent)?;
         } else {
             writeln!(file, "{}    let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
             writeln!(file, "{}    let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(file, "{}    result.{} = bytes;", indent, field_name)?;
         }
         writeln!(file, "{}}}", indent)?;
@@ -3453,13 +3503,13 @@ fn generate_bytes_read(
             writeln!(file, "{}    result.{} = None;", indent, field_name)?;
             writeln!(file, "{}}} else {{", indent)?;
             writeln!(file, "{}    let mut bytes = vec![0u8; len as usize];", indent)?;
-            writeln!(file, "{}    readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}    bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(file, "{}    result.{} = Some(bytes);", indent, field_name)?;
             writeln!(file, "{}}}", indent)?;
         } else {
             writeln!(file, "{}let length = if len < 0 {{ 0 }} else {{ len as u32 }};", indent)?;
             writeln!(file, "{}let mut bytes = vec![0u8; length as usize];", indent)?;
-            writeln!(file, "{}readable.read_bytes(&mut bytes)?;", indent)?;
+            writeln!(file, "{}bytes = readable.read_array(bytes.len())?;", indent)?;
             writeln!(file, "{}result.{} = {}bytes{};", indent, field_name, some_wrap, some_close)?;
         }
     }
@@ -3478,12 +3528,12 @@ fn generate_array_read(
     let null_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null array not allowed\"));".to_string()
+        "return Err(KafkaError::Generic( \"Null array not allowed\"));".to_string()
     };
     let neg_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Negative array length\"));".to_string()
+        "return Err(KafkaError::Generic( \"Negative array length\"));".to_string()
     };
 
     // Helper to generate the read loop that populates the array
@@ -3491,11 +3541,7 @@ fn generate_array_read(
         // Bounds check: validate array length against remaining bytes before allocating,
         // to prevent OOM from malicious messages with huge array lengths.
         writeln!(file, "{}if length as usize > readable.remaining() {{", ind)?;
-        writeln!(
-            file,
-            "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData,",
-            ind
-        )?;
+        writeln!(file, "{}    return Err(KafkaError::Generic(", ind)?;
         writeln!(
             file,
             "{}        format!(\"Tried to allocate a collection of size {{}}, but there are only {{}} bytes remaining.\", length, readable.remaining())));",
@@ -3627,10 +3673,10 @@ fn generate_array_element_read_with_prefix(
                     writeln!(file, "                    {}.push(String::new());", target)?;
                     writeln!(file, "                }} else {{")?;
                     writeln!(file, "                    let mut bytes = vec![0u8; (str_len - 1) as usize];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(file, "                    bytes = readable.read_array(bytes.len())?;")?;
                     writeln!(
                         file,
-                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                    {}.push(String::from_utf8(bytes).map_err(|e| KafkaError::Generic(e.to_string()))?);",
                         target
                     )?;
                     writeln!(file, "                }}")?;
@@ -3654,20 +3700,20 @@ fn generate_array_element_read_with_prefix(
                         file,
                         "                        let mut bytes = vec![0u8; (str_len - 1) as usize];"
                     )?;
-                    writeln!(file, "                        readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(file, "                        bytes = readable.read_array(bytes.len())?;")?;
                     writeln!(
                         file,
-                        "                        {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                        {}.push(String::from_utf8(bytes).map_err(|e| KafkaError::Generic(e.to_string()))?);",
                         target
                     )?;
                     writeln!(file, "                    }}")?;
                     writeln!(file, "                }} else {{")?;
                     writeln!(file, "                    let str_len = readable.read_short()? as usize;")?;
                     writeln!(file, "                    let mut bytes = vec![0u8; str_len];")?;
-                    writeln!(file, "                    readable.read_bytes(&mut bytes)?;")?;
+                    writeln!(file, "                    bytes = readable.read_array(bytes.len())?;")?;
                     writeln!(
                         file,
-                        "                    {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                        "                    {}.push(String::from_utf8(bytes).map_err(|e| KafkaError::Generic(e.to_string()))?);",
                         target
                     )?;
                     writeln!(file, "                }}")?;
@@ -3676,10 +3722,10 @@ fn generate_array_element_read_with_prefix(
                 // No flexible versions: always use standard encoding
                 writeln!(file, "                let str_len = readable.read_short()? as usize;")?;
                 writeln!(file, "                let mut bytes = vec![0u8; str_len];")?;
-                writeln!(file, "                readable.read_bytes(&mut bytes)?;")?;
+                writeln!(file, "                bytes = readable.read_array(bytes.len())?;")?;
                 writeln!(
                     file,
-                    "                {}.push(String::from_utf8(bytes).map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))?);",
+                    "                {}.push(String::from_utf8(bytes).map_err(|e| KafkaError::Generic(e.to_string()))?);",
                     target
                 )?;
             }
@@ -3747,38 +3793,38 @@ fn generate_field_write(
 
     match field.field_type() {
         FieldType::Bool => {
-            writeln!(file, "{}writable.write_byte(if {} {{ 1 }} else {{ 0 }})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_byte(if {} {{ 1 }} else {{ 0 }});", ind, accessor)?;
         },
         FieldType::Int8 => {
-            writeln!(file, "{}writable.write_byte({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_byte({});", ind, accessor)?;
         },
         FieldType::Int16 => {
-            writeln!(file, "{}writable.write_short({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_short({});", ind, accessor)?;
         },
         FieldType::Int32 => {
-            writeln!(file, "{}writable.write_int({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_int({});", ind, accessor)?;
         },
         FieldType::Int64 => {
-            writeln!(file, "{}writable.write_long({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_long({});", ind, accessor)?;
         },
         FieldType::Uint16 => {
-            writeln!(file, "{}writable.write_unsigned_short({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_unsigned_short({});", ind, accessor)?;
         },
         FieldType::Uint32 => {
-            writeln!(file, "{}writable.write_unsigned_int({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_unsigned_int({});", ind, accessor)?;
         },
         FieldType::Uuid => {
-            writeln!(file, "{}writable.write_uuid(&{})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_uuid(&{});", ind, accessor)?;
         },
         FieldType::Float64 => {
-            writeln!(file, "{}writable.write_double({})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_double({});", ind, accessor)?;
         },
         FieldType::String => {
             writeln!(file, "{}let bytes = {}.as_bytes();", ind, accessor)?;
             // Check if this version uses flexible encoding
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", ind)?;
+                    writeln!(file, "{}writable.write_unsigned_varint((bytes.len() as u32) + 1);", ind)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
@@ -3791,20 +3837,20 @@ fn generate_field_write(
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "{}    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;", ind)?;
+                    writeln!(file, "{}    writable.write_unsigned_varint((bytes.len() as u32) + 1);", ind)?;
                     writeln!(file, "{}}} else {{", ind)?;
-                    writeln!(file, "{}    writable.write_short(bytes.len() as i16)?;", ind)?;
+                    writeln!(file, "{}    writable.write_short(bytes.len() as i16);", ind)?;
                     writeln!(file, "{}}}", ind)?;
                 }
             } else {
-                writeln!(file, "{}writable.write_short(bytes.len() as i16)?;", ind)?;
+                writeln!(file, "{}writable.write_short(bytes.len() as i16);", ind)?;
             }
-            writeln!(file, "{}writable.write_bytes(bytes)?;", ind)?;
+            writeln!(file, "{}writable.write_byte_array(bytes);", ind)?;
         },
         FieldType::Bytes | FieldType::Records => {
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", ind, accessor)?;
+                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1);", ind, accessor)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
@@ -3819,22 +3865,22 @@ fn generate_field_write(
                     }
                     writeln!(
                         file,
-                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1);",
                         ind, accessor
                     )?;
                     writeln!(file, "{}}} else {{", ind)?;
-                    writeln!(file, "{}    writable.write_int({}.len() as i32)?;", ind, accessor)?;
+                    writeln!(file, "{}    writable.write_int({}.len() as i32);", ind, accessor)?;
                     writeln!(file, "{}}}", ind)?;
                 }
             } else {
-                writeln!(file, "{}writable.write_int({}.len() as i32)?;", ind, accessor)?;
+                writeln!(file, "{}writable.write_int({}.len() as i32);", ind, accessor)?;
             }
-            writeln!(file, "{}writable.write_bytes(&{})?;", ind, accessor)?;
+            writeln!(file, "{}writable.write_byte_array(&{});", ind, accessor)?;
         },
         FieldType::Array(element_type) => {
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1)?;", ind, accessor)?;
+                    writeln!(file, "{}writable.write_unsigned_varint(({}.len() as u32) + 1);", ind, accessor)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", ind, flexible_versions.lowest())?;
@@ -3849,15 +3895,15 @@ fn generate_field_write(
                     }
                     writeln!(
                         file,
-                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1)?;",
+                        "{}    writable.write_unsigned_varint(({}.len() as u32) + 1);",
                         ind, accessor
                     )?;
                     writeln!(file, "{}}} else {{", ind)?;
-                    writeln!(file, "{}    writable.write_int({}.len() as i32)?;", ind, accessor)?;
+                    writeln!(file, "{}    writable.write_int({}.len() as i32);", ind, accessor)?;
                     writeln!(file, "{}}}", ind)?;
                 }
             } else {
-                writeln!(file, "{}writable.write_int({}.len() as i32)?;", ind, accessor)?;
+                writeln!(file, "{}writable.write_int({}.len() as i32);", ind, accessor)?;
             }
             writeln!(file, "{}for element in {}.iter() {{", ind, accessor)?;
             generate_array_element_write(file, element_type.as_ref(), flexible_versions)?;
@@ -3871,10 +3917,10 @@ fn generate_field_write(
                 let nullable_versions = field.nullable_versions();
                 if nullable_versions.lowest() == 0 {
                     // All versions are nullable: always write presence byte
-                    writeln!(file, "{}writable.write_byte(1)?; // non-null presence byte", ind)?;
+                    writeln!(file, "{}writable.write_byte(1); // non-null presence byte", ind)?;
                 } else {
                     writeln!(file, "{}if version >= {} {{", ind, nullable_versions.lowest())?;
-                    writeln!(file, "{}    writable.write_byte(1)?; // non-null presence byte", ind)?;
+                    writeln!(file, "{}    writable.write_byte(1); // non-null presence byte", ind)?;
                     writeln!(file, "{}}}", ind)?;
                 }
             }
@@ -3892,14 +3938,14 @@ fn generate_field_write(
             let inner = format!("{}    ", indent);
             if nullable_versions.lowest() == 0 {
                 // All versions are nullable: always write null presence byte
-                writeln!(file, "{}writable.write_byte(-1)?; // null struct presence byte", inner)?;
+                writeln!(file, "{}writable.write_byte(-1); // null struct presence byte", inner)?;
             } else {
                 writeln!(file, "{}if version >= {} {{", inner, nullable_versions.lowest())?;
-                writeln!(file, "{}    writable.write_byte(-1)?; // null struct presence byte", inner)?;
+                writeln!(file, "{}    writable.write_byte(-1); // null struct presence byte", inner)?;
                 writeln!(file, "{}}} else {{", inner)?;
                 writeln!(
                     file,
-                    "{}    return Err(std::io::Error::new(std::io::ErrorKind::InvalidData, \"Null value for non-nullable struct field\"));",
+                    "{}    return Err(KafkaError::Generic( \"Null value for non-nullable struct field\"));",
                     inner
                 )?;
                 writeln!(file, "{}}}", inner)?;
@@ -3930,7 +3976,7 @@ fn generate_null_write(
         FieldType::String => {
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}writable.write_unsigned_varint(0);", inner)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
@@ -3943,19 +3989,19 @@ fn generate_null_write(
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "{}    writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}    writable.write_unsigned_varint(0);", inner)?;
                     writeln!(file, "{}}} else {{", inner)?;
-                    writeln!(file, "{}    writable.write_short(-1)?;", inner)?;
+                    writeln!(file, "{}    writable.write_short(-1);", inner)?;
                     writeln!(file, "{}}}", inner)?;
                 }
             } else {
-                writeln!(file, "{}writable.write_short(-1)?;", inner)?;
+                writeln!(file, "{}writable.write_short(-1);", inner)?;
             }
         },
         FieldType::Bytes | FieldType::Records => {
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}writable.write_unsigned_varint(0);", inner)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
@@ -3968,19 +4014,19 @@ fn generate_null_write(
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "{}    writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}    writable.write_unsigned_varint(0);", inner)?;
                     writeln!(file, "{}}} else {{", inner)?;
-                    writeln!(file, "{}    writable.write_int(-1)?;", inner)?;
+                    writeln!(file, "{}    writable.write_int(-1);", inner)?;
                     writeln!(file, "{}}}", inner)?;
                 }
             } else {
-                writeln!(file, "{}writable.write_int(-1)?;", inner)?;
+                writeln!(file, "{}writable.write_int(-1);", inner)?;
             }
         },
         FieldType::Array(_) => {
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
-                    writeln!(file, "{}writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}writable.write_unsigned_varint(0);", inner)?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
                         writeln!(file, "{}if version >= {} {{", inner, flexible_versions.lowest())?;
@@ -3993,13 +4039,13 @@ fn generate_null_write(
                             flexible_versions.highest()
                         )?;
                     }
-                    writeln!(file, "{}    writable.write_unsigned_varint(0)?;", inner)?;
+                    writeln!(file, "{}    writable.write_unsigned_varint(0);", inner)?;
                     writeln!(file, "{}}} else {{", inner)?;
-                    writeln!(file, "{}    writable.write_int(-1)?;", inner)?;
+                    writeln!(file, "{}    writable.write_int(-1);", inner)?;
                     writeln!(file, "{}}}", inner)?;
                 }
             } else {
-                writeln!(file, "{}writable.write_int(-1)?;", inner)?;
+                writeln!(file, "{}writable.write_int(-1);", inner)?;
             }
         },
         FieldType::Struct(_) => {
@@ -4008,7 +4054,7 @@ fn generate_null_write(
             // In non-nullable versions: this is an error (Java throws NullPointerException).
             // Since we can't easily access nullable_versions here, we write byte(-1)
             // unconditionally. The version check is handled by the caller's nullable wrapper.
-            writeln!(file, "{}writable.write_byte(-1)?; // null struct presence byte", inner)?;
+            writeln!(file, "{}writable.write_byte(-1); // null struct presence byte", inner)?;
         },
         _ => {
             // Primitive types cannot be nullable per can_be_nullable()
@@ -4024,31 +4070,31 @@ fn generate_array_element_write(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match element_type {
         FieldType::Bool => {
-            writeln!(file, "                writable.write_byte(if *element {{ 1 }} else {{ 0 }})?;")?;
+            writeln!(file, "                writable.write_byte(if *element {{ 1 }} else {{ 0 }});")?;
         },
         FieldType::Int8 => {
-            writeln!(file, "                writable.write_byte(*element)?;")?;
+            writeln!(file, "                writable.write_byte(*element);")?;
         },
         FieldType::Int16 => {
-            writeln!(file, "                writable.write_short(*element)?;")?;
+            writeln!(file, "                writable.write_short(*element);")?;
         },
         FieldType::Int32 => {
-            writeln!(file, "                writable.write_int(*element)?;")?;
+            writeln!(file, "                writable.write_int(*element);")?;
         },
         FieldType::Int64 => {
-            writeln!(file, "                writable.write_long(*element)?;")?;
+            writeln!(file, "                writable.write_long(*element);")?;
         },
         FieldType::Uint16 => {
-            writeln!(file, "                writable.write_unsigned_short(*element)?;")?;
+            writeln!(file, "                writable.write_unsigned_short(*element);")?;
         },
         FieldType::Uint32 => {
-            writeln!(file, "                writable.write_unsigned_int(*element)?;")?;
+            writeln!(file, "                writable.write_unsigned_int(*element);")?;
         },
         FieldType::Uuid => {
-            writeln!(file, "                writable.write_uuid(element)?;")?;
+            writeln!(file, "                writable.write_uuid(element);")?;
         },
         FieldType::Float64 => {
-            writeln!(file, "                writable.write_double(*element)?;")?;
+            writeln!(file, "                writable.write_double(*element);")?;
         },
         FieldType::String => {
             writeln!(file, "                let bytes = element.as_bytes();")?;
@@ -4056,7 +4102,7 @@ fn generate_array_element_write(
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "                writable.write_unsigned_varint((bytes.len() as u32) + 1)?;"
+                        "                writable.write_unsigned_varint((bytes.len() as u32) + 1);"
                     )?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
@@ -4071,23 +4117,23 @@ fn generate_array_element_write(
                     }
                     writeln!(
                         file,
-                        "                    writable.write_unsigned_varint((bytes.len() as u32) + 1)?;"
+                        "                    writable.write_unsigned_varint((bytes.len() as u32) + 1);"
                     )?;
                     writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    writable.write_short(bytes.len() as i16)?;")?;
+                    writeln!(file, "                    writable.write_short(bytes.len() as i16);")?;
                     writeln!(file, "                }}")?;
                 }
             } else {
-                writeln!(file, "                writable.write_short(bytes.len() as i16)?;")?;
+                writeln!(file, "                writable.write_short(bytes.len() as i16);")?;
             }
-            writeln!(file, "                writable.write_bytes(bytes)?;")?;
+            writeln!(file, "                writable.write_byte_array(bytes);")?;
         },
         FieldType::Bytes | FieldType::Records => {
             if !flexible_versions.empty() {
                 if flexible_versions.lowest() == 0 {
                     writeln!(
                         file,
-                        "                writable.write_unsigned_varint((element.len() as u32) + 1)?;"
+                        "                writable.write_unsigned_varint((element.len() as u32) + 1);"
                     )?;
                 } else {
                     if flexible_versions.highest() == i16::MAX {
@@ -4102,16 +4148,16 @@ fn generate_array_element_write(
                     }
                     writeln!(
                         file,
-                        "                    writable.write_unsigned_varint((element.len() as u32) + 1)?;"
+                        "                    writable.write_unsigned_varint((element.len() as u32) + 1);"
                     )?;
                     writeln!(file, "                }} else {{")?;
-                    writeln!(file, "                    writable.write_int(element.len() as i32)?;")?;
+                    writeln!(file, "                    writable.write_int(element.len() as i32);")?;
                     writeln!(file, "                }}")?;
                 }
             } else {
-                writeln!(file, "                writable.write_int(element.len() as i32)?;")?;
+                writeln!(file, "                writable.write_int(element.len() as i32);")?;
             }
-            writeln!(file, "                writable.write_bytes(element)?;")?;
+            writeln!(file, "                writable.write_byte_array(element);")?;
         },
         FieldType::Struct(_) => {
             writeln!(file, "                element.write(writable, version)?;")?;
@@ -4125,50 +4171,54 @@ fn generate_array_element_write(
     Ok(())
 }
 
-/// Map a FieldType to a SchemaType expression string for a specific (flexible, nullable) combination.
+/// Map a FieldType to a `protocol::types::Type` expression string for a
+/// specific (flexible, nullable) combination. The variant names below
+/// correspond to the Phase 2c-runtime `Type` enum (e.g. `Type::Boolean`,
+/// `Type::UInt16`, `Type::UnsignedInt32`); they are intentionally not the
+/// same shape as Java's static `Type` field names.
 fn schema_type_for(field_type: &FieldType, flexible: bool, nullable: bool) -> String {
     match field_type {
-        FieldType::Bool => "SchemaType::Boolean".to_string(),
-        FieldType::Int8 => "SchemaType::Int8".to_string(),
-        FieldType::Int16 => "SchemaType::Int16".to_string(),
-        FieldType::Uint16 => "SchemaType::Uint16".to_string(),
-        FieldType::Uint32 => "SchemaType::Uint32".to_string(),
-        FieldType::Int32 => "SchemaType::Int32".to_string(),
-        FieldType::Int64 => "SchemaType::Int64".to_string(),
-        FieldType::Uuid => "SchemaType::Uuid".to_string(),
-        FieldType::Float64 => "SchemaType::Float64".to_string(),
+        FieldType::Bool => "Type::Boolean".to_string(),
+        FieldType::Int8 => "Type::Int8".to_string(),
+        FieldType::Int16 => "Type::Int16".to_string(),
+        FieldType::Uint16 => "Type::UInt16".to_string(),
+        FieldType::Uint32 => "Type::UnsignedInt32".to_string(),
+        FieldType::Int32 => "Type::Int32".to_string(),
+        FieldType::Int64 => "Type::Int64".to_string(),
+        FieldType::Uuid => "Type::Uuid".to_string(),
+        FieldType::Float64 => "Type::Float64".to_string(),
         FieldType::String => match (flexible, nullable) {
-            (true, true) => "SchemaType::CompactNullableString",
-            (true, false) => "SchemaType::CompactString",
-            (false, true) => "SchemaType::NullableString",
-            (false, false) => "SchemaType::String",
+            (true, true) => "Type::CompactNullableString",
+            (true, false) => "Type::CompactString",
+            (false, true) => "Type::NullableString",
+            (false, false) => "Type::String",
         }
         .to_string(),
         FieldType::Bytes => match (flexible, nullable) {
-            (true, true) => "SchemaType::CompactNullableBytes",
-            (true, false) => "SchemaType::CompactBytes",
-            (false, true) => "SchemaType::NullableBytes",
-            (false, false) => "SchemaType::Bytes",
+            (true, true) => "Type::CompactNullableBytes",
+            (true, false) => "Type::CompactBytes",
+            (false, true) => "Type::NullableBytes",
+            (false, false) => "Type::Bytes",
         }
         .to_string(),
         FieldType::Records => {
             if flexible {
-                "SchemaType::CompactRecords".to_string()
+                "Type::CompactRecords".to_string()
             } else {
-                "SchemaType::Records".to_string()
+                "Type::Records".to_string()
             }
         },
         FieldType::Array(_) => {
             // Arrays are represented as Bytes in the schema type for introspection
             if flexible {
-                "SchemaType::CompactBytes".to_string()
+                "Type::CompactBytes".to_string()
             } else {
-                "SchemaType::Bytes".to_string()
+                "Type::Bytes".to_string()
             }
         },
         FieldType::Struct(_) => {
             // Structs are composite - use Bytes as placeholder for introspection
-            "SchemaType::Bytes".to_string()
+            "Type::Bytes".to_string()
         },
     }
 }
@@ -4302,10 +4352,18 @@ fn generate_schema_method(
     let version_param = if needs_version_param { "version" } else { "_version" };
 
     writeln!(file, "    /// Returns the schema for this message at the given version.")?;
-    writeln!(file, "    pub fn schema({}: i16) -> Schema {{", version_param)?;
+    writeln!(
+        file,
+        "    pub fn schema({}: i16) -> Result<Schema, KafkaError> {{",
+        version_param
+    )?;
     writeln!(file, "        let mut fields = Vec::new();")?;
 
-    // For each field, emit conditional push based on version
+    // For each field, emit conditional push based on version. The runtime
+    // `Field` constructor (`Field::with_doc`) takes name, type, doc string —
+    // matching Java's `Field(String, Type, String)` ctor used in the
+    // generated code. There is no `field_type` field on the runtime struct;
+    // its `r#type` field is private behind `Field::with_doc`.
     for field in struct_spec.fields() {
         let field_name = to_snake_case(field.name());
         let field_name = escape_rust_keyword(&field_name);
@@ -4326,7 +4384,7 @@ fn generate_schema_method(
         let schema_type_expr = schema_type_expr_for_field(field, flexible_versions);
         let about_escaped = field.about().replace('"', "\\\"");
         let push_stmt = format!(
-            "fields.push(Field {{ name: \"{}\", field_type: {}, about: \"{}\" }});",
+            "fields.push(Field::with_doc(\"{}\", {}, \"{}\"));",
             field_name, schema_type_expr, about_escaped,
         );
 
@@ -4758,10 +4816,10 @@ mod tests {
     #[test]
     fn g1_request_header_client_id_emits_non_compact_schema_type() {
         // Locks the RequestHeader.ClientId schema type for v2 (the message's first
-        // flexible version) to `SchemaType::NullableString` — the length-prefixed
+        // flexible version) to `Type::NullableString` — the length-prefixed
         // variant. If the per-field flexibleVersions override is ever dropped this
-        // will regress to `SchemaType::CompactNullableString`, which is wire-
-        // incompatible with Java brokers (Java emits `Type.NULLABLE_STRING`).
+        // will regress to `Type::CompactNullableString`, which is wire-incompatible
+        // with Java brokers (Java emits `Type.NULLABLE_STRING`).
         let mut field = parse_field(
             r#"{
                 "name": "ClientId",
@@ -4775,7 +4833,7 @@ mod tests {
         let msg_flex = Versions::parse(Some("2+"), Versions::NONE).unwrap();
         let expr = schema_type_expr_for_field(&field, msg_flex);
         assert_eq!(
-            expr, "SchemaType::NullableString",
+            expr, "Type::NullableString",
             "ClientId must use length-prefixed NullableString at every version: got {expr}",
         );
         // No version-dependent expression should be emitted for this field.
@@ -4804,7 +4862,7 @@ mod tests {
             "field without override on a flexible-from-v2 message must vary by version: expr was {expr}",
         );
         assert!(
-            expr.contains("SchemaType::CompactString") && expr.contains("SchemaType::String"),
+            expr.contains("Type::CompactString") && expr.contains("Type::String"),
             "expected both compact and length-prefixed branches, got: {expr}",
         );
     }
@@ -4832,12 +4890,12 @@ mod tests {
         let body_end = after_schema.find("Schema::new(fields)").expect("schema() body found");
         let body = &after_schema[..body_end];
         assert!(
-            body.contains("name: \"client_id\""),
+            body.contains("name: \"client_id\"") || body.contains("\"client_id\","),
             "client_id field expected in schema(); body was:\n{body}",
         );
         assert!(
-            body.contains("SchemaType::NullableString"),
-            "client_id must use SchemaType::NullableString (length-prefixed) on the wire; body was:\n{body}",
+            body.contains("Type::NullableString"),
+            "client_id must use Type::NullableString (length-prefixed) on the wire; body was:\n{body}",
         );
         assert!(
             !body.contains("CompactNullableString"),
