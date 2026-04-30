@@ -4950,4 +4950,52 @@ mod tests {
         field.validate().unwrap();
         assert_eq!(get_default_value_for_field(&field), "String::new()");
     }
+
+    // ----------------------------------------------------------------------
+    // G3: int64 must map to Rust `i64`, not `u64`. Producer IDs, offsets, and
+    // Uuid most/least-significant bits are signed in Java; using `u64` would
+    // flip ordering for values with the high bit set.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn g3_int64_maps_to_i64() {
+        assert_eq!(field_type_to_rust(&FieldType::Int64), "i64");
+    }
+
+    #[test]
+    fn g3_int32_int16_int8_map_to_signed() {
+        assert_eq!(field_type_to_rust(&FieldType::Int8), "i8");
+        assert_eq!(field_type_to_rust(&FieldType::Int16), "i16");
+        assert_eq!(field_type_to_rust(&FieldType::Int32), "i32");
+    }
+
+    #[test]
+    fn g3_uint_types_map_to_unsigned() {
+        // Sanity: uint types do remain unsigned.
+        assert_eq!(field_type_to_rust(&FieldType::Uint16), "u16");
+        assert_eq!(field_type_to_rust(&FieldType::Uint32), "u32");
+    }
+
+    #[test]
+    fn g3_uuid_maps_to_uuid_struct_not_u64_pair() {
+        // Locks Uuid to the Rust `Uuid` struct. The struct internally uses signed
+        // most/least-significant bits (mirroring Java UUID), so direct numeric
+        // comparison ordering is preserved.
+        assert_eq!(field_type_to_rust(&FieldType::Uuid), "Uuid");
+    }
+
+    #[test]
+    fn g3_int64_field_in_struct_emits_i64_not_u64() {
+        // End-to-end: a producer-id-shaped field declared as int64 must end up as
+        // `i64` in the generated Rust type.
+        let mut field = parse_field(
+            r#"{
+                "name": "ProducerId",
+                "type": "int64",
+                "versions": "0+"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(field_type_to_rust_for_field(&field), "i64");
+    }
 }
