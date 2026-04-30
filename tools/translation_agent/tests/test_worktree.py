@@ -27,10 +27,22 @@ def _ok(*_args, **_kwargs):
     return _completed(0)
 
 
+def _ok_show_ref_missing(args, **_kwargs):
+    """Default for the local-branch-exists check: branch doesn't exist locally
+    (rc=1), so worktree.py takes the fetch+create path that existing tests
+    assert on. All other git calls succeed (rc=0)."""
+    if "show-ref" in args:
+        return _completed(1)
+    return _completed(0)
+
+
 def test_worktree_for_branch_yields_path_runs_setup_and_teardown():
     calls = []
 
     def record(args, **kwargs):
+        if "show-ref" in args:
+            # Branch doesn't exist locally -> take the fetch+create path.
+            return _completed(1)
         calls.append(args[3:])  # strip ["git", "-C", "/repo"]
         return _completed(0)
 
@@ -65,6 +77,8 @@ def test_worktree_for_branch_propagates_setup_failure_no_cleanup_call():
 
     def maybe_fail(args, **kwargs):
         nonlocal fetch_failed
+        if "show-ref" in args:
+            return _completed(1)  # local branch doesn't exist -> fetch path
         if "fetch" in args:
             fetch_failed = True
             return _completed(1, stderr="fatal: no such ref")
@@ -167,16 +181,48 @@ def test_worktree_with_ak_commit_runs_make_build_and_bumps_submodule():
 
 def test_worktree_branch_name_with_slash_sanitized_in_temp_prefix():
     """Branch names with slashes must produce valid temp-dir paths."""
-    seen_prefix = []
+    seen_paths = []
 
     def record(args, **kwargs):
-        # The third positional arg to `worktree add` is the path.
+        if "show-ref" in args:
+            return _completed(1)  # take the fetch+create path
         if args[3:5] == ["worktree", "add"]:
-            seen_prefix.append(args[7])
+            # In the fetch+create path argv is:
+            # git -C /repo worktree add -B <branch> <path> origin/<base>
+            # so args[7] is the path.
+            seen_paths.append(args[7])
         return _completed(0)
 
     with patch.object(worktree.subprocess, "run", side_effect=record):
         with worktree.worktree_for_branch("/repo", "kafka-translate/abc"):
             pass
-    # The temp path uses an underscore in place of the slash.
-    assert "translation-agent-kafka-translate_abc-" in seen_prefix[0]
+    assert "translation-agent-kafka-translate_abc-" in seen_paths[0]
+
+
+def test_worktree_for_branch_uses_local_branch_when_it_exists():
+    """When the branch exists locally (e.g. dry-run cascade after a prior
+    plan run), use it directly without fetching from origin."""
+    calls = []
+
+    def record(args, **kwargs):
+        calls.append(args[3:])  # strip ["git", "-C", "/repo"]
+        if "show-ref" in args:
+            return _completed(0)  # branch DOES exist locally
+        return _completed(0)
+
+    with patch.object(worktree.subprocess, "run", side_effect=record):
+        with worktree.worktree_for_branch("/repo", "kafka-translate/abc"):
+            pass
+
+    # No fetch should have been called.
+    assert not any(c[:2] == ["fetch", "origin"] for c in calls), (
+        f"Should not have fetched from origin; got calls: {calls}"
+    )
+    # The worktree-add should NOT use -B (we're checking out the existing branch).
+    add_calls = [c for c in calls if c[:2] == ["worktree", "add"]]
+    assert len(add_calls) == 1, add_calls
+    assert "-B" not in add_calls[0], (
+        f"Should not use -B when reusing existing branch; got {add_calls[0]}"
+    )
+    # And the add call ends with the bare branch name as the source ref.
+    assert add_calls[0][-1] == "kafka-translate/abc"
