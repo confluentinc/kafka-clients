@@ -191,7 +191,7 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
     if args.dry_run:
         log.info(
             "[dry-run] r2 is on PATH -- running impl (no push, worktree "
-            "preserved, DB status unchanged)"
+            "preserved)"
         )
 
     err, sha = _run_impl_one(args, pr)
@@ -420,7 +420,7 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
     if args.dry_run:
         log.info(
             "[dry-run] r2 is on PATH -- running plan/impl tasks (no push, "
-            "worktree preserved, DB status unchanged)"
+            "worktree preserved)"
         )
 
     with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
