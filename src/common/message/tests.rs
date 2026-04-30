@@ -1290,3 +1290,322 @@ fn produce_response_data_round_trip_v13_flexible_full() {
     let decoded_b = decoded.responses.iter().find(|t| t.topic_id == topic_id_b).unwrap();
     assert_eq!(decoded_b.partition_responses[0].error_code, 100);
 }
+
+// =============================================================================
+// Byte-vector encoding fixtures captured from Apache Kafka 4.2.0 Java client
+// (Phase 2 DoD requirement; see PLAN.md lines 184–186).
+//
+// These are the **gold-standard wire-compatibility tests**: each constant
+// below is a hex string captured by running a one-off Java tool that builds
+// the same `*Data` payload and serializes via
+// `MessageUtil.toByteBufferAccessor(message, version).buffer()`. The Rust
+// encoder must produce **byte-for-byte identical** output for the broker to
+// accept the request.
+//
+// Capture tool source (NOT committed): `/tmp/kafka-fixture-capture/CaptureFixtures.java`.
+// Compile and run:
+//   javac -cp kafka-clients-4.2.0.jar:slf4j-api-1.7.36.jar CaptureFixtures.java
+//   java  -cp .:kafka-clients-4.2.0.jar:slf4j-api-1.7.36.jar CaptureFixtures
+//
+// To re-capture (e.g. when bumping the Apache Kafka version), recreate that
+// tool from the values constructed in each test below.
+// =============================================================================
+
+/// Decode a hex string into a `Vec<u8>`. Inline helper avoids pulling in the
+/// `hex` crate just for these fixture tests.
+fn hex_to_vec(s: &str) -> Vec<u8> {
+    assert!(s.len().is_multiple_of(2), "hex string must have even length");
+    (0..s.len())
+        .step_by(2)
+        .map(|i| u8::from_str_radix(&s[i..i + 2], 16).expect("valid hex"))
+        .collect()
+}
+
+/// Helper: encode the given Rust message at the given version and assert the
+/// bytes match the captured hex fixture.
+fn assert_encodes_to<M: Message>(msg: &M, version: i16, expected_hex: &str, what: &str) {
+    let bytes = encode(msg, version);
+    let expected = hex_to_vec(expected_hex);
+    assert_eq!(
+        bytes, expected,
+        "{} byte-vector encoding mismatch — captured from Apache Kafka 4.2.0 Java client",
+        what
+    );
+}
+
+// --- RequestHeader ----------------------------------------------------------
+
+/// RequestHeader v2 fixture — locks G1 (per-field `flexibleVersions: none`
+/// override on `client_id` forces length-prefixed encoding even on flexible
+/// header versions). The `client_id` length is `0x000b` (i16), NOT
+/// `varint(11+1)`, which is what the Java broker expects.
+///
+/// Captured from Java:
+/// ```java
+/// new RequestHeaderData()
+///     .setRequestApiKey((short) 0)
+///     .setRequestApiVersion((short) 11)
+///     .setCorrelationId(42)
+///     .setClientId("test-client");
+/// MessageUtil.toByteBufferAccessor(data, (short) 2);
+/// ```
+const REQUEST_HEADER_V2_HEX: &str = "0000000b0000002a000b746573742d636c69656e7400";
+
+#[test]
+fn request_header_v2_byte_fixture_matches_java() {
+    let data = RequestHeaderData {
+        request_api_key: 0,
+        request_api_version: 11,
+        correlation_id: 42,
+        client_id: Some("test-client".to_string()),
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 2, REQUEST_HEADER_V2_HEX, "RequestHeader v2 (G1 lock)");
+}
+
+// --- ResponseHeader ---------------------------------------------------------
+
+/// ResponseHeader v0 fixture — non-flexible, exactly 4 bytes (i32 BE
+/// correlation_id).
+const RESPONSE_HEADER_V0_HEX: &str = "0000002a";
+
+#[test]
+fn response_header_v0_byte_fixture_matches_java() {
+    let data = ResponseHeaderData { correlation_id: 42, unknown_tagged_fields: Vec::new() };
+    assert_encodes_to(&data, 0, RESPONSE_HEADER_V0_HEX, "ResponseHeader v0");
+}
+
+/// ResponseHeader v1 fixture — flexible, 4 bytes correlation_id + 1-byte
+/// varint(0) tagged-fields trailer = 5 bytes.
+const RESPONSE_HEADER_V1_HEX: &str = "0000006300";
+
+#[test]
+fn response_header_v1_byte_fixture_matches_java() {
+    let data = ResponseHeaderData { correlation_id: 99, unknown_tagged_fields: Vec::new() };
+    assert_encodes_to(&data, 1, RESPONSE_HEADER_V1_HEX, "ResponseHeader v1");
+}
+
+// --- ApiVersionsRequest -----------------------------------------------------
+
+/// ApiVersionsRequest v0 fixture — empty wire image (no fields exist at v0).
+const API_VERSIONS_REQUEST_V0_HEX: &str = "";
+
+#[test]
+fn api_versions_request_v0_byte_fixture_matches_java() {
+    let data = ApiVersionsRequestData::new();
+    assert_encodes_to(&data, 0, API_VERSIONS_REQUEST_V0_HEX, "ApiVersionsRequest v0");
+}
+
+/// ApiVersionsRequest v4 fixture — flexible. compact strings + tagged trailer.
+///   varint(11) "kafka-rust" varint(6) "0.1.0" varint(0)
+const API_VERSIONS_REQUEST_V4_HEX: &str = "0b6b61666b612d7275737406302e312e3000";
+
+#[test]
+fn api_versions_request_v4_byte_fixture_matches_java() {
+    let data = ApiVersionsRequestData {
+        client_software_name: "kafka-rust".to_string(),
+        client_software_version: "0.1.0".to_string(),
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 4, API_VERSIONS_REQUEST_V4_HEX, "ApiVersionsRequest v4");
+}
+
+// --- ApiVersionsResponse ----------------------------------------------------
+
+/// ApiVersionsResponse v0 fixture — non-flexible, two ApiVersion entries.
+///   error_code i16 = 0
+///   array length i32 = 2
+///   ApiVersion[0]: api_key=0, min=0, max=11
+///   ApiVersion[1]: api_key=18, min=0, max=4
+const API_VERSIONS_RESPONSE_V0_HEX: &str = "00000000000200000000000b001200000004";
+
+#[test]
+fn api_versions_response_v0_byte_fixture_matches_java() {
+    let data = ApiVersionsResponseData {
+        error_code: 0,
+        api_keys: vec![
+            ApiVersion { api_key: 0, min_version: 0, max_version: 11, unknown_tagged_fields: Vec::new() },
+            ApiVersion { api_key: 18, min_version: 0, max_version: 4, unknown_tagged_fields: Vec::new() },
+        ],
+        throttle_time_ms: 0,
+        supported_features: Vec::new(),
+        finalized_features_epoch: -1,
+        finalized_features: Vec::new(),
+        zk_migration_ready: false,
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 0, API_VERSIONS_RESPONSE_V0_HEX, "ApiVersionsResponse v0");
+}
+
+// --- MetadataRequest --------------------------------------------------------
+
+/// MetadataRequest v0 fixture — non-flexible, two topics by name.
+///   array length i32 = 2
+///   topic[0]: name length i16 = 7, "topic-1"
+///   topic[1]: name length i16 = 7, "topic-2"
+const METADATA_REQUEST_V0_HEX: &str = "000000020007746f7069632d310007746f7069632d32";
+
+#[test]
+fn metadata_request_v0_byte_fixture_matches_java() {
+    let data = MetadataRequestData {
+        topics: Some(vec![
+            MetadataRequestTopic {
+                topic_id: Uuid::zero(),
+                name: Some("topic-1".to_string()),
+                unknown_tagged_fields: Vec::new(),
+            },
+            MetadataRequestTopic {
+                topic_id: Uuid::zero(),
+                name: Some("topic-2".to_string()),
+                unknown_tagged_fields: Vec::new(),
+            },
+        ]),
+        // Java's MetadataRequestData defaults to allow_auto_topic_creation = true.
+        allow_auto_topic_creation: true,
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: false,
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 0, METADATA_REQUEST_V0_HEX, "MetadataRequest v0");
+}
+
+/// MetadataRequest v13 fixture — flexible, null topics + defaults.
+///   varint(0) for null topics
+///   bool allow_auto_topic_creation = true (1)
+///   bool include_topic_authorized_operations = false (0)
+///   varint(0) tagged-fields trailer
+const METADATA_REQUEST_V13_NULL_TOPICS_HEX: &str = "00010000";
+
+#[test]
+fn metadata_request_v13_null_topics_byte_fixture_matches_java() {
+    let data = MetadataRequestData {
+        topics: None,
+        allow_auto_topic_creation: true,
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: false,
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(
+        &data,
+        13,
+        METADATA_REQUEST_V13_NULL_TOPICS_HEX,
+        "MetadataRequest v13 null topics",
+    );
+}
+
+// --- MetadataResponse -------------------------------------------------------
+
+/// MetadataResponse v13 fixture with top-level error.
+///   throttle_time_ms i32 = 0
+///   brokers compact array varint(1)  (empty)
+///   cluster_id varint(0) — null
+///   controller_id i32 = -1
+///   topics compact array varint(1)  (empty)
+///   error_code i16 = 41 (NOT_CONTROLLER)
+///   varint(0) tagged-fields trailer
+const METADATA_RESPONSE_V13_TOP_LEVEL_ERROR_HEX: &str = "000000000100ffffffff01002900";
+
+#[test]
+fn metadata_response_v13_top_level_error_byte_fixture_matches_java() {
+    let data = MetadataResponseData {
+        throttle_time_ms: 0,
+        brokers: Vec::new(),
+        cluster_id: None,
+        controller_id: -1,
+        topics: Vec::new(),
+        cluster_authorized_operations: -2147483648,
+        error_code: 41, // NOT_CONTROLLER
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 13, METADATA_RESPONSE_V13_TOP_LEVEL_ERROR_HEX, "MetadataResponse v13");
+}
+
+// --- ProduceRequest ---------------------------------------------------------
+
+/// ProduceRequest v3 fixture — non-flexible.
+///   transactional_id length i16 = 5, "txn-1"
+///   acks i16 = -1 (0xffff)
+///   timeout_ms i32 = 30000 (0x00007530)
+///   topic_data array length i32 = 1
+///   topic[0]:
+///     name length i16 = 7, "topic-a"
+///     partition_data array length i32 = 2
+///     partition[0]:
+///       index i32 = 0
+///       records length i32 = 5, "hello"
+///     partition[1]:
+///       index i32 = 1
+///       records length i32 = -1 (null)
+const PRODUCE_REQUEST_V3_HEX: &str =
+    "000574786e2d31ffff00007530000000010007746f7069632d6100000002000000000000000568656c6c6f00000001ffffffff";
+
+#[test]
+fn produce_request_v3_byte_fixture_matches_java() {
+    let data = ProduceRequestData {
+        transactional_id: Some("txn-1".to_string()),
+        acks: -1,
+        timeout_ms: 30_000,
+        topic_data: vec![TopicProduceData {
+            name: "topic-a".to_string(),
+            topic_id: Uuid::zero(),
+            partition_data: vec![
+                PartitionProduceData { index: 0, records: Some(b"hello".to_vec()), unknown_tagged_fields: Vec::new() },
+                PartitionProduceData { index: 1, records: None, unknown_tagged_fields: Vec::new() },
+            ],
+            unknown_tagged_fields: Vec::new(),
+        }],
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 3, PRODUCE_REQUEST_V3_HEX, "ProduceRequest v3");
+}
+
+// --- ProduceResponse --------------------------------------------------------
+
+/// ProduceResponse v3 fixture — non-flexible.
+///   responses array length i32 = 1
+///   topic[0]:
+///     name length i16 = 7, "topic-a"
+///     partition_responses array length i32 = 2
+///     partition[0]: index=0, error_code=0, base_offset=12345, log_append_time=-1
+///     partition[1]: index=1, error_code=0, base_offset=67890, log_append_time=-1
+///   throttle_time_ms i32 = 100
+const PRODUCE_RESPONSE_V3_HEX: &str = "000000010007746f7069632d61000000020000000000000000000000003039ffffffffffffffff0000000100000000000000010932ffffffffffffffff00000064";
+
+#[test]
+fn produce_response_v3_byte_fixture_matches_java() {
+    let data = ProduceResponseData {
+        responses: vec![TopicProduceResponse {
+            name: "topic-a".to_string(),
+            topic_id: Uuid::zero(),
+            partition_responses: vec![
+                PartitionProduceResponse {
+                    index: 0,
+                    error_code: 0,
+                    base_offset: 12345,
+                    log_append_time_ms: -1,
+                    log_start_offset: -1,
+                    record_errors: Vec::new(),
+                    error_message: None,
+                    current_leader: LeaderIdAndEpoch::new(),
+                    unknown_tagged_fields: Vec::new(),
+                },
+                PartitionProduceResponse {
+                    index: 1,
+                    error_code: 0,
+                    base_offset: 67890,
+                    log_append_time_ms: -1,
+                    log_start_offset: -1,
+                    record_errors: Vec::new(),
+                    error_message: None,
+                    current_leader: LeaderIdAndEpoch::new(),
+                    unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            unknown_tagged_fields: Vec::new(),
+        }],
+        throttle_time_ms: 100,
+        node_endpoints: Vec::new(),
+        unknown_tagged_fields: Vec::new(),
+    };
+    assert_encodes_to(&data, 3, PRODUCE_RESPONSE_V3_HEX, "ProduceResponse v3");
+}
