@@ -634,6 +634,14 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
     writeln!(file, "#[allow(clippy::vec_init_then_push)]")?;
     writeln!(file, "#[allow(clippy::new_without_default)]")?;
+    // The generator emits `if version >= N { if cond { ... } }` and
+    // `if x != false { ... }` for tagged-field write paths because the
+    // version guard and the field-presence check are produced by
+    // independent code paths. The Rust idiom is `&&` / `if x`, but
+    // collapsing in the generator would entangle two orthogonal concerns
+    // and obscure which check is the version gate.
+    writeln!(file, "#[allow(clippy::collapsible_if)]")?;
+    writeln!(file, "#[allow(clippy::bool_comparison)]")?;
     // Generate impl block
     writeln!(file, "impl {} {{", data_class_name)?;
 
@@ -764,6 +772,14 @@ fn generate_nested_struct(
     writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
     writeln!(file, "#[allow(clippy::vec_init_then_push)]")?;
     writeln!(file, "#[allow(clippy::new_without_default)]")?;
+    // The generator emits `if version >= N { if cond { ... } }` and
+    // `if x != false { ... }` for tagged-field write paths because the
+    // version guard and the field-presence check are produced by
+    // independent code paths. The Rust idiom is `&&` / `if x`, but
+    // collapsing in the generator would entangle two orthogonal concerns
+    // and obscure which check is the version gate.
+    writeln!(file, "#[allow(clippy::collapsible_if)]")?;
+    writeln!(file, "#[allow(clippy::bool_comparison)]")?;
     // Generate impl for nested struct with new(), read(), and write()
     writeln!(file, "impl {} {{", struct_name)?;
     writeln!(file, "    pub fn new() -> Self {{")?;
@@ -854,6 +870,14 @@ fn generate_common_struct(
     writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
     writeln!(file, "#[allow(clippy::vec_init_then_push)]")?;
     writeln!(file, "#[allow(clippy::new_without_default)]")?;
+    // The generator emits `if version >= N { if cond { ... } }` and
+    // `if x != false { ... }` for tagged-field write paths because the
+    // version guard and the field-presence check are produced by
+    // independent code paths. The Rust idiom is `&&` / `if x`, but
+    // collapsing in the generator would entangle two orthogonal concerns
+    // and obscure which check is the version gate.
+    writeln!(file, "#[allow(clippy::collapsible_if)]")?;
+    writeln!(file, "#[allow(clippy::bool_comparison)]")?;
     // Generate impl with new(), read(), and write()
     writeln!(file, "impl {} {{", struct_name)?;
     writeln!(file, "    pub fn new() -> Self {{")?;
@@ -1002,6 +1026,11 @@ fn generate_message_impl(
     let lowest = struct_spec.versions().lowest();
     let highest = struct_spec.versions().highest();
 
+    // `add_size` and `write` paths use the same independently-generated
+    // version + presence checks as the inherent `impl X` block; see those
+    // allows for context.
+    writeln!(file, "#[allow(clippy::collapsible_if)]")?;
+    writeln!(file, "#[allow(clippy::bool_comparison)]")?;
     writeln!(file, "impl Message for {} {{", struct_name)?;
     writeln!(file, "    fn lowest_supported_version(&self) -> i16 {{ {} }}", lowest)?;
     writeln!(file, "    fn highest_supported_version(&self) -> i16 {{ {} }}", highest)?;
@@ -1266,7 +1295,7 @@ fn generate_field_add_size(
                     writeln!(file, "{}}}", ind)?;
                 }
             }
-            writeln!(file, "{}{}.add_size(size, cache, version)?;", ind, accessor)?;
+            writeln!(file, "{}{}.add_size(size, cache, version);", ind, accessor)?;
         },
     }
 
@@ -1591,7 +1620,7 @@ fn generate_array_element_add_size(
             writeln!(file, "{}    size.add_bytes(bytes_len as i32);", indent)?;
         },
         FieldType::Struct(_) => {
-            writeln!(file, "{}    element.add_size(size, cache, version)?;", indent)?;
+            writeln!(file, "{}    element.add_size(size, cache, version);", indent)?;
         },
         _ => {
             // Fixed-size elements handled by caller
@@ -1919,7 +1948,7 @@ fn generate_tagged_field_content_size(
                     },
                     FieldType::Struct(_) => {
                         writeln!(file, "{}        let mut elem_acc = MessageSizeAccumulator::new();", indent)?;
-                        writeln!(file, "{}        element.add_size(&mut elem_acc, cache, version)?;", indent)?;
+                        writeln!(file, "{}        element.add_size(&mut elem_acc, cache, version);", indent)?;
                         writeln!(file, "{}        array_size += elem_acc.total_size();", indent)?;
                     },
                     _ => {},
@@ -1945,7 +1974,7 @@ fn generate_tagged_field_content_size(
                     // Size prefix encodes the total data size (1 + struct_size).
                     writeln!(file, "{}{{", indent)?;
                     writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
-                    writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version)?;", indent, accessor)?;
+                    writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version);", indent, accessor)?;
                     writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                     writeln!(
                         file,
@@ -1963,7 +1992,7 @@ fn generate_tagged_field_content_size(
                     // Default is non-null. The field can be None (encoding null) or Some (encoding the struct).
                     writeln!(file, "{}if let Some(ref val) = self.{} {{", indent, field_name)?;
                     writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
-                    writeln!(file, "{}    val.add_size(&mut struct_acc, cache, version)?;", indent)?;
+                    writeln!(file, "{}    val.add_size(&mut struct_acc, cache, version);", indent)?;
                     writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                     writeln!(
                         file,
@@ -1993,7 +2022,7 @@ fn generate_tagged_field_content_size(
             } else {
                 writeln!(file, "{}{{", indent)?;
                 writeln!(file, "{}    let mut struct_acc = MessageSizeAccumulator::new();", indent)?;
-                writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version)?;", indent, accessor)?;
+                writeln!(file, "{}    {}.add_size(&mut struct_acc, cache, version);", indent, accessor)?;
                 writeln!(file, "{}    let struct_size = struct_acc.total_size();", indent)?;
                 writeln!(
                     file,
@@ -2669,7 +2698,7 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                // Calculate array size", indent)?;
                         writeln!(
                             file,
-                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(1024);",
+                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(1024);",
                             indent
                         )?;
                         writeln!(file, "{}                // Write array length", indent)?;
@@ -2758,7 +2787,11 @@ fn generate_tagged_field_write(
                             },
                         }
 
-                        writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                        writeln!(
+                            file,
+                            "{}                let size = size_accessor.position() as u32; size_accessor.flip();",
+                            indent
+                        )?;
                         writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                         writeln!(
                             file,
@@ -2784,7 +2817,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    // Calculate bytes size", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
                                 indent
                             )?;
                             writeln!(
@@ -2793,7 +2826,11 @@ fn generate_tagged_field_write(
                                 indent
                             )?;
                             writeln!(file, "{}                    size_accessor.write_byte_array(val);", indent)?;
-                            writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
+                            writeln!(
+                                file,
+                                "{}                    let size = size_accessor.position() as u32; size_accessor.flip();",
+                                indent
+                            )?;
                             writeln!(file, "{}                    writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
@@ -2813,7 +2850,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                // Calculate bytes size", indent)?;
                             writeln!(
                                 file,
-                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
                                 indent
                             )?;
                             writeln!(
@@ -2826,7 +2863,11 @@ fn generate_tagged_field_write(
                                 "{}                size_accessor.write_byte_array(&*{});",
                                 indent, tagged_accessor
                             )?;
-                            writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                            writeln!(
+                                file,
+                                "{}                let size = size_accessor.position() as u32; size_accessor.flip();",
+                                indent
+                            )?;
                             writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
@@ -2862,7 +2903,7 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
                                     indent
                                 )?;
                                 writeln!(
@@ -2875,7 +2916,11 @@ fn generate_tagged_field_write(
                                     "{}                    {}.write(&mut size_accessor, version)?;",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                    let size = size_accessor.len() as u32;", indent)?;
+                                writeln!(
+                                    file,
+                                    "{}                    let size = size_accessor.position() as u32; size_accessor.flip();",
+                                    indent
+                                )?;
                                 writeln!(file, "{}                    writable.write_unsigned_varint(size);", indent)?;
                                 writeln!(
                                     file,
@@ -2892,7 +2937,7 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
                                     indent
                                 )?;
                                 writeln!(
@@ -2905,7 +2950,11 @@ fn generate_tagged_field_write(
                                     "{}                {}.write(&mut size_accessor, version)?;",
                                     indent, tagged_accessor
                                 )?;
-                                writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                                writeln!(
+                                    file,
+                                    "{}                let size = size_accessor.position() as u32; size_accessor.flip();",
+                                    indent
+                                )?;
                                 writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                                 writeln!(
                                     file,
@@ -2918,7 +2967,7 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                // Calculate struct size", indent)?;
                             writeln!(
                                 file,
-                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::new(256);",
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
                                 indent
                             )?;
                             writeln!(
@@ -2926,7 +2975,11 @@ fn generate_tagged_field_write(
                                 "{}                {}.write(&mut size_accessor, version)?;",
                                 indent, tagged_accessor
                             )?;
-                            writeln!(file, "{}                let size = size_accessor.len() as u32;", indent)?;
+                            writeln!(
+                                file,
+                                "{}                let size = size_accessor.position() as u32; size_accessor.flip();",
+                                indent
+                            )?;
                             writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
@@ -3337,12 +3390,12 @@ fn generate_string_read(
     let null_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(KafkaError::Generic( \"Null string not allowed\"));".to_string()
+        "return Err(KafkaError::Generic(\"Null string not allowed\".to_string()));".to_string()
     };
     let neg_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(KafkaError::Generic( \"Negative string length\"));".to_string()
+        "return Err(KafkaError::Generic(\"Negative string length\".to_string()));".to_string()
     };
 
     if !flexible_versions.empty() {
@@ -3528,12 +3581,12 @@ fn generate_array_read(
     let null_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(KafkaError::Generic( \"Null array not allowed\"));".to_string()
+        "return Err(KafkaError::Generic(\"Null array not allowed\".to_string()));".to_string()
     };
     let neg_action = if nullable {
         format!("result.{} = None;", field_name)
     } else {
-        "return Err(KafkaError::Generic( \"Negative array length\"));".to_string()
+        "return Err(KafkaError::Generic(\"Negative array length\".to_string()));".to_string()
     };
 
     // Helper to generate the read loop that populates the array
