@@ -22,6 +22,7 @@
 //! remaining message specs. Phase 2d-3/4 will continue with the
 //! Metadata and Produce request/response pairs.
 
+use crate::common::message::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::message::request_header_data::RequestHeaderData;
 use crate::common::message::response_header_data::ResponseHeaderData;
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
@@ -260,5 +261,92 @@ fn response_header_data_round_trip_v1_flexible_empty() {
     let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
     let mut decoded = ResponseHeaderData::new();
     Message::read(&mut decoded, &mut decode_accessor, 1).expect("read succeeds");
+    assert_eq!(decoded, original);
+}
+// =============================================================================
+// ApiVersionsRequestData (Phase 2d-2)
+//
+// `ApiVersionsRequest.json` validVersions = 0-4, flexibleVersions = 3+.
+// `ClientSoftwareName` and `ClientSoftwareVersion` are added in v3+; both
+// are non-nullable strings (their default is empty per Phase 2a's G2 rule).
+// =============================================================================
+
+/// Round trip at v0 (lowest supported, non-flexible). At v0 the message
+/// is empty on the wire — neither client software field exists, no
+/// flexible trailer.
+#[test]
+fn api_versions_request_data_round_trip_v0() {
+    let original = ApiVersionsRequestData {
+        client_software_name: String::new(),
+        client_software_version: String::new(),
+        unknown_tagged_fields: Vec::new(),
+    };
+    let bytes = encode(&original, 0);
+    assert_eq!(bytes.len(), 0, "v0 ApiVersionsRequest is empty on the wire");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ApiVersionsRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 0).expect("read succeeds");
+    assert_eq!(decoded, original);
+}
+
+/// Round trip at v4 (highest supported, flexible) with non-empty client
+/// software identifiers and an unknown tagged field, exercising both the
+/// G2 default (non-empty strings round-trip) and the tagged-field
+/// trailer.
+#[test]
+fn api_versions_request_data_round_trip_v4_flexible() {
+    let original = ApiVersionsRequestData {
+        client_software_name: "kafka-rust".to_string(),
+        client_software_version: "0.1.0".to_string(),
+        unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0x01, 0x02, 0x03])],
+    };
+
+    let bytes = encode(&original, 4);
+
+    // Wire layout for ApiVersionsRequest v4 (all fields are flexible):
+    //   client_software_name length (varint = name_len + 1)
+    //   client_software_name bytes
+    //   client_software_version length (varint = version_len + 1)
+    //   client_software_version bytes
+    //   tagged-field count (varint = 1)
+    //   tagged field 0: tag(7) size(3) data(0x01 0x02 0x03)
+    let name_bytes = "kafka-rust".as_bytes();
+    let version_bytes = "0.1.0".as_bytes();
+    assert_eq!(bytes[0], (name_bytes.len() + 1) as u8, "compact string varint length for name");
+    assert_eq!(&bytes[1..1 + name_bytes.len()], name_bytes);
+    let after_name = 1 + name_bytes.len();
+    assert_eq!(
+        bytes[after_name],
+        (version_bytes.len() + 1) as u8,
+        "compact string varint length for version"
+    );
+    assert_eq!(&bytes[after_name + 1..after_name + 1 + version_bytes.len()], version_bytes);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ApiVersionsRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 4).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Empty client identifiers at v4: encoded as `varint(0+1)=varint(1)` with
+/// zero bytes of payload — confirms the Phase 2a G2 empty-default behavior
+/// for non-nullable strings on flexible versions.
+#[test]
+fn api_versions_request_data_round_trip_v4_empty_strings() {
+    let original = ApiVersionsRequestData {
+        client_software_name: String::new(),
+        client_software_version: String::new(),
+        unknown_tagged_fields: Vec::new(),
+    };
+    let bytes = encode(&original, 4);
+    // varint(1) + 0-byte name + varint(1) + 0-byte version + varint(0) trailer
+    assert_eq!(bytes.len(), 3);
+    assert_eq!(bytes, vec![1u8, 1u8, 0u8]);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ApiVersionsRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 4).expect("read succeeds");
     assert_eq!(decoded, original);
 }
