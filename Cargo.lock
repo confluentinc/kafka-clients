@@ -419,6 +419,7 @@ name = "confluent-kafka-rust"
 version = "0.1.0"
 dependencies = [
  "base64 0.22.1",
+ "bytes",
  "cbindgen",
  "crc32c",
  "dashmap",

@@ -36,6 +36,7 @@ crc32c = "0.6"
 dashmap = "6"
 futures-util = "0.3"
 base64 = "0.22"
+bytes = "1"
 
 [dev-dependencies]
 testcontainers = "0.27"

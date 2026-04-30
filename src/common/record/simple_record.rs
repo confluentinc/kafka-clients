@@ -17,6 +17,8 @@
 use std::fmt;
 use std::sync::Arc;
 
+use bytes::Bytes;
+
 use crate::common::header::RecordHeader;
 use crate::common::record::record_batch::NO_TIMESTAMP;
 
@@ -28,70 +30,88 @@ use crate::common::record::record_batch::NO_TIMESTAMP;
 ///
 /// Storage:
 ///
-/// * `key` and `value` are `Option<Arc<[u8]>>`. Java accepts `byte[]` or
-///   `ByteBuffer` and stores a `ByteBuffer` reference. In Rust we keep the
-///   payload behind an `Arc<[u8]>` so cloning a `SimpleRecord` (e.g. when it
-///   gets pushed onto the producer accumulator) costs only a refcount
-///   bump — no payload copy. This honors CLAUDE.md rule 12: the bytes
-///   travel from user → accumulator → batch buffer with zero copies.
-/// * `headers` is `Arc<[RecordHeader]>` for the same cheap-clone reason. The
-///   Java constructor `requireNonNull(headers)` semantic is preserved by
-///   making `headers` non-`Option` (always at least an empty slice).
+/// * `key` and `value` are `Option<Bytes>`. Java accepts `byte[]` or
+///   `ByteBuffer` and stores a `ByteBuffer` reference; `Utils.wrapNullable`
+///   produces a `ByteBuffer.wrap(byte[])` view that does NOT copy. The
+///   `bytes::Bytes` type is the closest Rust equivalent: it carries
+///   shared-ownership semantics over a refcounted backing buffer, so cloning
+///   a `SimpleRecord` (e.g. when it gets pushed onto the producer
+///   accumulator) costs only a refcount bump — no payload copy. The canonical
+///   constructor [`SimpleRecord::new`] takes `Option<Bytes>` so callers that
+///   already own a `Bytes` (e.g. `MemoryRecordsBuilder` once it lands in
+///   Phase 3c) pass through with zero copies, satisfying CLAUDE.md rule 12.
+/// * `headers` is `Arc<[RecordHeader]>` for cheap clones. The Java constructor
+///   `requireNonNull(headers)` semantic is preserved by making `headers`
+///   non-`Option` (always at least an empty slice).
 #[derive(Clone)]
 pub struct SimpleRecord {
-    key: Option<Arc<[u8]>>,
-    value: Option<Arc<[u8]>>,
+    key: Option<Bytes>,
+    value: Option<Bytes>,
     timestamp: i64,
     headers: Arc<[RecordHeader]>,
 }
 
 impl SimpleRecord {
-    /// Construct a record from borrowed byte slices and headers. Mirrors
-    /// Java's `SimpleRecord(long, byte[], byte[], Header[])` /
-    /// `(long, ByteBuffer, ByteBuffer, Header[])`.
-    pub fn new(timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> Self {
+    /// Construct a record from already-shared `Bytes` payloads — the
+    /// canonical, **zero-copy** constructor. Mirrors Java's
+    /// `SimpleRecord(long, ByteBuffer, ByteBuffer, Header[])` where
+    /// `ByteBuffer.wrap(byte[])` produces a non-copying view.
+    ///
+    /// The producer write path (Phase 3c `MemoryRecordsBuilder` and
+    /// callers) is expected to invoke this constructor with `Bytes`
+    /// payloads it already owns.
+    pub fn new(timestamp: i64, key: Option<Bytes>, value: Option<Bytes>, headers: &[RecordHeader]) -> Self {
         SimpleRecord {
-            key: key.map(Arc::from),
-            value: value.map(Arc::from),
+            key,
+            value,
             timestamp,
             headers: Arc::from(headers.to_vec().into_boxed_slice()),
         }
     }
 
-    /// Construct a record from already-shared byte payloads. Avoids re-copying
-    /// when the caller already has `Arc<[u8]>` (e.g. cloned from a batch).
-    pub fn from_arcs(
+    /// Construct a record by **copying** borrowed byte slices into freshly
+    /// allocated `Bytes` payloads. Convenience for tests and callers that
+    /// only have a `&[u8]`. This path is **not zero-copy** — each `Some(_)`
+    /// argument allocates and memcpys via `Bytes::copy_from_slice`.
+    /// Prefer [`SimpleRecord::new`] on the hot path.
+    pub fn new_from_slice(
         timestamp: i64,
-        key: Option<Arc<[u8]>>,
-        value: Option<Arc<[u8]>>,
-        headers: Arc<[RecordHeader]>,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
     ) -> Self {
-        SimpleRecord { key, value, timestamp, headers }
+        SimpleRecord::new(
+            timestamp,
+            key.map(Bytes::copy_from_slice),
+            value.map(Bytes::copy_from_slice),
+            headers,
+        )
     }
 
-    /// Construct a record without headers. Mirrors Java's
-    /// `SimpleRecord(long, byte[], byte[])` /
-    /// `(long, ByteBuffer, ByteBuffer)`.
-    pub fn with_no_headers(timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>) -> Self {
+    /// Construct a record without headers (zero-copy). Mirrors Java's
+    /// `SimpleRecord(long, ByteBuffer, ByteBuffer)`.
+    pub fn with_no_headers(timestamp: i64, key: Option<Bytes>, value: Option<Bytes>) -> Self {
         SimpleRecord::new(timestamp, key, value, &[])
     }
 
-    /// Construct a record carrying only a value. Mirrors Java's
-    /// `SimpleRecord(long, byte[])`.
-    pub fn with_value(timestamp: i64, value: Option<&[u8]>) -> Self {
+    /// Construct a record carrying only a value (zero-copy).
+    /// Mirrors Java's `SimpleRecord(long, ByteBuffer)`.
+    pub fn with_value(timestamp: i64, value: Option<Bytes>) -> Self {
         SimpleRecord::with_no_headers(timestamp, None, value)
     }
 
     /// Construct a record carrying only a value, without an explicit
-    /// timestamp. Mirrors Java's `SimpleRecord(byte[])` and
-    /// `SimpleRecord(ByteBuffer)`.
-    pub fn from_value(value: Option<&[u8]>) -> Self {
+    /// timestamp (zero-copy). Mirrors Java's `SimpleRecord(ByteBuffer)`.
+    pub fn from_value(value: Option<Bytes>) -> Self {
         SimpleRecord::with_value(NO_TIMESTAMP, value)
     }
 
     /// Construct a record carrying both a key and a value, without an
-    /// explicit timestamp. Mirrors Java's `SimpleRecord(byte[], byte[])`.
-    pub fn from_key_value(key: Option<&[u8]>, value: Option<&[u8]>) -> Self {
+    /// explicit timestamp (zero-copy). Mirrors Java's
+    /// `SimpleRecord(ByteBuffer, ByteBuffer)` (and the `byte[], byte[]`
+    /// overload, since Java's `wrapNullable` views the array without
+    /// copying).
+    pub fn from_key_value(key: Option<Bytes>, value: Option<Bytes>) -> Self {
         SimpleRecord::with_no_headers(NO_TIMESTAMP, key, value)
     }
 
@@ -164,7 +184,7 @@ mod tests {
 
     #[test]
     fn from_value_carries_no_timestamp() {
-        let r = SimpleRecord::from_value(Some(b"v"));
+        let r = SimpleRecord::from_value(Some(Bytes::from_static(b"v")));
         assert_eq!(r.timestamp(), NO_TIMESTAMP);
         assert_eq!(r.key(), None);
         assert_eq!(r.value(), Some(b"v".as_slice()));
@@ -179,7 +199,7 @@ mod tests {
 
     #[test]
     fn from_key_value_no_timestamp() {
-        let r = SimpleRecord::from_key_value(Some(b"k"), Some(b"v"));
+        let r = SimpleRecord::from_key_value(Some(Bytes::from_static(b"k")), Some(Bytes::from_static(b"v")));
         assert_eq!(r.timestamp(), NO_TIMESTAMP);
         assert_eq!(r.key(), Some(b"k".as_slice()));
         assert_eq!(r.value(), Some(b"v".as_slice()));
@@ -188,7 +208,12 @@ mod tests {
     #[test]
     fn full_constructor_round_trip() {
         let h = RecordHeader::new("h-key", Some(b"h-value"));
-        let r = SimpleRecord::new(42, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        let r = SimpleRecord::new(
+            42,
+            Some(Bytes::from_static(b"k")),
+            Some(Bytes::from_static(b"v")),
+            std::slice::from_ref(&h),
+        );
         assert_eq!(r.timestamp(), 42);
         assert_eq!(r.key(), Some(b"k".as_slice()));
         assert_eq!(r.value(), Some(b"v".as_slice()));
@@ -199,29 +224,29 @@ mod tests {
     #[test]
     fn equality_compares_all_fields() {
         let h = RecordHeader::new("h", Some(b"v"));
-        let a = SimpleRecord::new(1, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
-        let b = SimpleRecord::new(1, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        let a = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        let b = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
         assert_eq!(a, b);
 
-        let c = SimpleRecord::new(2, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        let c = SimpleRecord::new_from_slice(2, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
         assert_ne!(a, c);
 
-        let d = SimpleRecord::new(1, Some(b"K"), Some(b"v"), std::slice::from_ref(&h));
+        let d = SimpleRecord::new_from_slice(1, Some(b"K"), Some(b"v"), std::slice::from_ref(&h));
         assert_ne!(a, d);
 
-        let e = SimpleRecord::new(1, Some(b"k"), Some(b"V"), std::slice::from_ref(&h));
+        let e = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"V"), std::slice::from_ref(&h));
         assert_ne!(a, e);
 
-        let f = SimpleRecord::new(1, Some(b"k"), Some(b"v"), &[]);
+        let f = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"v"), &[]);
         assert_ne!(a, f);
     }
 
     #[test]
-    fn clone_is_cheap_arc_share() {
+    fn clone_is_cheap_bytes_share() {
         // Crude check that cloning shares storage rather than re-copying:
         // both clones must read the same bytes through the same address.
-        let value = vec![1u8, 2, 3, 4];
-        let r = SimpleRecord::with_value(0, Some(&value));
+        let value = Bytes::from(vec![1u8, 2, 3, 4]);
+        let r = SimpleRecord::with_value(0, Some(value));
         let r2 = r.clone();
         let p1 = r.value().unwrap().as_ptr();
         let p2 = r2.value().unwrap().as_ptr();
@@ -229,17 +254,36 @@ mod tests {
     }
 
     #[test]
-    fn from_arcs_avoids_recopy() {
-        let value: Arc<[u8]> = Arc::from([10u8, 20, 30].as_slice());
-        let p_in = value.as_ptr();
-        let r = SimpleRecord::from_arcs(0, None, Some(value), Arc::from(Vec::<RecordHeader>::new().into_boxed_slice()));
+    fn new_with_bytes_is_zero_copy() {
+        // The canonical zero-copy contract: passing a `Bytes` into `new`
+        // must NOT copy. The constructed record's slice must alias the
+        // input's backing storage (same pointer).
+        let payload: Bytes = Bytes::from(vec![10u8, 20, 30, 40, 50]);
+        let p_in = payload.as_ptr();
+        let r = SimpleRecord::new(0, None, Some(payload), &[]);
         let p_out = r.value().unwrap().as_ptr();
-        assert_eq!(p_in, p_out);
+        assert_eq!(
+            p_in, p_out,
+            "SimpleRecord::new with Some(Bytes) must alias the input — no copy",
+        );
+    }
+
+    #[test]
+    fn new_from_slice_copies() {
+        // The convenience copying path: `new_from_slice` must NOT alias
+        // the caller's stack slice (it produces a fresh allocation).
+        let stack = [99u8, 100, 101];
+        let p_in = stack.as_ptr();
+        let r = SimpleRecord::new_from_slice(0, None, Some(&stack), &[]);
+        let p_out = r.value().unwrap().as_ptr();
+        assert_ne!(p_in, p_out);
+        // Contents must still match.
+        assert_eq!(r.value(), Some(stack.as_slice()));
     }
 
     #[test]
     fn debug_formats_byte_sizes() {
-        let r = SimpleRecord::new(7, Some(b"abc"), Some(b"de"), &[]);
+        let r = SimpleRecord::new_from_slice(7, Some(b"abc"), Some(b"de"), &[]);
         let s = format!("{r:?}");
         assert_eq!(s, "SimpleRecord(timestamp=7, key=3 bytes, value=2 bytes)");
     }
