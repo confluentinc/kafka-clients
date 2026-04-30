@@ -88,5 +88,13 @@ pub trait Records: TransferableRecords {
     /// set starting from `position` and limited to `size` bytes. The position
     /// is expected to be aligned to a batch boundary, else the resulting slice
     /// cannot be iterated.
+    ///
+    /// Java's `Records.slice(int position, int size)` declares no `throws`
+    /// but raises `IllegalArgumentException` (unchecked) on invalid
+    /// arguments — see `MemoryRecords#slice` and `FileRecords#slice`. Per
+    /// CLAUDE.md rule 10, the Rust translation returns
+    /// `Err(KafkaError)` (typically `KafkaError::IllegalArgument`) so
+    /// argument validation is explicit at every call site, rather than
+    /// matching Java's unchecked-exception model with a panic.
     fn slice(&self, position: i32, size: i32) -> Result<Box<dyn Records + '_>, KafkaError>;
 }
