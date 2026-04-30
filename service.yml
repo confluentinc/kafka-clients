@@ -5,7 +5,39 @@ git:
   enable: true
 codeowners:
   enable: true
-renovatebot:
+semaphore:
   enable: true
-  automerge:
-    enable: true
+  pipeline_enable: false
+  triggers:
+  - branches
+  - pull_requests
+  branches:
+  - master
+  tasks:
+  - name: seed-branch-commit
+    branch: master
+    scheduled: false
+    pipeline_file: .semaphore/seed.yml
+    description: "Bootstrap the branch_commit cursor that the translation
+      agent walks. Run once when starting a new (rust_branch, ak_branch)
+      tracking pair, or when manually re-aligning after upstream changes.
+      Idempotent -- a row already present for the (ak_branch, ak_commit,
+      rust_branch) primary key is left unchanged."
+    parameters:
+      - name: AK_BRANCH
+        required: true
+        default_value: "trunk"
+        description: "Apache Kafka branch this seed maps from."
+      - name: AK_COMMIT
+        required: true
+        description: "Apache Kafka commit SHA (full 40 chars) the seed
+          maps to. The first sweep will walk the next 10 AK commits
+          starting after this one."
+      - name: RUST_BRANCH
+        required: true
+        default_value: "master"
+        description: "Rust client branch this seed maps to."
+      - name: RUST_COMMIT
+        required: true
+        description: "Rust commit SHA (full 40 chars) currently tracking
+          AK_COMMIT on RUST_BRANCH."
