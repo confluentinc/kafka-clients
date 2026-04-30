@@ -44,4 +44,5 @@ pub use message_size_accumulator::MessageSizeAccumulator;
 pub use object_serialization_cache::ObjectSerializationCache;
 pub use readable::Readable;
 pub use send_builder::SendBuilder;
+pub use types::RawTaggedField;
 pub use writable::Writable;

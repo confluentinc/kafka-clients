@@ -32,3 +32,12 @@
 pub mod api_message_type {
     include!(concat!(env!("OUT_DIR"), "/generated/api_message_type.rs"));
 }
+
+/// `RequestHeaderData`, generated from `RequestHeader.json`. Mirrors Java's
+/// generated `org.apache.kafka.common.message.RequestHeaderData`.
+pub mod request_header_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/request_header_data.rs"));
+}
+
+#[cfg(test)]
+mod tests;

@@ -16,7 +16,7 @@
 
 /// A tagged field whose declared schema is unknown to the reader. Mirrors
 /// `org.apache.kafka.common.protocol.types.RawTaggedField`.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct RawTaggedField {
     tag: i32,
     data: Vec<u8>,

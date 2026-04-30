@@ -147,3 +147,46 @@ auditing generator output in Phase 2d.
 - `SendBuilderTest#testZeroCopyRecords` and `testZeroCopyUnalignedRecords`
   — need `MemoryRecords` (Phase 3).
 - The deferred ApiKeys tests listed above.
+
+## Phase 2d-1 module-layout decisions
+
+The wired-in slice of generator output lives at:
+
+```
+src/common/message/
+  mod.rs       — hand-written module index that includes one `pub mod`
+                 per generated `*_data` file via `include!()`. Phase 2d-1
+                 includes `api_message_type` and `request_header_data`.
+                 Phase 2d-2/3/4 will append additional `pub mod` lines.
+  tests.rs     — hand-written round-trip tests that exercise the
+                 generated modules end-to-end through the runtime
+                 traits. Phase 2d-1's tests cover `RequestHeaderData`
+                 (including a byte-level G1 lock at flexible v2).
+```
+
+Why `include!()` per module rather than `pub mod foo;` pointing at a
+generated `mod.rs`:
+
+- Generator emits to `$OUT_DIR/generated/`, outside the crate source
+  tree. Cargo discovers `pub mod foo;` only in the source tree;
+  `include!()` is the standard escape hatch.
+- We want fine-grained control over which generated modules
+  participate in the crate build during the Phase 2d sub-phases. A
+  whole-tree `include!(..../mod.rs)` would force every `*_data.rs` to
+  compile as soon as the bridge is added, but only a subset has been
+  validated against the runtime traits.
+
+Generator-emit conventions enforced by Phase 2d-1's emit alignment
+that downstream phases must keep in mind:
+
+- The top of each generated file uses plain `//` comments (not `//!`)
+  and per-`use` outer `#[allow(unused_imports)]` attributes. Inner
+  doc/attribute lines (`//!`, `#![...]`) are illegal once the file is
+  included via `include!()` inside a `mod { ... }` block.
+- `Field::with_doc(name, type, doc)` is the constructor used in
+  emitted `schema()` bodies; the runtime `Field` struct fields are
+  private. If a future spec needs `Field::with_default`, add a new
+  generator branch.
+- `Schema::new(fields)` returns `Result<Schema, KafkaError>`; the
+  generated `schema()` method has the same return type. Any caller
+  must `?` it.
