@@ -2,27 +2,39 @@ RUST_PROJECT_ROOT = $(CURDIR)
 RUSTFLAGS_NATIVE = -C target-cpu=native
 CFLAGS_NATIVE = -march=native -mtune=native
 
-.PHONY: build devel-build test test-rust test-integration test-c test-python verify format-check lint clean
+.PHONY: all build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python verify format-check lint clean
 
-build:
+build: build-rust build-c build-python
+
+build-rust:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
+
+submodules:
+	git submodule update --init --recursive
+
+build-c: submodules build-rust
 	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
 	cmake --build bindings/c/build
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
-devel-build:
+init-venv:
+	python3 -m venv venv
+
+build-python: submodules init-venv build-rust
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
+
+devel-build: devel-build-rust devel-build-c devel-build-python
+
+devel-build-rust:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
+
+devel-build-c: submodules devel-build-rust
 	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
 	cmake --build bindings/c/build
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
-# One-shot setup for a fresh clone or worktree: pulls down the git
-# submodules (kafka source reference + Unity for the C unit tests).
-# `build` dependency is needed for creating the C headers.
-init: build
-	@git submodule update --init --recursive
-	@python3 -m venv venv
-	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
+devel-build-python: submodules init-venv devel-build-rust
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
 
 test: test-integration test-c test-python
 
@@ -32,11 +44,12 @@ test-rust:
 test-integration:
 	cargo test --features integration-tests
 
-test-c: build
+test-c: build-c
 	cd bindings/c/build && ctest --output-on-failure
 
-test-python: build
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test
+test-python: build-python
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
 verify: format-check lint test
 
@@ -49,4 +62,5 @@ lint:
 clean:
 	cargo clean
 	rm -rf bindings/c/build
-	$(MAKE) -C bindings/python clean
+	@(. venv/bin/activate && \
+	$(MAKE) -C bindings/python clean)
