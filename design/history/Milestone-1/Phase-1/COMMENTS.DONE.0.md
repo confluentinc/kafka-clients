@@ -25,3 +25,11 @@ introduced the issue. See `git log --grep=fixup!` for the full list.
   `Instant::now().elapsed()` returns the duration *since* that very `Instant::now()` call — i.e. effectively zero (a few hundred nanoseconds at most). The high-res clock starts at ~0, NOT at a `nanoTime`-equivalent reference point.
 - **Why it's wrong:** A test that wants to detect "the producer code accidentally subtracted `nanoTime` from `currentTimeMillis` (or vice versa)" cannot do so because both are now numerically tiny and indistinguishable. The independence guarantee Java's `MockTime` is documented to provide is silently broken.
 - **Fix applied:** Use `SystemTime::UNIX_EPOCH.elapsed().as_nanos()` (a stable wall-clock reference) so the value is large like Java's. Fixup commit references `2dc5b71`.
+
+---
+
+## Issue 2: `is_fatal()` does not include `OutOfOrderSequence` / `UnknownProducerId`
+
+- **Severity:** **MINOR** (Behaviour parity; only relevant once idempotent/transactional path is added — Phase 6+)
+- **File:** `src/common/errors.rs:190-201`
+- **Fix applied:** Updated the `is_fatal` docstring to clarify the method covers the **non-idempotent** producer, and added a TODO note pointing at `Sender.completeBatch` so the idempotent / transactional path (Milestone 6+) extends `is_fatal` to include `OutOfOrderSequence` / `UnknownProducerId`. Did not flip them on now since transactions are out of scope for Milestone 1 and unconditionally tagging them fatal would be incorrect for the non-idempotent producer that Phase 1 is building toward. Fixup commit references `43c713b`.
