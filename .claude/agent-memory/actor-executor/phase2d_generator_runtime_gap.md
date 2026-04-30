@@ -57,11 +57,39 @@ emit code now produces files that compile against the Phase 2c traits.
   2d-4 has wired all message specs in. Until then, users of
   `request_schema`/`response_schema` will get a useless empty `Schema`.
 
-**For Phase 2d-2/3/4:**
+**Generator emit fixes added in Phase 2d-2 (additive, none of these
+are new traits or runtime APIs):**
+
+- `KafkaError::Generic("...")` for null/negative-length string and
+  array errors now wraps the literal in `.to_string()` to match the
+  `Generic(String)` variant. (lib.rs lines emitting "Null string not
+  allowed" / "Negative string length" / "Null array not allowed" /
+  "Negative array length")
+- `add_size(...)` callsites no longer use the `?` operator — the
+  `Message::add_size` trait method returns `()`, not `Result`.
+  Affected emit sites: any `add_size(size, cache, version)` call,
+  including loops over array elements and tagged-field struct sizing.
+- Tagged-field write paths that pre-encode into a temporary
+  `ByteBufferAccessor` now use `allocate(N)` (not the non-existent
+  `new(N)`), and after writing call `position()` for the size,
+  `flip()`, then `buffer()` for the bytes. (`buffer()` returns
+  `&buf[..limit]`; without the flip, limit equals capacity and the
+  emitted bytes would include trailing zeros.)
+- Two new clippy allows on the inherent `impl X { ... }` block:
+  `collapsible_if` (because `if version >= N { if cond { ... } }` is
+  emitted by independent generator passes — the version gate and the
+  field-presence gate are orthogonal), and `bool_comparison` (the
+  generator emits `x != false` for the boolean tagged-field default
+  check). Same allows are also placed on the `impl Message for X`
+  block because `add_size` and `write` share these patterns.
+
+**For Phase 2d-3/4:**
 
 Adding a new generated module is now a 2-line change in
 `src/common/message/mod.rs` plus a round-trip test in
-`src/common/message/tests.rs`. No generator changes should be needed.
-If a generator change is needed, it indicates the emit code has a new
-field type / encoding edge case the proof-of-concept (RequestHeader)
-didn't exercise — note it explicitly in the commit message.
+`src/common/message/tests.rs`. No generator changes should be needed
+for arrays-of-structs, struct-typed tagged fields, int64/bool tagged
+fields, or non-flexible specs (Phase 2d-2 verified these). If a
+generator change is needed, it indicates the emit code has a new
+field type / encoding edge case the previous specs didn't exercise —
+note it explicitly in the commit message.
