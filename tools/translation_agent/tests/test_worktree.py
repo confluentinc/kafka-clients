@@ -112,15 +112,16 @@ def test_worktree_for_branch_cleanup_false_preserves_dir():
     shutil.rmtree(yielded, ignore_errors=True)
 
 
-def test_worktree_with_ak_commit_runs_make_init_and_bumps_submodule():
-    """When `ak_commit` is provided, the worktree runs `make init`,
+def test_worktree_with_ak_commit_runs_make_build_and_bumps_submodule():
+    """When `ak_commit` is provided, the worktree runs `make` (the
+    Makefile's default target = `build`, which depends on `submodules`),
     fetches AK in kafka/, checks out the AK commit, and commits the
     submodule pointer bump -- all BEFORE yielding to the caller."""
     calls = []
 
     def record(args, **kwargs):
-        # Record the full argv for git calls; for `make init` record the
-        # tool name only so we can spot it in the sequence.
+        # Record the full argv for git calls; for `make` record the
+        # tool name + any args so we can spot it in the sequence.
         if args[0] == "make":
             calls.append(("make", tuple(args[1:])))
         elif args[0] == "git":
@@ -138,15 +139,16 @@ def test_worktree_with_ak_commit_runs_make_init_and_bumps_submodule():
     # Verify ordered sequence:
     #  1. git -C /repo fetch origin kafka-translate/abc  (base fetch)
     #  2. git -C /repo worktree add ...                  (create worktree)
-    #  3. make init                                      (in worktree)
+    #  3. make                                           (in worktree, default target)
     #  4. git -C <wt>/kafka fetch origin trunk           (refresh AK ref)
     #  5. git -C <wt>/kafka checkout ak123               (point at target)
     #  6. git -C <wt> add kafka                          (stage submodule bump)
     #  7. git -C <wt> commit -m "Bump kafka submodule to ak123"
     #  8. git -C /repo worktree remove --force ...       (cleanup)
     kinds = [c[0] for c in calls]
-    assert kinds[2] == "make", f"make init should be 3rd call, got {kinds}"
-    assert calls[2][1] == ("init",)
+    assert kinds[2] == "make", f"make should be 3rd call, got {kinds}"
+    # No target arg -- `make` defaults to the first target (build).
+    assert calls[2][1] == ()
 
     # Find the kafka submodule operations.
     kafka_calls = [c for c in calls if c[0] == "git" and c[1].endswith("/kafka")]
