@@ -100,15 +100,27 @@ impl MockTime {
 
     /// Force the clock to a specific wall-time. Refuses going backwards in
     /// time, matching the Java `setCurrentTimeMs` precondition.
+    ///
+    /// Uses `compare_exchange` in a loop so that concurrent readers never see
+    /// a transient new value when the call ultimately rejects (Java's
+    /// `synchronized` block guarantees the same — the `getAndSet` is followed
+    /// by a conditional throw inside the monitor, so observers never see the
+    /// rolled-back value).
     pub fn set_current_time_ms(&self, new_ms: i64) -> Result<(), String> {
-        let old_ms = self.time_ms.swap(new_ms, Ordering::AcqRel);
-        if old_ms > new_ms {
-            // Restore the old value so we don't leave the clock partially
-            // updated from the perspective of concurrent readers.
-            self.time_ms.store(old_ms, Ordering::Release);
-            return Err(format!(
-                "Setting the time to {new_ms} while current time {old_ms} is newer; this is not allowed"
-            ));
+        loop {
+            let old_ms = self.time_ms.load(Ordering::Acquire);
+            if old_ms > new_ms {
+                return Err(format!(
+                    "Setting the time to {new_ms} while current time {old_ms} is newer; this is not allowed"
+                ));
+            }
+            if self
+                .time_ms
+                .compare_exchange(old_ms, new_ms, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+            {
+                break;
+            }
         }
         self.high_res_time_ns.store(new_ms.saturating_mul(1_000_000), Ordering::Release);
         self.tick();
