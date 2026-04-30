@@ -126,6 +126,10 @@ pub enum KafkaError {
     UnknownProducerId(String),
     /// `org.apache.kafka.common.errors.UnsupportedVersionException` — wire code `35`.
     UnsupportedVersion(String),
+    /// `org.apache.kafka.common.errors.InvalidRequestException` — wire code `42`.
+    /// Returned when a request cannot be parsed or fails validation prior to
+    /// reaching the API handler.
+    InvalidRequest(String),
 
     // ----- Authentication / Authorization (treated as fatal). -----
     /// `org.apache.kafka.common.errors.AuthenticationException`. No wire code
@@ -238,6 +242,7 @@ impl KafkaError {
             KafkaError::OutOfOrderSequence(_) => 45,
             KafkaError::UnknownProducerId(_) => 59,
             KafkaError::UnsupportedVersion(_) => 35,
+            KafkaError::InvalidRequest(_) => 42,
 
             KafkaError::Authentication(_) => 58,
             KafkaError::Authorization(_) => 29,
@@ -277,6 +282,7 @@ impl KafkaError {
             KafkaError::OutOfOrderSequence(_) => "OutOfOrderSequenceException",
             KafkaError::UnknownProducerId(_) => "UnknownProducerIdException",
             KafkaError::UnsupportedVersion(_) => "UnsupportedVersionException",
+            KafkaError::InvalidRequest(_) => "InvalidRequestException",
             KafkaError::Authentication(_) => "AuthenticationException",
             KafkaError::Authorization(_) => "AuthorizationException",
             KafkaError::TopicAuthorization(_) => "TopicAuthorizationException",
@@ -313,6 +319,7 @@ impl KafkaError {
             | KafkaError::OutOfOrderSequence(m)
             | KafkaError::UnknownProducerId(m)
             | KafkaError::UnsupportedVersion(m)
+            | KafkaError::InvalidRequest(m)
             | KafkaError::Authentication(m)
             | KafkaError::Authorization(m)
             | KafkaError::TopicAuthorization(m)
@@ -346,6 +353,7 @@ impl KafkaError {
             29 => KafkaError::TopicAuthorization(m()),
             31 => KafkaError::ClusterAuthorization(m()),
             35 => KafkaError::UnsupportedVersion(m()),
+            42 => KafkaError::InvalidRequest(m()),
             45 => KafkaError::OutOfOrderSequence(m()),
             47 => KafkaError::InvalidProducerEpoch(m()),
             58 => KafkaError::Authentication(m()),
@@ -424,6 +432,7 @@ mod tests {
         assert_eq!(KafkaError::TopicAuthorization("".into()).code(), 29);
         assert_eq!(KafkaError::ClusterAuthorization("".into()).code(), 31);
         assert_eq!(KafkaError::UnsupportedVersion("".into()).code(), 35);
+        assert_eq!(KafkaError::InvalidRequest("".into()).code(), 42);
         assert_eq!(KafkaError::OutOfOrderSequence("".into()).code(), 45);
         assert_eq!(KafkaError::InvalidProducerEpoch("".into()).code(), 47);
         assert_eq!(KafkaError::Authentication("".into()).code(), 58);
@@ -451,6 +460,7 @@ mod tests {
             (29, "TopicAuthorizationException"),
             (31, "ClusterAuthorizationException"),
             (35, "UnsupportedVersionException"),
+            (42, "InvalidRequestException"),
             (45, "OutOfOrderSequenceException"),
             (47, "InvalidProducerEpochException"),
             (58, "AuthenticationException"),

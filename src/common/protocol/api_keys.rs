@@ -767,6 +767,62 @@ impl ApiKey {
     pub fn in_scope(&self, listener: ListenerType) -> bool {
         self.listeners.contains(&listener)
     }
+
+    /// The corresponding generated `ApiMessageType` enum variant. Mirrors
+    /// Java's `ApiKeys.messageType` field.
+    pub fn message_type(&self) -> crate::common::message::api_message_type::ApiMessageType {
+        crate::common::message::api_message_type::ApiMessageType::from_api_key(self.id)
+            .expect("ApiKey.id has a matching ApiMessageType variant")
+    }
+
+    /// Lowest supported version. Mirrors `ApiKeys.oldestVersion()`.
+    pub fn oldest_version(&self) -> i16 {
+        self.message_type().lowest_supported_version()
+    }
+
+    /// Highest supported (released) version. Mirrors
+    /// `ApiKeys.latestVersion()`.
+    pub fn latest_version(&self) -> i16 {
+        self.message_type().highest_supported_version(false)
+    }
+
+    /// Highest supported version, optionally including unstable releases.
+    /// Mirrors `ApiKeys.latestVersion(boolean enableUnstableLastVersion)`.
+    pub fn latest_version_unstable(&self, enable_unstable_last_version: bool) -> i16 {
+        self.message_type().highest_supported_version(enable_unstable_last_version)
+    }
+
+    /// Returns true if `version` is in the inclusive range
+    /// `[oldestVersion(), latestVersion()]`. Mirrors
+    /// `ApiKeys.isVersionSupported(short)`.
+    pub fn is_version_supported(&self, version: i16) -> bool {
+        version >= self.oldest_version() && version <= self.latest_version()
+    }
+
+    /// Whether the API has any released versions. Mirrors
+    /// `ApiKeys.hasValidVersion()`.
+    pub fn has_valid_version(&self) -> bool {
+        self.oldest_version() <= self.latest_version()
+    }
+
+    /// Whether the given version is deprecated. Mirrors
+    /// `ApiKeys.isVersionDeprecated(short)`.
+    pub fn is_version_deprecated(&self, version: i16) -> bool {
+        let mt = self.message_type();
+        version >= mt.lowest_deprecated_version() && version <= mt.highest_deprecated_version()
+    }
+
+    /// Request header version for a given API version. Mirrors
+    /// `ApiKeys.requestHeaderVersion(short)`.
+    pub fn request_header_version(&self, version: i16) -> i16 {
+        self.message_type().request_header_version(version)
+    }
+
+    /// Response header version for a given API version. Mirrors
+    /// `ApiKeys.responseHeaderVersion(short)`.
+    pub fn response_header_version(&self, version: i16) -> i16 {
+        self.message_type().response_header_version(version)
+    }
 }
 
 #[cfg(test)]

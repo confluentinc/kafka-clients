@@ -34,7 +34,7 @@ pub mod send_builder;
 pub mod types;
 pub mod writable;
 
-pub use api_keys::ApiKeys;
+pub use api_keys::{ApiKey, ApiKeys};
 pub use api_message::ApiMessage;
 pub use byte_buffer_accessor::{ByteBufferAccessor, SliceReadable};
 pub use data_output_stream_writable::DataOutputStreamWritable;
