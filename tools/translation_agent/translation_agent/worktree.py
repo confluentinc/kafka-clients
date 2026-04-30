@@ -98,6 +98,15 @@ def worktree_for_branch(
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"translation-agent-{safe_name}-"))
     created = False
     try:
+        # If a previous (preserved-from-dry-run) worktree is still using
+        # this branch, evict it -- otherwise `git worktree add` errors
+        # with "branch is already used by worktree at <path>".
+        prior = _find_worktree_for_branch(repo_path, branch_name)
+        if prior is not None:
+            try:
+                _git(repo_path, "worktree", "remove", "--force", prior)
+            except WorktreeError:
+                pass  # best-effort; if remove fails the next add will too
         if _local_branch_exists(repo_path, branch_name):
             # Reuse the existing local branch. Important for dry-run cascades
             # (per-PR --plan-approve, sweep impl after a prior plan run) where
@@ -144,6 +153,28 @@ def worktree_for_branch(
                     pass
             if worktree_dir.exists():
                 shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def _find_worktree_for_branch(
+    repo_path: str, branch_name: str,
+) -> Optional[str]:
+    """Return the path of the worktree that currently has `branch_name`
+    checked out, or None. Parses `git worktree list --porcelain`.
+    """
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "worktree", "list", "--porcelain"],
+        capture_output=True,
+        text=True,
+    )
+    if proc.returncode != 0:
+        return None
+    current_path: Optional[str] = None
+    for line in proc.stdout.splitlines():
+        if line.startswith("worktree "):
+            current_path = line[len("worktree "):]
+        elif line == f"branch refs/heads/{branch_name}" and current_path:
+            return current_path
+    return None
 
 
 def _local_branch_exists(repo_path: str, branch_name: str) -> bool:

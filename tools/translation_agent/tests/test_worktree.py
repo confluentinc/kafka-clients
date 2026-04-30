@@ -33,6 +33,8 @@ def _ok_show_ref_missing(args, **_kwargs):
     assert on. All other git calls succeed (rc=0)."""
     if "show-ref" in args:
         return _completed(1)
+    if "worktree" in args and "list" in args:
+        return _completed(0, stdout="")  # no prior worktree
     return _completed(0)
 
 
@@ -43,6 +45,9 @@ def test_worktree_for_branch_yields_path_runs_setup_and_teardown():
         if "show-ref" in args:
             # Branch doesn't exist locally -> take the fetch+create path.
             return _completed(1)
+        if "worktree" in args and "list" in args:
+            # No prior worktree using the branch.
+            return _completed(0, stdout="")
         calls.append(args[3:])  # strip ["git", "-C", "/repo"]
         return _completed(0)
 
@@ -134,6 +139,10 @@ def test_worktree_with_ak_commit_runs_make_build_and_bumps_submodule():
     calls = []
 
     def record(args, **kwargs):
+        # Skip the worktree-list pre-check call so existing index
+        # assertions remain stable.
+        if args[0] == "git" and "worktree" in args and "list" in args:
+            return _completed(0, stdout="")
         # Record the full argv for git calls; for `make` record the
         # tool name + any args so we can spot it in the sequence.
         if args[0] == "make":
