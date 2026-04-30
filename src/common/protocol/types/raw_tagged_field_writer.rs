@@ -85,3 +85,100 @@ impl RawTaggedFieldWriter {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::protocol::types::io::SliceWritable;
+
+    /// Mirrors `RawTaggedFieldWriterTest.testWritingZeroRawTaggedFields`.
+    #[test]
+    fn writing_zero_raw_tagged_fields() {
+        let mut writer = RawTaggedFieldWriter::empty();
+        assert_eq!(writer.num_fields(), 0);
+        let mut buf = [0u8; 0];
+        let mut accessor = SliceWritable::new(&mut buf);
+        writer.write_raw_tags(&mut accessor, i32::MAX).unwrap();
+    }
+
+    /// Mirrors `RawTaggedFieldWriterTest.testWritingSeveralRawTaggedFields`.
+    #[test]
+    fn writing_several_raw_tagged_fields() {
+        let tags = vec![
+            RawTaggedField::new(2, vec![0x1, 0x2, 0x3]),
+            RawTaggedField::new(5, vec![0x4, 0x5]),
+        ];
+        let mut writer = RawTaggedFieldWriter::for_fields(tags);
+        assert_eq!(writer.num_fields(), 2);
+        // The Java test uses a single ByteBufferAccessor across all calls;
+        // its position keeps advancing. We mirror that by reborrowing the
+        // backing array between asserts; each scoped accessor knows the
+        // current write offset based on the slice we hand it.
+        let mut arr = [0u8; 9];
+        let pos_after_1 = {
+            let mut accessor = SliceWritable::new(&mut arr);
+            writer.write_raw_tags(&mut accessor, 1).unwrap();
+            accessor.position()
+        };
+        assert_eq!(pos_after_1, 0);
+        assert_eq!(&arr, &[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]);
+
+        let pos_after_3 = {
+            let mut accessor = SliceWritable::new(&mut arr);
+            writer.write_raw_tags(&mut accessor, 3).unwrap();
+            accessor.position()
+        };
+        assert_eq!(pos_after_3, 5);
+        assert_eq!(&arr, &[0x2, 0x3, 0x1, 0x2, 0x3, 0x0, 0x0, 0x0, 0x0]);
+
+        // Continue from offset 5 to mimic the Java accessor's persistent
+        // position (a fresh SliceWritable starts at index 0 of its slice,
+        // so we advance the slice base manually).
+        {
+            let mut accessor = SliceWritable::new(&mut arr[5..]);
+            writer.write_raw_tags(&mut accessor, 7).unwrap();
+        }
+        assert_eq!(&arr, &[0x2, 0x3, 0x1, 0x2, 0x3, 0x5, 0x2, 0x4, 0x5]);
+
+        {
+            let mut accessor = SliceWritable::new(&mut arr[9..]);
+            writer.write_raw_tags(&mut accessor, i32::MAX).unwrap();
+        }
+        assert_eq!(&arr, &[0x2, 0x3, 0x1, 0x2, 0x3, 0x5, 0x2, 0x4, 0x5]);
+    }
+
+    /// Mirrors `RawTaggedFieldWriterTest.testInvalidNextDefinedTag`.
+    #[test]
+    fn invalid_next_defined_tag() {
+        let tags = vec![
+            RawTaggedField::new(2, vec![0x1, 0x2, 0x3]),
+            RawTaggedField::new(5, vec![0x4, 0x5, 0x6]),
+            RawTaggedField::new(7, vec![0x0]),
+        ];
+        let mut writer = RawTaggedFieldWriter::for_fields(tags);
+        assert_eq!(writer.num_fields(), 3);
+        let mut buf = [0u8; 1024];
+        let mut accessor = SliceWritable::new(&mut buf);
+        let err = writer.write_raw_tags(&mut accessor, 2).unwrap_err();
+        assert_eq!(err.message(), "Attempted to use tag 2 as an undefined tag.");
+    }
+
+    /// Mirrors `RawTaggedFieldWriterTest.testOutOfOrderTags`.
+    #[test]
+    fn out_of_order_tags() {
+        let tags = vec![
+            RawTaggedField::new(5, vec![0x4, 0x5, 0x6]),
+            RawTaggedField::new(2, vec![0x1, 0x2, 0x3]),
+            RawTaggedField::new(7, vec![0x0]),
+        ];
+        let mut writer = RawTaggedFieldWriter::for_fields(tags);
+        assert_eq!(writer.num_fields(), 3);
+        let mut buf = [0u8; 1024];
+        let mut accessor = SliceWritable::new(&mut buf);
+        let err = writer.write_raw_tags(&mut accessor, 8).unwrap_err();
+        assert_eq!(
+            err.message(),
+            "Invalid raw tag field list: tag 2 comes after tag 5, but is not higher than it."
+        );
+    }
+}

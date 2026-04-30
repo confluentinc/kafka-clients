@@ -43,3 +43,22 @@ impl RawTaggedField {
         self.data.len()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn equality_and_size() {
+        let a = RawTaggedField::new(7, vec![1, 2, 3]);
+        let b = RawTaggedField::new(7, vec![1, 2, 3]);
+        let c = RawTaggedField::new(7, vec![1, 2, 4]);
+        let d = RawTaggedField::new(8, vec![1, 2, 3]);
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        assert_ne!(a, d);
+        assert_eq!(a.size(), 3);
+        assert_eq!(a.tag(), 7);
+        assert_eq!(a.data(), &[1, 2, 3]);
+    }
+}

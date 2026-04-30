@@ -274,3 +274,95 @@ fn format_value(v: &Value, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         Value::RawTagged(_) => f.write_str("RawTaggedField"),
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::protocol::types::array_of::ArrayOf;
+    use crate::common::protocol::types::field::Field;
+
+    fn flat_struct_schema() -> Schema {
+        Schema::new(vec![
+            Field::with_doc("int8", Type::Int8, ""),
+            Field::with_doc("int16", Type::Int16, ""),
+            Field::with_doc("int32", Type::Int32, ""),
+            Field::with_doc("int64", Type::Int64, ""),
+            Field::with_doc("boolean", Type::Boolean, ""),
+            Field::with_doc("float64", Type::Float64, ""),
+            Field::with_doc("string", Type::String, ""),
+        ])
+        .unwrap()
+    }
+
+    fn array_schema() -> Schema {
+        Schema::new(vec![Field::with_doc(
+            "array",
+            Type::Array(Box::new(ArrayOf::new(Type::Array(Box::new(ArrayOf::new(Type::Int8)))))),
+            "",
+        )])
+        .unwrap()
+    }
+
+    fn nested_child_schema() -> Schema {
+        Schema::new(vec![Field::with_doc("int8", Type::Int8, "")]).unwrap()
+    }
+
+    fn nested_schema(array: Schema, child: Schema) -> Schema {
+        Schema::new(vec![
+            Field::with_doc("array", Type::Array(Box::new(ArrayOf::new(Type::Schema(Box::new(array))))), ""),
+            Field::with_doc("nested", Type::Schema(Box::new(child)), ""),
+        ])
+        .unwrap()
+    }
+
+    fn populate_flat(schema: &Schema, string_value: &str) -> Struct {
+        let mut s = Struct::new(schema.clone());
+        s.set_by_name("int8", Value::Int8(12)).unwrap();
+        s.set_by_name("int16", Value::Int16(12)).unwrap();
+        s.set_by_name("int32", Value::Int32(12)).unwrap();
+        s.set_by_name("int64", Value::Int64(12)).unwrap();
+        s.set_by_name("boolean", Value::Bool(true)).unwrap();
+        s.set_by_name("float64", Value::Float64(0.5)).unwrap();
+        s.set_by_name("string", Value::String(string_value.to_string())).unwrap();
+        s
+    }
+
+    /// Mirrors `StructTest.testEquals`.
+    #[test]
+    fn equals() {
+        let schema = flat_struct_schema();
+        let struct1 = populate_flat(&schema, "foobar");
+        let struct2 = populate_flat(&schema, "foobar");
+        let struct3 = populate_flat(&schema, "mismatching string");
+
+        assert_eq!(struct1, struct2);
+        assert_ne!(struct1, struct3);
+
+        // Nested case.
+        let array_inner_schema = array_schema();
+        let child_schema = nested_child_schema();
+        let nested = nested_schema(array_inner_schema.clone(), child_schema.clone());
+        let array = vec![Value::Int8(1), Value::Int8(2)];
+        let mut s1 = Struct::new(nested.clone());
+        s1.set_by_name("array", Value::Array(array.clone())).unwrap();
+        let mut child1 = Struct::new(child_schema.clone());
+        child1.set_by_name("int8", Value::Int8(12)).unwrap();
+        s1.set_by_name("nested", Value::Struct(Box::new(child1))).unwrap();
+
+        let mut s2 = Struct::new(nested.clone());
+        s2.set_by_name("array", Value::Array(array)).unwrap();
+        let mut child2 = Struct::new(child_schema.clone());
+        child2.set_by_name("int8", Value::Int8(12)).unwrap();
+        s2.set_by_name("nested", Value::Struct(Box::new(child2))).unwrap();
+
+        let mut s3 = Struct::new(nested.clone());
+        let array3 = vec![Value::Int8(1), Value::Int8(2), Value::Int8(3)];
+        s3.set_by_name("array", Value::Array(array3)).unwrap();
+        let mut child3 = Struct::new(child_schema);
+        child3.set_by_name("int8", Value::Int8(13)).unwrap();
+        s3.set_by_name("nested", Value::Struct(Box::new(child3))).unwrap();
+
+        assert_eq!(s1, s2);
+        assert_ne!(s1, s3);
+    }
+}

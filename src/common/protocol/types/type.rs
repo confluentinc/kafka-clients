@@ -334,16 +334,16 @@ impl Type {
             (Type::Uuid, _) => Ok(16),
             (Type::Float64, _) => Ok(8),
 
-            (Type::String, Value::String(s)) => Ok(2 + s.as_bytes().len()),
+            (Type::String, Value::String(s)) => Ok(2 + s.len()),
             (Type::CompactString, Value::String(s)) => {
-                let len = s.as_bytes().len();
+                let len = s.len();
                 Ok(byte_utils::size_of_unsigned_varint((len + 1) as u32) + len)
             },
             (Type::NullableString, Value::Null) => Ok(2),
-            (Type::NullableString, Value::String(s)) => Ok(2 + s.as_bytes().len()),
+            (Type::NullableString, Value::String(s)) => Ok(2 + s.len()),
             (Type::CompactNullableString, Value::Null) => Ok(1),
             (Type::CompactNullableString, Value::String(s)) => {
-                let len = s.as_bytes().len();
+                let len = s.len();
                 Ok(byte_utils::size_of_unsigned_varint((len + 1) as u32) + len)
             },
 
@@ -877,5 +877,754 @@ fn java_value_kind(t: &Type) -> &'static str {
         Type::Array(_) | Type::CompactArray(_) => "Object[]",
         Type::TaggedFields(_) => "NavigableMap",
         Type::Schema(_) => "Struct",
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    use crate::common::protocol::types::field::Field;
+    use crate::common::protocol::types::r#struct::Struct;
+
+    /// Round-trip helper mirroring `ProtocolSerializationTest#roundtrip`.
+    fn roundtrip(t: &Type, value: &Value) -> Value {
+        let mut buf = Vec::with_capacity(t.size_of(value).unwrap());
+        t.write(&mut buf, value).unwrap();
+        assert_eq!(buf.len(), t.size_of(value).unwrap(), "buffer should be full");
+        let mut r = ReadBuffer::new(&buf);
+        let read = t.read(&mut r).unwrap();
+        assert!(!r.has_remaining(), "all bytes should be read");
+        read
+    }
+
+    fn check(t: Type, v: Value, expected: &str) {
+        let result = roundtrip(&t, &v);
+        assert_eq!(t.to_string(), expected, "Type::Display");
+        assert_eq!(v, result);
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testSimple`.
+    #[test]
+    fn simple() {
+        check(Type::Boolean, Value::Bool(false), "BOOLEAN");
+        check(Type::Boolean, Value::Bool(true), "BOOLEAN");
+        check(Type::Int8, Value::Int8(-111), "INT8");
+        check(Type::Int16, Value::Int16(-11111), "INT16");
+        check(Type::Int32, Value::Int32(-11111111), "INT32");
+        check(Type::Int64, Value::Int64(-11111111111), "INT64");
+        check(Type::Float64, Value::Float64(2.5), "FLOAT64");
+        check(Type::Float64, Value::Float64(-0.5), "FLOAT64");
+        check(Type::Float64, Value::Float64(1e300), "FLOAT64");
+        check(Type::Float64, Value::Float64(0.0), "FLOAT64");
+        check(Type::Float64, Value::Float64(-0.0), "FLOAT64");
+        check(Type::Float64, Value::Float64(f64::MAX), "FLOAT64");
+        check(Type::Float64, Value::Float64(f64::MIN_POSITIVE), "FLOAT64");
+        // NaN: round-trips via bit-equality, but f64 PartialEq returns false for NaN.
+        // We emulate Java's `assertEquals(Double.NaN, …)` (which is true via boxed Double.equals)
+        // by comparing bit patterns.
+        let mut buf = Vec::new();
+        Type::Float64.write(&mut buf, &Value::Float64(f64::NAN)).unwrap();
+        let mut r = ReadBuffer::new(&buf);
+        let v = Type::Float64.read(&mut r).unwrap();
+        if let Value::Float64(d) = v {
+            assert!(d.is_nan());
+        } else {
+            panic!("expected Float64");
+        }
+        check(Type::Float64, Value::Float64(f64::NEG_INFINITY), "FLOAT64");
+        check(Type::Float64, Value::Float64(f64::INFINITY), "FLOAT64");
+
+        check(Type::String, Value::String(String::new()), "STRING");
+        check(Type::String, Value::String("hello".into()), "STRING");
+        check(Type::String, Value::String("A\u{00ea}\u{00f1}\u{00fc}C".into()), "STRING");
+        check(Type::CompactString, Value::String(String::new()), "COMPACT_STRING");
+        check(Type::CompactString, Value::String("hello".into()), "COMPACT_STRING");
+        check(
+            Type::CompactString,
+            Value::String("A\u{00ea}\u{00f1}\u{00fc}C".into()),
+            "COMPACT_STRING",
+        );
+        check(Type::NullableString, Value::Null, "NULLABLE_STRING");
+        check(Type::NullableString, Value::String(String::new()), "NULLABLE_STRING");
+        check(Type::NullableString, Value::String("hello".into()), "NULLABLE_STRING");
+        check(Type::CompactNullableString, Value::Null, "COMPACT_NULLABLE_STRING");
+        check(
+            Type::CompactNullableString,
+            Value::String(String::new()),
+            "COMPACT_NULLABLE_STRING",
+        );
+        check(
+            Type::CompactNullableString,
+            Value::String("hello".into()),
+            "COMPACT_NULLABLE_STRING",
+        );
+
+        check(Type::Bytes, Value::Bytes(Vec::new()), "BYTES");
+        check(Type::Bytes, Value::Bytes(b"abcd".to_vec()), "BYTES");
+        check(Type::CompactBytes, Value::Bytes(Vec::new()), "COMPACT_BYTES");
+        check(Type::CompactBytes, Value::Bytes(b"abcd".to_vec()), "COMPACT_BYTES");
+        check(Type::NullableBytes, Value::Null, "NULLABLE_BYTES");
+        check(Type::NullableBytes, Value::Bytes(Vec::new()), "NULLABLE_BYTES");
+        check(Type::NullableBytes, Value::Bytes(b"abcd".to_vec()), "NULLABLE_BYTES");
+        check(Type::CompactNullableBytes, Value::Null, "COMPACT_NULLABLE_BYTES");
+        check(Type::CompactNullableBytes, Value::Bytes(Vec::new()), "COMPACT_NULLABLE_BYTES");
+        check(
+            Type::CompactNullableBytes,
+            Value::Bytes(b"abcd".to_vec()),
+            "COMPACT_NULLABLE_BYTES",
+        );
+
+        check(Type::Varint, Value::Int32(i32::MAX), "VARINT");
+        check(Type::Varint, Value::Int32(i32::MIN), "VARINT");
+        check(Type::Varlong, Value::Int64(i64::MAX), "VARLONG");
+        check(Type::Varlong, Value::Int64(i64::MIN), "VARLONG");
+
+        check(
+            Type::Array(Box::new(ArrayOf::new(Type::Int32))),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3), Value::Int32(4)]),
+            "ARRAY(INT32)",
+        );
+        check(
+            Type::Array(Box::new(ArrayOf::new(Type::String))),
+            Value::Array(Vec::new()),
+            "ARRAY(STRING)",
+        );
+        check(
+            Type::Array(Box::new(ArrayOf::new(Type::String))),
+            Value::Array(vec![
+                Value::String("hello".into()),
+                Value::String("there".into()),
+                Value::String("beautiful".into()),
+            ]),
+            "ARRAY(STRING)",
+        );
+        check(
+            Type::CompactArray(Box::new(CompactArrayOf::new(Type::Int32))),
+            Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3), Value::Int32(4)]),
+            "COMPACT_ARRAY(INT32)",
+        );
+        check(
+            Type::CompactArray(Box::new(CompactArrayOf::new(Type::CompactString))),
+            Value::Array(Vec::new()),
+            "COMPACT_ARRAY(COMPACT_STRING)",
+        );
+        check(
+            Type::CompactArray(Box::new(CompactArrayOf::new(Type::CompactString))),
+            Value::Array(vec![
+                Value::String("hello".into()),
+                Value::String("there".into()),
+                Value::String("beautiful".into()),
+            ]),
+            "COMPACT_ARRAY(COMPACT_STRING)",
+        );
+        check(
+            Type::Array(Box::new(ArrayOf::nullable(Type::String))),
+            Value::Null,
+            "ARRAY(STRING)",
+        );
+        check(
+            Type::CompactArray(Box::new(CompactArrayOf::nullable(Type::CompactString))),
+            Value::Null,
+            "COMPACT_ARRAY(COMPACT_STRING)",
+        );
+    }
+
+    /// Build the populated schema/struct from `ProtocolSerializationTest#setup`.
+    fn setup() -> (Schema, Struct) {
+        let inner =
+            Schema::new(vec![Field::no_doc("field", Type::Array(Box::new(ArrayOf::new(Type::Int32))))]).unwrap();
+        let schema = Schema::new(vec![
+            Field::no_doc("boolean", Type::Boolean),
+            Field::no_doc("int8", Type::Int8),
+            Field::no_doc("int16", Type::Int16),
+            Field::no_doc("int32", Type::Int32),
+            Field::no_doc("int64", Type::Int64),
+            Field::no_doc("varint", Type::Varint),
+            Field::no_doc("varlong", Type::Varlong),
+            Field::no_doc("float64", Type::Float64),
+            Field::no_doc("string", Type::String),
+            Field::no_doc("compact_string", Type::CompactString),
+            Field::no_doc("nullable_string", Type::NullableString),
+            Field::no_doc("compact_nullable_string", Type::CompactNullableString),
+            Field::no_doc("bytes", Type::Bytes),
+            Field::no_doc("compact_bytes", Type::CompactBytes),
+            Field::no_doc("nullable_bytes", Type::NullableBytes),
+            Field::no_doc("compact_nullable_bytes", Type::CompactNullableBytes),
+            Field::no_doc("array", Type::Array(Box::new(ArrayOf::new(Type::Int32)))),
+            Field::no_doc("compact_array", Type::CompactArray(Box::new(CompactArrayOf::new(Type::Int32)))),
+            Field::no_doc("null_array", Type::Array(Box::new(ArrayOf::nullable(Type::Int32)))),
+            Field::no_doc(
+                "compact_null_array",
+                Type::CompactArray(Box::new(CompactArrayOf::nullable(Type::Int32))),
+            ),
+            Field::no_doc("struct", Type::Schema(Box::new(inner))),
+        ])
+        .unwrap();
+
+        let mut st = Struct::new(schema.clone());
+        st.set_by_name("boolean", Value::Bool(true)).unwrap();
+        st.set_by_name("int8", Value::Int8(1)).unwrap();
+        st.set_by_name("int16", Value::Int16(1)).unwrap();
+        st.set_by_name("int32", Value::Int32(1)).unwrap();
+        st.set_by_name("int64", Value::Int64(1)).unwrap();
+        st.set_by_name("varint", Value::Int32(300)).unwrap();
+        st.set_by_name("varlong", Value::Int64(500)).unwrap();
+        st.set_by_name("float64", Value::Float64(0.5)).unwrap();
+        st.set_by_name("string", Value::String("1".into())).unwrap();
+        st.set_by_name("compact_string", Value::String("1".into())).unwrap();
+        st.set_by_name("nullable_string", Value::Null).unwrap();
+        st.set_by_name("compact_nullable_string", Value::Null).unwrap();
+        st.set_by_name("bytes", Value::Bytes(b"1".to_vec())).unwrap();
+        st.set_by_name("compact_bytes", Value::Bytes(b"1".to_vec())).unwrap();
+        st.set_by_name("nullable_bytes", Value::Null).unwrap();
+        st.set_by_name("compact_nullable_bytes", Value::Null).unwrap();
+        st.set_by_name("array", Value::Array(vec![Value::Int32(1)])).unwrap();
+        st.set_by_name("compact_array", Value::Array(vec![Value::Int32(1)])).unwrap();
+        st.set_by_name("null_array", Value::Null).unwrap();
+        st.set_by_name("compact_null_array", Value::Null).unwrap();
+
+        let mut child = st.instance_by_name("struct").unwrap();
+        child
+            .set_by_name("field", Value::Array(vec![Value::Int32(1), Value::Int32(2), Value::Int32(3)]))
+            .unwrap();
+        st.set_by_name("struct", Value::Struct(Box::new(child))).unwrap();
+        (schema, st)
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testNulls`.
+    #[test]
+    fn nulls() {
+        let (schema, mut st) = setup();
+        let cloned_schema = schema.clone();
+        let names: Vec<String> = cloned_schema.fields().iter().map(|f| f.def.name.clone()).collect();
+        for name in names {
+            let original = st.get_by_name(&name).unwrap().clone();
+            let bound_field = schema.get_by_name(&name).unwrap().clone();
+            // Try to set null; if validation fails, the type is non-nullable.
+            st.set_by_name(&name, Value::Null).unwrap();
+            let validate_result = st.validate();
+            if validate_result.is_ok() {
+                assert!(
+                    bound_field.def.r#type.is_nullable(),
+                    "field {name} validated null but is not nullable"
+                );
+            } else {
+                assert!(!bound_field.def.r#type.is_nullable(), "{name} should not be nullable");
+            }
+            st.set_by_name(&name, original).unwrap();
+        }
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testDefault`.
+    #[test]
+    fn default_value() {
+        let schema = Schema::new(vec![
+            Field::with_default("field", Type::Int32, "doc", Value::Int32(42)).unwrap(),
+        ])
+        .unwrap();
+        let st = Struct::new(schema);
+        assert_eq!(st.get_by_name("field").unwrap(), &Value::Int32(42));
+        st.validate().unwrap();
+    }
+
+    fn check_nullable_default(t: Type, default: Value) {
+        let schema = Schema::new(vec![Field::with_default("field", t, "doc", default.clone()).unwrap()]).unwrap();
+        let st = Struct::new(schema);
+        assert_eq!(st.get_by_name("field").unwrap(), &default);
+        st.validate().unwrap();
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testNullableDefault`.
+    #[test]
+    fn nullable_default() {
+        check_nullable_default(Type::NullableBytes, Value::Bytes(Vec::new()));
+        check_nullable_default(Type::CompactNullableBytes, Value::Bytes(Vec::new()));
+        check_nullable_default(Type::NullableString, Value::String("default".into()));
+        check_nullable_default(Type::CompactNullableString, Value::String("default".into()));
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadArraySizeTooLarge`.
+    #[test]
+    fn read_array_size_too_large() {
+        let t = Type::Array(Box::new(ArrayOf::new(Type::Int8)));
+        let size = 10usize;
+        let mut buf = Vec::with_capacity(4 + size);
+        buf.extend_from_slice(&i32::MAX.to_be_bytes());
+        for i in 0..size {
+            buf.push(i as u8);
+        }
+        let mut r = ReadBuffer::new(&buf);
+        assert!(t.read(&mut r).is_err(), "Array size not validated");
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadCompactArraySizeTooLarge`.
+    #[test]
+    fn read_compact_array_size_too_large() {
+        let t = Type::CompactArray(Box::new(CompactArrayOf::new(Type::Int8)));
+        let size = 10usize;
+        let mut buf = Vec::new();
+        byte_utils::write_unsigned_varint(i32::MAX as u32, &mut buf);
+        for i in 0..size {
+            buf.push(i as u8);
+        }
+        let mut r = ReadBuffer::new(&buf);
+        assert!(t.read(&mut r).is_err(), "Array size not validated");
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadTaggedFieldsSizeTooLarge`.
+    #[test]
+    fn read_tagged_fields_size_too_large() {
+        let tag = 1i32;
+        let t = Type::TaggedFields(Box::new(TaggedFields::from_pairs(vec![(
+            tag,
+            Field::no_doc("field", Type::NullableString),
+        )])));
+        let size_total = 10usize;
+        let mut buf = Vec::with_capacity(size_total);
+        let num_tagged_fields = 1u32;
+        byte_utils::write_unsigned_varint(num_tagged_fields, &mut buf);
+        byte_utils::write_unsigned_varint(tag as u32, &mut buf);
+        byte_utils::write_unsigned_varint(i32::MAX as u32, &mut buf);
+        let expected_remaining = size_total - buf.len();
+        // pad to total size (rest of allocation in Java's ByteBuffer)
+        while buf.len() < size_total {
+            buf.push(0);
+        }
+        let mut r = ReadBuffer::new(&buf);
+        let err = t.read(&mut r).unwrap_err();
+        assert_eq!(
+            err.message(),
+            format!(
+                "Error reading field of size {}, only {expected_remaining} bytes available",
+                i32::MAX
+            )
+        );
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadNegativeArraySize`.
+    #[test]
+    fn read_negative_array_size() {
+        let t = Type::Array(Box::new(ArrayOf::new(Type::Int8)));
+        let size = 10usize;
+        let mut buf = Vec::with_capacity(4 + size);
+        buf.extend_from_slice(&(-1i32).to_be_bytes());
+        for i in 0..size {
+            buf.push(i as u8);
+        }
+        let mut r = ReadBuffer::new(&buf);
+        assert!(t.read(&mut r).is_err(), "Array size not validated");
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadZeroCompactArraySize`.
+    #[test]
+    fn read_zero_compact_array_size() {
+        let t = Type::CompactArray(Box::new(CompactArrayOf::new(Type::Int8)));
+        let size = 10usize;
+        let mut buf = Vec::new();
+        byte_utils::write_unsigned_varint(0, &mut buf);
+        for i in 0..size {
+            buf.push(i as u8);
+        }
+        let mut r = ReadBuffer::new(&buf);
+        assert!(t.read(&mut r).is_err(), "Array size not validated");
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadStringSizeTooLarge`.
+    #[test]
+    fn read_string_size_too_large() {
+        let bytes = b"foo";
+        let mut buf = Vec::with_capacity(2 + bytes.len());
+        buf.extend_from_slice(&((bytes.len() as i16) * 5).to_be_bytes());
+        buf.extend_from_slice(bytes);
+
+        let mut r = ReadBuffer::new(&buf);
+        assert!(Type::String.read(&mut r).is_err());
+        let mut r = ReadBuffer::new(&buf);
+        assert!(Type::NullableString.read(&mut r).is_err());
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadNegativeStringSize`.
+    #[test]
+    fn read_negative_string_size() {
+        let bytes = b"foo";
+        let mut buf = Vec::with_capacity(2 + bytes.len());
+        buf.extend_from_slice(&(-1i16).to_be_bytes());
+        buf.extend_from_slice(bytes);
+        let mut r = ReadBuffer::new(&buf);
+        assert!(Type::String.read(&mut r).is_err());
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadBytesSizeTooLarge`.
+    #[test]
+    fn read_bytes_size_too_large() {
+        let bytes = b"foo";
+        let mut buf = Vec::with_capacity(4 + bytes.len());
+        buf.extend_from_slice(&((bytes.len() as i32) * 5).to_be_bytes());
+        buf.extend_from_slice(bytes);
+
+        let mut r = ReadBuffer::new(&buf);
+        assert!(Type::Bytes.read(&mut r).is_err());
+        let mut r = ReadBuffer::new(&buf);
+        assert!(Type::NullableBytes.read(&mut r).is_err());
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadNegativeBytesSize`.
+    #[test]
+    fn read_negative_bytes_size() {
+        let bytes = b"foo";
+        let mut buf = Vec::with_capacity(4 + bytes.len());
+        buf.extend_from_slice(&(-20i32).to_be_bytes());
+        buf.extend_from_slice(bytes);
+        let mut r = ReadBuffer::new(&buf);
+        assert!(Type::Bytes.read(&mut r).is_err());
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testToString`.
+    #[test]
+    fn to_string_test() {
+        let (_schema, st) = setup();
+        let s = st.to_string();
+        assert!(!s.is_empty(), "struct string should not be empty");
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testStructEquals`.
+    #[test]
+    fn struct_equals() {
+        let schema = Schema::new(vec![
+            Field::no_doc("field1", Type::NullableString),
+            Field::no_doc("field2", Type::NullableString),
+        ])
+        .unwrap();
+        let empty1 = Struct::new(schema.clone());
+        let empty2 = Struct::new(schema.clone());
+        assert_eq!(empty1, empty2);
+
+        let mut mostly = Struct::new(schema.clone());
+        mostly.set_by_name("field1", Value::String("foo".into())).unwrap();
+        assert_ne!(empty1, mostly);
+        assert_ne!(mostly, empty1);
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadIgnoringExtraDataAtTheEnd`.
+    #[test]
+    fn read_ignoring_extra_data_at_the_end() {
+        let old_schema = Schema::new(vec![
+            Field::no_doc("field1", Type::NullableString),
+            Field::no_doc("field2", Type::NullableString),
+        ])
+        .unwrap();
+        let new_schema = Schema::new(vec![Field::no_doc("field1", Type::NullableString)]).unwrap();
+        let value = "foo bar baz";
+        let mut old_format = Struct::new(old_schema.clone());
+        old_format.set_by_name("field1", Value::String(value.into())).unwrap();
+        old_format
+            .set_by_name("field2", Value::String("fine to ignore".into()))
+            .unwrap();
+        let mut buf = Vec::new();
+        old_format.write_to(&mut buf).unwrap();
+        let mut r = ReadBuffer::new(&buf);
+        let new_format = new_schema.read_struct(&mut r).unwrap();
+        assert_eq!(new_format.get_by_name("field1").unwrap(), &Value::String(value.into()));
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadWhenOptionalDataMissingAtTheEndIsTolerated`.
+    #[test]
+    fn read_when_optional_data_missing_at_the_end_is_tolerated() {
+        let old_schema = Schema::new(vec![Field::no_doc("field1", Type::NullableString)]).unwrap();
+        let new_schema = Schema::with_tolerance(
+            true,
+            vec![
+                Field::no_doc("field1", Type::NullableString),
+                Field::with_default("field2", Type::NullableString, "", Value::String("default".into())).unwrap(),
+                Field::with_default("field3", Type::NullableString, "", Value::Null).unwrap(),
+                Field::with_default("field4", Type::NullableBytes, "", Value::Bytes(Vec::new())).unwrap(),
+                Field::with_default("field5", Type::Int64, "doc", Value::Int64(i64::MAX)).unwrap(),
+            ],
+        )
+        .unwrap();
+        let value = "foo bar baz";
+        let mut old_format = Struct::new(old_schema);
+        old_format.set_by_name("field1", Value::String(value.into())).unwrap();
+        let mut buf = Vec::new();
+        old_format.write_to(&mut buf).unwrap();
+        let mut r = ReadBuffer::new(&buf);
+        let new_format = new_schema.read_struct(&mut r).unwrap();
+        assert_eq!(new_format.get_by_name("field1").unwrap(), &Value::String(value.into()));
+        assert_eq!(new_format.get_by_name("field2").unwrap(), &Value::String("default".into()));
+        assert_eq!(new_format.get_by_name("field3").unwrap(), &Value::Null);
+        assert_eq!(new_format.get_by_name("field4").unwrap(), &Value::Bytes(Vec::new()));
+        assert_eq!(new_format.get_by_name("field5").unwrap(), &Value::Int64(i64::MAX));
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadWhenOptionalDataMissingAtTheEndIsNotTolerated`.
+    #[test]
+    fn read_when_optional_data_missing_at_the_end_is_not_tolerated() {
+        let old_schema = Schema::new(vec![Field::no_doc("field1", Type::NullableString)]).unwrap();
+        let new_schema = Schema::new(vec![
+            Field::no_doc("field1", Type::NullableString),
+            Field::with_default("field2", Type::NullableString, "", Value::String("default".into())).unwrap(),
+        ])
+        .unwrap();
+        let value = "foo bar baz";
+        let mut old_format = Struct::new(old_schema);
+        old_format.set_by_name("field1", Value::String(value.into())).unwrap();
+        let mut buf = Vec::new();
+        old_format.write_to(&mut buf).unwrap();
+        let mut r = ReadBuffer::new(&buf);
+        let err = new_schema.read_struct(&mut r).unwrap_err();
+        assert!(
+            err.message().contains("Error reading field 'field2':"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    /// Mirrors `ProtocolSerializationTest.testReadWithMissingNonOptionalExtraDataAtTheEnd`.
+    #[test]
+    fn read_with_missing_non_optional_extra_data_at_the_end() {
+        let old_schema = Schema::new(vec![Field::no_doc("field1", Type::NullableString)]).unwrap();
+        let new_schema = Schema::with_tolerance(
+            true,
+            vec![
+                Field::no_doc("field1", Type::NullableString),
+                Field::no_doc("field2", Type::NullableString),
+            ],
+        )
+        .unwrap();
+        let value = "foo bar baz";
+        let mut old_format = Struct::new(old_schema);
+        old_format.set_by_name("field1", Value::String(value.into())).unwrap();
+        let mut buf = Vec::new();
+        old_format.write_to(&mut buf).unwrap();
+        let mut r = ReadBuffer::new(&buf);
+        let err = new_schema.read_struct(&mut r).unwrap_err();
+        assert!(
+            err.message()
+                .contains("Missing value for field 'field2' which has no default value"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    // ---------- Byte-vector encoding tests ----------
+    //
+    // CLAUDE.md DoD rule 3 requires byte-level encoding tests for wire types
+    // alongside round-trip tests. The hex sequences below are derived from
+    // the documented Kafka wire-protocol shape.
+
+    #[test]
+    fn boolean_bytes() {
+        let mut buf = Vec::new();
+        Type::Boolean.write(&mut buf, &Value::Bool(true)).unwrap();
+        assert_eq!(buf, [0x01]);
+        let mut buf = Vec::new();
+        Type::Boolean.write(&mut buf, &Value::Bool(false)).unwrap();
+        assert_eq!(buf, [0x00]);
+    }
+
+    #[test]
+    fn int16_be_bytes() {
+        let mut buf = Vec::new();
+        Type::Int16.write(&mut buf, &Value::Int16(0x0102)).unwrap();
+        assert_eq!(buf, [0x01, 0x02]);
+        let mut buf = Vec::new();
+        Type::Int16.write(&mut buf, &Value::Int16(-1)).unwrap();
+        assert_eq!(buf, [0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn int32_be_bytes() {
+        let mut buf = Vec::new();
+        Type::Int32.write(&mut buf, &Value::Int32(0x01020304)).unwrap();
+        assert_eq!(buf, [0x01, 0x02, 0x03, 0x04]);
+    }
+
+    #[test]
+    fn int64_be_bytes() {
+        let mut buf = Vec::new();
+        Type::Int64.write(&mut buf, &Value::Int64(0x0102030405060708)).unwrap();
+        assert_eq!(buf, [0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08]);
+    }
+
+    #[test]
+    fn string_short_prefix_bytes() {
+        let mut buf = Vec::new();
+        Type::String.write(&mut buf, &Value::String("abc".into())).unwrap();
+        assert_eq!(buf, [0x00, 0x03, b'a', b'b', b'c']);
+        let mut buf = Vec::new();
+        Type::String.write(&mut buf, &Value::String(String::new())).unwrap();
+        assert_eq!(buf, [0x00, 0x00]);
+    }
+
+    #[test]
+    fn nullable_string_null_bytes() {
+        let mut buf = Vec::new();
+        Type::NullableString.write(&mut buf, &Value::Null).unwrap();
+        assert_eq!(buf, [0xFF, 0xFF]); // -1 i16
+    }
+
+    #[test]
+    fn compact_string_bytes() {
+        let mut buf = Vec::new();
+        Type::CompactString.write(&mut buf, &Value::String("abc".into())).unwrap();
+        // compact: varint(len+1), so varint(4) = 0x04, then "abc"
+        assert_eq!(buf, [0x04, b'a', b'b', b'c']);
+    }
+
+    #[test]
+    fn compact_nullable_string_null_bytes() {
+        let mut buf = Vec::new();
+        Type::CompactNullableString.write(&mut buf, &Value::Null).unwrap();
+        // null compact string is varint 0
+        assert_eq!(buf, [0x00]);
+    }
+
+    #[test]
+    fn bytes_length_prefix_bytes() {
+        let mut buf = Vec::new();
+        Type::Bytes.write(&mut buf, &Value::Bytes(b"\x10\x20\x30".to_vec())).unwrap();
+        assert_eq!(buf, [0x00, 0x00, 0x00, 0x03, 0x10, 0x20, 0x30]);
+    }
+
+    #[test]
+    fn nullable_bytes_null_bytes() {
+        let mut buf = Vec::new();
+        Type::NullableBytes.write(&mut buf, &Value::Null).unwrap();
+        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]); // -1 i32
+    }
+
+    #[test]
+    fn array_int32_bytes() {
+        let mut buf = Vec::new();
+        Type::Array(Box::new(ArrayOf::new(Type::Int32)))
+            .write(&mut buf, &Value::Array(vec![Value::Int32(1), Value::Int32(2)]))
+            .unwrap();
+        // size 2 (i32 BE) then two i32 BE values
+        assert_eq!(buf, [0x00, 0x00, 0x00, 0x02, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn compact_array_int32_bytes() {
+        let mut buf = Vec::new();
+        Type::CompactArray(Box::new(CompactArrayOf::new(Type::Int32)))
+            .write(&mut buf, &Value::Array(vec![Value::Int32(1), Value::Int32(2)]))
+            .unwrap();
+        // varint(3) = 0x03 then two i32 BE values
+        assert_eq!(buf, [0x03, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x02]);
+    }
+
+    #[test]
+    fn null_array_bytes() {
+        let mut buf = Vec::new();
+        Type::Array(Box::new(ArrayOf::nullable(Type::Int32)))
+            .write(&mut buf, &Value::Null)
+            .unwrap();
+        assert_eq!(buf, [0xFF, 0xFF, 0xFF, 0xFF]);
+    }
+
+    #[test]
+    fn null_compact_array_bytes() {
+        let mut buf = Vec::new();
+        Type::CompactArray(Box::new(CompactArrayOf::nullable(Type::Int32)))
+            .write(&mut buf, &Value::Null)
+            .unwrap();
+        assert_eq!(buf, [0x00]);
+    }
+
+    #[test]
+    fn varint_zigzag_bytes() {
+        // zig-zag(1) = 2 -> single byte 0x02
+        let mut buf = Vec::new();
+        Type::Varint.write(&mut buf, &Value::Int32(1)).unwrap();
+        assert_eq!(buf, [0x02]);
+        // zig-zag(-1) = 1 -> 0x01
+        let mut buf = Vec::new();
+        Type::Varint.write(&mut buf, &Value::Int32(-1)).unwrap();
+        assert_eq!(buf, [0x01]);
+    }
+
+    #[test]
+    fn uuid_bytes_be() {
+        let u = crate::common::Uuid::new(0x0102030405060708i64, 0x090A0B0C0D0E0F10i64);
+        let mut buf = Vec::new();
+        Type::Uuid.write(&mut buf, &Value::Uuid(u)).unwrap();
+        assert_eq!(
+            buf,
+            [
+                0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+            ]
+        );
+    }
+
+    #[test]
+    fn empty_tagged_fields_bytes() {
+        // Empty tagged fields => varint(0)
+        let t = Type::TaggedFields(Box::new(TaggedFields::from_pairs(vec![])));
+        let mut buf = Vec::new();
+        t.write(&mut buf, &Value::TaggedFields(BTreeMap::new())).unwrap();
+        assert_eq!(buf, [0x00]);
+    }
+
+    #[test]
+    fn unsigned_int32_round_trip() {
+        check(Type::UnsignedInt32, Value::UInt32(0xDEAD_BEEF), "UINT32");
+    }
+
+    #[test]
+    fn uint16_round_trip() {
+        check(Type::UInt16, Value::UInt16(0xFFFF), "UINT16");
+    }
+
+    #[test]
+    fn uuid_round_trip() {
+        check(Type::Uuid, Value::Uuid(crate::common::Uuid::new(0x1234, 0x5678)), "UUID");
+    }
+
+    /// Round-trip a `TaggedFields` value with two defined tags and one
+    /// raw (unknown) tag. Mirrors the integration done implicitly in the
+    /// Java `RequestHeaderTest` and message-generated tests.
+    #[test]
+    fn tagged_fields_round_trip_defined_and_raw() {
+        let t = Type::TaggedFields(Box::new(TaggedFields::from_pairs(vec![
+            (1, Field::no_doc("a", Type::Int32)),
+            (3, Field::no_doc("b", Type::String)),
+        ])));
+        let mut map = BTreeMap::new();
+        map.insert(1i32, Value::Int32(42));
+        map.insert(3i32, Value::String("hello".into()));
+        // Tag 7 is undefined; carry as raw bytes.
+        map.insert(7i32, Value::RawTagged(RawTaggedField::new(7, b"raw".to_vec())));
+        let v = Value::TaggedFields(map);
+        let result = roundtrip(&t, &v);
+        assert_eq!(v, result);
+    }
+
+    /// Mirrors `Schema#walk` semantics: the visitor sees the schema first,
+    /// then each type once (and recurses into arrays).
+    #[test]
+    fn schema_walk_visits_in_order() {
+        struct Collector {
+            names: Vec<String>,
+        }
+        impl super::super::schema::SchemaVisitor for Collector {
+            fn visit_schema(&mut self, _: &Schema) {
+                self.names.push("Schema".into());
+            }
+            fn visit_type(&mut self, n: &Type) {
+                self.names.push(n.type_name().into());
+            }
+        }
+        let inner_schema = Schema::new(vec![Field::no_doc("inner_int", Type::Int32)]).unwrap();
+        let outer = Schema::new(vec![
+            Field::no_doc("a", Type::Int8),
+            Field::no_doc("b", Type::Array(Box::new(ArrayOf::new(Type::String)))),
+            Field::no_doc("c", Type::Schema(Box::new(inner_schema))),
+        ])
+        .unwrap();
+        let mut c = Collector { names: Vec::new() };
+        outer.walk(&mut c);
+        // Outer schema visited first, then INT8, then ARRAY -> STRING, then nested schema (which visits Schema then INT32).
+        assert_eq!(c.names, vec!["Schema", "INT8", "ARRAY", "STRING", "Schema", "INT32"]);
     }
 }

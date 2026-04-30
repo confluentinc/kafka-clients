@@ -245,3 +245,29 @@ pub trait SchemaVisitor {
     /// Visit a type; mirrors `Schema.Visitor#visit(Type)`.
     fn visit_type(&mut self, _node: &Type) {}
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Java throws a `SchemaException` for duplicate field names. The Rust
+    /// translation surfaces it as a [`KafkaError::Generic`].
+    #[test]
+    fn duplicate_field_rejected() {
+        let err = Schema::new(vec![Field::no_doc("a", Type::Int32), Field::no_doc("a", Type::String)]).unwrap_err();
+        assert!(err.message().contains("duplicate field"));
+    }
+
+    /// `BoundField` carries the schema id; the same `BoundField` from
+    /// schema X must not be usable on schema Y. Mirrors Java's reference
+    /// equality check `this.schema != field.schema`.
+    #[test]
+    fn cross_schema_field_rejected() {
+        let s1 = Schema::new(vec![Field::no_doc("a", Type::Int32)]).unwrap();
+        let s2 = Schema::new(vec![Field::no_doc("a", Type::Int32)]).unwrap();
+        let f1 = s1.get_by_name("a").unwrap().clone();
+        let st = crate::common::protocol::types::r#struct::Struct::new(s2);
+        let err = st.get(&f1).unwrap_err();
+        assert!(err.message().contains("different schema instance"));
+    }
+}
