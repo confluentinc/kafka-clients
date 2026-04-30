@@ -12,20 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Translation of `org.apache.kafka.common`.
+//! Translation of `org.apache.kafka.common.record`.
+//!
+//! Phase 3a covers the enum / identifier types and the trait base layer.
+//! Phase 3c/3d will fill in `MemoryRecords`, `MemoryRecordsBuilder`,
+//! `DefaultRecord`, `DefaultRecordBatch`, and the on-the-wire send path.
 
-pub mod config;
-pub mod errors;
-pub mod header;
-pub mod internals;
-pub mod kafka_exception;
-pub mod message;
-pub mod protocol;
-pub mod record;
-pub mod requests;
-pub mod utils;
-pub mod uuid;
+pub mod compression_type;
+pub mod control_record_type;
+pub mod record_version;
+pub mod timestamp_type;
 
-pub use errors::KafkaError;
-pub use kafka_exception::KafkaException;
-pub use uuid::Uuid;
+pub use compression_type::CompressionType;
+pub use control_record_type::ControlRecordType;
+pub use record_version::RecordVersion;
+pub use timestamp_type::TimestampType;
