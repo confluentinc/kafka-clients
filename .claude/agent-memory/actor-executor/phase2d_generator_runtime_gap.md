@@ -93,3 +93,26 @@ fields, or non-flexible specs (Phase 2d-2 verified these). If a
 generator change is needed, it indicates the emit code has a new
 field type / encoding edge case the previous specs didn't exercise —
 note it explicitly in the commit message.
+
+**Generator emit fixes added in Phase 2d-3 (additive):**
+
+- `#[allow(clippy::manual_range_contains)]` is now also placed on the
+  `impl Message for X` block. Previously it was only on the inherent
+  `impl X` block. Specs with closed-range version gates
+  (`versions: "8-10"` → `if version >= 8 && version <= 10`) trip clippy
+  inside `add_size`/`Message::write`, which live in the trait impl.
+  MetadataRequest (`IncludeClusterAuthorizedOperations` at v8-10) and
+  MetadataResponse (`ClusterAuthorizedOperations` at v8-10) were the
+  first specs to surface this. (lib.rs ~line 1032.)
+
+**Runtime-side additions in Phase 2d-3:**
+
+- `Uuid::zero()` const fn added in `src/common/uuid.rs` — equivalent to
+  the existing `ZERO_UUID` constant. The generator emits `Uuid::zero()`
+  as the default for all `uuid` fields (e.g. `topic_id` on
+  MetadataRequestTopic). Adding the method form was preferred over
+  changing the generator because (a) it matches Java's `Uuid` API
+  surface (Java has `Uuid.ZERO_UUID` static; the method form is the
+  natural Rust constructor), (b) many already-emitted-but-not-yet-wired
+  files reference `Uuid::zero()`, so this avoids a generator-wide change.
+  Phase 2d-4 (Produce*/FetchResponse* etc.) inherits this for free.

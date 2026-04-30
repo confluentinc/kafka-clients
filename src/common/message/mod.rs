@@ -61,5 +61,17 @@ pub mod api_versions_response_data {
     include!(concat!(env!("OUT_DIR"), "/generated/api_versions_response_data.rs"));
 }
 
+/// `MetadataRequestData`, generated from `MetadataRequest.json`. Mirrors
+/// Java's generated `org.apache.kafka.common.message.MetadataRequestData`.
+pub mod metadata_request_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/metadata_request_data.rs"));
+}
+
+/// `MetadataResponseData`, generated from `MetadataResponse.json`. Mirrors
+/// Java's generated `org.apache.kafka.common.message.MetadataResponseData`.
+pub mod metadata_response_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/metadata_response_data.rs"));
+}
+
 #[cfg(test)]
 mod tests;

@@ -26,12 +26,17 @@ use crate::common::message::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::message::api_versions_response_data::{
     ApiVersion, ApiVersionsResponseData, FinalizedFeatureKey, SupportedFeatureKey,
 };
+use crate::common::message::metadata_request_data::{MetadataRequestData, MetadataRequestTopic};
+use crate::common::message::metadata_response_data::{
+    MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+};
 use crate::common::message::request_header_data::RequestHeaderData;
 use crate::common::message::response_header_data::ResponseHeaderData;
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
 use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
 use crate::common::protocol::types::RawTaggedField;
 use crate::common::protocol::{Message, Readable};
+use crate::common::uuid::Uuid;
 
 /// Helper: encode a `Message` at the given version into a byte buffer (the
 /// same idiom used at every Phase 2d test site — sizer pass, allocate,
@@ -482,5 +487,363 @@ fn api_versions_response_data_round_trip_v4_flexible_empty() {
     let mut decoded = ApiVersionsResponseData::new();
     Message::read(&mut decoded, &mut decode_accessor, 4).expect("read succeeds");
     assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+// =============================================================================
+// MetadataRequestData (Phase 2d-3)
+//
+// `MetadataRequest.json` validVersions = 0-13, flexibleVersions = 9+.
+// v0 is non-flexible, topics is non-nullable, no AllowAutoTopicCreation, no
+// authorized-operations gates. v13 (highest) is flexible, has TopicId
+// (uuid, v10+) on each topic, AllowAutoTopicCreation (v4+),
+// IncludeTopicAuthorizedOperations (v8+), and topic Name is nullable
+// (v10+). At v13 IncludeClusterAuthorizedOperations is gone (removed in v11+).
+// =============================================================================
+
+/// Round trip at v0 (lowest supported, non-flexible). At v0:
+///   - Topics array is i32-prefixed (non-flexible) and non-nullable
+///   - Each topic has only `Name` (i16-prefixed string)
+///   - No `AllowAutoTopicCreation`, no authorized-operations bytes
+///   - No tagged-fields trailer
+#[test]
+fn metadata_request_data_round_trip_v0() {
+    let original = MetadataRequestData {
+        topics: Some(vec![
+            MetadataRequestTopic {
+                topic_id: Uuid::zero(),
+                name: Some("topic-1".to_string()),
+                unknown_tagged_fields: Vec::new(),
+            },
+            MetadataRequestTopic {
+                topic_id: Uuid::zero(),
+                name: Some("topic-2".to_string()),
+                unknown_tagged_fields: Vec::new(),
+            },
+        ]),
+        // Defaults from MetadataRequestData::new() — none of these fields
+        // exist on the wire at v0, but the round-trip must reproduce the
+        // initial values.
+        allow_auto_topic_creation: true,
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: false,
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 0);
+
+    // Wire layout for v0:
+    //   topics array length (i32 BE = 2)
+    //   topic[0]: name length (i16 BE = 7) + "topic-1" (7 bytes)
+    //   topic[1]: name length (i16 BE = 7) + "topic-2" (7 bytes)
+    // Total: 4 + (2 + 7) + (2 + 7) = 22 bytes.
+    assert_eq!(bytes.len(), 22, "v0 MetadataRequest with 2 topics is 22 bytes");
+    assert_eq!(&bytes[0..4], &2i32.to_be_bytes(), "topics array length = 2 (i32 BE)");
+    assert_eq!(&bytes[4..6], &7i16.to_be_bytes(), "topic[0] name length");
+    assert_eq!(&bytes[6..13], b"topic-1", "topic[0] name bytes");
+    assert_eq!(&bytes[13..15], &7i16.to_be_bytes(), "topic[1] name length");
+    assert_eq!(&bytes[15..22], b"topic-2", "topic[1] name bytes");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = MetadataRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 0).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v13 (highest supported, flexible). Exercises:
+///   - Compact varint-prefixed nullable topics array
+///   - `topic_id: Uuid` (added v10) — populated with a non-zero random Uuid
+///   - Nullable topic name (added v10) — round-trip the `None` path
+///   - `allow_auto_topic_creation` (v4+) and
+///     `include_topic_authorized_operations` (v8+)
+///   - Tagged fields on the parent message AND on a nested topic struct
+#[test]
+fn metadata_request_data_round_trip_v13_flexible_full() {
+    let topic_id_a = Uuid::random();
+    let topic_id_b = Uuid::random();
+    let original = MetadataRequestData {
+        topics: Some(vec![
+            // Topic looked up by name only — topic_id is the zero UUID.
+            MetadataRequestTopic {
+                topic_id: Uuid::zero(),
+                name: Some("topic-by-name".to_string()),
+                unknown_tagged_fields: vec![RawTaggedField::new(0, vec![0xAA])],
+            },
+            // Topic looked up by id only — name is null (v10+ nullable path).
+            MetadataRequestTopic { topic_id: topic_id_a, name: None, unknown_tagged_fields: Vec::new() },
+            // Topic with both id and name populated, mirroring the broker's
+            // tolerance for either lookup key.
+            MetadataRequestTopic {
+                topic_id: topic_id_b,
+                name: Some("topic-with-id".to_string()),
+                unknown_tagged_fields: Vec::new(),
+            },
+        ]),
+        allow_auto_topic_creation: false,
+        // include_cluster_authorized_operations is only present at v8-10;
+        // at v13 it's not on the wire so its value does not affect round-trip.
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: true,
+        unknown_tagged_fields: vec![RawTaggedField::new(99, vec![0xDE, 0xAD, 0xBE, 0xEF])],
+    };
+
+    let bytes = encode(&original, 13);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = MetadataRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 13).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v13 with the `topics: None` (null array) path. Mirrors
+/// "request metadata for all topics" in the v1+ broker semantics — encoded
+/// as a compact varint(0).
+#[test]
+fn metadata_request_data_round_trip_v13_null_topics() {
+    let original = MetadataRequestData {
+        topics: None,
+        allow_auto_topic_creation: true,
+        include_cluster_authorized_operations: false,
+        include_topic_authorized_operations: false,
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 13);
+
+    // Wire layout at v13 with null topics + all defaults:
+    //   varint(0) for null topics                                (1 byte)
+    //   bool allow_auto_topic_creation = true                    (1 byte)
+    //   bool include_topic_authorized_operations = false         (1 byte)
+    //   varint(0) tagged-fields trailer                          (1 byte)
+    // Total: 4 bytes.
+    assert_eq!(bytes.len(), 4, "v13 MetadataRequest null topics + all defaults = 4 bytes");
+    assert_eq!(bytes[0], 0, "null topics encodes as varint(0)");
+    assert_eq!(bytes[1], 1, "allow_auto_topic_creation = true");
+    assert_eq!(bytes[2], 0, "include_topic_authorized_operations = false");
+    assert_eq!(bytes[3], 0, "no tagged fields → varint(0)");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = MetadataRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 13).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+// =============================================================================
+// MetadataResponseData (Phase 2d-3)
+//
+// `MetadataResponse.json` validVersions = 0-13, flexibleVersions = 9+.
+// This spec exercises the broadest set of encoding paths covered so far:
+//   - Multiple topics, each with multiple partitions, each with multiple
+//     replicas / ISRs / offline replicas
+//   - Nullable Uuid (topic_id, v10+) — both zero and random values
+//   - Nullable string with `default: "null"` (cluster_id v2+, broker.rack
+//     v1+) — round-trip the `None` path
+//   - i16/i32 primitives at every nesting level
+// =============================================================================
+
+/// Round trip at v0 (lowest supported, non-flexible). At v0:
+///   - No throttle_time, no cluster_id, no controller_id, no top-level error
+///   - Brokers have only NodeId/Host/Port (no rack)
+///   - Topics have only ErrorCode/Name/Partitions (no topic_id, no
+///     is_internal, no authorized_operations)
+///   - Partitions have only ErrorCode/PartitionIndex/LeaderId/ReplicaNodes/
+///     IsrNodes (no leader_epoch, no offline_replicas)
+#[test]
+fn metadata_response_data_round_trip_v0() {
+    let original = MetadataResponseData {
+        throttle_time_ms: 0,
+        brokers: vec![
+            MetadataResponseBroker {
+                node_id: 1,
+                host: "broker-1.example.com".to_string(),
+                port: 9092,
+                rack: None, // not on the wire at v0
+                unknown_tagged_fields: Vec::new(),
+            },
+            MetadataResponseBroker {
+                node_id: 2,
+                host: "broker-2.example.com".to_string(),
+                port: 9092,
+                rack: None,
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        cluster_id: None,
+        // Default from MetadataResponseData::new() (-1) — not on the wire at v0.
+        controller_id: -1,
+        topics: vec![MetadataResponseTopic {
+            error_code: 0,
+            name: Some("the-topic".to_string()),
+            topic_id: Uuid::zero(), // not on the wire at v0
+            is_internal: false,     // not on the wire at v0
+            partitions: vec![MetadataResponsePartition {
+                error_code: 0,
+                partition_index: 0,
+                leader_id: 1,
+                leader_epoch: -1, // not on the wire at v0
+                replica_nodes: vec![1, 2],
+                isr_nodes: vec![1, 2],
+                offline_replicas: Vec::new(), // not on the wire at v0
+                unknown_tagged_fields: Vec::new(),
+            }],
+            topic_authorized_operations: -2147483648, // not on the wire at v0
+            unknown_tagged_fields: Vec::new(),
+        }],
+        cluster_authorized_operations: -2147483648, // not on the wire at v0
+        error_code: 0,                              // not on the wire at v0
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 0);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = MetadataResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 0).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v13 (highest supported, flexible) with two topics, two
+/// partitions per topic, two replicas per partition. Exercises every
+/// per-version field, including `topic_id: Uuid` (random values),
+/// nullable `cluster_id` and broker `rack` (the `default: "null"` path),
+/// and tagged fields at every nesting level (top-level + topic + partition
+/// + broker).
+#[test]
+fn metadata_response_data_round_trip_v13_flexible_full() {
+    let topic_id_a = Uuid::random();
+    let topic_id_b = Uuid::random();
+    let original = MetadataResponseData {
+        throttle_time_ms: 250,
+        brokers: vec![
+            MetadataResponseBroker {
+                node_id: 1,
+                host: "broker-1.example.com".to_string(),
+                port: 9092,
+                rack: Some("rack-a".to_string()),
+                unknown_tagged_fields: vec![RawTaggedField::new(11, vec![0x11])],
+            },
+            MetadataResponseBroker {
+                node_id: 2,
+                host: "broker-2.example.com".to_string(),
+                port: 9092,
+                // Cover the default-null path at the broker-level rack.
+                rack: None,
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        cluster_id: Some("test-cluster".to_string()),
+        controller_id: 1,
+        topics: vec![
+            MetadataResponseTopic {
+                error_code: 0,
+                name: Some("topic-a".to_string()),
+                topic_id: topic_id_a,
+                is_internal: false,
+                partitions: vec![
+                    MetadataResponsePartition {
+                        error_code: 0,
+                        partition_index: 0,
+                        leader_id: 1,
+                        leader_epoch: 5,
+                        replica_nodes: vec![1, 2],
+                        isr_nodes: vec![1, 2],
+                        offline_replicas: vec![],
+                        unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0x77])],
+                    },
+                    MetadataResponsePartition {
+                        error_code: 0,
+                        partition_index: 1,
+                        leader_id: 2,
+                        leader_epoch: 5,
+                        replica_nodes: vec![2, 1],
+                        isr_nodes: vec![2, 1],
+                        offline_replicas: vec![1],
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                // ClusterAuthorizedOperations is not on the wire at v13
+                // (deprecated v11+), but TopicAuthorizedOperations is (v8+).
+                topic_authorized_operations: 0xCAFEBABEu32 as i32,
+                unknown_tagged_fields: vec![RawTaggedField::new(0, vec![0xA0])],
+            },
+            MetadataResponseTopic {
+                error_code: 5, // LEADER_NOT_AVAILABLE
+                // Cover the v12+ nullable name path.
+                name: None,
+                topic_id: topic_id_b,
+                is_internal: true,
+                partitions: vec![
+                    MetadataResponsePartition {
+                        error_code: 9, // REPLICA_NOT_AVAILABLE
+                        partition_index: 0,
+                        leader_id: -1,
+                        leader_epoch: -1,
+                        replica_nodes: vec![1, 2, 3],
+                        isr_nodes: vec![1],
+                        offline_replicas: vec![2, 3],
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                    MetadataResponsePartition {
+                        error_code: 0,
+                        partition_index: 1,
+                        leader_id: 1,
+                        leader_epoch: 0,
+                        replica_nodes: vec![1, 2, 3],
+                        isr_nodes: vec![1, 2, 3],
+                        offline_replicas: vec![],
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                topic_authorized_operations: 0,
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        cluster_authorized_operations: -2147483648, // not on wire at v13
+        error_code: 0,                              // top-level error v13+
+        unknown_tagged_fields: vec![RawTaggedField::new(99, vec![0xDE, 0xAD, 0xBE, 0xEF])],
+    };
+
+    let bytes = encode(&original, 13);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = MetadataResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 13).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+
+    // The randomly generated topic ids must round-trip byte-for-byte —
+    // explicit assertion to lock the nullable Uuid encoding path in.
+    let decoded_a = decoded.topics.iter().find(|t| t.name.as_deref() == Some("topic-a")).unwrap();
+    assert_eq!(decoded_a.topic_id, topic_id_a, "random topic_id must round-trip");
+    let decoded_b = decoded.topics.iter().find(|t| t.name.is_none()).unwrap();
+    assert_eq!(decoded_b.topic_id, topic_id_b, "random topic_id (null name) must round-trip");
+}
+
+/// Round trip at v13 with a top-level error and minimal payload — locks in
+/// the v13-only `ErrorCode` encoding (i16 BE, just before the trailing
+/// tagged-fields varint).
+#[test]
+fn metadata_response_data_round_trip_v13_top_level_error() {
+    let original = MetadataResponseData {
+        throttle_time_ms: 0,
+        brokers: Vec::new(),
+        cluster_id: None,
+        controller_id: -1,
+        topics: Vec::new(),
+        cluster_authorized_operations: -2147483648,
+        error_code: 41, // NOT_CONTROLLER
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 13);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = MetadataResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 13).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decoded.error_code, 41, "top-level v13 error code is preserved");
     assert_eq!(decode_accessor.remaining(), 0);
 }
