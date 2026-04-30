@@ -59,12 +59,26 @@ impl MockTime {
     /// Mirrors `new MockTime(long autoTickMs)` — every call to
     /// [`Time::milliseconds`] / [`Time::nanoseconds`] advances the clock by
     /// `auto_tick_ms` first.
+    ///
+    /// Per the Java contract, `currentTimeMs` and `currentHighResTimeNs` are
+    /// independent values drawn from independent clocks (`System.currentTimeMillis()`
+    /// and `System.nanoTime()`). `System.nanoTime()` returns nanoseconds since
+    /// some fixed-but-arbitrary reference, which produces a large value
+    /// numerically distinguishable from a millisecond reading. We approximate
+    /// this in Rust by reading `SystemTime::UNIX_EPOCH.elapsed()` for the
+    /// nanosecond field — a stable wall-clock reference that yields a similarly
+    /// large value. This matters for tests that aim to detect bugs where
+    /// nanosecond and millisecond readings are incorrectly assumed to come from
+    /// the same source.
     pub fn new(auto_tick_ms: i64) -> Self {
         let now_ms = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
-        let now_ns = std::time::Instant::now().elapsed().as_nanos() as i64;
+        let now_ns = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos() as i64)
+            .unwrap_or(0);
         MockTime::with_initial(auto_tick_ms, now_ms, now_ns)
     }
 
