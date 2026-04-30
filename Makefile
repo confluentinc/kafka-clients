@@ -16,8 +16,8 @@ devel-build:
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
 # submodules (kafka source reference + Unity for the C unit tests).
-# Run this before `make build` on a new checkout.
-init:
+# `build` dependency is needed for creating the C headers.
+init: build
 	@git submodule update --init --recursive
 	@python3 -m venv venv
 	@(. venv/bin/activate && cd bindings/python && pip install .[dev])
