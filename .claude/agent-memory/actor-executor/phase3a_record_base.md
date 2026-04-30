@@ -20,6 +20,10 @@ identifier enums:
 - `control_record_type.rs` — full `ControlRecordType` translation.
   `recordKey()` (Java) is a `Struct`-based serialization helper that the
   producer client doesn't use; deferred to whenever `Struct` lands.
+  Specifically deferred to **Phase 3c** since the only call site is
+  `MemoryRecordsBuilder.java:614` (`Struct keyStruct = type.recordKey()`)
+  and `MemoryRecordsBuilder` itself lands in Phase 3c — alongside the
+  `protocol::types::Struct` dependency.
 - `record.rs` — `Record` trait.
 - `record_batch.rs` — `RecordBatch` trait + magic/sentinel constants
   (`MAGIC_VALUE_V0..V2`, `NO_TIMESTAMP`, `NO_PRODUCER_ID`,
