@@ -18,12 +18,30 @@
 //! Phase 3c/3d will fill in `MemoryRecords`, `MemoryRecordsBuilder`,
 //! `DefaultRecord`, `DefaultRecordBatch`, and the on-the-wire send path.
 
+pub mod abstract_record_batch;
+pub mod abstract_records;
+pub mod base_records;
 pub mod compression_type;
 pub mod control_record_type;
+pub mod mutable_record_batch;
+// CLAUDE.md rule 2 mandates each Java class lives in its own file (so the
+// `Record` trait lives in `record/record.rs`). Clippy's `module_inception`
+// lint would otherwise flag the same-name child module.
+#[allow(clippy::module_inception)]
+pub mod record;
+pub mod record_batch;
 pub mod record_version;
+pub mod records;
 pub mod timestamp_type;
+pub mod transferable_records;
 
+pub use base_records::BaseRecords;
 pub use compression_type::CompressionType;
 pub use control_record_type::ControlRecordType;
+pub use mutable_record_batch::MutableRecordBatch;
+pub use record::Record;
+pub use record_batch::RecordBatch;
 pub use record_version::RecordVersion;
+pub use records::Records;
 pub use timestamp_type::TimestampType;
+pub use transferable_records::TransferableRecords;
