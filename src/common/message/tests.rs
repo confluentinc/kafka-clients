@@ -30,6 +30,11 @@ use crate::common::message::metadata_request_data::{MetadataRequestData, Metadat
 use crate::common::message::metadata_response_data::{
     MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
 };
+use crate::common::message::produce_request_data::{PartitionProduceData, ProduceRequestData, TopicProduceData};
+use crate::common::message::produce_response_data::{
+    BatchIndexAndErrorMessage, LeaderIdAndEpoch, NodeEndpoint, PartitionProduceResponse, ProduceResponseData,
+    TopicProduceResponse,
+};
 use crate::common::message::request_header_data::RequestHeaderData;
 use crate::common::message::response_header_data::ResponseHeaderData;
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
@@ -846,4 +851,442 @@ fn metadata_response_data_round_trip_v13_top_level_error() {
     assert_eq!(decoded, original);
     assert_eq!(decoded.error_code, 41, "top-level v13 error code is preserved");
     assert_eq!(decode_accessor.remaining(), 0);
+}
+
+// =============================================================================
+// ProduceRequestData (Phase 2d-4)
+//
+// `ProduceRequest.json` validVersions = 3-13, flexibleVersions = 9+.
+// Versions 0-2 were removed in Apache Kafka 4.0 (v3 is the new baseline).
+//
+// Per-version behavior covered:
+//   - v3 (lowest): non-flexible, transactional_id added
+//   - v9: first flexible version (compact strings/arrays, tagged fields)
+//   - v13 (highest): topic_id replaces topic name (KIP-516, name dropped at v13+)
+//
+// `Records` field is `Option<Vec<u8>>` placeholder (Phase 3 will replace with
+// `MemoryRecords`). For round-trip tests, raw bytes are sufficient.
+// =============================================================================
+
+/// Round trip at v3 (lowest supported, non-flexible). At v3:
+///   - transactional_id is i16-prefixed nullable string
+///   - topics array is i32-prefixed
+///   - topic name is i16-prefixed string (no topic_id)
+///   - records is i32-prefixed nullable byte array
+///   - no tagged-fields trailer
+#[test]
+fn produce_request_data_round_trip_v3() {
+    let original = ProduceRequestData {
+        transactional_id: Some("txn-1".to_string()),
+        acks: -1,
+        timeout_ms: 30_000,
+        topic_data: vec![TopicProduceData {
+            name: "topic-a".to_string(),
+            topic_id: Uuid::zero(), // not on the wire at v3
+            partition_data: vec![
+                PartitionProduceData { index: 0, records: Some(b"hello".to_vec()), unknown_tagged_fields: Vec::new() },
+                PartitionProduceData {
+                    index: 1,
+                    // null records path
+                    records: None,
+                    unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            unknown_tagged_fields: Vec::new(),
+        }],
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 3);
+
+    // Wire layout for v3:
+    //   transactional_id length (i16 BE = 5) + "txn-1" (5 bytes)
+    //   acks (i16 BE = -1)
+    //   timeout_ms (i32 BE = 30000)
+    //   topic_data array length (i32 BE = 1)
+    //   topic[0]:
+    //     name length (i16 BE = 7) + "topic-a"
+    //     partition_data array length (i32 BE = 2)
+    //     partition[0]:
+    //       index (i32 BE = 0)
+    //       records length (i32 BE = 5) + "hello"
+    //     partition[1]:
+    //       index (i32 BE = 1)
+    //       records length (i32 BE = -1, null sentinel)
+    let txn_len = 5;
+    let topic_name_len = 7;
+    let expected_len = 2 + txn_len // transactional_id
+        + 2 // acks
+        + 4 // timeout_ms
+        + 4 // topic_data length
+        + 2 + topic_name_len // topic name
+        + 4 // partition_data length
+        + 4 + 4 + b"hello".len() // partition[0]
+        + 4 + 4; // partition[1] (null records)
+    assert_eq!(bytes.len(), expected_len, "v3 ProduceRequest expected size");
+    assert_eq!(&bytes[0..2], &(txn_len as i16).to_be_bytes(), "transactional_id length");
+    assert_eq!(&bytes[2..7], b"txn-1");
+    assert_eq!(&bytes[7..9], &(-1i16).to_be_bytes(), "acks");
+    assert_eq!(&bytes[9..13], &30_000i32.to_be_bytes(), "timeout_ms");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 3).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v9 (first flexible version). Exercises:
+///   - Compact varint-prefixed nullable transactional_id
+///   - Compact varint-prefixed topics array
+///   - Compact varint-prefixed nullable records
+///   - Tagged fields at every nesting level
+#[test]
+fn produce_request_data_round_trip_v9_flexible() {
+    let original = ProduceRequestData {
+        // Null transactional_id (non-transactional producer).
+        transactional_id: None,
+        acks: 1,
+        timeout_ms: 5_000,
+        topic_data: vec![
+            TopicProduceData {
+                name: "topic-a".to_string(),
+                topic_id: Uuid::zero(), // not on the wire at v9 (v13+ only)
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(b"payload-a".to_vec()),
+                    unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0x77])],
+                }],
+                unknown_tagged_fields: vec![RawTaggedField::new(0, vec![0xA0])],
+            },
+            TopicProduceData {
+                name: "topic-b".to_string(),
+                topic_id: Uuid::zero(),
+                partition_data: vec![
+                    PartitionProduceData {
+                        index: 0,
+                        records: Some(vec![1, 2, 3, 4, 5]),
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                    PartitionProduceData { index: 1, records: None, unknown_tagged_fields: Vec::new() },
+                ],
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        unknown_tagged_fields: vec![RawTaggedField::new(99, vec![0xDE, 0xAD])],
+    };
+
+    let bytes = encode(&original, 9);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 9).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v13 (highest supported, flexible) where topic name is
+/// dropped from the wire (KIP-516) and `topic_id: Uuid` takes its place.
+#[test]
+fn produce_request_data_round_trip_v13_flexible_full() {
+    let topic_id_a = Uuid::random();
+    let topic_id_b = Uuid::random();
+    let original = ProduceRequestData {
+        transactional_id: Some("txn-with-id".to_string()),
+        acks: -1,
+        timeout_ms: 60_000,
+        topic_data: vec![
+            TopicProduceData {
+                // At v13 the name is not encoded — round-trip must reproduce
+                // the *initial* value (default empty string from new()).
+                name: String::new(),
+                topic_id: topic_id_a,
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(b"records-for-topic-a".to_vec()),
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                unknown_tagged_fields: Vec::new(),
+            },
+            TopicProduceData {
+                name: String::new(),
+                topic_id: topic_id_b,
+                partition_data: vec![
+                    PartitionProduceData {
+                        index: 0,
+                        records: Some(vec![0xAA, 0xBB, 0xCC]),
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                    PartitionProduceData {
+                        index: 1,
+                        records: Some(Vec::new()), // empty records (not null)
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 13);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceRequestData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 13).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+
+    let decoded_a = decoded.topic_data.iter().find(|t| t.topic_id == topic_id_a).unwrap();
+    assert_eq!(
+        decoded_a.partition_data[0].records.as_deref(),
+        Some(b"records-for-topic-a".as_slice())
+    );
+}
+
+// =============================================================================
+// ProduceResponseData (Phase 2d-4)
+//
+// `ProduceResponse.json` validVersions = 3-13, flexibleVersions = 9+.
+// Notable per-version fields:
+//   - v3: ThrottleTimeMs added
+//   - v8: RecordErrors and ErrorMessage added (KIP-467)
+//   - v9: flexible versions
+//   - v10: CurrentLeader (struct-typed tagged field) and NodeEndpoints
+//          (array-typed tagged field) added (KIP-951)
+//   - v13: TopicId replaces topic name (KIP-516)
+// =============================================================================
+
+/// Round trip at v3 (lowest supported, non-flexible). At v3:
+///   - responses array is i32-prefixed
+///   - topic name is i16-prefixed (no topic_id)
+///   - partition fields: index, error_code, base_offset, log_append_time_ms
+///   - no log_start_offset (added v5), no record_errors / error_message
+///   - throttle_time_ms (added v1)
+///   - no tagged-fields trailer
+#[test]
+fn produce_response_data_round_trip_v3() {
+    let original = ProduceResponseData {
+        responses: vec![TopicProduceResponse {
+            name: "topic-a".to_string(),
+            topic_id: Uuid::zero(), // not on the wire at v3
+            partition_responses: vec![
+                PartitionProduceResponse {
+                    index: 0,
+                    error_code: 0,
+                    base_offset: 12345,
+                    log_append_time_ms: -1,
+                    log_start_offset: -1, // not on the wire at v3
+                    record_errors: Vec::new(),
+                    error_message: None,
+                    current_leader: LeaderIdAndEpoch::new(),
+                    unknown_tagged_fields: Vec::new(),
+                },
+                PartitionProduceResponse {
+                    index: 1,
+                    error_code: 0,
+                    base_offset: 67890,
+                    log_append_time_ms: -1,
+                    log_start_offset: -1,
+                    record_errors: Vec::new(),
+                    error_message: None,
+                    current_leader: LeaderIdAndEpoch::new(),
+                    unknown_tagged_fields: Vec::new(),
+                },
+            ],
+            unknown_tagged_fields: Vec::new(),
+        }],
+        throttle_time_ms: 100,
+        node_endpoints: Vec::new(), // not on the wire at v3
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 3);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 3).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v8 (highest non-flexible). Exercises RecordErrors and
+/// ErrorMessage which were added in v8 (KIP-467) but before flexible
+/// versions kicked in at v9.
+#[test]
+fn produce_response_data_round_trip_v8() {
+    let original = ProduceResponseData {
+        responses: vec![TopicProduceResponse {
+            name: "the-topic".to_string(),
+            topic_id: Uuid::zero(),
+            partition_responses: vec![PartitionProduceResponse {
+                index: 0,
+                error_code: 7, // CORRUPT_MESSAGE
+                base_offset: -1,
+                log_append_time_ms: -1,
+                log_start_offset: 0,
+                record_errors: vec![
+                    BatchIndexAndErrorMessage {
+                        batch_index: 2,
+                        batch_index_error_message: Some("bad record at idx 2".to_string()),
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                    BatchIndexAndErrorMessage {
+                        batch_index: 5,
+                        batch_index_error_message: None, // null path
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                error_message: Some("batch dropped".to_string()),
+                current_leader: LeaderIdAndEpoch::new(),
+                unknown_tagged_fields: Vec::new(),
+            }],
+            unknown_tagged_fields: Vec::new(),
+        }],
+        throttle_time_ms: 0,
+        node_endpoints: Vec::new(),
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 8);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 8).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v10 (flexible + KIP-951). Exercises:
+///   - CurrentLeader (struct-typed tagged field, tag 0)
+///   - NodeEndpoints (array-typed tagged field, tag 0 at parent)
+///   - All flexible-version paths
+#[test]
+fn produce_response_data_round_trip_v10_flexible_with_tagged_structs() {
+    let original = ProduceResponseData {
+        responses: vec![TopicProduceResponse {
+            name: "topic-a".to_string(),
+            topic_id: Uuid::zero(),
+            partition_responses: vec![PartitionProduceResponse {
+                index: 0,
+                error_code: 6, // NOT_LEADER_OR_FOLLOWER
+                base_offset: -1,
+                log_append_time_ms: -1,
+                log_start_offset: -1,
+                record_errors: Vec::new(),
+                error_message: Some("not leader".to_string()),
+                // Non-default CurrentLeader → emitted as tagged field 0.
+                current_leader: LeaderIdAndEpoch { leader_id: 2, leader_epoch: 7, unknown_tagged_fields: Vec::new() },
+                unknown_tagged_fields: Vec::new(),
+            }],
+            unknown_tagged_fields: Vec::new(),
+        }],
+        throttle_time_ms: 0,
+        // Non-empty NodeEndpoints → emitted as parent-level tagged field 0.
+        node_endpoints: vec![
+            NodeEndpoint {
+                node_id: 2,
+                host: "broker-2.example.com".to_string(),
+                port: 9092,
+                rack: Some("rack-b".to_string()),
+                unknown_tagged_fields: Vec::new(),
+            },
+            NodeEndpoint {
+                node_id: 3,
+                host: "broker-3.example.com".to_string(),
+                port: 9092,
+                rack: None, // default-null path
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 10);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 10).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+
+    // Verify the tagged struct round-trip explicitly.
+    assert_eq!(decoded.responses[0].partition_responses[0].current_leader.leader_id, 2);
+    assert_eq!(decoded.responses[0].partition_responses[0].current_leader.leader_epoch, 7);
+    assert_eq!(decoded.node_endpoints.len(), 2);
+}
+
+/// Round trip at v13 (highest supported, flexible). KIP-516 replaces topic
+/// name with topic_id on the wire. Multiple topics + multiple partitions.
+#[test]
+fn produce_response_data_round_trip_v13_flexible_full() {
+    let topic_id_a = Uuid::random();
+    let topic_id_b = Uuid::random();
+    let original = ProduceResponseData {
+        responses: vec![
+            TopicProduceResponse {
+                // At v13 the name is not encoded — must reproduce default.
+                name: String::new(),
+                topic_id: topic_id_a,
+                partition_responses: vec![
+                    PartitionProduceResponse {
+                        index: 0,
+                        error_code: 0,
+                        base_offset: 1000,
+                        log_append_time_ms: -1,
+                        log_start_offset: 0,
+                        record_errors: Vec::new(),
+                        error_message: None,
+                        current_leader: LeaderIdAndEpoch::new(),
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                    PartitionProduceResponse {
+                        index: 1,
+                        error_code: 0,
+                        base_offset: 2000,
+                        log_append_time_ms: -1,
+                        log_start_offset: 0,
+                        record_errors: Vec::new(),
+                        error_message: None,
+                        current_leader: LeaderIdAndEpoch::new(),
+                        unknown_tagged_fields: vec![RawTaggedField::new(99, vec![0x99])],
+                    },
+                ],
+                unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0x07, 0x77])],
+            },
+            TopicProduceResponse {
+                name: String::new(),
+                topic_id: topic_id_b,
+                partition_responses: vec![PartitionProduceResponse {
+                    index: 0,
+                    error_code: 100, // UNKNOWN_TOPIC_ID
+                    base_offset: -1,
+                    log_append_time_ms: -1,
+                    log_start_offset: -1,
+                    record_errors: Vec::new(),
+                    error_message: Some("unknown topic id".to_string()),
+                    current_leader: LeaderIdAndEpoch::new(),
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        throttle_time_ms: 250,
+        node_endpoints: Vec::new(),
+        unknown_tagged_fields: vec![RawTaggedField::new(123, vec![0xCA, 0xFE])],
+    };
+
+    let bytes = encode(&original, 13);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ProduceResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 13).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+
+    // Topic IDs must round-trip byte-for-byte.
+    let decoded_a = decoded.responses.iter().find(|t| t.topic_id == topic_id_a).unwrap();
+    assert_eq!(decoded_a.partition_responses.len(), 2);
+    let decoded_b = decoded.responses.iter().find(|t| t.topic_id == topic_id_b).unwrap();
+    assert_eq!(decoded_b.partition_responses[0].error_code, 100);
 }

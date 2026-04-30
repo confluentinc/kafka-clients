@@ -2394,7 +2394,7 @@ fn generate_tagged_field_read(
                         )?;
                         writeln!(
                             file,
-                            "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::from_bytes(struct_bytes);",
+                            "{}                    let mut struct_accessor = crate::common::protocol::ByteBufferAccessor::wrap(struct_bytes);",
                             indent
                         )?;
                         writeln!(
@@ -3932,7 +3932,12 @@ fn generate_field_write(
             } else {
                 writeln!(file, "{}writable.write_int({}.len() as i32);", ind, accessor)?;
             }
-            writeln!(file, "{}writable.write_byte_array(&{});", ind, accessor)?;
+            // Use `.as_slice()` so the accessor always coerces to `&[u8]`
+            // regardless of whether it's bound from a nullable field
+            // (`_nv: &Vec<u8>`) or the non-nullable case (`self.field: Vec<u8>`)
+            // — avoids the `clippy::needless_borrow` lint that fires when the
+            // emit prepends `&` to an already-borrowed accessor.
+            writeln!(file, "{}writable.write_byte_array({}.as_slice());", ind, accessor)?;
         },
         FieldType::Array(element_type) => {
             if !flexible_versions.empty() {

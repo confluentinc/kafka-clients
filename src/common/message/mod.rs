@@ -73,5 +73,17 @@ pub mod metadata_response_data {
     include!(concat!(env!("OUT_DIR"), "/generated/metadata_response_data.rs"));
 }
 
+/// `ProduceRequestData`, generated from `ProduceRequest.json`. Mirrors
+/// Java's generated `org.apache.kafka.common.message.ProduceRequestData`.
+pub mod produce_request_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/produce_request_data.rs"));
+}
+
+/// `ProduceResponseData`, generated from `ProduceResponse.json`. Mirrors
+/// Java's generated `org.apache.kafka.common.message.ProduceResponseData`.
+pub mod produce_response_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/produce_response_data.rs"));
+}
+
 #[cfg(test)]
 mod tests;
