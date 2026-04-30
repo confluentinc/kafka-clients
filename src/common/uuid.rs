@@ -54,6 +54,14 @@ impl Uuid {
         Uuid { most_significant_bits, least_significant_bits }
     }
 
+    /// Returns a UUID with both halves set to zero. Equivalent to the
+    /// [`ZERO_UUID`] constant; the method form is the constructor used by
+    /// generator-emitted struct defaults (`uuid` fields default to a
+    /// zero UUID).
+    pub const fn zero() -> Self {
+        ZERO_UUID
+    }
+
     /// Returns the most significant bits of the UUID's 128 value.
     pub const fn most_significant_bits(&self) -> i64 {
         self.most_significant_bits

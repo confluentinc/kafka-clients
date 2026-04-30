@@ -1028,7 +1028,11 @@ fn generate_message_impl(
 
     // `add_size` and `write` paths use the same independently-generated
     // version + presence checks as the inherent `impl X` block; see those
-    // allows for context.
+    // allows for context. `manual_range_contains` covers the
+    // `if version >= N && version <= M` field-presence gate emitted for
+    // fields with a closed `versions: "N-M"` range (e.g. MetadataRequest's
+    // `IncludeClusterAuthorizedOperations` at v8-10).
+    writeln!(file, "#[allow(clippy::manual_range_contains)]")?;
     writeln!(file, "#[allow(clippy::collapsible_if)]")?;
     writeln!(file, "#[allow(clippy::bool_comparison)]")?;
     writeln!(file, "impl Message for {} {{", struct_name)?;
