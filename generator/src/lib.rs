@@ -4856,4 +4856,98 @@ mod tests {
         // Cleanup
         let _ = std::fs::remove_dir_all(&tmp);
     }
+
+    // ----------------------------------------------------------------------
+    // G2: nullable string/bytes default-value resolution. A nullable field
+    // without an explicit `"default": "null"` must default to a non-null
+    // empty value (mirrors Java FieldSpec.fieldDefault() in OpenJDK).
+    // Only an explicit `"default": "null"` produces `None`.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn g2_nullable_string_no_default_is_some_empty_string() {
+        let mut field = parse_field(
+            r#"{
+                "name": "Topic",
+                "type": "string",
+                "versions": "0+",
+                "nullableVersions": "0+"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(get_default_value_for_field(&field), "Some(String::new())");
+    }
+
+    #[test]
+    fn g2_nullable_bytes_no_default_is_some_empty_vec() {
+        let mut field = parse_field(
+            r#"{
+                "name": "Payload",
+                "type": "bytes",
+                "versions": "0+",
+                "nullableVersions": "0+"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(get_default_value_for_field(&field), "Some(Vec::new())");
+    }
+
+    #[test]
+    fn g2_nullable_records_no_default_is_some_empty_vec() {
+        let mut field = parse_field(
+            r#"{
+                "name": "Records",
+                "type": "records",
+                "versions": "0+",
+                "nullableVersions": "0+"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(get_default_value_for_field(&field), "Some(Vec::new())");
+    }
+
+    #[test]
+    fn g2_nullable_string_explicit_null_default_is_none() {
+        let mut field = parse_field(
+            r#"{
+                "name": "Topic",
+                "type": "string",
+                "versions": "0+",
+                "nullableVersions": "0+",
+                "default": "null"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(get_default_value_for_field(&field), "None");
+    }
+
+    #[test]
+    fn g2_nullable_bytes_explicit_null_default_is_none() {
+        let mut field = parse_field(
+            r#"{
+                "name": "Payload",
+                "type": "bytes",
+                "versions": "0+",
+                "nullableVersions": "0+",
+                "default": "null"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(get_default_value_for_field(&field), "None");
+    }
+
+    #[test]
+    fn g2_non_nullable_string_no_default_is_empty_string() {
+        // A non-nullable string with no `default` should produce an empty owned
+        // String (Java emits `""`).
+        let mut field = parse_field(
+            r#"{
+                "name": "Topic",
+                "type": "string",
+                "versions": "0+"
+            }"#,
+        );
+        field.validate().unwrap();
+        assert_eq!(get_default_value_for_field(&field), "String::new()");
+    }
 }
