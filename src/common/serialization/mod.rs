@@ -48,6 +48,9 @@ pub mod uuid_serializer;
 pub mod void_deserializer;
 pub mod void_serializer;
 
+#[cfg(test)]
+mod tests;
+
 pub use boolean_deserializer::BooleanDeserializer;
 pub use boolean_serializer::BooleanSerializer;
 pub use byte_array_deserializer::ByteArrayDeserializer;
