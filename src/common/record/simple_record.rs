@@ -61,12 +61,7 @@ impl SimpleRecord {
     /// callers) is expected to invoke this constructor with `Bytes`
     /// payloads it already owns.
     pub fn new(timestamp: i64, key: Option<Bytes>, value: Option<Bytes>, headers: &[RecordHeader]) -> Self {
-        SimpleRecord {
-            key,
-            value,
-            timestamp,
-            headers: Arc::from(headers.to_vec().into_boxed_slice()),
-        }
+        SimpleRecord { key, value, timestamp, headers: Arc::from(headers.to_vec().into_boxed_slice()) }
     }
 
     /// Construct a record by **copying** borrowed byte slices into freshly
@@ -74,12 +69,7 @@ impl SimpleRecord {
     /// only have a `&[u8]`. This path is **not zero-copy** — each `Some(_)`
     /// argument allocates and memcpys via `Bytes::copy_from_slice`.
     /// Prefer [`SimpleRecord::new`] on the hot path.
-    pub fn new_from_slice(
-        timestamp: i64,
-        key: Option<&[u8]>,
-        value: Option<&[u8]>,
-        headers: &[RecordHeader],
-    ) -> Self {
+    pub fn new_from_slice(timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> Self {
         SimpleRecord::new(
             timestamp,
             key.map(Bytes::copy_from_slice),
@@ -262,10 +252,7 @@ mod tests {
         let p_in = payload.as_ptr();
         let r = SimpleRecord::new(0, None, Some(payload), &[]);
         let p_out = r.value().unwrap().as_ptr();
-        assert_eq!(
-            p_in, p_out,
-            "SimpleRecord::new with Some(Bytes) must alias the input — no copy",
-        );
+        assert_eq!(p_in, p_out, "SimpleRecord::new with Some(Bytes) must alias the input — no copy",);
     }
 
     #[test]
