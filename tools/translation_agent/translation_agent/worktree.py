@@ -97,19 +97,33 @@ def worktree_for_branch(
     safe_name = branch_name.replace("/", "_")
     worktree_dir = Path(tempfile.mkdtemp(prefix=f"translation-agent-{safe_name}-"))
     created = False
-    base = base_remote_branch if base_remote_branch is not None else branch_name
     try:
-        # Refresh origin/<base>; safe even with that branch checked out in
-        # another worktree because we don't use the colon refspec.
-        _git(repo_path, "fetch", "origin", base)
-        # `-B` creates or resets the local branch to origin's tip of `base`,
-        # which makes setup idempotent if a previous run left the ref behind.
-        _git(
-            repo_path, "worktree", "add",
-            "-B", branch_name,
-            str(worktree_dir),
-            f"origin/{base}",
-        )
+        if _local_branch_exists(repo_path, branch_name):
+            # Reuse the existing local branch. Important for dry-run cascades
+            # (per-PR --plan-approve, sweep impl after a prior plan run) where
+            # the local branch carries plan/impl commits that origin doesn't
+            # have because dry-run never pushed.
+            _git(
+                repo_path, "worktree", "add",
+                str(worktree_dir),
+                branch_name,
+            )
+        else:
+            # First-time setup: fetch the base from origin and create the
+            # local branch reset to it. `-B` makes the create-or-reset
+            # idempotent if a stale ref happens to exist (defensive).
+            base = (
+                base_remote_branch
+                if base_remote_branch is not None
+                else branch_name
+            )
+            _git(repo_path, "fetch", "origin", base)
+            _git(
+                repo_path, "worktree", "add",
+                "-B", branch_name,
+                str(worktree_dir),
+                f"origin/{base}",
+            )
         created = True
         if ak_commit is not None:
             _make_build(worktree_dir)
@@ -130,6 +144,19 @@ def worktree_for_branch(
                     pass
             if worktree_dir.exists():
                 shutil.rmtree(worktree_dir, ignore_errors=True)
+
+
+def _local_branch_exists(repo_path: str, branch_name: str) -> bool:
+    """True iff `branch_name` exists as a local ref under refs/heads/."""
+    proc = subprocess.run(
+        [
+            "git", "-C", repo_path,
+            "show-ref", "--verify", "--quiet",
+            f"refs/heads/{branch_name}",
+        ],
+        capture_output=True,
+    )
+    return proc.returncode == 0
 
 
 def _make_build(worktree_dir: Path) -> None:
