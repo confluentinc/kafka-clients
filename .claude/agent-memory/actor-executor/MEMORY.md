@@ -3,3 +3,6 @@
 - [Generator crate layout](generator_layout.md) — codegen lives in lib.rs (~5000 lines), not the message/ submodules
 - [Phase 2b types design](phase2b_types_design.md) — Type/Value enums, Schema id, ReadBuffer cursor, Records bytes-level only
 - [Phase 2c protocol layout](phase2c_protocol_layout.md) — Readable/Writable/ByteBufferAccessor moved out of types/io.rs
+- [Phase 2d generator/runtime gap](phase2d_generator_runtime_gap.md) — generator emits an API surface that doesn't match Phase 2c traits
+- [Phase 2d-4 byte fixtures](phase2d4_byte_fixtures.md) — Java-authoritative byte capture process + 2 produce-path generator emit fixes
+- [Phase 2e requests layout](phase2e_requests_layout.md) — wrapper trait shape choices: `&dyn Message`, `HashMap<Errors,_>`, no associated const
