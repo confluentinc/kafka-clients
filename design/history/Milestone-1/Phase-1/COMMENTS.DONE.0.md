@@ -65,3 +65,11 @@ introduced the issue. See `git log --grep=fixup!` for the full list.
 - **Severity:** **MINOR** (error-message text mismatch, no functional impact)
 - **File:** `src/common/config/config_exception.rs:26-28`
 - **Fix applied:** Implemented `fmt::Display` for `ConfigValue` mirroring Java's `Object.toString()` semantics per variant (`Int(5)` -> `5`, `String("foo")` -> `foo`, `List([a,b])` -> `[a, b]`, `Password` -> `[hidden]`, `Null` -> `null`). Changed `config_exception::new` to take `impl Display` and use `{value}` rather than `{value:?}`. Strengthened `range_at_least_rejects_below` to assert the full Java-equivalent message text. Fixup commit references `5eaecbf`.
+
+---
+
+## Issue 7: `MockTime::set_current_time_ms` has a small race window
+
+- **Severity:** **MINOR** (test-only code; race observable only under concurrent test access)
+- **File:** `src/common/utils/mock_time.rs:89-102`
+- **Fix applied:** Replaced swap-then-rollback with a `compare_exchange` loop, so the new value is never visible to concurrent readers if the call rejects (mirrors Java's `synchronized` semantics). Fixup commit references `2dc5b71`.
