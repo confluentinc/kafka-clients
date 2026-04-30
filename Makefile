@@ -6,12 +6,14 @@ CFLAGS_NATIVE = -march=native -mtune=native
 
 build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
+	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
+	cmake --build bindings/c/build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
 devel-build:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) CFLAGS_EXTRA="$(CFLAGS_NATIVE)" PROFILE=debug devel-build
+	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
+	cmake --build bindings/c/build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
 # One-shot setup for a fresh clone or worktree: pulls down the git
@@ -31,7 +33,7 @@ test-integration:
 	cargo test --features integration-tests
 
 test-c: build
-	$(MAKE) -C bindings/c RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) test
+	cd bindings/c/build && ctest --output-on-failure
 
 test-python: build
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test
@@ -46,5 +48,5 @@ lint:
 
 clean:
 	cargo clean
-	$(MAKE) -C bindings/c clean
+	rm -rf bindings/c/build
 	$(MAKE) -C bindings/python clean
