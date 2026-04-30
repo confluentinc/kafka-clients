@@ -141,6 +141,10 @@ def test_worktree_with_ak_commit_runs_make_build_and_bumps_submodule():
         elif args[0] == "git":
             # args[2] is the value for `-C` (the git path arg)
             calls.append(("git", args[2], tuple(args[3:])))
+        if "show-ref" in args:
+            return _completed(1)  # local branch doesn't exist
+        if "diff" in args and "--cached" in args and "--quiet" in args:
+            return _completed(1)  # there ARE staged changes -> commit happens
         return _completed(0)
 
     with patch.object(worktree.subprocess, "run", side_effect=record):
@@ -151,18 +155,20 @@ def test_worktree_with_ak_commit_runs_make_build_and_bumps_submodule():
             pass
 
     # Verify ordered sequence:
-    #  1. git -C /repo fetch origin kafka-translate/abc  (base fetch)
-    #  2. git -C /repo worktree add ...                  (create worktree)
-    #  3. make                                           (in worktree, default target)
-    #  4. git -C <wt>/kafka fetch origin trunk           (refresh AK ref)
-    #  5. git -C <wt>/kafka checkout ak123               (point at target)
-    #  6. git -C <wt> add kafka                          (stage submodule bump)
-    #  7. git -C <wt> commit -m "Bump kafka submodule to ak123"
-    #  8. git -C /repo worktree remove --force ...       (cleanup)
+    #  1. git -C /repo show-ref ...                      (local-branch check)
+    #  2. git -C /repo fetch origin kafka-translate/abc  (base fetch)
+    #  3. git -C /repo worktree add ...                  (create worktree)
+    #  4. make                                           (in worktree, default target)
+    #  5. git -C <wt>/kafka fetch origin trunk           (refresh AK ref)
+    #  6. git -C <wt>/kafka checkout ak123               (point at target)
+    #  7. git -C <wt> add kafka                          (stage submodule bump)
+    #  8. git -C <wt> diff --cached --quiet              (anything to commit?)
+    #  9. git -C <wt> commit -m "Bump kafka submodule to ak123"
+    # 10. git -C /repo worktree remove --force ...       (cleanup)
     kinds = [c[0] for c in calls]
-    assert kinds[2] == "make", f"make should be 3rd call, got {kinds}"
+    assert kinds[3] == "make", f"make should be 4th call, got {kinds}"
     # No target arg -- `make` defaults to the first target (build).
-    assert calls[2][1] == ()
+    assert calls[3][1] == ()
 
     # Find the kafka submodule operations.
     kafka_calls = [c for c in calls if c[0] == "git" and c[1].endswith("/kafka")]
