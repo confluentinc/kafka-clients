@@ -12,21 +12,18 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Translation of `org.apache.kafka.common`.
+//! Translation of `org.apache.kafka.common.serialization.ByteArrayDeserializer`.
 
-pub mod config;
-pub mod errors;
-pub mod header;
-pub mod internals;
-pub mod kafka_exception;
-pub mod message;
-pub mod protocol;
-pub mod record;
-pub mod requests;
-pub mod serialization;
-pub mod utils;
-pub mod uuid;
+use crate::common::KafkaError;
+use crate::common::serialization::Deserializer;
 
-pub use errors::KafkaError;
-pub use kafka_exception::KafkaException;
-pub use uuid::Uuid;
+/// Identity deserializer for `Vec<u8>`. Mirrors Java's
+/// `ByteArrayDeserializer implements Deserializer<byte[]>`.
+#[derive(Default, Debug, Clone, Copy)]
+pub struct ByteArrayDeserializer;
+
+impl Deserializer<Vec<u8>> for ByteArrayDeserializer {
+    fn deserialize(&self, _topic: &str, data: Option<&[u8]>) -> Result<Option<Vec<u8>>, KafkaError> {
+        Ok(data.map(<[u8]>::to_vec))
+    }
+}
