@@ -105,8 +105,23 @@ pub enum KafkaError {
     /// `org.apache.kafka.common.errors.UnknownTopicOrPartitionException` —
     /// wire code `3`.
     UnknownTopicOrPartition(String),
+    /// `org.apache.kafka.common.errors.UnknownTopicIdException` — wire code
+    /// `100`. Subclass of `InvalidMetadataException`, so retriable.
+    UnknownTopicId(String),
+    /// `org.apache.kafka.common.errors.KafkaStorageException` — wire code
+    /// `56`. Subclass of `InvalidMetadataException`, so retriable.
+    KafkaStorage(String),
+    /// `org.apache.kafka.common.errors.NotEnoughReplicasException` — wire
+    /// code `19`. Direct `RetriableException` subclass.
+    NotEnoughReplicas(String),
+    /// `org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException`
+    /// — wire code `20`. Direct `RetriableException` subclass.
+    NotEnoughReplicasAfterAppend(String),
 
     // ----- Non-retriable `ApiException` subclasses -----
+    /// `org.apache.kafka.common.errors.InvalidRequiredAcksException` — wire
+    /// code `21`. Subclass of `InvalidConfigurationException`; non-retriable.
+    InvalidRequiredAcks(String),
     /// `org.apache.kafka.common.errors.RecordTooLargeException` — wire code `10`.
     RecordTooLarge(String),
     /// Client-side record-too-large check (no wire code; librdkafka
@@ -180,6 +195,10 @@ impl KafkaError {
                 | KafkaError::LeaderNotAvailable(_)
                 | KafkaError::NotLeaderOrFollower(_)
                 | KafkaError::UnknownTopicOrPartition(_)
+                | KafkaError::UnknownTopicId(_)
+                | KafkaError::KafkaStorage(_)
+                | KafkaError::NotEnoughReplicas(_)
+                | KafkaError::NotEnoughReplicasAfterAppend(_)
         )
     }
 
@@ -233,6 +252,11 @@ impl KafkaError {
             KafkaError::LeaderNotAvailable(_) => 5,
             KafkaError::NotLeaderOrFollower(_) => 6,
             KafkaError::UnknownTopicOrPartition(_) => 3,
+            KafkaError::UnknownTopicId(_) => 100,
+            KafkaError::KafkaStorage(_) => 56,
+            KafkaError::NotEnoughReplicas(_) => 19,
+            KafkaError::NotEnoughReplicasAfterAppend(_) => 20,
+            KafkaError::InvalidRequiredAcks(_) => 21,
 
             KafkaError::RecordTooLarge(_) => 10,
             KafkaError::RecordTooLargeClient(_) => ERR_CODE_RECORD_TOO_LARGE_CLIENT,
@@ -274,6 +298,11 @@ impl KafkaError {
             KafkaError::LeaderNotAvailable(_) => "LeaderNotAvailableException",
             KafkaError::NotLeaderOrFollower(_) => "NotLeaderOrFollowerException",
             KafkaError::UnknownTopicOrPartition(_) => "UnknownTopicOrPartitionException",
+            KafkaError::UnknownTopicId(_) => "UnknownTopicIdException",
+            KafkaError::KafkaStorage(_) => "KafkaStorageException",
+            KafkaError::NotEnoughReplicas(_) => "NotEnoughReplicasException",
+            KafkaError::NotEnoughReplicasAfterAppend(_) => "NotEnoughReplicasAfterAppendException",
+            KafkaError::InvalidRequiredAcks(_) => "InvalidRequiredAcksException",
             KafkaError::RecordTooLarge(_) => "RecordTooLargeException",
             KafkaError::RecordTooLargeClient(_) => "RecordTooLargeException",
             KafkaError::InvalidTopic(_) => "InvalidTopicException",
@@ -311,6 +340,11 @@ impl KafkaError {
             | KafkaError::LeaderNotAvailable(m)
             | KafkaError::NotLeaderOrFollower(m)
             | KafkaError::UnknownTopicOrPartition(m)
+            | KafkaError::UnknownTopicId(m)
+            | KafkaError::KafkaStorage(m)
+            | KafkaError::NotEnoughReplicas(m)
+            | KafkaError::NotEnoughReplicasAfterAppend(m)
+            | KafkaError::InvalidRequiredAcks(m)
             | KafkaError::RecordTooLarge(m)
             | KafkaError::RecordTooLargeClient(m)
             | KafkaError::InvalidTopic(m)
@@ -350,16 +384,21 @@ impl KafkaError {
             10 => KafkaError::RecordTooLarge(m()),
             13 => KafkaError::Network(m()),
             17 => KafkaError::InvalidTopic(m()),
+            19 => KafkaError::NotEnoughReplicas(m()),
+            20 => KafkaError::NotEnoughReplicasAfterAppend(m()),
+            21 => KafkaError::InvalidRequiredAcks(m()),
             29 => KafkaError::TopicAuthorization(m()),
             31 => KafkaError::ClusterAuthorization(m()),
             35 => KafkaError::UnsupportedVersion(m()),
             42 => KafkaError::InvalidRequest(m()),
             45 => KafkaError::OutOfOrderSequence(m()),
             47 => KafkaError::InvalidProducerEpoch(m()),
+            56 => KafkaError::KafkaStorage(m()),
             58 => KafkaError::Authentication(m()),
             59 => KafkaError::UnknownProducerId(m()),
             87 => KafkaError::InvalidRecord(m()),
             90 => KafkaError::ProducerFenced(m()),
+            100 => KafkaError::UnknownTopicId(m()),
             // Codes outside the producer-relevant set (or unknown) collapse
             // to `UnknownServerException`, matching Java's `Errors.forCode`.
             _ => KafkaError::UnknownServer(m()),
@@ -390,11 +429,15 @@ mod tests {
         assert!(KafkaError::Timeout("t".into()).is_retriable());
         assert!(KafkaError::Disconnect("t".into()).is_retriable());
         assert!(KafkaError::CorruptRecord("t".into()).is_retriable());
+        assert!(KafkaError::NotEnoughReplicas("t".into()).is_retriable());
+        assert!(KafkaError::NotEnoughReplicasAfterAppend("t".into()).is_retriable());
         // RefreshRetriableException -> InvalidMetadataException subclasses
         assert!(KafkaError::Network("t".into()).is_retriable());
         assert!(KafkaError::LeaderNotAvailable("t".into()).is_retriable());
         assert!(KafkaError::NotLeaderOrFollower("t".into()).is_retriable());
         assert!(KafkaError::UnknownTopicOrPartition("t".into()).is_retriable());
+        assert!(KafkaError::UnknownTopicId("t".into()).is_retriable());
+        assert!(KafkaError::KafkaStorage("t".into()).is_retriable());
 
         // Non-retriable
         assert!(!KafkaError::RecordTooLarge("t".into()).is_retriable());
@@ -402,6 +445,7 @@ mod tests {
         assert!(!KafkaError::Serialization("t".into()).is_retriable());
         assert!(!KafkaError::Authentication("t".into()).is_retriable());
         assert!(!KafkaError::Config("t".into()).is_retriable());
+        assert!(!KafkaError::InvalidRequiredAcks("t".into()).is_retriable());
     }
 
     #[test]
@@ -457,16 +501,21 @@ mod tests {
             (10, "RecordTooLargeException"),
             (13, "NetworkException"),
             (17, "InvalidTopicException"),
+            (19, "NotEnoughReplicasException"),
+            (20, "NotEnoughReplicasAfterAppendException"),
+            (21, "InvalidRequiredAcksException"),
             (29, "TopicAuthorizationException"),
             (31, "ClusterAuthorizationException"),
             (35, "UnsupportedVersionException"),
             (42, "InvalidRequestException"),
             (45, "OutOfOrderSequenceException"),
             (47, "InvalidProducerEpochException"),
+            (56, "KafkaStorageException"),
             (58, "AuthenticationException"),
             (59, "UnknownProducerIdException"),
             (87, "InvalidRecordException"),
             (90, "ProducerFencedException"),
+            (100, "UnknownTopicIdException"),
         ];
         for (code, name) in cases {
             let err = KafkaError::from_code(code, Some("msg")).expect("non-zero code");
