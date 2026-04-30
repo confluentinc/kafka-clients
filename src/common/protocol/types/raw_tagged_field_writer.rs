@@ -16,7 +16,7 @@
 //! `org.apache.kafka.common.protocol.types.RawTaggedFieldWriter`.
 
 use crate::common::errors::KafkaError;
-use crate::common::protocol::types::io::Writable;
+use crate::common::protocol::Writable;
 use crate::common::protocol::types::raw_tagged_field::RawTaggedField;
 
 /// The `RawTaggedFieldWriter` is used by `Message` subclasses to serialise
@@ -89,15 +89,14 @@ impl RawTaggedFieldWriter {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::types::io::SliceWritable;
+    use crate::common::protocol::ByteBufferAccessor;
 
     /// Mirrors `RawTaggedFieldWriterTest.testWritingZeroRawTaggedFields`.
     #[test]
     fn writing_zero_raw_tagged_fields() {
         let mut writer = RawTaggedFieldWriter::empty();
         assert_eq!(writer.num_fields(), 0);
-        let mut buf = [0u8; 0];
-        let mut accessor = SliceWritable::new(&mut buf);
+        let mut accessor = ByteBufferAccessor::allocate(0);
         writer.write_raw_tags(&mut accessor, i32::MAX).unwrap();
     }
 
@@ -111,40 +110,22 @@ mod tests {
         let mut writer = RawTaggedFieldWriter::for_fields(tags);
         assert_eq!(writer.num_fields(), 2);
         // The Java test uses a single ByteBufferAccessor across all calls;
-        // its position keeps advancing. We mirror that by reborrowing the
-        // backing array between asserts; each scoped accessor knows the
-        // current write offset based on the slice we hand it.
-        let mut arr = [0u8; 9];
-        let pos_after_1 = {
-            let mut accessor = SliceWritable::new(&mut arr);
-            writer.write_raw_tags(&mut accessor, 1).unwrap();
-            accessor.position()
-        };
-        assert_eq!(pos_after_1, 0);
-        assert_eq!(&arr, &[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]);
+        // its position keeps advancing. We mirror that exactly here.
+        let mut accessor = ByteBufferAccessor::allocate(9);
 
-        let pos_after_3 = {
-            let mut accessor = SliceWritable::new(&mut arr);
-            writer.write_raw_tags(&mut accessor, 3).unwrap();
-            accessor.position()
-        };
-        assert_eq!(pos_after_3, 5);
-        assert_eq!(&arr, &[0x2, 0x3, 0x1, 0x2, 0x3, 0x0, 0x0, 0x0, 0x0]);
+        writer.write_raw_tags(&mut accessor, 1).unwrap();
+        assert_eq!(accessor.position(), 0);
+        assert_eq!(&accessor.raw_buffer()[..9], &[0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0]);
 
-        // Continue from offset 5 to mimic the Java accessor's persistent
-        // position (a fresh SliceWritable starts at index 0 of its slice,
-        // so we advance the slice base manually).
-        {
-            let mut accessor = SliceWritable::new(&mut arr[5..]);
-            writer.write_raw_tags(&mut accessor, 7).unwrap();
-        }
-        assert_eq!(&arr, &[0x2, 0x3, 0x1, 0x2, 0x3, 0x5, 0x2, 0x4, 0x5]);
+        writer.write_raw_tags(&mut accessor, 3).unwrap();
+        assert_eq!(accessor.position(), 5);
+        assert_eq!(&accessor.raw_buffer()[..9], &[0x2, 0x3, 0x1, 0x2, 0x3, 0x0, 0x0, 0x0, 0x0]);
 
-        {
-            let mut accessor = SliceWritable::new(&mut arr[9..]);
-            writer.write_raw_tags(&mut accessor, i32::MAX).unwrap();
-        }
-        assert_eq!(&arr, &[0x2, 0x3, 0x1, 0x2, 0x3, 0x5, 0x2, 0x4, 0x5]);
+        writer.write_raw_tags(&mut accessor, 7).unwrap();
+        assert_eq!(&accessor.raw_buffer()[..9], &[0x2, 0x3, 0x1, 0x2, 0x3, 0x5, 0x2, 0x4, 0x5]);
+
+        writer.write_raw_tags(&mut accessor, i32::MAX).unwrap();
+        assert_eq!(&accessor.raw_buffer()[..9], &[0x2, 0x3, 0x1, 0x2, 0x3, 0x5, 0x2, 0x4, 0x5]);
     }
 
     /// Mirrors `RawTaggedFieldWriterTest.testInvalidNextDefinedTag`.
@@ -157,8 +138,7 @@ mod tests {
         ];
         let mut writer = RawTaggedFieldWriter::for_fields(tags);
         assert_eq!(writer.num_fields(), 3);
-        let mut buf = [0u8; 1024];
-        let mut accessor = SliceWritable::new(&mut buf);
+        let mut accessor = ByteBufferAccessor::allocate(1024);
         let err = writer.write_raw_tags(&mut accessor, 2).unwrap_err();
         assert_eq!(err.message(), "Attempted to use tag 2 as an undefined tag.");
     }
@@ -173,8 +153,7 @@ mod tests {
         ];
         let mut writer = RawTaggedFieldWriter::for_fields(tags);
         assert_eq!(writer.num_fields(), 3);
-        let mut buf = [0u8; 1024];
-        let mut accessor = SliceWritable::new(&mut buf);
+        let mut accessor = ByteBufferAccessor::allocate(1024);
         let err = writer.write_raw_tags(&mut accessor, 8).unwrap_err();
         assert_eq!(
             err.message(),

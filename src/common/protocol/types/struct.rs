@@ -17,6 +17,7 @@
 use std::fmt;
 
 use crate::common::errors::KafkaError;
+use crate::common::protocol::Writable;
 use crate::common::protocol::types::bound_field::BoundField;
 use crate::common::protocol::types::schema::Schema;
 use crate::common::protocol::types::schema_exception::schema_exception;
@@ -183,7 +184,7 @@ impl Struct {
     }
 
     /// Encode the struct into `buffer`. Mirrors `Struct#writeTo`.
-    pub fn write_to(&self, buffer: &mut Vec<u8>) -> Result<(), KafkaError> {
+    pub fn write_to(&self, buffer: &mut dyn Writable) -> Result<(), KafkaError> {
         self.schema.write_struct(buffer, self)
     }
 

@@ -30,115 +30,13 @@ use crate::common::protocol::types::schema::Schema;
 use crate::common::protocol::types::schema_exception::schema_exception;
 use crate::common::protocol::types::tagged_fields::TaggedFields;
 use crate::common::protocol::types::value::Value;
+use crate::common::protocol::{ByteBufferAccessor, Readable, Writable};
 use crate::common::utils::byte_utils;
 
-/// Read cursor over a borrowed byte slice. Mirrors `ByteBuffer`'s
-/// position/limit/remaining trio used by Java's `Type#read`.
-///
-/// Phase 2c will replace this with a richer `ByteBufferAccessor` that also
-/// tracks limit independently of length. For now, the cursor advances
-/// monotonically through the borrowed slice.
-pub struct ReadBuffer<'a> {
-    data: &'a [u8],
-    position: usize,
-}
-
-impl<'a> ReadBuffer<'a> {
-    /// Construct a cursor positioned at the start of `data`.
-    pub fn new(data: &'a [u8]) -> Self {
-        ReadBuffer { data, position: 0 }
-    }
-
-    /// Bytes still available in the buffer (`limit() - position()`).
-    pub fn remaining(&self) -> usize {
-        self.data.len() - self.position
-    }
-
-    /// Whether there are any bytes left to read.
-    pub fn has_remaining(&self) -> bool {
-        self.position < self.data.len()
-    }
-
-    /// Current read position.
-    pub fn position(&self) -> usize {
-        self.position
-    }
-
-    fn ensure(&self, n: usize) -> Result<(), KafkaError> {
-        if self.remaining() < n {
-            return Err(schema_exception(format!(
-                "Truncated buffer: needed {n} bytes, only {} available",
-                self.remaining()
-            )));
-        }
-        Ok(())
-    }
-
-    fn read_i8(&mut self) -> Result<i8, KafkaError> {
-        self.ensure(1)?;
-        let v = self.data[self.position] as i8;
-        self.position += 1;
-        Ok(v)
-    }
-
-    fn read_i16(&mut self) -> Result<i16, KafkaError> {
-        self.ensure(2)?;
-        let bytes: [u8; 2] = self.data[self.position..self.position + 2].try_into().unwrap();
-        self.position += 2;
-        Ok(i16::from_be_bytes(bytes))
-    }
-
-    fn read_i32(&mut self) -> Result<i32, KafkaError> {
-        self.ensure(4)?;
-        let bytes: [u8; 4] = self.data[self.position..self.position + 4].try_into().unwrap();
-        self.position += 4;
-        Ok(i32::from_be_bytes(bytes))
-    }
-
-    fn read_i64(&mut self) -> Result<i64, KafkaError> {
-        self.ensure(8)?;
-        let bytes: [u8; 8] = self.data[self.position..self.position + 8].try_into().unwrap();
-        self.position += 8;
-        Ok(i64::from_be_bytes(bytes))
-    }
-
-    fn read_unsigned_varint(&mut self) -> Result<u32, KafkaError> {
-        let (value, len) = byte_utils::read_unsigned_varint(&self.data[self.position..])?;
-        self.position += len;
-        Ok(value)
-    }
-
-    fn read_varint(&mut self) -> Result<i32, KafkaError> {
-        let (value, len) = byte_utils::read_varint(&self.data[self.position..])?;
-        self.position += len;
-        Ok(value)
-    }
-
-    fn read_varlong(&mut self) -> Result<i64, KafkaError> {
-        let (value, len) = byte_utils::read_varlong(&self.data[self.position..])?;
-        self.position += len;
-        Ok(value)
-    }
-
-    fn read_double(&mut self) -> Result<f64, KafkaError> {
-        self.ensure(8)?;
-        let v = byte_utils::read_double_at(self.data, self.position);
-        self.position += 8;
-        Ok(v)
-    }
-
-    fn read_bytes(&mut self, n: usize) -> Result<Vec<u8>, KafkaError> {
-        self.ensure(n)?;
-        let v = self.data[self.position..self.position + n].to_vec();
-        self.position += n;
-        Ok(v)
-    }
-
-    fn read_string(&mut self, n: usize) -> Result<String, KafkaError> {
-        let bytes = self.read_bytes(n)?;
-        String::from_utf8(bytes).map_err(|e| schema_exception(format!("Invalid UTF-8: {e}")))
-    }
-}
+// `ReadBuffer<'a>` was a Phase-2b stand-in. Phase 2c replaces it with the
+// proper [`ByteBufferAccessor`] (and the [`Readable`] / [`Writable`] traits).
+// Internal helpers below operate on `&mut dyn Readable` / `&mut dyn Writable`
+// so any conforming buffer can drive `Type::read` / `Type::write`.
 
 /// A protocol type. Each variant maps to a Java `Type` singleton or
 /// container (`ArrayOf`, `CompactArrayOf`, `TaggedFields`, `Schema`).
@@ -388,115 +286,114 @@ impl Type {
         }
     }
 
-    /// Encode `value` by appending bytes to `buffer`. Mirrors `Type#write`.
-    pub fn write(&self, buffer: &mut Vec<u8>, value: &Value) -> Result<(), KafkaError> {
+    /// Encode `value` by writing primitives to `buffer`. Mirrors `Type#write`.
+    pub fn write(&self, buffer: &mut dyn Writable, value: &Value) -> Result<(), KafkaError> {
         match (self, value) {
             (Type::Boolean, Value::Bool(b)) => {
-                buffer.push(if *b { 1 } else { 0 });
+                buffer.write_byte(if *b { 1 } else { 0 });
                 Ok(())
             },
             (Type::Int8, Value::Int8(v)) => {
-                buffer.push(*v as u8);
+                buffer.write_byte(*v);
                 Ok(())
             },
             (Type::Int16, Value::Int16(v)) => {
-                buffer.extend_from_slice(&v.to_be_bytes());
+                buffer.write_short(*v);
                 Ok(())
             },
             (Type::UInt16, Value::UInt16(v)) => {
-                buffer.extend_from_slice(&v.to_be_bytes());
+                buffer.write_unsigned_short(*v);
                 Ok(())
             },
             (Type::Int32, Value::Int32(v)) => {
-                buffer.extend_from_slice(&v.to_be_bytes());
+                buffer.write_int(*v);
                 Ok(())
             },
             (Type::UnsignedInt32, Value::UInt32(v)) => {
-                buffer.extend_from_slice(&v.to_be_bytes());
+                buffer.write_unsigned_int(*v);
                 Ok(())
             },
             (Type::Int64, Value::Int64(v)) => {
-                buffer.extend_from_slice(&v.to_be_bytes());
+                buffer.write_long(*v);
                 Ok(())
             },
             (Type::Uuid, Value::Uuid(u)) => {
-                buffer.extend_from_slice(&u.most_significant_bits().to_be_bytes());
-                buffer.extend_from_slice(&u.least_significant_bits().to_be_bytes());
+                buffer.write_uuid(u);
                 Ok(())
             },
             (Type::Float64, Value::Float64(v)) => {
-                byte_utils::write_double(*v, buffer);
+                buffer.write_double(*v);
                 Ok(())
             },
 
             (Type::String, Value::String(s)) => write_string_short_prefixed(buffer, s),
             (Type::CompactString, Value::String(s)) => write_string_compact(buffer, s),
             (Type::NullableString, Value::Null) => {
-                buffer.extend_from_slice(&(-1i16).to_be_bytes());
+                buffer.write_short(-1);
                 Ok(())
             },
             (Type::NullableString, Value::String(s)) => write_string_short_prefixed(buffer, s),
             (Type::CompactNullableString, Value::Null) => {
-                byte_utils::write_unsigned_varint(0, buffer);
+                buffer.write_unsigned_varint(0);
                 Ok(())
             },
             (Type::CompactNullableString, Value::String(s)) => write_string_compact(buffer, s),
 
             (Type::Bytes, Value::Bytes(b)) => {
-                buffer.extend_from_slice(&(b.len() as i32).to_be_bytes());
-                buffer.extend_from_slice(b);
+                buffer.write_int(b.len() as i32);
+                buffer.write_byte_array(b);
                 Ok(())
             },
             (Type::CompactBytes, Value::Bytes(b)) => {
-                byte_utils::write_unsigned_varint((b.len() + 1) as u32, buffer);
-                buffer.extend_from_slice(b);
+                buffer.write_unsigned_varint((b.len() + 1) as u32);
+                buffer.write_byte_array(b);
                 Ok(())
             },
             (Type::NullableBytes | Type::Records, Value::Null) => {
-                buffer.extend_from_slice(&(-1i32).to_be_bytes());
+                buffer.write_int(-1);
                 Ok(())
             },
             (Type::NullableBytes | Type::Records, Value::Bytes(b)) => {
-                buffer.extend_from_slice(&(b.len() as i32).to_be_bytes());
-                buffer.extend_from_slice(b);
+                buffer.write_int(b.len() as i32);
+                buffer.write_byte_array(b);
                 Ok(())
             },
             (Type::CompactNullableBytes | Type::CompactRecords, Value::Null) => {
-                byte_utils::write_unsigned_varint(0, buffer);
+                buffer.write_unsigned_varint(0);
                 Ok(())
             },
             (Type::CompactNullableBytes | Type::CompactRecords, Value::Bytes(b)) => {
-                byte_utils::write_unsigned_varint((b.len() + 1) as u32, buffer);
-                buffer.extend_from_slice(b);
+                buffer.write_unsigned_varint((b.len() + 1) as u32);
+                buffer.write_byte_array(b);
                 Ok(())
             },
 
             (Type::Varint, Value::Int32(v)) => {
-                byte_utils::write_varint(*v, buffer);
+                buffer.write_varint(*v);
                 Ok(())
             },
             (Type::Varlong, Value::Int64(v)) => {
-                byte_utils::write_varlong(*v, buffer);
+                buffer.write_varlong(*v);
                 Ok(())
             },
 
             (Type::Array(a), Value::Null) if a.is_nullable() => {
-                buffer.extend_from_slice(&(-1i32).to_be_bytes());
+                buffer.write_int(-1);
                 Ok(())
             },
             (Type::Array(a), Value::Array(items)) => {
-                buffer.extend_from_slice(&(items.len() as i32).to_be_bytes());
+                buffer.write_int(items.len() as i32);
                 for it in items {
                     a.element_type().write(buffer, it)?;
                 }
                 Ok(())
             },
             (Type::CompactArray(a), Value::Null) if a.is_nullable() => {
-                byte_utils::write_unsigned_varint(0, buffer);
+                buffer.write_unsigned_varint(0);
                 Ok(())
             },
             (Type::CompactArray(a), Value::Array(items)) => {
-                byte_utils::write_unsigned_varint((items.len() + 1) as u32, buffer);
+                buffer.write_unsigned_varint((items.len() + 1) as u32);
                 for it in items {
                     a.element_type().write(buffer, it)?;
                 }
@@ -514,29 +411,19 @@ impl Type {
     }
 
     /// Decode the next value from `buffer`. Mirrors `Type#read`.
-    pub fn read(&self, buffer: &mut ReadBuffer<'_>) -> Result<Value, KafkaError> {
+    pub fn read(&self, buffer: &mut dyn Readable) -> Result<Value, KafkaError> {
         match self {
-            Type::Boolean => Ok(Value::Bool(buffer.read_i8()? != 0)),
-            Type::Int8 => Ok(Value::Int8(buffer.read_i8()?)),
-            Type::Int16 => Ok(Value::Int16(buffer.read_i16()?)),
-            Type::UInt16 => {
-                let v = buffer.read_i16()? as u16;
-                Ok(Value::UInt16(v))
-            },
-            Type::Int32 => Ok(Value::Int32(buffer.read_i32()?)),
-            Type::UnsignedInt32 => {
-                let v = buffer.read_i32()? as u32;
-                Ok(Value::UInt32(v))
-            },
-            Type::Int64 => Ok(Value::Int64(buffer.read_i64()?)),
-            Type::Uuid => {
-                let msb = buffer.read_i64()?;
-                let lsb = buffer.read_i64()?;
-                Ok(Value::Uuid(crate::common::Uuid::new(msb, lsb)))
-            },
+            Type::Boolean => Ok(Value::Bool(buffer.read_byte()? != 0)),
+            Type::Int8 => Ok(Value::Int8(buffer.read_byte()?)),
+            Type::Int16 => Ok(Value::Int16(buffer.read_short()?)),
+            Type::UInt16 => Ok(Value::UInt16(buffer.read_unsigned_short()?)),
+            Type::Int32 => Ok(Value::Int32(buffer.read_int()?)),
+            Type::UnsignedInt32 => Ok(Value::UInt32(buffer.read_unsigned_int()?)),
+            Type::Int64 => Ok(Value::Int64(buffer.read_long()?)),
+            Type::Uuid => Ok(Value::Uuid(buffer.read_uuid()?)),
             Type::Float64 => Ok(Value::Float64(buffer.read_double()?)),
             Type::String => {
-                let length = buffer.read_i16()?;
+                let length = buffer.read_short()?;
                 if length < 0 {
                     return Err(schema_exception(format!("String length {length} cannot be negative")));
                 }
@@ -569,7 +456,7 @@ impl Type {
                 Ok(Value::String(buffer.read_string(length)?))
             },
             Type::NullableString => {
-                let length = buffer.read_i16()?;
+                let length = buffer.read_short()?;
                 if length < 0 {
                     return Ok(Value::Null);
                 }
@@ -602,7 +489,7 @@ impl Type {
                 Ok(Value::String(buffer.read_string(length)?))
             },
             Type::Bytes => {
-                let size = buffer.read_i32()?;
+                let size = buffer.read_int()?;
                 if size < 0 {
                     return Err(schema_exception(format!("Bytes size {size} cannot be negative")));
                 }
@@ -613,7 +500,7 @@ impl Type {
                         buffer.remaining()
                     )));
                 }
-                Ok(Value::Bytes(buffer.read_bytes(size)?))
+                Ok(Value::Bytes(buffer.read_array(size)?))
             },
             Type::CompactBytes => {
                 let raw = buffer.read_unsigned_varint()? as i64 - 1;
@@ -627,10 +514,10 @@ impl Type {
                         buffer.remaining()
                     )));
                 }
-                Ok(Value::Bytes(buffer.read_bytes(size)?))
+                Ok(Value::Bytes(buffer.read_array(size)?))
             },
             Type::NullableBytes | Type::Records => {
-                let size = buffer.read_i32()?;
+                let size = buffer.read_int()?;
                 if size < 0 {
                     return Ok(Value::Null);
                 }
@@ -641,7 +528,7 @@ impl Type {
                         buffer.remaining()
                     )));
                 }
-                Ok(Value::Bytes(buffer.read_bytes(size)?))
+                Ok(Value::Bytes(buffer.read_array(size)?))
             },
             Type::CompactNullableBytes | Type::CompactRecords => {
                 let raw = buffer.read_unsigned_varint()? as i64 - 1;
@@ -655,12 +542,12 @@ impl Type {
                         buffer.remaining()
                     )));
                 }
-                Ok(Value::Bytes(buffer.read_bytes(size)?))
+                Ok(Value::Bytes(buffer.read_array(size)?))
             },
             Type::Varint => Ok(Value::Int32(buffer.read_varint()?)),
             Type::Varlong => Ok(Value::Int64(buffer.read_varlong()?)),
-            Type::Array(a) => read_array(a.element_type(), a.is_nullable(), buffer),
-            Type::CompactArray(a) => read_compact_array(a.element_type(), a.is_nullable(), buffer),
+            Type::Array(a) => read_array_value(a.element_type(), a.is_nullable(), buffer),
+            Type::CompactArray(a) => read_compact_array_value(a.element_type(), a.is_nullable(), buffer),
             Type::TaggedFields(tf) => tagged_fields_read(tf, buffer),
             Type::Schema(s) => Ok(Value::Struct(Box::new(s.read_struct(buffer)?))),
         }
@@ -679,7 +566,7 @@ impl fmt::Display for Type {
     }
 }
 
-fn write_string_short_prefixed(buffer: &mut Vec<u8>, s: &str) -> Result<(), KafkaError> {
+fn write_string_short_prefixed(buffer: &mut dyn Writable, s: &str) -> Result<(), KafkaError> {
     let bytes = s.as_bytes();
     if bytes.len() > i16::MAX as usize {
         return Err(schema_exception(format!(
@@ -687,12 +574,12 @@ fn write_string_short_prefixed(buffer: &mut Vec<u8>, s: &str) -> Result<(), Kafk
             bytes.len()
         )));
     }
-    buffer.extend_from_slice(&(bytes.len() as i16).to_be_bytes());
-    buffer.extend_from_slice(bytes);
+    buffer.write_short(bytes.len() as i16);
+    buffer.write_byte_array(bytes);
     Ok(())
 }
 
-fn write_string_compact(buffer: &mut Vec<u8>, s: &str) -> Result<(), KafkaError> {
+fn write_string_compact(buffer: &mut dyn Writable, s: &str) -> Result<(), KafkaError> {
     let bytes = s.as_bytes();
     if bytes.len() > i16::MAX as usize {
         return Err(schema_exception(format!(
@@ -700,13 +587,13 @@ fn write_string_compact(buffer: &mut Vec<u8>, s: &str) -> Result<(), KafkaError>
             bytes.len()
         )));
     }
-    byte_utils::write_unsigned_varint((bytes.len() + 1) as u32, buffer);
-    buffer.extend_from_slice(bytes);
+    buffer.write_unsigned_varint((bytes.len() + 1) as u32);
+    buffer.write_byte_array(bytes);
     Ok(())
 }
 
-fn read_array(element: &Type, nullable: bool, buffer: &mut ReadBuffer<'_>) -> Result<Value, KafkaError> {
-    let size = buffer.read_i32()?;
+fn read_array_value(element: &Type, nullable: bool, buffer: &mut dyn Readable) -> Result<Value, KafkaError> {
+    let size = buffer.read_int()?;
     if size < 0 {
         if nullable {
             return Ok(Value::Null);
@@ -727,7 +614,7 @@ fn read_array(element: &Type, nullable: bool, buffer: &mut ReadBuffer<'_>) -> Re
     Ok(Value::Array(items))
 }
 
-fn read_compact_array(element: &Type, nullable: bool, buffer: &mut ReadBuffer<'_>) -> Result<Value, KafkaError> {
+fn read_compact_array_value(element: &Type, nullable: bool, buffer: &mut dyn Readable) -> Result<Value, KafkaError> {
     let n = buffer.read_unsigned_varint()?;
     if n == 0 {
         if nullable {
@@ -767,17 +654,21 @@ fn tagged_fields_size(tf: &TaggedFields, map: &BTreeMap<i32, Value>) -> Result<u
     Ok(size)
 }
 
-fn tagged_fields_write(tf: &TaggedFields, map: &BTreeMap<i32, Value>, buffer: &mut Vec<u8>) -> Result<(), KafkaError> {
-    byte_utils::write_unsigned_varint(map.len() as u32, buffer);
+fn tagged_fields_write(
+    tf: &TaggedFields,
+    map: &BTreeMap<i32, Value>,
+    buffer: &mut dyn Writable,
+) -> Result<(), KafkaError> {
+    buffer.write_unsigned_varint(map.len() as u32);
     for (tag, val) in map {
-        byte_utils::write_unsigned_varint(*tag as u32, buffer);
+        buffer.write_unsigned_varint(*tag as u32);
         if let Some(field) = tf.fields().get(tag) {
             let value_size = field.r#type.size_of(val)?;
-            byte_utils::write_unsigned_varint(value_size as u32, buffer);
+            buffer.write_unsigned_varint(value_size as u32);
             field.r#type.write(buffer, val)?;
         } else if let Value::RawTagged(rtf) = val {
-            byte_utils::write_unsigned_varint(rtf.data().len() as u32, buffer);
-            buffer.extend_from_slice(rtf.data());
+            buffer.write_unsigned_varint(rtf.data().len() as u32);
+            buffer.write_byte_array(rtf.data());
         } else {
             return Err(schema_exception(format!(
                 "The value associated with tag {tag} must be a RawTaggedField in this version of the software."
@@ -787,7 +678,7 @@ fn tagged_fields_write(tf: &TaggedFields, map: &BTreeMap<i32, Value>, buffer: &m
     Ok(())
 }
 
-fn tagged_fields_read(tf: &TaggedFields, buffer: &mut ReadBuffer<'_>) -> Result<Value, KafkaError> {
+fn tagged_fields_read(tf: &TaggedFields, buffer: &mut dyn Readable) -> Result<Value, KafkaError> {
     let num = buffer.read_unsigned_varint()?;
     let mut map: BTreeMap<i32, Value> = BTreeMap::new();
     let mut prev_tag: i64 = -1;
@@ -809,26 +700,22 @@ fn tagged_fields_read(tf: &TaggedFields, buffer: &mut ReadBuffer<'_>) -> Result<
             )));
         }
         if let Some(field) = tf.fields().get(&tag) {
-            // Bound the inner read to `size` bytes by parsing from a
-            // temporary slice; this matches Java's behaviour of letting
-            // the Type#read consume from the buffer up to `size`.
-            let slice_end = buffer.position + size;
-            let value = {
-                let inner_slice = &buffer.data[buffer.position..slice_end];
-                let mut inner = ReadBuffer::new(inner_slice);
-                let v = field.r#type.read(&mut inner)?;
-                if inner.has_remaining() {
-                    return Err(schema_exception(format!(
-                        "Tagged field of size {size} had {} extra bytes after decoding",
-                        inner.remaining()
-                    )));
-                }
-                v
-            };
-            buffer.position = slice_end;
+            // Bound the inner read to `size` bytes by reading them out into
+            // an owned `Vec<u8>` and decoding the value from a fresh
+            // accessor. This mirrors Java's behaviour of letting `Type#read`
+            // consume from the buffer up to `size` bytes.
+            let inner_bytes = buffer.read_array(size)?;
+            let mut inner = ByteBufferAccessor::wrap(inner_bytes);
+            let value = field.r#type.read(&mut inner)?;
+            if inner.remaining() > 0 {
+                return Err(schema_exception(format!(
+                    "Tagged field of size {size} had {} extra bytes after decoding",
+                    inner.remaining()
+                )));
+            }
             map.insert(tag, value);
         } else {
-            let bytes = buffer.read_bytes(size)?;
+            let bytes = buffer.read_array(size)?;
             map.insert(tag, Value::RawTagged(RawTaggedField::new(tag, bytes)));
         }
     }
@@ -884,6 +771,7 @@ fn java_value_kind(t: &Type) -> &'static str {
 mod tests {
     use super::*;
 
+    use crate::common::protocol::SliceReadable;
     use crate::common::protocol::types::field::Field;
     use crate::common::protocol::types::r#struct::Struct;
 
@@ -892,9 +780,9 @@ mod tests {
         let mut buf = Vec::with_capacity(t.size_of(value).unwrap());
         t.write(&mut buf, value).unwrap();
         assert_eq!(buf.len(), t.size_of(value).unwrap(), "buffer should be full");
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let read = t.read(&mut r).unwrap();
-        assert!(!r.has_remaining(), "all bytes should be read");
+        assert_eq!(r.remaining(), 0, "all bytes should be read");
         read
     }
 
@@ -925,7 +813,7 @@ mod tests {
         // by comparing bit patterns.
         let mut buf = Vec::new();
         Type::Float64.write(&mut buf, &Value::Float64(f64::NAN)).unwrap();
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let v = Type::Float64.read(&mut r).unwrap();
         if let Value::Float64(d) = v {
             assert!(d.is_nan());
@@ -1154,7 +1042,7 @@ mod tests {
         for i in 0..size {
             buf.push(i as u8);
         }
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(t.read(&mut r).is_err(), "Array size not validated");
     }
 
@@ -1168,7 +1056,7 @@ mod tests {
         for i in 0..size {
             buf.push(i as u8);
         }
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(t.read(&mut r).is_err(), "Array size not validated");
     }
 
@@ -1191,7 +1079,7 @@ mod tests {
         while buf.len() < size_total {
             buf.push(0);
         }
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let err = t.read(&mut r).unwrap_err();
         assert_eq!(
             err.message(),
@@ -1212,7 +1100,7 @@ mod tests {
         for i in 0..size {
             buf.push(i as u8);
         }
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(t.read(&mut r).is_err(), "Array size not validated");
     }
 
@@ -1226,7 +1114,7 @@ mod tests {
         for i in 0..size {
             buf.push(i as u8);
         }
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(t.read(&mut r).is_err(), "Array size not validated");
     }
 
@@ -1238,9 +1126,9 @@ mod tests {
         buf.extend_from_slice(&((bytes.len() as i16) * 5).to_be_bytes());
         buf.extend_from_slice(bytes);
 
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(Type::String.read(&mut r).is_err());
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(Type::NullableString.read(&mut r).is_err());
     }
 
@@ -1251,7 +1139,7 @@ mod tests {
         let mut buf = Vec::with_capacity(2 + bytes.len());
         buf.extend_from_slice(&(-1i16).to_be_bytes());
         buf.extend_from_slice(bytes);
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(Type::String.read(&mut r).is_err());
     }
 
@@ -1263,9 +1151,9 @@ mod tests {
         buf.extend_from_slice(&((bytes.len() as i32) * 5).to_be_bytes());
         buf.extend_from_slice(bytes);
 
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(Type::Bytes.read(&mut r).is_err());
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(Type::NullableBytes.read(&mut r).is_err());
     }
 
@@ -1276,7 +1164,7 @@ mod tests {
         let mut buf = Vec::with_capacity(4 + bytes.len());
         buf.extend_from_slice(&(-20i32).to_be_bytes());
         buf.extend_from_slice(bytes);
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         assert!(Type::Bytes.read(&mut r).is_err());
     }
 
@@ -1323,7 +1211,7 @@ mod tests {
             .unwrap();
         let mut buf = Vec::new();
         old_format.write_to(&mut buf).unwrap();
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let new_format = new_schema.read_struct(&mut r).unwrap();
         assert_eq!(new_format.get_by_name("field1").unwrap(), &Value::String(value.into()));
     }
@@ -1348,7 +1236,7 @@ mod tests {
         old_format.set_by_name("field1", Value::String(value.into())).unwrap();
         let mut buf = Vec::new();
         old_format.write_to(&mut buf).unwrap();
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let new_format = new_schema.read_struct(&mut r).unwrap();
         assert_eq!(new_format.get_by_name("field1").unwrap(), &Value::String(value.into()));
         assert_eq!(new_format.get_by_name("field2").unwrap(), &Value::String("default".into()));
@@ -1371,7 +1259,7 @@ mod tests {
         old_format.set_by_name("field1", Value::String(value.into())).unwrap();
         let mut buf = Vec::new();
         old_format.write_to(&mut buf).unwrap();
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let err = new_schema.read_struct(&mut r).unwrap_err();
         assert!(
             err.message().contains("Error reading field 'field2':"),
@@ -1397,7 +1285,7 @@ mod tests {
         old_format.set_by_name("field1", Value::String(value.into())).unwrap();
         let mut buf = Vec::new();
         old_format.write_to(&mut buf).unwrap();
-        let mut r = ReadBuffer::new(&buf);
+        let mut r = SliceReadable::new(&buf);
         let err = new_schema.read_struct(&mut r).unwrap_err();
         assert!(
             err.message()

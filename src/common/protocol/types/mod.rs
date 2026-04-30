@@ -34,17 +34,15 @@
 //! `Double`, `String`, `byte[]`/`ByteBuffer`, `Object[]`, `Struct`,
 //! `NavigableMap<Integer, Object>`).
 //!
-//! The minimal [`Readable`] / [`Writable`] traits in [`io`] are *temporary*:
-//! they exist so that `RawTaggedFieldWriter::write_raw_tags` can target an
-//! abstract sink. Phase 2c will replace them with the full
-//! `org.apache.kafka.common.protocol.{Readable, Writable}` translations
-//! (which also support compressed, primitive, and varint reads/writes).
+//! The wire-protocol primitive traits ([`super::Readable`], [`super::Writable`])
+//! and their canonical impl ([`super::ByteBufferAccessor`]) live in the parent
+//! `protocol` module; this submodule contains only the static-shape side of
+//! the protocol (types, schemas, structs).
 
 pub mod array_of;
 pub mod bound_field;
 pub mod compact_array_of;
 pub mod field;
-pub mod io;
 pub mod raw_tagged_field;
 pub mod raw_tagged_field_writer;
 pub mod schema;
@@ -59,7 +57,6 @@ pub use array_of::ArrayOf;
 pub use bound_field::BoundField;
 pub use compact_array_of::CompactArrayOf;
 pub use field::{Field, TaggedFieldsSection};
-pub use io::{Readable, Writable};
 pub use raw_tagged_field::RawTaggedField;
 pub use raw_tagged_field_writer::RawTaggedFieldWriter;
 pub use schema::{Schema, SchemaVisitor};

@@ -23,8 +23,9 @@ use crate::common::protocol::types::bound_field::BoundField;
 use crate::common::protocol::types::field::Field;
 use crate::common::protocol::types::schema_exception::schema_exception;
 use crate::common::protocol::types::r#struct::Struct;
-use crate::common::protocol::types::r#type::{ReadBuffer, Type};
+use crate::common::protocol::types::r#type::Type;
 use crate::common::protocol::types::value::Value;
+use crate::common::protocol::{Readable, Writable};
 
 /// Monotonically increasing counter to identify each [`Schema`] uniquely;
 /// mirrors Java's reference equality between a `Schema` and a
@@ -127,7 +128,7 @@ impl Schema {
     // ---------- (de)serialisation helpers used by Type::Schema ----------
 
     /// Encode a [`Struct`] using this schema. Mirrors `Schema#write`.
-    pub fn write_struct(&self, buffer: &mut Vec<u8>, st: &Struct) -> Result<(), KafkaError> {
+    pub fn write_struct(&self, buffer: &mut dyn Writable, st: &Struct) -> Result<(), KafkaError> {
         for field in &self.fields {
             let value = st.field_or_default(field)?;
             field
@@ -145,11 +146,11 @@ impl Schema {
     }
 
     /// Decode a [`Struct`] using this schema. Mirrors `Schema#read`.
-    pub fn read_struct(&self, buffer: &mut ReadBuffer<'_>) -> Result<Struct, KafkaError> {
+    pub fn read_struct(&self, buffer: &mut dyn Readable) -> Result<Struct, KafkaError> {
         let mut values = vec![Value::Null; self.fields.len()];
         for (i, field) in self.fields.iter().enumerate() {
             if self.tolerate_missing_fields_with_defaults {
-                if buffer.has_remaining() {
+                if buffer.remaining() > 0 {
                     values[i] = field
                         .def
                         .r#type
