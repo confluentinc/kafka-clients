@@ -23,8 +23,13 @@ use crate::common::errors::KafkaError;
 
 /// Construct a `ConfigException` with `name` and `value` formatted into the
 /// message. Mirrors Java's `new ConfigException(String name, Object value, String message)`.
-pub fn new(name: &str, value: impl std::fmt::Debug, message: &str) -> KafkaError {
-    KafkaError::Config(format!("Invalid value {value:?} for configuration {name}: {message}"))
+///
+/// `value` is formatted via [`std::fmt::Display`] (matching Java's
+/// `Object.toString()` semantics), so a `&str` argument prints without quotes
+/// and a `&ConfigValue::Int(5)` prints as `5` rather than `Int(5)`. The Rust
+/// log/UX is then identical to the Java client's.
+pub fn new(name: &str, value: impl std::fmt::Display, message: &str) -> KafkaError {
+    KafkaError::Config(format!("Invalid value {value} for configuration {name}: {message}"))
 }
 
 /// Construct a `ConfigException` with just a free-form message. Mirrors

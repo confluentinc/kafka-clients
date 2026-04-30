@@ -159,6 +159,37 @@ impl ConfigValue {
     }
 }
 
+impl fmt::Display for ConfigValue {
+    /// Mirrors Java's `Object.toString()` semantics for each variant so that
+    /// `ConfigException` messages match the Java client's text exactly. In
+    /// particular, [`ConfigValue::String`] / [`ConfigValue::Class`] print the
+    /// raw value without quotes (Java's `String.toString()` is the string
+    /// itself, not a `Debug`-quoted form), and [`ConfigValue::List`] mirrors
+    /// Java's `AbstractCollection.toString()` (`[a, b, c]`).
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            ConfigValue::Boolean(b) => write!(f, "{b}"),
+            ConfigValue::String(s) | ConfigValue::Class(s) => f.write_str(s),
+            ConfigValue::Int(v) => write!(f, "{v}"),
+            ConfigValue::Short(v) => write!(f, "{v}"),
+            ConfigValue::Long(v) => write!(f, "{v}"),
+            ConfigValue::Double(v) => write!(f, "{v}"),
+            ConfigValue::List(items) => {
+                f.write_str("[")?;
+                for (i, item) in items.iter().enumerate() {
+                    if i > 0 {
+                        f.write_str(", ")?;
+                    }
+                    f.write_str(item)?;
+                }
+                f.write_str("]")
+            },
+            ConfigValue::Password(p) => fmt::Display::fmt(p, f),
+            ConfigValue::Null => f.write_str("null"),
+        }
+    }
+}
+
 /// Sensitive string value. Mirrors `org.apache.kafka.common.config.types.Password`.
 /// `Display` returns `[hidden]` so the value is never accidentally logged.
 #[derive(Clone, PartialEq, Eq)]
@@ -567,7 +598,10 @@ mod tests {
         let validator: Arc<dyn Validator> = Arc::new(Range::at_least(0));
         def.define("a", Type::Int, None, Some(validator), Importance::Low, "").unwrap();
         let err = def.parse(&map(&[("a", "-1")])).unwrap_err();
-        assert!(err.message().contains("Value must be at least 0"));
+        // Java's `ConfigException` formats the value via `Object.toString()` —
+        // for a numeric value the message reads "Invalid value -1 ..." not
+        // "Invalid value Int(-1) ...". Assert the Java-equivalent text.
+        assert_eq!(err.message(), "Invalid value -1 for configuration a: Value must be at least 0");
     }
 
     #[test]
