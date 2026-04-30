@@ -30,18 +30,19 @@
 
 use crate::common::errors::KafkaError;
 
-/// Listener types — mirrors `ApiMessageType.ListenerType`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum ListenerType {
-    /// Used by the `kafka.server.KafkaApis` instance for client traffic.
-    ZkBroker,
-    /// KRaft broker.
-    Broker,
-    /// KRaft controller.
-    Controller,
-}
+/// Listener types. Re-exported from the generated `ApiMessageType` so the
+/// hand-coded catalogue and the JSON spec agree on the listener vocabulary
+/// (post-KIP-833: `Broker` and `Controller` only — `ZkBroker` is no longer
+/// part of the spec).
+pub use crate::common::message::api_message_type::ListenerType;
 
 /// One entry in the API key catalogue. Mirrors the Java `enum` instance.
+///
+/// `listeners` is deliberately *not* a field on this struct: in Java the
+/// listener set is sourced from `ApiMessageType.listeners()` (the JSON spec),
+/// not from `ApiKeys.java`'s constructor. We delegate to the generated
+/// `ApiMessageType::listeners()` via [`Self::listeners`] / [`Self::in_scope`]
+/// so the two tables can never silently disagree.
 #[derive(Debug, Clone)]
 pub struct ApiKey {
     /// Wire id. Mirrors `ApiKeys.id`.
@@ -54,663 +55,178 @@ pub struct ApiKey {
     /// Whether the API supports being forwarded by a broker to the active
     /// controller. Mirrors `forwardable`.
     pub forwardable: bool,
-    /// Listeners this API is exposed on.
-    pub listeners: &'static [ListenerType],
 }
 
 /// The full API catalogue. Order matches the Java declaration order so any
 /// future code that depends on declaration order is unaffected.
 pub const ALL_API_KEYS: &[ApiKey] = &[
-    ApiKey {
-        id: 0,
-        name: "Produce",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 1,
-        name: "Fetch",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 2,
-        name: "ListOffsets",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 3,
-        name: "Metadata",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 4,
-        name: "LeaderAndIsr",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker],
-    },
-    ApiKey {
-        id: 5,
-        name: "StopReplica",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker],
-    },
-    ApiKey {
-        id: 6,
-        name: "UpdateMetadata",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker],
-    },
-    ApiKey {
-        id: 7,
-        name: "ControlledShutdown",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker],
-    },
-    ApiKey {
-        id: 8,
-        name: "OffsetCommit",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 9,
-        name: "OffsetFetch",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 10,
-        name: "FindCoordinator",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 11,
-        name: "JoinGroup",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 12,
-        name: "Heartbeat",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 13,
-        name: "LeaveGroup",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 14,
-        name: "SyncGroup",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 15,
-        name: "DescribeGroups",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 16,
-        name: "ListGroups",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 17,
-        name: "SaslHandshake",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 18,
-        name: "ApiVersions",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 19,
-        name: "CreateTopics",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 20,
-        name: "DeleteTopics",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 21,
-        name: "DeleteRecords",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 22,
-        name: "InitProducerId",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 23,
-        name: "OffsetForLeaderEpoch",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 24,
-        name: "AddPartitionsToTxn",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 25,
-        name: "AddOffsetsToTxn",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 26,
-        name: "EndTxn",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 27,
-        name: "WriteTxnMarkers",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 28,
-        name: "TxnOffsetCommit",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 29,
-        name: "DescribeAcls",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 30,
-        name: "CreateAcls",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 31,
-        name: "DeleteAcls",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 32,
-        name: "DescribeConfigs",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 33,
-        name: "AlterConfigs",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 34,
-        name: "AlterReplicaLogDirs",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 35,
-        name: "DescribeLogDirs",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 36,
-        name: "SaslAuthenticate",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 37,
-        name: "CreatePartitions",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 38,
-        name: "CreateDelegationToken",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 39,
-        name: "RenewDelegationToken",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 40,
-        name: "ExpireDelegationToken",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
+    ApiKey { id: 0, name: "Produce", cluster_action: false, forwardable: false },
+    ApiKey { id: 1, name: "Fetch", cluster_action: false, forwardable: false },
+    ApiKey { id: 2, name: "ListOffsets", cluster_action: false, forwardable: false },
+    ApiKey { id: 3, name: "Metadata", cluster_action: false, forwardable: false },
+    ApiKey { id: 4, name: "LeaderAndIsr", cluster_action: true, forwardable: false },
+    ApiKey { id: 5, name: "StopReplica", cluster_action: true, forwardable: false },
+    ApiKey { id: 6, name: "UpdateMetadata", cluster_action: true, forwardable: false },
+    ApiKey { id: 7, name: "ControlledShutdown", cluster_action: true, forwardable: false },
+    ApiKey { id: 8, name: "OffsetCommit", cluster_action: false, forwardable: false },
+    ApiKey { id: 9, name: "OffsetFetch", cluster_action: false, forwardable: false },
+    ApiKey { id: 10, name: "FindCoordinator", cluster_action: false, forwardable: false },
+    ApiKey { id: 11, name: "JoinGroup", cluster_action: false, forwardable: false },
+    ApiKey { id: 12, name: "Heartbeat", cluster_action: false, forwardable: false },
+    ApiKey { id: 13, name: "LeaveGroup", cluster_action: false, forwardable: false },
+    ApiKey { id: 14, name: "SyncGroup", cluster_action: false, forwardable: false },
+    ApiKey { id: 15, name: "DescribeGroups", cluster_action: false, forwardable: false },
+    ApiKey { id: 16, name: "ListGroups", cluster_action: false, forwardable: false },
+    ApiKey { id: 17, name: "SaslHandshake", cluster_action: false, forwardable: false },
+    ApiKey { id: 18, name: "ApiVersions", cluster_action: false, forwardable: false },
+    ApiKey { id: 19, name: "CreateTopics", cluster_action: false, forwardable: true },
+    ApiKey { id: 20, name: "DeleteTopics", cluster_action: false, forwardable: true },
+    ApiKey { id: 21, name: "DeleteRecords", cluster_action: false, forwardable: false },
+    ApiKey { id: 22, name: "InitProducerId", cluster_action: false, forwardable: false },
+    ApiKey { id: 23, name: "OffsetForLeaderEpoch", cluster_action: false, forwardable: false },
+    ApiKey { id: 24, name: "AddPartitionsToTxn", cluster_action: false, forwardable: false },
+    ApiKey { id: 25, name: "AddOffsetsToTxn", cluster_action: false, forwardable: false },
+    ApiKey { id: 26, name: "EndTxn", cluster_action: false, forwardable: false },
+    ApiKey { id: 27, name: "WriteTxnMarkers", cluster_action: true, forwardable: false },
+    ApiKey { id: 28, name: "TxnOffsetCommit", cluster_action: false, forwardable: false },
+    ApiKey { id: 29, name: "DescribeAcls", cluster_action: false, forwardable: false },
+    ApiKey { id: 30, name: "CreateAcls", cluster_action: false, forwardable: true },
+    ApiKey { id: 31, name: "DeleteAcls", cluster_action: false, forwardable: true },
+    ApiKey { id: 32, name: "DescribeConfigs", cluster_action: false, forwardable: false },
+    ApiKey { id: 33, name: "AlterConfigs", cluster_action: false, forwardable: true },
+    ApiKey { id: 34, name: "AlterReplicaLogDirs", cluster_action: false, forwardable: false },
+    ApiKey { id: 35, name: "DescribeLogDirs", cluster_action: false, forwardable: false },
+    ApiKey { id: 36, name: "SaslAuthenticate", cluster_action: false, forwardable: false },
+    ApiKey { id: 37, name: "CreatePartitions", cluster_action: false, forwardable: true },
+    ApiKey { id: 38, name: "CreateDelegationToken", cluster_action: false, forwardable: true },
+    ApiKey { id: 39, name: "RenewDelegationToken", cluster_action: false, forwardable: true },
+    ApiKey { id: 40, name: "ExpireDelegationToken", cluster_action: false, forwardable: true },
     ApiKey {
         id: 41,
         name: "DescribeDelegationToken",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
     },
-    ApiKey {
-        id: 42,
-        name: "DeleteGroups",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 43,
-        name: "ElectLeaders",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
+    ApiKey { id: 42, name: "DeleteGroups", cluster_action: false, forwardable: false },
+    ApiKey { id: 43, name: "ElectLeaders", cluster_action: false, forwardable: true },
     ApiKey {
         id: 44,
         name: "IncrementalAlterConfigs",
         cluster_action: false,
         forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
     },
     ApiKey {
         id: 45,
         name: "AlterPartitionReassignments",
         cluster_action: false,
         forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
     },
     ApiKey {
         id: 46,
         name: "ListPartitionReassignments",
         cluster_action: false,
         forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
     },
-    ApiKey {
-        id: 47,
-        name: "OffsetDelete",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 48,
-        name: "DescribeClientQuotas",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 49,
-        name: "AlterClientQuotas",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
+    ApiKey { id: 47, name: "OffsetDelete", cluster_action: false, forwardable: false },
+    ApiKey { id: 48, name: "DescribeClientQuotas", cluster_action: false, forwardable: false },
+    ApiKey { id: 49, name: "AlterClientQuotas", cluster_action: false, forwardable: true },
     ApiKey {
         id: 50,
         name: "DescribeUserScramCredentials",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
     },
     ApiKey {
         id: 51,
         name: "AlterUserScramCredentials",
         cluster_action: false,
         forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
     },
-    ApiKey {
-        id: 52,
-        name: "Vote",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 53,
-        name: "BeginQuorumEpoch",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 54,
-        name: "EndQuorumEpoch",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 55,
-        name: "DescribeQuorum",
-        cluster_action: true,
-        forwardable: true,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 56,
-        name: "AlterPartition",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 57,
-        name: "UpdateFeatures",
-        cluster_action: true,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 58,
-        name: "Envelope",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 59,
-        name: "FetchSnapshot",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 60,
-        name: "DescribeCluster",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 61,
-        name: "DescribeProducers",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 62,
-        name: "BrokerRegistration",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 63,
-        name: "BrokerHeartbeat",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 64,
-        name: "UnregisterBroker",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
-    ApiKey {
-        id: 65,
-        name: "DescribeTransactions",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 66,
-        name: "ListTransactions",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 67,
-        name: "AllocateProducerIds",
-        cluster_action: true,
-        forwardable: true,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
+    ApiKey { id: 52, name: "Vote", cluster_action: true, forwardable: false },
+    ApiKey { id: 53, name: "BeginQuorumEpoch", cluster_action: true, forwardable: false },
+    ApiKey { id: 54, name: "EndQuorumEpoch", cluster_action: true, forwardable: false },
+    ApiKey { id: 55, name: "DescribeQuorum", cluster_action: true, forwardable: true },
+    ApiKey { id: 56, name: "AlterPartition", cluster_action: true, forwardable: false },
+    ApiKey { id: 57, name: "UpdateFeatures", cluster_action: true, forwardable: true },
+    ApiKey { id: 58, name: "Envelope", cluster_action: true, forwardable: false },
+    ApiKey { id: 59, name: "FetchSnapshot", cluster_action: false, forwardable: false },
+    ApiKey { id: 60, name: "DescribeCluster", cluster_action: false, forwardable: false },
+    ApiKey { id: 61, name: "DescribeProducers", cluster_action: false, forwardable: false },
+    ApiKey { id: 62, name: "BrokerRegistration", cluster_action: true, forwardable: false },
+    ApiKey { id: 63, name: "BrokerHeartbeat", cluster_action: true, forwardable: false },
+    ApiKey { id: 64, name: "UnregisterBroker", cluster_action: false, forwardable: true },
+    ApiKey { id: 65, name: "DescribeTransactions", cluster_action: false, forwardable: false },
+    ApiKey { id: 66, name: "ListTransactions", cluster_action: false, forwardable: false },
+    ApiKey { id: 67, name: "AllocateProducerIds", cluster_action: true, forwardable: true },
     ApiKey {
         id: 68,
         name: "ConsumerGroupHeartbeat",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
     },
-    ApiKey {
-        id: 69,
-        name: "ConsumerGroupDescribe",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
+    ApiKey { id: 69, name: "ConsumerGroupDescribe", cluster_action: false, forwardable: false },
     ApiKey {
         id: 70,
         name: "ControllerRegistration",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::Controller],
     },
     ApiKey {
         id: 71,
         name: "GetTelemetrySubscriptions",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
     },
-    ApiKey {
-        id: 72,
-        name: "PushTelemetry",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 73,
-        name: "AssignReplicasToDirs",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
-    },
-    ApiKey {
-        id: 74,
-        name: "ListConfigResources",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker, ListenerType::Controller],
-    },
+    ApiKey { id: 72, name: "PushTelemetry", cluster_action: false, forwardable: false },
+    ApiKey { id: 73, name: "AssignReplicasToDirs", cluster_action: false, forwardable: false },
+    ApiKey { id: 74, name: "ListConfigResources", cluster_action: false, forwardable: false },
     ApiKey {
         id: 75,
         name: "DescribeTopicPartitions",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::ZkBroker, ListenerType::Broker],
     },
-    ApiKey {
-        id: 76,
-        name: "ShareGroupHeartbeat",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 77,
-        name: "ShareGroupDescribe",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 78,
-        name: "ShareFetch",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 79,
-        name: "ShareAcknowledge",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 80,
-        name: "AddRaftVoter",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 81,
-        name: "RemoveRaftVoter",
-        cluster_action: false,
-        forwardable: true,
-        listeners: &[ListenerType::Controller],
-    },
-    ApiKey {
-        id: 82,
-        name: "UpdateRaftVoter",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Controller],
-    },
+    ApiKey { id: 76, name: "ShareGroupHeartbeat", cluster_action: false, forwardable: false },
+    ApiKey { id: 77, name: "ShareGroupDescribe", cluster_action: false, forwardable: false },
+    ApiKey { id: 78, name: "ShareFetch", cluster_action: false, forwardable: false },
+    ApiKey { id: 79, name: "ShareAcknowledge", cluster_action: false, forwardable: false },
+    ApiKey { id: 80, name: "AddRaftVoter", cluster_action: false, forwardable: true },
+    ApiKey { id: 81, name: "RemoveRaftVoter", cluster_action: false, forwardable: true },
+    ApiKey { id: 82, name: "UpdateRaftVoter", cluster_action: false, forwardable: false },
     ApiKey {
         id: 83,
         name: "InitializeShareGroupState",
         cluster_action: true,
         forwardable: false,
-        listeners: &[ListenerType::Broker],
     },
-    ApiKey {
-        id: 84,
-        name: "ReadShareGroupState",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 85,
-        name: "WriteShareGroupState",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 86,
-        name: "DeleteShareGroupState",
-        cluster_action: true,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
+    ApiKey { id: 84, name: "ReadShareGroupState", cluster_action: true, forwardable: false },
+    ApiKey { id: 85, name: "WriteShareGroupState", cluster_action: true, forwardable: false },
+    ApiKey { id: 86, name: "DeleteShareGroupState", cluster_action: true, forwardable: false },
     ApiKey {
         id: 87,
         name: "ReadShareGroupStateSummary",
         cluster_action: true,
         forwardable: false,
-        listeners: &[ListenerType::Broker],
     },
-    ApiKey {
-        id: 88,
-        name: "StreamsGroupHeartbeat",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
-    ApiKey {
-        id: 89,
-        name: "StreamsGroupDescribe",
-        cluster_action: false,
-        forwardable: false,
-        listeners: &[ListenerType::Broker],
-    },
+    ApiKey { id: 88, name: "StreamsGroupHeartbeat", cluster_action: false, forwardable: false },
+    ApiKey { id: 89, name: "StreamsGroupDescribe", cluster_action: false, forwardable: false },
     ApiKey {
         id: 90,
         name: "DescribeShareGroupOffsets",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::Broker],
     },
     ApiKey {
         id: 91,
         name: "AlterShareGroupOffsets",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::Broker],
     },
     ApiKey {
         id: 92,
         name: "DeleteShareGroupOffsets",
         cluster_action: false,
         forwardable: false,
-        listeners: &[ListenerType::Broker],
     },
 ];
 
@@ -741,7 +257,7 @@ impl ApiKeys {
 
     /// Filter the catalogue by `listener`. Mirrors `apisForListener`.
     pub fn apis_for_listener(listener: ListenerType) -> Vec<&'static ApiKey> {
-        ALL_API_KEYS.iter().filter(|k| k.listeners.contains(&listener)).collect()
+        ALL_API_KEYS.iter().filter(|k| k.in_scope(listener)).collect()
     }
 
     /// Mirrors `brokerApis` / `clientApis` (the latter is an alias for the
@@ -762,10 +278,17 @@ impl ApiKeys {
 }
 
 impl ApiKey {
+    /// The listener types this API is exposed on. Delegates to the generated
+    /// `ApiMessageType::listeners()` so the catalogue tracks the JSON spec
+    /// instead of a stale hand-coded copy.
+    pub fn listeners(&self) -> &'static [ListenerType] {
+        self.message_type().listeners()
+    }
+
     /// Whether this API is exposed on the given listener. Mirrors
     /// `ApiKeys.inScope(ListenerType)`.
     pub fn in_scope(&self, listener: ListenerType) -> bool {
-        self.listeners.contains(&listener)
+        self.listeners().contains(&listener)
     }
 
     /// The corresponding generated `ApiMessageType` enum variant. Mirrors
@@ -848,12 +371,18 @@ mod tests {
         assert!(alter_partition.cluster_action);
     }
 
-    /// Translation of `ApiKeysTest#testApiScope`. Every API must be exposed
-    /// on at least one listener.
+    /// Translation of `ApiKeysTest#testApiScope`. Every API with at least
+    /// one supported version must be exposed on a listener. APIs with no
+    /// valid versions (`LEADER_AND_ISR`, `STOP_REPLICA`, `UPDATE_METADATA`,
+    /// `CONTROLLED_SHUTDOWN`) are exempt — Java applies the same
+    /// `hasValidVersion()` guard.
     #[test]
     fn every_api_has_a_listener() {
         for k in ApiKeys::values() {
-            assert!(!k.listeners.is_empty(), "missing scope for {}", k.name);
+            if !k.has_valid_version() {
+                continue;
+            }
+            assert!(!k.listeners().is_empty(), "missing scope for {}", k.name);
         }
     }
 
@@ -895,22 +424,14 @@ mod tests {
     /// the hand-coded shape.
     ///
     /// We compare `id` ↔ `api_key()` and `name` ↔ `name()` in both
-    /// directions. We deliberately do *not* compare `listeners`,
-    /// `cluster_action`, or `forwardable`:
+    /// directions. Listeners are not stored on `ApiKey` at all — the field
+    /// was removed when [`ApiKey::listeners`] was wired to delegate to the
+    /// generated `ApiMessageType::listeners()` (Issue 4 fix), so
+    /// listener-set drift is impossible by construction.
     ///
-    /// - `listeners`: in Java the source-of-truth is
-    ///   `messageType.listeners()` (driven from the JSON spec's `listeners`
-    ///   field) and `ApiKeys.java` does not store its own copy. The
-    ///   hand-coded `ALL_API_KEYS` table picked listener sets per Apache
-    ///   Kafka 4.2 best-effort and includes `ZkBroker` for many APIs that
-    ///   the generated `ApiMessageType` (post-KIP-833) no longer exposes
-    ///   on a ZK listener. Until Phase 2d wires `ApiKeys.in_scope()`
-    ///   directly to `ApiMessageType.listeners()`, the two tables can
-    ///   legitimately differ on listeners.
-    /// - `cluster_action`/`forwardable`: live on `ApiKeys.java`'s enum
-    ///   constructor, not on `ApiMessageType`. The Phase 2d Actor will
-    ///   keep them on the hand-coded table; the generated catalogue is not
-    ///   the source of truth here.
+    /// `cluster_action`/`forwardable` live on `ApiKeys.java`'s enum
+    /// constructor, not on `ApiMessageType`. They remain on the hand-coded
+    /// table; the generated catalogue is not the source of truth here.
     #[test]
     fn api_keys_match_generated_api_message_type() {
         use crate::common::message::api_message_type::ApiMessageType;
