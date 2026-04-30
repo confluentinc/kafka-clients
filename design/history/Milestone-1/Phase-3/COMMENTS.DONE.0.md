@@ -173,3 +173,62 @@ signature (matches CLAUDE.md rule 10: unchecked-but-recoverable Java
 exceptions translate to `Result`, not panic). Added a docstring on
 the trait method explaining the deliberate divergence and citing the
 rule.
+
+---
+
+# Phase 3b Review — Resolved Issues (Critic N=0)
+
+Issue 9 from the Phase 3b Round 1 review, resolved by the Actor and
+moved here per `.claude/rules/agent-roles.md`.
+
+Source review: `COMMENTS.0.md`. Original Phase 3b commits reviewed:
+`284528a` (serialization module) and `1b46ef3` (tests +
+actor-memory notes).
+
+---
+
+## 9. Re-export of `NULL_ENTRY_VALUE` constant violates CLAUDE.md rule 2
+
+- **Severity:** MINOR
+- **File:** `src/common/serialization/mod.rs:70`
+- **Java reference:** N/A (rule violation, not Java drift)
+- **CLAUDE.md rule:** *"Constant MUST be exported only by the file
+  defining them. E.g.: `GROUP_METADATA_TOPIC_NAME` is accessible
+  through `::common::internals::topic::GROUP_METADATA_TOPIC_NAME`"*
+
+`mod.rs` line 70 contained:
+
+```rust
+pub use list_serializer::{InnerKind, ListSerializer, NULL_ENTRY_VALUE, SerializationStrategy};
+```
+
+`NULL_ENTRY_VALUE` is a `pub const i32` (defined at
+`list_serializer.rs:31`) and per CLAUDE.md must NOT be re-exported at
+the parent module. The pattern in `src/common/record/mod.rs`
+correctly avoids re-exporting constants like `MAGIC_VALUE_V0`,
+`NO_TIMESTAMP`, etc. that live in `record_batch.rs` — only types and
+traits are re-exported there.
+
+**Expected**: `pub use list_serializer::{InnerKind, ListSerializer, SerializationStrategy};`
+(drop `NULL_ENTRY_VALUE`). Callers needing the constant should use
+`crate::common::serialization::list_serializer::NULL_ENTRY_VALUE`.
+
+**Actual**: Constant was re-exported, allowing
+`crate::common::serialization::NULL_ENTRY_VALUE` access — non-conformant
+with the rule and inconsistent with the rest of the codebase
+(`record::mod.rs`, `protocol::mod.rs`).
+
+This was internal-only; the constant has no callsite outside
+`list_serializer.rs` and `list_deserializer.rs`, both of which already
+import it via the file-module path
+(`crate::common::serialization::list_serializer::NULL_ENTRY_VALUE`),
+so the fix is mechanical and risk-free.
+
+**Resolution:** Fixup `5dd0a73` against `284528a`. Dropped
+`NULL_ENTRY_VALUE` from the `pub use list_serializer::{...}` line in
+`src/common/serialization/mod.rs`; kept the type re-exports
+(`InnerKind`, `ListSerializer`, `SerializationStrategy`). No callsite
+needed updating since the only in-tree consumer
+(`list_deserializer.rs:21`) already routed through the file-module
+path. All 416 lib tests still pass; format-check, lint, and
+check-generated all clean.
