@@ -35,6 +35,13 @@ pub fn get_leader_epoch(leader_epoch: i32) -> Option<i32> {
 /// Serialize a header and body into a single byte vector (no length prefix).
 /// Mirrors `RequestUtils.serialize(Message header, short headerVersion,
 /// Message apiMessage, short apiVersion)`.
+///
+/// TODO Phase 4: drop the `to_vec()` on the inline buffer. Phase 2 only
+/// uses this helper from tests and `AbstractRequest::serialize_with_header`
+/// (which itself is test-only at this milestone). When Phase 4 rebuilds the
+/// producer to construct `Send`s through `SendBuilder` directly, this
+/// helper can be reshaped to return a `ByteBufferAccessor` (read-mode) so
+/// callers can slice without an extra copy. See COMMENTS.0.md Issue 8.
 pub fn serialize(
     header: &dyn Message,
     header_version: i16,

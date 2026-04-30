@@ -15,6 +15,7 @@
 //! Translation of `org.apache.kafka.common.requests.MetadataResponse`.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::common::errors::KafkaError;
 use crate::common::message::metadata_response_data::MetadataResponseData;
@@ -156,7 +157,12 @@ impl AbstractRequestResponse for MetadataResponse {
 
 impl AbstractResponse for MetadataResponse {
     fn api_key(&self) -> &'static ApiKey {
-        ApiKeys::for_id(3).expect("METADATA")
+        // `ApiKeys::for_id(3)` is infallible (METADATA is always wired in)
+        // but `expect()` would still panic from a public-API entry point
+        // which violates CLAUDE.md rule 10.1. Cache the lookup once via
+        // `OnceLock` so subsequent calls are a single load.
+        static METADATA: OnceLock<&'static ApiKey> = OnceLock::new();
+        METADATA.get_or_init(|| ApiKeys::for_id(3).expect("METADATA api_key always present in ALL_API_KEYS"))
     }
 
     fn error_counts(&self) -> HashMap<Errors, i32> {

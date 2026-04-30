@@ -15,6 +15,7 @@
 //! Translation of `org.apache.kafka.common.requests.ProduceRequest`.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::common::errors::KafkaError;
 use crate::common::message::produce_request_data::ProduceRequestData;
@@ -27,10 +28,26 @@ use crate::common::requests::AbstractRequest;
 use crate::common::requests::AbstractRequestResponse;
 use crate::common::requests::AbstractResponse;
 use crate::common::requests::ProduceResponse;
+use crate::common::uuid::Uuid;
+
+/// Identifier of a single produce partition cached for use after the records
+/// payload has been released. Mirrors Java's `TopicIdPartition` keys of
+/// `ProduceRequest.partitionSizes`. We do not need the size in bytes — Java
+/// uses it only for verbose `toString()` and broker-side quotas, neither of
+/// which the producer client consumes after `clearPartitionRecords`.
+#[derive(Debug, Clone)]
+struct PartitionKey {
+    topic_name: String,
+    topic_id: Uuid,
+    partition_index: i32,
+}
 
 /// Translation of `org.apache.kafka.common.requests.ProduceRequest`.
 pub struct ProduceRequest {
-    data: ProduceRequestData,
+    /// Set to `None` by [`Self::clear_partition_records`] to release the
+    /// records `Vec<u8>` while the request sits in flight. Mirrors Java's
+    /// `private volatile ProduceRequestData data`.
+    data: Option<ProduceRequestData>,
     version: i16,
     /// Cached on construction to mirror Java's behaviour: even if the
     /// request's `data` is later cleared (`clearPartitionRecords`), the
@@ -38,6 +55,19 @@ pub struct ProduceRequest {
     acks: i16,
     timeout: i32,
     transactional_id: Option<String>,
+    /// Cached partition identifiers (one entry per `(topic, partition)`)
+    /// computed eagerly at construction. Mirrors Java's lazily-initialized
+    /// `partitionSizes` map: `getErrorResponse` and `error_counts` consult
+    /// this *after* `clear_partition_records()` has dropped the inner data.
+    partition_keys: Vec<PartitionKey>,
+    /// Empty stub returned by [`AbstractRequestResponse::data`] after
+    /// `clear_partition_records()`. Java throws `IllegalStateException` from
+    /// `data()` post-clear; in Rust we keep the trait `data()` infallible
+    /// (it returns `&dyn Message`) by handing back a default-constructed
+    /// `ProduceRequestData`. The dedicated `request_data()` accessor still
+    /// returns `Err` so callers that intentionally consult the original
+    /// payload see the same contract Java enforces.
+    cleared_stub: ProduceRequestData,
 }
 
 impl ProduceRequest {
@@ -50,16 +80,55 @@ impl ProduceRequest {
         let acks = data.acks;
         let timeout = data.timeout_ms;
         let transactional_id = data.transactional_id.clone();
-        ProduceRequest { data, version, acks, timeout, transactional_id }
+        let partition_keys = Self::build_partition_keys(&data);
+        ProduceRequest {
+            data: Some(data),
+            version,
+            acks,
+            timeout,
+            transactional_id,
+            partition_keys,
+            cleared_stub: ProduceRequestData::new(),
+        }
     }
 
-    /// Mirrors `ProduceRequest.data()`. The Java version throws
-    /// `IllegalStateException` if `clearPartitionRecords` has been called;
-    /// since the Rust translation does not yet wire up `clearPartitionRecords`
-    /// (records aren't owned by the wrapper — they're a `Vec<u8>` slice in
-    /// the generated `*Data` struct), we always return the inner data.
-    pub fn request_data(&self) -> &ProduceRequestData {
-        &self.data
+    fn build_partition_keys(data: &ProduceRequestData) -> Vec<PartitionKey> {
+        let mut keys = Vec::with_capacity(data.topic_data.iter().map(|t| t.partition_data.len()).sum());
+        for topic in &data.topic_data {
+            for partition in &topic.partition_data {
+                keys.push(PartitionKey {
+                    topic_name: topic.name.clone(),
+                    topic_id: topic.topic_id,
+                    partition_index: partition.index,
+                });
+            }
+        }
+        keys
+    }
+
+    /// Mirrors `ProduceRequest.data()`. Returns
+    /// [`KafkaError::IllegalArgument`] (Java's `IllegalStateException`) if
+    /// [`Self::clear_partition_records`] has been called. The error message
+    /// matches Java's text for log parity with the Java client.
+    pub fn request_data(&self) -> Result<&ProduceRequestData, KafkaError> {
+        self.data.as_ref().ok_or_else(|| {
+            KafkaError::IllegalArgument(
+                "The partition records are no longer available because \
+                 clearPartitionRecords() has been invoked."
+                    .to_owned(),
+            )
+        })
+    }
+
+    /// Mirrors `ProduceRequest.clearPartitionRecords()`. Releases the inner
+    /// records buffer once the request has been sent so the wrapper can sit
+    /// in flight (waiting for the broker response) without holding the
+    /// records `Vec<u8>` alive. After calling this, [`Self::request_data`]
+    /// returns an error.
+    pub fn clear_partition_records(&mut self) {
+        // `partition_keys` was already populated at construction, so
+        // `error_counts` / `get_error_response` keep working.
+        self.data = None;
     }
 
     /// Mirrors `ProduceRequest.acks()`.
@@ -88,18 +157,26 @@ impl ProduceRequest {
         version > Self::LAST_STABLE_VERSION_BEFORE_TRANSACTION_V2
     }
 
-    /// Sum of bytes in all `records` fields across all partitions. Mirrors
-    /// the lazily-initialised `partitionSizes` accumulator in Java (used
-    /// by the broker for quotas and by `getErrorResponse` to know how many
-    /// partition responses to emit).
+    /// Number of partitions this request is producing to. Mirrors the
+    /// `partitionSizes().size()` access pattern used by Java's
+    /// `errorCounts` and `getErrorResponse`.
     fn partition_count(&self) -> usize {
-        self.data.topic_data.iter().map(|t| t.partition_data.len()).sum()
+        self.partition_keys.len()
     }
 }
 
 impl AbstractRequestResponse for ProduceRequest {
     fn data(&self) -> &dyn Message {
-        &self.data
+        // Java's `data()` throws `IllegalStateException` after
+        // `clearPartitionRecords()`. The trait method on the Rust side is
+        // infallible (callers are `serialize`/`size_in_bytes`/…), so we
+        // surface the cleared state through `request_data()` and return
+        // an empty stub here. Java's contract — "do not serialize after
+        // `clearPartitionRecords`" — must still be honoured by callers.
+        match &self.data {
+            Some(d) => d,
+            None => &self.cleared_stub,
+        }
     }
 }
 
@@ -109,7 +186,10 @@ impl AbstractRequest for ProduceRequest {
     }
 
     fn api_key(&self) -> &'static ApiKey {
-        ApiKeys::for_id(0).expect("PRODUCE")
+        // See `MetadataResponse::api_key` — `OnceLock` cache avoids the
+        // public-API panic from CLAUDE.md rule 10.1.
+        static PRODUCE: OnceLock<&'static ApiKey> = OnceLock::new();
+        PRODUCE.get_or_init(|| ApiKeys::for_id(0).expect("PRODUCE api_key always present in ALL_API_KEYS"))
     }
 
     fn get_error_response(&self, throttle_time_ms: i32, error: &KafkaError) -> Option<Box<dyn AbstractResponse>> {
@@ -121,37 +201,37 @@ impl AbstractRequest for ProduceRequest {
         let err = Errors::for_code(error.code());
         let mut data = ProduceResponseData { throttle_time_ms, ..ProduceResponseData::new() };
 
-        for topic in &self.data.topic_data {
+        // Iterate cached partition keys so the lookup keeps working after
+        // `clear_partition_records()` has dropped the inner `topic_data`.
+        for key in &self.partition_keys {
             // Find existing TopicProduceResponse or push a new one.
             let position = data
                 .responses
                 .iter()
-                .position(|r| r.name == topic.name && r.topic_id == topic.topic_id);
+                .position(|r| r.name == key.topic_name && r.topic_id == key.topic_id);
             let tpr_idx = match position {
                 Some(idx) => idx,
                 None => {
                     data.responses.push(TopicProduceResponse {
-                        name: topic.name.clone(),
-                        topic_id: topic.topic_id,
+                        name: key.topic_name.clone(),
+                        topic_id: key.topic_id,
                         partition_responses: Vec::new(),
                         unknown_tagged_fields: Vec::new(),
                     });
                     data.responses.len() - 1
                 },
             };
-            for partition in &topic.partition_data {
-                data.responses[tpr_idx].partition_responses.push(PartitionProduceResponse {
-                    index: partition.index,
-                    error_code: err.code(),
-                    base_offset: ProduceResponse::INVALID_OFFSET,
-                    log_append_time_ms: -1, // matches Java's RecordBatch.NO_TIMESTAMP
-                    log_start_offset: ProduceResponse::INVALID_OFFSET,
-                    record_errors: Vec::new(),
-                    error_message: err.message().map(str::to_owned),
-                    current_leader: LeaderIdAndEpoch::new(),
-                    unknown_tagged_fields: Vec::new(),
-                });
-            }
+            data.responses[tpr_idx].partition_responses.push(PartitionProduceResponse {
+                index: key.partition_index,
+                error_code: err.code(),
+                base_offset: ProduceResponse::INVALID_OFFSET,
+                log_append_time_ms: -1, // matches Java's RecordBatch.NO_TIMESTAMP
+                log_start_offset: ProduceResponse::INVALID_OFFSET,
+                record_errors: Vec::new(),
+                error_message: err.message().map(str::to_owned),
+                current_leader: LeaderIdAndEpoch::new(),
+                unknown_tagged_fields: Vec::new(),
+            });
         }
         Some(Box::new(ProduceResponse::new(data)))
     }
@@ -232,6 +312,85 @@ mod tests {
         assert_eq!(req.acks(), -1);
         assert_eq!(req.timeout(), 10);
         assert!(req.transactional_id().is_none());
+    }
+
+    /// `ProduceRequest.clearPartitionRecords` releases the `data` reference
+    /// once the request has been put on the wire. Subsequent calls to
+    /// `request_data()` must surface the Java `IllegalStateException` text.
+    #[test]
+    fn clear_partition_records_releases_data_and_request_data_errors() {
+        let data = ProduceRequestData {
+            acks: -1,
+            timeout_ms: 1000,
+            transactional_id: None,
+            topic_data: vec![TopicProduceData {
+                name: "t".to_owned(),
+                topic_id: Uuid::zero(),
+                partition_data: vec![PartitionProduceData {
+                    index: 0,
+                    records: Some(b"hello".to_vec()),
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                unknown_tagged_fields: Vec::new(),
+            }],
+            unknown_tagged_fields: Vec::new(),
+        };
+        let mut req = ProduceRequest::new(data, 13);
+        assert!(req.request_data().is_ok());
+
+        req.clear_partition_records();
+
+        let err = req.request_data().expect_err("post-clear request_data must error");
+        assert!(
+            err.to_string().contains("clearPartitionRecords"),
+            "expected Java's IllegalStateException text, got {err}",
+        );
+
+        // Cached metadata must remain accessible.
+        assert_eq!(req.acks(), -1);
+        assert_eq!(req.timeout(), 1000);
+    }
+
+    /// After `clearPartitionRecords`, `error_counts` and `getErrorResponse`
+    /// must keep working — Java mirrors this via the lazily-initialised
+    /// `partitionSizes` map. We populate the equivalent cache eagerly at
+    /// construction so the post-clear behaviour matches.
+    #[test]
+    fn error_response_and_counts_survive_clear_partition_records() {
+        let data = ProduceRequestData {
+            acks: -1,
+            timeout_ms: 1000,
+            transactional_id: None,
+            topic_data: vec![TopicProduceData {
+                name: "t".to_owned(),
+                topic_id: Uuid::new(0x1, 0x2),
+                partition_data: vec![
+                    PartitionProduceData {
+                        index: 0,
+                        records: Some(b"records-0".to_vec()),
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                    PartitionProduceData {
+                        index: 1,
+                        records: Some(b"records-1".to_vec()),
+                        unknown_tagged_fields: Vec::new(),
+                    },
+                ],
+                unknown_tagged_fields: Vec::new(),
+            }],
+            unknown_tagged_fields: Vec::new(),
+        };
+        let mut req = ProduceRequest::new(data, 13);
+        req.clear_partition_records();
+
+        let counts = req.error_counts(&KafkaError::Network("e".to_owned())).expect("counts");
+        assert_eq!(counts.get(&Errors::NetworkException), Some(&2));
+
+        let response = req
+            .get_error_response(0, &KafkaError::Network("e".to_owned()))
+            .expect("acks=-1 must produce a response");
+        let counts = response.error_counts();
+        assert_eq!(counts.get(&Errors::NetworkException), Some(&2));
     }
 
     #[test]

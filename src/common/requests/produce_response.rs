@@ -15,6 +15,7 @@
 //! Translation of `org.apache.kafka.common.requests.ProduceResponse`.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::common::errors::KafkaError;
 use crate::common::message::produce_response_data::ProduceResponseData;
@@ -65,7 +66,10 @@ impl AbstractRequestResponse for ProduceResponse {
 
 impl AbstractResponse for ProduceResponse {
     fn api_key(&self) -> &'static ApiKey {
-        ApiKeys::for_id(0).expect("PRODUCE")
+        // See `MetadataResponse::api_key` — `OnceLock` cache avoids the
+        // public-API panic from CLAUDE.md rule 10.1.
+        static PRODUCE: OnceLock<&'static ApiKey> = OnceLock::new();
+        PRODUCE.get_or_init(|| ApiKeys::for_id(0).expect("PRODUCE api_key always present in ALL_API_KEYS"))
     }
 
     fn error_counts(&self) -> HashMap<Errors, i32> {

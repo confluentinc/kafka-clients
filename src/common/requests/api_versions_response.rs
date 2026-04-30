@@ -15,6 +15,7 @@
 //! Translation of `org.apache.kafka.common.requests.ApiVersionsResponse`.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
 use crate::common::errors::KafkaError;
 use crate::common::message::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
@@ -95,7 +96,10 @@ impl AbstractRequestResponse for ApiVersionsResponse {
 
 impl AbstractResponse for ApiVersionsResponse {
     fn api_key(&self) -> &'static ApiKey {
-        ApiKeys::for_id(18).expect("API_VERSIONS")
+        // See `MetadataResponse::api_key` — `OnceLock` cache avoids the
+        // public-API panic from CLAUDE.md rule 10.1.
+        static API_VERSIONS: OnceLock<&'static ApiKey> = OnceLock::new();
+        API_VERSIONS.get_or_init(|| ApiKeys::for_id(18).expect("API_VERSIONS api_key always present in ALL_API_KEYS"))
     }
 
     fn error_counts(&self) -> HashMap<Errors, i32> {

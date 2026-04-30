@@ -19,6 +19,13 @@
 //! captured from the Java client live in
 //! `src/common/message/tests.rs`; here we lock the wrapper-level
 //! concatenation by reusing those known-good *Data* hex strings.
+//!
+//! TODO Phase 4: capture a Java-derived end-to-end fixture
+//! (`header_v2 ++ produce_request_v9` taken from a `RequestUtils.serialize`
+//! call) so the wrapper-level test directly compares against bytes the Java
+//! client produced. The current per-`*Data` Java fixtures cover the inner
+//! encoding, but a single end-to-end fixture would close the loop. See
+//! COMMENTS.0.md Issue 10.
 
 use crate::common::message::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::message::api_versions_response_data::ApiVersionsResponseData;

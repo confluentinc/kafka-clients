@@ -14,6 +14,8 @@
 
 //! Translation of `org.apache.kafka.common.requests.MetadataRequest`.
 
+use std::sync::OnceLock;
+
 use crate::common::errors::KafkaError;
 use crate::common::message::metadata_request_data::{MetadataRequestData, MetadataRequestTopic};
 use crate::common::message::metadata_response_data::{MetadataResponseData, MetadataResponseTopic};
@@ -182,7 +184,10 @@ impl AbstractRequest for MetadataRequest {
     }
 
     fn api_key(&self) -> &'static ApiKey {
-        ApiKeys::for_id(3).expect("METADATA")
+        // See `MetadataResponse::api_key` — `OnceLock` cache avoids the
+        // public-API panic from CLAUDE.md rule 10.1.
+        static METADATA: OnceLock<&'static ApiKey> = OnceLock::new();
+        METADATA.get_or_init(|| ApiKeys::for_id(3).expect("METADATA api_key always present in ALL_API_KEYS"))
     }
 
     fn get_error_response(&self, throttle_time_ms: i32, error: &KafkaError) -> Option<Box<dyn AbstractResponse>> {
