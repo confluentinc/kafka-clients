@@ -12,17 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Translation of `org.apache.kafka.common`.
+//! Translation of `org.apache.kafka.common.protocol`.
+//!
+//! Phase 2b only contains the `types` submodule. The runtime side of the
+//! protocol (`Readable`, `Writable`, `ApiKeys`, `Errors`, `Message`, …) is
+//! added in Phase 2c.
 
-pub mod config;
-pub mod errors;
-pub mod header;
-pub mod internals;
-pub mod kafka_exception;
-pub mod protocol;
-pub mod utils;
-pub mod uuid;
-
-pub use errors::KafkaError;
-pub use kafka_exception::KafkaException;
-pub use uuid::Uuid;
+pub mod types;
