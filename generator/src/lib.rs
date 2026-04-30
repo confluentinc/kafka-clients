@@ -4186,11 +4186,22 @@ fn schema_type_for(field_type: &FieldType, flexible: bool, nullable: bool) -> St
 /// Compute the schema type expression for a field. The result may be version-dependent
 /// when flexibility or nullability boundaries fall within the field's version range,
 /// producing an inline if/else expression.
-fn schema_type_expr_for_field(field: &FieldSpec, flexible_versions: Versions) -> String {
+///
+/// The `message_flexible_versions` parameter is the message-level `flexibleVersions`.
+/// A field that overrides this with its own `flexibleVersions` (for example,
+/// `RequestHeader.ClientId` declares `"flexibleVersions": "none"`) must use the override:
+/// it always emits length-prefixed schema types (`SchemaType::NullableString`) instead of
+/// the compact variant (`SchemaType::CompactNullableString`). Mirrors
+/// `SchemaGenerator.fieldFlexibleVersions` in the Java generator.
+fn schema_type_expr_for_field(field: &FieldSpec, message_flexible_versions: Versions) -> String {
     let field_type = field.field_type();
     let nullable_versions = field.nullable_versions();
     let v_low = field.versions().lowest();
     let v_high = field.versions().highest();
+
+    // Resolve the per-field flexibleVersions override (Java's
+    // `field.flexibleVersions().orElse(messageFlexibleVersions)`).
+    let flexible_versions = field_flexible_versions(field, message_flexible_versions);
 
     // Collect version boundaries where (flexible, nullable) may change
     let mut breakpoints = vec![v_low];
@@ -4237,9 +4248,16 @@ fn schema_type_expr_for_field(field: &FieldSpec, flexible_versions: Versions) ->
 }
 
 /// Returns true if the schema type for this field varies by version.
-fn field_has_version_dependent_schema_type(field: &FieldSpec, flexible_versions: Versions) -> bool {
+///
+/// Uses the per-field flexibleVersions override (when present) so that fields like
+/// `RequestHeader.ClientId` (`flexibleVersions: "none"`) do not get a misleading
+/// version-dependent schema-type expression on a flexible message.
+fn field_has_version_dependent_schema_type(field: &FieldSpec, message_flexible_versions: Versions) -> bool {
     let v_low = field.versions().lowest();
     let v_high = field.versions().highest();
+
+    // Resolve the per-field flexibleVersions override.
+    let flexible_versions = field_flexible_versions(field, message_flexible_versions);
 
     // Check if flexibility boundary falls within field's version range
     if !flexible_versions.empty() {
@@ -4704,5 +4722,138 @@ mod tests {
         assert!(!stripped.contains("// inline comment"));
         assert!(stripped.contains("\"name\""));
         assert!(stripped.contains("\"test\""));
+    }
+
+    /// Helper: parse a single field-spec JSON literal for tests.
+    fn parse_field(json: &str) -> FieldSpec {
+        serde_json::from_str::<FieldSpec>(json).expect("valid field JSON")
+    }
+
+    // ----------------------------------------------------------------------
+    // G1: per-field flexibleVersions overrides (mirrors Java
+    // SchemaGenerator.fieldFlexibleVersions / MessageDataGenerator.fieldFlexibleVersions).
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn test_field_flexible_versions_no_override_returns_message_flex() {
+        // Field with no `flexibleVersions` override inherits the message-level value.
+        let mut field =
+            parse_field(r#"{ "name": "Foo", "type": "string", "versions": "0+", "nullableVersions": "0+" }"#);
+        field.validate().unwrap();
+        let msg_flex = Versions::parse(Some("2+"), Versions::NONE).unwrap();
+        assert_eq!(field_flexible_versions(&field, msg_flex), msg_flex);
+    }
+
+    #[test]
+    fn test_field_flexible_versions_none_override_disables_compact_encoding() {
+        // RequestHeader.ClientId-shaped field: `"flexibleVersions": "none"`. The
+        // override forces non-flexible (length-prefixed) encoding even when the
+        // message itself is flexible.
+        let mut field = parse_field(
+            r#"{
+                "name": "ClientId",
+                "type": "string",
+                "versions": "1+",
+                "nullableVersions": "1+",
+                "flexibleVersions": "none"
+            }"#,
+        );
+        field.validate().unwrap();
+        let msg_flex = Versions::parse(Some("2+"), Versions::NONE).unwrap();
+        let resolved = field_flexible_versions(&field, msg_flex);
+        assert!(resolved.empty(), "flexibleVersions=none must resolve to empty");
+        assert!(!resolved.contains(2));
+    }
+
+    #[test]
+    fn g1_request_header_client_id_emits_non_compact_schema_type() {
+        // Locks the RequestHeader.ClientId schema type for v2 (the message's first
+        // flexible version) to `SchemaType::NullableString` — the length-prefixed
+        // variant. If the per-field flexibleVersions override is ever dropped this
+        // will regress to `SchemaType::CompactNullableString`, which is wire-
+        // incompatible with Java brokers (Java emits `Type.NULLABLE_STRING`).
+        let mut field = parse_field(
+            r#"{
+                "name": "ClientId",
+                "type": "string",
+                "versions": "1+",
+                "nullableVersions": "1+",
+                "flexibleVersions": "none"
+            }"#,
+        );
+        field.validate().unwrap();
+        let msg_flex = Versions::parse(Some("2+"), Versions::NONE).unwrap();
+        let expr = schema_type_expr_for_field(&field, msg_flex);
+        assert_eq!(
+            expr, "SchemaType::NullableString",
+            "ClientId must use length-prefixed NullableString at every version: got {expr}",
+        );
+        // No version-dependent expression should be emitted for this field.
+        assert!(
+            !field_has_version_dependent_schema_type(&field, msg_flex),
+            "ClientId schema type must not vary by version when override is `none`",
+        );
+    }
+
+    #[test]
+    fn g1_field_without_override_still_picks_compact_at_flexible_version() {
+        // Sanity check: when the field has no override, a flexible-version message
+        // does produce a version-dependent compact-vs-length-prefixed expression.
+        let mut field = parse_field(
+            r#"{
+                "name": "Topic",
+                "type": "string",
+                "versions": "0+"
+            }"#,
+        );
+        field.validate().unwrap();
+        let msg_flex = Versions::parse(Some("2+"), Versions::NONE).unwrap();
+        let expr = schema_type_expr_for_field(&field, msg_flex);
+        assert!(
+            field_has_version_dependent_schema_type(&field, msg_flex),
+            "field without override on a flexible-from-v2 message must vary by version: expr was {expr}",
+        );
+        assert!(
+            expr.contains("SchemaType::CompactString") && expr.contains("SchemaType::String"),
+            "expected both compact and length-prefixed branches, got: {expr}",
+        );
+    }
+
+    #[test]
+    fn g1_request_header_full_codegen_uses_non_compact_for_client_id() {
+        // End-to-end check: feed RequestHeader.json into the generator and assert
+        // the generated schema() method uses NullableString (not the compact
+        // variant) for client_id. This locks the entire generation pipeline.
+        use std::path::Path;
+        let tmp = std::env::temp_dir().join(format!("phase2a-g1-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let input = Path::new("messages");
+        // Run only on RequestHeader.json by isolating it into a temp input dir.
+        let isolated = tmp.join("input");
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::copy(input.join("RequestHeader.json"), isolated.join("RequestHeader.json")).unwrap();
+        let output = tmp.join("output");
+        generate_messages(&isolated, &output).expect("codegen succeeds for RequestHeader");
+        let generated =
+            std::fs::read_to_string(output.join("request_header_data.rs")).expect("request_header_data.rs written");
+        // Locate the schema() function body.
+        let schema_start = generated.find("pub fn schema").expect("schema() method emitted");
+        let after_schema = &generated[schema_start..];
+        let body_end = after_schema.find("Schema::new(fields)").expect("schema() body found");
+        let body = &after_schema[..body_end];
+        assert!(
+            body.contains("name: \"client_id\""),
+            "client_id field expected in schema(); body was:\n{body}",
+        );
+        assert!(
+            body.contains("SchemaType::NullableString"),
+            "client_id must use SchemaType::NullableString (length-prefixed) on the wire; body was:\n{body}",
+        );
+        assert!(
+            !body.contains("CompactNullableString"),
+            "client_id must NOT use the compact variant — its `flexibleVersions: none` override forces length-prefixed encoding; body was:\n{body}",
+        );
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
