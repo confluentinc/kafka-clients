@@ -462,9 +462,13 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     // a handful of those modules; the remainder will be added in 2d-2/3/4 as
     // each spec passes its round-trip / byte-vector tests. Until the full set
     // is wired up these methods would fail to compile, so we currently emit
-    // stubs that always return an empty schema. The Phase 2d-4 Actor will
-    // re-enable the per-API dispatch and emit the corresponding compile-time
-    // assertion that all message modules are reachable.
+    // stubs that always return an empty schema.
+    //
+    // TODO Phase 4: replace these stubs with a per-API match dispatching to
+    // each `*Data::schema(version)`. Required by the parameterized
+    // `ApiVersionsResponseTest` translation (it iterates
+    // `messageType.requestSchemas()[i]` and asserts each non-tagged field
+    // shape). See COMMENTS.0.md Issue 6 for context.
     writeln!(file, "    /// Returns the request schema for this API at the given version.")?;
     writeln!(
         file,
@@ -553,7 +557,10 @@ fn process_spec_file(spec_file: &Path, output_dir: &Path) -> Result<(), Box<dyn 
         "use crate::common::protocol::{{ApiMessage, ByteBufferAccessor, Message, MessageSizeAccumulator, ObjectSerializationCache, RawTaggedField, Readable, Writable}};"
     )?;
     writeln!(file, "#[allow(unused_imports)]")?;
-    writeln!(file, "use crate::common::protocol::types::{{Field, Schema, Type}};")?;
+    writeln!(
+        file,
+        "use crate::common::protocol::types::{{ArrayOf, CompactArrayOf, Field, Schema, Type}};"
+    )?;
     writeln!(file, "#[allow(unused_imports)]")?;
     writeln!(file, "use crate::common::errors::KafkaError;")?;
     writeln!(file, "#[allow(unused_imports)]")?;
@@ -805,6 +812,13 @@ fn generate_nested_struct(
 
     // Generate write method
     generate_write_method(file, &struct_name, &struct_spec, flexible_versions)?;
+    writeln!(file)?;
+
+    // Generate schema method — nested structs are referenced from
+    // outer-struct schema emit via `Type::Schema(<Name>::schema(version)?)`
+    // (Issue 3 fix), so every nested struct must expose the same surface as
+    // the top-level `*Data` types.
+    generate_schema_method(file, &struct_spec, flexible_versions)?;
 
     // Builder setters
     generate_builder_setters(file, &struct_spec)?;
@@ -899,6 +913,11 @@ fn generate_common_struct(
 
     // Generate write method for common struct
     generate_write_method(file, struct_name, struct_spec, flexible_versions)?;
+    writeln!(file)?;
+
+    // Generate schema method — common structs may also be referenced as
+    // `Type::Schema(<Name>::schema(version)?)` from any *Data that uses them.
+    generate_schema_method(file, struct_spec, flexible_versions)?;
 
     // Builder setters
     generate_builder_setters(file, struct_spec)?;
@@ -2698,11 +2717,98 @@ fn generate_tagged_field_write(
                         writeln!(file, "{}                writable.write_uuid(&{});", indent, tagged_accessor)?;
                     },
                     FieldType::Array(element_type) => {
-                        // For arrays, we need to calculate the size first by writing to a temp buffer
-                        writeln!(file, "{}                // Calculate array size", indent)?;
+                        // Compute the exact serialized size of the array first
+                        // (length varint + element bytes) and allocate the temp
+                        // buffer to that size — avoids the legacy fixed-cap
+                        // `allocate(1024)` (which over-allocated for small
+                        // arrays and triggered a `Vec::resize` reallocation
+                        // for arrays >1024 bytes).
+                        writeln!(file, "{}                // Calculate exact array serialized size", indent)?;
                         writeln!(
                             file,
-                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(1024);",
+                            "{}                let mut size_acc = crate::common::protocol::MessageSizeAccumulator::new();",
+                            indent
+                        )?;
+                        writeln!(
+                            file,
+                            "{}                size_acc.add_bytes(byte_utils::size_of_unsigned_varint({}.len() as u32 + 1) as i32);",
+                            indent, tagged_accessor
+                        )?;
+                        // Element sizes
+                        match element_type.as_ref() {
+                            FieldType::Bool | FieldType::Int8 => {
+                                writeln!(
+                                    file,
+                                    "{}                size_acc.add_bytes({}.len() as i32);",
+                                    indent, tagged_accessor
+                                )?;
+                            },
+                            FieldType::Int16 | FieldType::Uint16 => {
+                                writeln!(
+                                    file,
+                                    "{}                size_acc.add_bytes(({}.len() * 2) as i32);",
+                                    indent, tagged_accessor
+                                )?;
+                            },
+                            FieldType::Int32 | FieldType::Uint32 | FieldType::Float64 => {
+                                writeln!(
+                                    file,
+                                    "{}                size_acc.add_bytes(({}.len() * 4) as i32);",
+                                    indent, tagged_accessor
+                                )?;
+                            },
+                            FieldType::Int64 => {
+                                writeln!(
+                                    file,
+                                    "{}                size_acc.add_bytes(({}.len() * 8) as i32);",
+                                    indent, tagged_accessor
+                                )?;
+                            },
+                            FieldType::Uuid => {
+                                writeln!(
+                                    file,
+                                    "{}                size_acc.add_bytes(({}.len() * 16) as i32);",
+                                    indent, tagged_accessor
+                                )?;
+                            },
+                            FieldType::String => {
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
+                                writeln!(file, "{}                    let elen = element.len() as u32;", indent)?;
+                                writeln!(
+                                    file,
+                                    "{}                    size_acc.add_bytes(byte_utils::size_of_unsigned_varint(elen + 1) as i32);",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                    size_acc.add_bytes(elen as i32);", indent)?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                            _ => {
+                                // Structs / unknown — recurse via add_size.
+                                writeln!(
+                                    file,
+                                    "{}                let mut size_cache = crate::common::protocol::ObjectSerializationCache::new();",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                for element in {}.iter() {{",
+                                    indent, tagged_accessor
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    element.add_size(&mut size_acc, &mut size_cache, version);",
+                                    indent
+                                )?;
+                                writeln!(file, "{}                }}", indent)?;
+                            },
+                        }
+                        writeln!(
+                            file,
+                            "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(size_acc.total_size() as usize);",
                             indent
                         )?;
                         writeln!(file, "{}                // Write array length", indent)?;
@@ -2816,31 +2922,32 @@ fn generate_tagged_field_write(
                         )?;
                     },
                     FieldType::Bytes | FieldType::Records => {
+                        // Tagged Bytes/Records on the wire: varint(payload_size) ++ payload,
+                        // where payload = varint(len+1) ++ raw_bytes. Compute the
+                        // payload size exactly (no over-allocation).
                         if nullable {
                             writeln!(file, "{}                if let Some(ref val) = self.{} {{", indent, field_name)?;
-                            writeln!(file, "{}                    // Calculate bytes size", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
+                                "{}                    let prefix_size = byte_utils::size_of_unsigned_varint(val.len() as u32 + 1) as i32;",
                                 indent
                             )?;
                             writeln!(
                                 file,
-                                "{}                    size_accessor.write_unsigned_varint((val.len() as u32) + 1);",
+                                "{}                    let payload_size = prefix_size + val.len() as i32;",
                                 indent
                             )?;
-                            writeln!(file, "{}                    size_accessor.write_byte_array(val);", indent)?;
                             writeln!(
                                 file,
-                                "{}                    let size = size_accessor.position() as u32; size_accessor.flip();",
+                                "{}                    writable.write_unsigned_varint(payload_size as u32);",
                                 indent
                             )?;
-                            writeln!(file, "{}                    writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
-                                "{}                    writable.write_byte_array(size_accessor.buffer());",
+                                "{}                    writable.write_unsigned_varint((val.len() as u32) + 1);",
                                 indent
                             )?;
+                            writeln!(file, "{}                    writable.write_byte_array(val);", indent)?;
                             writeln!(file, "{}                }} else {{", indent)?;
                             // null encoding: size = 1 (varint(0))
                             writeln!(
@@ -2851,32 +2958,30 @@ fn generate_tagged_field_write(
                             writeln!(file, "{}                    writable.write_unsigned_varint(0); // null", indent)?;
                             writeln!(file, "{}                }}", indent)?;
                         } else {
-                            writeln!(file, "{}                // Calculate bytes size", indent)?;
                             writeln!(
                                 file,
-                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
-                                indent
-                            )?;
-                            writeln!(
-                                file,
-                                "{}                size_accessor.write_unsigned_varint(({}.len() as u32) + 1);",
+                                "{}                let prefix_size = byte_utils::size_of_unsigned_varint({}.len() as u32 + 1) as i32;",
                                 indent, tagged_accessor
                             )?;
                             writeln!(
                                 file,
-                                "{}                size_accessor.write_byte_array(&*{});",
+                                "{}                let payload_size = prefix_size + {}.len() as i32;",
                                 indent, tagged_accessor
                             )?;
                             writeln!(
                                 file,
-                                "{}                let size = size_accessor.position() as u32; size_accessor.flip();",
+                                "{}                writable.write_unsigned_varint(payload_size as u32);",
                                 indent
                             )?;
-                            writeln!(file, "{}                writable.write_unsigned_varint(size);", indent)?;
                             writeln!(
                                 file,
-                                "{}                writable.write_byte_array(size_accessor.buffer());",
-                                indent
+                                "{}                writable.write_unsigned_varint(({}.len() as u32) + 1);",
+                                indent, tagged_accessor
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                writable.write_byte_array(&*{});",
+                                indent, tagged_accessor
                             )?;
                         }
                     },
@@ -2900,14 +3005,32 @@ fn generate_tagged_field_write(
                                     indent
                                 )?;
                                 writeln!(file, "{}                }} else {{", indent)?;
+                                // Pre-compute the struct's serialized size so the temp buffer
+                                // is allocated exactly. Avoids the legacy `allocate(256)`
+                                // over-allocation per partition response.
                                 writeln!(
                                     file,
-                                    "{}                    // Calculate struct size (with presence indicator)",
+                                    "{}                    let mut struct_acc = crate::common::protocol::MessageSizeAccumulator::new();",
                                     indent
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
+                                    "{}                    let mut struct_cache = crate::common::protocol::ObjectSerializationCache::new();",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    {}.add_size(&mut struct_acc, &mut struct_cache, version);",
+                                    indent, tagged_accessor
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    let payload_size = struct_acc.total_size() + 1; // +1 for presence indicator",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                    let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(payload_size as usize);",
                                     indent
                                 )?;
                                 writeln!(
@@ -2933,15 +3056,30 @@ fn generate_tagged_field_write(
                                 )?;
                                 writeln!(file, "{}                }}", indent)?;
                             } else {
-                                // Nullable struct with null default: only written when non-null
+                                // Nullable struct with null default: only written when non-null.
                                 writeln!(
                                     file,
-                                    "{}                // Calculate struct size (with presence indicator)",
+                                    "{}                let mut struct_acc = crate::common::protocol::MessageSizeAccumulator::new();",
                                     indent
                                 )?;
                                 writeln!(
                                     file,
-                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
+                                    "{}                let mut struct_cache = crate::common::protocol::ObjectSerializationCache::new();",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                {}.add_size(&mut struct_acc, &mut struct_cache, version);",
+                                    indent, tagged_accessor
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                let payload_size = struct_acc.total_size() + 1; // +1 for presence indicator",
+                                    indent
+                                )?;
+                                writeln!(
+                                    file,
+                                    "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(payload_size as usize);",
                                     indent
                                 )?;
                                 writeln!(
@@ -2967,11 +3105,25 @@ fn generate_tagged_field_write(
                                 )?;
                             }
                         } else {
-                            // Non-nullable struct
-                            writeln!(file, "{}                // Calculate struct size", indent)?;
+                            // Non-nullable struct: pre-compute exact size.
                             writeln!(
                                 file,
-                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(256);",
+                                "{}                let mut struct_acc = crate::common::protocol::MessageSizeAccumulator::new();",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                let mut struct_cache = crate::common::protocol::ObjectSerializationCache::new();",
+                                indent
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                {}.add_size(&mut struct_acc, &mut struct_cache, version);",
+                                indent, tagged_accessor
+                            )?;
+                            writeln!(
+                                file,
+                                "{}                let mut size_accessor = crate::common::protocol::ByteBufferAccessor::allocate(struct_acc.total_size() as usize);",
                                 indent
                             )?;
                             writeln!(
@@ -3932,12 +4084,33 @@ fn generate_field_write(
             } else {
                 writeln!(file, "{}writable.write_int({}.len() as i32);", ind, accessor)?;
             }
+            // For `FieldType::Records`, emit `write_byte_buffer` so on a
+            // `SendBuilder` the bytes are passed through as their own
+            // zero-copy chunk (an `Arc<[u8]>` in the chunk list) — they do
+            // not get copied a second time when the network layer ships
+            // them, satisfying CLAUDE.md rule 12 (vectored I/O / zero-copy
+            // through the full write path).
+            //
+            // For `FieldType::Bytes` we keep `write_byte_array` because
+            // small bytes fields (e.g. SASL tokens) are not on a hot
+            // zero-copy path and `write_byte_buffer`'s `Arc::from(...)`
+            // allocation per write would be a regression. Both methods
+            // produce identical wire bytes — `ByteBufferAccessor` and
+            // `DataOutputStreamWritable` route `write_byte_buffer` through
+            // `write_byte_array` (no length prefix; the prefix was emitted
+            // above). The runtime difference is only visible on
+            // `SendBuilder`.
+            //
             // Use `.as_slice()` so the accessor always coerces to `&[u8]`
             // regardless of whether it's bound from a nullable field
             // (`_nv: &Vec<u8>`) or the non-nullable case (`self.field: Vec<u8>`)
             // — avoids the `clippy::needless_borrow` lint that fires when the
             // emit prepends `&` to an already-borrowed accessor.
-            writeln!(file, "{}writable.write_byte_array({}.as_slice());", ind, accessor)?;
+            let write_method = match field.field_type() {
+                FieldType::Records => "write_byte_buffer",
+                _ => "write_byte_array",
+            };
+            writeln!(file, "{}writable.{}({}.as_slice());", ind, write_method, accessor)?;
         },
         FieldType::Array(element_type) => {
             if !flexible_versions.empty() {
@@ -4219,7 +4392,15 @@ fn generate_array_element_write(
             } else {
                 writeln!(file, "                writable.write_int(element.len() as i32);")?;
             }
-            writeln!(file, "                writable.write_byte_array(element);")?;
+            // For `FieldType::Records` use `write_byte_buffer` so on a
+            // `SendBuilder` the bytes pass through as their own zero-copy
+            // chunk. See the parallel comment in `generate_field_write` for
+            // the full rationale.
+            let write_method = match element_type {
+                FieldType::Records => "write_byte_buffer",
+                _ => "write_byte_array",
+            };
+            writeln!(file, "                writable.{}(element);", write_method)?;
         },
         FieldType::Struct(_) => {
             writeln!(file, "                element.write(writable, version)?;")?;
@@ -4270,17 +4451,35 @@ fn schema_type_for(field_type: &FieldType, flexible: bool, nullable: bool) -> St
                 "Type::Records".to_string()
             }
         },
-        FieldType::Array(_) => {
-            // Arrays are represented as Bytes in the schema type for introspection
+        FieldType::Array(element_type) => {
+            // Element type → schema-side `Type` expression. For nested
+            // structs we emit `<StructName>::schema(version)?` so the
+            // inner schema reflects the version-specific shape; for scalar
+            // element types we recurse through `schema_type_for` (with
+            // flexible=false so the inner element keeps its non-compact
+            // form — array compaction is encoded by the outer
+            // `Array`/`CompactArray` wrapper, not by the element).
+            let element_expr = match element_type.as_ref() {
+                FieldType::Struct(name) => {
+                    format!("Type::Schema(Box::new({}::schema(version)?))", name)
+                },
+                inner => schema_type_for(inner, false, false),
+            };
+            // Inner-array nullability matches the outer field nullability:
+            // a `nullable []T` produces `ArrayOf::nullable(...)`.
+            let constructor = if nullable { "nullable" } else { "new" };
             if flexible {
-                "Type::CompactBytes".to_string()
+                format!(
+                    "Type::CompactArray(Box::new(CompactArrayOf::{}({})))",
+                    constructor, element_expr
+                )
             } else {
-                "Type::Bytes".to_string()
+                format!("Type::Array(Box::new(ArrayOf::{}({})))", constructor, element_expr)
             }
         },
-        FieldType::Struct(_) => {
-            // Structs are composite - use Bytes as placeholder for introspection
-            "Type::Bytes".to_string()
+        FieldType::Struct(name) => {
+            // A direct struct field — emit a nested `Type::Schema`.
+            format!("Type::Schema(Box::new({}::schema(version)?))", name)
         },
     }
 }
@@ -4357,6 +4556,17 @@ fn schema_type_expr_for_field(field: &FieldSpec, message_flexible_versions: Vers
 fn field_has_version_dependent_schema_type(field: &FieldSpec, message_flexible_versions: Versions) -> bool {
     let v_low = field.versions().lowest();
     let v_high = field.versions().highest();
+
+    // Direct or array-of struct fields always emit a `<Inner>::schema(version)?`
+    // call, which reads `version` — so the schema method must take `version`,
+    // not `_version`.
+    match field.field_type() {
+        FieldType::Struct(_) => return true,
+        FieldType::Array(element_type) if matches!(element_type.as_ref(), FieldType::Struct(_)) => {
+            return true;
+        },
+        _ => {},
+    }
 
     // Resolve the per-field flexibleVersions override.
     let flexible_versions = field_flexible_versions(field, message_flexible_versions);
@@ -5107,5 +5317,69 @@ mod tests {
         );
         field.validate().unwrap();
         assert_eq!(field_type_to_rust_for_field(&field), "i64");
+    }
+
+    // ----------------------------------------------------------------------
+    // Issue 3: Schema emit for array-of-struct fields uses
+    // `Type::Array(ArrayOf::new(Type::Schema(...)))` /
+    // `Type::CompactArray(CompactArrayOf::new(Type::Schema(...)))`, NOT the
+    // placeholder `Type::Bytes` / `Type::CompactBytes`.
+    // ----------------------------------------------------------------------
+
+    #[test]
+    fn schema_emit_for_array_of_struct_uses_array_of_schema_not_bytes() {
+        // End-to-end: feed ProduceRequest.json into the generator and assert the
+        // emitted `schema()` method for the top-level message uses
+        // `Type::CompactArray(...)` over a nested struct schema for the
+        // `topic_data` field, not the legacy `Type::CompactBytes` placeholder.
+        use std::path::Path;
+        let tmp = std::env::temp_dir().join(format!("phase2-issue3-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let input = Path::new("messages");
+        let isolated = tmp.join("input");
+        std::fs::create_dir_all(&isolated).unwrap();
+        // Bring along the dependency files needed to resolve nested types.
+        for spec in &["ProduceRequest.json", "RequestHeader.json"] {
+            let src = input.join(spec);
+            if src.exists() {
+                std::fs::copy(&src, isolated.join(spec)).unwrap();
+            }
+        }
+        let output = tmp.join("output");
+        generate_messages(&isolated, &output).expect("codegen succeeds for ProduceRequest");
+        let generated =
+            std::fs::read_to_string(output.join("produce_request_data.rs")).expect("produce_request_data.rs written");
+
+        // Find the top-level ProduceRequestData::schema() body.
+        let marker = "impl ProduceRequestData {";
+        let start = generated.find(marker).expect("top-level impl block emitted");
+        let after = &generated[start..];
+        let schema_start = after.find("pub fn schema").expect("top-level schema() emitted");
+        let body_end = after[schema_start..].find("Schema::new(fields)").expect("schema() body found");
+        let body = &after[schema_start..schema_start + body_end];
+
+        // The `topic_data` field is `[]TopicProduceData`. At v9+ flexible-encoded.
+        assert!(
+            body.contains("topic_data"),
+            "topic_data field expected in schema(); body was:\n{body}",
+        );
+        // Strip whitespace to make the test rustfmt-tolerant.
+        let normalized: String = body.chars().filter(|c| !c.is_whitespace()).collect();
+        assert!(
+            normalized.contains("CompactArrayOf::new(Type::Schema(Box::new(TopicProduceData::schema"),
+            "topic_data must use CompactArrayOf over the nested struct's schema; body was:\n{body}",
+        );
+        assert!(
+            normalized.contains("ArrayOf::new(Type::Schema(Box::new(TopicProduceData::schema"),
+            "topic_data must use ArrayOf over the nested struct's schema for non-flexible versions; body was:\n{body}",
+        );
+        // The legacy placeholder must be gone.
+        assert!(
+            !body.contains("if version >= 9 { Type::CompactBytes } else { Type::Bytes }"),
+            "topic_data must not collapse to Bytes/CompactBytes placeholder; body was:\n{body}",
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
     }
 }
