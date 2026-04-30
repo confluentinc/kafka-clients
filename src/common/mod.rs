@@ -21,6 +21,7 @@ pub mod internals;
 pub mod kafka_exception;
 pub mod message;
 pub mod protocol;
+pub mod requests;
 pub mod utils;
 pub mod uuid;
 
