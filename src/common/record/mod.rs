@@ -32,6 +32,7 @@ pub mod record;
 pub mod record_batch;
 pub mod record_version;
 pub mod records;
+pub mod simple_record;
 pub mod timestamp_type;
 pub mod transferable_records;
 
@@ -43,5 +44,6 @@ pub use record::Record;
 pub use record_batch::RecordBatch;
 pub use record_version::RecordVersion;
 pub use records::Records;
+pub use simple_record::SimpleRecord;
 pub use timestamp_type::TimestampType;
 pub use transferable_records::TransferableRecords;
