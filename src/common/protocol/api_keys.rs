@@ -826,4 +826,73 @@ mod tests {
     // ApiMessageType.responseSchemas[], which is generated in Phase 2d. They
     // are deferred until then; the Phase 2d Actor will translate them when
     // the message catalog is wired up.
+
+    /// Drift check between Phase 2c's hand-coded `ALL_API_KEYS` table and the
+    /// Phase 2d generated `ApiMessageType` enum.
+    ///
+    /// Phase 2c's NOTES.md committed to either replacing the hand-coded
+    /// table with one populated from `ApiMessageType` or — if the refactor
+    /// was deferred — adding a test that asserts they agree on every
+    /// observable field. We chose the latter because the generated
+    /// `ApiMessageType` is mid-evolution (Phase 2d) and converting the
+    /// catalogue in-place would lock subsequent generator changes against
+    /// the hand-coded shape.
+    ///
+    /// We compare `id` ↔ `api_key()` and `name` ↔ `name()` in both
+    /// directions. We deliberately do *not* compare `listeners`,
+    /// `cluster_action`, or `forwardable`:
+    ///
+    /// - `listeners`: in Java the source-of-truth is
+    ///   `messageType.listeners()` (driven from the JSON spec's `listeners`
+    ///   field) and `ApiKeys.java` does not store its own copy. The
+    ///   hand-coded `ALL_API_KEYS` table picked listener sets per Apache
+    ///   Kafka 4.2 best-effort and includes `ZkBroker` for many APIs that
+    ///   the generated `ApiMessageType` (post-KIP-833) no longer exposes
+    ///   on a ZK listener. Until Phase 2d wires `ApiKeys.in_scope()`
+    ///   directly to `ApiMessageType.listeners()`, the two tables can
+    ///   legitimately differ on listeners.
+    /// - `cluster_action`/`forwardable`: live on `ApiKeys.java`'s enum
+    ///   constructor, not on `ApiMessageType`. The Phase 2d Actor will
+    ///   keep them on the hand-coded table; the generated catalogue is not
+    ///   the source of truth here.
+    #[test]
+    fn api_keys_match_generated_api_message_type() {
+        use crate::common::message::api_message_type::ApiMessageType;
+
+        for k in ApiKeys::values() {
+            let generated = ApiMessageType::from_api_key(k.id)
+                .unwrap_or_else(|| panic!("ApiMessageType missing variant for api_key={}", k.id));
+
+            assert_eq!(
+                generated.api_key(),
+                k.id,
+                "api_key mismatch for {}: generated={}, hand-coded={}",
+                k.name,
+                generated.api_key(),
+                k.id
+            );
+
+            assert_eq!(
+                generated.name(),
+                k.name,
+                "name mismatch for api_key={}: generated={}, hand-coded={}",
+                k.id,
+                generated.name(),
+                k.name
+            );
+        }
+
+        // Reverse direction: every generated variant must be in the
+        // hand-coded table.
+        for id in 0..i16::MAX {
+            if let Some(generated) = ApiMessageType::from_api_key(id) {
+                assert!(
+                    ApiKeys::has_id(id as i32),
+                    "ApiMessageType has variant for api_key={} ({}) but ALL_API_KEYS does not",
+                    id,
+                    generated.name()
+                );
+            }
+        }
+    }
 }

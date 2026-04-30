@@ -192,18 +192,19 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     let mut file = fs::File::create(&output_file)?;
 
     write_license_header(&mut file)?;
-    writeln!(file, "//! Generated from JSON message specifications.")?;
-    writeln!(file, "//!")?;
-    writeln!(file, "//! Rust equivalent of Java's generated `ApiMessageType` enum.")?;
+    // Plain comments (not `//!`) are used here because the file is included
+    // via `include!()` inside a `mod { ... }` block, where inner doc comments
+    // would attach to the wrong item.
+    writeln!(file, "// Generated from JSON message specifications.")?;
+    writeln!(file, "//")?;
+    writeln!(file, "// Rust equivalent of Java's generated `ApiMessageType` enum.")?;
     writeln!(
         file,
-        "//! Provides version ranges, header version logic, and listener information"
+        "// Provides version ranges, header version logic, and listener information"
     )?;
-    writeln!(file, "//! for each Kafka API key.")?;
+    writeln!(file, "// for each Kafka API key.")?;
     writeln!(file)?;
-    writeln!(file, "#![allow(unused_imports)]")?;
-    writeln!(file)?;
-    writeln!(file, "use crate::common::protocol::Schema;")?;
+    writeln!(file, "use crate::common::protocol::types::Schema;")?;
     writeln!(file)?;
 
     // --- ListenerType enum ---
@@ -456,45 +457,34 @@ pub fn generate_api_message_type(input_dir: &Path, output_dir: &Path) -> Result<
     writeln!(file, "    }}")?;
     writeln!(file)?;
 
-    // request_schema()
+    // request_schema() and response_schema() require every `*_data` module to
+    // be reachable from `crate::common::message::*`. Phase 2d-1 only wires up
+    // a handful of those modules; the remainder will be added in 2d-2/3/4 as
+    // each spec passes its round-trip / byte-vector tests. Until the full set
+    // is wired up these methods would fail to compile, so we currently emit
+    // stubs that always return an empty schema. The Phase 2d-4 Actor will
+    // re-enable the per-API dispatch and emit the corresponding compile-time
+    // assertion that all message modules are reachable.
     writeln!(file, "    /// Returns the request schema for this API at the given version.")?;
-    writeln!(file, "    pub fn request_schema(self, version: i16) -> Schema {{")?;
-    writeln!(file, "        match self {{")?;
-    for data in apis.values() {
-        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
-        if data.request_spec.is_some() && data.has_valid_versions() {
-            let module = format!("{}_data", to_snake_case(&format!("{}Request", data.name(&api_names))));
-            let struct_name = format!("{}RequestData", data.name(&api_names));
-            writeln!(
-                file,
-                "            Self::{} => crate::{}::{}::schema(version),",
-                variant, module, struct_name
-            )?;
-        }
-    }
-    writeln!(file, "            _ => Schema::new(Vec::new()),")?;
-    writeln!(file, "        }}")?;
+    writeln!(
+        file,
+        "    pub fn request_schema(self, version: i16) -> Result<Schema, crate::common::errors::KafkaError> {{"
+    )?;
+    writeln!(file, "        let _ = version;")?;
+    writeln!(file, "        let _ = self;")?;
+    writeln!(file, "        Schema::new(Vec::new())")?;
     writeln!(file, "    }}")?;
     writeln!(file)?;
 
     // response_schema()
     writeln!(file, "    /// Returns the response schema for this API at the given version.")?;
-    writeln!(file, "    pub fn response_schema(self, version: i16) -> Schema {{")?;
-    writeln!(file, "        match self {{")?;
-    for data in apis.values() {
-        let variant = to_snake_case(&data.name(&api_names)).to_uppercase();
-        if data.response_spec.is_some() {
-            let module = format!("{}_data", to_snake_case(&format!("{}Response", data.name(&api_names))));
-            let struct_name = format!("{}ResponseData", data.name(&api_names));
-            writeln!(
-                file,
-                "            Self::{} => crate::{}::{}::schema(version),",
-                variant, module, struct_name
-            )?;
-        }
-    }
-    writeln!(file, "            _ => Schema::new(Vec::new()),")?;
-    writeln!(file, "        }}")?;
+    writeln!(
+        file,
+        "    pub fn response_schema(self, version: i16) -> Result<Schema, crate::common::errors::KafkaError> {{"
+    )?;
+    writeln!(file, "        let _ = version;")?;
+    writeln!(file, "        let _ = self;")?;
+    writeln!(file, "        Schema::new(Vec::new())")?;
     writeln!(file, "    }}")?;
 
     writeln!(file, "}}")?;
