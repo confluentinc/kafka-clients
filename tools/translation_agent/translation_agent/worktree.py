@@ -77,11 +77,14 @@ def worktree_for_branch(
     point Phase B's push *would have* used).
 
     Pass `ak_commit=<sha>` to bootstrap the worktree for plan/impl agent
-    work: the orchestrator runs `make init` (initializes submodules and
-    creates the python venv), checks out `ak_commit` in the `kafka/`
-    submodule, and commits the submodule pointer bump as its own commit
-    BEFORE the agent runs. The agent's subsequent commits (e.g. "Design
-    document") sit on top of the bump commit.
+    work: the orchestrator runs `make` (= `make build`, the Makefile's
+    default target -- which walks `submodules -> build-rust -> build-c
+    -> build-python` in dependency order, so the kafka submodule is
+    initialized as a prerequisite of the C build), checks out
+    `ak_commit` in the `kafka/` submodule, and commits the submodule
+    pointer bump as its own commit BEFORE the agent runs. The agent's
+    subsequent commits (e.g. "Design document") sit on top of the bump
+    commit.
 
     Commits made inside the worktree advance the local `branch_name` ref;
     a `git push` from inside also advances `origin/<branch_name>`. With
@@ -109,7 +112,7 @@ def worktree_for_branch(
         )
         created = True
         if ak_commit is not None:
-            _make_init(worktree_dir)
+            _make_build(worktree_dir)
             _bump_kafka_submodule(worktree_dir, ak_commit, ak_branch)
         yield worktree_dir
     finally:
@@ -129,24 +132,28 @@ def worktree_for_branch(
                 shutil.rmtree(worktree_dir, ignore_errors=True)
 
 
-def _make_init(worktree_dir: Path) -> None:
-    """Run `make init` inside the worktree to populate submodules and venv.
+def _make_build(worktree_dir: Path) -> None:
+    """Run `make` (= `make build`, the default target) inside the worktree.
 
-    Slow (typically 30-60 seconds): clones the kafka submodule into the
-    worktree (mostly using cached objects from the main repo), creates a
-    python venv, and pip-installs the project's dev deps. Required so
-    the spawned agent can read AK source under `kafka/` and run python
-    tests if needed.
+    Per the root Makefile, `build` depends on `build-rust`, `build-c`
+    (which itself depends on `submodules` -> `git submodule update --init
+    --recursive`), and `build-python`. So a single `make` call walks the
+    full prerequisite chain in the right order: submodules first, then
+    cargo + cmake + python build. Required so the spawned agent can read
+    AK source under `kafka/` and the C bindings have generated headers.
+
+    Slow (typically a few minutes for a fresh worktree because of the
+    cargo release build).
     """
     proc = subprocess.run(
-        ["make", "init"],
+        ["make"],
         cwd=str(worktree_dir),
         capture_output=True,
         text=True,
     )
     if proc.returncode != 0:
         raise WorktreeError(
-            f"make init in {worktree_dir} failed (rc={proc.returncode}): "
+            f"make in {worktree_dir} failed (rc={proc.returncode}): "
             f"{proc.stderr.strip()}"
         )
 
