@@ -179,14 +179,21 @@ impl KafkaError {
         )
     }
 
-    /// True iff this error is fatal — the producer cannot recover and the
-    /// client should be closed.
+    /// True iff this error is fatal in the **non-idempotent producer** — the
+    /// producer cannot recover and the client should be closed.
     ///
     /// This corresponds to:
     /// * `AuthenticationException`, `AuthorizationException` and subclasses
     /// * `ApplicationRecoverableException` family (`ProducerFencedException`,
     ///   `InvalidProducerEpochException`)
     /// * `UnsupportedVersionException` (the broker speaks a newer protocol)
+    ///
+    /// Note: Java's `Sender.completeBatch` additionally treats
+    /// `OutOfOrderSequenceException` and `UnknownProducerIdException` as fatal
+    /// when idempotence is enabled (the `failBatch(... isFatalIdempotentException ...)`
+    /// path). When the idempotent / transactional producer paths are wired up
+    /// (Milestone 6+), this method (or a separate `is_fatal_idempotent`) must
+    /// be extended to include those two variants.
     pub fn is_fatal(&self) -> bool {
         matches!(
             self,
