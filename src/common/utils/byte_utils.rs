@@ -168,7 +168,7 @@ pub fn write_unsigned_varint(value: u32, buffer: &mut Vec<u8>) {
 }
 
 /// Write the unsigned-varint encoding of `value` to a `Write` sink.
-pub fn write_unsigned_varint_to_stream<W: Write>(value: u32, w: &mut W) -> io::Result<()> {
+pub fn write_unsigned_varint_to_stream<W: Write + ?Sized>(value: u32, w: &mut W) -> io::Result<()> {
     let mut v = value;
     while (v & !0x7F) != 0 {
         w.write_all(&[((v & 0x7F) | 0x80) as u8])?;
@@ -183,7 +183,7 @@ pub fn write_varint(value: i32, buffer: &mut Vec<u8>) {
 }
 
 /// Write the signed (zig-zag) varint encoding of `value` to a `Write` sink.
-pub fn write_varint_to_stream<W: Write>(value: i32, w: &mut W) -> io::Result<()> {
+pub fn write_varint_to_stream<W: Write + ?Sized>(value: i32, w: &mut W) -> io::Result<()> {
     write_unsigned_varint_to_stream(zig_zag_encode_i32(value), w)
 }
 
@@ -198,7 +198,7 @@ pub fn write_unsigned_varlong(value: u64, buffer: &mut Vec<u8>) {
 }
 
 /// Write the unsigned-varlong encoding of `value` to a `Write` sink.
-pub fn write_unsigned_varlong_to_stream<W: Write>(value: u64, w: &mut W) -> io::Result<()> {
+pub fn write_unsigned_varlong_to_stream<W: Write + ?Sized>(value: u64, w: &mut W) -> io::Result<()> {
     let mut v = value;
     while (v & !0x7F) != 0 {
         w.write_all(&[((v & 0x7F) | 0x80) as u8])?;
@@ -213,7 +213,7 @@ pub fn write_varlong(value: i64, buffer: &mut Vec<u8>) {
 }
 
 /// Write the signed (zig-zag) varlong encoding of `value` to a `Write` sink.
-pub fn write_varlong_to_stream<W: Write>(value: i64, w: &mut W) -> io::Result<()> {
+pub fn write_varlong_to_stream<W: Write + ?Sized>(value: i64, w: &mut W) -> io::Result<()> {
     write_unsigned_varlong_to_stream(zig_zag_encode_i64(value), w)
 }
 
