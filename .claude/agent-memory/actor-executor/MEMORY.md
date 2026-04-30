@@ -6,3 +6,6 @@
 - [Phase 2d generator/runtime gap](phase2d_generator_runtime_gap.md) — generator emits an API surface that doesn't match Phase 2c traits
 - [Phase 2d-4 byte fixtures](phase2d4_byte_fixtures.md) — Java-authoritative byte capture process + 2 produce-path generator emit fixes
 - [Phase 2e requests layout](phase2e_requests_layout.md) — wrapper trait shape choices: `&dyn Message`, `HashMap<Errors,_>`, no associated const
+- [Phase 2 review fixes](phase2_review_fixes.md) — patterns kept from Phase 2 review round (write_byte_buffer split, OnceLock api_key, ListenerType dedup)
+- [Phase 3a record base](phase3a_record_base.md) — record/ trait base layer summary, what's deferred to 3c/3d/5
+- [Phase 3a compression gap](phase3a_compression_dispatch_gap.md) — CompressionType codec-dispatch deferred to Phase 3c
