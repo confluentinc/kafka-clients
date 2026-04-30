@@ -33,3 +33,27 @@ introduced the issue. See `git log --grep=fixup!` for the full list.
 - **Severity:** **MINOR** (Behaviour parity; only relevant once idempotent/transactional path is added — Phase 6+)
 - **File:** `src/common/errors.rs:190-201`
 - **Fix applied:** Updated the `is_fatal` docstring to clarify the method covers the **non-idempotent** producer, and added a TODO note pointing at `Sender.completeBatch` so the idempotent / transactional path (Milestone 6+) extends `is_fatal` to include `OutOfOrderSequence` / `UnknownProducerId`. Did not flip them on now since transactions are out of scope for Milestone 1 and unconditionally tagging them fatal would be incorrect for the non-idempotent producer that Phase 1 is building toward. Fixup commit references `43c713b`.
+
+---
+
+## Issue 3: `Uuid::from_string` length check uses byte length, not character count, and slice may panic
+
+- **Severity:** **MINOR** (edge case — only triggers on non-ASCII input that Java would still reject but with a different message)
+- **File:** `src/common/uuid.rs:103-107`
+- **Fix applied:** Replaced `s.len() > 24` and `&s[..24]` with char-boundary slicing (`s.chars().take(25).count() > 24` and `s.chars().take(24).collect()`). Added a regression test (`from_string_non_ascii_too_long_does_not_panic`) using a 25-emoji input that would have panicked on the old byte-indexed slice. Fixup commit references `43c713b`.
+
+---
+
+## Issue 4: `Uuid` `testHashCode` Java fixture not translated; explicit `hash_code` missing
+
+- **Severity:** **MINOR** (test gap — Java test asserts specific hash values that are part of the wire-equivalence contract)
+- **File:** `src/common/uuid.rs`
+- **Fix applied:** Added an explicit `pub const fn hash_code(&self) -> i32` matching Java's `(int)(xor >> 32) ^ (int) xor` formula, with a docstring noting that the derived `std::hash::Hash` is intentionally separate (used for HashMap keys; not wire-visible). Translated the Java `testHashCode` fixture as `hash_code_matches_java`. Fixup commit references `43c713b`.
+
+---
+
+## Issue 5: Java `UuidTest::testStringConversion` round-trip with `ZERO_UUID` not translated
+
+- **Severity:** **MINOR** (test coverage gap)
+- **File:** `src/common/uuid.rs`
+- **Fix applied:** Added `ZERO_UUID` round-trip assertion to `to_string_round_trip` to mirror `UuidTest.java:69-78`. Fixup commit references `43c713b`.
