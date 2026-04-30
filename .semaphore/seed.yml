@@ -2,8 +2,7 @@ version: v1.0
 name: Seed translation_agent DB
 
 # Run as a Semaphore Task (configured in the project's Tasks tab).
-# Inserts the initial branch_commit correspondence row so the first
-# sweep has a cursor to walk from.
+# Inserts or updates the branch_commit cursor for a Rust branch.
 #
 # Required Task parameters (set when triggering the Task):
 #   AK_COMMIT     -- full SHA in the AK repo
@@ -11,6 +10,9 @@ name: Seed translation_agent DB
 # Optional (defaults below match the main pipeline):
 #   AK_BRANCH     -- defaults to trunk
 #   RUST_BRANCH   -- defaults to master
+#   FORCE         -- "True" to overwrite an existing cursor for the same
+#                    RUST_BRANCH; "False" (default) errors out if a row
+#                    already exists with different values.
 
 agent:
   machine:
@@ -25,6 +27,8 @@ blocks:
           value: trunk
         - name: RUST_BRANCH
           value: master
+        - name: FORCE
+          value: "False"
       jobs:
         - name: seed
           commands:
@@ -38,7 +42,11 @@ blocks:
               : "${AK_COMMIT:?AK_COMMIT must be set as a Task parameter}"
               : "${RUST_COMMIT:?RUST_COMMIT must be set as a Task parameter}"
             - |
-              translation-agent --seed \
+              FORCE_FLAG=""
+              if [ "${FORCE}" = "True" ]; then
+                FORCE_FLAG="--force"
+              fi
+              translation-agent --seed $FORCE_FLAG \
                 --ak-branch "${AK_BRANCH}" \
                 --ak-commit "${AK_COMMIT}" \
                 --rust-branch "${RUST_BRANCH}" \

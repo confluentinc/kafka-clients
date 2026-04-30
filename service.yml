@@ -41,3 +41,14 @@ semaphore:
         required: true
         description: "Rust commit SHA (full 40 chars) currently tracking
           AK_COMMIT on RUST_BRANCH."
+      - name: FORCE
+        required: true
+        default_value: "False"
+        description: "Allow overwriting the existing branch_commit cursor
+          for the given RUST_BRANCH. Without this, the task errors out
+          if a row already exists with different ak_branch/ak_commit/
+          rust_commit values. Use to re-align after upstream changes or
+          after an interrupted run."
+        options:
+          - "False"
+          - "True"
