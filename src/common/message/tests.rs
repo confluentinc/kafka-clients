@@ -18,13 +18,29 @@
 //! validate the *runtime contract* of the codegen pipeline rather than
 //! testing any single module in isolation.
 //!
-//! Phase 2d-1 covers `RequestHeaderData` only; Phase 2d-2/3/4 will add
-//! tests for the remaining specs as they are wired up.
+//! Phase 2d-1 covers `RequestHeaderData`; Phase 2d-2 starts adding the
+//! remaining message specs. Phase 2d-3/4 will continue with the
+//! Metadata and Produce request/response pairs.
 
 use crate::common::message::request_header_data::RequestHeaderData;
+use crate::common::message::response_header_data::ResponseHeaderData;
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
 use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+use crate::common::protocol::types::RawTaggedField;
 use crate::common::protocol::{Message, Readable};
+
+/// Helper: encode a `Message` at the given version into a byte buffer (the
+/// same idiom used at every Phase 2d test site — sizer pass, allocate,
+/// write, flip).
+fn encode<M: Message>(msg: &M, version: i16) -> Vec<u8> {
+    let mut cache = ObjectSerializationCache::new();
+    let mut sizer = crate::common::protocol::MessageSizeAccumulator::new();
+    Message::add_size(msg, &mut sizer, &mut cache, version);
+    let mut accessor = ByteBufferAccessor::allocate(sizer.total_size() as usize);
+    Message::write(msg, &mut accessor, &cache, version).expect("write succeeds");
+    accessor.flip();
+    accessor.buffer().to_vec()
+}
 
 /// Header version 2 — the first flexible version of `RequestHeader`. We
 /// encode the data at this version so the test exercises the
@@ -168,6 +184,81 @@ fn request_header_data_round_trip_null_client_id_v1() {
 
     let mut decode_accessor = ByteBufferAccessor::wrap(bytes.to_vec());
     let mut decoded = RequestHeaderData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 1).expect("read succeeds");
+    assert_eq!(decoded, original);
+}
+
+// =============================================================================
+// ResponseHeaderData (Phase 2d-2)
+//
+// `ResponseHeader.json` validVersions = 0-1, flexibleVersions = 1+. v0 is the
+// non-flexible, fixed 4-byte correlation id. v1 is flexible and adds a
+// trailing tagged-fields varint.
+// =============================================================================
+
+/// Round trip at the lowest supported version (v0, non-flexible). The
+/// wire image is exactly 4 bytes: the i32 BE correlation id.
+#[test]
+fn response_header_data_round_trip_v0() {
+    let original = ResponseHeaderData { correlation_id: 42, unknown_tagged_fields: Vec::new() };
+
+    let bytes = encode(&original, 0);
+    assert_eq!(bytes.len(), 4, "v0 ResponseHeader is exactly 4 bytes (correlation id)");
+    assert_eq!(&bytes[..], &42i32.to_be_bytes(), "correlation_id encoded as i32 BE");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ResponseHeaderData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 0).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at the highest supported version (v1, flexible). Encodes a
+/// non-empty tagged field to exercise the flexible-versions trailer.
+#[test]
+fn response_header_data_round_trip_v1_flexible_with_tagged_field() {
+    let original = ResponseHeaderData {
+        correlation_id: -1,
+        unknown_tagged_fields: vec![RawTaggedField::new(42, vec![0xCA, 0xFE])],
+    };
+
+    let bytes = encode(&original, 1);
+
+    // Wire layout for ResponseHeader v1:
+    //   correlation_id     (i32 BE, 4 bytes)
+    //   tagged-field count (unsigned varint = 1)
+    //   tagged field 0:
+    //     tag             (unsigned varint = 42)
+    //     size            (unsigned varint = 2)
+    //     data            (2 bytes)
+    assert_eq!(&bytes[0..4], &(-1i32).to_be_bytes(), "correlation_id encoded as i32 BE");
+    assert_eq!(bytes[4], 1, "single tagged field in trailer");
+    assert_eq!(bytes[5], 42, "tag varint");
+    assert_eq!(bytes[6], 2, "size varint");
+    assert_eq!(&bytes[7..9], &[0xCA, 0xFE], "tagged field data");
+    assert_eq!(
+        bytes.len(),
+        9,
+        "v1 ResponseHeader = 4 + varint(1) + varint(42) + varint(2) + 2 bytes"
+    );
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ResponseHeaderData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 1).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// At v1 with no tagged fields, the trailer is a single 0-byte varint.
+#[test]
+fn response_header_data_round_trip_v1_flexible_empty() {
+    let original = ResponseHeaderData { correlation_id: 99, unknown_tagged_fields: Vec::new() };
+    let bytes = encode(&original, 1);
+    assert_eq!(bytes.len(), 5, "v1 ResponseHeader empty = 4 bytes + varint(0)");
+    assert_eq!(bytes[4], 0, "no tagged fields → varint(0)");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ResponseHeaderData::new();
     Message::read(&mut decoded, &mut decode_accessor, 1).expect("read succeeds");
     assert_eq!(decoded, original);
 }

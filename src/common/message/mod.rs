@@ -23,9 +23,11 @@
 //!
 //! Phase 2d-1 wires up `api_message_type` (used by the `ApiKey` ↔
 //! `ApiMessageType` drift test) and `request_header_data` (the
-//! proof-of-concept generated message). Phase 2d-2/3/4 will additively
-//! include the remaining generated message data structs as their
-//! wire-protocol round-trip tests are added.
+//! proof-of-concept generated message). Phase 2d-2 additively wires
+//! `response_header_data`, `api_versions_request_data`, and
+//! `api_versions_response_data`. Phase 2d-3/4 will continue to include
+//! the remaining generated message data structs as their wire-protocol
+//! round-trip tests are added.
 
 /// `ApiMessageType` enum, generated from the message JSON specs. Mirrors
 /// Java's generated `org.apache.kafka.common.message.ApiMessageType`.
@@ -37,6 +39,12 @@ pub mod api_message_type {
 /// generated `org.apache.kafka.common.message.RequestHeaderData`.
 pub mod request_header_data {
     include!(concat!(env!("OUT_DIR"), "/generated/request_header_data.rs"));
+}
+
+/// `ResponseHeaderData`, generated from `ResponseHeader.json`. Mirrors Java's
+/// generated `org.apache.kafka.common.message.ResponseHeaderData`.
+pub mod response_header_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/response_header_data.rs"));
 }
 
 #[cfg(test)]
