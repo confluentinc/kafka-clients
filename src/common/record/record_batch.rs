@@ -160,15 +160,23 @@ pub trait RecordBatch {
     /// 1. The earliest offset is returned if multiple records share the max
     ///    timestamp.
     /// 2. Always returns `None` for magic 0 batches.
-    fn offset_of_max_timestamp(
-        &self,
-        decompression_buffer_supplier: &mut BufferSupplier,
-    ) -> Result<Option<i64>, KafkaError> {
+    ///
+    /// Mirrors Java's no-arg `RecordBatch#offsetOfMaxTimestamp` (default
+    /// interface body), which internally allocates a fresh
+    /// `BufferSupplier.create()` inside a try-with-resources. The Rust
+    /// translation does the same: a local [`BufferSupplier::create`] is
+    /// instantiated for the duration of the streaming-iterator scope, then
+    /// dropped when the borrow ends.
+    fn offset_of_max_timestamp(&self) -> Result<Option<i64>, KafkaError> {
         if self.magic() == MAGIC_VALUE_V0 {
             return Ok(None);
         }
         let max_timestamp = self.max_timestamp();
-        for record in self.streaming_iterator(decompression_buffer_supplier) {
+        // Mirror Java's `try (CloseableIterator<Record> iter =
+        // streamingIterator(BufferSupplier.create()))`: the supplier is
+        // owned locally and dropped when this block exits.
+        let mut supplier = BufferSupplier::create();
+        for record in self.streaming_iterator(&mut supplier) {
             if max_timestamp == record.timestamp() {
                 return Ok(Some(record.offset()));
             }
