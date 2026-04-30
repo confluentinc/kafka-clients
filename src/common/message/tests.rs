@@ -23,6 +23,9 @@
 //! Metadata and Produce request/response pairs.
 
 use crate::common::message::api_versions_request_data::ApiVersionsRequestData;
+use crate::common::message::api_versions_response_data::{
+    ApiVersion, ApiVersionsResponseData, FinalizedFeatureKey, SupportedFeatureKey,
+};
 use crate::common::message::request_header_data::RequestHeaderData;
 use crate::common::message::response_header_data::ResponseHeaderData;
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
@@ -349,4 +352,135 @@ fn api_versions_request_data_round_trip_v4_empty_strings() {
     let mut decoded = ApiVersionsRequestData::new();
     Message::read(&mut decoded, &mut decode_accessor, 4).expect("read succeeds");
     assert_eq!(decoded, original);
+}
+// =============================================================================
+// ApiVersionsResponseData (Phase 2d-2)
+//
+// `ApiVersionsResponse.json` validVersions = 0-4, flexibleVersions = 3+.
+// This spec exercises:
+//   - Arrays of structs (`ApiKeys: Vec<ApiVersion>`)
+//   - int64 fields (FinalizedFeaturesEpoch)
+//   - bool fields (ZkMigrationReady)
+//   - Tagged fields with non-trivial encodings (struct arrays, primitives)
+// =============================================================================
+
+/// Round trip at v0 (lowest supported, non-flexible) with a populated
+/// `api_keys` array. At v0 the only fields are `error_code` and
+/// `api_keys` (Vec<ApiVersion>), encoded as i32-prefixed array of fixed
+/// 6-byte ApiVersion entries (no tagged-fields trailer in either parent
+/// or child).
+#[test]
+fn api_versions_response_data_round_trip_v0() {
+    let original = ApiVersionsResponseData {
+        error_code: 0,
+        api_keys: vec![
+            ApiVersion {
+                api_key: 0, // Produce
+                min_version: 0,
+                max_version: 11,
+                unknown_tagged_fields: Vec::new(),
+            },
+            ApiVersion {
+                api_key: 18, // ApiVersions
+                min_version: 0,
+                max_version: 4,
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        throttle_time_ms: 0,
+        supported_features: Vec::new(),
+        finalized_features_epoch: -1,
+        finalized_features: Vec::new(),
+        zk_migration_ready: false,
+        unknown_tagged_fields: Vec::new(),
+    };
+
+    let bytes = encode(&original, 0);
+    // Wire layout for v0:
+    //   error_code (i16 BE = 0)
+    //   array length (i32 BE = 2)
+    //   ApiVersion[0]: api_key=0, min=0, max=11 (3 i16 BE = 6 bytes)
+    //   ApiVersion[1]: api_key=18, min=0, max=4 (6 bytes)
+    // Total: 2 + 4 + 6 + 6 = 18 bytes
+    assert_eq!(bytes.len(), 18);
+    assert_eq!(&bytes[0..2], &0i16.to_be_bytes(), "error_code = 0");
+    assert_eq!(&bytes[2..6], &2i32.to_be_bytes(), "array length = 2 (i32 BE at v0)");
+    // ApiVersion[0]
+    assert_eq!(&bytes[6..8], &0i16.to_be_bytes(), "api_keys[0].api_key");
+    assert_eq!(&bytes[8..10], &0i16.to_be_bytes(), "api_keys[0].min_version");
+    assert_eq!(&bytes[10..12], &11i16.to_be_bytes(), "api_keys[0].max_version");
+    // ApiVersion[1]
+    assert_eq!(&bytes[12..14], &18i16.to_be_bytes(), "api_keys[1].api_key");
+    assert_eq!(&bytes[14..16], &0i16.to_be_bytes(), "api_keys[1].min_version");
+    assert_eq!(&bytes[16..18], &4i16.to_be_bytes(), "api_keys[1].max_version");
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ApiVersionsResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 0).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v4 (highest supported, flexible) with all tagged fields
+/// populated, exercising the most complex encoding paths: compact array
+/// (length+1 varint), struct-typed tagged fields, int64 tagged field,
+/// bool tagged field, and an unknown tagged field for forward-compat.
+#[test]
+fn api_versions_response_data_round_trip_v4_flexible_full() {
+    let original = ApiVersionsResponseData {
+        error_code: 0,
+        api_keys: vec![
+            ApiVersion { api_key: 0, min_version: 0, max_version: 11, unknown_tagged_fields: Vec::new() },
+            ApiVersion { api_key: 18, min_version: 0, max_version: 4, unknown_tagged_fields: Vec::new() },
+        ],
+        throttle_time_ms: 250,
+        supported_features: vec![
+            SupportedFeatureKey {
+                name: "metadata.version".to_string(),
+                min_version: 1,
+                max_version: 14,
+                unknown_tagged_fields: Vec::new(),
+            },
+            SupportedFeatureKey {
+                name: "kraft.version".to_string(),
+                min_version: 0,
+                max_version: 1,
+                unknown_tagged_fields: Vec::new(),
+            },
+        ],
+        finalized_features_epoch: 100,
+        finalized_features: vec![FinalizedFeatureKey {
+            name: "metadata.version".to_string(),
+            max_version_level: 14,
+            min_version_level: 14,
+            unknown_tagged_fields: Vec::new(),
+        }],
+        zk_migration_ready: true,
+        // unknown tag (99) for forward-compat — round-trips through the
+        // unknown_tagged_fields catch-all.
+        unknown_tagged_fields: vec![RawTaggedField::new(99, vec![0xDE, 0xAD])],
+    };
+
+    let bytes = encode(&original, 4);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ApiVersionsResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 4).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
+}
+
+/// Round trip at v4 with the *minimum* payload — no API keys, no tagged
+/// fields populated. Exercises the "all defaults" path: error_code = 0,
+/// empty array (compact-encoded as varint(1)), no tagged fields.
+#[test]
+fn api_versions_response_data_round_trip_v4_flexible_empty() {
+    let original = ApiVersionsResponseData::new();
+    let bytes = encode(&original, 4);
+
+    let mut decode_accessor = ByteBufferAccessor::wrap(bytes);
+    let mut decoded = ApiVersionsResponseData::new();
+    Message::read(&mut decoded, &mut decode_accessor, 4).expect("read succeeds");
+    assert_eq!(decoded, original);
+    assert_eq!(decode_accessor.remaining(), 0);
 }

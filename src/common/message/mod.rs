@@ -54,5 +54,12 @@ pub mod api_versions_request_data {
     include!(concat!(env!("OUT_DIR"), "/generated/api_versions_request_data.rs"));
 }
 
+/// `ApiVersionsResponseData`, generated from `ApiVersionsResponse.json`.
+/// Mirrors Java's generated
+/// `org.apache.kafka.common.message.ApiVersionsResponseData`.
+pub mod api_versions_response_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/api_versions_response_data.rs"));
+}
+
 #[cfg(test)]
 mod tests;
