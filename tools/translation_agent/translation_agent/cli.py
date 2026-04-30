@@ -128,6 +128,13 @@ def _build_parser() -> argparse.ArgumentParser:
     # Seed-mode args (--ak-branch and --rust-branch are shared with sweep mode).
     parser.add_argument("--ak-commit", help="AK commit hash (for --seed).")
     parser.add_argument("--rust-commit", help="Rust commit hash (for --seed).")
+    parser.add_argument(
+        "--force", action="store_true",
+        help="With --seed: overwrite the branch_commit cursor for the "
+             "given --rust-branch even if a row already exists with "
+             "different ak/rust commits. Without --force, an existing "
+             "row with different values causes an error.",
+    )
 
     return parser
 
@@ -138,18 +145,31 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
     if missing:
         log.error("--seed requires: %s", ", ".join(missing))
         return 2
-    inserted = db.seed_correspondence(
-        conn, args.ak_branch, args.ak_commit, args.rust_branch, args.rust_commit,
-    )
-    if inserted:
-        log.info(
-            "Inserted branch_commit (ak=%s/%s, rust=%s/%s)",
+    try:
+        result = db.seed_correspondence(
+            conn,
             args.ak_branch, args.ak_commit, args.rust_branch, args.rust_commit,
+            force=args.force,
         )
-    else:
+    except ValueError as e:
+        log.error("%s", e)
+        return 1
+    if result == "inserted":
         log.info(
-            "branch_commit already exists for (%s, %s, %s) -- left unchanged",
-            args.ak_branch, args.ak_commit, args.rust_branch,
+            "Inserted branch_commit (rust=%s -> ak=%s/%s, rust_commit=%s)",
+            args.rust_branch, args.ak_branch, args.ak_commit, args.rust_commit,
+        )
+    elif result == "updated":
+        log.info(
+            "Updated branch_commit cursor for rust_branch=%s -> ak=%s/%s, "
+            "rust_commit=%s [--force]",
+            args.rust_branch, args.ak_branch, args.ak_commit, args.rust_commit,
+        )
+    else:  # "unchanged"
+        log.info(
+            "branch_commit cursor for rust_branch=%s already at ak=%s/%s, "
+            "rust_commit=%s -- no change",
+            args.rust_branch, args.ak_branch, args.ak_commit, args.rust_commit,
         )
     return 0
 

@@ -59,13 +59,15 @@ STATUS_NAMES = {
 
 
 _SCHEMA = [
+    # branch_commit's PK is `rust_branch` alone -- each Rust branch tracks
+    # exactly one (ak_branch, ak_commit) at a time. The row IS the
+    # current cursor; updates replace it in place.
     """
     CREATE TABLE IF NOT EXISTS branch_commit (
+        rust_branch  TEXT NOT NULL PRIMARY KEY,
         ak_branch    TEXT NOT NULL,
         ak_commit    TEXT NOT NULL,
-        rust_branch  TEXT NOT NULL,
-        rust_commit  TEXT NOT NULL,
-        PRIMARY KEY (ak_branch, ak_commit, rust_branch)
+        rust_commit  TEXT NOT NULL
     )
     """,
     """
@@ -82,7 +84,6 @@ _SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_pr_commit_status ON pr_commit(status)",
     "CREATE INDEX IF NOT EXISTS idx_pr_commit_rust_branch ON pr_commit(rust_branch)",
-    "CREATE INDEX IF NOT EXISTS idx_branch_commit_rust ON branch_commit(rust_branch, rust_commit)",
 ]
 
 
@@ -94,10 +95,52 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Idempotently create all tables and indexes."""
+    """Idempotently create all tables and indexes, and migrate any old
+    branch_commit schema (multi-column PK) to the new single-column PK.
+    """
     with conn:
+        # Migrate first so the CREATE-IF-NOT-EXISTS below sees the right
+        # shape on a pre-existing DB.
+        _migrate_branch_commit_pk(conn)
         for stmt in _SCHEMA:
             conn.execute(stmt)
+
+
+def _migrate_branch_commit_pk(conn: sqlite3.Connection) -> None:
+    """Convert old branch_commit schema (PK on `(ak_branch, ak_commit, rust_branch)`)
+    to the new schema (PK on `rust_branch` alone). No-op if the table
+    doesn't exist yet or is already on the new schema.
+
+    Collapses any duplicate rows for the same `rust_branch` by picking the
+    most recently inserted (max rowid).
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_commit'"
+    ).fetchone()
+    if row is None:
+        return
+    sql = row["sql"] or ""
+    if "PRIMARY KEY (ak_branch, ak_commit, rust_branch)" not in sql:
+        return  # already on the new schema
+    conn.executescript(
+        """
+        CREATE TABLE branch_commit_new (
+            rust_branch  TEXT NOT NULL PRIMARY KEY,
+            ak_branch    TEXT NOT NULL,
+            ak_commit    TEXT NOT NULL,
+            rust_commit  TEXT NOT NULL
+        );
+        INSERT INTO branch_commit_new (rust_branch, ak_branch, ak_commit, rust_commit)
+        SELECT rust_branch, ak_branch, ak_commit, rust_commit
+        FROM branch_commit
+        WHERE rowid IN (
+            SELECT MAX(rowid) FROM branch_commit GROUP BY rust_branch
+        );
+        DROP INDEX IF EXISTS idx_branch_commit_rust;
+        DROP TABLE branch_commit;
+        ALTER TABLE branch_commit_new RENAME TO branch_commit;
+        """
+    )
 
 
 def seed_correspondence(
@@ -106,21 +149,53 @@ def seed_correspondence(
     ak_commit: str,
     rust_branch: str,
     rust_commit: str,
-) -> bool:
-    """Insert a (AK, Rust) correspondence row.
+    *,
+    force: bool = False,
+) -> str:
+    """Insert or update the cursor row for `rust_branch`.
 
-    Idempotent: if a row already exists for the (ak_branch, ak_commit,
-    rust_branch) primary key, the existing row is left unchanged. Returns
-    True if a new row was inserted, False otherwise.
+    Returns one of:
+      - "inserted" -- new row added.
+      - "unchanged" -- row already exists with identical values.
+      - "updated" -- row existed with different values AND `force=True`.
+
+    Raises ValueError if a row already exists with different values and
+    `force=False` (the operator must opt in to overwriting the cursor).
     """
     with conn:
-        cursor = conn.execute(
-            "INSERT OR IGNORE INTO branch_commit "
-            "(ak_branch, ak_commit, rust_branch, rust_commit) "
-            "VALUES (?, ?, ?, ?)",
-            (ak_branch, ak_commit, rust_branch, rust_commit),
+        existing = conn.execute(
+            "SELECT ak_branch, ak_commit, rust_commit FROM branch_commit "
+            "WHERE rust_branch = ?",
+            (rust_branch,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO branch_commit "
+                "(rust_branch, ak_branch, ak_commit, rust_commit) "
+                "VALUES (?, ?, ?, ?)",
+                (rust_branch, ak_branch, ak_commit, rust_commit),
+            )
+            return "inserted"
+        same = (
+            existing["ak_branch"] == ak_branch
+            and existing["ak_commit"] == ak_commit
+            and existing["rust_commit"] == rust_commit
         )
-        return cursor.rowcount > 0
+        if same:
+            return "unchanged"
+        if not force:
+            raise ValueError(
+                f"branch_commit row for rust_branch={rust_branch!r} already "
+                f"exists (ak={existing['ak_branch']}/{existing['ak_commit']}, "
+                f"rust_commit={existing['rust_commit']}). Pass force=True to "
+                f"update."
+            )
+        conn.execute(
+            "UPDATE branch_commit SET ak_branch = ?, ak_commit = ?, "
+            "rust_commit = ? WHERE rust_branch = ?",
+            (ak_branch, ak_commit, rust_commit, rust_branch),
+        )
+        return "updated"
 
 
 def get_pr(conn: sqlite3.Connection, pr_number: int) -> Optional[dict]:
@@ -188,15 +263,14 @@ def set_last_error(
 def get_latest_correspondence(
     conn: sqlite3.Connection, rust_branch: str
 ) -> Optional[dict]:
-    """Return the most recently inserted `branch_commit` row for `rust_branch`.
+    """Return the `branch_commit` row for `rust_branch`, or None.
 
     Used by the sweep mode (design step 2) to find the AK commit
-    corresponding to the current Rust-branch cursor. Ordering is by sqlite's
-    implicit rowid DESC, so the most recent INSERT wins. Returns None if the
-    Rust branch has never been seeded or translated to.
+    corresponding to the current Rust-branch cursor. Each Rust branch
+    has at most one row (PK on rust_branch).
     """
     row = conn.execute(
-        "SELECT * FROM branch_commit WHERE rust_branch = ? ORDER BY rowid DESC LIMIT 1",
+        "SELECT * FROM branch_commit WHERE rust_branch = ?",
         (rust_branch,),
     ).fetchone()
     return dict(row) if row else None
@@ -280,10 +354,13 @@ def mark_implementation_done(
     rust_branch: str,
     rust_commit: str,
 ) -> None:
-    """Status 3 -> 4 AND insert the new branch_commit correspondence row.
+    """Status 3 -> 4 AND advance the branch_commit cursor for `rust_branch`.
 
     Single sqlite transaction so the two writes are atomic -- avoids the
     risk of advancing the PR status without recording the new cursor.
+    Uses INSERT OR REPLACE because branch_commit's PK is rust_branch
+    alone -- each Rust branch tracks exactly one (ak_branch, ak_commit)
+    at a time, so a successful impl moves the cursor in place.
     """
     with conn:
         conn.execute(
@@ -291,10 +368,10 @@ def mark_implementation_done(
             (STATUS_IMPLEMENTATION_DONE, pr_number),
         )
         conn.execute(
-            "INSERT OR IGNORE INTO branch_commit "
-            "(ak_branch, ak_commit, rust_branch, rust_commit) "
+            "INSERT OR REPLACE INTO branch_commit "
+            "(rust_branch, ak_branch, ak_commit, rust_commit) "
             "VALUES (?, ?, ?, ?)",
-            (ak_branch, ak_commit, rust_branch, rust_commit),
+            (rust_branch, ak_branch, ak_commit, rust_commit),
         )
 
 
