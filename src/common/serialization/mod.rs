@@ -67,7 +67,7 @@ pub use float_serializer::FloatSerializer;
 pub use integer_deserializer::IntegerDeserializer;
 pub use integer_serializer::IntegerSerializer;
 pub use list_deserializer::ListDeserializer;
-pub use list_serializer::{InnerKind, ListSerializer, NULL_ENTRY_VALUE, SerializationStrategy};
+pub use list_serializer::{InnerKind, ListSerializer, SerializationStrategy};
 pub use long_deserializer::LongDeserializer;
 pub use long_serializer::LongSerializer;
 pub use serde::Serde;
