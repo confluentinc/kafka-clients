@@ -196,11 +196,24 @@ def _bump_kafka_submodule(
     Then `git add kafka` + `git commit` records the pointer change as a
     standalone commit, BEFORE the spawned agent does its own work. The
     agent's subsequent commit (e.g. "Design document") sits on top.
+
+    If the submodule was already at `ak_commit` (e.g. the local branch
+    was already bumped in a previous run that we're now reusing), there's
+    nothing to commit -- skip the commit silently rather than failing.
     """
     kafka_dir = str(worktree_dir / "kafka")
     _git(kafka_dir, "fetch", "origin", ak_branch)
     _git(kafka_dir, "checkout", ak_commit)
     _git(str(worktree_dir), "add", "kafka")
+    # `git diff --cached --quiet` exits 0 if there are NO staged changes,
+    # 1 if there are. We only want to commit when there's something to
+    # commit; otherwise the bump is already recorded and we move on.
+    diff = subprocess.run(
+        ["git", "-C", str(worktree_dir), "diff", "--cached", "--quiet"],
+        capture_output=True,
+    )
+    if diff.returncode == 0:
+        return
     _git(
         str(worktree_dir), "commit",
         "-m", f"Bump kafka submodule to {ak_commit}",
