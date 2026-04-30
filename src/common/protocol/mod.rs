@@ -14,8 +14,34 @@
 
 //! Translation of `org.apache.kafka.common.protocol`.
 //!
-//! Phase 2b only contains the `types` submodule. The runtime side of the
-//! protocol (`Readable`, `Writable`, `ApiKeys`, `Errors`, `Message`, …) is
-//! added in Phase 2c.
+//! The runtime side of the protocol (`Readable`, `Writable`,
+//! `ByteBufferAccessor`, `Message`, `ApiMessage`, `ApiKeys`, `Errors`, …)
+//! lives at the top level. The `types` submodule contains the
+//! `org.apache.kafka.common.protocol.types.*` translation (`Type`, `Schema`,
+//! `Struct`, `Field`, `RawTaggedFieldWriter`, …).
 
+pub mod api_keys;
+pub mod api_message;
+pub mod byte_buffer_accessor;
+pub mod data_output_stream_writable;
+pub mod errors;
+pub mod message;
+pub mod message_size_accumulator;
+pub mod message_util;
+pub mod object_serialization_cache;
+pub mod readable;
+pub mod send_builder;
 pub mod types;
+pub mod writable;
+
+pub use api_keys::ApiKeys;
+pub use api_message::ApiMessage;
+pub use byte_buffer_accessor::{ByteBufferAccessor, SliceReadable};
+pub use data_output_stream_writable::DataOutputStreamWritable;
+pub use errors::Errors;
+pub use message::Message;
+pub use message_size_accumulator::MessageSizeAccumulator;
+pub use object_serialization_cache::ObjectSerializationCache;
+pub use readable::Readable;
+pub use send_builder::SendBuilder;
+pub use writable::Writable;
