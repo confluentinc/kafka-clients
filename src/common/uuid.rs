@@ -100,10 +100,16 @@ impl Uuid {
     /// Returns an error if the input cannot be base64-decoded into exactly
     /// 16 bytes.
     pub fn from_string(s: &str) -> Result<Self, String> {
-        if s.len() > 24 {
+        // Java compares against `String.length()` (UTF-16 code units) and
+        // slices via `substring(0, 24)`. Counting Rust `char`s and slicing on
+        // char boundaries gives the closest equivalent and, importantly,
+        // avoids panicking on non-ASCII input (which `&s[..24]` byte slicing
+        // would do if byte 24 lands in the middle of a multi-byte UTF-8
+        // character). Per CLAUDE.md rule 10.1, public API must not panic.
+        if s.chars().take(25).count() > 24 {
+            let prefix: String = s.chars().take(24).collect();
             return Err(format!(
-                "Input string with prefix `{}` is too long to be decoded as a base64 UUID",
-                &s[..24]
+                "Input string with prefix `{prefix}` is too long to be decoded as a base64 UUID"
             ));
         }
         let bytes = base64::engine::general_purpose::URL_SAFE_NO_PAD
@@ -120,6 +126,22 @@ impl Uuid {
         let msb = i64::from_be_bytes(bytes[0..8].try_into().unwrap());
         let lsb = i64::from_be_bytes(bytes[8..16].try_into().unwrap());
         Ok(Uuid::new(msb, lsb))
+    }
+
+    /// Java-compatible hash code. Mirrors `Uuid.hashCode()`:
+    ///
+    /// ```text
+    /// long xor = mostSignificantBits ^ leastSignificantBits;
+    /// return (int) (xor >> 32) ^ (int) xor;
+    /// ```
+    ///
+    /// Note: this is intentionally separate from Rust's [`std::hash::Hash`]
+    /// derivation (which is non-deterministic and version-dependent). Use
+    /// this method when matching Java's wire-visible hash contract; use
+    /// `Hash` for `HashMap`/`HashSet` keys.
+    pub const fn hash_code(&self) -> i32 {
+        let xor = self.most_significant_bits ^ self.least_significant_bits;
+        ((xor >> 32) as i32) ^ (xor as i32)
     }
 }
 
@@ -179,18 +201,46 @@ mod tests {
         assert_ne!(id1, id3);
     }
 
-    /// Java: `toStringTest` — round-trip via base64.
+    /// Java: `testStringConversion` — round-trips both a random UUID and
+    /// `ZERO_UUID` via base64.
     #[test]
     fn to_string_round_trip() {
         let id = Uuid::random();
         let parsed = Uuid::from_string(&id.to_string()).unwrap();
         assert_eq!(id, parsed);
+
+        // Java also exercises `ZERO_UUID.toString()` round-trip in the same
+        // test. See `UuidTest.java:69-78`.
+        assert_eq!(Uuid::from_string(&ZERO_UUID.to_string()).unwrap(), ZERO_UUID);
+    }
+
+    /// Java: `testHashCode` — explicit hash-code values are part of the
+    /// wire-visible contract. See `UuidTest.java:57-66`.
+    #[test]
+    fn hash_code_matches_java() {
+        let id1 = Uuid::new(16, 7);
+        let id2 = Uuid::new(1043, 20075);
+        let id3 = Uuid::new(104_312_423_523_523, 200_732_425_676_585);
+        assert_eq!(id1.hash_code(), 23);
+        assert_eq!(id2.hash_code(), 19064);
+        assert_eq!(id3.hash_code(), -2_011_255_899);
     }
 
     /// Java: `fromStringTooLong`.
     #[test]
     fn from_string_too_long() {
         let too_long = "x".repeat(25);
+        let err = Uuid::from_string(&too_long).unwrap_err();
+        assert!(err.contains("too long"), "expected too-long message, got: {err}");
+    }
+
+    /// Non-ASCII input must not panic when computing the prefix slice. The
+    /// 25-character input below is 100 bytes long (each emoji is 4 bytes), so
+    /// the byte-indexed slice `&s[..24]` would panic in the middle of an
+    /// emoji. The fix uses char-boundary slicing instead.
+    #[test]
+    fn from_string_non_ascii_too_long_does_not_panic() {
+        let too_long: String = std::iter::repeat_n('🦀', 25).collect();
         let err = Uuid::from_string(&too_long).unwrap_err();
         assert!(err.contains("too long"), "expected too-long message, got: {err}");
     }
