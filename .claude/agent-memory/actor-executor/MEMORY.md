@@ -1,2 +1,5 @@
 - [Phase 1 lint gotchas](phase1_lint_gotchas.md) — clippy patterns I hit repeatedly during foundation translation
 - [Module name collisions](module_inception_pattern.md) — `header/header.rs`, `utils/utils.rs` need `#[allow(clippy::module_inception)]`
+- [Generator crate layout](generator_layout.md) — codegen lives in lib.rs (~5000 lines), not the message/ submodules
+- [Phase 2b types design](phase2b_types_design.md) — Type/Value enums, Schema id, ReadBuffer cursor, Records bytes-level only
+- [Phase 2c protocol layout](phase2c_protocol_layout.md) — Readable/Writable/ByteBufferAccessor moved out of types/io.rs
