@@ -406,3 +406,113 @@ errors via `?`. All in-tree call sites updated with `r.unwrap()` or
 explicit Result handling. The breaking change touched many test
 sites but the surface change is small (one-character `r` ->
 `r.unwrap()` in iteration loops).
+
+---
+
+# Phase 3d-3 — Critic N=0 (Round 1) — Resolved Issues
+
+Issues 18–19 were raised against commits `d55a926` (MemoryRecords core)
+and `338da1d` (boundary-test tightening) and resolved by the fixup
+commits cited below.
+
+## 18. `Records::batches()` silently truncates on corrupt — inconsistent with the Phase 3d-2 Issue 17 contract
+
+- **Severity:** MAJOR (Behavior Mismatch)
+- **File:** `src/common/record/memory_records.rs:186-201` and
+  `src/common/record/records.rs:57`
+- **Java reference:** `Records.java`, `RecordBatchIterator.java:35-46`,
+  `MemoryRecords.java:329-331`
+- **Description:** Java's `Records.batches()` returns
+  `Iterable<MutableRecordBatch>` whose iteration `throws
+  CorruptRecordException` on the first malformed batch — Java callers
+  doing `for (RecordBatch batch : memoryRecords.batches())` get an
+  exception, not silent truncation. Phase 3d-2 Issue 17 fixed this
+  same divergence on `RecordBatch::iter` /
+  `RecordBatch::streaming_iterator` /
+  `MutableRecordBatch::skip_key_value_iterator` by changing them to
+  yield `Result<Box<dyn Record + 'a>, KafkaError>`.
+  Phase 3d-3 left `Records::batches()` as plain
+  `Box<dyn Iterator<Item = Box<dyn RecordBatch + 'a>> + 'a>` — losing
+  every corrupt-batch error to a silent truncation
+  (`memory_records.rs:197-200`). This is the same class of
+  silent-truncation bug 3d-2 Issue 17 fixed for the inner iterators,
+  unfixed for the outer one.
+- **Expected:** Either (a) change `Records::batches()` to yield
+  `Result<Box<dyn RecordBatch + 'a>, KafkaError>`, mirroring 3d-2's
+  `RecordBatch::iter` change, or (b) expose
+  `MemoryRecords::batch_iterator` as `pub(crate)` and document that
+  callers needing error visibility must use the typed entry point. Option
+  (a) is closer to Java semantics and consistent with the 3d-2 decision.
+- **Actual:** `Records::batches()` `filter_map`s away every `Err(_)`,
+  drops the error, and stops iteration. Callers cannot distinguish
+  "clean EOF" from "corrupt batch encountered". `MemoryRecords::valid_bytes`
+  has the same divergence (`memory_records.rs:106-108`) but it's
+  internally consistent because it returns the running total at first
+  error, matching Java's "exception propagates after partial work"
+  semantic.
+
+**Resolution:** Fixups `7abab09` and `be4d9f0` against `d55a926`.
+Adopted Option (a) — changed the trait `Records::batches()` to yield
+`Result<Box<dyn RecordBatch + 'a>, KafkaError>`, consistent with the
+Phase 3d-2 Issue 17 decision. Iterator behaviour now mirrors Java's
+`MemoryRecordsBatchIterator`: on the first malformed batch the
+underlying `RecordBatchIterator` is poisoned and the trait surface
+yields `Err(KafkaError::CorruptRecord(_))` at that step, then `None`
+on every subsequent call.
+
+The two default-impl helpers on the trait (`Records::last_batch`,
+`Records::has_matching_magic`) now also return `Result` and propagate
+errors via `?` — matching Java's behaviour where these methods would
+likewise propagate `CorruptRecordException` through the underlying
+`Iterator.next()`. The only in-tree caller of the now-Result-returning
+`first_batch` (`abstract_records::first_batch`) was updated to
+`Result<Option<...>, KafkaError>` accordingly.
+
+The `MemoryRecords::batches()` impl drops the previous
+`filter_map(Result::ok)` and yields the underlying iterator items
+directly. Tests that previously called `.batches().count()` /
+`.collect()` were updated to either map through `r.expect(...)` or
+use the new `ok_batches()` helper that asserts all items parse
+cleanly.
+
+Added a regression test
+`batches_yields_err_on_corrupt_second_batch_then_stops` that builds
+3 valid batches, corrupts the second batch's magic byte, and asserts
+the iterator yields `Ok(_)` for batch 0, `Err(CorruptRecord)` for
+batch 1, then `None` on the third call (matching Java's "throw and
+stop" semantic). Test count: 545 -> 546.
+
+The follow-up fixup `be4d9f0` swapped a `result.ok().expect(...)` to
+an explicit `match` — `Box<dyn RecordBatch>` does not implement
+`Debug`, which prevented the simpler `result.expect(...)` shape and
+also tripped `clippy::ok_expect`.
+
+## 19. Missing direct translation of Java's `firstBatchSize` boundary case at `len == HEADER_SIZE_UP_TO_MAGIC`
+
+- **Severity:** MINOR (Test Coverage Gap)
+- **File:** `src/common/record/memory_records.rs` tests
+- **Java reference:** `MemoryRecordsTest.java:1056-1057`
+- **Description:** Java's `testNextBatchSize` asserts at line 1056-1057
+  that with `buffer.limit(Records.HEADER_SIZE_UP_TO_MAGIC)` (i.e.
+  exactly 17 bytes), `firstBatchSize()` returns the full batch size
+  (a positive value), NOT null. The Rust translation has
+  `first_batch_size_returns_none_when_buffer_truncated_before_magic`
+  using `LOG_OVERHEAD = 12 bytes < 17` (returns None — different code
+  path) but no test that pins the `len == 17` boundary returning
+  `Some(size)`. The implementation IS correct (`<` not `<=`); it's the
+  test coverage that's missing this specific Java case.
+- **Expected:** Add a test that constructs a buffer truncated to
+  exactly `HEADER_SIZE_UP_TO_MAGIC` bytes (with valid SIZE field set
+  to a value declaring the full batch) and asserts
+  `first_batch_size()` returns `Ok(Some(declared_full_size))`.
+- **Actual:** No such test. The "before_magic" test name implies the
+  boundary but the body uses 12 bytes, not 17.
+
+**Resolution:** Fixup `5de9e40` against `338da1d`. Added test
+`first_batch_size_at_header_size_up_to_magic_boundary` that
+constructs a 17-byte buffer with `SIZE = 12345` and `magic =
+CURRENT_MAGIC_VALUE`, then asserts `first_batch_size()` returns
+`Some(LOG_OVERHEAD as i32 + 12345)` — pinning the positive boundary
+where the early-out (`<` not `<=`) does NOT fire and the underlying
+`next_batch_size` validates the SIZE/MAGIC fields and returns the
+declared full size. Test count: 546 -> 547.

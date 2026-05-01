@@ -999,3 +999,186 @@ Round 1 outcome: Issues 13–17 resolved by fixup commits `415b3b6`
 (Issue 14), `33b1d64` (Issue 13), `efe9a41` (Issue 17), `98ad1ec`
 (Issue 16), `6b10c4d` (Issue 15); see `COMMENTS.DONE.0.md` for the
 resolutions.
+
+---
+
+# Phase 3d-3 Review — Critic N=0
+
+Scope: 7 commits since `786b5eb` (Phase 3d-2 rotation):
+- `04693f0` Phase 3d-3: UnalignedRecords trait + UnalignedMemoryRecords
+- `d55a926` Phase 3d-3: MemoryRecords core (read path)
+- `b1fd28e` Phase 3d-3: RecordsSend + DefaultRecordsSend (state core)
+- `e26b722` Phase 3d-3: wire to_send on MemoryRecords + UnalignedMemoryRecords
+- `338da1d` Phase 3d-3: tighten first_batch_size + add slice boundary test
+- `4432fc2` Phase 3d-3: actor memory notes
+- `999ecfa` Phase 3d-3: index actor memory in MEMORY.md
+
+Issue numbering continues from 18.
+
+DoD checks I re-ran (all green):
+- `cargo build` — clean.
+- `cargo test --lib` — `test result: ok. 545 passed; 0 failed; 0 ignored;
+  0 measured; 0 filtered out; finished in 0.27s` (was 511, +34; matches
+  actor's report).
+- `cargo xtask format-check` — `All code is properly formatted!`
+- `cargo xtask lint` — `No lint issues found!`
+- `cargo xtask check-generated` — `199 generated file(s)` clean.
+
+## What I verified
+
+- **`first_batch_size` early-out** (`memory_records.rs:122-132`): Java
+  `MemoryRecords.firstBatchSize()` lines 120-124 first checks
+  `buffer.remaining() < HEADER_SIZE_UP_TO_MAGIC` (= 17) and returns
+  `null`; only on >=17 does it call `nextBatchSize()`. Rust matches:
+  `if self.buffer.len() < HEADER_SIZE_UP_TO_MAGIC { return Ok(None); }`
+  before the `next_batch_size()` call. Boundary test
+  `first_batch_size_returns_none_when_buffer_truncated_before_magic`
+  exercises `len == LOG_OVERHEAD = 12 < 17`. The Java boundary case
+  `buffer.limit(HEADER_SIZE_UP_TO_MAGIC)` returning the full size IS
+  correctly handled by the implementation (the early-out uses `<`, not
+  `<=`) — though this exact boundary is not unit-tested in Rust (Java's
+  `testNextBatchSize` does test it explicitly at line 1057). Minor — see
+  Issue 18.
+- **`MemoryRecords::slice` zero-copy** (`memory_records.rs:243-263`):
+  uses `Bytes::slice(position..position + available)` — refcount-shares
+  the same backing allocation. Test `slice_is_zero_copy` (line 661)
+  asserts `p_slice.offset_from(p_orig) == after_first as isize` — a
+  tighter assertion than "lies inside" (it pins the exact pointer
+  arithmetic). Java's slice path does
+  `slicedBuffer.position(position).limit(...).slice()` which is also
+  refcount-shared but with a cursor offset; the Rust version is
+  semantically equivalent and avoids the duplicate-and-reslice dance.
+- **`UnalignedRecords` trait** (`unaligned_records.rs:27`): marker
+  trait `pub trait UnalignedRecords: TransferableRecords {}`. Java's
+  `UnalignedRecords` has only one default method (`toSend`) which
+  cannot survive trait-object boxing in Rust because
+  `DefaultRecordsSend<R>` requires `R: Sized`. The actor's docstring
+  documents this constraint and moves `to_send` to the concrete impls.
+  This is a real Rust trait-object limitation; the workaround is
+  faithful to Java's behavior at every concrete call site
+  (`UnalignedMemoryRecords::to_send` at `unaligned_memory_records.rs:69`).
+- **`UnalignedMemoryRecords`** (`unaligned_memory_records.rs`): wraps
+  `Bytes`, exposes `new`/`from_vec`/`buffer`/`empty`/`size_in_bytes`/`to_send`.
+  No equality/hash impl in Java either (Java only does
+  `Objects.requireNonNull(buffer)`); Rust matches. Tests cover
+  empty singleton, `size_in_bytes` correctness, `Clone` storage
+  sharing, and `to_send` sizing — comprehensive for the surface.
+- **`RecordsSend` state core** (`records_send.rs`): fields
+  `records`, `max_bytes_to_write`, `remaining`, `pending` match Java's
+  abstract class fields. `completed()` is `remaining <= 0 && !pending`
+  matching Java line 41-43. `size()` returns `i64` (Java's `long`).
+  `advance(written)` and `set_pending(p)` are explicit mutators that
+  Phase 5 will call from the `write_to(channel)` loop. Phase 5 deferral
+  (the `TransferableChannel` body) is documented in the file header
+  (`records_send.rs:40-52`). Tests exercise constructor invariants,
+  completion-with-pending, and partial advances. The deferral is
+  legitimate — `TransferableChannel` lives in `common/network/*` (not
+  yet translated).
+- **`DefaultRecordsSend`** (`default_records_send.rs`): is a thin
+  newtype wrapper over `RecordsSend<R: TransferableRecords>` (NOT
+  copy-paste). Constructors `new(records)` (sized to
+  `records.size_in_bytes()`) and `with_max_bytes(records, n)` mirror
+  Java's two `DefaultRecordsSend(T)` / `DefaultRecordsSend(T, int)`
+  ctors. All accessors forward to `inner`. Acceptable.
+- **License headers** present on all 5 new files (Apache 2.0 /
+  Confluent Inc.).
+- **Module re-exports** (`mod.rs`): `MemoryRecords`, `RecordsSend`,
+  `DefaultRecordsSend`, `UnalignedMemoryRecords`, `UnalignedRecords`,
+  `TransferableRecords` all re-exported at parent module level.
+  Static functions (`build_batch` test helpers, etc.) NOT re-exported.
+  Matches CLAUDE.md rule 2.
+- **`AbstractRecords` static helpers** (`estimateSizeInBytes`,
+  `withRecords` etc.) are NOT called by the Phase 3d-3 surface. They
+  remain deferred to Phase 3d-4 (which lands `MemoryRecordsBuilder`).
+  No stub-call regressions.
+- **Hot-path zero-copy posture for Phase 5**: `RecordsSend::records()`
+  returns `&R` (no clone), `DefaultRecordsSend::advance` mutates in
+  place. The deferred `write_to(channel)` body has not yet allocated
+  any buffer — the API does not preclude `write_vectored` over the
+  underlying `Bytes` slice. Acceptable.
+- **`testIterator` deferral**: read Java line 128. The test builds via
+  `MemoryRecordsBuilder`, then verifies (a) batch metadata
+  (partition_leader_epoch, producer_id, sequence — all stamped by the
+  builder, not the read path), (b) per-record metadata (offset,
+  timestamp, sequence — also builder-stamped), and (c) flat iteration
+  count. The flat iteration count IS covered in Rust by
+  `records_iterator_flattens_across_batches` (`memory_records.rs:680`)
+  using a hand-rolled batch builder. Builder-stamped metadata is a
+  legitimate 3d-4 concern. Deferral is correctly scoped.
+- **`testChecksum` deferral**: read Java line 266. Constructs via
+  `MemoryRecords.withRecords(magic, compression, records)` and asserts
+  `batch.checksum()` against hard-coded values for v0/v1/v2 + None/LZ4.
+  The CRC computation is already byte-level verified in Phase 3d-2
+  by `default_record_batch::tests::byte_level_fixture_two_records`,
+  which independently re-computes the CRC and asserts equality.
+  Deferral is reasonable.
+- **`testNextBatchSize` partial translation**: Java's
+  `assertNull(records.firstBatchSize())` on
+  `buffer.limit(Records.LOG_OVERHEAD)` (12 bytes) → corresponds to
+  Rust's `first_batch_size_returns_none_when_buffer_truncated_before_magic`.
+  Java's `buffer.limit(Records.HEADER_SIZE_UP_TO_MAGIC)` (17 bytes
+  exactly, returns full size) is not directly translated. Java's
+  `buffer.put(SIZE_OFFSET + 3, (byte) 0)` corrupt-size case →
+  Rust's `first_batch_size_raises_on_corrupt_size`. Java's
+  invalid-magic case → Rust's `first_batch_size_raises_on_invalid_magic`.
+  Three of four Java assertion blocks are covered. See Issue 18.
+
+## Issues found
+
+(All issues for Phase 3d-3 resolved — see COMMENTS.DONE.0.md.)
+
+## Verified clean (no issue) for Phase 3d-3
+
+- **`MemoryRecords::slice` zero-copy contract** holds (verified by
+  `slice_is_zero_copy` pinning `offset_from` to `after_first`).
+- **`Bytes::slice` for slicing** is the right primitive — refcount-shared
+  backing storage, matches Java's `ByteBuffer.duplicate().slice()` semantics.
+- **`UnalignedRecords` is a marker trait** justified by the `R: Sized`
+  constraint on `DefaultRecordsSend<R>`. Acceptable Rust adaptation.
+- **`UnalignedMemoryRecords` does NOT add unnecessary equality/hash impls**
+  — matches Java which also lacks `equals`/`hashCode` overrides
+  (`UnalignedMemoryRecords.java` only does `Objects.requireNonNull`).
+- **`RecordsSend` deferral of `write_to(channel)`** is correctly scoped to
+  Phase 5 (TransferableChannel lives in `common/network/*`). The state
+  core (`advance`, `set_pending`, `completed`, `size`, `records`,
+  `remaining`, `pending`, `max_bytes_to_write`) is fully implemented and
+  tested.
+- **`DefaultRecordsSend`** is a thin wrapper, NOT a copy-paste. All
+  methods forward to `inner: RecordsSend<R>`.
+- **`AbstractRecords` static helpers** are correctly NOT touched —
+  `MemoryRecords` does not need them (Phase 3d-4 will land them
+  alongside `MemoryRecordsBuilder`).
+- **`Apache 2.0 / Confluent Inc.` headers** on all 5 new files.
+- **Module re-exports** in `mod.rs` follow the parent-module pattern
+  (CLAUDE.md rule 2).
+- **`MemoryRecords::to_send(self)` consumes self** — acceptable because
+  the only Java caller of `records.toSend()` (SendBuilder.java:146)
+  doesn't retain the records afterward, and `Bytes` clones are
+  refcount-cheap if a caller needs both.
+- **`Records::records()` per-record allocation** (`memory_records.rs:203-225`)
+  is documented as consumer-side only and verified by trace: no
+  producer hot-path code calls it. Acceptable for Phase 3d-3.
+- **No regressions:** 545 = 511 (3d-2 baseline) + 34 (3d-3). Matches
+  the test ledger.
+- **No TODO/FIXME / `unimplemented!()` / `todo!()` / `panic!()`** in
+  any of the 5 new files.
+- **Hot-path allocation audit**: `MemoryRecords::to_send()` does not
+  allocate (moves `Bytes`). `RecordsSend::advance/set_pending` are
+  in-place mutations. The Phase 5 `write_to(channel)` body has not
+  forced any buffer materialization yet. Acceptable.
+
+---
+
+## Phase 3d-3 Round 1 verdict: needs minor fixes
+
+Issue 18 is MAJOR — same class of silent-truncation bug Phase 3d-2
+Issue 17 fixed for the inner iterators, unfixed for `Records::batches()`.
+Fix consistency is important here so Phase 3d-4's `filterTo` (which
+will iterate batches and rebuild) doesn't inherit the silent-truncation
+divergence.
+
+Issue 19 is MINOR — implementation is correct; only test coverage of a
+specific boundary case is missing.
+
+No BLOCKER. No code-correctness issue beyond Issue 18. Phase 3d-3 can
+advance to Phase 3d-4 once Issue 18 is resolved.
