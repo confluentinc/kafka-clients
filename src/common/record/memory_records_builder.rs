@@ -591,26 +591,26 @@ impl MemoryRecordsBuilder {
             return Ok(());
         }
 
-        // For compressed batches, flush the codec writer to emit any
-        // trailing block (gzip/zstd require a final flush + finish).
-        // Dropping the `Box<dyn Write>` runs the codec's destructor,
-        // which finishes the compressed stream and writes the final
-        // bytes into `buffer_stream`. Mirrors Java's
-        // `MemoryRecordsBuilder.java:333-340`:
+        // For compressed batches, drop the codec writer to flush the
+        // final block and any codec-specific footer (gzip's deflate
+        // trailer, zstd's frame epilogue, lz4's end-of-block marker).
+        // Mirrors Java's `MemoryRecordsBuilder.java:333-340`:
         //   if (appendStream != CLOSED_STREAM) {
         //       try { appendStream.close(); } catch (...) { ... }
         //   }
+        // Java goes through `BufferedOutputStream.close()` →
+        // `flush()` (push buffered bytes into the codec) → `out.close()`
+        // (codec emits its final-block + trailer). We must NOT call
+        // `Write::flush` on `flate2::GzEncoder` here — `flush()` on
+        // `GzEncoder` emits a `Z_SYNC_FLUSH` deflate block (`00 00 00
+        // 00 ff ff`), and the subsequent `finish()` then emits a second
+        // final block. Java's GZIPOutputStream.close() invokes only
+        // `def.finish()`, producing a single final block. Dropping the
+        // boxed writer here invokes the codec's destructor, which calls
+        // `try_finish()` for `flate2::GzEncoder` / `ZstdEncoder` /
+        // `Lz4FrameEncoder`. That single call is the exact analogue of
+        // Java's `out.close()`.
         if self.compression_type != CompressionType::None {
-            // Explicit flush before drop so we surface I/O errors.
-            if let Some(ref mut stream) = self.append_stream {
-                std::io::Write::flush(stream).map_err(|e| {
-                    KafkaError::Generic(format!("I/O exception when writing to the append stream, closing: {e}"))
-                })?;
-            }
-            // Drop the writer; this finishes the compressed stream
-            // (gzip/zstd emit the trailing footer here) and releases the
-            // self-borrow on `buffer_stream` so the borrow checker's
-            // invariant is upheld going forward.
             self.append_stream = None;
         }
         self.close_for_record_appends();

@@ -52,6 +52,10 @@ pub mod timestamp_type;
 pub mod transferable_records;
 pub mod unaligned_memory_records;
 pub mod unaligned_records;
+// Java-derived wire-format byte fixtures (Phase 3e). Compile only under
+// `cfg(test)` — the module's contents are gated as well.
+#[cfg(test)]
+mod wire_fixtures;
 
 pub use base_records::BaseRecords;
 pub use compression_type::CompressionType;

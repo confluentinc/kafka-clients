@@ -71,7 +71,17 @@ impl Write for ZstdWriter<'_> {
 
 impl Drop for ZstdWriter<'_> {
     fn drop(&mut self) {
-        if let Some(enc) = self.encoder.take() {
+        if let Some(mut enc) = self.encoder.take() {
+            // Mirror Java's `BufferedOutputStream(zstd, 16K).close()`
+            // contract: `flush()` (which `ZstdOutputStream.flush()`
+            // forwards to `flushStream` since `closeFrameOnFlush=false`)
+            // then `out.close()` (which calls `endStream`). On the wire
+            // this produces a `Z_FLUSH`-terminated block followed by an
+            // empty last-block marker. `Encoder::flush` calls
+            // `flush(EndDirective::Flush)` and `Encoder::finish` calls
+            // `flush(EndDirective::End)`, so calling both in this order
+            // matches Java byte-for-byte (see Phase 3e wire fixtures).
+            let _ = enc.flush();
             // `finish` writes the zstd frame trailer.
             let _ = enc.finish();
         }

@@ -1230,9 +1230,12 @@ mod tests {
             NO_SEQUENCE,
             NO_PARTITION_LEADER_EPOCH,
             false,
-            &[
-                SimpleRecord::new(100, Some(Bytes::from_static(b"k")), Some(Bytes::from_static(b"v")), &[]),
-            ],
+            &[SimpleRecord::new(
+                100,
+                Some(Bytes::from_static(b"k")),
+                Some(Bytes::from_static(b"v")),
+                &[],
+            )],
         )
         .expect("with_records LogAppendTime succeeds");
         let after_ms = std::time::SystemTime::now()
@@ -1252,6 +1255,9 @@ mod tests {
             max_ts >= before_ms - 1 && max_ts <= after_ms + 1,
             "LogAppendTime max_timestamp {max_ts} not in window [{before_ms}, {after_ms}]"
         );
-        assert_ne!(max_ts, NO_TIMESTAMP, "LogAppendTime must NOT silently downgrade to NO_TIMESTAMP");
+        assert_ne!(
+            max_ts, NO_TIMESTAMP,
+            "LogAppendTime must NOT silently downgrade to NO_TIMESTAMP"
+        );
     }
 }
