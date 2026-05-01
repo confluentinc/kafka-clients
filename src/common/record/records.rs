@@ -63,9 +63,7 @@ pub trait Records: TransferableRecords {
     /// This mirrors the Phase 3d-2 decision for the inner record iterators
     /// (`RecordBatch::iter` / `streaming_iterator` /
     /// `skip_key_value_iterator`).
-    fn batches<'a>(
-        &'a self,
-    ) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a>;
+    fn batches<'a>(&'a self) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a>;
 
     /// Return the last record batch, if any. Default impl mirrors Java's
     /// `AbstractRecords#lastBatch` (walks every batch — expensive).

@@ -183,9 +183,7 @@ impl BaseRecords for MemoryRecords {
 impl TransferableRecords for MemoryRecords {}
 
 impl Records for MemoryRecords {
-    fn batches<'a>(
-        &'a self,
-    ) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a> {
+    fn batches<'a>(&'a self) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a> {
         // Mirrors Java's `MemoryRecordsBatchIterator` which throws
         // `CorruptRecordException` on the first malformed batch. The Rust
         // translation surfaces that signal as `Err(KafkaError::CorruptRecord)`
@@ -539,6 +537,38 @@ mod tests {
         truncated[SIZE_OFFSET..SIZE_OFFSET + 4].copy_from_slice(&100i32.to_be_bytes());
         let records = MemoryRecords::readable_records_from_vec(truncated);
         assert_eq!(records.first_batch_size().unwrap(), None);
+    }
+
+    /// Translation of Java `MemoryRecordsTest.testNextBatchSize` lines
+    /// 1056-1057: with `buffer.limit(Records.HEADER_SIZE_UP_TO_MAGIC)`
+    /// (i.e. exactly 17 bytes), `firstBatchSize()` returns the full
+    /// declared batch size — NOT null.
+    ///
+    /// Positive boundary test: at exactly `len == HEADER_SIZE_UP_TO_MAGIC`
+    /// the early-out (`<` not `<=`) does NOT fire, so the underlying
+    /// `next_batch_size` validates the SIZE and MAGIC fields and returns
+    /// `Some(LOG_OVERHEAD + declared_size)`.
+    #[test]
+    fn first_batch_size_at_header_size_up_to_magic_boundary() {
+        use crate::common::record::records::HEADER_SIZE_UP_TO_MAGIC;
+        // Exactly 17 bytes: [base_offset(8)] [size(4)] [4 unspecified] [magic(1)].
+        let mut buf = vec![0u8; HEADER_SIZE_UP_TO_MAGIC];
+        // Declared batch length = 12345 bytes (the SIZE field; >=
+        // LEGACY_RECORD_OVERHEAD_V0=14 so it doesn't trigger corruption).
+        let declared_len = 12345i32;
+        buf[SIZE_OFFSET..SIZE_OFFSET + 4].copy_from_slice(&declared_len.to_be_bytes());
+        // Magic must be in the valid range [0, CURRENT_MAGIC_VALUE].
+        buf[RECORDS_MAGIC_OFFSET] = CURRENT_MAGIC_VALUE as u8;
+
+        let records = MemoryRecords::readable_records_from_vec(buf);
+        // `first_batch_size` returns `LOG_OVERHEAD + declared_len`. The
+        // payload bytes are NOT required to be present — Java's
+        // `firstBatchSize()` validates only the header.
+        assert_eq!(
+            records.first_batch_size().unwrap(),
+            Some(LOG_OVERHEAD as i32 + declared_len),
+            "len == HEADER_SIZE_UP_TO_MAGIC must return the declared full size, not None"
+        );
     }
 
     #[test]
