@@ -46,6 +46,7 @@ use crate::common::errors::KafkaError;
 use crate::common::header::{Header, RecordHeader};
 use crate::common::record::Record;
 use crate::common::record::TimestampType;
+use crate::common::record::default_record_batch::increment_sequence;
 use crate::common::record::record_batch::{MAGIC_VALUE_V2, NO_SEQUENCE};
 use crate::common::utils::byte_utils;
 
@@ -500,8 +501,10 @@ pub fn size_of_body_in_bytes(
 
 /// Upper bound on the on-wire size of a record carrying `key`, `value` and
 /// `headers`. Mirrors Java's package-private `recordSizeUpperBound`. Used by
-/// `DefaultRecordBatch.estimateBatchSizeUpperBound` (Phase 3d-2).
-#[allow(dead_code)] // Phase 3d-2 will wire this into DefaultRecordBatch.
+/// `DefaultRecordBatch::estimate_batch_size_upper_bound`. The
+/// `dead_code` allow stays until Phase 3d-4's `MemoryRecordsBuilder` calls
+/// `estimate_batch_size_upper_bound` from non-test code.
+#[allow(dead_code)]
 pub(crate) fn record_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
     let key_size = key.map_or(-1, |k| k.len() as i32);
     let value_size = value.map_or(-1, |v| v.len() as i32);
@@ -544,24 +547,6 @@ fn size_of(key_size: i32, value_size: i32, headers: &[RecordHeader]) -> i32 {
         }
     }
     size
-}
-
-// ---------------------------------------------------------------------------
-// Helper: Java's `DefaultRecordBatch.incrementSequence`. The full
-// `DefaultRecordBatch` lives in Phase 3d-2; we inline this single helper here
-// because `read_from_buffer_inner` needs it. It will be moved into
-// `default_record_batch.rs` when that phase lands and re-exported from the
-// same module path so callers don't have to change.
-// ---------------------------------------------------------------------------
-
-/// Mirrors `DefaultRecordBatch.incrementSequence(int, int)`. Wraps around the
-/// signed 32-bit space.
-pub(crate) fn increment_sequence(sequence: i32, increment: i32) -> i32 {
-    if sequence > i32::MAX - increment {
-        increment - (i32::MAX - sequence) - 1
-    } else {
-        sequence + increment
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -1092,17 +1077,8 @@ mod tests {
         assert_eq!(s3, s4);
     }
 
-    /// `increment_sequence` matches Java's wrap behaviour at the i32 boundary.
-    #[test]
-    fn increment_sequence_wraps_at_i32_max() {
-        assert_eq!(increment_sequence(0, 5), 5);
-        assert_eq!(increment_sequence(100, 23), 123);
-        // Just-fits
-        assert_eq!(increment_sequence(i32::MAX - 5, 5), i32::MAX);
-        // Wraps: sequence > i32::MAX - increment ⇒ increment - (i32::MAX - sequence) - 1
-        assert_eq!(increment_sequence(i32::MAX - 5, 10), 10 - (i32::MAX - (i32::MAX - 5)) - 1);
-        assert_eq!(increment_sequence(i32::MAX, 1), 0);
-    }
+    // `increment_sequence` test moved to `default_record_batch.rs` in
+    // Phase 3d-2 (the function lives there now).
 
     /// Sanity: `attributes()` always returns 0 for a record we constructed.
     #[test]

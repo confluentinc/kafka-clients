@@ -150,11 +150,39 @@ impl GrowableSupplier {
 
 #[cfg(test)]
 mod tests {
-    // The Java client does not have a dedicated `BufferSupplierTest.java`
-    // (the class is exercised indirectly by record-batch tests in Phase 3).
-    // We test the cache contract directly here.
+    //! Java's `BufferSupplierTest` lives at
+    //! `kafka/clients/src/test/java/org/apache/kafka/common/record/BufferSupplierTest.java`.
+    //! It contains the single test method `testGrowableBuffer` — translated
+    //! below as `growable_buffer_caches_and_grows`.
+    //!
+    //! The other `*` tests are Rust-side additions that exercise the
+    //! `NoCaching` and `Default` variants which Java's test omits.
 
     use super::*;
+
+    /// Translation of `BufferSupplierTest.testGrowableBuffer`.
+    #[test]
+    fn growable_buffer_caches_and_grows() {
+        let mut supplier = BufferSupplier::growable();
+        let buffer = supplier.get(1024);
+        // ByteBuffer.position() is 0 on a freshly returned buffer (Java's
+        // `get` returns a buffer at position 0). Rust's `Vec<u8>` analogue:
+        // length matches the requested capacity and the contents are zeroed.
+        assert_eq!(buffer.len(), 1024);
+
+        // Mark and release.
+        let original_capacity = buffer.capacity();
+        supplier.release(buffer);
+
+        // Fetch a smaller buffer; expect the cached one (>=1024 capacity).
+        let cached = supplier.get(512);
+        assert!(cached.capacity() >= original_capacity);
+
+        // Releasing again then asking for a larger buffer reallocates fresh.
+        supplier.release(cached);
+        let increased = supplier.get(2048);
+        assert_eq!(increased.len(), 2048);
+    }
 
     #[test]
     fn no_caching_always_allocates_fresh() {

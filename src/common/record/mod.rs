@@ -21,10 +21,13 @@
 pub mod abstract_record_batch;
 pub mod abstract_records;
 pub mod base_records;
+pub(crate) mod byte_buffer_log_input_stream;
 pub mod compression_ratio_estimator;
 pub mod compression_type;
 pub mod control_record_type;
 pub mod default_record;
+pub mod default_record_batch;
+pub(crate) mod log_input_stream;
 pub mod mutable_record_batch;
 pub mod partial_default_record;
 // CLAUDE.md rule 2 mandates each Java class lives in its own file (so the
@@ -33,6 +36,8 @@ pub mod partial_default_record;
 #[allow(clippy::module_inception)]
 pub mod record;
 pub mod record_batch;
+pub(crate) mod record_batch_iterator;
+pub mod record_validation_stats;
 pub mod record_version;
 pub mod records;
 pub mod simple_record;
@@ -43,10 +48,12 @@ pub use base_records::BaseRecords;
 pub use compression_type::CompressionType;
 pub use control_record_type::ControlRecordType;
 pub use default_record::DefaultRecord;
+pub use default_record_batch::DefaultRecordBatch;
 pub use mutable_record_batch::MutableRecordBatch;
 pub use partial_default_record::PartialDefaultRecord;
 pub use record::Record;
 pub use record_batch::RecordBatch;
+pub use record_validation_stats::RecordValidationStats;
 pub use record_version::RecordVersion;
 pub use records::Records;
 pub use simple_record::SimpleRecord;

@@ -24,7 +24,7 @@ use std::io::Read;
 
 use crate::common::errors::KafkaError;
 use crate::common::record::TimestampType;
-use crate::common::record::default_record::increment_sequence;
+use crate::common::record::default_record_batch::increment_sequence;
 use crate::common::record::record::Record;
 use crate::common::record::record_batch::{MAGIC_VALUE_V2, NO_SEQUENCE};
 use crate::common::utils::byte_utils;
