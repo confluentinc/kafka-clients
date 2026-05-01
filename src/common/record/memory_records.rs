@@ -809,7 +809,10 @@ mod tests {
         let mut it = records.batches();
         // First batch parses cleanly.
         let first = it.next().expect("first batch present");
-        let first = first.ok().expect("first batch should parse cleanly");
+        let first = match first {
+            Ok(b) => b,
+            Err(e) => panic!("first batch should parse cleanly: {e:?}"),
+        };
         assert_eq!(first.base_offset(), 0);
 
         // Second batch surfaces the corruption error.
