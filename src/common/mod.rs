@@ -14,6 +14,9 @@
 
 //! Translation of `org.apache.kafka.common`.
 
+pub mod cluster;
+pub mod cluster_resource;
+pub mod cluster_resource_listener;
 pub mod compress;
 pub mod config;
 pub mod errors;
@@ -21,13 +24,28 @@ pub mod header;
 pub mod internals;
 pub mod kafka_exception;
 pub mod message;
+pub mod node;
+pub mod partition_info;
 pub mod protocol;
 pub mod record;
 pub mod requests;
 pub mod serialization;
+pub mod topic_collection;
+pub mod topic_id_partition;
+pub mod topic_partition;
+pub mod topic_partition_info;
 pub mod utils;
 pub mod uuid;
 
+pub use cluster::Cluster;
+pub use cluster_resource::ClusterResource;
+pub use cluster_resource_listener::ClusterResourceListener;
 pub use errors::KafkaError;
 pub use kafka_exception::KafkaException;
+pub use node::Node;
+pub use partition_info::PartitionInfo;
+pub use topic_collection::{TopicCollection, TopicIdCollection, TopicNameCollection};
+pub use topic_id_partition::TopicIdPartition;
+pub use topic_partition::TopicPartition;
+pub use topic_partition_info::TopicPartitionInfo;
 pub use uuid::Uuid;

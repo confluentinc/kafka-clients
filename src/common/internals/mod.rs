@@ -14,4 +14,5 @@
 
 //! Translation of `org.apache.kafka.common.internals`.
 
+pub mod cluster_resource_listeners;
 pub mod topic;
