@@ -21,19 +21,40 @@
 //! > "MemoryRecordsBuilder::append writes serialized bytes directly into
 //! > the batch buffer — no intermediate Vec<u8> per record."
 //!
-//! For the no-compression path (the default fast path) records flow
-//! straight from caller-supplied `&[u8]` into the batch buffer via
-//! `default_record::write_to(&mut Vec<u8>, ...)`. There is no per-record
-//! intermediate buffer and no copy of key/value bytes beyond what
-//! [`bytes::Bytes`] already manages.
+//! Both the uncompressed and compressed paths stream directly into the
+//! batch buffer:
 //!
-//! For the compressed path the builder maintains an `uncompressed_buf`
-//! that records are streamed into; on `close()` the codec processes that
-//! buffer once into the batch. The compressed-path intermediate buffer is
-//! intrinsic to streaming compression — Java's design uses the same
-//! materialized-then-compressed shape (the codec writer is just inverted —
-//! Java compresses streaming and Rust compresses at-close, both producing
-//! identical wire output).
+//! * **Uncompressed**: `append` writes through the codec's pass-through
+//!   wrapper into `buffer_stream` via `default_record::write_to_stream` —
+//!   no per-record intermediate buffer.
+//! * **Compressed**: at construction time, the codec is wrapped around
+//!   `buffer_stream` and held as the persistent `append_stream` (mirrors
+//!   Java's `MemoryRecordsBuilder.java:143` —
+//!   `appendStream = new DataOutputStream(compression.wrapForOutput(this.bufferStream, magic))`).
+//!   Each `append` streams record bytes through that codec writer
+//!   directly into `buffer_stream`. The codec's stateful compressor
+//!   (gzip's deflate state, zstd's dictionary, etc.) is preserved across
+//!   appends. `close()` flushes/drops the codec writer to emit any
+//!   trailing block before back-patching the batch header.
+//!
+//! ### Self-referential lifetime
+//!
+//! Java's `appendStream` is just a field whose lifetime is bounded by the
+//! builder thanks to GC. Rust's borrow checker cannot express
+//! "this `Box<dyn Write>` borrows the buffer_stream that lives on the
+//! same struct". We resolve the self-referential constraint by:
+//!
+//! * Boxing the `ByteBufferOutputStream` so its address is stable across
+//!   moves of the builder (a stack-allocated stream would invalidate
+//!   the codec writer's pointer the first time the builder is moved).
+//! * Constructing a `'static`-erased `Box<dyn Write + 'static>` over a
+//!   raw `*mut` pointer to the boxed stream (see `install_append_stream`).
+//!   The `'static` is a controlled lie — the writer is dropped before
+//!   the boxed stream via the explicit `Drop` impl on the builder.
+//! * Funneling all access through `&mut self` methods so the borrow on
+//!   `buffer_stream` while the codec writes is always exclusive, and
+//!   ensuring the codec writer is dropped (in `close()` / `abort()` /
+//!   `Drop`) before any code re-borrows `buffer_stream`.
 //!
 //! ## Magic version scope
 //!
@@ -82,7 +103,14 @@ pub struct MemoryRecordsBuilder {
     compression_level: Option<i32>,
     /// Owning storage for the batch payload. The Java `ByteBufferOutputStream`
     /// maps to Rust's [`ByteBufferOutputStream`].
-    buffer_stream: ByteBufferOutputStream,
+    ///
+    /// Boxed so the stream's address is stable across moves of the
+    /// builder — required for the self-referential `append_stream` field
+    /// (which holds a raw pointer into this stream). Stack-allocating
+    /// `ByteBufferOutputStream` here would invalidate the codec writer's
+    /// pointer the first time the builder is moved (e.g. when returned
+    /// from a constructor by value).
+    buffer_stream: Box<ByteBufferOutputStream>,
     magic: i8,
     initial_position: usize,
     base_offset: i64,
@@ -115,12 +143,24 @@ pub struct MemoryRecordsBuilder {
     built_records: Option<MemoryRecords>,
     aborted: bool,
 
-    /// Per-record uncompressed accumulation buffer. For
-    /// [`CompressionType::None`] this is `None` and records are written
-    /// directly into [`Self::buffer_stream`] (the zero-copy fast path).
-    /// For compressed batches, records are streamed into this buffer and
-    /// compressed in one shot at [`Self::close`].
-    uncompressed_buf: Option<Vec<u8>>,
+    /// Persistent codec writer that streams records into
+    /// [`Self::buffer_stream`]. For [`CompressionType::None`] this is
+    /// `None` and writes go directly to `buffer_stream`. For compressed
+    /// batches this is `Some(codec_writer)` constructed at builder
+    /// creation; each `append` writes through it, and `close()` drops
+    /// it (which flushes any trailing block) before back-patching the
+    /// header.
+    ///
+    /// The writer borrows the boxed `buffer_stream` via a raw pointer.
+    /// See the module-level "Self-referential lifetime" docs and the
+    /// safety comment on [`Self::install_append_stream`].
+    ///
+    /// `'static` is a controlled lie — the writer is alive only as long
+    /// as `buffer_stream` is valid. All access is funneled through
+    /// `&mut self` methods, the writer is never exposed outside the
+    /// builder, and the explicit `Drop` impl drops the writer before
+    /// the rest of the fields.
+    append_stream: Option<Box<dyn std::io::Write + 'static>>,
 }
 
 impl MemoryRecordsBuilder {
@@ -186,13 +226,9 @@ impl MemoryRecordsBuilder {
         // Reserve the header region so records start writing right after.
         buffer_stream.set_position(initial_position + batch_header_size_in_bytes as usize);
 
-        let uncompressed_buf = if compression_type == CompressionType::None {
-            None
-        } else {
-            // Pre-size to a reasonable starting capacity; the codec/buffer
-            // will grow as needed.
-            Some(Vec::with_capacity(256))
-        };
+        // Move the stream onto the heap so its address is stable —
+        // required for the self-referential `append_stream` field.
+        let buffer_stream = Box::new(buffer_stream);
 
         let mut builder = MemoryRecordsBuilder {
             timestamp_type,
@@ -223,12 +259,54 @@ impl MemoryRecordsBuilder {
             base_timestamp: None,
             built_records: None,
             aborted: false,
-            uncompressed_buf,
+            append_stream: None,
         };
         if builder.has_delete_horizon_ms() {
             builder.base_timestamp = Some(delete_horizon_ms);
         }
+        // Wrap the codec around `buffer_stream` for compressed batches.
+        // Mirrors Java's MemoryRecordsBuilder.java:143:
+        //   appendStream = new DataOutputStream(compression.wrapForOutput(this.bufferStream, magic));
+        // For uncompressed batches we leave `append_stream = None` and
+        // fast-path writes directly to `buffer_stream`; this avoids
+        // boxing for the no-compression case (which is the producer fast
+        // path).
+        if compression_type != CompressionType::None {
+            builder.install_append_stream();
+        }
         Ok(builder)
+    }
+
+    /// Construct the persistent codec writer that streams compressed
+    /// records into `buffer_stream`.
+    ///
+    /// SAFETY: We take a raw pointer to `self.buffer_stream`, manufacture
+    /// an `&'static mut ByteBufferOutputStream` from it, and pass that
+    /// into the codec's `wrap_for_output` to produce a
+    /// `Box<dyn Write + 'static>`. The `'static` is a lie — the writer
+    /// is only valid for as long as `self.buffer_stream` is. We uphold
+    /// the invariant by:
+    ///   * Storing the writer as a field (`append_stream`) that is
+    ///     dropped *before* `buffer_stream` is moved (see `close()` and
+    ///     `Drop`).
+    ///   * Only invoking `Write` on the writer from `&mut self` methods,
+    ///     so the borrow is exclusive while writes happen.
+    ///   * Never letting the writer escape the builder.
+    ///
+    /// This mirrors Java's `appendStream` field at
+    /// `MemoryRecordsBuilder.java:78` whose lifetime is bounded by the
+    /// builder thanks to GC.
+    fn install_append_stream(&mut self) {
+        // Take the heap address of the boxed stream — stable across
+        // moves of `self`. Auto-deref of `Box<ByteBufferOutputStream>`
+        // gives us `&mut ByteBufferOutputStream` whose address we
+        // capture as a raw pointer.
+        let ptr: *mut ByteBufferOutputStream = &mut *self.buffer_stream;
+        // SAFETY: see the function-level safety comment.
+        let stream_ref: &'static mut ByteBufferOutputStream = unsafe { &mut *ptr };
+        let writer: Box<dyn std::io::Write + 'static> =
+            wrap_codec_for_output(self.compression_type, stream_ref, self.magic, self.compression_level);
+        self.append_stream = Some(writer);
     }
 
     /// 13-arg constructor (no `delete_horizon_ms`); defaults to
@@ -447,6 +525,9 @@ impl MemoryRecordsBuilder {
 
     /// Abort the in-progress batch. Mirrors Java's `abort()`.
     pub fn abort(&mut self) {
+        // Drop the codec writer first to release the borrow on
+        // buffer_stream before we mutate it.
+        self.append_stream = None;
         self.close_for_record_appends();
         self.buffer_stream.set_position(self.initial_position);
         self.aborted = true;
@@ -479,8 +560,8 @@ impl MemoryRecordsBuilder {
         Ok(())
     }
 
-    /// Finalize the batch in place: compress (if needed) and stamp the
-    /// batch header. Mirrors Java's `close()`.
+    /// Finalize the batch in place: flush the codec (if needed) and
+    /// stamp the batch header. Mirrors Java's `close()`.
     ///
     /// # Errors
     ///
@@ -501,16 +582,36 @@ impl MemoryRecordsBuilder {
 
         if self.num_records == 0 {
             // Mirrors Java: reset position and emit an empty MemoryRecords.
+            // Drop the codec writer first to release the buffer_stream
+            // borrow.
+            self.append_stream = None;
             self.close_for_record_appends();
             self.buffer_stream.set_position(self.initial_position);
             self.built_records = Some(MemoryRecords::empty().clone());
             return Ok(());
         }
 
-        // For compressed batches, compress the accumulated records into the
-        // bufferStream now (between the reserved header and end-of-buffer).
+        // For compressed batches, flush the codec writer to emit any
+        // trailing block (gzip/zstd require a final flush + finish).
+        // Dropping the `Box<dyn Write>` runs the codec's destructor,
+        // which finishes the compressed stream and writes the final
+        // bytes into `buffer_stream`. Mirrors Java's
+        // `MemoryRecordsBuilder.java:333-340`:
+        //   if (appendStream != CLOSED_STREAM) {
+        //       try { appendStream.close(); } catch (...) { ... }
+        //   }
         if self.compression_type != CompressionType::None {
-            self.compress_into_buffer_stream()?;
+            // Explicit flush before drop so we surface I/O errors.
+            if let Some(ref mut stream) = self.append_stream {
+                std::io::Write::flush(stream).map_err(|e| {
+                    KafkaError::Generic(format!("I/O exception when writing to the append stream, closing: {e}"))
+                })?;
+            }
+            // Drop the writer; this finishes the compressed stream
+            // (gzip/zstd emit the trailing footer here) and releases the
+            // self-borrow on `buffer_stream` so the borrow checker's
+            // invariant is upheld going forward.
+            self.append_stream = None;
         }
         self.close_for_record_appends();
 
@@ -536,8 +637,13 @@ impl MemoryRecordsBuilder {
         // appends are rejected by `closed_for_appends`.
         let position = self.buffer_stream.position();
         let initial_position = self.initial_position;
-        let mut owned =
-            std::mem::replace(&mut self.buffer_stream, ByteBufferOutputStream::with_capacity(0)).into_buffer();
+        // Take ownership of the boxed stream and unbox it to extract the
+        // underlying Vec. The stub box keeps the field valid while the
+        // builder lives on (callers may still hit scalar getters after
+        // build()).
+        let boxed_stream =
+            std::mem::replace(&mut self.buffer_stream, Box::new(ByteBufferOutputStream::with_capacity(0)));
+        let mut owned = (*boxed_stream).into_buffer();
         // `owned.len() == position` after `into_buffer()` because the
         // stream's `into_buffer()` truncates to `position`.
         debug_assert_eq!(owned.len(), position);
@@ -572,35 +678,6 @@ impl MemoryRecordsBuilder {
                     self.magic
                 )));
             }
-        }
-        Ok(())
-    }
-
-    /// Compress `uncompressed_buf` into `buffer_stream` between the
-    /// reserved header position and the end of the buffer. After this the
-    /// buffer_stream's position is advanced past the compressed bytes.
-    fn compress_into_buffer_stream(&mut self) -> Result<(), KafkaError> {
-        // Take the uncompressed bytes (replace with empty so we don't
-        // double-compress on accidental re-entry).
-        let uncompressed = self.uncompressed_buf.take().unwrap_or_default();
-        if uncompressed.is_empty() {
-            return Ok(());
-        }
-        // Wrap a fresh codec writer around the buffer_stream and stream
-        // the uncompressed bytes through it.
-        {
-            let mut writer = wrap_codec_for_output(
-                self.compression_type,
-                &mut self.buffer_stream,
-                self.magic,
-                self.compression_level,
-            );
-            std::io::Write::write_all(&mut writer, &uncompressed).map_err(|e| {
-                KafkaError::Generic(format!("I/O exception when compressing the append stream, closing: {e}"))
-            })?;
-            std::io::Write::flush(&mut writer).map_err(|e| {
-                KafkaError::Generic(format!("I/O exception when flushing the append stream, closing: {e}"))
-            })?;
         }
         Ok(())
     }
@@ -792,13 +869,22 @@ impl MemoryRecordsBuilder {
                 headers,
             )?
         } else {
-            // Streaming compressed path: append into the uncompressed
-            // accumulator. The codec runs at `close()`.
-            let buf = self
-                .uncompressed_buf
+            // Streaming compressed path: write through the persistent
+            // codec writer that was wrapped around `buffer_stream` at
+            // construction. Mirrors Java's
+            // `MemoryRecordsBuilder.java:763`:
+            //   DefaultRecord.writeTo(appendStream, offsetDelta,
+            //                         timestampDelta, key, value, headers)
+            // Records flow straight from caller bytes through the codec
+            // into `buffer_stream` — no intermediate `Vec<u8>` per
+            // record, no batch-sized accumulator. The codec's stateful
+            // compressor (gzip's deflate state, zstd's dictionary, etc.)
+            // is preserved across appends.
+            let stream = self
+                .append_stream
                 .as_mut()
-                .expect("uncompressed_buf is Some for compressed builders");
-            default_record::write_to(buf, offset_delta, timestamp_delta, key, value, headers)?
+                .expect("append_stream is Some for compressed builders");
+            default_record::write_to_stream(stream, offset_delta, timestamp_delta, key, value, headers)?
         };
         self.record_written(offset, timestamp, size_in_bytes)
     }
@@ -956,6 +1042,18 @@ impl MemoryRecordsBuilder {
     /// Base sequence of the resulting batch. Mirrors Java's `baseSequence()`.
     pub fn base_sequence(&self) -> i32 {
         self.base_sequence
+    }
+}
+
+impl Drop for MemoryRecordsBuilder {
+    /// SAFETY: The codec writer in `append_stream` holds a raw pointer
+    /// to `buffer_stream`. Rust drops fields in declaration order, but
+    /// `buffer_stream` is declared *before* `append_stream`, so without
+    /// this explicit drop the writer would briefly outlive its referent.
+    /// We force the writer to drop first here, then the rest of the
+    /// fields drop in their declared order.
+    fn drop(&mut self) {
+        self.append_stream = None;
     }
 }
 
@@ -2015,5 +2113,133 @@ mod tests {
         // Sanity: the size matches just the records section (everything
         // from initial_position onwards).
         assert!(<MemoryRecords as crate::common::record::BaseRecords>::size_in_bytes(&built) > 0);
+    }
+
+    /// Issue #20 fix verification: for compressed batches, records must
+    /// flow through the codec writer directly into `buffer_stream` as
+    /// they are appended — there must NOT be an intermediate per-batch
+    /// `Vec<u8>` accumulator that's compressed in one shot at close.
+    ///
+    /// We verify this indirectly by:
+    ///   1. Appending many records (LZ4's frame-level buffer flushes
+    ///      every 64 KiB; smaller codecs like gzip flush more often).
+    ///      For LZ4 specifically, appending > 64 KiB of records forces
+    ///      at least one frame block to be emitted before close().
+    ///   2. Asserting `builder.buffer_stream.position()` advances past
+    ///      the reserved batch header BEFORE close() runs.
+    ///
+    /// Under the old design (`uncompressed_buf` materialized then
+    /// compressed at close), the buffer_stream's position would stay
+    /// pinned at `RECORD_BATCH_OVERHEAD` until close() — this assertion
+    /// would fail. Under the streaming design, the codec emits frame
+    /// blocks during append and the position advances in-flight.
+    #[test]
+    fn compressed_append_streams_into_buffer_stream_in_flight() {
+        // Pick LZ4: its block size is 64 KiB, so appending ~150 KiB of
+        // records forces at least one block to be emitted before close.
+        let stream = ByteBufferOutputStream::with_capacity(256 * 1024);
+        let mut builder = MemoryRecordsBuilder::from_stream_no_delete_horizon(
+            stream,
+            CURRENT_MAGIC_VALUE,
+            CompressionType::Lz4,
+            TimestampType::CreateTime,
+            0,
+            0,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            crate::common::record::record_batch::NO_SEQUENCE,
+            false,
+            false,
+            NO_PARTITION_LEADER_EPOCH,
+            256 * 1024,
+        )
+        .unwrap();
+
+        // Position right after construction: the batch header is
+        // reserved (RECORD_BATCH_OVERHEAD) and the codec MAY have
+        // already written a frame header (lz4 writes 7 bytes of magic
+        // + flags at construction; gzip waits until the first write).
+        // Capture whatever the position is post-construction as the
+        // baseline; the streaming assertion is "position grows DURING
+        // append", not "position grows past a specific offset".
+        let baseline_position = builder.buffer_stream.position();
+        assert!(baseline_position >= RECORD_BATCH_OVERHEAD);
+
+        // Append a 1KB record 200 times (200 KB of uncompressed data) —
+        // larger than LZ4's 64 KiB block size, so the codec MUST emit
+        // at least one block while we're still appending.
+        let big_value = vec![b'x'; 1024];
+        for i in 0..200 {
+            builder.append(i as i64, Some(b"k"), Some(&big_value), &[]).unwrap();
+        }
+
+        // CRITICAL ASSERTION: the buffer_stream's position must have
+        // advanced past `baseline_position` while we were still
+        // appending. Under the old `uncompressed_buf` design, the
+        // position would have stayed at `baseline_position` because
+        // nothing had been compressed yet. Under streaming compression,
+        // the codec has emitted at least one block.
+        let mid_position = builder.buffer_stream.position();
+        assert!(
+            mid_position > baseline_position,
+            "compressed records must stream into buffer_stream during append (streaming codec); \
+             position is {mid_position} but should be > baseline {baseline_position}"
+        );
+
+        // Now close & build. Round-trip the records to confirm
+        // correctness end-to-end.
+        let built = builder.build().unwrap();
+        let batches: Vec<_> = built.batches().map(|r| r.unwrap()).collect();
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0].count_or_null().unwrap_or(0), 200);
+    }
+
+    /// Round-trip sanity for every compressed codec — exercises the
+    /// streaming-codec path end-to-end (append → close → decode) for
+    /// gzip, snappy, lz4, and zstd. If the streaming wiring corrupted
+    /// any codec's internal state, the decoded records would mismatch.
+    #[test]
+    fn compressed_streaming_round_trip_per_codec() {
+        for codec in [
+            CompressionType::Gzip,
+            CompressionType::Snappy,
+            CompressionType::Lz4,
+            CompressionType::Zstd,
+        ] {
+            let stream = ByteBufferOutputStream::with_capacity(8192);
+            let mut builder = MemoryRecordsBuilder::from_stream_no_delete_horizon(
+                stream,
+                CURRENT_MAGIC_VALUE,
+                codec,
+                TimestampType::CreateTime,
+                0,
+                0,
+                NO_PRODUCER_ID,
+                NO_PRODUCER_EPOCH,
+                crate::common::record::record_batch::NO_SEQUENCE,
+                false,
+                false,
+                NO_PARTITION_LEADER_EPOCH,
+                8192,
+            )
+            .unwrap();
+            let payloads = ["alpha", "bravo", "charlie", "delta", "echo"];
+            for (i, p) in payloads.iter().enumerate() {
+                builder
+                    .append(100 + i as i64, Some(format!("k{i}").as_bytes()), Some(p.as_bytes()), &[])
+                    .unwrap();
+            }
+            let built = builder.build().unwrap();
+            let batches: Vec<_> = built.batches().map(|r| r.unwrap()).collect();
+            assert_eq!(batches.len(), 1, "codec {codec:?}: expected exactly one batch");
+            let count = batches[0].count_or_null().unwrap_or(0);
+            assert_eq!(count, payloads.len() as i32, "codec {codec:?}: record count mismatch");
+            let decoded: Vec<_> = batches[0].iter().map(|r| r.unwrap()).collect();
+            assert_eq!(decoded.len(), payloads.len(), "codec {codec:?}: decoded count");
+            for (i, rec) in decoded.iter().enumerate() {
+                let v = rec.value().expect("value present");
+                assert_eq!(v, payloads[i].as_bytes(), "codec {codec:?}: payload {i} round-trip");
+            }
+        }
     }
 }
