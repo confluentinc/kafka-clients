@@ -582,6 +582,9 @@ struct CompressedIter<'a> {
     read_records: i32,
     errored: bool,
     skip_key_value: bool,
+    /// Pending corruption error to emit on the next `next()` call (mirrors
+    /// `UncompressedIter::pending_error`).
+    pending_error: Option<KafkaError>,
     /// `_kind` discriminates which `read_from_*` to call.
     _phantom: std::marker::PhantomData<&'a ()>,
 }
@@ -605,6 +608,7 @@ fn compressed_iter<'a>(
         read_records: 0,
         errored: false,
         skip_key_value,
+        pending_error: None,
         _phantom: std::marker::PhantomData,
     }
 }
@@ -617,6 +621,11 @@ impl<'a> Iterator for CompressedIter<'a> {
     type Item = Result<Box<dyn Record + 'a>, KafkaError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Drain a pending error first (deferred from the previous `next()`).
+        if let Some(err) = self.pending_error.take() {
+            self.errored = true;
+            return Some(Err(err));
+        }
         if self.errored {
             return None;
         }
@@ -631,39 +640,54 @@ impl<'a> Iterator for CompressedIter<'a> {
             return None;
         }
         self.read_records += 1;
-        if self.skip_key_value {
-            match partial_default_record::read_partially_from(
+        let read_result: Result<Box<dyn Record + 'a>, KafkaError> = if self.skip_key_value {
+            partial_default_record::read_partially_from(
                 &mut self.inner,
                 self.base_offset,
                 self.base_timestamp,
                 self.base_sequence,
                 self.log_append_time,
-            ) {
-                Ok(p) => Some(Ok(Box::new(p) as Box<dyn Record + 'a>)),
-                Err(e) => {
-                    self.errored = true;
-                    Some(Err(KafkaError::CorruptRecord(format!(
-                        "Could not read record from compressed stream: {e}"
-                    ))))
-                },
-            }
+            )
+            .map(|p| Box::new(p) as Box<dyn Record + 'a>)
         } else {
-            match default_record::read_from_stream(
+            default_record::read_from_stream(
                 &mut self.inner,
                 self.base_offset,
                 self.base_timestamp,
                 self.base_sequence,
                 self.log_append_time,
-            ) {
-                Ok(r) => Some(Ok(Box::new(r) as Box<dyn Record + 'a>)),
+            )
+            .map(|r| Box::new(r) as Box<dyn Record + 'a>)
+        };
+        let rec = match read_result {
+            Ok(r) => r,
+            Err(e) => {
+                self.errored = true;
+                return Some(Err(KafkaError::CorruptRecord(format!(
+                    "Could not read record from compressed stream: {e}"
+                ))));
+            },
+        };
+        // After reading the declared number of records, ensure no surplus
+        // bytes remain in the decompressed stream. Mirrors Java's
+        // `StreamRecordIterator.ensureNoneRemaining()`.
+        if self.read_records == self.num_records {
+            let mut probe = [0u8; 1];
+            match self.inner.read(&mut probe) {
+                Ok(0) => {}, // EOF as expected.
+                Ok(_) => {
+                    self.pending_error = Some(KafkaError::CorruptRecord(
+                        "Incorrect declared batch size, records still remaining in file".to_string(),
+                    ));
+                },
                 Err(e) => {
-                    self.errored = true;
-                    Some(Err(KafkaError::CorruptRecord(format!(
-                        "Could not read record from compressed stream: {e}"
-                    ))))
+                    self.pending_error = Some(KafkaError::CorruptRecord(format!(
+                        "Error checking for remaining bytes after reading batch: {e}"
+                    )));
                 },
             }
         }
+        Some(Ok(rec))
     }
 }
 
@@ -1717,6 +1741,54 @@ mod tests {
             collected.iter().map(|r| r.is_ok()).collect::<Vec<_>>()
         );
         assert!(collected.len() < 5);
+    }
+
+    /// Translation of `DefaultRecordBatchTest.testInvalidRecordCountTooManyCompressedV2`.
+    /// Same as the non-compressed variant but with a GZIP-compressed batch —
+    /// exercises the `CompressedIter` code path.
+    #[test]
+    fn invalid_record_count_too_many_compressed_terminates_iter() {
+        let recs = vec![
+            SimpleRecord::new(1i64, None, Some(Bytes::from_static(b"hello")), &[]),
+            SimpleRecord::new(2i64, None, Some(Bytes::from_static(b"there")), &[]),
+            SimpleRecord::new(3i64, None, Some(Bytes::from_static(b"beautiful")), &[]),
+        ];
+        let mut buf = build_compressed_batch(CompressionType::Gzip, 0, TimestampType::CreateTime, &recs);
+        // Override RecordCount to a value larger than the actual number of
+        // records — Java's helper does the same thing
+        // (`buffer.putInt(RECORDS_COUNT_OFFSET, invalidCount)`).
+        write_i32_at(&mut buf, RECORDS_COUNT_OFFSET, 5);
+        let batch = DefaultRecordBatch::new(buf);
+        let collected: Vec<_> = batch.iter().collect();
+        assert!(
+            collected.iter().any(|r| matches!(r, Err(KafkaError::CorruptRecord(_)))),
+            "expected at least one CorruptRecord error in compressed batch"
+        );
+        assert!(collected.len() < 5);
+    }
+
+    /// Translation of `DefaultRecordBatchTest.testInvalidRecordCountTooLittleCompressedV2`.
+    /// Same as the non-compressed variant but with a GZIP-compressed batch.
+    /// Java's `StreamRecordIterator.ensureNoneRemaining()` throws
+    /// `InvalidRecordException` after the last declared record when the
+    /// underlying stream still has bytes; the Rust iterator surfaces
+    /// `Err(CorruptRecord)` at the same point.
+    #[test]
+    fn invalid_record_count_too_little_compressed_yields_declared_count() {
+        let recs = vec![
+            SimpleRecord::new(1i64, None, Some(Bytes::from_static(b"hello")), &[]),
+            SimpleRecord::new(2i64, None, Some(Bytes::from_static(b"there")), &[]),
+            SimpleRecord::new(3i64, None, Some(Bytes::from_static(b"beautiful")), &[]),
+        ];
+        let mut buf = build_compressed_batch(CompressionType::Gzip, 0, TimestampType::CreateTime, &recs);
+        write_i32_at(&mut buf, RECORDS_COUNT_OFFSET, 2);
+        let batch = DefaultRecordBatch::new(buf);
+        let collected: Vec<_> = batch.iter().collect();
+        let oks: Vec<_> = collected.iter().filter(|r| r.is_ok()).collect();
+        let errs: Vec<_> = collected.iter().filter(|r| r.is_err()).collect();
+        assert_eq!(oks.len(), 2, "expected 2 successful records, got {}", oks.len());
+        assert_eq!(errs.len(), 1, "expected exactly one corruption error, got {}", errs.len());
+        assert!(matches!(errs[0], Err(KafkaError::CorruptRecord(_))));
     }
 
     /// Translation of `testInvalidRecordCountTooLittleNonCompressedV2`.
