@@ -8,7 +8,9 @@
 - [Phase 2e requests layout](phase2e_requests_layout.md) — wrapper trait shape choices: `&dyn Message`, `HashMap<Errors,_>`, no associated const
 - [Phase 2 review fixes](phase2_review_fixes.md) — patterns kept from Phase 2 review round (write_byte_buffer split, OnceLock api_key, ListenerType dedup)
 - [Phase 3a record base](phase3a_record_base.md) — record/ trait base layer summary, what's deferred to 3c/3d/5
-- [Phase 3a compression gap](phase3a_compression_dispatch_gap.md) — CompressionType codec-dispatch deferred to Phase 3c
+- [Phase 3a compression gap](phase3a_compression_dispatch_gap.md) — RESOLVED in Phase 3c (kept for history)
+- [Phase 3c compression](phase3c_compression.md) — compress/ module + dispatch wiring + ratio estimator: what landed, what's deferred
+- [Phase 3c snappy framing gap](phase3c_snappy_framing_gap.md) — `snap` crate emits RFC framing, not xerial — wire-incompat with Java brokers
 - [Phase 3b serializers](phase3b_serializers.md) — what landed/skipped/deferred for serialization module
 - [Phase 3b serializer design](phase3b_serializer_design.md) — dual `serialize`/`serialize_to` trait shape; Headers-overload omission rationale
 - [Phase 3b list serde gap](phase3b_list_serde_gap.md) — `ListSerializer` cross-process Java-FQN limitation, what we support vs defer

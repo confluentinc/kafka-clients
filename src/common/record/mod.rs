@@ -21,6 +21,7 @@
 pub mod abstract_record_batch;
 pub mod abstract_records;
 pub mod base_records;
+pub mod compression_ratio_estimator;
 pub mod compression_type;
 pub mod control_record_type;
 pub mod mutable_record_batch;

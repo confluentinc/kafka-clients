@@ -14,6 +14,7 @@
 
 //! Translation of `org.apache.kafka.common`.
 
+pub mod compress;
 pub mod config;
 pub mod errors;
 pub mod header;

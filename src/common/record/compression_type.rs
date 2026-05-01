@@ -14,15 +14,24 @@
 
 //! Translation of `org.apache.kafka.common.record.CompressionType`.
 //!
-//! Compression codec dispatch (the Java overrides on `GZIP`, `LZ4`, `ZSTD`
-//! that build a `Compression` instance) is deferred to Phase 3c. The
-//! per-codec level constants (`MIN_LEVEL`, `MAX_LEVEL`, `DEFAULT_LEVEL`) are
-//! ported here because they are stable, non-codec-dispatch metadata used
-//! by configuration validation.
+//! Codec dispatch wiring (Phase 3c, RESOLVED): [`CompressionType::wrap_for_output`]
+//! and [`CompressionType::wrap_for_input`] dispatch into the matching
+//! `crate::common::compress::*Compression` implementations using each
+//! codec's default compression level. [`CompressionType::level_validator`]
+//! returns the `ConfigDef.Validator`-equivalent closure used by
+//! `ProducerConfig` to validate `compression.gzip.level` etc. (the level
+//! constants `MIN_LEVEL`, `MAX_LEVEL`, `DEFAULT_LEVEL` are stable wire
+//! metadata and remained in this enum from Phase 3a).
 
 use std::fmt;
+use std::io::{Read, Write};
 
+use crate::common::compress::{
+    Compression, GzipCompression, Lz4Compression, NoCompression, SnappyCompression, ZstdCompression,
+};
 use crate::common::errors::KafkaError;
+use crate::common::utils::buffer_supplier::BufferSupplier;
+use crate::common::utils::byte_buffer_output_stream::ByteBufferOutputStream;
 
 /// The compression type to use.
 ///
@@ -158,6 +167,122 @@ impl CompressionType {
                 "Compression levels are not defined for this compression type: {}",
                 self.name()
             ))),
+        }
+    }
+
+    /// Wrap `buffer_stream` with a `Write` adapter that compresses data
+    /// with this compression type at its default level. Mirrors Java's
+    /// pattern `Compression.gzip().build().wrapForOutput(...)` etc., where
+    /// the per-message-version dispatch is `CompressionType.wrap_for_output`.
+    ///
+    /// `message_version` is the record-format magic byte and steers LZ4
+    /// to emit the broken FD checksum for V0 (legacy compatibility).
+    pub fn wrap_for_output<'a>(
+        &self,
+        buffer_stream: &'a mut ByteBufferOutputStream,
+        message_version: i8,
+    ) -> Box<dyn Write + 'a> {
+        match self {
+            CompressionType::None => NoCompression::new().wrap_for_output(buffer_stream, message_version),
+            CompressionType::Gzip => GzipCompression::default().wrap_for_output(buffer_stream, message_version),
+            CompressionType::Snappy => SnappyCompression::new().wrap_for_output(buffer_stream, message_version),
+            CompressionType::Lz4 => Lz4Compression::default().wrap_for_output(buffer_stream, message_version),
+            CompressionType::Zstd => ZstdCompression::default().wrap_for_output(buffer_stream, message_version),
+        }
+    }
+
+    /// Wrap `buffer` with a `Read` adapter that decompresses data with
+    /// this compression type. Mirrors Java's `CompressionType.wrap_for_input`.
+    pub fn wrap_for_input<'a>(
+        &self,
+        buffer: &'a [u8],
+        message_version: i8,
+        decompression_buffer_supplier: BufferSupplier,
+    ) -> Box<dyn Read + 'a> {
+        match self {
+            CompressionType::None => {
+                NoCompression::new().wrap_for_input(buffer, message_version, decompression_buffer_supplier)
+            },
+            CompressionType::Gzip => {
+                GzipCompression::default().wrap_for_input(buffer, message_version, decompression_buffer_supplier)
+            },
+            CompressionType::Snappy => {
+                SnappyCompression::new().wrap_for_input(buffer, message_version, decompression_buffer_supplier)
+            },
+            CompressionType::Lz4 => {
+                Lz4Compression::default().wrap_for_input(buffer, message_version, decompression_buffer_supplier)
+            },
+            CompressionType::Zstd => {
+                ZstdCompression::default().wrap_for_input(buffer, message_version, decompression_buffer_supplier)
+            },
+        }
+    }
+
+    /// Returns a closure that validates a candidate compression level
+    /// against this codec's `[min_level, max_level]` bounds. Mirrors Java's
+    /// `levelValidator()` which returns a `ConfigDef.Validator`.
+    ///
+    /// The validator's contract:
+    /// - For Gzip, the codec's `defaultLevel()` (`-1`) is allowed even
+    ///   though it is outside `[1, 9]`.
+    /// - For Lz4 and Zstd, the level must lie strictly within
+    ///   `[min_level, max_level]`.
+    /// - For None and Snappy, any level invocation is an error: those
+    ///   codecs do not accept a level.
+    ///
+    /// We expose the validator as a `Box<dyn Fn>` instead of a custom
+    /// trait because `ConfigDef.Validator` in Java has a single
+    /// `ensureValid(name, value)` method that returns `void` or throws.
+    pub fn level_validator(&self) -> Box<dyn Fn(i32) -> Result<(), KafkaError> + Send + Sync + 'static> {
+        match self {
+            CompressionType::Gzip => {
+                let min = GZIP_MIN_LEVEL;
+                let max = GZIP_MAX_LEVEL;
+                let default = GZIP_DEFAULT_LEVEL;
+                Box::new(move |level| {
+                    if (level < min || max < level) && level != default {
+                        Err(KafkaError::Config(format!(
+                            "gzip doesn't support given compression level: {level}"
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+            },
+            CompressionType::Lz4 => {
+                let min = LZ4_MIN_LEVEL;
+                let max = LZ4_MAX_LEVEL;
+                Box::new(move |level| {
+                    if level < min || max < level {
+                        Err(KafkaError::Config(format!(
+                            "lz4 doesn't support given compression level: {level}"
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+            },
+            CompressionType::Zstd => {
+                let min = ZSTD_MIN_LEVEL;
+                let max = ZSTD_MAX_LEVEL;
+                Box::new(move |level| {
+                    if level < min || max < level {
+                        Err(KafkaError::Config(format!(
+                            "zstd doesn't support given compression level: {level}"
+                        )))
+                    } else {
+                        Ok(())
+                    }
+                })
+            },
+            CompressionType::None | CompressionType::Snappy => {
+                let name = self.name();
+                Box::new(move |_| {
+                    Err(KafkaError::InvalidRequest(format!(
+                        "Compression levels are not defined for this compression type: {name}"
+                    )))
+                })
+            },
         }
     }
 }

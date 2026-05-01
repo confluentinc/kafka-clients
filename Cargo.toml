@@ -32,6 +32,12 @@ flate2 = "1"
 snap = "1"
 lz4_flex = "0.11"
 zstd = "0.13"
+# `twox-hash` is already pulled in transitively by `lz4_flex`. We promote it
+# to a direct dep because Phase 3c's `Lz4BlockOutputStream` reproduces Kafka's
+# LZ4 frame XXH32 header/block checksum bytewise — the framing differs from
+# `lz4_flex`'s default (which omits the header) and must match Java's
+# `net.jpountz.xxhash.XXHash32` byte-for-byte.
+twox-hash = { version = "2", features = ["xxhash32"] }
 crc32c = "0.6"
 dashmap = "6"
 futures-util = "0.3"
