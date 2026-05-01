@@ -28,6 +28,7 @@ pub mod control_record_type;
 pub mod default_record;
 pub mod default_record_batch;
 pub(crate) mod log_input_stream;
+pub mod memory_records;
 pub mod mutable_record_batch;
 pub mod partial_default_record;
 // CLAUDE.md rule 2 mandates each Java class lives in its own file (so the
@@ -51,6 +52,7 @@ pub use compression_type::CompressionType;
 pub use control_record_type::ControlRecordType;
 pub use default_record::DefaultRecord;
 pub use default_record_batch::DefaultRecordBatch;
+pub use memory_records::MemoryRecords;
 pub use mutable_record_batch::MutableRecordBatch;
 pub use partial_default_record::PartialDefaultRecord;
 pub use record::Record;
