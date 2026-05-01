@@ -180,6 +180,10 @@ pub enum KafkaError {
     /// Argument validation failure (Java `IllegalArgumentException`). Carried
     /// here so we have a single `Result` type without a stdlib panic.
     IllegalArgument(String),
+    /// Operation called in an invalid state (Java `IllegalStateException`).
+    /// E.g. appending to a closed `MemoryRecordsBuilder`. Carried here for
+    /// the same reason as `IllegalArgument`.
+    IllegalState(String),
 }
 
 impl KafkaError {
@@ -281,6 +285,7 @@ impl KafkaError {
             KafkaError::BufferExhausted(_) => ERR_CODE_BUFFER_EXHAUSTED,
             KafkaError::Config(_) => ERR_CODE_CONFIG,
             KafkaError::IllegalArgument(_) => ERR_CODE_CONFIG,
+            KafkaError::IllegalState(_) => ERR_CODE_CONFIG,
         }
     }
 
@@ -323,6 +328,7 @@ impl KafkaError {
             KafkaError::BufferExhausted(_) => "BufferExhaustedException",
             KafkaError::Config(_) => "ConfigException",
             KafkaError::IllegalArgument(_) => "IllegalArgumentException",
+            KafkaError::IllegalState(_) => "IllegalStateException",
         }
     }
 
@@ -364,7 +370,8 @@ impl KafkaError {
             | KafkaError::Interrupt(m)
             | KafkaError::BufferExhausted(m)
             | KafkaError::Config(m)
-            | KafkaError::IllegalArgument(m) => m.as_str(),
+            | KafkaError::IllegalArgument(m)
+            | KafkaError::IllegalState(m) => m.as_str(),
         }
     }
 

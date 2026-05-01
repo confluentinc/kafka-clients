@@ -38,7 +38,7 @@
 //! offset and base timestamp of the batch this record is contained in.
 
 use std::fmt;
-use std::io::{self, Read};
+use std::io::{self, Read, Write};
 
 use bytes::Bytes;
 
@@ -282,6 +282,76 @@ pub fn write_to(
     Ok(byte_utils::size_of_varint(body_size) as i32 + body_size)
 }
 
+/// Write a record to a stream-style `&mut dyn Write`. Mirrors the Java
+/// `DefaultRecord.writeTo(DataOutputStream, ...)` overload used by
+/// `MemoryRecordsBuilder` when an output codec wraps the underlying buffer.
+///
+/// For the no-compression path callers should still prefer [`write_to`] with
+/// `&mut Vec<u8>` (zero-copy into the batch buffer; see CLAUDE.md rule 12).
+/// This stream variant exists for the compressed path where the codec
+/// ([`crate::common::record::CompressionType::wrap_for_output`]) returns a
+/// `Box<dyn Write>` that is not a `Vec<u8>`.
+///
+/// Returns the total wire size in bytes (length-prefix varint + body).
+pub fn write_to_stream<W: Write + ?Sized>(
+    out: &mut W,
+    offset_delta: i32,
+    timestamp_delta: i64,
+    key: Option<&[u8]>,
+    value: Option<&[u8]>,
+    headers: &[RecordHeader],
+) -> Result<i32, KafkaError> {
+    let body_size = size_of_body_in_bytes_from_buffers(offset_delta, timestamp_delta, key, value, headers);
+    byte_utils::write_varint_to_stream(body_size, out).map_err(map_io_err)?;
+
+    let attributes: i8 = 0;
+    out.write_all(&[attributes as u8]).map_err(map_io_err)?;
+
+    byte_utils::write_varlong_to_stream(timestamp_delta, out).map_err(map_io_err)?;
+    byte_utils::write_varint_to_stream(offset_delta, out).map_err(map_io_err)?;
+
+    match key {
+        None => byte_utils::write_varint_to_stream(-1, out).map_err(map_io_err)?,
+        Some(k) => {
+            byte_utils::write_varint_to_stream(k.len() as i32, out).map_err(map_io_err)?;
+            out.write_all(k).map_err(map_io_err)?;
+        },
+    }
+
+    match value {
+        None => byte_utils::write_varint_to_stream(-1, out).map_err(map_io_err)?,
+        Some(v) => {
+            byte_utils::write_varint_to_stream(v.len() as i32, out).map_err(map_io_err)?;
+            out.write_all(v).map_err(map_io_err)?;
+        },
+    }
+
+    byte_utils::write_varint_to_stream(headers.len() as i32, out).map_err(map_io_err)?;
+
+    for header in headers {
+        let utf8 = header.key().as_bytes();
+        byte_utils::write_varint_to_stream(utf8.len() as i32, out).map_err(map_io_err)?;
+        out.write_all(utf8).map_err(map_io_err)?;
+
+        match header.value() {
+            None => byte_utils::write_varint_to_stream(-1, out).map_err(map_io_err)?,
+            Some(hv) => {
+                byte_utils::write_varint_to_stream(hv.len() as i32, out).map_err(map_io_err)?;
+                out.write_all(hv).map_err(map_io_err)?;
+            },
+        }
+    }
+
+    Ok(byte_utils::size_of_varint(body_size) as i32 + body_size)
+}
+
+fn map_io_err(e: io::Error) -> KafkaError {
+    // Java surfaces I/O exceptions from `DataOutputStream.write*` as
+    // `KafkaException("I/O exception when writing to the append stream, closing", e)`.
+    // We map to `KafkaError::Generic` with the same wording.
+    KafkaError::Generic(format!("I/O exception when writing to the append stream, closing: {e}"))
+}
+
 /// Read a record from `buffer`, returning a `DefaultRecord` whose key/value
 /// slices alias the source buffer. Mirrors Java's
 /// `DefaultRecord.readFrom(ByteBuffer, long, long, int, Long)`.
@@ -501,9 +571,8 @@ pub fn size_of_body_in_bytes(
 
 /// Upper bound on the on-wire size of a record carrying `key`, `value` and
 /// `headers`. Mirrors Java's package-private `recordSizeUpperBound`. Used by
-/// `DefaultRecordBatch::estimate_batch_size_upper_bound`. The
-/// `dead_code` allow stays until Phase 3d-4's `MemoryRecordsBuilder` calls
-/// `estimate_batch_size_upper_bound` from non-test code.
+/// `DefaultRecordBatch::estimate_batch_size_upper_bound`, which is in turn
+/// used by `MemoryRecordsBuilder::has_room_for`.
 #[allow(dead_code)]
 pub(crate) fn record_size_upper_bound(key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> i32 {
     let key_size = key.map_or(-1, |k| k.len() as i32);

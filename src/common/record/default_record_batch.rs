@@ -963,8 +963,8 @@ where
 
 /// Get an upper bound on the size of a batch with only a single record using
 /// a given key, value and headers. Mirrors Java's package-private
-/// `estimateBatchSizeUpperBound`. Phase 3d-4's `MemoryRecordsBuilder` will
-/// call this from non-test code.
+/// `estimateBatchSizeUpperBound`. Used by
+/// `MemoryRecordsBuilder::has_room_for` for the magic-v2 path.
 #[allow(dead_code)]
 pub(crate) fn estimate_batch_size_upper_bound(
     key: Option<&[u8]>,

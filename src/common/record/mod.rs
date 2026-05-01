@@ -14,9 +14,12 @@
 
 //! Translation of `org.apache.kafka.common.record`.
 //!
-//! Phase 3a covers the enum / identifier types and the trait base layer.
-//! Phase 3c/3d will fill in `MemoryRecords`, `MemoryRecordsBuilder`,
-//! `DefaultRecord`, `DefaultRecordBatch`, and the on-the-wire send path.
+//! Phase 3 covers the producer write path: `DefaultRecord` and
+//! `DefaultRecordBatch` (Phase 3d-1/3d-2), `MemoryRecords` and
+//! `RecordsSend` (3d-3), and `MemoryRecordsBuilder` plus the
+//! `MemoryRecords::with_records(...)` factories (3d-4). The on-the-wire
+//! send path (`Send` trait, `RecordsSend::write_to(channel)`) is
+//! deferred to Phase 5.
 
 pub mod abstract_record_batch;
 pub mod abstract_records;
@@ -30,6 +33,7 @@ pub mod default_record_batch;
 pub mod default_records_send;
 pub(crate) mod log_input_stream;
 pub mod memory_records;
+pub mod memory_records_builder;
 pub mod mutable_record_batch;
 pub mod partial_default_record;
 // CLAUDE.md rule 2 mandates each Java class lives in its own file (so the
@@ -56,6 +60,7 @@ pub use default_record::DefaultRecord;
 pub use default_record_batch::DefaultRecordBatch;
 pub use default_records_send::DefaultRecordsSend;
 pub use memory_records::MemoryRecords;
+pub use memory_records_builder::MemoryRecordsBuilder;
 pub use mutable_record_batch::MutableRecordBatch;
 pub use partial_default_record::PartialDefaultRecord;
 pub use record::Record;

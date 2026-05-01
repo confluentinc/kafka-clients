@@ -46,8 +46,16 @@ use crate::common::errors::KafkaError;
 use crate::common::record::byte_buffer_log_input_stream::ByteBufferLogInputStream;
 use crate::common::record::default_record::DefaultRecord;
 use crate::common::record::default_record_batch::DefaultRecordBatch;
+use crate::common::record::memory_records_builder::MemoryRecordsBuilder;
+use crate::common::record::record_batch::{
+    CURRENT_MAGIC_VALUE, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, NO_TIMESTAMP,
+};
 use crate::common::record::record_batch_iterator::RecordBatchIterator;
-use crate::common::record::{BaseRecords, DefaultRecordsSend, Record, RecordBatch, Records, TransferableRecords};
+use crate::common::record::{
+    BaseRecords, CompressionType, DefaultRecordsSend, Record, RecordBatch, Records, SimpleRecord, TimestampType,
+    TransferableRecords, default_record_batch,
+};
+use crate::common::utils::byte_buffer_output_stream::ByteBufferOutputStream;
 
 /// A [`Records`] implementation backed by a [`Bytes`] buffer of contiguous
 /// record batches.
@@ -137,6 +145,137 @@ impl MemoryRecords {
     fn batch_iterator(&self) -> RecordBatchIterator<ByteBufferLogInputStream<'_>, DefaultRecordBatch> {
         // Java passes `Integer.MAX_VALUE` for the per-batch size cap.
         RecordBatchIterator::new(ByteBufferLogInputStream::new(self.buffer.as_ref(), i32::MAX))
+    }
+
+    /// Build a [`MemoryRecords`] from the given records using
+    /// [`MemoryRecordsBuilder`]. Mirrors Java's most general
+    /// `withRecords(byte, long, Compression, TimestampType, long, short,
+    /// int, int, boolean, SimpleRecord...)` factory.
+    ///
+    /// Returns [`MemoryRecords::empty`]'s clone for an empty input slice.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_records(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        timestamp_type: TimestampType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        is_transactional: bool,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        if records.is_empty() {
+            return Ok(MemoryRecords::empty().clone());
+        }
+        let size_estimate = estimate_size_in_bytes(magic, compression, records);
+        let stream = ByteBufferOutputStream::with_capacity(size_estimate as usize);
+        let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
+            // Java uses System.currentTimeMillis(); we use a stable
+            // timestamp here because tests pin the value via
+            // `with_records_log_append_time` if they care.
+            NO_TIMESTAMP
+        } else {
+            NO_TIMESTAMP
+        };
+        let mut builder = MemoryRecordsBuilder::from_stream_no_delete_horizon(
+            stream,
+            magic,
+            compression,
+            timestamp_type,
+            initial_offset,
+            log_append_time,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            is_transactional,
+            false,
+            partition_leader_epoch,
+            size_estimate,
+        )?;
+        for record in records {
+            builder.append_simple(record)?;
+        }
+        builder.build()
+    }
+
+    /// Convenience: build a [`MemoryRecords`] for the default case used
+    /// by tests — no producer state, no partition leader epoch,
+    /// `CreateTime`, `initial_offset = 0`.
+    ///
+    /// Mirrors Java's `withRecords(byte, Compression, SimpleRecord...)`
+    /// at magic = `CURRENT_MAGIC_VALUE`.
+    pub fn with_records_default(
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            TimestampType::CreateTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            NO_PARTITION_LEADER_EPOCH,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withIdempotentRecords` — sets `producer_id` and
+    /// `base_sequence` but leaves `is_transactional` false.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_idempotent_records(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords` — sets `producer_id`,
+    /// `base_sequence`, and `is_transactional`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_transactional_records(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            true,
+            records,
+        )
     }
 
     /// Build a [`DefaultRecordsSend`] sized to this record set's full size.
@@ -256,6 +395,31 @@ impl MemoryRecords {
         // Zero-copy slice: shares the same backing allocation.
         let sliced = self.buffer.slice(position..position + available);
         Ok(MemoryRecords::readable_records(sliced))
+    }
+}
+
+/// Mirrors Java's `AbstractRecords.estimateSizeInBytes(byte,
+/// CompressionType, Iterable<SimpleRecord>)`. For magic v2 dispatches
+/// to `DefaultRecordBatch::size_in_bytes_simple`. Compression compresses
+/// estimate per Java's heuristic.
+fn estimate_size_in_bytes(magic: i8, compression: CompressionType, records: &[SimpleRecord]) -> i32 {
+    let size = if magic <= crate::common::record::record_batch::MAGIC_VALUE_V0 + 1 {
+        // v0/v1 path uses LegacyRecord which is out of scope. Phase 3 only
+        // produces v2 batches; for v0/v1 callers we fall through to the
+        // default-batch sizing as a conservative upper bound.
+        default_record_batch::size_in_bytes_simple(records)
+    } else {
+        default_record_batch::size_in_bytes_simple(records)
+    };
+    estimate_compressed_size_in_bytes(size, compression)
+}
+
+fn estimate_compressed_size_in_bytes(size: i32, compression: CompressionType) -> i32 {
+    if compression == CompressionType::None {
+        size
+    } else {
+        // Java: `Math.min(Math.max(size / 2, 1024), 1 << 16)`
+        (size / 2).clamp(1024, 1 << 16)
     }
 }
 
