@@ -517,14 +517,9 @@ fn downcast_to_default_record(record: Box<dyn Record + '_>) -> Option<DefaultRec
 #[cfg(test)]
 mod tests {
     //! Translation of the parts of `MemoryRecordsTest.java` that exercise the
-    //! read path. Tests requiring `MemoryRecordsBuilder` (Phase 3d-4) are
-    //! noted explicitly with the Java method name and the deferral reason.
+    //! read path.
     //!
-    //! Deferred to Phase 3d-4 (need `MemoryRecordsBuilder`):
-    //! * `testIterator` — builds via builder
-    //! * `testHasRoomForMethod` — builder API
-    //! * `testHasRoomForMethodWithHeaders` — builder API
-    //! * `testChecksum` — builds via `withRecords`
+    //! Deferred to Phase 6+ (need `filterTo`, control records, KRaft):
     //! * `testFilterToPreservesPartitionLeaderEpoch` — needs `filterTo`
     //! * `testFilterToEmptyBatchRetention` — needs `filterTo`
     //! * `testEmptyBatchRetention` — needs `filterTo`
@@ -540,16 +535,24 @@ mod tests {
     //! * `testFilterToWithUndersizedBuffer` — needs `filterTo`
     //! * `testFilterTo` — needs `filterTo`
     //! * `testFilterToPreservesLogAppendTime` — needs `filterTo`
-    //! * `testWithRecords` — needs `withRecords`
-    //! * `testUnsupportedCompress` — needs `withRecords`
     //!
-    //! Translated here (read-path coverage):
-    //! * `testNextBatchSize` (parts that don't construct via `withRecords`)
+    //! Translated in Phase 3d-3 (read-path coverage):
+    //! * `testNextBatchSize` (read-path subset — `firstBatchSize` semantics)
     //! * `testSlice`
     //! * `testSliceInvalidPosition`
     //! * `testSliceInvalidSize`
     //! * `testSliceEmptyRecords`
     //! * `testSliceForAlreadySlicedMemoryRecords`
+    //!
+    //! Translated in Phase 3d-4 (in
+    //! `memory_records_builder.rs::tests` — they now build via the
+    //! builder):
+    //! * `testIterator` (v2 portion)
+    //! * `testHasRoomForMethod`
+    //! * `testHasRoomForMethodWithHeaders` (v2 only)
+    //! * `testChecksum` (uncompressed v2 byte-level lock)
+    //! * `testWithRecords`
+    //! * `testUnsupportedCompress`
     //!
     //! Plus Rust-only zero-copy and round-trip checks.
 
