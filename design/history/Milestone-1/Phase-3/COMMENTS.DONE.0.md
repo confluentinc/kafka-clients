@@ -516,3 +516,169 @@ CURRENT_MAGIC_VALUE`, then asserts `first_batch_size()` returns
 where the early-out (`<` not `<=`) does NOT fire and the underlying
 `next_batch_size` validates the SIZE/MAGIC fields and returns the
 declared full size. Test count: 546 -> 547.
+
+---
+
+## 20. Compressed-append path materializes per-batch intermediate `Vec<u8>` — violates PLAN.md zero-copy DoD claim
+- **File**: `src/common/record/memory_records_builder.rs`
+- **Severity**: MAJOR (Performance / Behavior Mismatch)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/record/MemoryRecordsBuilder.java:78, 143, 758-763`
+- **Description**: Java's `MemoryRecordsBuilder` keeps `appendStream =
+  new DataOutputStream(compression.wrapForOutput(this.bufferStream,
+  magic))` and writes every record through the codec straight into
+  the underlying `ByteBufferOutputStream` (`DefaultRecord.writeTo
+  (appendStream, ...)` at line 763). Compression is **streaming,
+  in-place, per-record**. The original Phase 3d-4 Rust translation
+  maintained a separate `uncompressed_buf: Option<Vec<u8>>`. On
+  `append_default_record` the compressed branch wrote to that
+  intermediate `Vec`; on `close()` the entire accumulated buffer was
+  shipped through the codec in one shot. This meant **every record
+  on the compressed producer path incurred an extra `Vec<u8>` write
+  and an entire batch-sized memcpy at close**. The module-level
+  docstring acknowledged the deviation but argued "Java's design
+  uses the same materialized-then-compressed shape" — that was
+  incorrect.
+
+**Resolution:** Fixup `ecb5d4f` against `6f74810`. Translated Java's
+streaming design:
+
+* Replaced `uncompressed_buf` with `append_stream:
+  Option<Box<dyn Write + 'static>>` — a persistent codec writer
+  wrapped around `buffer_stream` at construction time, mirroring
+  Java's `appendStream` at line 78 + the wrap at line 143.
+* Boxed `buffer_stream: Box<ByteBufferOutputStream>` so its address
+  is stable across moves of the builder. The codec writer holds a
+  raw pointer to the boxed stream; without boxing the pointer would
+  dangle the first time the builder is moved (e.g. returned by value
+  from `from_stream`). This was caught by an early SIGSEGV in
+  `abort_resets_buffer_position` during testing.
+* Constructed the codec writer with a `'static`-erased lifetime (a
+  controlled lie). Safety upheld by:
+  - Funneling all writer access through `&mut self` methods.
+  - Never exposing the writer outside the builder.
+  - Explicit `Drop` impl that drops `append_stream` first, before
+    the rest of the fields (default field-drop order is
+    declaration-order which would drop `buffer_stream` first).
+* `append_default_record` for compressed batches now calls
+  `default_record::write_to_stream(&mut append_stream, ...)` —
+  identical to the uncompressed path's API but writes flow through
+  the codec into `buffer_stream` instead of directly. Mirrors
+  Java's MemoryRecordsBuilder.java:763.
+* `close()` flushes the codec writer (surfacing I/O errors) and
+  drops it (which finishes the compressed stream — gzip/zstd emit
+  their trailing footer here).
+
+Tests added:
+
+* `compressed_append_streams_into_buffer_stream_in_flight` (LZ4):
+  appends > 64 KiB of records and asserts
+  `buffer_stream.position()` advances DURING append (not just at
+  close). Under the old design this would fail because nothing was
+  compressed until close.
+* `compressed_streaming_round_trip_per_codec`: append + decode for
+  gzip / snappy / lz4 / zstd, exercising the full streaming
+  pipeline.
+
+Existing zero-copy tests for the uncompressed path are unchanged —
+the no-compression path's invariant (pointer-equality between the
+pre-build alloc and `MemoryRecords::buffer().as_ptr()`) still holds.
+
+Test count: 575 -> 577.
+
+---
+
+## 21. `MemoryRecords::with_records` ignores `LogAppendTime` — Java uses `System.currentTimeMillis()`
+- **File**: `src/common/record/memory_records.rs`
+- **Severity**: MAJOR (Behavior Mismatch)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/record/MemoryRecords.java:511-514`
+- **Description**: The Rust `with_records` factory had:
+  ```rust
+  let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
+      NO_TIMESTAMP
+  } else {
+      NO_TIMESTAMP
+  };
+  ```
+  Both branches returned `NO_TIMESTAMP`. Java's equivalent factory
+  sets `logAppendTime = System.currentTimeMillis()` when
+  `timestampType == LOG_APPEND_TIME`. When a caller invoked
+  `with_records(..., TimestampType::LogAppendTime, ...)` the
+  resulting batch header recorded `NO_TIMESTAMP` as `max_timestamp`
+  instead of a concrete wall-clock value.
+
+**Resolution:** Fixup `ca38cc3` against `6f74810`. Replaced the
+dead-code branch with a real wall-clock capture via
+`SystemTime::now().duration_since(UNIX_EPOCH).as_millis() as i64`,
+mirroring Java's `System.currentTimeMillis()`. Added test
+`with_records_log_append_time_populates_max_timestamp` that captures
+`now` before and after the `with_records` call, then asserts the
+resulting batch's `max_timestamp` lies in the [before, after] window
+(±1ms slop) — and explicitly is NOT `NO_TIMESTAMP`. Test count: 574
+-> 575.
+
+---
+
+## 22. `compress_into_buffer_stream` error message diverges from Java
+- **File**: `src/common/record/memory_records_builder.rs` (the
+  `compress_into_buffer_stream` helper, since removed)
+- **Severity**: MINOR (Behavior Mismatch — error message contract)
+- **Java Reference**: `MemoryRecordsBuilder.java:480, 689` —
+  `KafkaException("I/O exception when writing to the append stream,
+  closing", e)`
+- **Description**: The original Phase 3d-4 helper used
+  `"I/O exception when compressing the append stream, closing: {e}"`
+  and `"I/O exception when flushing the append stream, closing: {e}"`,
+  diverging from Java's single message. Per
+  `definition-of-done.md` item 3, error message text is part of the
+  behavioral contract and must match.
+
+**Resolution:** Auto-resolved by Issue #20's fix. The streaming
+codec design eliminates the `compress_into_buffer_stream` helper
+entirely; the only remaining error path in `close()` for the
+compressed branch is the codec writer's `flush()`, whose error
+message now reads
+`"I/O exception when writing to the append stream, closing: {e}"` —
+matching Java's wording exactly. Fixup: `ecb5d4f` (same commit as
+Issue #20).
+
+---
+
+## 23. `with_records` factory doesn't translate Java's `withRecords(byte, Compression, SimpleRecord...)` short-form, only the wide one
+- **File**: `src/common/record/memory_records.rs`
+- **Severity**: MINOR (Missing Requirement)
+- **Java Reference**: `MemoryRecords.java:587-660` — 8+ overloads
+- **Description**: Java exposed 8+ `withRecords` /
+  `withIdempotentRecords` / `withTransactionalRecords` overloads;
+  Rust shipped only 4 (`with_records`, `with_records_default`,
+  `with_idempotent_records`, `with_transactional_records`).
+  Rust lacks Java's overload resolution, so each Java overload needs
+  a distinct method name. Missing the no-`initial_offset` /
+  no-`magic` short-forms means callers in later phases that mirror
+  Java code need adaptation.
+
+**Resolution:** Fixup `6756c50` against `6f74810`. Translated the
+missing overloads as distinct methods, each documenting the exact
+Java line range it mirrors:
+
+* `with_records_magic` → Java `withRecords(byte, Compression, ...)`
+* `with_records_initial_offset` → Java `withRecords(long,
+  Compression, ...)`
+* `with_records_create_time` → Java `withRecords(byte, long,
+  Compression, ...)`
+* `with_records_partition_leader_epoch` → Java
+  `withRecords(Compression, int, ...)`
+* `with_records_initial_offset_partition_leader_epoch` → Java
+  `withRecords(long, Compression, int, ...)`
+* `with_records_timestamp_type` → Java `withRecords(byte, long,
+  Compression, TimestampType, ...)`
+* `with_idempotent_records_default` → Java
+  `withIdempotentRecords(Compression, long, short, int, ...)`
+* `with_idempotent_records_initial_offset` → Java
+  `withIdempotentRecords(long, Compression, ...)`
+* `with_transactional_records_default` → Java
+  `withTransactionalRecords(Compression, long, short, int, ...)`
+* `with_transactional_records_initial_offset` → Java
+  `withTransactionalRecords(long, Compression, ...)`
+
+`with_records_default` is retained, now expressed as a thin route
+through `with_records_magic`.

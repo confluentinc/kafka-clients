@@ -1004,6 +1004,14 @@ resolutions.
 
 # Phase 3d-3 Review — Critic N=0
 
+## Phase 3d-3 Round 2 verdict: APPROVED
+
+Issues 18 and 19 fixups verified (commits `7abab09`, `be4d9f0`, `5de9e40`,
+`20becd5`). All four DoD checks clean: cargo build, cargo test --lib (547
+passed), cargo xtask format-check, cargo xtask lint, cargo xtask
+check-generated. Trait signature change blast radius confirmed minimal
+(only intra-module callers). No new regressions. Phase 3d-3 closed.
+
 Scope: 7 commits since `786b5eb` (Phase 3d-2 rotation):
 - `04693f0` Phase 3d-3: UnalignedRecords trait + UnalignedMemoryRecords
 - `d55a926` Phase 3d-3: MemoryRecords core (read path)
@@ -1182,3 +1190,26 @@ specific boundary case is missing.
 
 No BLOCKER. No code-correctness issue beyond Issue 18. Phase 3d-3 can
 advance to Phase 3d-4 once Issue 18 is resolved.
+
+---
+
+# Phase 3d-4 Review — Critic N=0
+
+DoD check at HEAD `c136928`:
+- `cargo build` — pass.
+- `cargo test --lib` — `test result: ok. 574 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out`.
+- `cargo xtask format-check` — pass (`✅ All code is properly formatted!`).
+- `cargo xtask lint` — pass (`✅ No lint issues found!`).
+
+Test ledger 547 → 574 (+27) matches actor's count.
+
+The zero-copy *uncompressed* DoD is verified: tests `append_writes_directly_into_batch_buffer_uncompressed` and `append_writes_directly_into_batch_buffer_with_initial_offset` capture the underlying `ByteBufferOutputStream` `Vec`'s `as_ptr()` before any append, do two appends, call `build()`, and assert the resulting `MemoryRecords::buffer().as_ptr()` aliases the original allocation. Pre-sizing the stream to 2048 bytes with 4 bytes of payload guarantees no realloc; `Vec::drain(0..15)` for the bufferOffset variant preserves the data pointer. The test is non-tautological (the captured pointer is the original `Vec`'s data pointer, not re-fetched from the result). The `into_buffer()` → `Vec::drain` → `Bytes::from(Vec)` pipeline is allocation-preserving end-to-end.
+
+`hasRoomFor` correctly mirrors Java (uses `DefaultRecord::size_in_bytes`, not `record_size_upper_bound` — verified at `MemoryRecordsBuilder.java:866`). The `#[allow(dead_code)]` on `record_size_upper_bound` is justified.
+
+`KafkaError::IllegalState` is wired correctly across `is_retriable`/`is_fatal`/`code`/`java_class_name`/`message`/`from_code`. It maps to `IllegalStateException` and `ERR_CODE_CONFIG` (no fake wire code) — appropriate for a client-side error.
+
+Apache 2.0 headers present on all new files. Re-exports updated in `mod.rs`. No TODO/FIXME left.
+
+_(Issues 20, 21, 22, 23 from Phase 3d-4 Round 1 review have been
+resolved and moved to `COMMENTS.DONE.0.md`.)_
