@@ -241,19 +241,18 @@ impl Cluster {
         })
     }
 
-    /// Create a "bootstrap" cluster from the given list of host/ports.
-    pub fn bootstrap(addresses: &[SocketAddr]) -> Cluster {
-        let mut nodes = Vec::with_capacity(addresses.len());
+    /// Create a "bootstrap" cluster from a list of `(host, port)` pairs.
+    /// This is the direct analogue of Java's
+    /// `Cluster.bootstrap(List<InetSocketAddress>)`: Java calls
+    /// `InetSocketAddress.getHostString()` which returns the textual host
+    /// the caller supplied (DNS name or numeric IP), *not* a resolved IP.
+    /// Preserving textual hostnames is required so a later
+    /// `MetadataResponse` can match its broker entries by name.
+    pub fn bootstrap(hosts: &[(String, u16)]) -> Cluster {
+        let mut nodes = Vec::with_capacity(hosts.len());
         let mut node_id: i32 = -1;
-        for addr in addresses {
-            // Java uses `getHostString()` which returns the literal host
-            // (no reverse DNS). `SocketAddr::ip().to_string()` gives the
-            // numeric form; for parity with Java we pass through whatever
-            // textual host/IP was used to build the SocketAddr. Callers
-            // building `SocketAddr` from a hostname have already resolved.
-            // For unresolved hostnames see `Cluster::bootstrap_with_hosts`.
-            let host = addr.ip().to_string();
-            nodes.push(Node::new(node_id, host, addr.port() as i32));
+        for (host, port) in hosts {
+            nodes.push(Node::new(node_id, host.clone(), *port as i32));
             node_id -= 1;
         }
         Cluster::build(
@@ -269,16 +268,27 @@ impl Cluster {
         )
     }
 
-    /// Create a "bootstrap" cluster from `(host, port)` pairs. This is the
-    /// closer analogue of Java's `Cluster.bootstrap(List<InetSocketAddress>)`
-    /// because Java's `InetSocketAddress.getHostString()` returns the
-    /// original textual host (not the resolved IP), preserving DNS names
-    /// for later lookup. Use this when you want to defer DNS resolution.
-    pub fn bootstrap_with_hosts(hosts: &[(String, u16)]) -> Cluster {
-        let mut nodes = Vec::with_capacity(hosts.len());
+    /// Create a "bootstrap" cluster from already-resolved `SocketAddr`
+    /// values.
+    ///
+    /// **Warning — this loses hostnames.** A `SocketAddr` only stores the
+    /// numeric IP (Rust's stdlib has no `InetSocketAddress.getHostString()`
+    /// equivalent), so this constructor records each broker's host as the
+    /// IP-literal form. If your input was a textual DNS name (e.g.
+    /// `www.example.com:9092`), use [`Cluster::bootstrap`] instead — it is
+    /// the actual analogue of Java's
+    /// `Cluster.bootstrap(List<InetSocketAddress>)` and preserves DNS
+    /// names for the later `MetadataResponse` match.
+    ///
+    /// Use this only when you genuinely want IP-keyed bootstrap nodes
+    /// (e.g. tests, or a caller that has already resolved addresses and
+    /// does not need the original hostname).
+    pub fn bootstrap_with_addresses(addresses: &[SocketAddr]) -> Cluster {
+        let mut nodes = Vec::with_capacity(addresses.len());
         let mut node_id: i32 = -1;
-        for (host, port) in hosts {
-            nodes.push(Node::new(node_id, host.clone(), *port as i32));
+        for addr in addresses {
+            let host = addr.ip().to_string();
+            nodes.push(Node::new(node_id, host, addr.port() as i32));
             node_id -= 1;
         }
         Cluster::build(
@@ -396,7 +406,8 @@ impl Cluster {
         self.internal_topics.iter().map(|s| s.as_ref())
     }
 
-    /// Whether this cluster was constructed by [`Cluster::bootstrap`].
+    /// Whether this cluster was constructed by [`Cluster::bootstrap`] or
+    /// [`Cluster::bootstrap_with_addresses`].
     pub fn is_bootstrap_configured(&self) -> bool {
         self.is_bootstrap_configured
     }
@@ -497,12 +508,12 @@ mod tests {
 
     #[test]
     fn test_bootstrap() {
-        // Translation of ClusterTest.testBootstrap. We use the host-form
-        // bootstrap (`bootstrap_with_hosts`) so the textual hostnames are
-        // preserved — matching Java's `InetSocketAddress.getHostString()`.
+        // Translation of ClusterTest.testBootstrap. `Cluster::bootstrap`
+        // is the direct analogue of Java's hostname-preserving
+        // `Cluster.bootstrap(List<InetSocketAddress>)`.
         let ip = "140.211.11.105";
         let host = "www.example.com";
-        let cluster = Cluster::bootstrap_with_hosts(&[(ip.to_string(), 9002), (host.to_string(), 9002)]);
+        let cluster = Cluster::bootstrap(&[(ip.to_string(), 9002), (host.to_string(), 9002)]);
         let mut actual: HashSet<String> = HashSet::new();
         for n in cluster.nodes() {
             actual.insert(n.host().to_string());
