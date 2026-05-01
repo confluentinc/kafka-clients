@@ -120,6 +120,14 @@ impl MemoryRecords {
     /// * `Ok(None)` — buffer doesn't yet hold enough bytes for the header;
     /// * `Err(KafkaError::CorruptRecord)` — record size or magic is invalid.
     pub fn first_batch_size(&self) -> Result<Option<i32>, KafkaError> {
+        // Java: `if (buffer.remaining() < HEADER_SIZE_UP_TO_MAGIC) return null;`
+        // before calling `nextBatchSize()`. This early-out short-circuits
+        // the SIZE-field validation in `next_batch_size`: a buffer with a
+        // partial header skips raising a CorruptRecord and just returns
+        // None, mirroring Java's "not enough yet, try again" semantic.
+        if self.buffer.len() < crate::common::record::records::HEADER_SIZE_UP_TO_MAGIC {
+            return Ok(None);
+        }
         ByteBufferLogInputStream::new(self.buffer.as_ref(), i32::MAX).next_batch_size()
     }
 
@@ -602,6 +610,17 @@ mod tests {
             records.slice_inner(records.size_in_bytes() + 1, records.size_in_bytes()),
             Err(KafkaError::IllegalArgument(_))
         ));
+    }
+
+    /// Boundary: position == buffer.len() is allowed (Java accepts it,
+    /// only rejects strictly greater). Yields an empty slice.
+    #[test]
+    fn slice_at_end_position_returns_empty() {
+        let (combined, _) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        let total = records.size_in_bytes();
+        let sliced = records.slice_inner(total, 100).unwrap();
+        assert_eq!(sliced.size_in_bytes(), 0);
     }
 
     /// Translation of `testSliceInvalidSize`.
