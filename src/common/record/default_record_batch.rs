@@ -689,9 +689,9 @@ fn compute_attributes(
 /// Write an empty v2 batch header at `buffer[buffer.len()..]` (i.e. append
 /// to the buffer). Mirrors Java's `writeEmptyHeader(ByteBuffer, ...)`.
 ///
-/// `buffer` must have at least [`RECORD_BATCH_OVERHEAD`] bytes of remaining
-/// capacity beyond its current length; on return the buffer length grows by
-/// 61 bytes.
+/// On entry the buffer is grown by [`RECORD_BATCH_OVERHEAD`] bytes; the
+/// header bytes are then written into that fresh region via
+/// [`write_header_at`].
 ///
 /// # Errors
 ///
@@ -715,8 +715,13 @@ pub fn write_empty_header(
     is_control_record: bool,
 ) -> Result<(), KafkaError> {
     let offset_delta = (last_offset - base_offset) as i32;
-    write_header(
+    let position = buffer.len();
+    // Empty batch: no records — pre-grow exactly the 61 header bytes so
+    // `write_header_at` has the slot it needs.
+    buffer.resize(position + RECORD_BATCH_OVERHEAD, 0);
+    write_header_at(
         buffer,
+        position,
         base_offset,
         offset_delta,
         RECORD_BATCH_OVERHEAD as i32,
@@ -736,20 +741,46 @@ pub fn write_empty_header(
     )
 }
 
-/// Write the v2 batch header to `buffer` at the current end (append). Mirrors
-/// Java's `writeHeader(ByteBuffer, ...)`. Computes the CRC over the
-/// attributes-onward range (`size_in_bytes - ATTRIBUTES_OFFSET` bytes).
+/// Write the v2 batch header into `buffer` at byte offset `position`,
+/// then compute the CRC over the attributes-onward range
+/// (`size_in_bytes - ATTRIBUTES_OFFSET` bytes). Mirrors Java's
+/// `writeHeader(ByteBuffer, ...)`.
+///
+/// # Contract
+///
+/// The caller must pre-size `buffer` so that
+/// `buffer.len() >= position + size_in_bytes`, with the record bytes already
+/// populated in `[position + RECORD_BATCH_OVERHEAD, position + size_in_bytes)`.
+/// This function only writes the 61 header bytes in place at
+/// `[position, position + RECORD_BATCH_OVERHEAD)`; it does NOT resize the
+/// buffer. The CRC is then computed over the contiguous attributes-onward
+/// region — including the caller-prepopulated records — and written into
+/// `[position + CRC_OFFSET, position + CRC_OFFSET + 4)`.
+///
+/// `MemoryRecordsBuilder` (Phase 3d-4) allocates the full batch buffer up
+/// front, appends records into the records section, and then calls this
+/// function once at close to stamp the header in place.
 ///
 /// # Errors
 ///
 /// Returns [`KafkaError::IllegalArgument`] when `magic` is below
 /// [`CURRENT_MAGIC_VALUE`], when `base_timestamp` is invalid (negative and not
 /// [`NO_TIMESTAMP`]), or when `timestamp_type` is
-/// [`TimestampType::NoTimestampType`] (Java throws `IllegalArgumentException`
-/// in each case; CLAUDE.md rule 10.2 maps these to `Result`).
+/// [`TimestampType::NoTimestampType`] (Java throws
+/// `IllegalArgumentException` in each case; CLAUDE.md rule 10.2 maps these
+/// to `Result`).
+///
+/// # Panics
+///
+/// Panics with [`debug_assert!`] when `buffer.len() < position + size_in_bytes`.
+/// This is an internal precondition — callers are expected to allocate the
+/// full batch up front and only use this function to write the header in
+/// place. A debug-time panic is acceptable here per CLAUDE.md rule 10.1
+/// (programming error, not user input).
 #[allow(clippy::too_many_arguments)]
-pub fn write_header(
-    buffer: &mut Vec<u8>,
+pub fn write_header_at(
+    buffer: &mut [u8],
+    position: usize,
     base_offset: i64,
     last_offset_delta: i32,
     size_in_bytes: i32,
@@ -775,6 +806,12 @@ pub fn write_header(
             "Invalid message timestamp {base_timestamp}"
         )));
     }
+    debug_assert!(
+        buffer.len() >= position + size_in_bytes as usize,
+        "buffer too small for batch: have {} need {}",
+        buffer.len(),
+        position + size_in_bytes as usize
+    );
 
     let attributes = compute_attributes(
         compression_type,
@@ -784,30 +821,24 @@ pub fn write_header(
         is_delete_horizon_set,
     )?;
 
-    let position = buffer.len();
-    // Pre-grow the buffer to fit the entire header, then index-write each
-    // field. This matches Java's `buffer.putXxx(position + OFFSET, value)`
-    // pattern exactly.
-    buffer.resize(position + RECORD_BATCH_OVERHEAD, 0);
-
-    let buf = &mut buffer[position..position + RECORD_BATCH_OVERHEAD];
-    write_i64_at(buf, BASE_OFFSET_OFFSET, base_offset);
-    write_i32_at(buf, LENGTH_OFFSET, size_in_bytes - LOG_OVERHEAD as i32);
-    write_i32_at(buf, PARTITION_LEADER_EPOCH_OFFSET, partition_leader_epoch);
-    buf[MAGIC_OFFSET] = magic as u8;
-    write_i16_at(buf, ATTRIBUTES_OFFSET, attributes as i16);
-    write_i64_at(buf, BASE_TIMESTAMP_OFFSET, base_timestamp);
-    write_i64_at(buf, MAX_TIMESTAMP_OFFSET, max_timestamp);
-    write_i32_at(buf, LAST_OFFSET_DELTA_OFFSET, last_offset_delta);
-    write_i64_at(buf, PRODUCER_ID_OFFSET, producer_id);
-    write_i16_at(buf, PRODUCER_EPOCH_OFFSET, epoch);
-    write_i32_at(buf, BASE_SEQUENCE_OFFSET, sequence);
-    write_i32_at(buf, RECORDS_COUNT_OFFSET, num_records);
-    // CRC covers attributes..end-of-batch — when called by `write_empty_header`
-    // (no records), the resize above produced exactly the right layout. The
-    // current resize-then-CRC pattern silently truncates pre-filled records;
-    // Issue #13 fixes this by replacing this function with `write_header_at`
-    // that takes a pre-sized slice.
+    {
+        let buf = &mut buffer[position..position + RECORD_BATCH_OVERHEAD];
+        write_i64_at(buf, BASE_OFFSET_OFFSET, base_offset);
+        write_i32_at(buf, LENGTH_OFFSET, size_in_bytes - LOG_OVERHEAD as i32);
+        write_i32_at(buf, PARTITION_LEADER_EPOCH_OFFSET, partition_leader_epoch);
+        buf[MAGIC_OFFSET] = magic as u8;
+        write_i16_at(buf, ATTRIBUTES_OFFSET, attributes as i16);
+        write_i64_at(buf, BASE_TIMESTAMP_OFFSET, base_timestamp);
+        write_i64_at(buf, MAX_TIMESTAMP_OFFSET, max_timestamp);
+        write_i32_at(buf, LAST_OFFSET_DELTA_OFFSET, last_offset_delta);
+        write_i64_at(buf, PRODUCER_ID_OFFSET, producer_id);
+        write_i16_at(buf, PRODUCER_EPOCH_OFFSET, epoch);
+        write_i32_at(buf, BASE_SEQUENCE_OFFSET, sequence);
+        write_i32_at(buf, RECORDS_COUNT_OFFSET, num_records);
+    }
+    // CRC covers attributes..end-of-batch — the caller has already populated
+    // the records section in `[position + RECORD_BATCH_OVERHEAD,
+    // position + size_in_bytes)`.
     let crc = crc32c::crc32c(&buffer[position + ATTRIBUTES_OFFSET..position + size_in_bytes as usize]);
     byte_utils::write_unsigned_int_be_at(buffer, position + CRC_OFFSET, crc as i64);
     Ok(())
@@ -959,7 +990,7 @@ mod tests {
     //!
     //! Tests that depend on `MemoryRecords` / `MemoryRecordsBuilder` (Phase
     //! 3d-3 / 3d-4) build batches manually here using
-    //! [`write_header`] + per-record [`default_record::write_to`]. When the
+    //! [`write_header_at`] + per-record [`default_record::write_to`]. When the
     //! builder lands those tests will be re-routed through it (no behavioural
     //! change — the builder produces the same byte layout).
 
