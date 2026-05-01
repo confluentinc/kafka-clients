@@ -35,10 +35,15 @@
 //!    PLAN.md) and `DefaultRecordBatch::sizeInBytes` (Phase 3c). They are
 //!    therefore deferred to Phase 3c, when `DefaultRecordBatch` lands.
 
+use crate::common::errors::KafkaError;
 use crate::common::record::{RecordBatch, Records};
 
 /// Return the first batch in `records`, or `None` if empty. Mirrors Java's
 /// `AbstractRecords#firstBatch()`.
-pub fn first_batch<'a>(records: &'a dyn Records) -> Option<Box<dyn RecordBatch + 'a>> {
-    records.batches().next()
+///
+/// Returns `Err(KafkaError::CorruptRecord)` if the first batch fails to
+/// parse — matching Java's `CorruptRecordException` propagation through
+/// `Iterator.next()`.
+pub fn first_batch<'a>(records: &'a dyn Records) -> Result<Option<Box<dyn RecordBatch + 'a>>, KafkaError> {
+    records.batches().next().transpose()
 }

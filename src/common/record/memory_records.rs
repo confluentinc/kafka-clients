@@ -183,21 +183,19 @@ impl BaseRecords for MemoryRecords {
 impl TransferableRecords for MemoryRecords {}
 
 impl Records for MemoryRecords {
-    fn batches<'a>(&'a self) -> Box<dyn Iterator<Item = Box<dyn RecordBatch + 'a>> + 'a> {
-        // Trait yields plain batches (no `Result`). Per the trait doc, we
-        // surface corrupt batches by truncating: yield every successful
-        // batch in order, stop on the first error. This mirrors Java's
-        // `AbstractIterator` "throw and stop" — except in Rust we trade the
-        // panic for a silent truncation, since we cannot panic from inside
-        // an iterator without violating CLAUDE.md rule 10.
-        //
-        // Callers that need the error inspect the underlying iterator via
-        // [`MemoryRecords::batch_iterator`] (crate-private — exposed in
-        // tests).
-        Box::new(self.batch_iterator().filter_map(|r| match r {
-            Ok(b) => Some(Box::new(b) as Box<dyn RecordBatch + 'a>),
-            Err(_) => None,
-        }))
+    fn batches<'a>(
+        &'a self,
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a> {
+        // Mirrors Java's `MemoryRecordsBatchIterator` which throws
+        // `CorruptRecordException` on the first malformed batch. The Rust
+        // translation surfaces that signal as `Err(KafkaError::CorruptRecord)`
+        // at the same iteration step. The underlying `RecordBatchIterator`
+        // is "poisoned" after the first error, so subsequent calls return
+        // `None` (matching Java's "throw and stop" semantic).
+        Box::new(
+            self.batch_iterator()
+                .map(|r| r.map(|b| Box::new(b) as Box<dyn RecordBatch + 'a>)),
+        )
     }
 
     fn records<'a>(&'a self) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a> {
@@ -508,6 +506,11 @@ mod tests {
         assert_eq!(e1.records().count(), 0);
     }
 
+    /// Helper: collect batches, asserting all parsed successfully.
+    fn ok_batches(records: &MemoryRecords) -> Vec<Box<dyn RecordBatch + '_>> {
+        records.batches().map(|r| r.expect("batch should parse")).collect()
+    }
+
     /// Translation of `testNextBatchSize` (read-path subset). Exercises the
     /// `firstBatchSize` API directly from a hand-built batch.
     #[test]
@@ -574,7 +577,7 @@ mod tests {
         let after_first = sizes[0] as i32;
         let s1 = records.slice_inner(after_first, total - after_first).unwrap();
         assert_eq!(s1.size_in_bytes(), total - after_first);
-        assert_eq!(s1.batches().count(), 2);
+        assert_eq!(ok_batches(&s1).len(), 2);
 
         // Slice from after first, size > remaining: clamps to remaining.
         let s2 = records.slice_inner(after_first, total).unwrap();
@@ -588,13 +591,13 @@ mod tests {
         let second_size = sizes[1] as i32;
         let s4 = records.slice_inner(after_first, second_size).unwrap();
         assert_eq!(s4.size_in_bytes(), second_size);
-        assert_eq!(s4.batches().count(), 1);
+        assert_eq!(ok_batches(&s4).len(), 1);
 
         // Slice of a slice: read from the third batch onward.
         let after_second = (sizes[0] + sizes[1]) as i32;
         let s5 = s1.slice_inner(second_size, total - after_second).expect("slice of slice");
         assert_eq!(s5.size_in_bytes(), total - after_second);
-        assert_eq!(s5.batches().count(), 1);
+        assert_eq!(ok_batches(&s5).len(), 1);
     }
 
     /// Translation of `testSliceInvalidPosition`.
@@ -637,7 +640,7 @@ mod tests {
         let empty = MemoryRecords::empty();
         let sliced = empty.slice_inner(0, 0).unwrap();
         assert_eq!(sliced.size_in_bytes(), 0);
-        assert_eq!(sliced.batches().count(), 0);
+        assert_eq!(ok_batches(&sliced).len(), 0);
     }
 
     /// Translation of `testSliceForAlreadySlicedMemoryRecords`.
@@ -649,12 +652,12 @@ mod tests {
         let position = (sizes[0] + sizes[1]) as i32;
         let sliced = records.slice_inner(position, records.size_in_bytes() - position).unwrap();
         assert_eq!(sliced.size_in_bytes(), records.size_in_bytes() - position);
-        assert_eq!(sliced.batches().count(), 1);
+        assert_eq!(ok_batches(&sliced).len(), 1);
 
         // Slice the slice further: from beyond its end -> empty.
         let further = sliced.slice_inner(sliced.size_in_bytes(), 0).unwrap();
         assert_eq!(further.size_in_bytes(), 0);
-        assert_eq!(further.batches().count(), 0);
+        assert_eq!(ok_batches(&further).len(), 0);
     }
 
     /// Zero-copy contract: `slice` must alias the original buffer.
@@ -689,7 +692,7 @@ mod tests {
     fn batches_iterator_yields_all_batches() {
         let (combined, _) = three_batches();
         let records = MemoryRecords::readable_records_from_vec(combined);
-        let batches: Vec<_> = records.batches().collect();
+        let batches: Vec<_> = records.batches().map(|r| r.expect("clean batch parses")).collect();
         assert_eq!(batches.len(), 3);
         assert_eq!(batches[0].base_offset(), 0);
         assert_eq!(batches[1].base_offset(), 6);
@@ -759,5 +762,36 @@ mod tests {
         assert_eq!(send.size(), total as i64);
         assert_eq!(send.remaining(), total);
         assert!(!send.completed());
+    }
+
+    /// Issue 18 fix: `Records::batches()` yields `Err` for a corrupt batch
+    /// at the same iteration step where Java raises
+    /// `CorruptRecordException`, then stops. Mirrors Java's
+    /// `MemoryRecordsBatchIterator` "throw and stop" semantic.
+    #[test]
+    fn batches_yields_err_on_corrupt_second_batch_then_stops() {
+        let (mut combined, sizes) = three_batches();
+        // Corrupt the second batch's magic byte.
+        let second_batch_offset = sizes[0];
+        combined[second_batch_offset + RECORDS_MAGIC_OFFSET] = 10;
+        let records = MemoryRecords::readable_records_from_vec(combined);
+
+        let mut it = records.batches();
+        // First batch parses cleanly.
+        let first = it.next().expect("first batch present");
+        let first = first.ok().expect("first batch should parse cleanly");
+        assert_eq!(first.base_offset(), 0);
+
+        // Second batch surfaces the corruption error.
+        let second = it.next().expect("second batch present (as Err)");
+        match second {
+            Err(KafkaError::CorruptRecord(_)) => {},
+            Ok(_) => panic!("expected CorruptRecord error, got Ok"),
+            Err(e) => panic!("expected CorruptRecord error, got {e:?}"),
+        }
+
+        // Iterator stops — no more items, even though a third batch exists
+        // in the buffer (the underlying RecordBatchIterator is poisoned).
+        assert!(it.next().is_none(), "iterator must stop after first error");
     }
 }

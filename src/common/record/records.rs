@@ -54,27 +54,45 @@ pub const HEADER_SIZE_UP_TO_MAGIC: usize = MAGIC_OFFSET + MAGIC_LENGTH;
 ///   Phase 3d.
 pub trait Records: TransferableRecords {
     /// Iterate over the record batches.
-    fn batches<'a>(&'a self) -> Box<dyn Iterator<Item = Box<dyn RecordBatch + 'a>> + 'a>;
+    ///
+    /// Java's `Records.batches()` returns `Iterable<MutableRecordBatch>` whose
+    /// iteration `throws CorruptRecordException` on the first malformed batch.
+    /// The Rust translation surfaces that signal as a `Result` item — callers
+    /// see `Err(KafkaError::CorruptRecord(_))` at the same iteration step
+    /// where Java would throw, and the iterator stops yielding afterwards.
+    /// This mirrors the Phase 3d-2 decision for the inner record iterators
+    /// (`RecordBatch::iter` / `streaming_iterator` /
+    /// `skip_key_value_iterator`).
+    fn batches<'a>(
+        &'a self,
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a>;
 
     /// Return the last record batch, if any. Default impl mirrors Java's
     /// `AbstractRecords#lastBatch` (walks every batch — expensive).
-    fn last_batch<'a>(&'a self) -> Option<Box<dyn RecordBatch + 'a>> {
+    ///
+    /// Returns the last successfully parsed batch. A corrupt-batch error
+    /// stops iteration and is propagated as `Err`, matching Java's
+    /// "throw and stop" iterator semantic.
+    fn last_batch<'a>(&'a self) -> Result<Option<Box<dyn RecordBatch + 'a>>, KafkaError> {
         let mut last = None;
         for batch in self.batches() {
-            last = Some(batch);
+            last = Some(batch?);
         }
-        last
+        Ok(last)
     }
 
     /// Whether every batch in this set has the supplied magic value.
     /// Default impl mirrors Java's `AbstractRecords#hasMatchingMagic`.
-    fn has_matching_magic(&self, magic: i8) -> bool {
+    ///
+    /// A corrupt-batch error short-circuits iteration with `Err`, matching
+    /// Java's "throw and stop" iterator semantic.
+    fn has_matching_magic(&self, magic: i8) -> Result<bool, KafkaError> {
         for batch in self.batches() {
-            if batch.magic() != magic {
-                return false;
+            if batch?.magic() != magic {
+                return Ok(false);
             }
         }
-        true
+        Ok(true)
     }
 
     /// Iterate over the (deeply-decompressed) records in this log. Java
