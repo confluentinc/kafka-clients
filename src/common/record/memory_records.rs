@@ -47,7 +47,7 @@ use crate::common::record::byte_buffer_log_input_stream::ByteBufferLogInputStrea
 use crate::common::record::default_record::DefaultRecord;
 use crate::common::record::default_record_batch::DefaultRecordBatch;
 use crate::common::record::record_batch_iterator::RecordBatchIterator;
-use crate::common::record::{BaseRecords, Record, RecordBatch, Records, TransferableRecords};
+use crate::common::record::{BaseRecords, DefaultRecordsSend, Record, RecordBatch, Records, TransferableRecords};
 
 /// A [`Records`] implementation backed by a [`Bytes`] buffer of contiguous
 /// record batches.
@@ -129,6 +129,16 @@ impl MemoryRecords {
     fn batch_iterator(&self) -> RecordBatchIterator<ByteBufferLogInputStream<'_>, DefaultRecordBatch> {
         // Java passes `Integer.MAX_VALUE` for the per-batch size cap.
         RecordBatchIterator::new(ByteBufferLogInputStream::new(self.buffer.as_ref(), i32::MAX))
+    }
+
+    /// Build a [`DefaultRecordsSend`] sized to this record set's full size.
+    ///
+    /// Mirrors Java's `AbstractRecords#toSend()` override (which returns
+    /// `new DefaultRecordsSend<>(this)`). Consuming `self` here mirrors
+    /// Java's reference-passing — the underlying `Bytes` is refcount-shared
+    /// so callers that still need the records can `clone()` first.
+    pub fn to_send(self) -> DefaultRecordsSend<MemoryRecords> {
+        DefaultRecordsSend::new(self)
     }
 }
 
@@ -717,5 +727,18 @@ mod tests {
         let p1 = r1.buffer().as_ptr();
         let p2 = r2.buffer().as_ptr();
         assert_eq!(p1, p2);
+    }
+
+    /// `to_send()` produces a `DefaultRecordsSend` sized to the record
+    /// set. Mirrors Java's `AbstractRecords#toSend()`.
+    #[test]
+    fn to_send_returns_default_records_send_sized_to_self() {
+        let (a, _) = three_batches();
+        let total = a.len() as i32;
+        let r = MemoryRecords::readable_records_from_vec(a);
+        let send = r.to_send();
+        assert_eq!(send.size(), total as i64);
+        assert_eq!(send.remaining(), total);
+        assert!(!send.completed());
     }
 }

@@ -18,7 +18,7 @@ use std::sync::OnceLock;
 
 use bytes::Bytes;
 
-use crate::common::record::{BaseRecords, TransferableRecords, UnalignedRecords};
+use crate::common::record::{BaseRecords, DefaultRecordsSend, TransferableRecords, UnalignedRecords};
 
 /// Represents a memory record set which is not necessarily offset-aligned.
 ///
@@ -57,6 +57,17 @@ impl UnalignedMemoryRecords {
     pub fn empty() -> &'static UnalignedMemoryRecords {
         static EMPTY: OnceLock<UnalignedMemoryRecords> = OnceLock::new();
         EMPTY.get_or_init(|| UnalignedMemoryRecords::new(Bytes::new()))
+    }
+
+    /// Build a [`DefaultRecordsSend`] sized to this record set's full size.
+    ///
+    /// Mirrors Java's `UnalignedRecords#toSend()` default body (which
+    /// returns `new DefaultRecordsSend<>(this, sizeInBytes())`). Java
+    /// declares this on the parent interface; in Rust we expose it on the
+    /// concrete impl because `DefaultRecordsSend<R>` requires `R: Sized`,
+    /// which trait objects of `UnalignedRecords` cannot satisfy.
+    pub fn to_send(self) -> DefaultRecordsSend<UnalignedMemoryRecords> {
+        DefaultRecordsSend::new(self)
     }
 }
 
@@ -99,5 +110,16 @@ mod tests {
         let r2 = r.clone();
         let p2 = r2.buffer().as_ptr();
         assert_eq!(p1, p2, "clone must share the same backing storage");
+    }
+
+    /// `to_send()` produces a `DefaultRecordsSend` sized to the record set.
+    /// Mirrors Java's `UnalignedRecords#toSend()` default body.
+    #[test]
+    fn to_send_returns_default_records_send_sized_to_self() {
+        let payload = vec![7u8; 64];
+        let r = UnalignedMemoryRecords::from_vec(payload);
+        let send = r.to_send();
+        assert_eq!(send.size(), 64);
+        assert_eq!(send.remaining(), 64);
     }
 }
