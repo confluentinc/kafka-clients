@@ -1844,6 +1844,45 @@ mod tests {
         }
     }
 
+    /// Java: `MemoryRecordsTest.testNextBatchSize` (builder-construction half).
+    /// Phase 3d-3 translated the buffer-limit half (read-path subset);
+    /// this exercises the builder-construction round-trip from append →
+    /// build → firstBatchSize.
+    #[test]
+    fn next_batch_size_via_builder() {
+        for compression in [
+            CompressionType::None,
+            CompressionType::Gzip,
+            CompressionType::Snappy,
+            CompressionType::Lz4,
+            CompressionType::Zstd,
+        ] {
+            let stream = ByteBufferOutputStream::with_capacity(2048);
+            let log_append_time: i64 = 1_700_000_000_000;
+            let mut builder = MemoryRecordsBuilder::from_stream_no_delete_horizon(
+                stream,
+                CURRENT_MAGIC_VALUE,
+                compression,
+                TimestampType::LogAppendTime,
+                0,
+                log_append_time,
+                NO_PRODUCER_ID,
+                NO_PRODUCER_EPOCH,
+                crate::common::record::record_batch::NO_SEQUENCE,
+                false,
+                false,
+                NO_PARTITION_LEADER_EPOCH,
+                2048,
+            )
+            .unwrap();
+            builder.append(10, None, Some(b"abc"), &[]).unwrap();
+            let records = builder.build().unwrap();
+            let size = <MemoryRecords as crate::common::record::BaseRecords>::size_in_bytes(&records);
+            // Java: `assertEquals(size, records.firstBatchSize().intValue())`.
+            assert_eq!(records.first_batch_size().unwrap(), Some(size));
+        }
+    }
+
     /// Java: `MemoryRecordsTest.testChecksum` byte-level checksum lock for
     /// magic v2. Locks a known checksum value against a fixed input set.
     /// Mirrors Java's hard-coded `expectedChecksum = 3851219455L` (uncompressed)
