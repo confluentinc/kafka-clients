@@ -63,6 +63,19 @@ impl TopicIdPartition {
     }
 }
 
+/// Behavioral delta from Java: when the topic name is empty (the Rust
+/// stand-in for Java's `null` topic — see [`TopicPartition`] for why), Java
+/// prints the literal four-character string `"null"` because Java's
+/// `String + null` operator inserts `"null"`. The Rust translation has no
+/// such operator and prints nothing between the colon and the dash.
+///
+/// Concretely, for a Uuid `"vDiRhkpVQgmtSLnsAZx7lA"` and partition `1`:
+/// - Java: `"vDiRhkpVQgmtSLnsAZx7lA:null-1"`
+/// - Rust: `"vDiRhkpVQgmtSLnsAZx7lA:-1"`
+///
+/// No in-tree caller asserts on the literal `"null"` substring; if a
+/// future log-line or admin-tool format string demands Java parity, this
+/// `Display` impl is the only place to fix.
 impl fmt::Display for TopicIdPartition {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}:{}-{}", self.topic_id, self.topic(), self.partition())
