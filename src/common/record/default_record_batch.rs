@@ -352,7 +352,7 @@ impl RecordBatch for DefaultRecordBatch {
         (self.attributes_byte() & CONTROL_FLAG_MASK) > 0
     }
 
-    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a> {
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a> {
         if self.count() == 0 {
             return Box::new(std::iter::empty());
         }
@@ -364,7 +364,7 @@ impl RecordBatch for DefaultRecordBatch {
         // record set here. Use cases which call for a lower memory footprint
         // can use `streaming_iterator` at the cost of additional complexity.
         // (Mirrors Java's eager-collect path.)
-        let mut records: Vec<Box<dyn Record + 'a>> = Vec::with_capacity(self.count() as usize);
+        let mut records: Vec<Result<Box<dyn Record + 'a>, KafkaError>> = Vec::with_capacity(self.count() as usize);
         for r in compressed_iter(self, BufferSupplier::no_caching(), false) {
             records.push(r);
         }
@@ -374,7 +374,7 @@ impl RecordBatch for DefaultRecordBatch {
     fn streaming_iterator<'a>(
         &'a self,
         decompression_buffer_supplier: &'a mut BufferSupplier,
-    ) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a> {
         // Mirror Java: streaming iterator delegates to the per-codec
         // wrap_for_input; for uncompressed we use the in-buffer iterator.
         if self.is_compressed() {
@@ -446,7 +446,7 @@ impl MutableRecordBatch for DefaultRecordBatch {
     fn skip_key_value_iterator<'a>(
         &'a self,
         buffer_supplier: &'a mut BufferSupplier,
-    ) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a> {
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a> {
         if self.count() == 0 {
             return Box::new(std::iter::empty());
         }
@@ -480,6 +480,10 @@ struct UncompressedIter<'a> {
     base_sequence: i32,
     num_records: i32,
     read_records: i32,
+    /// Pending corruption error to emit on the next `next()` call. We yield
+    /// the last good record first, then the error. Mirrors Java's
+    /// "throw InvalidRecordException" after the surplus is detected.
+    pending_error: Option<KafkaError>,
     /// Set on the first error; subsequent calls return `None`.
     errored: bool,
     _phantom: std::marker::PhantomData<&'a ()>,
@@ -502,31 +506,32 @@ fn uncompressed_iter(batch: &DefaultRecordBatch) -> UncompressedIter<'_> {
         base_sequence: batch.base_sequence(),
         num_records,
         read_records: 0,
+        pending_error: None,
         errored: false,
         _phantom: std::marker::PhantomData,
     }
 }
 
 impl<'a> Iterator for UncompressedIter<'a> {
-    type Item = Box<dyn Record + 'a>;
+    type Item = Result<Box<dyn Record + 'a>, KafkaError>;
 
     fn next(&mut self) -> Option<Self::Item> {
+        // Drain a pending error first (deferred from the previous `next()`).
+        if let Some(err) = self.pending_error.take() {
+            self.errored = true;
+            return Some(Err(err));
+        }
         if self.errored {
             return None;
         }
         if self.num_records < 0 {
-            // Corrupt header: count is negative — surface as an empty iterator
-            // after one logged error. To preserve Java's behaviour ("throws
-            // InvalidRecordException"), we prefer to surface the error through
-            // a panic-free sentinel: yield a poisoned empty record? No — to
-            // keep faithful semantics, set errored and return None. Tests
-            // assert via `forEach Record::ensureValid` which depends on
-            // iteration emitting records (Java throws on the constructor).
-            // We accept this divergence and document it: callers should
-            // verify count via `count_or_null()` first if they need the
-            // "negative count" check.
+            // Corrupt header: count is negative. Java throws
+            // InvalidRecordException; we surface as a Result::Err and stop.
             self.errored = true;
-            return None;
+            return Some(Err(KafkaError::CorruptRecord(format!(
+                "Found invalid record count {} in magic v2 batch",
+                self.num_records
+            ))));
         }
         if self.read_records >= self.num_records {
             return None;
@@ -541,18 +546,23 @@ impl<'a> Iterator for UncompressedIter<'a> {
         ) {
             Ok(rec) => {
                 if self.read_records == self.num_records && !self.records.is_empty() {
-                    // Java throws InvalidRecordException — we surface via
-                    // poison flag and stop iteration. Tests that assert
-                    // ensure_valid throws will need to check the records
-                    // remaining via the buffer length sentinel; this is
-                    // tracked in actor memory if needed.
-                    self.errored = true;
+                    // Declared `RecordCount` is smaller than the actual
+                    // payload — Java throws InvalidRecordException on the
+                    // *next* call. Defer the error so the last good record
+                    // is yielded first.
+                    self.pending_error = Some(KafkaError::CorruptRecord(format!(
+                        "Invalid record count: declared count {} but {} surplus bytes remain in batch",
+                        self.num_records,
+                        self.records.len()
+                    )));
                 }
-                Some(Box::new(rec))
+                Some(Ok(Box::new(rec)))
             },
-            Err(_e) => {
+            Err(e) => {
                 self.errored = true;
-                None
+                Some(Err(KafkaError::CorruptRecord(format!(
+                    "Could not read record from buffer: {e}"
+                ))))
             },
         }
     }
@@ -604,10 +614,20 @@ fn compressed_partial_iter<'a>(batch: &'a DefaultRecordBatch, supplier: BufferSu
 }
 
 impl<'a> Iterator for CompressedIter<'a> {
-    type Item = Box<dyn Record + 'a>;
+    type Item = Result<Box<dyn Record + 'a>, KafkaError>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        if self.errored || self.read_records >= self.num_records {
+        if self.errored {
+            return None;
+        }
+        if self.num_records < 0 {
+            self.errored = true;
+            return Some(Err(KafkaError::CorruptRecord(format!(
+                "Found invalid record count {} in magic v2 batch",
+                self.num_records
+            ))));
+        }
+        if self.read_records >= self.num_records {
             return None;
         }
         self.read_records += 1;
@@ -619,10 +639,12 @@ impl<'a> Iterator for CompressedIter<'a> {
                 self.base_sequence,
                 self.log_append_time,
             ) {
-                Ok(p) => Some(Box::new(p) as Box<dyn Record + 'a>),
-                Err(_) => {
+                Ok(p) => Some(Ok(Box::new(p) as Box<dyn Record + 'a>)),
+                Err(e) => {
                     self.errored = true;
-                    None
+                    Some(Err(KafkaError::CorruptRecord(format!(
+                        "Could not read record from compressed stream: {e}"
+                    ))))
                 },
             }
         } else {
@@ -633,10 +655,12 @@ impl<'a> Iterator for CompressedIter<'a> {
                 self.base_sequence,
                 self.log_append_time,
             ) {
-                Ok(r) => Some(Box::new(r) as Box<dyn Record + 'a>),
-                Err(_) => {
+                Ok(r) => Some(Ok(Box::new(r) as Box<dyn Record + 'a>)),
+                Err(e) => {
                     self.errored = true;
-                    None
+                    Some(Err(KafkaError::CorruptRecord(format!(
+                        "Could not read record from compressed stream: {e}"
+                    ))))
                 },
             }
         }
@@ -1219,7 +1243,7 @@ mod tests {
         assert_eq!(batch.base_sequence(), NO_SEQUENCE);
         assert_eq!(batch.last_sequence(), NO_SEQUENCE);
         for r in batch.iter() {
-            r.ensure_valid().unwrap();
+            r.unwrap().ensure_valid().unwrap();
         }
     }
 
@@ -1282,7 +1306,7 @@ mod tests {
         assert_eq!(batch.producer_epoch(), epoch);
         assert_eq!(batch.base_sequence(), base_sequence);
         assert_eq!(batch.last_sequence(), 0);
-        let all: Vec<_> = batch.iter().collect();
+        let all: Vec<_> = batch.iter().map(|r| r.unwrap()).collect();
         assert_eq!(all.len(), 3);
         assert_eq!(all[0].sequence(), i32::MAX - 1);
         assert_eq!(all[1].sequence(), i32::MAX);
@@ -1413,7 +1437,7 @@ mod tests {
 
         let mut offset = first_offset;
         for r in batch.iter() {
-            assert_eq!(r.offset(), offset);
+            assert_eq!(r.unwrap().offset(), offset);
             offset += 1;
         }
     }
@@ -1469,7 +1493,7 @@ mod tests {
         assert_eq!(batch.max_timestamp(), log_append_time);
         assert!(batch.is_valid()); // CRC was recomputed.
         for r in batch.iter() {
-            assert_eq!(r.timestamp(), log_append_time);
+            assert_eq!(r.unwrap().timestamp(), log_append_time);
         }
     }
 
@@ -1546,6 +1570,7 @@ mod tests {
             let normal: Vec<RecordSnapshot> = batch
                 .iter()
                 .map(|r| {
+                    let r = r.unwrap();
                     (
                         r.offset(),
                         r.timestamp(),
@@ -1558,6 +1583,7 @@ mod tests {
             let streaming: Vec<RecordSnapshot> = batch
                 .streaming_iterator(&mut supplier)
                 .map(|r| {
+                    let r = r.unwrap();
                     (
                         r.offset(),
                         r.timestamp(),
@@ -1602,7 +1628,7 @@ mod tests {
             };
             let batch = DefaultRecordBatch::new(buf);
             assert_eq!(batch.compression_type(), ct);
-            let collected: Vec<_> = batch.iter().collect();
+            let collected: Vec<_> = batch.iter().map(|r| r.unwrap()).collect();
             assert_eq!(collected.len(), recs.len(), "codec {ct:?}");
             for (i, r) in collected.iter().enumerate() {
                 assert_eq!(r.timestamp(), recs[i].timestamp(), "codec {ct:?} record {i}");
@@ -1653,16 +1679,15 @@ mod tests {
             };
             let batch = DefaultRecordBatch::new(buf);
             let mut supplier = BufferSupplier::create();
-            let collected: Vec<_> = batch.skip_key_value_iterator(&mut supplier).collect();
+            let collected: Vec<_> = batch.skip_key_value_iterator(&mut supplier).map(|r| r.unwrap()).collect();
             assert_eq!(collected.len(), recs.len(), "codec {ct:?}");
         }
     }
 
-    /// Translation of `DefaultRecordBatchTest.testInvalidRecordCountTooManyNonCompressedV2`
-    /// — when the declared count is larger than actual records, iteration
-    /// yields fewer items and surfaces an error via the iterator's poison
-    /// flag (Java throws InvalidRecordException; we surface the error by
-    /// terminating early — see UncompressedIter::next docstring).
+    /// Translation of `DefaultRecordBatchTest.testInvalidRecordCountTooManyNonCompressedV2`.
+    /// When the declared count is larger than actual records, iteration
+    /// surfaces an `Err(KafkaError::CorruptRecord)` once the underlying buffer
+    /// runs out. Java throws `InvalidRecordException` at the same point.
     #[test]
     fn invalid_record_count_too_many_terminates_iter() {
         let recs = vec![
@@ -1683,16 +1708,22 @@ mod tests {
         // Override RecordCount to a value larger than the actual number of records.
         write_i32_at(&mut buf, RECORDS_COUNT_OFFSET, 5);
         let batch = DefaultRecordBatch::new(buf);
-        // Iteration eventually fails because the underlying buffer runs out
-        // before all 5 records are read; the iterator stops at the corruption
-        // point.
         let collected: Vec<_> = batch.iter().collect();
+        // The 3 actual records read OK, then the 4th read attempt surfaces
+        // `Err(CorruptRecord)`; the iterator stops poisoned afterwards.
+        assert!(
+            collected.iter().any(|r| matches!(r, Err(KafkaError::CorruptRecord(_)))),
+            "expected at least one CorruptRecord error, got {:?}",
+            collected.iter().map(|r| r.is_ok()).collect::<Vec<_>>()
+        );
         assert!(collected.len() < 5);
     }
 
-    /// Translation of `testInvalidRecordCountTooLittleNonCompressedV2` —
-    /// declared count is smaller; iteration yields the declared count and
-    /// surfaces an error because there are leftover bytes.
+    /// Translation of `testInvalidRecordCountTooLittleNonCompressedV2`.
+    /// Declared count is smaller than actual records; iteration yields the
+    /// declared count of `Ok` items and then surfaces
+    /// `Err(KafkaError::CorruptRecord)` for the surplus bytes. Java throws
+    /// `InvalidRecordException` at the same point.
     #[test]
     fn invalid_record_count_too_little_yields_declared_count() {
         let recs = vec![
@@ -1712,9 +1743,12 @@ mod tests {
         );
         write_i32_at(&mut buf, RECORDS_COUNT_OFFSET, 2);
         let batch = DefaultRecordBatch::new(buf);
-        // Iteration yields 2 items and stops; surplus bytes remain.
         let collected: Vec<_> = batch.iter().collect();
-        assert_eq!(collected.len(), 2);
+        let oks: Vec<_> = collected.iter().filter(|r| r.is_ok()).collect();
+        let errs: Vec<_> = collected.iter().filter(|r| r.is_err()).collect();
+        assert_eq!(oks.len(), 2, "expected 2 successful records, got {}", oks.len());
+        assert_eq!(errs.len(), 1, "expected exactly one corruption error, got {}", errs.len());
+        assert!(matches!(errs[0], Err(KafkaError::CorruptRecord(_))));
     }
 
     /// **Byte-level fixture (PLAN.md DoD).** Builds an empty v2 batch via

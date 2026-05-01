@@ -53,8 +53,11 @@ pub trait MutableRecordBatch: RecordBatch {
     /// the record stream. The yielded `Record`s' key and value will be empty.
     /// Used when the consumer does not need the body, saving allocation/GC
     /// overhead.
+    ///
+    /// Each item is `Result<Box<dyn Record + 'a>, KafkaError>` for the same
+    /// reason as [`RecordBatch::iter`].
     fn skip_key_value_iterator<'a>(
         &'a self,
         buffer_supplier: &'a mut BufferSupplier,
-    ) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a>;
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a>;
 }

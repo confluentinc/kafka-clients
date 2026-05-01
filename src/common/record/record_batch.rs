@@ -141,7 +141,13 @@ pub trait RecordBatch {
 
     /// Iterate over the records in this batch. Mirrors Java's
     /// `Iterable<Record>` parent on `RecordBatch`.
-    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a>;
+    ///
+    /// Each item is `Result<Box<dyn Record + 'a>, KafkaError>`: corrupt
+    /// records (e.g. declared `RecordCount` mismatches actual records, varint
+    /// decode error) yield `Err(KafkaError::CorruptRecord(_))` and the
+    /// iterator stops. Java throws `InvalidRecordException` in the same
+    /// situations; CLAUDE.md rule 10.2 maps these to `Result`.
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a>;
 
     /// Return a streaming iterator that defers decompression of the record
     /// stream until each next() call. The supplied buffer supplier may be
@@ -149,10 +155,13 @@ pub trait RecordBatch {
     ///
     /// Phase 3a defines this as part of the contract; the concrete iterator
     /// implementations land in Phase 3c/3d.
+    ///
+    /// Each item is `Result<Box<dyn Record + 'a>, KafkaError>` for the same
+    /// reason as [`iter`](Self::iter).
     fn streaming_iterator<'a>(
         &'a self,
         decompression_buffer_supplier: &'a mut BufferSupplier,
-    ) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a>;
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a>;
 
     /// Iterate all records to find the offset of the maximum timestamp.
     ///
@@ -177,6 +186,7 @@ pub trait RecordBatch {
         // owned locally and dropped when this block exits.
         let mut supplier = BufferSupplier::create();
         for record in self.streaming_iterator(&mut supplier) {
+            let record = record?;
             if max_timestamp == record.timestamp() {
                 return Ok(Some(record.offset()));
             }
