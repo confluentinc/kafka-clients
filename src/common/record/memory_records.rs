@@ -208,15 +208,52 @@ impl MemoryRecords {
     /// by tests — no producer state, no partition leader epoch,
     /// `CreateTime`, `initial_offset = 0`.
     ///
-    /// Mirrors Java's `withRecords(byte, Compression, SimpleRecord...)`
-    /// at magic = `CURRENT_MAGIC_VALUE`.
+    /// Mirrors Java's `withRecords(Compression, SimpleRecord...)` at
+    /// `MemoryRecords.java:587-589` — which itself routes to
+    /// `withRecords(CURRENT_MAGIC_VALUE, compression, records)`.
     pub fn with_records_default(
         compression: CompressionType,
         records: &[SimpleRecord],
     ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records_magic(CURRENT_MAGIC_VALUE, compression, records)
+    }
+
+    /// Mirrors Java's `withRecords(byte magic, Compression, SimpleRecord...)`
+    /// at `MemoryRecords.java:597-599` — magic explicit, default
+    /// `initial_offset = 0` and `CreateTime`.
+    pub fn with_records_magic(
+        magic: i8,
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records_create_time(magic, 0, compression, records)
+    }
+
+    /// Mirrors Java's `withRecords(long initialOffset, Compression,
+    /// SimpleRecord...)` at `MemoryRecords.java:601-604` — explicit
+    /// initial offset, magic = `CURRENT_MAGIC_VALUE`, `CreateTime`.
+    pub fn with_records_initial_offset(
+        initial_offset: i64,
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records_create_time(CURRENT_MAGIC_VALUE, initial_offset, compression, records)
+    }
+
+    /// Mirrors Java's `withRecords(byte magic, long initialOffset,
+    /// Compression, SimpleRecord...)` at `MemoryRecords.java:606-608`
+    /// and the underlying `withRecords(magic, initialOffset, compression,
+    /// CREATE_TIME, records)` at `:655-660` — explicit magic and
+    /// initial offset, `CreateTime`, no producer state.
+    pub fn with_records_create_time(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
         MemoryRecords::with_records(
-            CURRENT_MAGIC_VALUE,
-            0,
+            magic,
+            initial_offset,
             compression,
             TimestampType::CreateTime,
             NO_PRODUCER_ID,
@@ -228,7 +265,81 @@ impl MemoryRecords {
         )
     }
 
-    /// Mirrors Java's `withIdempotentRecords` — sets `producer_id` and
+    /// Mirrors Java's `withRecords(Compression, int partitionLeaderEpoch,
+    /// SimpleRecord...)` at `MemoryRecords.java:591-595` — partition
+    /// leader epoch explicit, magic = `CURRENT_MAGIC_VALUE`,
+    /// `initial_offset = 0`, `CreateTime`.
+    pub fn with_records_partition_leader_epoch(
+        compression: CompressionType,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            TimestampType::CreateTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            partition_leader_epoch,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withRecords(long initialOffset, Compression,
+    /// int partitionLeaderEpoch, SimpleRecord...)` at
+    /// `MemoryRecords.java:610-613` — explicit `initial_offset` and
+    /// `partition_leader_epoch`, magic = `CURRENT_MAGIC_VALUE`,
+    /// `CreateTime`, no producer state.
+    pub fn with_records_initial_offset_partition_leader_epoch(
+        initial_offset: i64,
+        compression: CompressionType,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            partition_leader_epoch,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withRecords(byte, long, Compression,
+    /// TimestampType, SimpleRecord...)` at `MemoryRecords.java:655-660`
+    /// — explicit timestamp type, no producer state.
+    pub fn with_records_timestamp_type(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        timestamp_type: TimestampType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            timestamp_type,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            NO_PARTITION_LEADER_EPOCH,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withIdempotentRecords(byte, long, Compression,
+    /// long, short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:621-626` — sets `producer_id` and
     /// `base_sequence` but leaves `is_transactional` false.
     #[allow(clippy::too_many_arguments)]
     pub fn with_idempotent_records(
@@ -255,7 +366,57 @@ impl MemoryRecords {
         )
     }
 
-    /// Mirrors Java's `withTransactionalRecords` — sets `producer_id`,
+    /// Mirrors Java's `withIdempotentRecords(Compression, long, short, int,
+    /// SimpleRecord...)` at `MemoryRecords.java:615-619` — short-form
+    /// overload using `CURRENT_MAGIC_VALUE`, `initial_offset = 0`, and
+    /// `NO_PARTITION_LEADER_EPOCH`.
+    pub fn with_idempotent_records_default(
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_idempotent_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            NO_PARTITION_LEADER_EPOCH,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withIdempotentRecords(long, Compression, long,
+    /// short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:628-633` — explicit `initial_offset` and
+    /// `partition_leader_epoch`, magic = `CURRENT_MAGIC_VALUE`.
+    pub fn with_idempotent_records_initial_offset(
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_idempotent_records(
+            CURRENT_MAGIC_VALUE,
+            initial_offset,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords(byte, long, Compression,
+    /// long, short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:641-646` — sets `producer_id`,
     /// `base_sequence`, and `is_transactional`.
     #[allow(clippy::too_many_arguments)]
     pub fn with_transactional_records(
@@ -278,6 +439,54 @@ impl MemoryRecords {
             base_sequence,
             partition_leader_epoch,
             true,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords(Compression, long, short,
+    /// int, SimpleRecord...)` at `MemoryRecords.java:635-639` —
+    /// short-form overload using `CURRENT_MAGIC_VALUE`,
+    /// `initial_offset = 0`, and `NO_PARTITION_LEADER_EPOCH`.
+    pub fn with_transactional_records_default(
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_transactional_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            NO_PARTITION_LEADER_EPOCH,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords(long, Compression, long,
+    /// short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:648-653` — explicit `initial_offset` and
+    /// `partition_leader_epoch`, magic = `CURRENT_MAGIC_VALUE`.
+    pub fn with_transactional_records_initial_offset(
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_transactional_records(
+            CURRENT_MAGIC_VALUE,
+            initial_offset,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
             records,
         )
     }
