@@ -23,6 +23,13 @@ use rand::seq::SliceRandom;
 
 use crate::common::{ClusterResource, Node, PartitionInfo, TopicPartition, Uuid};
 
+/// Convert a `HashSet<String>` to a `HashSet<Arc<str>>` at a public-API
+/// boundary. Used once per `pub fn new_*` constructor; the inner
+/// [`Cluster::build`] then carries `Arc<str>` end-to-end.
+fn into_arc_set(set: HashSet<String>) -> HashSet<Arc<str>> {
+    set.into_iter().map(Arc::<str>::from).collect()
+}
+
 /// An immutable representation of a subset of the nodes, topics, and
 /// partitions in the Kafka cluster.
 #[derive(Clone, Debug)]
@@ -59,9 +66,9 @@ impl Cluster {
             false,
             nodes,
             partitions,
-            unauthorized_topics,
+            into_arc_set(unauthorized_topics),
             HashSet::new(),
-            internal_topics,
+            into_arc_set(internal_topics),
             None,
             HashMap::new(),
         )
@@ -81,9 +88,9 @@ impl Cluster {
             false,
             nodes,
             partitions,
-            unauthorized_topics,
+            into_arc_set(unauthorized_topics),
             HashSet::new(),
-            internal_topics,
+            into_arc_set(internal_topics),
             controller,
             HashMap::new(),
         )
@@ -104,9 +111,9 @@ impl Cluster {
             false,
             nodes,
             partitions,
-            unauthorized_topics,
-            invalid_topics,
-            internal_topics,
+            into_arc_set(unauthorized_topics),
+            into_arc_set(invalid_topics),
+            into_arc_set(internal_topics),
             controller,
             HashMap::new(),
         )
@@ -123,6 +130,38 @@ impl Cluster {
         internal_topics: HashSet<String>,
         controller: Option<Node>,
         topic_ids: HashMap<String, Uuid>,
+    ) -> Self {
+        let topic_ids_arc: HashMap<Arc<str>, Uuid> =
+            topic_ids.into_iter().map(|(k, v)| (Arc::<str>::from(k), v)).collect();
+        Self::build(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            into_arc_set(unauthorized_topics),
+            into_arc_set(invalid_topics),
+            into_arc_set(internal_topics),
+            controller,
+            topic_ids_arc,
+        )
+    }
+
+    /// `Arc<str>`-aware constructor used internally by [`Cluster::with_partitions`]
+    /// (and any future caller on the metadata-refresh path) so that the
+    /// existing `Arc<str>` topic names can be reused without reallocation.
+    /// All inputs flow straight into the inner indices via `Arc::clone`
+    /// (refcount bumps), bypassing the `String → Arc<str>` round-trip the
+    /// public `pub fn new_*` constructors perform at their boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_arc_inputs(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<Arc<str>>,
+        invalid_topics: HashSet<Arc<str>>,
+        internal_topics: HashSet<Arc<str>>,
+        controller: Option<Node>,
+        topic_ids: HashMap<Arc<str>, Uuid>,
     ) -> Self {
         Self::build(
             cluster_id,
@@ -143,11 +182,11 @@ impl Cluster {
         is_bootstrap_configured: bool,
         nodes: Vec<Node>,
         partitions: Vec<PartitionInfo>,
-        unauthorized_topics: HashSet<String>,
-        invalid_topics: HashSet<String>,
-        internal_topics: HashSet<String>,
+        unauthorized_topics: HashSet<Arc<str>>,
+        invalid_topics: HashSet<Arc<str>>,
+        internal_topics: HashSet<Arc<str>>,
         controller: Option<Node>,
-        topic_ids: HashMap<String, Uuid>,
+        topic_ids: HashMap<Arc<str>, Uuid>,
     ) -> Self {
         // Make a randomized copy of the nodes — matches Java's
         // `Collections.shuffle(copy)` so iteration order is randomized.
@@ -204,15 +243,9 @@ impl Cluster {
             available_partitions_by_topic.insert(topic.clone(), avail);
         }
 
-        // Topic-id maps. Convert input `HashMap<String, Uuid>` to
-        // `HashMap<Arc<str>, Uuid>` so the keys can be shared.
-        let topic_ids_arc: HashMap<Arc<str>, Uuid> =
-            topic_ids.into_iter().map(|(k, v)| (Arc::<str>::from(k), v)).collect();
-        let topic_names: HashMap<Uuid, Arc<str>> = topic_ids_arc.iter().map(|(k, v)| (*v, k.clone())).collect();
-
-        let unauthorized_topics: HashSet<Arc<str>> = unauthorized_topics.into_iter().map(Arc::<str>::from).collect();
-        let invalid_topics: HashSet<Arc<str>> = invalid_topics.into_iter().map(Arc::<str>::from).collect();
-        let internal_topics: HashSet<Arc<str>> = internal_topics.into_iter().map(Arc::<str>::from).collect();
+        // Topic-id reverse map (Uuid → Arc<str>) shares the same `Arc<str>`
+        // keys as `topic_ids` (refcount bumps, not allocations).
+        let topic_names: HashMap<Uuid, Arc<str>> = topic_ids.iter().map(|(k, v)| (*v, k.clone())).collect();
 
         Cluster {
             is_bootstrap_configured,
@@ -227,7 +260,7 @@ impl Cluster {
             partitions_by_node,
             nodes_by_id,
             cluster_resource: ClusterResource::new(cluster_id),
-            topic_ids: topic_ids_arc,
+            topic_ids,
             topic_names,
         }
     }
@@ -305,25 +338,25 @@ impl Cluster {
     }
 
     /// Return a copy of this cluster combined with `partitions`.
+    ///
+    /// Reuses the existing `Arc<str>` topic-name allocations end-to-end:
+    /// the unauthorized/invalid/internal-topic sets and the topic-id map
+    /// are cloned by refcount bump, never by reallocation. Hot path
+    /// (metadata-refresh) — see Phase 4a Critic Issue 4.
     pub fn with_partitions(&self, partitions: HashMap<TopicPartition, PartitionInfo>) -> Cluster {
         let mut combined: HashMap<TopicPartition, PartitionInfo> = self.partitions_by_topic_partition.clone();
         for (k, v) in partitions {
             combined.insert(k, v);
         }
-        let unauthorized: HashSet<String> = self.unauthorized_topics.iter().map(|s| s.to_string()).collect();
-        let invalid: HashSet<String> = self.invalid_topics.iter().map(|s| s.to_string()).collect();
-        let internal: HashSet<String> = self.internal_topics.iter().map(|s| s.to_string()).collect();
-        let topic_ids: HashMap<String, Uuid> = self.topic_ids.iter().map(|(k, v)| (k.to_string(), *v)).collect();
-        let nodes = self.nodes.clone();
-        Cluster::new_with_topic_ids(
+        Cluster::from_arc_inputs(
             self.cluster_resource.cluster_id().map(str::to_owned),
-            nodes,
+            self.nodes.clone(),
             combined.into_values().collect(),
-            unauthorized,
-            invalid,
-            internal,
+            self.unauthorized_topics.clone(),
+            self.invalid_topics.clone(),
+            self.internal_topics.clone(),
             self.controller.clone(),
-            topic_ids,
+            self.topic_ids.clone(),
         )
     }
 
@@ -855,5 +888,55 @@ mod tests {
         let combined = cluster.with_partitions(extra);
         assert!(combined.partition(&tp).is_some());
         assert!(combined.partition(&TopicPartition::new("t", 0)).is_some());
+    }
+
+    #[test]
+    fn with_partitions_shares_topic_arc() {
+        // Phase 4a Critic Issue 4: with_partitions must reuse the existing
+        // `Arc<str>` topic-name allocations rather than round-tripping
+        // through `String`. Build a cluster that has every Arc<str>-keyed
+        // input populated (unauthorized, invalid, internal, topic_ids) and
+        // verify each Arc address survives a `with_partitions` call.
+        let n0 = Node::new(0, "h".to_string(), 100);
+        let topic_id = Uuid::random();
+        let mut topic_ids: HashMap<String, Uuid> = HashMap::new();
+        topic_ids.insert("t".to_string(), topic_id);
+        let mut unauthorized: HashSet<String> = HashSet::new();
+        unauthorized.insert("u".to_string());
+        let mut invalid: HashSet<String> = HashSet::new();
+        invalid.insert("i".to_string());
+        let mut internal: HashSet<String> = HashSet::new();
+        internal.insert("n".to_string());
+        let parts = vec![PartitionInfo::new(
+            "t",
+            0,
+            Some(n0.clone()),
+            vec![n0.clone()],
+            vec![n0.clone()],
+        )];
+        let cluster = Cluster::new_with_topic_ids(
+            None,
+            vec![n0.clone()],
+            parts,
+            unauthorized,
+            invalid,
+            internal,
+            None,
+            topic_ids,
+        );
+
+        // Snapshot Arc addresses on the source side.
+        let topic_id_key_ptr = cluster.topic_ids.keys().next().unwrap().as_ptr();
+        let unauth_ptr = cluster.unauthorized_topics.iter().next().unwrap().as_ptr();
+        let invalid_ptr = cluster.invalid_topics.iter().next().unwrap().as_ptr();
+        let internal_ptr = cluster.internal_topics.iter().next().unwrap().as_ptr();
+
+        let combined = cluster.with_partitions(HashMap::new());
+
+        // Every Arc<str> address must survive intact across with_partitions.
+        assert_eq!(combined.topic_ids.keys().next().unwrap().as_ptr(), topic_id_key_ptr);
+        assert_eq!(combined.unauthorized_topics.iter().next().unwrap().as_ptr(), unauth_ptr);
+        assert_eq!(combined.invalid_topics.iter().next().unwrap().as_ptr(), invalid_ptr);
+        assert_eq!(combined.internal_topics.iter().next().unwrap().as_ptr(), internal_ptr);
     }
 }
