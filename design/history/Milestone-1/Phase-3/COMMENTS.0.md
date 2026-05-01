@@ -166,6 +166,32 @@ phases.
 
 ---
 
+## Phase 3b Round 2 verdict: APPROVED
+
+Round 2 covered fixup commit `5dd0a73` (drop `NULL_ENTRY_VALUE` re-export
+from `src/common/serialization/mod.rs`) and `a78894` (rotate Issue 9 to
+DONE). Re-ran DoD checks:
+
+- `cargo build` — clean, no warnings.
+- `cargo test --lib` — `test result: ok. 416 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.01s`.
+- `cargo xtask format-check` — clean.
+- `cargo xtask lint` — clean.
+- `cargo xtask check-generated` — clean.
+
+Per-issue verification:
+- Issue 9: `src/common/serialization/mod.rs` — `NULL_ENTRY_VALUE` token
+  removed from `pub use list_serializer::{...}` line; nothing else
+  changed in the fixup (1 file, 1 line modified). `grep -rn
+  "NULL_ENTRY_VALUE" src/` confirms the only callsite outside its
+  defining file is `list_deserializer.rs:21` which imports from
+  `crate::common::serialization::list_serializer::{...}` (the defining
+  file path), per CLAUDE.md rule 2. No drift.
+
+`COMMENTS.DONE.0.md` has Issue 9 with a Resolution paragraph citing
+`5dd0a73`.
+
+---
+
 # Phase 3b Review — Critic N=0
 
 Scope: 2 commits since `7cef0e1` — `284528a` (serialization module) and
@@ -347,3 +373,551 @@ Round 1 outcome: APPROVED with one MINOR rule violation (#9). Issue 9
 was mechanical (drop one identifier from a `pub use`) and did not
 affect correctness; resolved by fixup `5dd0a73` and moved to
 `COMMENTS.DONE.0.md`. No BLOCKER, no MAJOR.
+
+---
+
+# Phase 3c Review — Critic N=0
+
+Scope: 1 commit since `a78894` — `fe88cbd` (compression module). Issue
+numbering continues from 11 (10 reserved/unused).
+
+DoD checks I re-ran (all green):
+- `cargo build --lib` — clean, no warnings.
+- `cargo test --lib` — `test result: ok. 446 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s` (was 416 in Phase 3b, +30 Phase 3c tests; matches actor's claim).
+- `cargo xtask format-check` — `All code is properly formatted!`
+- `cargo xtask lint` — `No lint issues found!`
+- `cargo xtask check-generated` — `All generated code is properly formatted!`
+
+## Phase 3c Round 1 verdict: APPROVED with deferrals
+
+The Phase 3c compression translation is correct, faithful to Java's wire
+format for LZ4, and the two deferrals (Snappy xerial framing, LZ4 level
+knob) are well documented. No BLOCKER, no MAJOR.
+
+### What I verified — LZ4 framing fidelity (HIGHEST PRIORITY)
+
+I read both `Lz4BlockOutputStream.java` and `Lz4BlockInputStream.java`
+line-by-line against the Rust translations:
+
+- **Magic** `0x184D2204` little-endian → `[0x04, 0x22, 0x4D, 0x18]` on
+  disk: matches (`lz4_block_output_stream.rs:39`,
+  `writes_header_with_correct_magic` test).
+- **FLG byte layout** (bits 0-1 reserved=0, bit 2 contentChecksum, bit 3
+  contentSize, bit 4 blockChecksum, bit 5 blockIndependence=1, bits 6-7
+  version=1): byte-exact match in `Flg::to_byte` /
+  `Flg::from_byte`. Validation rejects `block_independence != 1`,
+  `version != 1`, and `reserved != 0` with the same Java strings.
+- **BD byte layout** (bits 0-3 reserved2=0, bits 4-6 blockSizeValue 4..7,
+  bit 7 reserved3=0): matches in `Bd::to_byte` / `Bd::from_byte`.
+  `block_maximum_size = 1 << ((2 * blockSizeValue) + 8)`: matches.
+- **HC checksum** = `(XXH32(buf, seed=0) >> 8) & 0xFF`: matches.
+  Coverage range = `[FLG..end-of-FD]` (offset 4, len = bufferOffset-4)
+  by default; `[magic..end-of-FD]` (offset 0, len = bufferOffset) when
+  `useBrokenFlagDescriptorChecksum=true`: matches in
+  `lz4_block_output_stream.rs:259-263` and the input-side check in
+  `lz4_block_input_stream.rs:210-216`.
+- **Per-block layout** `[blockSize:4 LE][data][optional blockChecksum:4 LE]`,
+  with high bit `0x80000000` = incompressible, threshold check
+  `compressedLength >= bufferOffset` falls back to the raw buffer:
+  byte-exact match in `Lz4BlockOutputStream::write_block`
+  (`lz4_block_output_stream.rs:283-314`).
+- **End-mark** is a single `0u32` LE (`writeEndMark`): matches.
+- **XXH32 seed = 0** confirmed by `xxh32_known_vectors` test
+  (`xxh32(&[]) == 0x02CC5D05`, the canonical empty-string XXH32 result).
+- **Input-side error strings** `PREMATURE_EOS`, `NOT_SUPPORTED`,
+  `BLOCK_HASH_MISMATCH`, `DESCRIPTOR_HASH_MISMATCH`: match Java's
+  string literals exactly.
+
+The full Java `Lz4ArgumentsProvider` matrix (6 payloads × 2 broken × 2
+ignore × 2 blockChecksum × 2 close × 3 levels = 288 combinations) is
+unrolled into Rust `for` loops in 8 separate `#[test]` functions
+(`header_premature_end`, `not_supported`, `bad_frame_checksum`,
+`bad_block_size`, `compression_frame_structure`, `array_backed_buffer`,
+`array_backed_buffer_slice`, `skip`). Spot-checked
+`compression_frame_structure`: it independently re-computes the XXH32
+HC byte from the post-magic bytes and asserts equality — that
+duplicate-implementation cross-check is exactly what catches a
+mis-applied seed or wrong byte coverage.
+
+### What I verified — codec dispatch and level validation
+
+- `CompressionType::wrap_for_output` / `wrap_for_input` route to all 5
+  concrete codecs (no `KafkaError::InvalidRequest` placeholders): match.
+- `CompressionType::level_validator()` produces a `Box<dyn Fn(i32) -> Result<…>>`.
+  - Gzip: rejects `level < 1 || level > 9` unless `level == -1`.
+  - Lz4: rejects `level < 1 || level > 17` strictly.
+  - Zstd: rejects `level < -131072 || level > 22` strictly.
+  - None / Snappy: any level call errors. Matches Java's
+    `IllegalArgumentException` modulo `KafkaError::Config` mapping.
+- `GzipCompression::Builder::level(default)` is allowed even though
+  `-1` is outside `[1, 9]`: matches Java's `Builder` exception (line 102
+  in `GzipCompression.java`).
+- `Lz4Compression::Builder::level` does NOT make the same exception
+  for `default_level=9` because `9 ∈ [1, 17]` — matches Java.
+- `Lz4Compression::wrap_for_output` selects broken-FD checksum iff
+  `message_version == MAGIC_VALUE_V0`: matches Java's
+  `Lz4Compression.wrapForOutput(buffer, magic)` which mirrors the
+  V0/V1+ split.
+
+### What I verified — CompressionRatioEstimator
+
+- The asymmetric step constants in
+  `compression_ratio_estimator.rs:30-34`:
+  `IMPROVING_STEP = 0.005`, `DETERIORATE_STEP = 0.05`. Java's literals
+  match. The `update_estimation` direction is correct: `observed > current`
+  uses `DETERIORATE_STEP` (rapid catch-up to bad ratios), `observed <
+  current` uses `IMPROVING_STEP` (slow improvement). Both branches use
+  `max(_, observed)` to clamp to the observed value — matches Java
+  exactly. The `testUpdateEstimation` cases all pass:
+  `(0.8, 0.84) → 0.85`, `(0.6, 0.7) → 0.7`, `(0.6, 0.4) → 0.595`,
+  `(0.004, 0.001) → 0.004`, all `>= observed`.
+- Concurrency model: `DashMap<String, Mutex<[f32; 5]>>` behind a
+  `OnceLock`. Java reads `currentEstimation` outside the synchronized
+  block (line 44); Rust holds the lock for the whole read-then-write.
+  More conservative than Java but functionally equivalent. Acceptable.
+- The Rust translation uses unique topic names per test to avoid
+  cross-test interference from the static map — necessary because
+  Rust unit tests share process state. Documented in
+  `update_estimation_test`.
+
+### What I verified — tests
+
+30 new tests, distributed:
+- `gzip_compression.rs`: 3 (matches Java's 3:
+  `testCompressionDecompression`, `testCompressionLevels`,
+  `testLevelValidator`).
+- `gzip_output_stream.rs`: 2 (Rust-only roundtrip helpers).
+- `lz4_block_output_stream.rs`: 5 (Rust-only header/FLG/BD round-trips).
+- `lz4_compression.rs`: 12 (matches Java's 11 modulo `testDirectBuffer`
+  elision — see below — plus one extra `testCompressionLevels` split).
+- `snappy_compression.rs`: 1 (matches Java's 1:
+  `testCompressionDecompression`).
+- `zstd_compression.rs`: 2 (matches Java's 2).
+- `no_compression.rs`: 2 (1 maps to Java's
+  `testCompressionDecompression`, 1 Rust-only sanity check).
+- `compression_ratio_estimator.rs`: 3 (matches Java's 1
+  `testUpdateEstimation` plus 2 Rust-only initial-rate / reset checks).
+
+Total: 30. **Matches actor claim**.
+
+`testDirectBuffer` elision: Java exercises `ByteBuffer.allocateDirect`
+(off-heap). Rust's `&[u8]` covers both heap-backed and direct-equivalent
+slices uniformly because Rust has no JNI/heap-vs-direct buffer
+distinction. The actor's argument is valid, and `array_backed_buffer_slice`
+exercises the non-zero-offset path that was the actual concern in the
+Java test. Acceptable.
+
+### What I verified — Cargo.toml and deps
+
+`twox-hash = { version = "2", features = ["xxhash32"] }` is a new
+direct dep. `cargo tree | grep twox` confirms it was already pulled in
+transitively by `lz4_flex` (so promoting it to a direct dep adds zero
+new ELF/object dependency surface). Per CLAUDE.md rule 1.2, this is a
+popular Rust crate (xxh3/xxh32 reference impl) so the promotion is
+fine. Comment in Cargo.toml lines 32-37 justifies the promotion.
+
+### What I verified — license and rules
+
+- Apache 2.0 / Confluent Inc. headers present on all 11 new
+  `src/common/compress/*.rs` files and the new
+  `compression_ratio_estimator.rs`.
+- One Java class per Rust file: every Java
+  `org.apache.kafka.common.compress.X.java` has a corresponding
+  `src/common/compress/x_compression.rs` (or `*_stream.rs`).
+- `pub` exports in `mod.rs` re-export the trait and concrete codec
+  types at the parent module level (CLAUDE.md rule 2 internal-import
+  pattern).
+
+### Issues found
+
+None. No BLOCKER, no MAJOR, no MINOR.
+
+The two known deferrals are documented (`phase3c_snappy_framing_gap.md`
+and the LZ4 level note in `phase3c_compression.md`) and tracked below.
+
+---
+
+## 11. Snappy uses RFC framing instead of xerial framing — DEFERRED-OK
+
+- **Severity:** DEFERRED-OK (must resolve before Phase 5 broker integration)
+- **File:** `src/common/compress/snappy_compression.rs`
+- **Java reference:** `kafka/clients/src/main/java/org/apache/kafka/common/compress/SnappyCompression.java` — uses `org.xerial.snappy.SnappyOutputStream` / `SnappyInputStream`.
+
+The `snap` crate (`snap::write::FrameEncoder` / `snap::read::FrameDecoder`)
+emits the *standard Snappy framing format* (magic
+`0xff 0x06 0x00 0x00 0x73 0x4e 0x61 0x50 0x70 0x59`). Java's xerial
+framing uses a different magic
+(`0x82, 'S', 'N', 'A', 'P', 'P', 'Y', 0x00, version, compatVersion`)
+and different per-block headers.
+
+**Wire-compat impact:** Roundtrip within this client works (the actor's
+`testCompressionDecompression` round-trips successfully because writer
+and reader use the same Rust framing). However, a Kafka broker reading
+a `CompressionType.SNAPPY` batch produced by this client will fail to
+decode the snappy frames, and vice versa.
+
+**Acceptable for Phase 3c** because no producer is yet wired against a
+broker (Phase 5). **Must be resolved before Phase 5** — the fix is
+either (a) a small xerial-framing wrapper around `snap::raw::Encoder` /
+`Decoder` (xerial framing is fully documented and ~80 LOC of glue), or
+(b) pulling in a maintained xerial-snappy crate when one becomes
+available. Tracked in `phase3c_snappy_framing_gap.md`.
+
+---
+
+## 12. LZ4 level parameter is validated but never lowered into the compressor — DEFERRED-OK
+
+- **Severity:** DEFERRED-OK (Performance-only; not wire-compat)
+- **File:** `src/common/compress/lz4_block_output_stream.rs:201-202`
+- **Java reference:** `Lz4BlockOutputStream.java:79` — Java picks
+  `fastCompressor()` for the default level and `highCompressor(level)`
+  otherwise.
+
+`lz4_flex::block::compress_into` always uses `LZ4_compress_default`,
+so the `level` field on `Lz4BlockOutputStream` is recorded for API
+parity but never affects compression strength. All LZ4 levels produce
+decompressible output (level is a quality-vs-speed knob, not a framing
+change), so this is **not a wire-compat issue** — Java brokers will
+decode our LZ4 batches correctly regardless of the level we requested.
+
+**Behavioural divergence:** Java users who set `compression.lz4.level=17`
+expect a smaller payload than the default; Rust users will get a
+default-level payload. Documented in
+`lz4_block_output_stream.rs:198-202` with a clear `#[allow(dead_code)]`
+note. **Acceptable for Phase 3c** because the level constants validate
+correctly (CLAUDE.md DoD #2 — the public API contract is honored even
+if the underlying compressor doesn't honor the level). A future fix is
+to either swap to a level-aware crate or call into `lz4-sys` for the
+high-compressor path.
+
+---
+
+## Verified clean (no issue) for Phase 3c
+
+- **`twox-hash` direct dep promotion** is justified — already
+  transitive via `lz4_flex` (verified with `cargo tree`).
+- **`Compression::of(name)` / `Compression.NONE` static factories**
+  not translated. Java's interface has these as `static` methods; Rust
+  trait methods cannot be static while remaining object-safe. Callers
+  go through `CompressionType::wrap_for_output` for default-level
+  dispatch or `<Codec>::Builder::new().level(l).build()` for
+  level-aware construction. Documented in
+  `phase3c_compression.md`. Acceptable per CLAUDE.md rule on
+  Java→Rust idiomatic adaptation.
+- **`GzipOutputStream` size parameter** ignored (flate2 has no
+  output-buffer-size knob): documented at
+  `gzip_output_stream.rs:35-37`. The Rust `Builder` still passes the
+  Java `8 * 1024` value for getter parity. Acceptable.
+- **`Lz4Compression::wrap_for_input` splits the `BufferSupplier`**
+  into two suppliers (one for `Lz4BlockInputStream`, one for the outer
+  `ChunkedBytesStream`). Java shares the same supplier across both
+  layers. Behavioural difference: cached buffers are not shared between
+  layers, so a 64KB LZ4 buffer + a 2KB chunked buffer are pooled
+  independently. **Not a correctness bug**, just slightly less buffer
+  reuse on the consumer hot path. Documented at
+  `lz4_compression.rs:81-95`.
+- **`Lz4BlockInputStream` always copies uncompressed blocks** into the
+  decompression buffer. Java slices `in` directly to avoid the copy.
+  This is a **performance regression** vs. Java for incompressible
+  payloads, but lifetime-correct in Rust without resorting to
+  unsafe transmute or `Arc<Bytes>` rewriting. Documented at
+  `lz4_block_input_stream.rs:42-46`. Acceptable for Phase 3c (consumer
+  path); revisit when consumer hot-path benchmarking begins.
+- **`CompressionRatioEstimator` uses `DashMap` over `RwLock<HashMap>`**:
+  acceptable, `dashmap` is a popular crate and is already a direct dep
+  in Cargo.toml from earlier phases. Eliminates the read-write lock
+  contention that Java's `ConcurrentHashMap` avoids natively.
+- **`std::mem::forget(lz4)` in the test path** (`lz4_compression.rs:376`)
+  intentionally leaks the writer's owned scratch buffers (~80KB per
+  test case) to prevent `Drop` from writing the end-mark. ~144 cases
+  hit this path → ~11MB test-binary leak. Pragmatic and isolated to
+  test code.
+- **Hot-path zero-copy** (CLAUDE.md rule 12): the producer-side write
+  path goes
+  `BufWriter (gzip/zstd) → encoder → ByteBufferOutputStream`, which
+  writes compressed bytes *directly* into the destination buffer
+  (`buffer.write_buffer(&[u8])` is a single `copy_from_slice` into the
+  growable `Vec<u8>`). No intermediate per-record buffer is allocated.
+  LZ4's output stream accumulates uncompressed input in a
+  `max_block_size` (=64KB) scratch buffer and writes compressed
+  blocks directly to the sink — also matches Java's pattern. Phase 3d
+  (`MemoryRecordsBuilder`) will need to reuse `ByteBufferOutputStream`
+  across batches for full hot-path optimization, but that's a Phase 3d
+  concern.
+- **`phase3a_compression_dispatch_gap.md` marked RESOLVED**: confirmed
+  in lines 1-7. Cross-references `phase3c_compression.md`.
+- **No regressions in 3a/3b**: 446 = 350 (3a baseline) + 66 (3b) +
+  30 (3c). Matches the test ledger.
+
+---
+
+Round 1 outcome: **APPROVED with deferrals**. Two DEFERRED-OK items
+(#11 Snappy xerial framing must be fixed before Phase 5; #12 LZ4 level
+knob is a performance-only deviation, not wire-compat). No code changes
+requested. Phase 3c can advance to Phase 3d.
+
+# Phase 3d-1 Review — Critic N=0
+
+Reviewed commit `4401d79` (Phase 3d-1: DefaultRecord + PartialDefaultRecord).
+Files: `src/common/record/default_record.rs` (+1192 LOC),
+`src/common/record/partial_default_record.rs` (+506 LOC),
+`src/common/record/mod.rs` (re-exports for both).
+
+## Verification done
+
+1. **DoD checks (timeout 240s):**
+   - `cargo build` — clean.
+   - `cargo test --lib` — `475 passed; 0 failed; 0 ignored; 0 measured;
+     0 filtered out; finished in 0.24s`.
+   - `cargo xtask format-check` — clean.
+   - `cargo xtask lint` — `No lint issues found!`.
+   - `cargo xtask check-generated` — clean.
+2. **Test count fidelity:** Java `DefaultRecordTest.java` has 20
+   `@Test` methods (14 non-Partial + 6 Partial). Rust translates
+   14 → `default_record::tests` and 6 → `partial_default_record::tests`,
+   plus 7 Rust-side extras in `default_record` (byte-level fixture,
+   zero-copy alias assertion, Unicode header round-trip,
+   `record_size_upper_bound` matches, `size_in_bytes_with_sizes`
+   matches, `increment_sequence` wrap, `attributes` zero) and
+   2 Rust-side extras in `partial_default_record` (round-trip metadata,
+   `key()/value()/headers()` empty). Total +29 tests
+   (446 → 475). Matches actor's report.
+3. **Byte-level fixture audit** (`byte_level_fixture`,
+   `default_record.rs:984`): hand-recomputed the 14-byte expected
+   vector against the v2 spec for
+   `(offset_delta=1, ts_delta=2, key="k", value="v",
+   headers=[("h","vh")])`:
+   body = 13 bytes → length-prefix `0x1A` (zigzag(13)=26).
+   Body fields all match the literal. Literal is *not* recomputed
+   from `write_to` — it's a hard-coded `&[u8]` array.
+4. **Zero-copy alias assertion** (`read_from_buffer_is_zero_copy`,
+   `default_record.rs:1020`): captures `bytes.as_ptr()` and
+   `bytes.len()` *before* the move into `read_from_buffer`, then
+   asserts the returned record's `key().as_ptr()` and
+   `value().as_ptr()` fall inside the original `[start, start+len)`
+   range. Test exercises the `Bytes::split_to` (refcount-bump)
+   pathway. Passes.
+5. **Varint behaviour spot-checks** (against `byte_utils`): zig-zag
+   encoding `1 → 0x02`, `-1 → 0x01`, `100 → 0xC8 0x01`,
+   `i64::MAX → 10 bytes` — all confirmed via the `byte_level_fixture`
+   and `invalid_varlong` tests. `byte_utils` was already validated
+   in Phase 2c.
+6. **Header round-trip**: `header_key_unicode_round_trip` confirms
+   the `RecordHeader::from_bytes` path. UTF-8 lossy decode matches
+   `Utils.utf8` semantics.
+7. **`PartialDefaultRecord` justification** (Java
+   `PartialDefaultRecord.java`): Java extends `DefaultRecord` and
+   overrides `key()/value()/headers()` to throw
+   `UnsupportedOperationException`. Java's
+   `DefaultRecord.readPartiallyFrom` returns this type. Rust's
+   addition is required because `read_partially_from` mirrors the
+   Java static method, and the `PartialDefaultRecord` type is the
+   return type. **Justified**, not overreach.
+8. **CRC**: `DefaultRecord.ensure_valid()` is a no-op (Java
+   matches). The CRC lives on `DefaultRecordBatch` (Phase 3d-2). No
+   redundant per-record CRC. Confirmed.
+9. **Visibility audit**: `increment_sequence` is `pub(crate)`
+   (`default_record.rs:559`), `record_size_upper_bound` is
+   `pub(crate)` with `#[allow(dead_code)]` (`default_record.rs:505`).
+   Both correct per the deferral plan.
+10. **License headers**: both files carry the Apache 2.0 / Confluent
+    Inc. header (CLAUDE.md rule 7).
+11. **Module re-exports**: `pub use default_record::DefaultRecord`
+    and `pub use partial_default_record::PartialDefaultRecord` in
+    `mod.rs`. Static functions (`write_to`, `read_from_buffer`, …)
+    are *not* re-exported at the parent level — accessible only
+    through `record::default_record::*`. Matches CLAUDE.md rule 2.
+
+## Findings
+
+No new issues. The translation is faithful and covers every Java
+test plus the byte-level fixture and zero-copy alias assertions
+required by PLAN.md DoD.
+
+Two design choices worth recording (not bugs):
+
+- **`PartialDefaultRecord::key()/value()/headers()` return
+  `None`/`&[]`** instead of throwing
+  `UnsupportedOperationException`. The Rust author cites CLAUDE.md
+  rule 10 (avoid panics in public API). The `Record` trait has
+  these as required methods, so returning the absent value is
+  correct: callers test `has_key()`/`has_value()` first, and the
+  payload accessors then naturally yield empty. No call site
+  currently distinguishes "absent because partial" from "absent
+  because null". Acceptable.
+
+- **`partial_default_record::read_partially_from_inner` allocates a
+  body-sized scratch buffer** (`vec![0u8; body_size_usize]`) where
+  Java skips bytes via `InputStream.skip`. Documented at
+  `partial_default_record.rs:198-205`. Used only on the
+  consumer/broker validation path, not the producer hot path. Not
+  a CLAUDE.md rule 12 violation. Acceptable.
+
+## Phase 3d-1 Round 1 verdict: APPROVED
+
+No code changes requested. Phase 3d-1 can advance to Phase 3d-2
+(DefaultRecordBatch).
+
+---
+
+# Phase 3d-2 Review — Critic N=0
+
+Scope: 1 commit since `4401d79` — `f159d8f` (DefaultRecordBatch +
+LogInputStream + iterator + RecordValidationStats). Issue numbering
+continues from 13 (3a: 1–8, 3b: 9, 3c: 11–12, 3d-1: had no issues).
+
+DoD checks I re-ran (all green):
+- `cargo build` — clean.
+- `cargo test --lib` — `test result: ok. 508 passed; 0 failed; 0 ignored;
+  0 measured; 0 filtered out; finished in 0.25s` (was 475 in Phase 3d-1,
+  +33; matches actor's report).
+- `cargo xtask format-check` — `All code is properly formatted!`
+- `cargo xtask lint` — `No lint issues found!`
+- `cargo xtask check-generated` — `All generated code is properly formatted!`
+
+## What I verified — wire format byte fidelity
+
+- **Header offsets (61 bytes total):** all 13 Java field offsets match
+  byte-for-byte (`BASE_OFFSET_OFFSET=0`, `LENGTH_OFFSET=8`,
+  `PARTITION_LEADER_EPOCH_OFFSET=12`, `MAGIC_OFFSET=16`,
+  `CRC_OFFSET=17`, `ATTRIBUTES_OFFSET=21`, `LAST_OFFSET_DELTA_OFFSET=23`,
+  `BASE_TIMESTAMP_OFFSET=27`, `MAX_TIMESTAMP_OFFSET=35`,
+  `PRODUCER_ID_OFFSET=43`, `PRODUCER_EPOCH_OFFSET=51`,
+  `BASE_SEQUENCE_OFFSET=53`, `RECORDS_COUNT_OFFSET=57`,
+  `RECORDS_OFFSET=61`). Verified via lines 74–103.
+- **CRC range matches Java exactly:**
+  `crc32c(&self.buffer[ATTRIBUTES_OFFSET..])` (line 181) matches
+  `Crc32C.compute(buffer, ATTRIBUTES_OFFSET, length - ATTRIBUTES_OFFSET)`
+  (Java DefaultRecordBatch.java:399).
+- **Attribute mask layout matches Java exactly:**
+  `COMPRESSION_CODEC_MASK=0x07` (bits 0-2),
+  `TIMESTAMP_TYPE_MASK=0x08` (bit 3),
+  `TRANSACTIONAL_FLAG_MASK=0x10` (bit 4),
+  `CONTROL_FLAG_MASK=0x20` (bit 5),
+  `DELETE_HORIZON_FLAG_MASK=0x40` (bit 6).
+- **Big-endian for all multi-byte fields:** confirmed via
+  `i64_at`/`i32_at`/`i16_at`/`write_*_at` helpers (lines 938–966) all
+  use `from_be_bytes` / `to_be_bytes`.
+- **Mutator CRC discipline matches Java:**
+  - `set_last_offset` (Rust line 397) — only updates `BASE_OFFSET_OFFSET`
+    (offset 0), which is *outside* the CRC range (CRC starts at offset
+    21). No CRC recomputation needed. **Matches Java
+    DefaultRecordBatch.java:367** (which also does not recompute CRC).
+  - `set_partition_leader_epoch` (line 435) — only updates
+    `PARTITION_LEADER_EPOCH_OFFSET` (offset 12), also outside CRC range.
+    **Matches Java line 386.**
+  - `set_max_timestamp` (line 403) — updates `ATTRIBUTES_OFFSET` (21)
+    and `MAX_TIMESTAMP_OFFSET` (35), both inside CRC range. **Recomputes
+    CRC at line 432**, matching Java line 380–381 exactly.
+  - Tests `set_last_offset_rewrites_base_offset` (line 1394) and
+    `set_partition_leader_epoch_rewrites_field` (line 1426) explicitly
+    assert `batch.is_valid()` post-mutation — i.e., the on-disk CRC is
+    still the right one for the unchanged attributes-onward bytes.
+- **Decompression for all 5 codecs:** `decompression_round_trip_for_each_codec`
+  (line 1549) iterates `[None, Gzip, Snappy, Lz4, Zstd]` and asserts
+  3-record round-trip with mixed null keys/values for every codec.
+- **Multi-batch iterator:** `iterates_two_concatenated_batches`
+  (`record_batch_iterator.rs:128`) and
+  `iterator_ignores_incomplete_entries` (`byte_buffer_log_input_stream.rs:203`)
+  both build two concatenated batches and assert correct iteration.
+- **`increment_sequence` relocation:** moved to
+  `default_record_batch.rs:916`, removed from `default_record.rs`.
+  `default_record.rs:49` and `partial_default_record.rs:27` import the
+  new path correctly. Body unchanged — round-trip-tests in 3d-1 still
+  pass (`grep -rn increment_sequence src/` shows 9 callsites, all
+  consistent).
+- **Module re-exports:** `DefaultRecordBatch` and `RecordValidationStats`
+  re-exported at parent (`mod.rs:51, 56`); static helpers
+  (`write_empty_header`, `write_header`, `increment_sequence`,
+  `decrement_sequence`, `estimate_batch_size_upper_bound`,
+  `size_in_bytes_records`, `size_in_bytes_simple`) are *not*
+  re-exported. `byte_buffer_log_input_stream`,
+  `log_input_stream`, and `record_batch_iterator` are `pub(crate)`
+  modules (per CLAUDE.md rule on `internal` packages). Clean.
+- **Apache 2.0 / Confluent Inc. headers** present on all 5 new files.
+- **`BufferSupplierTest.java` translation:** Java's file has only one
+  `@Test` (`testGrowableBuffer`); translated to
+  `growable_buffer_caches_and_grows`. Six bonus Rust-side tests cover
+  `NoCaching`/`Default` variants Java's test omits. Complete.
+- **No regressions:** 508 = 475 (3d-1 baseline) + 33 (3d-2). Matches.
+- **No TODO/FIXME** in any of the five new files. No `unimplemented!()`
+  / `todo!()`.
+
+## Issues found
+
+Issues 13, 14, 15, 16, and 17 have been resolved and moved to
+`COMMENTS.DONE.0.md`.
+
+---
+
+## Verified clean (no issue) for Phase 3d-2
+
+- **Decompression covers all 5 codecs** —
+  `decompression_round_trip_for_each_codec` at line 1549 explicitly
+  iterates `[None, Gzip, Snappy, Lz4, Zstd]`.
+- **`skip_key_value_iterator`** matches Java's contract: returns
+  `PartialDefaultRecord` items for compressed batches, full
+  `DefaultRecord` items for uncompressed (Java optimization is
+  pointless on a slice-only buffer). Test
+  `skip_key_value_iterator_yields_correct_count` (line 1601)
+  exercises 4 codecs.
+- **Multi-batch concatenation** —
+  `record_batch_iterator::tests::iterates_two_concatenated_batches`
+  (line 128) builds 2 batches at offsets 0 and 2, then iterates;
+  `byte_buffer_log_input_stream::tests::iterator_ignores_incomplete_entries`
+  builds 2 batches and truncates 5 bytes off the end.
+- **`set_last_offset` does NOT recompute CRC**, mirroring Java exactly
+  (`base_offset` is outside the CRC range). The hint "Java's
+  `setLastOffset` recomputes CRC" was incorrect against the actual
+  Java source (DefaultRecordBatch.java:367 only does the BASE_OFFSET
+  putLong).
+- **`set_partition_leader_epoch` does NOT recompute CRC**, mirroring
+  Java exactly. The leader epoch field is at offset 12, also outside
+  the CRC range.
+- **`record_size_upper_bound` `#[allow(dead_code)]`** is exercised by
+  `estimate_batch_size_upper_bound_includes_overhead` (line 1770) via
+  the `estimate_batch_size_upper_bound` wrapper — so the function is
+  not subtly broken.
+- **`PartialEq` / `Eq` / `Hash` / `Debug` / `Display`** all derive
+  consistently from the underlying `Vec<u8>`; matches Java's
+  `equals()` / `hashCode()` / `toString()` semantics.
+- **`is_valid()`** combines size and CRC checks; matches Java line 394.
+- **`ensure_valid()`** returns distinct error messages for the two
+  failure modes; both map to `KafkaError::CorruptRecord`.
+- **`UncompressedIter::records: Bytes`** is the single per-iter
+  allocation; per-record key/value slices alias inside it (zero-copy).
+- **`CompressedIter`** correctly dispatches to
+  `partial_default_record::read_partially_from` when
+  `skip_key_value=true`, else `default_record::read_from_stream`.
+- **`compute_attributes`** packs all 5 flags correctly (verified
+  against Java DefaultRecordBatch.java:412–447).
+- **`LogInputStream` trait** is `pub(crate)`, single method
+  `next_batch() -> Result<Option<T>, KafkaError>`. Java is
+  package-private with `nextBatch() throws IOException`. Match modulo
+  Rust error handling.
+- **`RecordValidationStats`** is a faithful plain-data translation of
+  Java's class. `EMPTY` constant + `default()` impl. `add()` is
+  in-place mutation matching Java.
+- **`ByteBufferLogInputStream::next_batch_size`** correctly enforces
+  the V0 minimum overhead (14) and rejects oversized batches per
+  `max_message_size`. Magic byte validated against
+  `0..=CURRENT_MAGIC_VALUE`. V0/V1 batches are rejected with a
+  `CorruptRecord` (PLAN.md scope — legacy formats out of scope).
+- **`RecordBatchIterator`** poisons on first error, matching Java's
+  "throw and stop" semantics.
+
+---
+
+## Phase 3d-2 Round 1 verdict: needs minor fixes
+
+Issues 13 and 14 are MAJOR; 15, 16, 17 are MINOR. Issue 13 (latent
+`write_header` truncation bug) should be fixed before Phase 3d-3 lands
+or it will surface as a panic. Issue 14 (CLAUDE.md rule 10 violation)
+is a contract concern that affects the public `MutableRecordBatch`
+trait and should be fixed in 3d-2 to avoid having to break the trait
+signature in a later phase.
+
+Round 1 outcome: Issues 13–17 resolved by fixup commits `415b3b6`
+(Issue 14), `33b1d64` (Issue 13), `efe9a41` (Issue 17), `98ad1ec`
+(Issue 16), `6b10c4d` (Issue 15); see `COMMENTS.DONE.0.md` for the
+resolutions.

@@ -232,3 +232,177 @@ needed updating since the only in-tree consumer
 (`list_deserializer.rs:21`) already routed through the file-module
 path. All 416 lib tests still pass; format-check, lint, and
 check-generated all clean.
+
+---
+
+# Phase 3d-2 — Critic N=0 (Round 1) — Resolved Issues
+
+Issues 13–17 were raised against commit `f159d8f` and resolved by the
+fixup commits cited below.
+
+## 13. `write_header` truncates pre-filled record bytes — MAJOR (latent)
+
+- **Severity:** MAJOR (latent — not exercised by current callers,
+  but a public function with a documented incorrect contract).
+- **File:** `src/common/record/default_record_batch.rs:744–830`
+  (`pub fn write_header`).
+- **Java reference:** `DefaultRecordBatch.java:480–520` (`writeHeader`).
+
+Java's `writeHeader` writes header bytes *in place* over a
+`ByteBuffer` slot whose records are already populated between
+`position + RECORD_BATCH_OVERHEAD` and `position + sizeInBytes`. The
+Rust translation at line 781 did
+`buffer.resize(position + RECORD_BATCH_OVERHEAD, 0)`. If the caller had
+already appended records (so `buffer.len() == position + size_in_bytes`,
+where `size_in_bytes > RECORD_BATCH_OVERHEAD`), this resize would shrink
+the buffer and silently drop the records. The CRC compute at line 828
+would then index out of bounds and panic.
+
+Currently no caller hit this path: the only `write_header` caller was
+`write_empty_header`, which always sets `size_in_bytes =
+RECORD_BATCH_OVERHEAD` (records absent), so the resize was a no-op.
+
+**Resolution:** Fixup `33b1d64` against `f159d8f`. Renamed
+`write_header(buffer: &mut Vec<u8>, ...)` to
+`write_header_at(buffer: &mut [u8], position: usize, ...)`. The new
+function takes a pre-sized mutable slice — caller must ensure
+`buffer.len() >= position + size_in_bytes` with records already
+populated in `[position + RECORD_BATCH_OVERHEAD,
+position + size_in_bytes)`. Only the 61 header bytes are written in
+place; no resize. The precondition is verified with `debug_assert!`
+(programming error, not user input — CLAUDE.md rule 10.1 allows
+debug-time panic on internal invariants). `write_empty_header` is
+unchanged externally — it pre-grows the buffer by 61 bytes and routes
+through `write_header_at` internally. This unblocks Phase 3d-3 / 3d-4
+which both need to call the header-write function after appending
+records into a pre-allocated batch buffer.
+
+---
+
+## 14. `set_max_timestamp` panics on `NoTimestampType` — MAJOR (CLAUDE.md rule 10)
+
+- **Severity:** MAJOR (CLAUDE.md rule 10 violation on public API).
+- **File:** `src/common/record/default_record_batch.rs:411–414`.
+- **Java reference:** `DefaultRecordBatch.java:425–426` (throws
+  `IllegalArgumentException`).
+
+`set_max_timestamp` is a public method on the `MutableRecordBatch`
+trait. CLAUDE.md rule 10.2 states: "Return a `Result` when Java code
+throws an exception even if unchecked but recoverable."
+`IllegalArgumentException` for an invalid argument is recoverable —
+the caller can detect it, validate, and retry. The Rust translation
+`assert!(timestamp_type != TimestampType::NoTimestampType, ...)`
+panicked, which is forbidden by rule 10.1. Same issue applied to
+`compute_attributes`, `write_header`, and `write_empty_header` (bad
+magic / bad timestamp / `NoTimestampType` were all panic-on-recoverable
+paths).
+
+**Resolution:** Fixup `415b3b6` against `f159d8f`. Converted all
+`assert!` calls on user-recoverable inputs to
+`return Err(KafkaError::IllegalArgument(_))` with the same message text
+Java raises. Updated function signatures:
+- `MutableRecordBatch::set_max_timestamp` -> `Result<(), KafkaError>`
+- `write_header` / `write_empty_header` -> `Result<(), KafkaError>`
+- `compute_attributes` (internal) -> `Result<u8, KafkaError>`
+
+Validation for `magic >= CURRENT_MAGIC_VALUE` and
+`base_timestamp >= 0 || base_timestamp == NO_TIMESTAMP` was hoisted out
+of the (now-removed) `assert!` and surfaced as
+`KafkaError::IllegalArgument`. `testSetNoTimestampTypeNotAllowed` was
+converted from `#[should_panic]` to assert
+`Err(KafkaError::IllegalArgument)` with a message-text contains check.
+All other in-process callers updated with `?` propagation or
+`.unwrap()` in tests where input is guaranteed valid.
+
+---
+
+## 15. `byte_level_fixture_empty_batch` has zero records — MINOR
+
+- **Severity:** MINOR (PLAN.md DoD partial-fulfillment).
+- **File:** `src/common/record/default_record_batch.rs:1697–1766`.
+- **PLAN.md DoD:** "build a batch with two known records, assert the
+  bytes equal a hex fixture".
+
+The original fixture covered the 61-byte header only, with the CRC
+recomputed from the same encoder under test (tautological). A bug in
+the encoder's CRC byte range or polynomial would not surface.
+
+**Resolution:** Fixup `6b10c4d` against `f159d8f`. Added new test
+`byte_level_fixture_two_records` that builds an 83-byte batch with two
+known records `(offset=0, ts=1000, key="k1", value="v1")` and
+`(offset=1, ts=1001, key="k2", value="v2")` and asserts the entire byte
+sequence equals a hard-coded `&[u8]` literal. The CRC value
+(`0x8CCB7CD8`) is part of the literal; an additional assertion
+independently verifies that
+`crc32c::crc32c(&expected[ATTRIBUTES_OFFSET..]) == 0x8CCB7CD8` to catch
+a regression in the encoder's CRC byte range. The previous empty-batch
+fixture is kept for header-only coverage. Test count: 510 -> 511.
+
+---
+
+## 16. Compressed variants of invalid-record-count tests not translated — MINOR
+
+- **Severity:** MINOR (test coverage gap).
+- **File:** `src/common/record/default_record_batch.rs` (tests module).
+- **Java reference:** `DefaultRecordBatchTest.java:238`
+  (`testInvalidRecordCountTooManyCompressedV2`),
+  `DefaultRecordBatchTest.java:247`
+  (`testInvalidRecordCountTooLittleCompressedV2`).
+
+Java has both uncompressed and compressed variants of the
+invalid-record-count tests. The Rust translation had only the
+non-compressed ones; the compressed variants exercise the
+`CompressedIter` code path, which is independent from `UncompressedIter`.
+
+**Resolution:** Fixup `98ad1ec` against `f159d8f`. Translated both
+tests as
+`invalid_record_count_too_many_compressed_terminates_iter` and
+`invalid_record_count_too_little_compressed_yields_declared_count`.
+Both build a GZIP-compressed batch via the existing
+`build_compressed_batch` helper and override `RECORDS_COUNT_OFFSET` to
+mismatch the actual record count. To make the "too little compressed"
+test surface the corruption, also extended `CompressedIter::next` to
+mirror Java's `StreamRecordIterator.ensureNoneRemaining()`: after the
+last declared record is yielded, probe the underlying decompressed
+stream for a single extra byte; if any bytes remain, defer a
+`KafkaError::CorruptRecord` to the next `next()` call with the same
+"Incorrect declared batch size, records still remaining in file"
+error text Java raises. Test count: 508 -> 510.
+
+---
+
+## 17. Iterator silently drops the corruption signal — MINOR
+
+- **Severity:** MINOR (behavioral divergence; documented).
+- **File:** `src/common/record/default_record_batch.rs:545–551`,
+  `611–614`.
+- **Java reference:** `DefaultRecordBatch.java` —
+  `StreamRecordIterator.next()` throws `InvalidRecordException` when
+  bytes remain or the count is negative.
+
+The `UncompressedIter` / `CompressedIter` set an internal `errored`
+flag on corruption (negative `RecordCount`, surplus bytes, mid-record
+decode failure) but still yielded the offending or last-good record
+successfully. There was no public way for the caller to inspect the
+flag. Java throws `InvalidRecordException` and propagates it.
+
+**Resolution:** Fixup `efe9a41` against `f159d8f`. Converted
+`RecordBatch::iter`, `RecordBatch::streaming_iterator`, and
+`MutableRecordBatch::skip_key_value_iterator` Item types from
+`Box<dyn Record + 'a>` to `Result<Box<dyn Record + 'a>, KafkaError>`.
+Iterator behaviour:
+- Negative `RecordCount` -> immediate `Err(CorruptRecord)`.
+- Declared count too LITTLE (uncompressed and compressed) -> yield the
+  declared-count of records, then the next `next()` call returns
+  `Err(CorruptRecord)` (deferred via a `pending_error` field so the
+  last good record still flows through).
+- Declared count too MANY -> yield the actual records, then the next
+  read fails on the empty buffer or stream -> `Err(CorruptRecord)`.
+- Mid-record decode failure -> `Err(CorruptRecord)` with the underlying
+  error wrapped in the message.
+
+The `RecordBatch::offset_of_max_timestamp` default impl propagates
+errors via `?`. All in-tree call sites updated with `r.unwrap()` or
+explicit Result handling. The breaking change touched many test
+sites but the surface change is small (one-character `r` ->
+`r.unwrap()` in iteration loops).
