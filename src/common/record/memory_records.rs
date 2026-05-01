@@ -171,11 +171,15 @@ impl MemoryRecords {
         }
         let size_estimate = estimate_size_in_bytes(magic, compression, records);
         let stream = ByteBufferOutputStream::with_capacity(size_estimate as usize);
+        // Mirrors Java's MemoryRecords.java:511-514:
+        //   long logAppendTime = RecordBatch.NO_TIMESTAMP;
+        //   if (timestampType == TimestampType.LOG_APPEND_TIME)
+        //       logAppendTime = System.currentTimeMillis();
         let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
-            // Java uses System.currentTimeMillis(); we use a stable
-            // timestamp here because tests pin the value via
-            // `with_records_log_append_time` if they care.
-            NO_TIMESTAMP
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(NO_TIMESTAMP)
         } else {
             NO_TIMESTAMP
         };
@@ -993,5 +997,52 @@ mod tests {
         // Iterator stops — no more items, even though a third batch exists
         // in the buffer (the underlying RecordBatchIterator is poisoned).
         assert!(it.next().is_none(), "iterator must stop after first error");
+    }
+
+    /// Issue 21 fix: `with_records` with `TimestampType::LogAppendTime`
+    /// must populate the batch's `max_timestamp` (which records
+    /// `log_append_time` for v2 LogAppendTime batches) with the current
+    /// wall-clock time, mirroring Java's
+    /// `MemoryRecords.java:511-514` (`System.currentTimeMillis()`).
+    /// Previously both branches returned `NO_TIMESTAMP`.
+    #[test]
+    fn with_records_log_append_time_populates_max_timestamp() {
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let records = MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            CompressionType::None,
+            TimestampType::LogAppendTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            NO_PARTITION_LEADER_EPOCH,
+            false,
+            &[
+                SimpleRecord::new(100, Some(Bytes::from_static(b"k")), Some(Bytes::from_static(b"v")), &[]),
+            ],
+        )
+        .expect("with_records LogAppendTime succeeds");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // The first (and only) batch's max_timestamp must record the
+        // wall-clock time captured during `with_records`.
+        let batches: Vec<_> = records.batches().map(|r| r.unwrap()).collect();
+        assert_eq!(batches.len(), 1);
+        let max_ts = batches[0].max_timestamp();
+        // Java sets logAppendTime = System.currentTimeMillis() at the
+        // moment of build, so max_ts must lie within the [before, after]
+        // window we captured (allowing ±1ms slop for clock granularity).
+        assert!(
+            max_ts >= before_ms - 1 && max_ts <= after_ms + 1,
+            "LogAppendTime max_timestamp {max_ts} not in window [{before_ms}, {after_ms}]"
+        );
+        assert_ne!(max_ts, NO_TIMESTAMP, "LogAppendTime must NOT silently downgrade to NO_TIMESTAMP");
     }
 }
