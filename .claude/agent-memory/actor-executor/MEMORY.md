@@ -18,3 +18,4 @@
 - [Phase 3d-2 default_record_batch](phase3d2_default_record_batch.md) — DefaultRecordBatch + LogInputStream + RecordBatchIterator + RecordValidationStats; Vec<u8> storage with per-iter Bytes view
 - [Phase 3d-3 memory_records](phase3d3_memory_records.md) — MemoryRecords + UnalignedMemoryRecords (Bytes-backed, zero-copy slice) + RecordsSend state-core; `Records::records()` per-record alloc; `to_send()` on concrete impls only
 - [Phase 3d-4 builder](phase3d4_memory_records_builder.md) — MemoryRecordsBuilder + with_records factories; uncompressed path direct-write into bufferStream; close() moves Vec to satisfy strict zero-copy DoD
+- [Phase 3d-4 streaming codec](phase3d4_streaming_codec.md) — self-borrow pattern: Box the borrowee + 'static-erased writer + explicit Drop impl for "appendStream wraps bufferStream" Java idiom
