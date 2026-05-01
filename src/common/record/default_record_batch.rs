@@ -1899,6 +1899,120 @@ mod tests {
         assert_eq!(batch.max_timestamp(), 1000);
     }
 
+    /// **Byte-level fixture: a batch with two known records (PLAN.md DoD).**
+    ///
+    /// Builds a v2 batch carrying two records
+    /// `(offset=0, ts=1000, key="k1", value="v1")` and
+    /// `(offset=1, ts=1001, key="k2", value="v2")` and asserts the entire
+    /// 83-byte sequence equals a hard-coded `&[u8]` literal — including the
+    /// CRC bytes. The CRC value is independently verified to be CRC-32C
+    /// (Castagnoli) over the attributes-onward range as required by the v2
+    /// spec, NOT recomputed by the encoder under test, so a regression in
+    /// the encoder's CRC range or polynomial would fail the assertion.
+    ///
+    /// Expected bytes generated from the v2 spec; do not auto-update. If
+    /// `default_record::write_to` or `write_header*` change their byte
+    /// emission, this fixture must be re-derived from the spec by hand or
+    /// from a known-good Java client capture.
+    #[test]
+    fn byte_level_fixture_two_records() {
+        let recs = vec![
+            SimpleRecord::new(1000i64, Some(Bytes::from_static(b"k1")), Some(Bytes::from_static(b"v1")), &[]),
+            SimpleRecord::new(1001i64, Some(Bytes::from_static(b"k2")), Some(Bytes::from_static(b"v2")), &[]),
+        ];
+        let buf = build_uncompressed_batch(
+            0,
+            TimestampType::CreateTime,
+            &recs,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+        );
+
+        // Hand-derived expected bytes for a 2-record uncompressed batch.
+        //
+        // Header (61 bytes):
+        //   base_offset = 0           (8 BE) : 00 00 00 00 00 00 00 00
+        //   length = 83 - 12 = 71     (4 BE) : 00 00 00 47
+        //   partition_leader_epoch = -1 (4 BE) : FF FF FF FF
+        //   magic = 2                 (1 B) : 02
+        //   crc                       (4 BE) : 8C CB 7C D8  (CRC-32C Castagnoli)
+        //   attributes = 0            (2 BE) : 00 00
+        //   last_offset_delta = 1     (4 BE) : 00 00 00 01
+        //   base_timestamp = 1000     (8 BE) : 00 00 00 00 00 00 03 E8
+        //   max_timestamp = 1001      (8 BE) : 00 00 00 00 00 00 03 E9
+        //   producer_id = -1          (8 BE) : FF FF FF FF FF FF FF FF
+        //   producer_epoch = -1       (2 BE) : FF FF
+        //   base_sequence = -1        (4 BE) : FF FF FF FF
+        //   records_count = 2         (4 BE) : 00 00 00 02
+        //
+        // Each record body is 10 bytes:
+        //   length      (varint zigzag of 10) : 14
+        //   attributes  (1 B = 0)             : 00
+        //   ts_delta    (varint zigzag)       : rec0=0->00, rec1=1->02
+        //   offset_delta(varint zigzag)       : rec0=0->00, rec1=1->02
+        //   key_len     (varint zigzag of 2)  : 04
+        //   key bytes                          : "k1"=6B 31 / "k2"=6B 32
+        //   value_len   (varint zigzag of 2)  : 04
+        //   value bytes                        : "v1"=76 31 / "v2"=76 32
+        //   header_count(varint zigzag of 0)  : 00
+        let expected: &[u8] = &[
+            // Header
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // base_offset
+            0x00, 0x00, 0x00, 0x47, // length
+            0xFF, 0xFF, 0xFF, 0xFF, // partition_leader_epoch
+            0x02, // magic
+            0x8C, 0xCB, 0x7C, 0xD8, // crc
+            0x00, 0x00, // attributes
+            0x00, 0x00, 0x00, 0x01, // last_offset_delta
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE8, // base_timestamp
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03, 0xE9, // max_timestamp
+            0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // producer_id
+            0xFF, 0xFF, // producer_epoch
+            0xFF, 0xFF, 0xFF, 0xFF, // base_sequence
+            0x00, 0x00, 0x00, 0x02, // records_count
+            // Record 0: (offset=0, ts=1000, key="k1", value="v1")
+            0x14, 0x00, 0x00, 0x00, 0x04, 0x6B, 0x31, 0x04, 0x76, 0x31, 0x00,
+            // Record 1: (offset=1, ts=1001, key="k2", value="v2")
+            0x14, 0x00, 0x02, 0x02, 0x04, 0x6B, 0x32, 0x04, 0x76, 0x32, 0x00,
+        ];
+
+        assert_eq!(
+            buf.as_slice(),
+            expected,
+            "byte-level fixture mismatch. Got len={}, expected len={}.",
+            buf.len(),
+            expected.len()
+        );
+
+        // Independently verify the CRC byte literal really is the CRC-32C
+        // over `[ATTRIBUTES_OFFSET..end]` — this catches a regression where
+        // the encoder uses the wrong byte range.
+        let independent_crc = crc32c::crc32c(&expected[ATTRIBUTES_OFFSET..]);
+        assert_eq!(independent_crc, 0x8CCB_7CD8u32, "CRC literal does not match v2 spec");
+
+        // Round-trip: parse the fixture and read out the records.
+        let batch = DefaultRecordBatch::new(buf);
+        assert!(batch.is_valid());
+        assert_eq!(batch.base_offset(), 0);
+        assert_eq!(batch.last_offset(), 1);
+        assert_eq!(batch.base_timestamp(), 1000);
+        assert_eq!(batch.max_timestamp(), 1001);
+        assert_eq!(batch.count_or_null(), Some(2));
+        let read: Vec<_> = batch.iter().map(|r| r.unwrap()).collect();
+        assert_eq!(read.len(), 2);
+        assert_eq!(read[0].offset(), 0);
+        assert_eq!(read[0].timestamp(), 1000);
+        assert_eq!(read[0].key().unwrap(), b"k1");
+        assert_eq!(read[0].value().unwrap(), b"v1");
+        assert_eq!(read[1].offset(), 1);
+        assert_eq!(read[1].timestamp(), 1001);
+        assert_eq!(read[1].key().unwrap(), b"k2");
+        assert_eq!(read[1].value().unwrap(), b"v2");
+    }
+
     /// `estimate_batch_size_upper_bound` includes the 61-byte overhead.
     #[test]
     fn estimate_batch_size_upper_bound_includes_overhead() {
