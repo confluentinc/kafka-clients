@@ -908,6 +908,84 @@ Issues 13, 14, 15, 16, and 17 have been resolved and moved to
 
 ---
 
+## Phase 3d-2 Round 2 verdict: APPROVED
+
+Round 2 covered fixup commits `415b3b6`, `33b1d64`, `efe9a41`,
+`98ad1ec`, `6b10c4d` resolving Issues 13–17, and rotation commit
+`786b5eb`. Re-ran DoD checks:
+
+- `cargo build` — clean.
+- `cargo test --lib` — `test result: ok. 511 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s` (was 508).
+- `cargo xtask format-check` — clean.
+- `cargo xtask lint` — `No lint issues found!`.
+- `cargo xtask check-generated` — `199 generated file(s)` clean.
+
+Per-issue verification:
+- **Issue 14 (`415b3b6`)** — `MutableRecordBatch::set_max_timestamp`
+  now returns `Result<(), KafkaError>`; `write_header` /
+  `write_empty_header` / `compute_attributes` likewise. The `assert!`
+  branches are replaced with
+  `Err(KafkaError::IllegalArgument(<same message text>))`. The
+  internal `debug_assert!` on `buffer.len() >= position + size_in_bytes`
+  in `write_header_at` is a programming-error precondition (rule 10.1
+  permits debug-time panic on internal invariants). All callsites
+  use `?` propagation or `.expect("test helper passes valid …")` —
+  no `let _ = …` ignore patterns introduced.
+- **Issue 13 (`33b1d64`)** — `write_header` is fully replaced by
+  `write_header_at(buffer: &mut [u8], position: usize, …)`. The new
+  function does NOT call `buffer.resize`; it operates on a pre-sized
+  slice and writes only the 61 header bytes in place. The CRC is
+  computed over the contiguous `[ATTRIBUTES_OFFSET..size_in_bytes)`
+  range that the caller pre-populated. `write_empty_header`
+  pre-grows the buffer and routes through `write_header_at`. No
+  residual references to the old `write_header` API in the source
+  tree (the unrelated `lz4_block_output_stream::write_header` is a
+  different function). API is `pub fn`, which is correct — the
+  builder in Phase 3d-4 will need it; CLAUDE.md does not require
+  `pub(crate)` for non-`internal` packages.
+- **Issue 17 (`efe9a41`)** — `RecordBatch::iter`,
+  `RecordBatch::streaming_iterator`,
+  `MutableRecordBatch::skip_key_value_iterator` now all yield
+  `Result<Box<dyn Record + 'a>, KafkaError>`.
+  `offset_of_max_timestamp`'s default impl propagates with `?`. All
+  earlier 3a/3b/3c/3d-1 test sites either iterate happy-path with
+  `.unwrap()` or are not affected. The "too little" path defers an
+  error via a `pending_error` field so the last-good record is
+  yielded first, then the error — mirrors Java's
+  `InvalidRecordException` timing exactly. The "too many" path lets
+  the underlying buffer-empty read raise `Err(CorruptRecord)`.
+- **Issue 16 (`98ad1ec`)** — Two new tests:
+  `invalid_record_count_too_many_compressed_terminates_iter` and
+  `invalid_record_count_too_little_compressed_yields_declared_count`,
+  both using GZIP. `CompressedIter::next` extends with the
+  `ensure_none_remaining` semantics: probes the underlying stream
+  for one extra byte after the last declared record and defers
+  `Err(CorruptRecord("Incorrect declared batch size, records still
+  remaining in file"))` if any bytes remain. Message text matches
+  Java's.
+- **Issue 15 (`6b10c4d`)** — `byte_level_fixture_two_records` builds
+  two records via `build_uncompressed_batch` and asserts the entire
+  83-byte sequence equals a hard-coded `&[u8]` literal. CRC literal
+  `0x8CCB7CD8` is independently re-verified via
+  `crc32c::crc32c(&expected[ATTRIBUTES_OFFSET..])`, NOT recomputed
+  by the encoder under test. Spot-checked key bytes:
+  Magic at offset 16 = `0x02`, Attributes i16 at offset 21 = `0x0000`,
+  base_timestamp BE at offset 27 = `1000 = 0x03E8`,
+  max_timestamp at offset 35 = `1001 = 0x03E9`, records_count at
+  offset 57 = `2`. All match the v2 spec.
+- **Comment rotation (`786b5eb`)** — `COMMENTS.0.md` issues section
+  retains only the deferred items 5/6/7/8 and 11/12 from earlier
+  phases; Issues 13–17 bodies are absent. `COMMENTS.DONE.0.md` has
+  full Issue 13–17 sections with **Resolution:** paragraphs citing
+  the fixup SHAs.
+
+No new regressions: the iterator type change broke no earlier test
+(verified by 511/511 pass), the `write_header_at` API is new and
+hasn't leaked elsewhere, no `let _ = …` swallow patterns were
+introduced.
+
+---
+
 ## Phase 3d-2 Round 1 verdict: needs minor fixes
 
 Issues 13 and 14 are MAJOR; 15, 16, 17 are MINOR. Issue 13 (latent

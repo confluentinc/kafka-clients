@@ -27,6 +27,7 @@ For every task, follow this exact loop:
 - Ensure every method from the source Java class is implemented.
 - Translate ALL corresponding tests from the Java codebase. Never skip a test unless it's genuinely irrelevant to Rust (explain why if skipping).
 - If there are blockers (missing dependencies/classes), implement those as well.
+- **For large phases with multiple independent classes, consider spawning a sub-agent per class or logical group** using the Agent tool. Each sub-agent translates its assigned class(es), runs verification checks, commits, and returns — keeping each session focused and avoiding context exhaustion mid-phase. Use your judgment: a small phase with two related classes fits in one session; a large phase with five unrelated classes benefits from parallelism.
 
 ### 3. Verify (Definition of Done)
 After each logical step, run ALL of these and fix any failures:

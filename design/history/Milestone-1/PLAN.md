@@ -25,7 +25,7 @@ Translate the Java code required to make `KafkaProducer` send records to a real 
 | `KafkaConsumer` and `consumer/` package | SKIP | Producer-only. |
 | `MockProducer` | SKIP for now | Optional follow-up; not required for end-to-end production sends. |
 | `Telemetry` (`common/telemetry/`) | SKIP | All `clientTelemetryReporter` references stubbed to `None`. |
-| SASL / OAUTHBEARER / Kerberos / SCRAM | SKIP | Plaintext + TLS only this milestone. The `bootstrap.servers` URL parsing must accept `PLAINTEXT://` and `SSL://` schemes; `SASL_*` is rejected with `ConfigError`. |
+| SASL / OAUTHBEARER / Kerberos / SCRAM | SASL/PLAIN + SASL_SSL included (Phase 9). SCRAM, OAUTHBEARER, Kerberos rejected with `ConfigError`. | Phase 9 is scoped to PLAIN mechanism only — sufficient for CCloud/EC2. |
 | `Cluster.bootstrap` partial leader info | Translate (needed) | |
 | Legacy v0/v1 records (`AbstractLegacyRecordBatch`, `LegacyRecord`) | SKIP | v2 records only — Kafka 4.2 brokers do not require legacy. |
 | Coverage tooling beyond what `xtask coverage` already provides | SKIP | |
@@ -62,6 +62,7 @@ The work is broken into 8 phases. Each phase ends with a green `cargo build && c
 | 6 | Producer internals (no `KafkaProducer` shell): `BufferPool`, `ProducerBatch`, `ProduceRequestResult`, `FutureRecordMetadata`, `RecordAccumulator`, `BuiltInPartitioner`, `RoundRobinPartitioner`, `IncompleteBatches`, `ProducerInterceptors`, `ProducerMetadata`, `Sender` | ~4k | All build on Phases 3–5. `Sender` is the loop driver. |
 | 7 | Public surface: `Partitioner`, `Callback`, `ProducerInterceptor`, `RecordMetadata`, `ProducerRecord`, `Producer` trait, `KafkaProducer`, `ProducerConfig` | ~2k | Thin wrapper that ties it all together. |
 | 8 | Integration test: produce N messages to Testcontainers Kafka, assert delivery via `kafka-console-consumer` or via the Java client side-by-side | small | Real broker round-trip. |
+| 9 | SASL/PLAIN + SASL_SSL: `SaslChannelBuilder`, `SaslClientAuthenticator`, wire messages, CCloud smoke test | ~1k | Required for EC2/CCloud testing against real authenticated brokers. |
 
 ## Phase 1 — Foundations
 
@@ -349,6 +350,49 @@ src/common/
 
 ---
 
+## Phase 9 — SASL/PLAIN + SASL_SSL
+
+**Goal:** Enable `security.protocol=SASL_SSL` with `sasl.mechanism=PLAIN` so the producer can connect to CCloud and real brokers requiring authentication. Scope is intentionally narrow: PLAIN mechanism only, no SCRAM, no Kerberos, no OAUTHBEARER.
+
+**Reference:** `master` branch has a working implementation of exactly this scope — use it as the primary reference alongside the Java source.
+
+**Java classes to translate:**
+- `common/network/SaslChannelBuilder.java` — creates a `KafkaChannel` with either plaintext or TLS transport + `SaslClientAuthenticator`
+- `common/security/authenticator/SaslClientAuthenticator.java` — PLAIN-only state machine: `SendApiVersionsRequest → ReceiveApiVersionsResponse → SendHandshakeRequest → ReceiveHandshakeResponse → SendPlainToken → ReceiveResponse → Complete`
+- `common/security/ssl/SslFactory.java` / `DefaultSslEngineFactory.java` — already partially covered by `SslChannelBuilder` in Phase 5; extend to load CA cert from `ssl.ca.location` env-style config
+
+**Skip:**
+- SCRAM, OAUTHBEARER, Kerberos/GSSAPI — reject with `ConfigError("Unsupported SASL mechanism: ...")`
+- Server-side: `KafkaPrincipal`, `KafkaPrincipalBuilder`, `LoginManager`, JAAS server contexts
+- Re-authentication (methods exist on the `Authenticator` trait as no-ops; leave as-is)
+
+**Wire messages (generate from existing JSON specs in `generator/messages/`):**
+- `SaslHandshakeRequest.json` / `SaslHandshakeResponse.json`
+- `SaslAuthenticateRequest.json` / `SaslAuthenticateResponse.json`
+
+**Config changes:**
+- `ProducerConfig` / `KafkaProducer::new` must accept `SASL_PLAINTEXT` and `SASL_SSL` in addition to `PLAINTEXT` and `SSL` (remove the Phase 7 rejection for SASL_*)
+- Accept `sasl.mechanism` (default `PLAIN`), `sasl.jaas.config` or separate `sasl.username` / `sasl.password` keys
+- `SecurityProtocol` enum extended with `SaslPlaintext` and `SaslSsl` variants
+
+**Integration test (`tests/integration/ssl_sasl_test.rs`):**
+Translate the 5 cases from master:
+1. SSL connection (TLS-only, self-signed cert via `rcgen`)
+2. SASL_PLAINTEXT + PLAIN credentials
+3. SASL_SSL (TLS + PLAIN)
+4. Auth failure with wrong credentials → `AuthenticationException`
+5. Unsupported mechanism → `UnsupportedSaslMechanismException`
+
+**CCloud smoke test (env-var driven, optional gate):**
+Wire `tests/integration/performance_test.rs` (already has env-var support from `dev/milestone-5`) to accept `SECURITY_PROTOCOL`, `SASL_MECHANISM`, `SASL_USERNAME`, `SASL_PASSWORD`, `SSL_CA_LOCATION`. Test skips if `SASL_USERNAME` is not set, so it runs only when an EC2/CCloud environment is configured.
+
+**DoD additions:**
+- Auth failure surfaces as `KafkaError::Authentication` with a message matching Java's error string
+- SASL handshake sends correct mechanism name in the `SaslHandshakeRequest`; token format matches RFC 4616 (`\0username\0password`)
+- All 5 integration test cases green against a Testcontainers broker with SASL configured
+
+---
+
 ## Risks & Mitigations
 
 | Risk | Mitigation |
@@ -369,7 +413,7 @@ The Manager will execute the agent loop **per phase**. Each phase ends with:
 - `COMMENTS.DONE.N.md` archived to `design/history/Milestone-1/Phase-K/`.
 - Plan file for the **next** phase committed before spawning that phase's Actor.
 
-Agent numbers will be assigned sequentially per phase: Phase 1 → N=1, Phase 2 → N=2, etc.
+Agent numbers will be assigned sequentially per phase: Phase 1 → N=1, Phase 2 → N=2, ..., Phase 9 → N=9.
 
 ## Approval Checklist
 

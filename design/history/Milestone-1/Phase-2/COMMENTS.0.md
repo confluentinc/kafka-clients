@@ -10,6 +10,72 @@ the source so the deferral is visible at the call site).
 
 ---
 
+## Round 2 verdict: APPROVED
+
+Phase 2 round-2 review: all 7 fixes verified against the source diffs and
+the regenerated `*Data` files; 3 deferred items confirmed appropriate
+with TODO Phase 4 markers in place. 316 lib tests + 74 generator tests
+pass.
+
+Verified per-issue:
+
+- **Issue 1 (Records → write_byte_buffer):** generated
+  `produce_request_data.rs:120` emits `writable.write_byte_buffer(_nv.as_slice())`
+  for the records field; non-Records `Bytes` fields keep `write_byte_array`.
+  `ByteBufferAccessor::write_byte_buffer` falls through to `write_byte_array`
+  so byte fixtures still pass; `SendBuilder::write_byte_buffer` routes
+  through its `Arc<[u8]>` chunk path. The `match field.field_type()` dispatch
+  is per-field so no Bytes fields were unintentionally affected.
+- **Issue 2 (clear_partition_records):** `data: Option<ProduceRequestData>`,
+  the new method sets `data = None`, `request_data()` returns
+  `KafkaError::IllegalArgument` post-clear with Java's "clearPartitionRecords"
+  text, eager `partition_keys` cache lets `error_counts` and
+  `get_error_response` keep working post-clear, two new tests cover it.
+- **Issue 3 (array-of-struct schema):** `produce_request_data.rs:425/429`
+  emits `Type::CompactArray(Box::new(CompactArrayOf::new(Type::Schema(...))))`
+  / `Type::Array(...)` for `topic_data`. New generator unit test
+  `schema_emit_for_array_of_struct_uses_array_of_schema_not_bytes` locks
+  this and asserts the legacy `CompactBytes/Bytes` placeholder is gone.
+- **Issue 4 (listeners drift):** `listeners` field is removed from `ApiKey`
+  entirely. `ApiKey::listeners()` delegates to
+  `self.message_type().listeners()`, `ListenerType` is re-exported from the
+  generated module, drift is impossible by construction. `every_api_has_a_listener`
+  test now applies the `has_valid_version()` guard Java does.
+- **Issue 5 (tagged-field allocate):** no `allocate(256)` / `allocate(1024)`
+  literals in the generator emit. Bytes/Records compute `payload_size`
+  inline (no temp buffer); Struct/Array paths pre-compute the exact size
+  via a fresh `MessageSizeAccumulator` (+ `ObjectSerializationCache` for
+  nested structs) and allocate the temp buffer to that size. Per-site
+  fresh cache is fine — the size pass and write pass are independent.
+- **Issue 7 (KafkaError variants):** 5 new variants wired —
+  `NotEnoughReplicas` (19, retriable), `NotEnoughReplicasAfterAppend` (20,
+  retriable), `InvalidRequiredAcks` (21, neither retriable nor fatal —
+  matches Java's `InvalidConfigurationException` semantics), `KafkaStorage`
+  (56, retriable), `UnknownTopicId` (100, retriable). `is_retriable`,
+  `is_fatal`, `code`, `java_class_name`, `message`, `from_code` all
+  updated correctly.
+- **Issue 9 (OnceLock instead of expect):** all 6 sites covered —
+  Metadata{Request,Response}, Produce{Request,Response},
+  ApiVersions{Request,Response}. Each `api_key()` uses a function-local
+  `static OnceLock<&'static ApiKey>` initialized via
+  `ApiKeys::for_id(id).expect(...)`. The `expect` is now inside the
+  `OnceLock` initializer (unreachable from the public-API boundary).
+
+TODO markers verified for all 3 deferred items:
+
+- **Issue 6:** `generator/src/lib.rs:467` — TODO Phase 4 references
+  COMMENTS.0.md Issue 6 and the parameterized `ApiVersionsResponseTest`
+  use case.
+- **Issue 8:** `src/common/requests/request_utils.rs:39` — TODO Phase 4 in
+  the `serialize` docstring referencing COMMENTS.0.md Issue 8.
+- **Issue 10:** `src/common/requests/tests.rs:23` — module-level TODO
+  Phase 4 referencing COMMENTS.0.md Issue 10.
+
+No new findings. No regressions. The deferred items are correctly scoped
+to Phase 4.
+
+---
+
 ## DEFERRED (TODO marker present in source)
 
 ### Issue 6: `ApiMessageType::request_schema` / `response_schema` are empty stubs

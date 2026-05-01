@@ -43,6 +43,8 @@ pub mod records;
 pub mod simple_record;
 pub mod timestamp_type;
 pub mod transferable_records;
+pub mod unaligned_memory_records;
+pub mod unaligned_records;
 
 pub use base_records::BaseRecords;
 pub use compression_type::CompressionType;
@@ -59,3 +61,5 @@ pub use records::Records;
 pub use simple_record::SimpleRecord;
 pub use timestamp_type::TimestampType;
 pub use transferable_records::TransferableRecords;
+pub use unaligned_memory_records::UnalignedMemoryRecords;
+pub use unaligned_records::UnalignedRecords;

@@ -1,0 +1,5 @@
+- [Phase-1 review patterns](phase1_review_patterns.md) — high-yield areas + recurring translation-bug patterns I saw in Phase 1
+- [Phase-2 review patterns](phase2_review_patterns.md) — generator emit + runtime wire-protocol translation gotchas
+- [Phase-3 review patterns](phase3_review_patterns.md) — record-format trait surface + zero-copy regressions in SimpleRecord-style value types
+- [Phase-3b review patterns](phase3b_review_patterns.md) — serializer/deserializer translations: UUID text form, NaN bits, constant re-export rule, hot-path zero-copy
+- [Phase-3c review patterns](phase3c_review_patterns.md) — codec translations: LZ4 framing byte-exact verification, snappy xerial-vs-RFC trap, compression-ratio step direction
