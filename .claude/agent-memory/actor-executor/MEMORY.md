@@ -16,3 +16,4 @@
 - [Phase 3b list serde gap](phase3b_list_serde_gap.md) — `ListSerializer` cross-process Java-FQN limitation, what we support vs defer
 - [Phase 3d-1 default_record](phase3d1_default_record.md) — DefaultRecord/PartialDefaultRecord landed; `increment_sequence` temporarily inlined, move to 3d-2 batch file
 - [Phase 3d-2 default_record_batch](phase3d2_default_record_batch.md) — DefaultRecordBatch + LogInputStream + RecordBatchIterator + RecordValidationStats; Vec<u8> storage with per-iter Bytes view
+- [Phase 3d-3 memory_records](phase3d3_memory_records.md) — MemoryRecords + UnalignedMemoryRecords (Bytes-backed, zero-copy slice) + RecordsSend state-core; `Records::records()` per-record alloc; `to_send()` on concrete impls only
