@@ -24,7 +24,9 @@ pub mod base_records;
 pub mod compression_ratio_estimator;
 pub mod compression_type;
 pub mod control_record_type;
+pub mod default_record;
 pub mod mutable_record_batch;
+pub mod partial_default_record;
 // CLAUDE.md rule 2 mandates each Java class lives in its own file (so the
 // `Record` trait lives in `record/record.rs`). Clippy's `module_inception`
 // lint would otherwise flag the same-name child module.
@@ -40,7 +42,9 @@ pub mod transferable_records;
 pub use base_records::BaseRecords;
 pub use compression_type::CompressionType;
 pub use control_record_type::ControlRecordType;
+pub use default_record::DefaultRecord;
 pub use mutable_record_batch::MutableRecordBatch;
+pub use partial_default_record::PartialDefaultRecord;
 pub use record::Record;
 pub use record_batch::RecordBatch;
 pub use record_version::RecordVersion;
