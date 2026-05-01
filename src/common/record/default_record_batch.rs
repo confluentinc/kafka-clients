@@ -400,23 +400,20 @@ impl MutableRecordBatch for DefaultRecordBatch {
         write_i64_at(&mut self.buffer, BASE_OFFSET_OFFSET, new_base);
     }
 
-    fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64) {
+    fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64) -> Result<(), KafkaError> {
         // Validate: NO_TIMESTAMP_TYPE is rejected (Java throws
-        // IllegalArgumentException; we panic to match the unchecked-exception
-        // semantics. The caller must validate before calling.)
-        // To keep the public API non-panicking, we mirror Java's behaviour by
-        // panicking only in the explicitly-rejected case, matching the
-        // documented contract. CLAUDE.md rule 10 allows panics for cases with
-        // no recovery; the caller is expected to pass a valid timestamp type.
-        assert!(
-            timestamp_type != TimestampType::NoTimestampType,
-            "Timestamp type must be provided to compute attributes for message format v2 and above"
-        );
+        // IllegalArgumentException; CLAUDE.md rule 10.2 maps recoverable Java
+        // exceptions to `Result`).
+        if timestamp_type == TimestampType::NoTimestampType {
+            return Err(KafkaError::IllegalArgument(
+                "Timestamp type must be provided to compute attributes for message format v2 and above".to_string(),
+            ));
+        }
 
         let current_max = self.max_timestamp();
         // Skip work + CRC recomputation when nothing changes.
         if self.timestamp_type() == timestamp_type && current_max == max_timestamp {
-            return;
+            return Ok(());
         }
 
         let attrs = compute_attributes(
@@ -425,11 +422,12 @@ impl MutableRecordBatch for DefaultRecordBatch {
             self.is_transactional(),
             self.is_control_batch(),
             self.has_delete_horizon_ms(),
-        );
+        )?;
         write_i16_at(&mut self.buffer, ATTRIBUTES_OFFSET, attrs as i16);
         write_i64_at(&mut self.buffer, MAX_TIMESTAMP_OFFSET, max_timestamp);
         let crc = self.compute_checksum();
         byte_utils::write_unsigned_int_be_at(&mut self.buffer, CRC_OFFSET, crc as i64);
+        Ok(())
     }
 
     fn set_partition_leader_epoch(&mut self, epoch: i32) {
@@ -652,23 +650,24 @@ impl<'a> Iterator for CompressedIter<'a> {
 /// Compute the attributes byte for the given configuration. Mirrors Java's
 /// private `computeAttributes`.
 ///
-/// # Panics
+/// # Errors
 ///
-/// Panics if `timestamp_type == TimestampType::NoTimestampType`. Java throws
-/// `IllegalArgumentException`; we use a panic here to match the unchecked
-/// exception (this code path is internal to the batch encoder and only ever
-/// reached for in-process construction).
+/// Returns [`KafkaError::IllegalArgument`] if
+/// `timestamp_type == TimestampType::NoTimestampType` (Java throws
+/// `IllegalArgumentException`; CLAUDE.md rule 10.2 maps recoverable Java
+/// exceptions to `Result`).
 fn compute_attributes(
     compression_type: CompressionType,
     timestamp_type: TimestampType,
     is_transactional: bool,
     is_control: bool,
     is_delete_horizon_set: bool,
-) -> u8 {
-    assert!(
-        timestamp_type != TimestampType::NoTimestampType,
-        "Timestamp type must be provided to compute attributes for message format v2 and above"
-    );
+) -> Result<u8, KafkaError> {
+    if timestamp_type == TimestampType::NoTimestampType {
+        return Err(KafkaError::IllegalArgument(
+            "Timestamp type must be provided to compute attributes for message format v2 and above".to_string(),
+        ));
+    }
 
     let mut attributes: u8 = if is_transactional { TRANSACTIONAL_FLAG_MASK } else { 0 };
     if is_control {
@@ -684,7 +683,7 @@ fn compute_attributes(
     if is_delete_horizon_set {
         attributes |= DELETE_HORIZON_FLAG_MASK;
     }
-    attributes
+    Ok(attributes)
 }
 
 /// Write an empty v2 batch header at `buffer[buffer.len()..]` (i.e. append
@@ -693,6 +692,13 @@ fn compute_attributes(
 /// `buffer` must have at least [`RECORD_BATCH_OVERHEAD`] bytes of remaining
 /// capacity beyond its current length; on return the buffer length grows by
 /// 61 bytes.
+///
+/// # Errors
+///
+/// Returns [`KafkaError::IllegalArgument`] if `magic` is below
+/// [`CURRENT_MAGIC_VALUE`], if `timestamp` is invalid (negative and not
+/// [`NO_TIMESTAMP`]), or if `timestamp_type` is
+/// [`TimestampType::NoTimestampType`].
 #[allow(clippy::too_many_arguments)]
 pub fn write_empty_header(
     buffer: &mut Vec<u8>,
@@ -707,7 +713,7 @@ pub fn write_empty_header(
     timestamp: i64,
     is_transactional: bool,
     is_control_record: bool,
-) {
+) -> Result<(), KafkaError> {
     let offset_delta = (last_offset - base_offset) as i32;
     write_header(
         buffer,
@@ -727,7 +733,7 @@ pub fn write_empty_header(
         false,
         partition_leader_epoch,
         0,
-    );
+    )
 }
 
 /// Write the v2 batch header to `buffer` at the current end (append). Mirrors
@@ -736,10 +742,11 @@ pub fn write_empty_header(
 ///
 /// # Errors
 ///
-/// Java throws `IllegalArgumentException` for invalid magic / timestamp; we
-/// keep the unchecked-exception semantics by panicking. Internal batch
-/// construction routes through `MemoryRecordsBuilder` (Phase 3d-4) and
-/// validates upstream.
+/// Returns [`KafkaError::IllegalArgument`] when `magic` is below
+/// [`CURRENT_MAGIC_VALUE`], when `base_timestamp` is invalid (negative and not
+/// [`NO_TIMESTAMP`]), or when `timestamp_type` is
+/// [`TimestampType::NoTimestampType`] (Java throws `IllegalArgumentException`
+/// in each case; CLAUDE.md rule 10.2 maps these to `Result`).
 #[allow(clippy::too_many_arguments)]
 pub fn write_header(
     buffer: &mut Vec<u8>,
@@ -759,12 +766,15 @@ pub fn write_header(
     is_delete_horizon_set: bool,
     partition_leader_epoch: i32,
     num_records: i32,
-) {
-    assert!(magic >= CURRENT_MAGIC_VALUE, "Invalid magic value {magic}");
-    assert!(
-        base_timestamp >= 0 || base_timestamp == NO_TIMESTAMP,
-        "Invalid message timestamp {base_timestamp}"
-    );
+) -> Result<(), KafkaError> {
+    if magic < CURRENT_MAGIC_VALUE {
+        return Err(KafkaError::IllegalArgument(format!("Invalid magic value {magic}")));
+    }
+    if base_timestamp < 0 && base_timestamp != NO_TIMESTAMP {
+        return Err(KafkaError::IllegalArgument(format!(
+            "Invalid message timestamp {base_timestamp}"
+        )));
+    }
 
     let attributes = compute_attributes(
         compression_type,
@@ -772,7 +782,7 @@ pub fn write_header(
         is_transactional,
         is_control_batch,
         is_delete_horizon_set,
-    );
+    )?;
 
     let position = buffer.len();
     // Pre-grow the buffer to fit the entire header, then index-write each
@@ -793,40 +803,14 @@ pub fn write_header(
     write_i16_at(buf, PRODUCER_EPOCH_OFFSET, epoch);
     write_i32_at(buf, BASE_SEQUENCE_OFFSET, sequence);
     write_i32_at(buf, RECORDS_COUNT_OFFSET, num_records);
-    // CRC needs the records section appended *first* — but `writeHeader` in
-    // Java is called after the records have been written between
-    // `RECORD_BATCH_OVERHEAD` and `position + sizeInBytes`. Mirror that: the
-    // caller (MemoryRecordsBuilder, our tests, etc.) appends records *first*,
-    // then calls `writeHeader` which writes the header bytes (overwriting the
-    // pre-grown region) and computes CRC over the contiguous
-    // attributes..end-of-batch range.
-    //
-    // To support that pattern, we accept that `buffer.len()` already includes
-    // the records section: when called by `writeEmptyHeader`, `numRecords=0`
-    // and `sizeInBytes = RECORD_BATCH_OVERHEAD`, so the resize above produced
-    // exactly the right layout. When called by a builder that already wrote
-    // the records, the records live at `buffer[position +
-    // RECORD_BATCH_OVERHEAD..]` and our resize above grew the buffer by 61
-    // bytes — but those 61 bytes are now AFTER the records. That's wrong.
-    //
-    // Solution: undo the post-records resize and use a different code path
-    // when records are already present. The simplest fix is to NOT pre-grow
-    // when the buffer is already at `position + size_in_bytes` (records
-    // present), and DO pre-grow when only the header is being written
-    // (`size_in_bytes == RECORD_BATCH_OVERHEAD`). But that's brittle.
-    //
-    // Cleanest: require the caller to pre-allocate `position + size_in_bytes`
-    // bytes of buffer.len() *before* calling, with records already filled in
-    // between `position + RECORD_BATCH_OVERHEAD` and `position +
-    // size_in_bytes`. The caller path in `writeEmptyHeader` does this
-    // implicitly via the resize above; the builder path will
-    // pre-allocate separately.
-    //
-    // The implementation below handles both: we re-borrow `buffer` (not the
-    // 61-byte slice) to compute CRC over the full range from ATTRIBUTES_OFFSET
-    // to position + size_in_bytes.
+    // CRC covers attributes..end-of-batch — when called by `write_empty_header`
+    // (no records), the resize above produced exactly the right layout. The
+    // current resize-then-CRC pattern silently truncates pre-filled records;
+    // Issue #13 fixes this by replacing this function with `write_header_at`
+    // that takes a pre-sized slice.
     let crc = crc32c::crc32c(&buffer[position + ATTRIBUTES_OFFSET..position + size_in_bytes as usize]);
     byte_utils::write_unsigned_int_be_at(buffer, position + CRC_OFFSET, crc as i64);
+    Ok(())
 }
 
 /// Compute the encoded size in bytes for a batch built from `records` with
@@ -1037,7 +1021,8 @@ mod tests {
         write_i32_at(&mut header_only, PARTITION_LEADER_EPOCH_OFFSET, NO_PARTITION_LEADER_EPOCH);
         header_only[MAGIC_OFFSET] = CURRENT_MAGIC_VALUE as u8;
         let attrs =
-            compute_attributes(CompressionType::None, timestamp_type, is_transactional, is_control_batch, false);
+            compute_attributes(CompressionType::None, timestamp_type, is_transactional, is_control_batch, false)
+                .expect("test helper passes valid timestamp_type");
         write_i16_at(&mut header_only, ATTRIBUTES_OFFSET, attrs as i16);
         write_i32_at(&mut header_only, LAST_OFFSET_DELTA_OFFSET, last_offset_delta);
         write_i64_at(&mut header_only, BASE_TIMESTAMP_OFFSET, base_timestamp);
@@ -1097,7 +1082,8 @@ mod tests {
         write_i32_at(&mut buf, LENGTH_OFFSET, size_in_bytes - LOG_OVERHEAD as i32);
         write_i32_at(&mut buf, PARTITION_LEADER_EPOCH_OFFSET, NO_PARTITION_LEADER_EPOCH);
         buf[MAGIC_OFFSET] = CURRENT_MAGIC_VALUE as u8;
-        let attrs = compute_attributes(compression_type, timestamp_type, false, false, false);
+        let attrs = compute_attributes(compression_type, timestamp_type, false, false, false)
+            .expect("test helper passes valid timestamp_type");
         write_i16_at(&mut buf, ATTRIBUTES_OFFSET, attrs as i16);
         write_i32_at(&mut buf, LAST_OFFSET_DELTA_OFFSET, last_offset_delta);
         write_i64_at(&mut buf, BASE_TIMESTAMP_OFFSET, base_timestamp);
@@ -1139,7 +1125,8 @@ mod tests {
                         timestamp,
                         is_transactional,
                         is_control_batch,
-                    );
+                    )
+                    .expect("write_empty_header succeeds for valid inputs");
                     let batch = DefaultRecordBatch::new(buf);
                     assert_eq!(batch.producer_id(), producer_id);
                     assert_eq!(batch.producer_epoch(), producer_epoch);
@@ -1446,7 +1433,7 @@ mod tests {
         );
         let log_append_time = 15i64;
         let mut batch = DefaultRecordBatch::new(buf);
-        batch.set_max_timestamp(TimestampType::LogAppendTime, log_append_time);
+        batch.set_max_timestamp(TimestampType::LogAppendTime, log_append_time).unwrap();
         assert_eq!(batch.timestamp_type(), TimestampType::LogAppendTime);
         assert_eq!(batch.max_timestamp(), log_append_time);
         assert!(batch.is_valid()); // CRC was recomputed.
@@ -1456,8 +1443,9 @@ mod tests {
     }
 
     /// Translation of `DefaultRecordBatchTest.testSetNoTimestampTypeNotAllowed`.
+    /// Java throws `IllegalArgumentException`; CLAUDE.md rule 10.2 maps this
+    /// to a `Result::Err`. We assert the error variant + message text.
     #[test]
-    #[should_panic(expected = "Timestamp type must be provided")]
     fn set_no_timestamp_type_not_allowed() {
         let recs = vec![SimpleRecord::new(
             1i64,
@@ -1476,7 +1464,15 @@ mod tests {
             false,
         );
         let mut batch = DefaultRecordBatch::new(buf);
-        batch.set_max_timestamp(TimestampType::NoTimestampType, NO_TIMESTAMP);
+        let err = batch
+            .set_max_timestamp(TimestampType::NoTimestampType, NO_TIMESTAMP)
+            .unwrap_err();
+        match err {
+            KafkaError::IllegalArgument(msg) => {
+                assert!(msg.contains("Timestamp type must be provided"), "got {msg:?}");
+            },
+            other => panic!("expected IllegalArgument, got {other:?}"),
+        }
     }
 
     /// Tuple of (offset, timestamp, key bytes, value bytes) used to
@@ -1709,7 +1705,8 @@ mod tests {
             /* timestamp */ 1_000,
             /* is_transactional */ false,
             /* is_control_record */ false,
-        );
+        )
+        .unwrap();
 
         // Hand-computed expected layout (all big-endian, 61 bytes).
         // base_offset = 0 (8 bytes): 00*8

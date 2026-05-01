@@ -14,6 +14,7 @@
 
 //! Translation of `org.apache.kafka.common.record.MutableRecordBatch`.
 
+use crate::common::errors::KafkaError;
 use crate::common::record::{Record, RecordBatch, TimestampType};
 use crate::common::utils::buffer_supplier::BufferSupplier;
 use crate::common::utils::byte_buffer_output_stream::ByteBufferOutputStream;
@@ -31,7 +32,14 @@ pub trait MutableRecordBatch: RecordBatch {
     /// timestamp value and the timestamp type; the per-record timestamps
     /// are not rewritten because clients ignore them when the type is
     /// `LogAppendTime`. The `baseTimestamp` field is also untouched.
-    fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64);
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] if `timestamp_type` is
+    /// [`TimestampType::NoTimestampType`] (mirrors Java's
+    /// `IllegalArgumentException` from
+    /// `DefaultRecordBatch.setMaxTimestamp`).
+    fn set_max_timestamp(&mut self, timestamp_type: TimestampType, max_timestamp: i64) -> Result<(), KafkaError>;
 
     /// Set the partition leader epoch.
     fn set_partition_leader_epoch(&mut self, epoch: i32);
