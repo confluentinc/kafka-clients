@@ -21,13 +21,9 @@ agent:
 blocks:
   - name: Seed correspondence
     task:
-      env_vars:
-        - name: AK_BRANCH
-          value: trunk
-        - name: RUST_BRANCH
-          value: master
-        - name: FORCE
-          value: "False"
+      # No task-level env_vars: declaring AK_BRANCH/RUST_BRANCH/FORCE here
+      # would shadow the Task parameter values supplied at trigger time.
+      # Defaults are applied shell-side via ${VAR:-default} below.
       jobs:
         - name: seed
           commands:
@@ -42,11 +38,11 @@ blocks:
               : "${RUST_COMMIT:?RUST_COMMIT must be set as a Task parameter}"
             - |
               FORCE_FLAG=""
-              if [ "${FORCE}" = "True" ]; then
+              if [ "${FORCE:-False}" = "True" ]; then
                 FORCE_FLAG="--force"
               fi
-              translation-agent --seed --force $FORCE_FLAG \
-                --ak-branch "${AK_BRANCH}" \
+              translation-agent --seed $FORCE_FLAG \
+                --ak-branch "${AK_BRANCH:-trunk}" \
                 --ak-commit "${AK_COMMIT}" \
-                --rust-branch "${RUST_BRANCH}" \
+                --rust-branch "${RUST_BRANCH:-master}" \
                 --rust-commit "${RUST_COMMIT}"
