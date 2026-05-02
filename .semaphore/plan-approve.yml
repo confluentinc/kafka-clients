@@ -20,7 +20,7 @@ blocks:
             - sem-version python 3.10
             - cd tools/translation_agent
             - pip install -e '.[dev]'
-            - artifact pull project translation_agent_db
+            - artifact pull project translation_agent.db
             - |
               if [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "ERROR: this promotion must be triggered from a PR build."

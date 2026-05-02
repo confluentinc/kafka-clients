@@ -218,14 +218,14 @@ manually-triggered Task, defined under `.semaphore/` at the repo root:
 | `.semaphore/seed.yml` | manual Task in the Semaphore project's Tasks tab | `translation-agent --seed ...` to bootstrap `branch_commit` on first use. Required Task parameters: `AK_COMMIT`, `RUST_COMMIT`; optional: `AK_BRANCH`, `RUST_BRANCH`. |
 
 Each pipeline:
-- runs `artifact pull project translation_agent_db || true` in its
+- runs `artifact pull project translation_agent.db || true` in its
   prologue (the `|| true` lets first-ever runs proceed before the
   artifact exists);
 - delegates `artifact push` to the orchestrator itself (in a
   `try/finally` so partial state is persisted on inner failures).
 
 The artifact name is configurable via `--artifact-name`
-(default: `translation_agent_db`). The mainline branch is configurable
+(default: `translation_agent.db`). The mainline branch is configurable
 via the `MAIN_BRANCH` env var on the main pipeline (set in the project's
 Environment Variables tab to follow a non-`master` branch).
 
