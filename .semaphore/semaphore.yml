@@ -27,8 +27,13 @@ global_job_config:
       - |
         if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
           echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
+          # Semaphore's shallow single-branch clone doesn't create
+          # refs/remotes/origin/<other-branch>, so origin/<branch> isn't a
+          # valid start point. Use FETCH_HEAD (which the explicit fetch
+          # above does update) and -B so re-runs reset an existing local
+          # branch instead of failing.
           git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
-          git checkout -b "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
         fi
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
@@ -46,7 +51,7 @@ blocks:
         # Secrets tab to track a different mainline branch. The sweep runs
         # only when the build is for this exact branch.
         - name: MAIN_BRANCH
-          value: dev/milestone-5
+          value: dev/milestone-7
         # Path to the AK repo, relative to the translation_agent cwd set in
         # the prologue (which is `tools/translation_agent`). Defaults to the
         # `kafka` git submodule at the repo root.
