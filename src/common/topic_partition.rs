@@ -15,18 +15,19 @@
 //! A topic name and partition number.
 
 use std::fmt;
+use std::sync::Arc;
 
 /// A topic name and partition number.
 #[derive(Clone, Debug, Eq)]
 pub struct TopicPartition {
     partition: i32,
-    topic: String,
+    topic: Arc<str>,
 }
 
 impl TopicPartition {
     /// Creates a new `TopicPartition` with the given topic and partition.
-    pub fn new(topic: String, partition: i32) -> Self {
-        Self { partition, topic }
+    pub fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
+        Self { partition, topic: topic.into() }
     }
 
     /// Returns the partition number.
@@ -36,6 +37,11 @@ impl TopicPartition {
 
     /// Returns the topic name.
     pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Returns a shared reference to the topic name.
+    pub fn topic_arc(&self) -> &Arc<str> {
         &self.topic
     }
 }
