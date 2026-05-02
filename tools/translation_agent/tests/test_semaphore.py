@@ -31,6 +31,6 @@ def test_push_invokes_subprocess():
     ), patch.object(semaphore.subprocess, "run") as mrun:
         semaphore.push_project_artifact("td", "/tmp/db.sqlite")
     mrun.assert_called_once_with(
-        ["artifact", "push", "project", "--force", "td", "/tmp/db.sqlite"],
+        ["artifact", "push", "project", "/tmp/db.sqlite", "--force"],
         check=True,
     )

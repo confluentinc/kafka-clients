@@ -46,6 +46,6 @@ def push_project_artifact(name: str, file_path: str) -> None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
     log.info("Pushing %s to Semaphore project artifact %r", file_path, name)
     subprocess.run(
-        [ARTIFACT_BINARY, "push", "project", "--force", name, file_path],
+        [ARTIFACT_BINARY, "push", "project", file_path, "--force"],
         check=True,
     )

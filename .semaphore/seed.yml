@@ -45,7 +45,7 @@ blocks:
               if [ "${FORCE}" = "True" ]; then
                 FORCE_FLAG="--force"
               fi
-              translation-agent --seed $FORCE_FLAG \
+              translation-agent --seed --force $FORCE_FLAG \
                 --ak-branch "${AK_BRANCH}" \
                 --ak-commit "${AK_COMMIT}" \
                 --rust-branch "${RUST_BRANCH}" \
