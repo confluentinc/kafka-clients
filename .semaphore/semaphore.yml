@@ -19,6 +19,17 @@ global_job_config:
   prologue:
     commands:
       - checkout
+      # When the Task is triggered manually with a "Run on branch" override,
+      # Semaphore exposes the desired branch as SEMAPHORE_GIT_BRANCH_CHECKOUT
+      # but `checkout` still lands on the build's original ref. Switch to the
+      # requested branch so submodule init + pip install operate against the
+      # right tree.
+      - |
+        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+          echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
+          git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -b "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+        fi
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
       - cd tools/translation_agent
@@ -45,6 +56,10 @@ blocks:
         - name: sweep-or-per-pr
           commands:
             - |
+              if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+                echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+                SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+              fi
               if [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ]; then
                 echo "On main branch (${MAIN_BRANCH}) -- running sweep"
                 translation-agent \
