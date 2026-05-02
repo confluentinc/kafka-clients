@@ -28,7 +28,7 @@ global_job_config:
         if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
           echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
           git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
-          git checkout -b "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -b "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" origin/${SEMAPHORE_GIT_BRANCH_CHECKOUT}
         fi
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
