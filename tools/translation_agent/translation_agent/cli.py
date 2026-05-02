@@ -641,19 +641,25 @@ def _create_pr_for_ak_commit(
     if args.dry_run:
         pr_number = _synthetic_pr_number(ak_commit)
         log.info(
-            "[dry-run] would push %s to branch %s and create draft PR %r "
-            "(synthetic pr_number=%d)",
-            f"origin/{args.rust_branch}", branch_name, title, pr_number,
+            "[dry-run] would bump kafka -> %s on branch %s, push, and "
+            "create draft PR %r (synthetic pr_number=%d)",
+            ak_commit[:12], branch_name, title, pr_number,
         )
     else:
         try:
-            git_ops.push_new_branch(
+            # Branch is created with one commit (the kafka submodule
+            # bump) on top of origin/<rust-branch> so `gh pr create`
+            # has a real diff to PR -- otherwise GitHub's GraphQL
+            # rejects with "No commits between <base> and <head>".
+            worktree.push_branch_with_kafka_bump(
                 args.rust_repo_path,
-                source_ref=f"origin/{args.rust_branch}",
-                target_branch=branch_name,
+                branch_name,
+                base_remote_branch=args.rust_branch,
+                ak_commit=ak_commit,
+                ak_branch=ak_branch,
             )
-        except git_ops.GitError as e:
-            log.error("Failed to push branch %s: %s", branch_name, e)
+        except worktree.WorktreeError as e:
+            log.error("Failed to bump+push branch %s: %s", branch_name, e)
             return False
         try:
             pr_number = github.create_draft_pr(

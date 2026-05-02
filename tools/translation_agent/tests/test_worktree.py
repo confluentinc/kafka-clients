@@ -214,6 +214,66 @@ def test_worktree_branch_name_with_slash_sanitized_in_temp_prefix():
     assert "translation-agent-kafka-translate_abc-" in seen_paths[0]
 
 
+def test_push_branch_with_kafka_bump_skips_make_runs_submodule_init_and_pushes():
+    """Sweep step 3 builds the new branch with one commit (the kafka
+    submodule bump) before `gh pr create`. Verify it: (a) does NOT call
+    `make` (the slow build is plan/impl-only), (b) DOES run
+    `git submodule update --init kafka` so the bump can fetch+checkout,
+    (c) records the bump commit, and (d) pushes the branch to origin."""
+    calls = []
+
+    def record(args, **kwargs):
+        if args[0] == "git" and "worktree" in args and "list" in args:
+            return _completed(0, stdout="")
+        if args[0] == "make":
+            calls.append(("make", tuple(args[1:])))
+        elif args[0] == "git":
+            calls.append(("git", args[2], tuple(args[3:])))
+        if "show-ref" in args:
+            return _completed(1)  # local branch doesn't exist
+        if "diff" in args and "--cached" in args and "--quiet" in args:
+            return _completed(1)  # staged changes -> commit fires
+        return _completed(0)
+
+    with patch.object(worktree.subprocess, "run", side_effect=record):
+        worktree.push_branch_with_kafka_bump(
+            "/repo", "kafka-translate/abc",
+            base_remote_branch="master",
+            ak_commit="ak123",
+            ak_branch="trunk",
+        )
+
+    kinds = [c[0] for c in calls]
+    assert "make" not in kinds, f"make must not run with build=False; got {kinds}"
+
+    # Submodule init for kafka is run inside the worktree (not /repo).
+    submod_init = [
+        c for c in calls
+        if c[0] == "git"
+        and c[1] != "/repo"
+        and c[2][:3] == ("submodule", "update", "--init")
+        and "kafka" in c[2]
+    ]
+    assert submod_init, f"expected submodule init for kafka; got {calls}"
+
+    # The bump commit happens inside the worktree.
+    wt_commits = [
+        c for c in calls
+        if c[0] == "git" and c[1] != "/repo" and not c[1].endswith("/kafka")
+        and c[2][:1] == ("commit",)
+    ]
+    assert wt_commits, f"expected commit; got {calls}"
+    assert any("Bump kafka submodule to ak123" in arg for arg in wt_commits[0][2])
+
+    # Final push from /repo (worktrees share refs with the main repo).
+    pushes = [
+        c for c in calls
+        if c[0] == "git" and c[1] == "/repo" and c[2][:1] == ("push",)
+    ]
+    assert pushes, f"expected push call; got {calls}"
+    assert pushes[0][2] == ("push", "-u", "origin", "kafka-translate/abc")
+
+
 def test_worktree_for_branch_uses_local_branch_when_it_exists():
     """When the branch exists locally (e.g. dry-run cascade after a prior
     plan run), use it directly without fetching from origin."""

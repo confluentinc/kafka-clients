@@ -61,6 +61,7 @@ def worktree_for_branch(
     base_remote_branch: Optional[str] = None,
     ak_commit: Optional[str] = None,
     ak_branch: str = "trunk",
+    build: bool = True,
 ) -> Iterator[Path]:
     """Create a temporary git worktree checked out at `branch_name`.
 
@@ -85,6 +86,12 @@ def worktree_for_branch(
     pointer bump as its own commit BEFORE the agent runs. The agent's
     subsequent commits (e.g. "Design document") sit on top of the bump
     commit.
+
+    Pass `build=False` together with `ak_commit` to skip the slow `make`
+    build and only initialize the `kafka/` submodule (cheap) before the
+    bump. This is the PR-creation path (sweep step 3): we just need a
+    branch with the bump commit so `gh pr create` has something to PR --
+    no Cargo/cmake/Python build required at that point.
 
     Commits made inside the worktree advance the local `branch_name` ref;
     a `git push` from inside also advances `origin/<branch_name>`. With
@@ -135,7 +142,15 @@ def worktree_for_branch(
             )
         created = True
         if ak_commit is not None:
-            _make_build(worktree_dir)
+            if build:
+                _make_build(worktree_dir)
+            else:
+                # Skip the full make build but still populate kafka/ so
+                # _bump_kafka_submodule can fetch + checkout inside it.
+                _git(
+                    str(worktree_dir),
+                    "submodule", "update", "--init", "kafka",
+                )
             _bump_kafka_submodule(worktree_dir, ak_commit, ak_branch)
         yield worktree_dir
     finally:
@@ -249,3 +264,40 @@ def _bump_kafka_submodule(
         str(worktree_dir), "commit",
         "-m", f"Bump kafka submodule to {ak_commit}",
     )
+
+
+def push_branch_with_kafka_bump(
+    rust_repo_path: str,
+    branch_name: str,
+    *,
+    base_remote_branch: str,
+    ak_commit: str,
+    ak_branch: str,
+) -> None:
+    """Create `branch_name` on origin from `base_remote_branch` with one
+    commit that bumps the kafka submodule pointer to `ak_commit`.
+
+    Used by sweep step 3 before `gh pr create`. GitHub refuses to open a
+    PR when head and base point at the same commit, so the PR-creation
+    branch needs at least one differentiating commit. Bumping the kafka
+    submodule is the natural choice -- the same bump the plan/impl
+    worktree would do anyway, just done earlier.
+
+    Implementation: opens a temporary worktree (no `make` build, just a
+    `git submodule update --init kafka` to populate the directory),
+    commits the bump via `_bump_kafka_submodule`, then `git push`es the
+    local branch to origin. Worktree is torn down on exit.
+
+    Idempotent: if origin already has the branch with this exact bump
+    commit, the inner `_bump_kafka_submodule` is a no-op (no diff to
+    commit) and the push is a no-op (same SHA).
+    """
+    with worktree_for_branch(
+        rust_repo_path, branch_name,
+        cleanup=True,
+        base_remote_branch=base_remote_branch,
+        ak_commit=ak_commit,
+        ak_branch=ak_branch,
+        build=False,
+    ):
+        _git(rust_repo_path, "push", "-u", "origin", branch_name)

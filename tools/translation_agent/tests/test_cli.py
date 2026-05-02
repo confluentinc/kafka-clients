@@ -300,7 +300,7 @@ def test_end_to_end_full_lifecycle(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[100]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -386,7 +386,7 @@ def test_sweep_creates_prs_for_new_commits(tmp_path):
                return_value=["ak_a", "ak_b"]), \
          patch("translation_agent.cli.git_ops.commit_subject",
                side_effect=lambda repo, c: f"subj for {c}"), \
-         patch("translation_agent.cli.git_ops.push_new_branch") as mpush, \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump") as mpush, \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101, 102]) as mcreate:
         rc = _run(
@@ -416,7 +416,7 @@ def test_sweep_dry_run_skips_remote_but_inserts_synthetic_row(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="subj"), \
-         patch("translation_agent.cli.git_ops.push_new_branch") as mpush, \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump") as mpush, \
          patch("translation_agent.cli.github.create_draft_pr") as mcreate, \
          patch("translation_agent.cli._r2_available", return_value=False):
         rc = _run(
@@ -469,7 +469,7 @@ def test_sweep_recovers_pr_number_on_already_exists(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=gh.GhPrAlreadyExists("already exists")), \
          patch("translation_agent.cli.github.find_pr_number_for_branch",
@@ -498,7 +498,7 @@ def test_sweep_dep_eval_transitions_status_0_to_1(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a", "ak_b"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101, 102]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -530,7 +530,7 @@ def test_sweep_dep_eval_out_of_batch_dep_treated_as_none(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -554,7 +554,7 @@ def test_sweep_dep_eval_failure_persists_last_error(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -577,7 +577,7 @@ def test_sweep_dep_eval_unparseable_json_persists_last_error(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -799,7 +799,7 @@ def test_sweep_continues_after_gh_error_on_one_commit(tmp_path):
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a", "ak_b"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.git_ops.push_new_branch"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[gh.GhError("boom"), 200]):
         rc = _run(
