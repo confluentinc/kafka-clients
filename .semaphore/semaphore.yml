@@ -36,7 +36,7 @@ global_job_config:
       - pip install -e '.[dev]'
       # First sweep on a fresh project will have no artifact yet -- allow
       # the pull to fail so the orchestrator can create the DB from scratch.
-      - artifact pull project translation_agent_db || true
+      - artifact pull project translation_agent.db || true
 
 blocks:
   - name: Run translation-agent

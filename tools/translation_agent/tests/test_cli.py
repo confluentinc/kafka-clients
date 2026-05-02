@@ -226,7 +226,7 @@ def test_seed_pushes_artifact(tmp_path):
                   "--rust-branch", "master", "--rust-commit", "r",
                   db_path=db_path)
     assert rc == 0
-    mpush.assert_called_once_with("translation_agent_db", db_path)
+    mpush.assert_called_once_with("translation_agent.db", db_path)
 
 
 def test_no_artifact_push_skips(tmp_path):

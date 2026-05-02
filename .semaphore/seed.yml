@@ -36,7 +36,7 @@ blocks:
             - cd tools/translation_agent
             - pip install -e '.[dev]'
             # First-ever seed has no artifact yet; subsequent re-seeds do.
-            - artifact pull project translation_agent_db || true
+            - artifact pull project translation_agent.db || true
             - |
               : "${AK_COMMIT:?AK_COMMIT must be set as a Task parameter}"
               : "${RUST_COMMIT:?RUST_COMMIT must be set as a Task parameter}"

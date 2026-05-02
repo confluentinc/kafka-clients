@@ -86,7 +86,7 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Skip the Semaphore artifact push at the end of the run.",
     )
     parser.add_argument(
-        "--artifact-name", default="translation_agent_db",
+        "--artifact-name", default="translation_agent.db",
         help="Semaphore project-artifact name for the sqlite DB "
              "(default: %(default)s).",
     )
