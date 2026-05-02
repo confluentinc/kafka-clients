@@ -18,7 +18,7 @@ blocks:
             - checkout
             - git submodule update --init --depth=1 kafka
             - sem-version python 3.10
-            - sudo apt install -y rustup && rustup default stable
+            - sudo apt install -y cmake rustup && rustup default stable
             - cd tools/translation_agent
             - pip install -e '.[dev]'
             - artifact pull project translation_agent.db
