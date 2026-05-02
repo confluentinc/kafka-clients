@@ -37,6 +37,7 @@ global_job_config:
         fi
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
+      - sudo apt install -y rustup && rustup default stable
       - cd tools/translation_agent
       - pip install -e '.[dev]'
       # First sweep on a fresh project will have no artifact yet -- allow
