@@ -26,8 +26,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
-use log::{debug, error, trace, warn};
-use tokio::sync::Notify;
+use crate::{kafka_debug, kafka_error, kafka_trace, kafka_warn};
 
 use crate::client_response::ClientResponse;
 use crate::common::KafkaError;
@@ -41,6 +40,8 @@ use crate::common::requests::{PartitionResponse, RecordError};
 use crate::kafka_client::KafkaClient;
 use crate::metadata::LeaderIdAndEpoch;
 use crate::produce_request_data::{PartitionProduceData, ProduceRequestData, TopicProduceData};
+
+use crate::common::utils::LogContext;
 
 use super::ProducerBatch;
 use super::ProducerMetadata;
@@ -117,14 +118,16 @@ pub struct Sender<C: KafkaClient> {
     running: Arc<AtomicBool>,
     /// True when the caller wants to ignore all unsent/inflight messages and force close.
     force_close: Arc<AtomicBool>,
-    /// Wakeup notification for the sender task.
-    wakeup: Arc<Notify>,
     /// A per-partition queue of batches ordered by creation time for tracking in-flight batches.
     in_flight_batches: HashMap<TopicPartition, Vec<ProducerBatch>>,
     /// Pending produce requests awaiting responses, keyed by correlation ID.
     pending_produce_responses: HashMap<i32, PendingProduceRequest>,
     /// Provider of current wall-clock time in milliseconds (epoch).
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `Sender`.
+    log_context: LogContext,
 }
 
 impl<C: KafkaClient> Sender<C> {
@@ -142,8 +145,8 @@ impl<C: KafkaClient> Sender<C> {
         retry_backoff_ms: i64,
         running: Arc<AtomicBool>,
         force_close: Arc<AtomicBool>,
-        wakeup: Arc<Notify>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+        log_context: LogContext,
     ) -> Self {
         Self {
             client,
@@ -157,10 +160,10 @@ impl<C: KafkaClient> Sender<C> {
             retry_backoff_ms,
             running,
             force_close,
-            wakeup,
             in_flight_batches: HashMap::new(),
             pending_produce_responses: HashMap::new(),
             time_provider,
+            log_context,
         }
     }
 
@@ -168,14 +171,17 @@ impl<C: KafkaClient> Sender<C> {
     ///
     /// Translated from `Sender.run()`.
     pub async fn run(&mut self) {
-        debug!("Starting Kafka producer I/O task.");
+        kafka_debug!(self.log_context, "Starting Kafka producer I/O task.");
 
         // Main loop, runs until close is called
         while self.running.load(Ordering::Acquire) {
             self.run_once().await;
         }
 
-        debug!("Beginning shutdown of Kafka producer I/O task, sending remaining records.");
+        kafka_debug!(
+            self.log_context,
+            "Beginning shutdown of Kafka producer I/O task, sending remaining records."
+        );
 
         // We stopped accepting requests but there may still be requests in the
         // accumulator or waiting for acknowledgment. Wait until these are completed.
@@ -186,13 +192,13 @@ impl<C: KafkaClient> Sender<C> {
         }
 
         if self.force_close.load(Ordering::Acquire) {
-            debug!("Aborting incomplete batches due to forced shutdown");
+            kafka_debug!(self.log_context, "Aborting incomplete batches due to forced shutdown");
             self.accumulator.abort_incomplete_batches();
         }
 
         self.client.close().await;
 
-        debug!("Shutdown of Kafka producer I/O task has completed.");
+        kafka_debug!(self.log_context, "Shutdown of Kafka producer I/O task has completed.");
     }
 
     /// Run a single iteration of sending.
@@ -209,11 +215,7 @@ impl<C: KafkaClient> Sender<C> {
         let current_time_ms = (self.time_provider)();
         let poll_timeout = self.send_producer_data(current_time_ms).await;
 
-        // Use tokio::select to allow wakeup interruption during poll
-        let responses = tokio::select! {
-            responses = self.client.poll(poll_timeout, current_time_ms) => responses,
-            _ = self.wakeup.notified() => Vec::new(),
-        };
+        let responses = self.client.poll(poll_timeout, current_time_ms).await;
 
         // Process any produce responses (equivalent to Java's callback-based
         // handleProduceResponse invoked from within poll/completeResponses)
@@ -352,7 +354,8 @@ impl<C: KafkaClient> Sender<C> {
             for topic in &result.unknown_leader_topics {
                 self.metadata.add(topic, now);
             }
-            debug!(
+            kafka_debug!(
+                self.log_context,
                 "Requesting metadata update due to unknown leader topics from the batched records: {:?}",
                 result.unknown_leader_topics
             );
@@ -391,7 +394,7 @@ impl<C: KafkaClient> Sender<C> {
             for batch in batch_list.iter_mut() {
                 let tp = batch.topic_partition.clone();
                 let records = batch.records();
-                infos.push(RequestBatchInfo { tp, records_data: Some(records.buffer().to_vec()) });
+                infos.push(RequestBatchInfo { tp, records_data: Some(records.into_buffer()) });
             }
             request_data.push((*destination, infos));
         }
@@ -421,7 +424,7 @@ impl<C: KafkaClient> Sender<C> {
         poll_timeout = poll_timeout.max(0);
 
         if !result.ready_nodes.is_empty() {
-            trace!("Nodes with data ready to send: {:?}", result.ready_nodes);
+            kafka_trace!(self.log_context, "Nodes with data ready to send: {:?}", result.ready_nodes);
             poll_timeout = 0;
         }
 
@@ -431,7 +434,7 @@ impl<C: KafkaClient> Sender<C> {
 
     fn fail_expired_batches(&mut self, expired_batches: &mut [ProducerBatch], now: i64, deallocate_buffer: bool) {
         if !expired_batches.is_empty() {
-            trace!("Expired {} batches in accumulator", expired_batches.len());
+            kafka_trace!(self.log_context, "Expired {} batches in accumulator", expired_batches.len());
         }
         for expired_batch in expired_batches.iter_mut() {
             let error_message = format!(
@@ -496,7 +499,8 @@ impl<C: KafkaClient> Sender<C> {
         let mut deferred_actions: Vec<(TopicPartition, BatchAction)> = Vec::new();
 
         if response.was_timed_out() {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Cancelled request with header {} due to the last request to node {} timed out",
                 request_header,
                 response.destination()
@@ -510,7 +514,8 @@ impl<C: KafkaClient> Sender<C> {
                 deferred_actions.push((tp.clone(), action));
             }
         } else if response.was_disconnected() {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Cancelled request with header {} due to node {} being disconnected",
                 request_header,
                 response.destination()
@@ -524,18 +529,24 @@ impl<C: KafkaClient> Sender<C> {
                 deferred_actions.push((tp.clone(), action));
             }
         } else if response.version_mismatch().is_some() {
-            warn!(
-                "Cancelled request {} due to a version mismatch with node {}",
+            kafka_warn!(
+                self.log_context,
+                "Cancelled request {} due to a version mismatch with node {}: {}",
                 response,
-                response.destination()
+                response.destination(),
+                response.version_mismatch().unwrap_or("unknown")
             );
-            let part_resp = PartitionResponse::from_error(Errors::UnsupportedVersion);
+            let part_resp = PartitionResponse::from_error_with_message(
+                Errors::UnsupportedVersion,
+                response.version_mismatch().map(|s| s.to_string()),
+            );
             for (tp, batch) in batches.iter_mut() {
                 let action = self.complete_batch(batch, &part_resp, correlation_id, now, None);
                 deferred_actions.push((tp.clone(), action));
             }
         } else {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Received produce response from node {} with correlation id {}",
                 response.destination(),
                 correlation_id
@@ -582,9 +593,13 @@ impl<C: KafkaClient> Sender<C> {
                                 );
                                 deferred_actions.push((tp, action));
                             } else {
-                                error!(
+                                kafka_error!(
+                                    self.log_context,
                                     "Can't find batch created for topic id {} topic name {} partition {} using {:?}",
-                                    topic_resp.topic_id, topic_resp.name, partition_resp.index, topic_names
+                                    topic_resp.topic_id,
+                                    topic_resp.name,
+                                    partition_resp.index,
+                                    topic_names
                                 );
                             }
                         }
@@ -603,8 +618,10 @@ impl<C: KafkaClient> Sender<C> {
                             .metadata
                             .update_partition_leadership(&partitions_with_updated_leader_info, &leader_nodes);
 
-                        for part in &updated_partitions {
-                            debug!("For {} leader was updated.", part);
+                        if log::log_enabled!(log::Level::Trace) {
+                            for part in &updated_partitions {
+                                kafka_debug!(self.log_context, "For {} leader was updated.", part);
+                            }
                         }
                     }
                 }
@@ -647,7 +664,8 @@ impl<C: KafkaClient> Sender<C> {
             // Signal the caller to split the batch and reenqueue the sub-batches.
             // The caller owns the batch and will pass it to
             // `accumulator.split_and_reenqueue()`.
-            warn!(
+            kafka_warn!(
+                self.log_context,
                 "Got error produce response in correlation id {} on topic-partition {}, splitting and retrying ({} attempts left). Error: {}",
                 correlation_id,
                 batch.topic_partition,
@@ -657,7 +675,8 @@ impl<C: KafkaClient> Sender<C> {
             BatchAction::SplitAndReenqueue
         } else if error != Errors::None {
             if self.can_retry(batch, response, now) {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Got error produce response with correlation id {} on topic-partition {}, retrying ({} attempts left). Error: {}",
                     correlation_id,
                     batch.topic_partition,
@@ -684,16 +703,29 @@ impl<C: KafkaClient> Sender<C> {
 
         if error != Errors::None && error.is_invalid_metadata() {
             if error == Errors::UnknownTopicOrPartition {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Received unknown topic or partition error in produce request on partition {}. \
                      The topic-partition may not exist or the user may not have Describe access to it",
                     batch.topic_partition
                 );
             } else {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Received invalid metadata error in produce request on partition {} due to {}. \
                      Going to request metadata update now",
-                    batch.topic_partition, error
+                    batch.topic_partition,
+                    error
+                );
+            }
+
+            if error == Errors::NotLeaderOrFollower || error == Errors::FencedLeaderEpoch {
+                kafka_debug!(
+                    self.log_context,
+                    "For {}, received error {}, with leaderIdAndEpoch {:?}",
+                    batch.topic_partition,
+                    error,
+                    response.current_leader
                 );
             }
 
@@ -949,6 +981,13 @@ impl<C: KafkaClient> Sender<C> {
 
         let request_builder = ProduceRequestBuilder::new(data);
 
+        // Capture debug representation before request_builder is moved into Box.
+        let request_debug = if log::log_enabled!(log::Level::Trace) {
+            format!("{:?}", request_builder)
+        } else {
+            String::new()
+        };
+
         // Fetch topic names from metadata outside the response path, since topic
         // IDs may change during the response (e.g. if a topic is recreated).
         let topic_names = self.metadata.topic_names();
@@ -972,16 +1011,16 @@ impl<C: KafkaClient> Sender<C> {
             .insert(correlation_id, PendingProduceRequest { partitions: batch_tps, topic_names });
 
         self.client.send(client_request, now);
-        trace!("Sent produce request to {}", node_id);
+        kafka_trace!(self.log_context, "Sent produce request to {}: {}", node_id, request_debug);
     }
 
-    fn topic_ids_for_partitions(&self, batch_infos: &[RequestBatchInfo]) -> HashMap<String, Uuid> {
+    fn topic_ids_for_partitions(&self, batch_infos: &[RequestBatchInfo]) -> HashMap<Arc<str>, Uuid> {
         let metadata_topic_ids = self.metadata.topic_ids();
         let mut result = HashMap::new();
         for info in batch_infos {
-            let topic = info.tp.topic().to_string();
-            let topic_id = metadata_topic_ids.get(&topic).copied().unwrap_or(Uuid::ZERO_UUID);
-            result.insert(topic, topic_id);
+            let topic_arc = info.tp.topic_arc().clone();
+            let topic_id = metadata_topic_ids.get(&*topic_arc).copied().unwrap_or(Uuid::ZERO_UUID);
+            result.insert(topic_arc, topic_id);
         }
         result
     }
@@ -1127,7 +1166,6 @@ mod tests {
 
             let running = Arc::new(AtomicBool::new(true));
             let force_close = Arc::new(AtomicBool::new(false));
-            let wakeup = Arc::new(Notify::new());
 
             let sender = Sender::new(
                 client,
@@ -1141,8 +1179,8 @@ mod tests {
                 RETRY_BACKOFF_MS,
                 running,
                 force_close,
-                wakeup,
                 time_provider,
+                LogContext::empty(),
             );
 
             let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
@@ -1166,12 +1204,13 @@ mod tests {
         }
 
         /// Append a record to the accumulator for the given partition.
-        fn append_to_accumulator(&self, tp: &TopicPartition) -> Arc<FutureRecordMetadata> {
+        async fn append_to_accumulator(&self, tp: &TopicPartition) -> Arc<FutureRecordMetadata> {
             self.append_to_accumulator_with(tp, self.time.milliseconds(), "key", "value")
+                .await
         }
 
         /// Append a record with specific timestamp and key/value.
-        fn append_to_accumulator_with(
+        async fn append_to_accumulator_with(
             &self,
             tp: &TopicPartition,
             timestamp: i64,
@@ -1193,6 +1232,7 @@ mod tests {
                     self.time.milliseconds(),
                     &cluster,
                 )
+                .await
                 .expect("append should succeed");
             result.future
         }
@@ -1419,7 +1459,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let offset = 0i64;
         let tp0 = ctx.tp0.clone();
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
 
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
@@ -1455,7 +1495,7 @@ mod tests {
     async fn test_can_retry_without_idempotence() {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
 
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
@@ -1487,7 +1527,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -1521,8 +1561,8 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Create a producer batch with more than one record so it is eligible for splitting
-        let future1 = ctx.append_to_accumulator(&tp0);
-        let future2 = ctx.append_to_accumulator(&tp0);
+        let future1 = ctx.append_to_accumulator(&tp0).await;
+        let future2 = ctx.append_to_accumulator(&tp0).await;
 
         // Send request
         ctx.sender.run_once().await; // connect
@@ -1558,7 +1598,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -1597,7 +1637,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        ctx.append_to_accumulator(&tp0);
+        ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send request
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
@@ -1606,7 +1646,7 @@ mod tests {
         ctx.time.sleep(DELIVERY_TIMEOUT_MS as i64 / 2);
 
         // Send second ProduceRequest
-        ctx.append_to_accumulator(&tp0);
+        ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // must not send request because the partition is muted
         assert_eq!(ctx.sender.client().in_flight_request_count(), 1);
         assert_eq!(ctx.sender.in_flight_batches(&ctx.tp0).len(), 1);
@@ -1634,7 +1674,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
 
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -1660,7 +1700,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
 
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -1698,8 +1738,8 @@ mod tests {
         let tp1 = ctx.tp1.clone();
 
         // Send multiple ProduceRequests across multiple partitions
-        let future1 = ctx.append_to_accumulator_with(&tp0, ctx.time.milliseconds(), "k1", "v1");
-        let future2 = ctx.append_to_accumulator_with(&tp1, ctx.time.milliseconds(), "k2", "v2");
+        let future1 = ctx.append_to_accumulator_with(&tp0, ctx.time.milliseconds(), "k1", "v1").await;
+        let future2 = ctx.append_to_accumulator_with(&tp1, ctx.time.milliseconds(), "k2", "v2").await;
 
         // Send request
         ctx.sender.run_once().await; // connect
@@ -1746,7 +1786,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
         let offset = 0i64;
 
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
 
         ctx.sender.run_once().await;
         assert!(ctx.metadata.contains_topic(tp0.topic()), "Topic not added to metadata");
@@ -1799,7 +1839,7 @@ mod tests {
 
         let mut futures = Vec::with_capacity(record_count);
         for _i in 0..record_count {
-            futures.push(ctx.append_to_accumulator(&tp0));
+            futures.push(ctx.append_to_accumulator(&tp0).await);
         }
 
         ctx.sender.run_once().await; // connect
@@ -1878,7 +1918,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // --- Successful retry ---
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -1933,7 +1973,7 @@ mod tests {
         assert_eq!(0, ctx.sender.in_flight_batches(&ctx.tp0).len());
 
         // --- Unsuccessful retry (exhausted retries) ---
-        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        let future = ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
         ctx.sender.run_once().await; // send produce request
         assert_eq!(1, ctx.sender.in_flight_batches(&ctx.tp0).len());
 
@@ -1994,7 +2034,7 @@ mod tests {
             .update_with_current_request_version(&metadata_response, false, ctx.time.milliseconds());
 
         // Send the first message to tp1.
-        ctx.append_to_accumulator_with(&tp1, 0, "key1", "value1");
+        ctx.append_to_accumulator_with(&tp1, 0, "key1", "value1").await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
 
@@ -2004,7 +2044,7 @@ mod tests {
 
         ctx.time.sleep(900);
         // Now send another message to tp1
-        ctx.append_to_accumulator_with(&tp1, 0, "key2", "value2");
+        ctx.append_to_accumulator_with(&tp1, 0, "key2", "value2").await;
 
         // With guarantee_message_order, the second message should not be sent
         // because tp1 is muted.
@@ -2035,7 +2075,7 @@ mod tests {
         let tp0 = ctx.tp0.clone();
 
         // Send first ProduceRequest
-        let future = ctx.append_to_accumulator(&tp0);
+        let future = ctx.append_to_accumulator(&tp0).await;
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send
         assert_eq!(1, ctx.sender.client().in_flight_request_count());
@@ -2066,7 +2106,7 @@ mod tests {
         let mut ctx = SenderTestContext::new();
         let tp0 = ctx.tp0.clone();
 
-        ctx.append_to_accumulator_with(&tp0, 0, "key", "value");
+        ctx.append_to_accumulator_with(&tp0, 0, "key", "value").await;
 
         ctx.sender.run_once().await; // connect
         ctx.sender.run_once().await; // send produce request
@@ -2119,7 +2159,6 @@ mod tests {
 
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
-        let wakeup = Arc::new(Notify::new());
 
         let mut sender = Sender::new(
             client,
@@ -2133,8 +2172,8 @@ mod tests {
             1000,
             running,
             force_close,
-            wakeup,
             time_provider,
+            LogContext::empty(),
         );
 
         let tp0 = TopicPartition::new(TOPIC_NAME.to_string(), 0);
@@ -2168,6 +2207,7 @@ mod tests {
                 time.milliseconds(),
                 &cluster,
             )
+            .await
             .expect("append should succeed");
 
         sender.run_once().await; // connect
@@ -2221,6 +2261,7 @@ mod tests {
                 time.milliseconds(),
                 &cluster,
             )
+            .await
             .expect("append should succeed");
         sender.run_once().await;
         assert_eq!(
