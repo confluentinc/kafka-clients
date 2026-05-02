@@ -24,12 +24,13 @@
 //! sticky partitioning (described in detail in KIP-794). There is one partitioner
 //! object per topic.
 
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use log::trace;
-
 use crate::common::Cluster;
+use crate::common::utils::LogContext;
 use crate::common::utils::{murmur2, to_positive};
+use crate::kafka_trace;
 
 /// Information for the current sticky partition.
 ///
@@ -77,10 +78,12 @@ impl PartitionLoadStats {
 /// partitioning to avoid switching partitions too frequently, and uses adaptive
 /// load stats to distribute records based on queue sizes.
 pub struct BuiltInPartitioner {
-    topic: String,
+    topic: Arc<str>,
     sticky_batch_size: i32,
     partition_load_stats: Option<PartitionLoadStats>,
     sticky_partition_info: Option<StickyPartitionInfo>,
+    /// Contextual log message prefix.
+    log_context: LogContext,
 }
 
 impl BuiltInPartitioner {
@@ -92,17 +95,23 @@ impl BuiltInPartitioner {
     ///
     /// # Panics
     /// Panics if `sticky_batch_size` is less than 1.
-    pub fn new(topic: &str, sticky_batch_size: i32) -> Self {
+    pub fn new(topic: &Arc<str>, sticky_batch_size: i32) -> Self {
+        Self::with_log_context(topic, sticky_batch_size, LogContext::empty())
+    }
+
+    /// Creates a new `BuiltInPartitioner` with a `LogContext`.
+    pub fn with_log_context(topic: &Arc<str>, sticky_batch_size: i32, log_context: LogContext) -> Self {
         assert!(
             sticky_batch_size >= 1,
             "sticky_batch_size must be >= 1 but got {}",
             sticky_batch_size
         );
         Self {
-            topic: topic.to_string(),
+            topic: Arc::clone(topic),
             sticky_batch_size,
             partition_load_stats: None,
             sticky_partition_info: None,
+            log_context,
         }
     }
 
@@ -145,7 +154,7 @@ impl BuiltInPartitioner {
             }
         };
 
-        trace!("Switching to partition {} in topic {}", partition, self.topic);
+        kafka_trace!(self.log_context, "Switching to partition {} in topic {}", partition, self.topic);
         partition
     }
 
@@ -235,9 +244,12 @@ impl BuiltInPartitioner {
         // but doing so may hinder batching because partition switch may happen while batch isn't
         // ready to send.
         if produced_bytes >= self.sticky_batch_size * 2 {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "Produced {} bytes, exceeding twice the batch size of {} bytes, with switching set to {}",
-                produced_bytes, self.sticky_batch_size, enable_switch
+                produced_bytes,
+                self.sticky_batch_size,
+                enable_switch
             );
         }
 
@@ -264,7 +276,7 @@ impl BuiltInPartitioner {
         let queue_sizes = match queue_sizes {
             Some(qs) => qs,
             None => {
-                trace!("No load stats for topic {}, not using adaptive", self.topic);
+                kafka_trace!(self.log_context, "No load stats for topic {}, not using adaptive", self.topic);
                 self.partition_load_stats = None;
                 return;
             },
@@ -275,7 +287,8 @@ impl BuiltInPartitioner {
         // The queue_sizes.len() represents the number of all partitions in the topic and if we have
         // less than 2 partitions, there is no need to do adaptive logic.
         if length < 1 || queue_sizes.len() < 2 {
-            trace!(
+            kafka_trace!(
+                self.log_context,
                 "The number of partitions is too small: available={}, all={}, not using adaptive for topic {}",
                 length,
                 queue_sizes.len(),
@@ -301,7 +314,11 @@ impl BuiltInPartitioner {
         if all_equal && length == queue_sizes.len() {
             // No need to have complex probability logic when all queue sizes are the same,
             // and we didn't exclude partitions that experience high latencies.
-            trace!("All queue lengths are the same, not using adaptive for topic {}", self.topic);
+            kafka_trace!(
+                self.log_context,
+                "All queue lengths are the same, not using adaptive for topic {}",
+                self.topic
+            );
             self.partition_load_stats = None;
             return;
         }
@@ -311,7 +328,8 @@ impl BuiltInPartitioner {
         for i in 1..length {
             queue_sizes[i] = max_size_plus1 - queue_sizes[i] + queue_sizes[i - 1];
         }
-        trace!(
+        kafka_trace!(
+            self.log_context,
             "Partition load stats for topic {}: CFT={:?}, IDs={:?}, length={}",
             self.topic,
             &queue_sizes[..length],
@@ -350,6 +368,10 @@ mod tests {
     const TOPIC_B: &str = "topicB";
     const TOPIC_C: &str = "topicC";
 
+    fn topic_arc(s: &str) -> Arc<str> {
+        Arc::from(s)
+    }
+
     /// A test partitioner that uses sequential values instead of random.
     /// Translated from `BuiltInPartitionerTest.SequentialPartitioner`.
     struct SequentialPartitioner {
@@ -359,8 +381,9 @@ mod tests {
 
     impl SequentialPartitioner {
         fn new(topic: &str, sticky_batch_size: i32) -> Self {
+            let topic_arc = topic_arc(topic);
             Self {
-                inner: BuiltInPartitioner::new(topic, sticky_batch_size),
+                inner: BuiltInPartitioner::new(&topic_arc, sticky_batch_size),
                 mock_random: AtomicI32::new(0),
             }
         }
@@ -518,7 +541,7 @@ mod tests {
         let test_cluster = make_cluster(&cluster_nodes, all_partitions);
 
         // Create partitions with "sticky" batch size to accommodate 1 record.
-        let mut partitioner_a = BuiltInPartitioner::new(TOPIC_A, 1);
+        let mut partitioner_a = BuiltInPartitioner::new(&topic_arc(TOPIC_A), 1);
 
         // Assure we never choose partition 1 because it is unavailable.
         let part_a = partitioner_a.peek_current_partition_info(&test_cluster).partition();
@@ -535,7 +558,7 @@ mod tests {
         }
         assert!(found_another_part_a, "Expected to find partition other than {}", part_a);
 
-        let mut partitioner_b = BuiltInPartitioner::new(TOPIC_B, 1);
+        let mut partitioner_b = BuiltInPartitioner::new(&topic_arc(TOPIC_B), 1);
         // Assure we always choose partition 1 for topic B.
         let part_b = partitioner_b.peek_current_partition_info(&test_cluster).partition();
         partitioner_b.update_partition_info(1, &test_cluster);
@@ -548,7 +571,7 @@ mod tests {
         }
 
         // Assure that we still choose the partition when there are no partitions available.
-        let mut partitioner_c = BuiltInPartitioner::new(TOPIC_C, 1);
+        let mut partitioner_c = BuiltInPartitioner::new(&topic_arc(TOPIC_C), 1);
         let part_c = partitioner_c.peek_current_partition_info(&test_cluster).partition();
         partitioner_c.update_partition_info(1, &test_cluster);
         assert_eq!(0, part_c);
@@ -611,10 +634,11 @@ mod tests {
     /// Translated from `BuiltInPartitionerTest.testStickyBatchSizeMoreThatZero`.
     #[test]
     fn test_sticky_batch_size_more_than_zero() {
-        let result = std::panic::catch_unwind(|| BuiltInPartitioner::new(TOPIC_A, 0));
+        let topic_a = topic_arc(TOPIC_A);
+        let result = std::panic::catch_unwind(|| BuiltInPartitioner::new(&topic_arc(TOPIC_A), 0));
         assert!(result.is_err(), "Expected panic for sticky_batch_size=0");
 
         // Should not panic
-        let _ = BuiltInPartitioner::new(TOPIC_A, 1);
+        let _ = BuiltInPartitioner::new(&topic_a, 1);
     }
 }
