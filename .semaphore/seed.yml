@@ -16,8 +16,7 @@ name: Seed translation_agent DB
 
 agent:
   machine:
-    type: e1-standard-2
-    os_image: ubuntu2204
+    type: s1-prod-ubuntu24-04-arm64-0
 
 blocks:
   - name: Seed correspondence
