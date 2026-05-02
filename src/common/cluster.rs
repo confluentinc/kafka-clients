@@ -166,12 +166,12 @@ impl Cluster {
         )
     }
 
-    /// Create a "bootstrap" cluster using the given list of socket addresses.
-    pub fn bootstrap(addresses: &[SocketAddr]) -> Self {
+    /// Create a "bootstrap" cluster using the given list of (hostname, address) pairs.
+    pub fn bootstrap(addresses: &[(String, SocketAddr)]) -> Self {
         let mut nodes = Vec::with_capacity(addresses.len());
         let mut node_id: i32 = -1;
-        for address in addresses {
-            nodes.push(Node::new(node_id, address.ip().to_string(), address.port() as i32));
+        for (host, address) in addresses {
+            nodes.push(Node::new(node_id, host.clone(), address.port() as i32));
             node_id -= 1;
         }
         Self::new_internal(
@@ -399,7 +399,10 @@ mod tests {
 
     #[test]
     fn test_bootstrap_cluster() {
-        let addrs: Vec<SocketAddr> = vec!["127.0.0.1:9092".parse().unwrap(), "127.0.0.1:9093".parse().unwrap()];
+        let addrs: Vec<(String, SocketAddr)> = vec![
+            ("broker1".to_string(), "127.0.0.1:9092".parse().unwrap()),
+            ("broker2".to_string(), "127.0.0.1:9093".parse().unwrap()),
+        ];
         let cluster = Cluster::bootstrap(&addrs);
         assert!(cluster.is_bootstrap_configured());
         assert_eq!(cluster.nodes().len(), 2);
