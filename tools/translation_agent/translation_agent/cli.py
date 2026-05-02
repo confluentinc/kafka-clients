@@ -16,8 +16,9 @@
 
 Three invocation modes per the design:
 
-- Sweep mode (default): `translation-agent --ak-repo-path ... --ak-branch ...
-  --rust-branch ...` — runs design steps 1..6+8.
+- Sweep mode (default): `translation-agent --ak-repo-path ... --rust-branch
+  ...` — runs design steps 1..6+8. The AK branch is read from the
+  `branch_commit` cursor row whose primary key is `--rust-branch`.
 - Per-PR mode: `translation-agent --pr <N> [--plan-approve]` — design step 7.
 - Seed mode: `translation-agent --seed --ak-branch ... --ak-commit ...
   --rust-branch ... --rust-commit ...` — bootstraps the `branch_commit`
@@ -110,7 +111,11 @@ def _build_parser() -> argparse.ArgumentParser:
 
     # Sweep-mode args.
     parser.add_argument("--ak-repo-path", help="Path to a local clone of the AK repo.")
-    parser.add_argument("--ak-branch", help="AK branch to follow.")
+    parser.add_argument(
+        "--ak-branch",
+        help="AK branch (only required for --seed; sweep reads it from the "
+             "branch_commit cursor).",
+    )
     parser.add_argument("--rust-branch", help="Rust branch to write PRs against.")
     parser.add_argument(
         "--rust-repo-path", default=".",
@@ -125,7 +130,8 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Print intent without invoking r2/gh/git/artifact.",
     )
 
-    # Seed-mode args (--ak-branch and --rust-branch are shared with sweep mode).
+    # Seed-mode args (--rust-branch is shared with sweep mode; --ak-branch
+    # is required for seed only).
     parser.add_argument("--ak-commit", help="AK commit hash (for --seed).")
     parser.add_argument("--rust-commit", help="Rust commit hash (for --seed).")
     parser.add_argument(
@@ -236,13 +242,15 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
 
 
 def _run_sweep(args: argparse.Namespace, conn) -> int:
-    required = ("ak_repo_path", "ak_branch", "rust_branch")
+    required = ("ak_repo_path", "rust_branch")
     missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
     if missing:
         log.error("sweep mode requires: %s", ", ".join(missing))
         return 2
 
-    # Step 2: find the AK cursor for this Rust branch.
+    # Step 2: find the AK cursor for this Rust branch. The cursor row (PK is
+    # rust_branch alone) tells us which AK branch + commit we're tracking, so
+    # sweep mode does not take --ak-branch on the CLI.
     cursor = db.get_latest_correspondence(conn, args.rust_branch)
     if cursor is None:
         log.error(
@@ -250,21 +258,17 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
             args.rust_branch,
         )
         return 1
+    ak_branch = cursor["ak_branch"]
     log.info(
         "Cursor: rust=%s/%s -> AK=%s/%s",
         cursor["rust_branch"], cursor["rust_commit"],
-        cursor["ak_branch"], cursor["ak_commit"],
+        ak_branch, cursor["ak_commit"],
     )
-    if cursor["ak_branch"] != args.ak_branch:
-        log.warning(
-            "Cursor's ak_branch=%s differs from --ak-branch=%s; using --ak-branch.",
-            cursor["ak_branch"], args.ak_branch,
-        )
 
     # Step 3: get the next 10 AK commits.
     try:
         ak_commits = git_ops.next_commits(
-            args.ak_repo_path, since=cursor["ak_commit"], branch=args.ak_branch, n=10,
+            args.ak_repo_path, since=cursor["ak_commit"], branch=ak_branch, n=10,
         )
     except git_ops.GitError as e:
         log.error("Failed to read AK commits: %s", e)
@@ -272,12 +276,12 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
     if not ak_commits:
         log.info("No new AK commits to translate; will still process existing rows.")
     else:
-        log.info("Found %d new AK commit(s) on %s", len(ak_commits), args.ak_branch)
+        log.info("Found %d new AK commit(s) on %s", len(ak_commits), ak_branch)
 
     # Step 3 (cont): create branches + draft PRs, insert into pr_commit.
     new_pr_count = 0
     for ak_commit in ak_commits:
-        rc = _create_pr_for_ak_commit(args, conn, ak_commit)
+        rc = _create_pr_for_ak_commit(args, conn, ak_branch, ak_commit)
         if rc:
             new_pr_count += 1
 
@@ -504,7 +508,7 @@ def _run_plan_one(args, row):
     branch_name = github.branch_name_for_ak(ak_commit)
     prompt = prompts.PLAN_GENERATION_PROMPT_TEMPLATE.format(
         ak_commit=ak_commit,
-        ak_branch=row["ak_branch"] or args.ak_branch or "(unknown)",
+        ak_branch=row["ak_branch"] or "(unknown)",
         pr_number=pr_number,
         branch_name=branch_name,
     )
@@ -518,7 +522,7 @@ def _run_plan_one(args, row):
                 args.rust_branch if args.dry_run else None
             ),
             ak_commit=ak_commit,
-            ak_branch=row["ak_branch"] or args.ak_branch or "trunk",
+            ak_branch=row["ak_branch"] or "trunk",
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
@@ -554,7 +558,7 @@ def _run_impl_one(args, row):
     branch_name = github.branch_name_for_ak(ak_commit)
     prompt = prompts.IMPLEMENTATION_PROMPT_TEMPLATE.format(
         ak_commit=ak_commit,
-        ak_branch=row["ak_branch"] or args.ak_branch or "(unknown)",
+        ak_branch=row["ak_branch"] or "(unknown)",
         pr_number=pr_number,
         branch_name=branch_name,
     )
@@ -568,7 +572,7 @@ def _run_impl_one(args, row):
                 args.rust_branch if args.dry_run else None
             ),
             ak_commit=ak_commit,
-            ak_branch=row["ak_branch"] or args.ak_branch or "trunk",
+            ak_branch=row["ak_branch"] or "trunk",
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
@@ -612,7 +616,7 @@ def _run_impl_one(args, row):
 
 
 def _create_pr_for_ak_commit(
-    args: argparse.Namespace, conn, ak_commit: str,
+    args: argparse.Namespace, conn, ak_branch: str, ak_commit: str,
 ) -> bool:
     """Create the branch + draft PR + pr_commit row for a single AK commit.
 
@@ -678,7 +682,7 @@ def _create_pr_for_ak_commit(
             return False
 
     inserted = db.insert_pr_commit(
-        conn, pr_number, args.rust_branch, args.ak_branch, ak_commit,
+        conn, pr_number, args.rust_branch, ak_branch, ak_commit,
     )
     label = "[dry-run] " if args.dry_run else ""
     if inserted:

@@ -35,14 +35,12 @@ blocks:
         # Secrets tab to track a different mainline branch. The sweep runs
         # only when the build is for this exact branch.
         - name: MAIN_BRANCH
-          value: master
+          value: dev/milestone-5
         # Path to the AK repo, relative to the translation_agent cwd set in
         # the prologue (which is `tools/translation_agent`). Defaults to the
         # `kafka` git submodule at the repo root.
         - name: AK_REPO_PATH
           value: ../../kafka
-        - name: AK_BRANCH
-          value: trunk
       jobs:
         - name: sweep-or-per-pr
           commands:
@@ -51,7 +49,6 @@ blocks:
                 echo "On main branch (${MAIN_BRANCH}) -- running sweep"
                 translation-agent \
                   --ak-repo-path "${AK_REPO_PATH}" \
-                  --ak-branch "${AK_BRANCH}" \
                   --rust-branch "${MAIN_BRANCH}"
               elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} (status check only)"
