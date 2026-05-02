@@ -25,8 +25,8 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 use std::sync::{Arc, Mutex};
 
+use crate::{kafka_debug, kafka_trace, kafka_warn};
 use dashmap::DashMap;
-use log::{trace, warn};
 
 use crate::common::Cluster;
 use crate::common::KafkaError;
@@ -41,6 +41,7 @@ use crate::common::record::RecordBatch;
 use crate::common::record::TimestampType;
 use crate::common::record::abstract_records;
 use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::LogContext;
 use crate::metadata_snapshot::MetadataSnapshot;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
@@ -87,7 +88,7 @@ pub struct ReadyCheckResult {
     /// The time in ms until the next check is needed.
     pub next_ready_check_delay_ms: i64,
     /// Topics whose leader is unknown.
-    pub unknown_leader_topics: HashSet<String>,
+    pub unknown_leader_topics: HashSet<Arc<str>>,
 }
 
 /// Callbacks passed into append.
@@ -149,14 +150,18 @@ pub struct RecordAccumulator {
     partition_availability_timeout_ms: i64,
     enable_adaptive_partitioning: bool,
     free: Arc<BufferPool>,
-    topic_info_map: DashMap<String, Arc<TopicInfo>>,
+    topic_info_map: DashMap<Arc<str>, Arc<TopicInfo>>,
     node_stats: DashMap<i32, NodeLatencyStats>,
     incomplete: IncompleteBatches,
     /// Only accessed by the sender thread, so no synchronization needed.
     muted: Mutex<HashSet<TopicPartition>>,
     /// Only accessed by the sender thread.
-    nodes_drain_index: Mutex<HashMap<String, usize>>,
+    nodes_drain_index: Mutex<HashMap<i32, usize>>,
     next_batch_expiry_time_ms: Mutex<i64>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `RecordAccumulator`.
+    log_context: LogContext,
 }
 
 impl RecordAccumulator {
@@ -185,6 +190,46 @@ impl RecordAccumulator {
         partitioner_config: PartitionerConfig,
         buffer_pool: Arc<BufferPool>,
     ) -> Self {
+        Self::with_log_context(
+            batch_size,
+            compression,
+            linger_ms,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            delivery_timeout_ms,
+            partitioner_config,
+            buffer_pool,
+            LogContext::empty(),
+        )
+    }
+
+    /// Create a new record accumulator with a `LogContext`.
+    ///
+    /// # Arguments
+    /// * `batch_size` - The size to use when allocating `MemoryRecords` instances
+    /// * `compression` - The compression codec for the records
+    /// * `linger_ms` - An artificial delay time to add before declaring a records
+    ///   instance that isn't full ready for sending
+    /// * `retry_backoff_ms` - An artificial delay time to retry the produce request
+    ///   upon receiving an error
+    /// * `retry_backoff_max_ms` - The upper bound of the retry backoff time
+    /// * `delivery_timeout_ms` - An upper bound on the time to report success or
+    ///   failure on record delivery
+    /// * `partitioner_config` - Partitioner configuration
+    /// * `buffer_pool` - The buffer pool
+    /// * `log_context` - Contextual log message prefix
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_log_context(
+        batch_size: i32,
+        compression: crate::common::compress::Compression,
+        linger_ms: i32,
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        delivery_timeout_ms: i32,
+        partitioner_config: PartitionerConfig,
+        buffer_pool: Arc<BufferPool>,
+        log_context: LogContext,
+    ) -> Self {
         let retry_backoff = ExponentialBackoff::new(
             retry_backoff_ms,
             crate::common_client_configs::RETRY_BACKOFF_EXP_BASE,
@@ -211,6 +256,7 @@ impl RecordAccumulator {
             muted: Mutex::new(HashSet::new()),
             nodes_drain_index: Mutex::new(HashMap::new()),
             next_batch_expiry_time_ms: Mutex::new(i64::MAX),
+            log_context,
         }
     }
 
@@ -235,7 +281,7 @@ impl RecordAccumulator {
     /// * `now_ms` - The current time, in milliseconds
     /// * `cluster` - The cluster metadata
     #[allow(clippy::too_many_arguments)]
-    pub fn append(
+    pub async fn append(
         &self,
         topic: &str,
         partition: i32,
@@ -244,26 +290,29 @@ impl RecordAccumulator {
         value: Option<&[u8]>,
         headers: &[RecordHeader],
         callback: Option<Callback>,
-        _max_time_to_block: i64,
+        max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
     ) -> Result<RecordAppendResult, KafkaError> {
-        let topic_info = self.get_or_create_topic_info(topic);
+        let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         self.appends_in_progress.fetch_add(1, Ordering::Relaxed);
 
-        let result = self.append_inner(
-            topic,
-            partition,
-            timestamp,
-            key,
-            value,
-            headers,
-            callback,
-            now_ms,
-            cluster,
-            &topic_info,
-        );
+        let result = self
+            .append_inner(
+                &topic_arc,
+                partition,
+                timestamp,
+                key,
+                value,
+                headers,
+                callback,
+                max_time_to_block,
+                now_ms,
+                cluster,
+                &topic_info,
+            )
+            .await;
 
         self.appends_in_progress.fetch_sub(1, Ordering::Relaxed);
 
@@ -271,15 +320,16 @@ impl RecordAccumulator {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn append_inner(
+    async fn append_inner(
         &self,
-        topic: &str,
+        topic: &Arc<str>,
         partition: i32,
         timestamp: i64,
         key: Option<&[u8]>,
         value: Option<&[u8]>,
         headers: &[RecordHeader],
         callback: Option<Callback>,
+        max_time_to_block: i64,
         now_ms: i64,
         cluster: &Cluster,
         topic_info: &Arc<TopicInfo>,
@@ -296,16 +346,18 @@ impl RecordAccumulator {
                 partition
             };
 
-            // Get or create the deque for this partition.
-            let dq_entry = topic_info
+            // Ensure the deque for this partition exists, then drop the DashMap guard
+            // before any potential .await to avoid holding the shard lock across
+            // an await point (which would block ready()/drain() from iterating).
+            topic_info
                 .batches
                 .entry(effective_partition)
                 .or_insert_with(|| Mutex::new(VecDeque::new()));
-            let dq = dq_entry.value();
 
             // Try to append to an existing batch.
             {
-                let mut deque = dq.lock().unwrap();
+                let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
+                let mut deque = dq_ref.lock().unwrap();
 
                 // Check if we need to complete a previously disabled partition switch.
                 if partition == record_metadata::UNKNOWN_PARTITION
@@ -326,6 +378,7 @@ impl RecordAccumulator {
                 }
                 callback = returned_callback;
             }
+            // DashMap guard dropped here — safe to .await below.
 
             // Need a new batch. Allocate a buffer (only once).
             if buffer.is_none() {
@@ -338,17 +391,22 @@ impl RecordAccumulator {
                 );
                 let size = self.batch_size.max(estimated);
 
-                trace!(
-                    "Allocating a new {} byte message buffer for topic {} partition {}",
-                    size, topic, effective_partition
+                kafka_trace!(
+                    self.log_context,
+                    "Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms",
+                    size,
+                    topic,
+                    effective_partition,
+                    max_time_to_block
                 );
 
-                buffer = Some(vec![0u8; size as usize]);
+                buffer = Some(self.free.allocate(size as usize, max_time_to_block).await?);
             }
 
             // Try again under lock -- another thread might have created the batch.
             {
-                let mut deque = dq.lock().unwrap();
+                let dq_ref = topic_info.batches.get(&effective_partition).unwrap();
+                let mut deque = dq_ref.lock().unwrap();
 
                 if partition == record_metadata::UNKNOWN_PARTITION
                     && self.partition_changed(topic_info, &deque, cluster)
@@ -397,7 +455,7 @@ impl RecordAccumulator {
     #[allow(clippy::too_many_arguments)]
     fn append_new_batch(
         &self,
-        topic: &str,
+        topic: &Arc<str>,
         partition: i32,
         deque: &mut VecDeque<ProducerBatch>,
         timestamp: i64,
@@ -411,7 +469,7 @@ impl RecordAccumulator {
         debug_assert!(partition != record_metadata::UNKNOWN_PARTITION);
 
         let records_builder = self.records_builder(buffer);
-        let tp = TopicPartition::new(topic.to_string(), partition);
+        let tp = TopicPartition::new(Arc::clone(topic), partition);
         let mut batch = ProducerBatch::new(tp, records_builder, now_ms);
 
         let future = batch
@@ -524,10 +582,12 @@ impl RecordAccumulator {
             let mut next = self.next_batch_expiry_time_ms.lock().unwrap();
             *next = (*next).min(expiry);
         } else {
-            warn!(
+            kafka_warn!(
+                self.log_context,
                 "Skipping next batch expiry time update due to addition overflow: \
                  batch.created_ms={}, delivery_timeout_ms={}",
-                batch.created_ms, self.delivery_timeout_ms
+                batch.created_ms,
+                self.delivery_timeout_ms
             );
         }
     }
@@ -565,7 +625,7 @@ impl RecordAccumulator {
     pub fn reenqueue(&self, mut batch: ProducerBatch, now: i64) {
         batch.reenqueued(now);
         let tp = batch.topic_partition.clone();
-        let topic_info = self.get_or_create_topic_info(tp.topic());
+        let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
         let dq_entry = topic_info
             .batches
             .entry(tp.partition())
@@ -616,11 +676,11 @@ impl RecordAccumulator {
         &self,
         metadata_snapshot: &MetadataSnapshot,
         now_ms: i64,
-        topic: &str,
+        topic: &Arc<str>,
         topic_info: &TopicInfo,
         mut next_ready_check_delay_ms: i64,
         ready_nodes: &mut HashSet<Node>,
-        unknown_leader_topics: &mut HashSet<String>,
+        unknown_leader_topics: &mut HashSet<Arc<str>>,
     ) -> i64 {
         let cluster = metadata_snapshot.cluster();
         let mut queue_sizes: Option<Vec<i32>> = None;
@@ -638,7 +698,7 @@ impl RecordAccumulator {
         for entry in topic_info.batches.iter() {
             let partition = *entry.key();
             let deque_mutex = entry.value();
-            let part = TopicPartition::new(topic.to_string(), partition);
+            let part = TopicPartition::new(Arc::clone(topic), partition);
 
             let leader = cluster.leader_for(&part);
             if leader.is_some() && queue_sizes.is_some() {
@@ -650,9 +710,7 @@ impl RecordAccumulator {
                 }
             }
 
-            let leader_epoch = metadata_snapshot.leader_epoch_for(&part);
             let mut deque = deque_mutex.lock().unwrap();
-
             let deque_size = deque.len();
 
             let batch = match deque.front_mut() {
@@ -660,6 +718,7 @@ impl RecordAccumulator {
                 None => continue,
             };
 
+            let leader_epoch = metadata_snapshot.leader_epoch_for(&part);
             let waited_time_ms = batch.waited_time_ms(now_ms);
             batch.maybe_update_leader_epoch(leader_epoch);
             let backing_off =
@@ -695,7 +754,7 @@ impl RecordAccumulator {
                     ready_nodes,
                 );
             } else {
-                unknown_leader_topics.insert(part.topic().to_string());
+                unknown_leader_topics.insert(part.topic_arc().clone());
             }
         }
 
@@ -753,13 +812,20 @@ impl RecordAccumulator {
         let attempts = batch.attempts();
         let should_wait_more = attempts > 0 && waited_time_ms < self.retry_backoff.backoff(attempts as i64 - 1);
         let should_backoff = !has_leader_changed && should_wait_more;
-        if should_backoff {
-            trace!("For batch {:?}, will backoff", batch.topic_partition);
-        } else {
-            trace!(
-                "For batch {:?}, will not backoff, should_wait_more {}, has_leader_changed {}",
-                batch.topic_partition, should_wait_more, has_leader_changed
-            );
+        if log::log_enabled!(log::Level::Trace) {
+            if should_backoff {
+                kafka_trace!(self.log_context, "For {}, will backoff", batch);
+            } else {
+                kafka_trace!(
+                    self.log_context,
+                    "For {}, will not backoff, should_wait_more {}, has_leader_changed {}",
+                    batch,
+                    should_wait_more,
+                    has_leader_changed
+                );
+            }
+        } else if log::log_enabled!(log::Level::Debug) && has_leader_changed {
+            kafka_debug!(self.log_context, "For {}, leader has changed, hence skipping backoff.", batch);
         }
         should_backoff
     }
@@ -778,15 +844,14 @@ impl RecordAccumulator {
             return ready;
         }
 
-        let mut drain_index = self.get_drain_index(node.id_string());
+        let mut drain_index = self.get_drain_index(node.id());
         drain_index %= parts.len();
         let start = drain_index;
 
         loop {
             let part = &parts[drain_index];
-            let tp = TopicPartition::new(part.topic().to_string(), part.partition());
+            let tp = TopicPartition::new(part.topic(), part.partition());
 
-            self.update_drain_index(node.id_string(), drain_index);
             drain_index = (drain_index + 1) % parts.len();
 
             if self.is_muted(&tp) {
@@ -855,8 +920,7 @@ impl RecordAccumulator {
 
             let mut batch = batch;
             batch.close();
-            // Use actual size from built records, not estimated size.
-            size += batch.records().size_in_bytes() as i32;
+            size += batch.estimated_size_in_bytes() as i32;
             batch.drained(now);
             ready.push(batch);
 
@@ -864,17 +928,18 @@ impl RecordAccumulator {
                 break;
             }
         }
+        self.update_drain_index(node.id(), drain_index);
         ready
     }
 
-    fn get_drain_index(&self, id_string: &str) -> usize {
+    fn get_drain_index(&self, node_id: i32) -> usize {
         let map = self.nodes_drain_index.lock().unwrap();
-        map.get(id_string).copied().unwrap_or(0)
+        map.get(&node_id).copied().unwrap_or(0)
     }
 
-    fn update_drain_index(&self, id_string: &str, drain_index: usize) {
+    fn update_drain_index(&self, node_id: i32, drain_index: usize) {
         let mut map = self.nodes_drain_index.lock().unwrap();
-        map.insert(id_string.to_string(), drain_index);
+        map.insert(node_id, drain_index);
     }
 
     /// Drain all the data for the given nodes and collate them into a list of
@@ -932,12 +997,19 @@ impl RecordAccumulator {
     }
 
     /// Get batches for a topic-partition. Used in drain logic.
-    fn get_or_create_topic_info(&self, topic: &str) -> Arc<TopicInfo> {
-        let entry = self
-            .topic_info_map
-            .entry(topic.to_string())
-            .or_insert_with(|| Arc::new(TopicInfo::new(BuiltInPartitioner::new(topic, self.batch_size))));
-        Arc::clone(entry.value())
+    fn get_or_create_topic_info(&self, topic: &str) -> (Arc<str>, Arc<TopicInfo>) {
+        if let Some(entry) = self.topic_info_map.get(topic) {
+            return (entry.key().clone(), Arc::clone(entry.value()));
+        }
+        let topic_arc: Arc<str> = Arc::from(topic);
+        let entry = self.topic_info_map.entry(Arc::clone(&topic_arc)).or_insert_with(|| {
+            Arc::new(TopicInfo::new(BuiltInPartitioner::with_log_context(
+                &topic_arc,
+                self.batch_size,
+                self.log_context.clone(),
+            )))
+        });
+        (entry.key().clone(), Arc::clone(entry.value()))
     }
 
     /// Deallocate the batch buffer back to the pool.
@@ -952,10 +1024,12 @@ impl RecordAccumulator {
         // are allocated outside the buffer pool.
         if !batch.is_split_batch() {
             if batch.is_buffer_deallocated() {
-                warn!(
+                kafka_warn!(
+                    self.log_context,
                     "Skipping deallocating a batch that has already been deallocated. \
                      Batch is {}, created time is {}",
-                    batch, batch.created_ms
+                    batch,
+                    batch.created_ms
                 );
             } else {
                 batch.mark_buffer_deallocated();
@@ -1125,7 +1199,7 @@ impl RecordAccumulator {
         let num_split_batches = sub_batches.len();
         let tp = big_batch.topic_partition.clone();
 
-        let topic_info = self.get_or_create_topic_info(tp.topic());
+        let (_topic_arc, topic_info) = self.get_or_create_topic_info(tp.topic());
         let dq_entry = topic_info
             .batches
             .entry(tp.partition())
@@ -1245,8 +1319,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testFull`.
-    #[test]
-    fn test_full() {
+    #[tokio::test]
+    async fn test_full() {
         let now: i64 = 0;
         let n1 = node1();
         // Test case assumes that records do not fill the batch completely.
@@ -1264,6 +1338,7 @@ mod tests {
         for _ in 0..appends {
             accum
                 .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
             assert_eq!(1, accum.deque_size(&tp1()));
             let result = accum.ready(&metadata, now);
@@ -1273,6 +1348,7 @@ mod tests {
         // This append will trigger a new batch creation.
         let result = accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         assert!(result.batch_is_full);
         assert!(result.new_batch_created);
@@ -1284,8 +1360,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testAppendLargeCompressed`.
-    #[test]
-    fn test_append_large() {
+    #[tokio::test]
+    async fn test_append_large() {
         let now: i64 = 0;
         let n1 = node1();
         let batch_size = 512;
@@ -1299,13 +1375,14 @@ mod tests {
         // Should succeed even though value is larger than batch size.
         let result = accum
             .append(TOPIC, 0, 0, Some(b"key"), Some(&large_value), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         assert!(result.new_batch_created);
     }
 
     /// Translated from `RecordAccumulatorTest.testLinger`.
-    #[test]
-    fn test_linger() {
+    #[tokio::test]
+    async fn test_linger() {
         let now: i64 = 0;
         let n1 = node1();
         let linger_ms = 10;
@@ -1320,6 +1397,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         // Not ready immediately.
@@ -1332,8 +1410,8 @@ mod tests {
     }
 
     /// Translated from a subset of `RecordAccumulatorTest.testDrainBatches`.
-    #[test]
-    fn test_drain_batches() {
+    #[tokio::test]
+    async fn test_drain_batches() {
         let n1 = node1();
         let n2 = node2();
         let now: i64 = 0;
@@ -1351,12 +1429,15 @@ mod tests {
         // Append to all partitions.
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         accum
             .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         accum
             .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         // Drain from both nodes with batch_size limit -- should get one batch per node.
@@ -1400,8 +1481,8 @@ mod tests {
     }
 
     /// Test has_undrained.
-    #[test]
-    fn test_has_undrained() {
+    #[tokio::test]
+    async fn test_has_undrained() {
         let n1 = node1();
         let now: i64 = 0;
         let batch_size = 1024;
@@ -1414,14 +1495,15 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(b"key"), Some(b"value"), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         assert!(accum.has_undrained());
     }
 
     /// Test ready with unknown leader.
-    #[test]
-    fn test_ready_unknown_leader() {
+    #[tokio::test]
+    async fn test_ready_unknown_leader() {
         let n1 = node1();
         let now: i64 = 0;
 
@@ -1433,6 +1515,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(b"key"), Some(b"value"), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         let result = accum.ready(&metadata, now);
@@ -1441,8 +1524,8 @@ mod tests {
     }
 
     /// Test expired batches.
-    #[test]
-    fn test_expired_batches() {
+    #[tokio::test]
+    async fn test_expired_batches() {
         let n1 = node1();
         let delivery_timeout_ms = 100;
         let now: i64 = 0;
@@ -1464,6 +1547,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(b"key"), Some(b"value"), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         // Not expired yet.
@@ -1478,8 +1562,8 @@ mod tests {
     /// Test reenqueue.
     ///
     /// Translated from `RecordAccumulatorTest.testReenqueue` (subset).
-    #[test]
-    fn test_reenqueue() {
+    #[tokio::test]
+    async fn test_reenqueue() {
         let n1 = node1();
         let now: i64 = 0;
 
@@ -1489,6 +1573,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(b"key"), Some(b"value"), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         // Drain the batch.
@@ -1507,8 +1592,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testPartialDrain`.
-    #[test]
-    fn test_partial_drain() {
+    #[tokio::test]
+    async fn test_partial_drain() {
         let n1 = node1();
         let now: i64 = 0;
 
@@ -1531,6 +1616,7 @@ mod tests {
             for _ in 0..appends {
                 accum
                     .append(tp.topic(), tp.partition(), 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                    .await
                     .unwrap();
             }
         }
@@ -1551,8 +1637,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testNextReadyCheckDelay`.
-    #[test]
-    fn test_next_ready_check_delay() {
+    #[tokio::test]
+    async fn test_next_ready_check_delay() {
         let linger_ms = 10i32;
         // test case assumes that the records do not fill the batch completely
         let batch_size = 1025;
@@ -1579,6 +1665,7 @@ mod tests {
         for _ in 0..appends {
             accum
                 .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
         }
         let result = accum.ready(&metadata, now);
@@ -1593,6 +1680,7 @@ mod tests {
         for _ in 0..appends {
             accum
                 .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now + half_linger, &cluster)
+                .await
                 .unwrap();
         }
         let result = accum.ready(&metadata, now + half_linger);
@@ -1606,6 +1694,7 @@ mod tests {
         for _ in 0..=appends {
             accum
                 .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now + half_linger, &cluster)
+                .await
                 .unwrap();
         }
         let result = accum.ready(&metadata, now + half_linger);
@@ -1617,8 +1706,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testRetryBackoff`.
-    #[test]
-    fn test_retry_backoff() {
+    #[tokio::test]
+    async fn test_retry_backoff() {
         let linger_ms = i32::MAX / 16;
         let retry_backoff_ms = i64::from(i32::MAX) / 8;
         let retry_backoff_max_ms = retry_backoff_ms * 10;
@@ -1648,6 +1737,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         let result = accum.ready(&metadata, now + linger_ms as i64 + 1);
@@ -1670,6 +1760,7 @@ mod tests {
         // Put message for partition 1 into accumulator
         accum
             .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         let result = accum.ready(&metadata, now + linger_ms as i64 + 1);
         assert!(result.ready_nodes.contains(&n1), "Node1 should be ready");
@@ -1725,6 +1816,7 @@ mod tests {
         for i in 0..100 {
             accum
                 .append(TOPIC, i % 3, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
         }
         let result = accum.ready(&metadata, now);
@@ -1749,8 +1841,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testMutedPartitions`.
-    #[test]
-    fn test_muted_partitions() {
+    #[tokio::test]
+    async fn test_muted_partitions() {
         let now: i64 = 0;
         let n1 = node1();
         // test case assumes that the records do not fill the batch completely
@@ -1771,6 +1863,7 @@ mod tests {
         for _ in 0..appends {
             accum
                 .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
             assert_eq!(
                 0,
@@ -1808,8 +1901,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testSoonToExpireBatchesArePickedUpForExpiry`.
-    #[test]
-    fn test_soon_to_expire_batches_are_picked_up_for_expiry() {
+    #[tokio::test]
+    async fn test_soon_to_expire_batches_are_picked_up_for_expiry() {
         let linger_ms = 500;
         let batch_size = 1025;
         let n1 = node1();
@@ -1829,6 +1922,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         let ready_nodes = accum.ready(&metadata, now).ready_nodes;
         let drained = accum.drain(&metadata, &ready_nodes, i32::MAX, now);
@@ -1843,6 +1937,7 @@ mod tests {
         // Queue another batch and advance clock.
         accum
             .append(TOPIC, 1, 0, Some(&k), Some(&v), &[], None, 0, now_after_linger, &cluster)
+            .await
             .unwrap();
         let now_advanced = now_after_linger + linger_ms as i64 * 4;
 
@@ -1853,8 +1948,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testExpiredBatchesRetry`.
-    #[test]
-    fn test_expired_batches_retry() {
+    #[tokio::test]
+    async fn test_expired_batches_retry() {
         let linger_ms = 3000;
         let rtt = 1000i64;
         let delivery_timeout_ms = 3200;
@@ -1888,6 +1983,7 @@ mod tests {
         for mute in [false, true] {
             accum
                 .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
             now += linger_ms as i64;
             let ready_nodes = accum.ready(&metadata, now).ready_nodes;
@@ -1938,18 +2034,18 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testExpiredBatchSingle` (deliveryTimeoutMs=3200).
-    #[test]
-    fn test_expired_batch_single() {
-        do_expire_batch_single(3200);
+    #[tokio::test]
+    async fn test_expired_batch_single() {
+        do_expire_batch_single(3200).await;
     }
 
     /// Translated from `RecordAccumulatorTest.testExpiredBatchSingleMaxValue`.
-    #[test]
-    fn test_expired_batch_single_max_value() {
-        do_expire_batch_single(i32::MAX);
+    #[tokio::test]
+    async fn test_expired_batch_single_max_value() {
+        do_expire_batch_single(i32::MAX).await;
     }
 
-    fn do_expire_batch_single(delivery_timeout_ms: i32) {
+    async fn do_expire_batch_single(delivery_timeout_ms: i32) {
         let linger_ms = 300;
         let n1 = node1();
         let mut now: i64 = 1_000_000; // start at a non-zero time
@@ -1981,6 +2077,7 @@ mod tests {
         for mute in [false, true] {
             accum
                 .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
             assert_eq!(
                 0,
@@ -2019,11 +2116,12 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testStressfulSituation`.
-    #[test]
-    fn test_stressful_situation() {
+    #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
+    async fn test_stressful_situation() {
         let num_threads = 5;
         let msgs = 10000;
         let num_parts = 2;
+        let max_block_time_ms: i64 = 1000;
         let n1 = node1();
 
         let accum = Arc::new(create_test_accumulator(
@@ -2039,7 +2137,7 @@ mod tests {
         for _ in 0..num_threads {
             let accum_clone = Arc::clone(&accum);
             let cluster_clone = Arc::clone(&cluster);
-            let handle = std::thread::spawn(move || {
+            let handle = tokio::spawn(async move {
                 for j in 0..msgs {
                     accum_clone
                         .append(
@@ -2050,35 +2148,43 @@ mod tests {
                             Some(b"value"),
                             &[],
                             None,
-                            0,
+                            max_block_time_ms,
                             0,
                             &cluster_clone,
                         )
+                        .await
                         .unwrap();
                 }
             });
             handles.push(handle);
         }
 
-        let now: i64 = 0;
-        let mut read = 0;
-        while read < num_threads * msgs {
-            let nodes = accum.ready(&metadata, now).ready_nodes;
-            let mut batches = accum.drain(&metadata, &nodes, 5 * 1024, now);
-            if let Some(node_batches) = batches.get_mut(&n1.id()) {
-                for batch in node_batches.iter_mut() {
-                    // Count records by checking estimated size delta
-                    // In Java: for (Record record : batch.records().records()) read++;
-                    // We count the batch's record count.
-                    read += batch.record_count;
-                    accum.complete_and_deallocate_batch(batch);
+        let accum_drain = Arc::clone(&accum);
+        let metadata_drain = metadata.clone();
+        let drain_handle = tokio::task::spawn_blocking(move || {
+            let now: i64 = 0;
+            let mut read = 0i32;
+            while read < num_threads * msgs {
+                let nodes = accum_drain.ready(&metadata_drain, now).ready_nodes;
+                let mut batches = accum_drain.drain(&metadata_drain, &nodes, 5 * 1024, now);
+                let mut drained_any = false;
+                if let Some(node_batches) = batches.get_mut(&n1.id()) {
+                    for batch in node_batches.iter_mut() {
+                        read += batch.record_count;
+                        accum_drain.complete_and_deallocate_batch(batch);
+                        drained_any = true;
+                    }
+                }
+                if !drained_any {
+                    std::thread::yield_now();
                 }
             }
-        }
+        });
 
         for handle in handles {
-            handle.join().unwrap();
+            handle.await.unwrap();
         }
+        drain_handle.await.unwrap();
     }
 
     /// Translated from `RecordAccumulatorTest.testHasRoomForAllowsOversizedFirstRecordButRejectsSubsequentRecords`.
@@ -2128,8 +2234,8 @@ mod tests {
     /// Translated from `RecordAccumulatorTest.testDrainBatches` (full version).
     ///
     /// Tests drain order across nodes and partitions, including muting.
-    #[test]
-    fn test_drain_batches_full() {
+    #[tokio::test]
+    async fn test_drain_batches_full() {
         let n1 = node1();
         let n2 = node2();
         let now: i64 = 0;
@@ -2152,6 +2258,7 @@ mod tests {
         for p in 0..4 {
             accum
                 .append(TOPIC, p, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+                .await
                 .unwrap();
         }
 
@@ -2169,12 +2276,15 @@ mod tests {
         // Add records for partitions, mute tp3
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         accum
             .append(TOPIC, 2, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         accum
             .append(TOPIC, 3, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
         let tp4 = TopicPartition::new(TOPIC.to_string(), 3);
         accum.mute_partition(tp4.clone());
@@ -2251,8 +2361,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testExponentialRetryBackoff`.
-    #[test]
-    fn test_exponential_retry_backoff() {
+    #[tokio::test]
+    async fn test_exponential_retry_backoff() {
         let linger_ms = i32::MAX / 16;
         let retry_backoff_ms: i64 = 100;
         let retry_backoff_max_ms: i64 = 1000;
@@ -2282,6 +2392,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         // No backoff for initial attempt
@@ -2308,8 +2419,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testExponentialRetryBackoffLeaderChange`.
-    #[test]
-    fn test_exponential_retry_backoff_leader_change() {
+    #[tokio::test]
+    async fn test_exponential_retry_backoff_leader_change() {
         let linger_ms = i32::MAX / 16;
         let retry_backoff_ms: i64 = 100;
         let retry_backoff_max_ms: i64 = 1000;
@@ -2348,6 +2459,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(&k), Some(&v), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         // No backoff for initial attempt
@@ -2393,8 +2505,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testAbortIncompleteBatches`.
-    #[test]
-    fn test_abort_incomplete_batches() {
+    #[tokio::test]
+    async fn test_abort_incomplete_batches() {
         let linger_ms = i32::MAX;
         let num_records: i32 = 100;
         let n1 = node1();
@@ -2422,6 +2534,7 @@ mod tests {
             });
             accum
                 .append(TOPIC, i % 3, 0, Some(&k), Some(&v), &[], Some(cb), 0, now, &cluster)
+                .await
                 .unwrap();
         }
 
@@ -2460,8 +2573,8 @@ mod tests {
     }
 
     /// Translated from `RecordAccumulatorTest.testAbortUnsentBatches`.
-    #[test]
-    fn test_abort_unsent_batches() {
+    #[tokio::test]
+    async fn test_abort_unsent_batches() {
         let linger_ms = i32::MAX;
         let num_records: i32 = 100;
         let n1 = node1();
@@ -2490,6 +2603,7 @@ mod tests {
             });
             accum
                 .append(TOPIC, i % 3, 0, Some(&k), Some(&v), &[], Some(cb), 0, now, &cluster)
+                .await
                 .unwrap();
         }
 
@@ -2524,8 +2638,8 @@ mod tests {
     /// Note: In Java, this test uses GZIP compression to create large batches that need splitting.
     /// In our Rust implementation, we use NONE compression with a batch that exceeds the
     /// accumulator's batch size, then split it.
-    #[test]
-    fn test_split_and_reenqueue() {
+    #[tokio::test]
+    async fn test_split_and_reenqueue() {
         let now: i64 = 0;
         let n1 = node1();
         let accum = create_test_accumulator(1024, 10 * 1024, Compression::none(), 10);
@@ -2615,6 +2729,7 @@ mod tests {
 
         accum
             .append(TOPIC, 0, 0, Some(b"key"), Some(b"value"), &[], None, 0, now, &cluster)
+            .await
             .unwrap();
 
         accum.begin_flush();
@@ -2702,8 +2817,8 @@ mod tests {
     /// Note: This test requires gzip compression to create batches that need splitting.
     /// Since the test focuses on buffer pool memory accounting, we simulate the scenario
     /// by creating an oversized batch manually.
-    #[test]
-    fn test_split_batch_off_accumulator() {
+    #[tokio::test]
+    async fn test_split_batch_off_accumulator() {
         let batch_size = 1024;
         let buffer_capacity: i64 = 3 * 1024;
 
@@ -2771,8 +2886,8 @@ mod tests {
     ///
     /// Tests that the built-in partitioner avoids creating fractional batches by sticking
     /// to a partition until the batch is full.
-    #[test]
-    fn test_built_in_partitioner_fractional_batches() {
+    #[tokio::test]
+    async fn test_built_in_partitioner_fractional_batches() {
         let total_size: i64 = 1024 * 1024;
         let batch_size = 512;
         let val_size = 32;
@@ -2803,6 +2918,7 @@ mod tests {
                         now,
                         &cluster,
                     )
+                    .await
                     .unwrap();
             }
 
@@ -2833,8 +2949,8 @@ mod tests {
     ///
     /// Tests that repeatedly splitting batches eventually produces single-record batches
     /// and does not recurse infinitely.
-    #[test]
-    fn test_split_and_reenqueue_prevent_infinite_recursion() {
+    #[tokio::test]
+    async fn test_split_and_reenqueue_prevent_infinite_recursion() {
         let now: i64 = 0;
         let batch_size = 1024 * 1024; // 1MB batch size
         let n1 = node1();
