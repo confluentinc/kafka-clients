@@ -19,8 +19,8 @@
 use std::io;
 
 use crate::common::protocol::{ApiKeys, Errors, Readable};
+use crate::common::record::BatchIterator;
 use crate::common::record::CompressionType;
-use crate::common::record::MemoryRecords;
 use crate::common::record::RecordBatch;
 use crate::produce_request_data::ProduceRequestData;
 use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
@@ -66,6 +66,11 @@ impl ProduceRequest {
     /// Returns a reference to the underlying data.
     pub fn data(&self) -> &ProduceRequestData {
         &self.data
+    }
+
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut ProduceRequestData {
+        &mut self.data
     }
 
     /// Returns the API version of this request.
@@ -162,8 +167,7 @@ impl ProduceRequest {
             },
         };
 
-        let memory_records = MemoryRecords::new(bytes.clone());
-        let mut batches = memory_records.batches();
+        let mut batches = BatchIterator::new(bytes);
 
         let first_batch = match batches.next() {
             Some(batch) => batch,
@@ -285,14 +289,17 @@ impl RequestBuilder for ProduceRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         // Validate the given records first, matching Java's Builder.build(short version)
         for topic_data in &self.data.topic_data {
             for partition_data in &topic_data.partition_data {
                 ProduceRequest::validate_records(version, &partition_data.records)?;
             }
         }
-        Ok(ConcreteRequest::Produce(ProduceRequest::new(self.data.clone(), version)))
+        Ok(ConcreteRequest::Produce(ProduceRequest::new(
+            std::mem::replace(&mut self.data, ProduceRequestData::new()),
+            version,
+        )))
     }
 }
 

@@ -1,0 +1,52 @@
+version: v1.0
+name: Seed translation_agent DB
+
+# Run as a Semaphore Task (configured in the project's Tasks tab).
+# Inserts or updates the branch_commit cursor for a Rust branch.
+#
+# Required Task parameters (set when triggering the Task):
+#   AK_COMMIT     -- full SHA in the AK repo
+#   RUST_COMMIT   -- full SHA in the Rust repo
+# Optional (defaults below match the main pipeline):
+#   AK_BRANCH     -- defaults to trunk
+#   RUST_BRANCH   -- defaults to master
+#   FORCE         -- "True" to overwrite an existing cursor for the same
+#                    RUST_BRANCH; "False" (default) errors out if a row
+#                    already exists with different values.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-0
+
+blocks:
+  - name: Seed correspondence
+    task:
+      env_vars:
+        - name: AK_BRANCH
+          value: trunk
+        - name: RUST_BRANCH
+          value: master
+        - name: FORCE
+          value: "False"
+      jobs:
+        - name: seed
+          commands:
+            - checkout
+            - sem-version python 3.10
+            - cd tools/translation_agent
+            - pip install -e '.[dev]'
+            # First-ever seed has no artifact yet; subsequent re-seeds do.
+            - artifact pull project translation_agent_db || true
+            - |
+              : "${AK_COMMIT:?AK_COMMIT must be set as a Task parameter}"
+              : "${RUST_COMMIT:?RUST_COMMIT must be set as a Task parameter}"
+            - |
+              FORCE_FLAG=""
+              if [ "${FORCE}" = "True" ]; then
+                FORCE_FLAG="--force"
+              fi
+              translation-agent --seed --force $FORCE_FLAG \
+                --ak-branch "${AK_BRANCH}" \
+                --ak-commit "${AK_COMMIT}" \
+                --rust-branch "${RUST_BRANCH}" \
+                --rust-commit "${RUST_COMMIT}"
