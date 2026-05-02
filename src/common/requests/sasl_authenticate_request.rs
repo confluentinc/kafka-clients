@@ -55,6 +55,11 @@ impl SaslAuthenticateRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut SaslAuthenticateRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -132,7 +137,7 @@ impl RequestBuilder for SaslAuthenticateRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         Ok(ConcreteRequest::SaslAuthenticate(SaslAuthenticateRequest::new(
             self.data.clone(),
             version,
@@ -163,7 +168,7 @@ mod tests {
     fn test_builder_build() {
         let mut data = SaslAuthenticateRequestData::new();
         data.set_auth_bytes(vec![1, 2, 3]);
-        let builder = SaslAuthenticateRequestBuilder::new(data);
+        let mut builder = SaslAuthenticateRequestBuilder::new(data);
         let request = builder.build().unwrap();
         assert_eq!(*request.api_key(), ApiKeys::SASL_AUTHENTICATE);
         if let ConcreteRequest::SaslAuthenticate(r) = &request {
