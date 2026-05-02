@@ -21,3 +21,7 @@ the Rust client from many languages.
 Python CPython C extension binding module wrapping the Rust C FFI, with a high-level Pythonic wrapper, unit tests and a performance test.
 
 C binding (confluent-kafka-c) that uses the Rust C FFI directly with a CMake build system, providing both static and dynamic linking against the Rust library. Uses MockProducer for initial testing.
+
+## Milestone 5
+
+Performance optimizations on the hot path
