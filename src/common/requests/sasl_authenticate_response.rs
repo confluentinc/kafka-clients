@@ -44,6 +44,11 @@ impl SaslAuthenticateResponse {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut SaslAuthenticateResponseData {
+        &mut self.data
+    }
+
     /// Returns the API key for this response.
     pub fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::SASL_AUTHENTICATE
