@@ -107,6 +107,36 @@ locally on `{branch_name}`.
 """
 
 
+PR_DESCRIPTION_PROMPT_TEMPLATE = """\
+You are the Manager agent for the Confluent Kafka Rust translation
+project, following the workflow in `.claude/rules/agent-roles.md`.
+
+Generate a concise pull-request description for the work on this
+branch (`{branch_name}`).
+
+Phase: {phase}    # "plan" or "impl"
+
+Inputs available in the cwd:
+- Plan document: ./design/history/{pr_number}_description/plan.md
+- Branch git log: `git log --no-merges origin/{base_branch}..HEAD`
+- AK source upstream:
+  - commit: {ak_commit}
+  - link:   https://github.com/apache/kafka/commit/{ak_commit}
+
+Write the PR description (markdown) to ./pr_body.md. Do NOT commit it.
+Do NOT run `gh` -- the orchestrator updates the PR after you exit.
+Do NOT run `git push`. Exit 0 when ./pr_body.md exists and is non-empty.
+
+Body shape (~400 words max, reviewers shouldn't have to scroll):
+- Open with one sentence summarizing the change.
+- Cite the AK commit it translates (link form).
+- For the "plan" phase: summarize the plan's scope, approach, and any
+  notable risks.
+- For the "impl" phase: summarize what was implemented, what tests
+  cover it, and any follow-up TODOs.
+"""
+
+
 DRY_RUN_NOTE = """\
 NOTE: This is a dry run. The worktree and your commits will be
 preserved on disk for inspection but the orchestrator will skip the

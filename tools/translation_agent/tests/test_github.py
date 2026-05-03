@@ -100,3 +100,88 @@ def test_find_pr_number_for_branch_none_when_empty():
     with patch.object(github.subprocess, "run",
                       return_value=_completed(0, stdout="[]")):
         assert github.find_pr_number_for_branch("/repo", "kafka-translate/abc") is None
+
+
+# --- update_pr_body / get_pr_body / prepend_pr_body -------------------------
+
+def test_update_pr_body_passes_body_via_stdin():
+    """Long markdown bodies must come via stdin to avoid argv limits.
+    The argv shape is `gh pr edit <N> --body-file -` and the body
+    arrives through `input=`."""
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0)) as mrun:
+        github.update_pr_body("/repo", 42, "## Summary\n\nThe new body.")
+    mrun.assert_called_once_with(
+        ["gh", "pr", "edit", "42", "--body-file", "-"],
+        input="## Summary\n\nThe new body.",
+        capture_output=True, text=True,
+        cwd="/repo",
+    )
+
+
+def test_update_pr_body_raises_on_nonzero_exit():
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(1, stderr="not authorized")):
+        with pytest.raises(github.GhError, match="not authorized"):
+            github.update_pr_body("/repo", 42, "x")
+
+
+def test_get_pr_body_returns_stripped_string():
+    """`gh pr view --json body --jq '.body'` emits the body with one
+    trailing newline; we strip just that."""
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0, stdout="existing body\n")) as mrun:
+        body = github.get_pr_body("/repo", 42)
+    assert body == "existing body"
+    mrun.assert_called_once_with(
+        ["gh", "pr", "view", "42", "--json", "body", "--jq", ".body"],
+        capture_output=True, text=True,
+        cwd="/repo",
+    )
+
+
+def test_get_pr_body_raises_on_nonzero_exit():
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(1, stderr="not found")):
+        with pytest.raises(github.GhError, match="not found"):
+            github.get_pr_body("/repo", 42)
+
+
+def test_prepend_pr_body_round_trips_get_then_update():
+    """prepend_pr_body must read current body, prepend the line + a
+    blank separator, and write the combined body back -- no truncation,
+    no extra blanks."""
+    calls = []
+
+    def router(args, **kwargs):
+        if "view" in args:
+            calls.append(("view", args, kwargs))
+            return _completed(0, stdout="Original body line.\n")
+        if "edit" in args:
+            calls.append(("edit", args, kwargs))
+            return _completed(0)
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch.object(github.subprocess, "run", side_effect=router):
+        github.prepend_pr_body("/repo", 42, "Approved on 2026-05-03")
+
+    assert calls[0][0] == "view"
+    assert calls[1][0] == "edit"
+    # The body fed to `gh pr edit` is the prepend line + blank + original.
+    edit_kwargs = calls[1][2]
+    assert edit_kwargs["input"] == "Approved on 2026-05-03\n\nOriginal body line."
+
+
+def test_prepend_pr_body_handles_empty_existing_body():
+    """When the current body is empty, prepend_pr_body just writes
+    the line with no leading separator."""
+    def router(args, **kwargs):
+        if "view" in args:
+            return _completed(0, stdout="")
+        if "edit" in args:
+            assert kwargs["input"] == "Approved", kwargs["input"]
+            return _completed(0)
+        raise AssertionError(f"unexpected gh call: {args}")
+
+    with patch.object(github.subprocess, "run", side_effect=router):
+        github.prepend_pr_body("/repo", 42, "Approved")

@@ -136,3 +136,66 @@ def find_pr_number_for_branch(repo_path: str, head_branch: str) -> Optional[int]
 def _parse_pr_number(gh_output: str) -> Optional[int]:
     m = _PR_URL_RE.search(gh_output)
     return int(m.group(1)) if m else None
+
+
+def update_pr_body(repo_path: str, pr_number: int, body: str) -> None:
+    """Replace PR `pr_number`'s body via `gh pr edit <N> --body-file -`.
+
+    The body is fed through stdin (not argv) so long markdown bodies
+    can't hit OS argv length limits. Raises GhError on non-zero exit.
+
+    The orchestrator calls this after each state transition (post plan,
+    post impl) to keep the PR description in sync with what's been
+    done so far. Sandbox is denied `gh pr edit` -- only the
+    orchestrator publishes to GitHub.
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "edit", str(pr_number), "--body-file", "-"],
+        input=body,
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh pr edit failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+
+
+def get_pr_body(repo_path: str, pr_number: int) -> str:
+    """Return PR `pr_number`'s current body via `gh pr view --json body`.
+
+    Used by `prepend_pr_body` to read-modify-write. Raises GhError on
+    non-zero exit or unparseable JSON.
+    """
+    proc = subprocess.run(
+        [
+            "gh", "pr", "view", str(pr_number),
+            "--json", "body", "--jq", ".body",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh pr view failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+    # `--jq '.body'` produces the raw string with a trailing newline;
+    # strip just that to avoid every prepend doubling blank lines.
+    return proc.stdout.rstrip("\n")
+
+
+def prepend_pr_body(repo_path: str, pr_number: int, line: str) -> None:
+    """Read the current body, prepend `line` + a blank separator, write
+    it back. Convenience for state-transition markers (e.g. the plan-
+    approved tick) where we don't want an LLM in the loop just to add
+    one line.
+
+    Idempotency: not enforced -- repeated calls will prepend repeated
+    lines. Callers should only invoke this on the actual state flip,
+    not on every retry of an already-flipped state.
+    """
+    current = get_pr_body(repo_path, pr_number)
+    new_body = f"{line}\n\n{current}" if current else line
+    update_pr_body(repo_path, pr_number, new_body)

@@ -28,11 +28,13 @@ Three invocation modes per the design:
 """
 
 import argparse
+import datetime as _dt
 import hashlib
 import logging
 import shutil
 import sys
-from typing import Sequence
+from pathlib import Path
+from typing import Optional, Sequence
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -221,6 +223,21 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         log.error("%s", e)
         return 1
     log.info("PR %d marked plan_approved (status %d)", args.pr, db.STATUS_PLAN_APPROVED)
+
+    # Programmatic body marker for the 2 -> 3 transition. No LLM call:
+    # nothing new has happened content-wise vs status 2, so a full
+    # regeneration would just rewrite near-identical text. Skipped for
+    # synthetic dry-run rows (no real PR) and dry-run mode (no remote
+    # writes). Cosmetic: failure is a warning, not a blocker.
+    if not args.dry_run and args.pr >= 0:
+        approval_line = f"✓ Plan approved on {_dt.date.today().isoformat()}"
+        try:
+            github.prepend_pr_body(args.rust_repo_path, args.pr, approval_line)
+            log.info("PR #%d: prepended approval marker to body", args.pr)
+        except github.GhError as e:
+            log.warning(
+                "PR #%d approval body prepend failed: %s", args.pr, e,
+            )
 
     pr = db.get_pr(conn, args.pr)
     if pr["ak_branch"] is None:
@@ -521,6 +538,66 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                 )
 
 
+def _update_pr_description_via_r2(
+    args: argparse.Namespace, row, phase: str, wt: Path,
+) -> Optional[str]:
+    """Inside an open worktree, invoke r2 to write ./pr_body.md, then
+    publish via `gh pr edit <N> --body-file -`. Returns None on success
+    or an error string. Intended to be called from `_run_plan_one`
+    (phase="plan") and `_run_impl_one` (phase="impl") right after the
+    orchestrator's `git_ops.push_branch` succeeds.
+
+    No-ops for synthetic dry-run rows (pr_number < 0) and dry-run mode
+    in general (logs intent only). Description-update failures are
+    cosmetic; callers log them as warnings and continue rather than
+    rolling back the state transition.
+    """
+    pr_number = row["pr_number"]
+    if pr_number is None or pr_number < 0:
+        return None  # synthetic dry-run row, no real PR to edit
+    if args.dry_run:
+        log.info(
+            "[dry-run] PR #%d: would regenerate description (%s phase)",
+            pr_number, phase,
+        )
+        return None
+    branch_name = github.branch_name_for_ak(row["ak_commit"])
+    prompt = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(
+        phase=phase,
+        pr_number=pr_number,
+        branch_name=branch_name,
+        base_branch=args.rust_branch,
+        ak_commit=row["ak_commit"],
+    )
+    try:
+        rc, _ = streaming.run_with_prefix(
+            ["r2", "sandbox", "claude", "-p", prompt],
+            pr_number=pr_number,
+            cwd=str(wt),
+        )
+    except FileNotFoundError as e:
+        return f"r2 not on PATH: {e}"
+    except Exception as e:
+        return f"r2 description invocation crashed: {e}"
+    if rc != 0:
+        return f"r2 description failed (rc={rc})"
+    body_path = wt / "pr_body.md"
+    if not body_path.exists():
+        return "r2 description did not produce ./pr_body.md"
+    try:
+        body = body_path.read_text()
+    except OSError as e:
+        return f"failed to read ./pr_body.md: {e}"
+    if not body.strip():
+        return "./pr_body.md is empty"
+    try:
+        github.update_pr_body(args.rust_repo_path, pr_number, body)
+    except github.GhError as e:
+        return f"gh pr edit failed: {e}"
+    log.info("PR #%d: updated description (%s phase)", pr_number, phase)
+    return None
+
+
 def _run_plan_one(args, row):
     """Returns (err, None). err is None on success.
 
@@ -574,6 +651,16 @@ def _run_plan_one(args, row):
                     return (
                         f"failed to push plan branch {branch_name}: {e}",
                         None,
+                    )
+                # Refresh the PR body now that the plan is published.
+                # Cosmetic; failure is a warning, not a blocker.
+                desc_err = _update_pr_description_via_r2(
+                    args, row, "plan", wt,
+                )
+                if desc_err:
+                    log.warning(
+                        "PR #%d description update failed: %s",
+                        pr_number, desc_err,
                     )
     except worktree.WorktreeError as e:
         return f"worktree setup failed: {e}", None
@@ -645,6 +732,18 @@ def _run_impl_one(args, row):
                 return (
                     f"failed to push impl branch {branch_name}: {e}",
                     None,
+                )
+            # Refresh the PR body now that the implementation is
+            # published. Overwrites whatever the plan-phase claude
+            # wrote (and whatever approval prepended). Cosmetic;
+            # failure is a warning, not a blocker.
+            desc_err = _update_pr_description_via_r2(
+                args, row, "impl", wt,
+            )
+            if desc_err:
+                log.warning(
+                    "PR #%d description update failed: %s",
+                    pr_number, desc_err,
                 )
     except worktree.WorktreeError as e:
         return f"worktree setup failed: {e}", None
