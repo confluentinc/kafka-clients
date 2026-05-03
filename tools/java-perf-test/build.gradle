@@ -1,0 +1,45 @@
+plugins {
+    id 'java'
+    id 'application'
+    // Shadow plugin builds a single fat-jar so the test can be run as
+    // `java -jar build/libs/java-perf-test-all.jar` without classpath setup.
+    id 'com.github.johnrengelman.shadow' version '8.1.1'
+}
+
+repositories {
+    mavenCentral()
+}
+
+java {
+    sourceCompatibility = JavaVersion.VERSION_17
+    targetCompatibility = JavaVersion.VERSION_17
+}
+
+dependencies {
+    // Apache Kafka Java client. Matches the version the Rust translation
+    implementation 'org.apache.kafka:kafka-clients:4.2.0'
+
+    // JSON output for metrics.jsonl
+    implementation 'com.fasterxml.jackson.core:jackson-databind:2.18.0'
+
+    // SLF4J binding so kafka-clients log lines show up
+    implementation 'org.slf4j:slf4j-simple:2.0.16'
+}
+
+application {
+    mainClass = 'io.confluent.kafka.perftest.ProducerPerformanceTest'
+}
+
+shadowJar {
+    archiveBaseName.set('java-perf-test')
+    archiveClassifier.set('all')
+    archiveVersion.set('')
+    mergeServiceFiles()
+}
+
+// Reduce SLF4J chatter from kafka-clients in default `gradle run`. The user
+// can re-enable by setting -Dorg.slf4j.simpleLogger.defaultLogLevel=info.
+run {
+    systemProperty 'org.slf4j.simpleLogger.defaultLogLevel',
+        System.getProperty('org.slf4j.simpleLogger.defaultLogLevel', 'warn')
+}

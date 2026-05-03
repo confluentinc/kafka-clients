@@ -72,4 +72,13 @@ pub trait Writable {
     fn write_unsigned_int(&mut self, val: u32) -> io::Result<()> {
         self.write_int(val as i32)
     }
+
+    /// Write record bytes with zero-copy support.
+    ///
+    /// The default implementation copies the bytes into the main buffer.
+    /// Scatter-gather implementations override this to store the buffer
+    /// separately for vectored I/O, avoiding the copy.
+    fn write_records(&mut self, data: Vec<u8>) -> io::Result<()> {
+        self.write_byte_array(&data)
+    }
 }

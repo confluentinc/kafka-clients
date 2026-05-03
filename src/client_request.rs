@@ -109,6 +109,11 @@ impl ClientRequest {
         self.request_builder.as_ref()
     }
 
+    /// Returns a mutable reference to the request builder.
+    pub fn request_builder_mut(&mut self) -> &mut dyn RequestBuilder {
+        self.request_builder.as_mut()
+    }
+
     /// Returns the destination broker id.
     pub fn destination(&self) -> &str {
         &self.destination
