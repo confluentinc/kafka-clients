@@ -13,6 +13,11 @@ name: Seed translation_agent DB
 #   FORCE         -- "True" to overwrite an existing cursor for the same
 #                    RUST_BRANCH; "False" (default) errors out if a row
 #                    already exists with different values.
+#   CLEANUP_PRS   -- "True" to delete every pr_commit row for
+#                    RUST_BRANCH before seeding. "False" (default)
+#                    leaves them untouched. Use to reset a branch's
+#                    PR queue when stale/failed rows would otherwise
+#                    be picked up by the next sweep.
 
 agent:
   machine:
@@ -41,7 +46,11 @@ blocks:
               if [ "${FORCE:-False}" = "True" ]; then
                 FORCE_FLAG="--force"
               fi
-              translation-agent --seed $FORCE_FLAG \
+              CLEANUP_PRS_FLAG=""
+              if [ "${CLEANUP_PRS:-False}" = "True" ]; then
+                CLEANUP_PRS_FLAG="--cleanup-prs"
+              fi
+              translation-agent --seed $FORCE_FLAG $CLEANUP_PRS_FLAG \
                 --ak-branch "${AK_BRANCH:-trunk}" \
                 --ak-commit "${AK_COMMIT}" \
                 --rust-branch "${RUST_BRANCH:-master}" \

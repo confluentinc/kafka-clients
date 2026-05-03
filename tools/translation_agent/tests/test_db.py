@@ -226,6 +226,35 @@ def test_insert_pr_commit_idempotent(conn):
     assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 1
 
 
+def test_cleanup_pr_commits_for_rust_branch_deletes_only_matching_branch(conn):
+    """Used by --seed --cleanup-prs. Must delete exactly the supplied
+    branch's PR rows and leave other branches untouched."""
+    db.insert_pr_commit(conn, 1, "master",       "trunk", "ak1")
+    db.insert_pr_commit(conn, 2, "master",       "trunk", "ak2")
+    db.insert_pr_commit(conn, 3, "dev/feature",  "trunk", "ak3")
+
+    deleted = db.cleanup_pr_commits_for_rust_branch(conn, "master")
+    assert deleted == 2
+
+    remaining = [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM pr_commit ORDER BY pr_number"
+        ).fetchall()
+    ]
+    assert len(remaining) == 1
+    assert remaining[0]["pr_number"] == 3
+    assert remaining[0]["rust_branch"] == "dev/feature"
+
+
+def test_cleanup_pr_commits_for_rust_branch_idempotent_returns_zero(conn):
+    """Re-running on a branch with no rows is a clean no-op (rowcount 0)."""
+    db.insert_pr_commit(conn, 1, "master", "trunk", "ak1")
+    assert db.cleanup_pr_commits_for_rust_branch(conn, "master") == 1
+    assert db.cleanup_pr_commits_for_rust_branch(conn, "master") == 0
+    # Other branches untouched throughout.
+    assert db.cleanup_pr_commits_for_rust_branch(conn, "nonexistent") == 0
+
+
 def test_mark_plan_created_transitions_1_to_2(conn):
     db.insert_pr_commit(conn, 42, "master", "trunk", "ak")
     db.update_dependencies(conn, 42, None, None)

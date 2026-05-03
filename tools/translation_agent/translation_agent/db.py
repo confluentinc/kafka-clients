@@ -298,6 +298,25 @@ def insert_pr_commit(
         return cursor.rowcount > 0
 
 
+def cleanup_pr_commits_for_rust_branch(
+    conn: sqlite3.Connection, rust_branch: str,
+) -> int:
+    """Delete every pr_commit row matching `rust_branch`. Returns the
+    number of rows removed.
+
+    Used by `--seed --cleanup-prs` to reset a branch's PR queue when
+    stale/failed/dry-run rows would otherwise be picked up by the next
+    sweep's unblocked-predicate checks. Idempotent: 0 rows when the
+    branch has no PRs. Index-backed via idx_pr_commit_rust_branch.
+    """
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM pr_commit WHERE rust_branch = ?",
+            (rust_branch,),
+        )
+        return cursor.rowcount
+
+
 def get_unblocked_for_status(
     conn: sqlite3.Connection,
     status: int,
