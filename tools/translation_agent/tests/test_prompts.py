@@ -24,6 +24,29 @@ def test_dep_eval_template_substitutes():
     assert "- d" in p
 
 
+def test_plan_and_impl_prompts_forbid_git_push():
+    """Push must always go through the orchestrator (Python), never from
+    inside the R2 sandbox. The prompts must reflect that contract: they
+    instruct claude to commit but explicitly forbid `git push`. The
+    sandbox's deny-list backstops this, but the prompt is the first
+    line of defense (and a clearer signal than a silent denial)."""
+    plan = prompts.PLAN_GENERATION_PROMPT_TEMPLATE.format(
+        ak_commit="abc", ak_branch="trunk", pr_number=42,
+        branch_name="kafka-translate/abc",
+    )
+    impl = prompts.IMPLEMENTATION_PROMPT_TEMPLATE.format(
+        ak_commit="abc", ak_branch="trunk", pr_number=42,
+        branch_name="kafka-translate/abc",
+    )
+    for name, prompt in (("plan", plan), ("impl", impl)):
+        assert "Do NOT run `git push`" in prompt, (
+            f"{name} prompt is missing the explicit no-push instruction"
+        )
+        assert "commit" in prompt.lower(), (
+            f"{name} prompt should still ask claude to commit locally"
+        )
+
+
 def test_parse_clean_json():
     out = '{"plan_dependency": "abc", "implementation_dependency": "def"}'
     assert prompts.parse_dep_eval_json(out) == ("abc", "def")

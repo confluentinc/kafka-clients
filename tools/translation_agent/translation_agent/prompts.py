@@ -58,11 +58,11 @@ project, following the workflow in `.claude/rules/agent-roles.md`.
 
 Write a translation design document for the Apache Kafka commit listed
 below. The document must be saved at the file path below using the
-Write tool. After writing, commit it and push it.
+Write tool. After writing, commit it locally on the current branch.
 
 File to write: ./design/history/{pr_number}_description/plan.md
 Commit message: "Design document"
-Push target: branch `{branch_name}`
+Current branch: `{branch_name}`
 
 Inputs:
 - AK commit:       {ak_commit}
@@ -72,9 +72,10 @@ Inputs:
 - Rust repo root:  current working directory
 
 IMPORTANT: do NOT enter plan mode. Use the Write tool directly to
-create the file, then `git add`, `git commit -m "Design document"`,
-and `git push`. Do not propose, do not ask for approval, do not call
-ExitPlanMode. Just write, commit, push. Exit 0 on success.
+create the file, then `git add` and `git commit -m "Design document"`.
+Do NOT run `git push` -- it is denied in this sandbox; the orchestrator
+pushes after you exit. Do not propose, do not ask for approval, do not
+call ExitPlanMode. Just write and commit. Exit 0 on success.
 """
 
 
@@ -88,7 +89,8 @@ Execute the translation task described in the design document at:
 
 Spawn the Actor agent to implement the changes the document describes;
 spawn the Critic agent to review them; iterate through the comment/fix
-loop until no comments remain. Push all commits to `{branch_name}`.
+loop until no comments remain. Commit the changes locally on
+`{branch_name}`.
 
 Inputs:
 - AK commit:       {ak_commit}
@@ -98,16 +100,18 @@ Inputs:
 - Rust repo root:  current working directory
 
 IMPORTANT: do NOT enter plan mode. Read the design document and
-execute it directly. Exit 0 only when the implementation is complete,
-all tests pass, and the commits are pushed.
+execute it directly. Do NOT run `git push` -- it is denied in this
+sandbox; the orchestrator pushes after you exit. Exit 0 only when the
+implementation is complete, all tests pass, and the commits are made
+locally on `{branch_name}`.
 """
 
 
 DRY_RUN_NOTE = """\
-NOTE: This is a dry run. After committing locally, do NOT run `git push`.
-The worktree and your commits will be preserved on disk for inspection
-but will not be pushed to origin. The orchestrator will not advance the
-PR's status in its sqlite DB. A subsequent real run will re-do this work.
+NOTE: This is a dry run. The worktree and your commits will be
+preserved on disk for inspection but the orchestrator will skip the
+post-invocation push. The PR's status in its sqlite DB will not
+advance. A subsequent real run will re-do this work.
 """
 
 
