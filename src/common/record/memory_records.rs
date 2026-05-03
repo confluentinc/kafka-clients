@@ -75,6 +75,11 @@ impl MemoryRecords {
         &mut self.buffer
     }
 
+    /// Consume this `MemoryRecords` and return the underlying buffer.
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
     /// Returns an iterator over the batches in this records set.
     ///
     /// Each batch is a `DefaultRecordBatch` containing the full batch header
@@ -587,6 +592,12 @@ impl std::fmt::Display for MemoryRecords {
 pub struct BatchIterator<'a> {
     data: &'a [u8],
     pos: usize,
+}
+
+impl<'a> BatchIterator<'a> {
+    pub fn new(data: &'a [u8]) -> Self {
+        Self { data, pos: 0 }
+    }
 }
 
 impl<'a> Iterator for BatchIterator<'a> {
