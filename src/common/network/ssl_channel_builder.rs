@@ -35,6 +35,7 @@ use super::SslTransportLayer;
 use crate::common::security::SslFactory;
 
 use std::io;
+use std::sync::Arc;
 
 use tokio::net::TcpStream;
 
@@ -71,9 +72,10 @@ impl ChannelBuilder for SslChannelBuilder {
         max_receive_size: i32,
         metadata_registry: Box<dyn ChannelMetadataRegistry>,
     ) -> io::Result<KafkaChannel> {
-        let connector = self.ssl_factory.create_tls_connector();
         let domain = SslFactory::create_server_name(peer_host)?;
-        let transport_layer = Box::new(SslTransportLayer::new(stream, connector, domain));
+        let conn = rustls::ClientConnection::new(Arc::clone(self.ssl_factory.client_config()), domain.clone())
+            .map_err(|e| io::Error::other(format!("Failed to construct TLS client connection: {e}")))?;
+        let transport_layer = Box::new(SslTransportLayer::new(stream, conn, domain));
 
         // SSL authentication happens during the TLS handshake (in the transport
         // layer), so we use a PlaintextAuthenticator — matching Java's

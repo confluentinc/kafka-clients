@@ -137,6 +137,97 @@ impl NetworkReceive {
     pub fn size(&self) -> usize {
         self.buffer.as_ref().expect("payload buffer not yet allocated").len() + SIZE_LENGTH
     }
+
+    /// Synchronous, non-blocking mirror of [`Receive::read_from`](Receive::read_from).
+    ///
+    /// Calls [`TransportLayer::try_read`](TransportLayer::try_read) instead of
+    /// awaiting [`TransportLayer::read`](TransportLayer::read), avoiding the
+    /// `Box::pin(async {…})` allocation on every call and (more importantly)
+    /// the `tokio::time::timeout(Duration::ZERO, …)` wrapper that the selector
+    /// previously used in the hot read loop. The size-header / allocate /
+    /// payload state machine is identical to the async version.
+    ///
+    /// `WouldBlock` from the transport is converted to "no progress this call"
+    /// (returns the bytes accumulated so far), matching how the async version
+    /// behaves and matching Java NIO's non-blocking `channel.read()` returning 0.
+    ///
+    /// # Errors
+    ///
+    /// Returns `UnexpectedEof` if the transport returns `Ok(0)` mid-receive
+    /// (remote closed). Other I/O errors are propagated.
+    pub fn try_read_from(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize> {
+        let mut total_read = 0;
+
+        // Phase 1: Read the 4-byte size header
+        if self.size_bytes_read < SIZE_LENGTH {
+            match channel.try_read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]) {
+                Ok(0) => {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during size header read"));
+                },
+                Ok(bytes_read) => {
+                    total_read += bytes_read;
+                    self.size_bytes_read += bytes_read;
+                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    return Ok(total_read);
+                },
+                Err(e) => {
+                    return Err(e);
+                },
+            }
+
+            if self.size_bytes_read == SIZE_LENGTH {
+                let receive_size = i32::from_be_bytes(self.size_buf);
+                if receive_size < 0 {
+                    return Err(InvalidReceiveError::new(format!("Invalid receive (size = {receive_size})")).into());
+                }
+                if self.max_size != UNLIMITED && receive_size > self.max_size {
+                    return Err(InvalidReceiveError::new(format!(
+                        "Invalid receive (size = {receive_size} larger than {max_size})",
+                        max_size = self.max_size,
+                    ))
+                    .into());
+                }
+                self.requested_buffer_size = receive_size;
+                if receive_size == 0 {
+                    self.buffer = Some(Vec::new());
+                }
+            }
+        }
+
+        // Phase 2: Allocate buffer if size is known but not yet allocated
+        if self.buffer.is_none() && self.requested_buffer_size != -1 {
+            self.buffer = Some(vec![0u8; self.requested_buffer_size as usize]);
+            self.buffer_bytes_read = 0;
+            trace!(
+                "Allocated buffer of size {} for source {}",
+                self.requested_buffer_size, self.source
+            );
+        }
+
+        // Phase 3: Read payload data
+        if let Some(ref mut buf) = self.buffer
+            && self.buffer_bytes_read < buf.len()
+        {
+            match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
+                Ok(0) => {
+                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                },
+                Ok(bytes_read) => {
+                    total_read += bytes_read;
+                    self.buffer_bytes_read += bytes_read;
+                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    return Ok(total_read);
+                },
+                Err(e) => {
+                    return Err(e);
+                },
+            }
+        }
+
+        Ok(total_read)
+    }
 }
 
 impl Default for NetworkReceive {
@@ -180,7 +271,9 @@ impl Receive for NetworkReceive {
                         // non-blocking returning 0: try again later.
                         return Ok(total_read);
                     },
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        return Err(e);
+                    },
                 }
 
                 if self.size_bytes_read == SIZE_LENGTH {
@@ -234,7 +327,9 @@ impl Receive for NetworkReceive {
                         // non-blocking returning 0: return bytes read so far.
                         return Ok(total_read);
                     },
-                    Err(e) => return Err(e),
+                    Err(e) => {
+                        return Err(e);
+                    },
                 }
             }
 
