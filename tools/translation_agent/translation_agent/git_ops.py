@@ -85,6 +85,32 @@ def _commit_present(repo_path: str, commit: str) -> bool:
     return proc.returncode == 0
 
 
+def _commit_reachable_from(
+    repo_path: str, commit: str, ref: str = "FETCH_HEAD",
+) -> bool:
+    """True iff `commit` is in the local object DB AND is an ancestor
+    of `ref` in the local clone.
+
+    Both conditions matter for shallow clones: Semaphore's
+    `git submodule update --init --depth=1` pins the submodule at the
+    submodule-pointer SHA (often the cursor itself), which can leave
+    the cursor object present but DISCONNECTED from the branch tip's
+    history -- the two end up as separate shallow roots until a
+    deepen materializes the path between them. Just checking object
+    presence would falsely declare success while the connecting
+    commits are still missing.
+
+    Side-effect-free.
+    """
+    if not _commit_present(repo_path, commit):
+        return False
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "merge-base", "--is-ancestor", commit, ref],
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
 def _deepen_with_shallow_race_retry(
     repo_path: str,
     deepen_step: int,
@@ -123,28 +149,36 @@ def _ensure_commit_reachable(
     deepen_step: int = 50,
     max_deepens: int = 200,
 ) -> None:
-    """Deepen the shallow clone of `branch` until `commit` is in the
-    local object DB.
+    """Deepen the shallow clone of `branch` until `commit` is reachable
+    from FETCH_HEAD (the just-fetched tip of `branch`).
 
-    No-op if `commit` is already present, or if the repo isn't shallow
-    (full clones already have everything).
+    The probe uses `_commit_reachable_from` -- object present AND
+    ancestor of FETCH_HEAD -- not just object presence. This matters
+    for the Semaphore submodule init case: the parent repo's submodule
+    pointer can land the cursor commit as a separate shallow root,
+    disconnected from the branch tip. A presence-only probe would
+    falsely succeed and the subsequent log range would be empty (or
+    raise downstream).
 
-    On a shallow clone, runs `git fetch --deepen=<deepen_step> <remote>
-    <branch>` repeatedly until: (a) `commit` appears, (b) the repo is
-    no longer shallow (we've fetched the full history), or (c) we've
-    done `max_deepens` rounds. Cases (b) and (c) without finding the
-    commit raise GitError -- the cursor is not on this branch.
+    Caller must have run `git fetch <remote> <branch>` first so
+    FETCH_HEAD is set to the branch's tip. Each deepen fetch also
+    refreshes FETCH_HEAD.
 
-    Required because Semaphore's `git submodule update --init --depth=1`
-    leaves the AK submodule with only 1 commit, while the orchestrator's
-    branch_commit cursor can be hundreds/thousands of commits older.
+    On a shallow clone, runs `git fetch --deepen=<deepen_step>
+    <remote> <branch>` repeatedly until: (a) cursor becomes reachable,
+    (b) the repo is no longer shallow (full history fetched), or
+    (c) `max_deepens` rounds exhausted. Cases (b) and (c) without
+    success raise GitError -- the cursor is not on this branch.
     """
-    if _commit_present(repo_path, commit):
+    if _commit_reachable_from(repo_path, commit):
         return
     if not _is_shallow(repo_path):
         raise GitError(
-            f"commit {commit} not found in {repo_path}; the repo is not "
-            f"shallow, so this commit is not reachable from {remote}/{branch}"
+            f"commit {commit} is not reachable from {remote}/{branch} "
+            f"in {repo_path}; the repo is not shallow, so deepening "
+            f"cannot help. The cursor may be on a different branch or "
+            f"unrelated history. Re-seed branch_commit (--force) "
+            f"pointing at a commit on {remote}/{branch}."
         )
     for round_idx in range(max_deepens):
         try:
@@ -155,17 +189,17 @@ def _ensure_commit_reachable(
             raise GitError(
                 f"failed to deepen shallow clone (round {round_idx + 1}): {e}"
             ) from e
-        if _commit_present(repo_path, commit):
+        if _commit_reachable_from(repo_path, commit):
             return
         if not _is_shallow(repo_path):
-            # The deepen exhausted the remote's history; if we still
-            # don't have the commit, it's not on this branch.
+            # The deepen exhausted the remote's history; if cursor
+            # still isn't reachable, it's genuinely not on this branch.
             raise GitError(
-                f"commit {commit} not found after fully unshallowing "
-                f"{remote}/{branch}; commit is not on that branch"
+                f"commit {commit} not reachable from {remote}/{branch} "
+                f"after fully unshallowing; commit is not on that branch"
             )
     raise GitError(
-        f"commit {commit} not found after {max_deepens} deepen rounds "
+        f"commit {commit} not reachable after {max_deepens} deepen rounds "
         f"(~{max_deepens * deepen_step} commits) of {remote}/{branch}"
     )
 
@@ -217,32 +251,19 @@ def next_commits(
             f"failed to fetch {remote}/{branch} latest tip: {e}"
         ) from e
 
-    # Step 2: ensure the cursor commit is in the local object DB.
-    # Initial fetch above may have brought it in; otherwise deepen.
+    # Step 2: ensure the cursor commit is reachable from FETCH_HEAD --
+    # both present in the local DB AND in FETCH_HEAD's ancestry. The
+    # initial fetch above may already satisfy this; otherwise deepen
+    # until it does. The probe (see _commit_reachable_from) handles
+    # the Semaphore submodule-init case where the cursor object lands
+    # as a separate shallow root, disconnected from the branch tip
+    # until enough deepen rounds materialize the path between them.
     _ensure_commit_reachable(
         repo_path, since, branch,
         remote=remote, deepen_step=deepen_step, max_deepens=max_deepens,
     )
 
-    # Step 3: confirm the cursor is in FETCH_HEAD's ancestry. Without
-    # this, an unrelated cursor would make `since..FETCH_HEAD` collapse
-    # to `FETCH_HEAD` alone and we'd return random commits.
-    proc = subprocess.run(
-        [
-            "git", "-C", repo_path,
-            "merge-base", "--is-ancestor", since, "FETCH_HEAD",
-        ],
-        capture_output=True,
-    )
-    if proc.returncode != 0:
-        raise GitError(
-            f"cursor {since} is not an ancestor of {remote}/{branch}; "
-            f"the cursor may be on a different branch or unrelated "
-            f"history. Re-seed branch_commit (--force) pointing at a "
-            f"commit on {remote}/{branch}."
-        )
-
-    # Step 4: walk the full range oldest-first and limit in Python.
+    # Step 3: walk the full range oldest-first and limit in Python.
     out = _run_git(
         repo_path,
         [
