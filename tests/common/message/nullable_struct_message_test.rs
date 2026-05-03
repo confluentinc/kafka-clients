@@ -33,13 +33,13 @@ fn deserialize(buf: &[u8], version: i16) -> NullableStructMessageData {
 }
 
 /// Serialize a NullableStructMessageData to a buffer at a given version.
-fn serialize(message: &NullableStructMessageData, version: i16) -> Vec<u8> {
+fn serialize(message: &mut NullableStructMessageData, version: i16) -> Vec<u8> {
     let acc = to_byte_buffer_accessor(message, version).unwrap();
     acc.buffer().to_vec()
 }
 
 /// Round-trip serialize then deserialize, verifying size calculation.
-fn round_trip(message: &NullableStructMessageData, version: i16) -> NullableStructMessageData {
+fn round_trip(message: &mut NullableStructMessageData, version: i16) -> NullableStructMessageData {
     let buffer = serialize(message, version);
     // Check size calculation
     let mut cache = ObjectSerializationCache::new();
@@ -51,7 +51,7 @@ fn round_trip(message: &NullableStructMessageData, version: i16) -> NullableStru
 /// Translated from: testDefaultValues
 #[test]
 fn test_default_values() {
-    let message = NullableStructMessageData::new();
+    let mut message = NullableStructMessageData::new();
     assert!(message.nullable_struct.is_none());
     // In Java, nullableStruct2 defaults to new MyStruct2() (non-null) because
     // it has nullableVersions "1+" but no "default": "null".
@@ -61,7 +61,7 @@ fn test_default_values() {
     // it has no "default": "null" in the JSON spec.
     assert_eq!(Some(MyStruct4::new()), message.nullable_struct4);
 
-    let message2 = round_trip(&message, 2);
+    let message2 = round_trip(&mut message, 2);
     assert!(message2.nullable_struct.is_none());
     assert_eq!(Some(MyStruct2::new()), message2.nullable_struct2);
     assert!(message2.nullable_struct3.is_none());
@@ -77,7 +77,7 @@ fn test_round_trip() {
     message.set_nullable_struct3(Some(MyStruct3::new().set_my_int(3).set_my_string("3".to_string()).clone()));
     message.set_nullable_struct4(Some(MyStruct4::new().set_my_int(4).set_my_string("4".to_string()).clone()));
 
-    let new_message = round_trip(&message, 2);
+    let new_message = round_trip(&mut message, 2);
     assert_eq!(message, new_message);
 }
 
@@ -90,7 +90,7 @@ fn test_null_for_all_fields() {
     message.set_nullable_struct3(None);
     message.set_nullable_struct4(None);
 
-    let message = round_trip(&message, 2);
+    let message = round_trip(&mut message, 2);
     assert!(message.nullable_struct.is_none());
     assert!(message.nullable_struct2.is_none());
     assert!(message.nullable_struct3.is_none());
@@ -122,7 +122,7 @@ fn test_nullable_struct2_can_not_be_null_in_version0() {
     let size_result = message.size(&mut cache, 0);
     if let Ok(size) = size_result {
         let mut buf = ByteBufferAccessor::new(size as usize);
-        let write_result = Message::write(&message, &mut buf, &cache, 0);
+        let write_result = Message::write(&mut message, &mut buf, &cache, 0);
         if write_result.is_ok() {
             // If write succeeded, the read should either fail or produce wrong data
             buf.set_position(0).unwrap();
@@ -187,6 +187,6 @@ fn test_tagged_struct_size() {
         "Struct size should be 127 bytes (one short of varint two-byte threshold)"
     );
 
-    let new_message = round_trip(&message, 2);
+    let new_message = round_trip(&mut message, 2);
     assert_eq!(message, new_message);
 }
