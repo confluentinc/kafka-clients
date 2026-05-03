@@ -541,6 +541,16 @@ def _run_plan_one(args, row):
                     "[dry-run] PR #%d plan worktree preserved at %s",
                     pr_number, wt,
                 )
+            else:
+                # The R2 sandbox denies `git push`, so claude only
+                # committed locally. Publish the plan commit ourselves.
+                try:
+                    git_ops.push_branch(args.rust_repo_path, branch_name)
+                except git_ops.GitError as e:
+                    return (
+                        f"failed to push plan branch {branch_name}: {e}",
+                        None,
+                    )
     except worktree.WorktreeError as e:
         return f"worktree setup failed: {e}", None
     return None, None
@@ -586,30 +596,32 @@ def _run_impl_one(args, row):
                 return f"r2 impl invocation crashed: {e}", None
             if rc != 0:
                 return f"r2 impl failed (rc={rc})", None
+            # Read the local branch tip -- claude's commits in the
+            # worktree advance the local ref directly. We're the source
+            # of truth for what gets pushed, so no fetch needed.
+            try:
+                sha = git_ops.rev_parse(args.rust_repo_path, branch_name)
+            except git_ops.GitError as e:
+                return (
+                    f"failed to read local commit on {branch_name}: {e}",
+                    None,
+                )
             if args.dry_run:
                 log.info(
                     "[dry-run] PR #%d impl worktree preserved at %s",
                     pr_number, wt,
                 )
-                # Read the LOCAL branch tip (no push happened, so
-                # origin/<branch> is stale). The local branch was
-                # advanced by claude's commits in the worktree.
-                try:
-                    sha = git_ops.rev_parse(args.rust_repo_path, branch_name)
-                except git_ops.GitError as e:
-                    return (
-                        f"failed to read local commit on {branch_name}: {e}",
-                        None,
-                    )
                 return None, sha
-            # Real run: capture the new rust commit from origin so we can
-            # update branch_commit. Done inside the `with` so a failed
-            # rev-parse still triggers worktree cleanup.
+            # Real run: the R2 sandbox denies `git push`, so publish
+            # the impl commits ourselves before returning the SHA that
+            # branch_commit will record.
             try:
-                git_ops.fetch(args.rust_repo_path, branch_name)
-                sha = git_ops.rev_parse(args.rust_repo_path, f"origin/{branch_name}")
+                git_ops.push_branch(args.rust_repo_path, branch_name)
             except git_ops.GitError as e:
-                return f"failed to read new rust commit on {branch_name}: {e}", None
+                return (
+                    f"failed to push impl branch {branch_name}: {e}",
+                    None,
+                )
     except worktree.WorktreeError as e:
         return f"worktree setup failed: {e}", None
     return None, sha

@@ -91,3 +91,28 @@ def push_new_branch(
         repo_path,
         ["push", remote, f"{source_ref}:refs/heads/{target_branch}"],
     )
+
+
+def push_branch(
+    repo_path: str,
+    branch_name: str,
+    remote: str = "origin",
+    set_upstream: bool = True,
+) -> None:
+    """Push the local `branch_name` to `remote`.
+
+    Used by the orchestrator after a plan/impl R2 invocation returns,
+    because the sandbox denies `git push` to keep the agent from
+    surprising the operator with a remote write. The local commits
+    (made by claude inside the worktree) are still on the local ref --
+    this just publishes them.
+
+    Idempotent fast-forward: if origin already has the branch at the
+    same SHA, this is a no-op. If origin's tip diverges, raises GitError
+    so the caller can decide.
+    """
+    args = ["push"]
+    if set_upstream:
+        args.append("-u")
+    args.extend([remote, branch_name])
+    _run_git(repo_path, args)

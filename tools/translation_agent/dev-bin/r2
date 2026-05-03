@@ -38,7 +38,8 @@ if ! command -v claude >/dev/null 2>&1; then
 fi
 
 # Tool allow-list. Covers both dep-eval (read AK + git inspect) and
-# plan/impl (commit + push from the per-PR worktree).
+# plan/impl (commit-only from the per-PR worktree -- the orchestrator
+# pushes after this invocation returns, see DISALLOWED_TOOLS below).
 ALLOWED_TOOLS=(
     Read
     Edit
@@ -69,6 +70,22 @@ ALLOWED_TOOLS=(
     "Bash(python3 *)"
 )
 
+# Deny-list. Deny patterns take precedence over allow patterns, so
+# even though Bash(git *) above permits any git command, the patterns
+# here carve `git push` back out. Both forms are listed because Claude
+# Code's pattern matcher distinguishes the bare command from the
+# command-with-args form. Rationale: every push to origin must go
+# through the orchestrator (Python) so the state machine stays in
+# sync with what the remote actually has -- the agent inside R2
+# committing-and-pushing on its own is the kind of side effect we
+# want denied at the sandbox boundary, not just discouraged in the
+# prompt.
+DISALLOWED_TOOLS=(
+    "Bash(git push)"
+    "Bash(git push:*)"
+    "Bash(git push *)"
+)
+
 # --permission-mode dontAsk: never prompt for permissions. Anything not
 # in --allowedTools is denied silently rather than blocking on a prompt
 # that has nowhere to go in headless `-p` mode. Combined with
@@ -82,4 +99,7 @@ ALLOWED_TOOLS=(
 # either "claude is thinking" or "claude is in an invisible
 # permission-denial retry loop". With --verbose, the loop becomes
 # visible (each denial logs a line).
-exec claude --permission-mode dontAsk --verbose --allowedTools "${ALLOWED_TOOLS[@]}" "$@"
+exec claude --permission-mode dontAsk --verbose \
+    --allowedTools "${ALLOWED_TOOLS[@]}" \
+    --disallowedTools "${DISALLOWED_TOOLS[@]}" \
+    "$@"
