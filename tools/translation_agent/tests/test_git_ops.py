@@ -157,6 +157,65 @@ def test_next_commits_raises_when_branch_fully_unshallowed_without_since():
             git_ops.next_commits("/repo", "base", "trunk")
 
 
+def test_next_commits_retries_deepen_on_shallow_file_race():
+    """Git's `fatal: shallow file has changed since we read it` is a
+    transient race. The deepen helper must retry it inside the same
+    round, not bubble it up as a hard failure."""
+    state = {"successful_fetches": 0, "fetch_attempts": 0}
+
+    def router(args, **_kwargs):
+        if "cat-file" in args:
+            # Commit becomes present only after a fetch has actually
+            # succeeded (failed attempts don't count).
+            return _completed(0) if state["successful_fetches"] >= 1 else _completed(1)
+        if "rev-parse" in args and "--is-shallow-repository" in args:
+            return _completed(0, "true\n")
+        if "fetch" in args:
+            state["fetch_attempts"] += 1
+            # First attempt hits the shallow-race; second succeeds.
+            if state["fetch_attempts"] == 1:
+                return _completed(
+                    128, "",
+                    "fatal: shallow file has changed since we read it",
+                )
+            state["successful_fetches"] += 1
+            return _completed(0)
+        if "log" in args and "--reverse" in args:
+            return _completed(0, "newsha\n")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    # Patch the backoff to 0 so the test stays fast.
+    with patch.object(git_ops, "_DEEPEN_RETRY_BACKOFF_SECONDS", 0), \
+         patch.object(git_ops.subprocess, "run", side_effect=router) as mrun:
+        commits = git_ops.next_commits("/repo", "base", "trunk", n=5)
+
+    assert commits == ["newsha"]
+    # Two fetches: the failed one and the retry.
+    fetch_calls = [c for c in mrun.call_args_list if "fetch" in c.args[0]]
+    assert len(fetch_calls) == 2, fetch_calls
+
+
+def test_next_commits_does_not_retry_non_shallow_race_fetch_errors():
+    """Network/auth/other fetch failures must propagate immediately --
+    we only retry the specific shallow-file-changed race."""
+    def router(args, **_kwargs):
+        if "cat-file" in args:
+            return _completed(1)  # commit absent -> deepen path
+        if "rev-parse" in args and "--is-shallow-repository" in args:
+            return _completed(0, "true\n")
+        if "fetch" in args:
+            return _completed(128, "", "fatal: unable to access 'origin'")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    with patch.object(git_ops, "_DEEPEN_RETRY_BACKOFF_SECONDS", 0), \
+         patch.object(git_ops.subprocess, "run", side_effect=router) as mrun:
+        with pytest.raises(git_ops.GitError, match="unable to access"):
+            git_ops.next_commits("/repo", "base", "trunk")
+    # Exactly one fetch attempt -- no retry on this error class.
+    fetch_calls = [c for c in mrun.call_args_list if "fetch" in c.args[0]]
+    assert len(fetch_calls) == 1, fetch_calls
+
+
 def test_next_commits_raises_after_max_deepens():
     """If we exhaust max_deepens rounds while still shallow without
     finding the cursor, give up with a clear error."""
