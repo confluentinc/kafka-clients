@@ -80,3 +80,23 @@ def test_push_new_branch_uses_refspec():
         ],
         capture_output=True, text=True,
     )
+
+
+def test_push_branch_uses_set_upstream_by_default():
+    """The orchestrator-side push (called after R2 returns because the
+    sandbox denies `git push`) defaults to `-u origin <branch>`."""
+    with patch.object(git_ops.subprocess, "run", return_value=_completed(0)) as mrun:
+        git_ops.push_branch("/repo", "kafka-translate/abc")
+    mrun.assert_called_once_with(
+        ["git", "-C", "/repo", "push", "-u", "origin", "kafka-translate/abc"],
+        capture_output=True, text=True,
+    )
+
+
+def test_push_branch_set_upstream_false_omits_dash_u():
+    with patch.object(git_ops.subprocess, "run", return_value=_completed(0)) as mrun:
+        git_ops.push_branch("/repo", "kafka-translate/abc", set_upstream=False)
+    mrun.assert_called_once_with(
+        ["git", "-C", "/repo", "push", "origin", "kafka-translate/abc"],
+        capture_output=True, text=True,
+    )

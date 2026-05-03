@@ -135,7 +135,7 @@ def test_pr_plan_approve_transitions_2_to_3_and_runs_impl(tmp_path):
     _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
     with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
-         patch("translation_agent.cli.git_ops.fetch"), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.git_ops.rev_parse",
                return_value="rust_new_sha"):
         rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
@@ -301,6 +301,7 @@ def test_end_to_end_full_lifecycle(tmp_path):
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
          patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[100]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -320,7 +321,7 @@ def test_end_to_end_full_lifecycle(tmp_path):
     # Plan-approve run: 2 -> 3 -> 4, branch_commit updated.
     with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
-         patch("translation_agent.cli.git_ops.fetch"), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.git_ops.rev_parse",
                return_value="rust_a_sha"), \
          patch("translation_agent.cli.semaphore.push_project_artifact") as mpush_appr:
@@ -531,6 +532,7 @@ def test_sweep_dep_eval_out_of_batch_dep_treated_as_none(tmp_path):
                return_value=["ak_a"]), \
          patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
          patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.github.create_draft_pr",
                side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
@@ -698,7 +700,8 @@ def test_sweep_plan_step_transitions_status_1_to_2(tmp_path):
     conn.close()
     with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
-               return_value=(0, "")):
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.push_branch"):
         rc = _run(
             "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
             "--rust-branch", "master",
@@ -722,7 +725,7 @@ def test_sweep_impl_step_transitions_status_3_to_4_and_updates_branch_commit(tmp
     with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
-         patch("translation_agent.cli.git_ops.fetch"), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.git_ops.rev_parse",
                return_value="rust_y_sha"):
         rc = _run(
@@ -751,7 +754,8 @@ def test_sweep_plan_blocked_by_unapproved_dep_skipped(tmp_path):
     conn.close()
     with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
-               return_value=(0, "")) as mstream:
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli.git_ops.push_branch"):
         rc = _run(
             "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
             "--rust-branch", "master",
