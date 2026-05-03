@@ -2,9 +2,15 @@ version: v1.0
 name: Translation agent
 
 # Single CI pipeline that conditionally:
-#  - on the configured main branch -> runs the full sweep
+#  - on the configured main branch (push, not PR) -> runs the full sweep
 #    (dependency evaluation, plan generation, implementation)
-#  - on a PR build -> runs `translation-agent --pr <N>` (status check only)
+#  - on a PR build whose head branch is NOT the main branch -> runs
+#    `translation-agent --pr <N>` (status check only)
+#  - on a PR build whose head branch IS the main branch -> SKIP both
+#    phases. We never want a human's PR-against-main review to also
+#    trigger a full sweep (which would publish new translation PRs
+#    mid-review) or a per-PR status check (the PR isn't a translation
+#    PR managed by the orchestrator).
 #  - otherwise -> no-op
 #
 # A manual promotion ("Approve plan and implement") triggers
@@ -66,7 +72,15 @@ blocks:
                 echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
                 SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
               fi
-              if [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ]; then
+              # Tested first because it's the most-specific case: a PR
+              # build whose head branch is the main branch matches both
+              # the sweep clause (branch == MAIN_BRANCH) and the per-PR
+              # clause (PR_NUMBER set). Without this guard the sweep
+              # clause would win and publish new translation PRs while
+              # a human is still reviewing the PR against main.
+              if [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
+              elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ]; then
                 echo "On main branch (${MAIN_BRANCH}) -- running sweep"
                 translation-agent \
                   --ak-repo-path "${AK_REPO_PATH}" \
