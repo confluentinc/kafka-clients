@@ -177,29 +177,82 @@ def next_commits(
     deepen_step: int = 50,
     max_deepens: int = 200,
 ) -> List[str]:
-    """Return up to n commit SHAs on `branch`, oldest-to-newest, after `since`.
+    """Return up to `n` commit SHAs on `branch`, oldest-to-newest, after
+    `since`.
 
-    Equivalent to `git log --reverse <since>..<branch> --max-count=N --format=%H`.
+    Three subtleties this implementation gets right:
 
-    If `repo_path` is a shallow clone and `since` isn't in the local
-    object DB (the common case under Semaphore's `--depth=1` submodule
-    init), deepens the clone progressively until `since` becomes
-    reachable. See `_ensure_commit_reachable`.
+    1. **Fetch the latest tip first.** Semaphore's
+       `git submodule update --init --depth=1` pins the local
+       `origin/<branch>` at the submodule pointer SHA, NOT at
+       `<branch>`'s actual current head on the remote. Without an
+       explicit fetch, the range's upper bound stays months stale.
+       We always run `git fetch <remote> <branch>` first so
+       `FETCH_HEAD` reflects the remote's real tip, then use
+       `FETCH_HEAD` (not bare `<branch>`) as the upper bound.
+
+    2. **Verify the cursor is an ancestor of the tip.** If `since`
+       isn't reachable from `FETCH_HEAD`, `git log <since>..<tip>`
+       silently degrades to `git log <tip>` -- returning unrelated
+       commits. We use `git merge-base --is-ancestor` to fail loudly
+       instead.
+
+    3. **Take the N oldest in range, not the N newest.** Git's
+       `--max-count` is applied during the default newest-first walk,
+       so `git log --reverse <range> --max-count=N` returns the N
+       NEWEST commits in the range, displayed oldest-first. For
+       sweep ordering we want the N OLDEST so the cursor advances
+       commit-by-commit. We walk the full range and limit in Python.
+
+    Also handles the shallow-clone case via `_ensure_commit_reachable`
+    -- if `since` isn't in the local object DB after the initial
+    fetch, deepens progressively until it appears.
     """
+    # Step 1: refresh the local view of <branch>'s tip on the remote.
+    # FETCH_HEAD is updated as a side effect.
+    try:
+        _run_git(repo_path, ["fetch", remote, branch])
+    except GitError as e:
+        raise GitError(
+            f"failed to fetch {remote}/{branch} latest tip: {e}"
+        ) from e
+
+    # Step 2: ensure the cursor commit is in the local object DB.
+    # Initial fetch above may have brought it in; otherwise deepen.
     _ensure_commit_reachable(
         repo_path, since, branch,
         remote=remote, deepen_step=deepen_step, max_deepens=max_deepens,
     )
+
+    # Step 3: confirm the cursor is in FETCH_HEAD's ancestry. Without
+    # this, an unrelated cursor would make `since..FETCH_HEAD` collapse
+    # to `FETCH_HEAD` alone and we'd return random commits.
+    proc = subprocess.run(
+        [
+            "git", "-C", repo_path,
+            "merge-base", "--is-ancestor", since, "FETCH_HEAD",
+        ],
+        capture_output=True,
+    )
+    if proc.returncode != 0:
+        raise GitError(
+            f"cursor {since} is not an ancestor of {remote}/{branch}; "
+            f"the cursor may be on a different branch or unrelated "
+            f"history. Re-seed branch_commit (--force) pointing at a "
+            f"commit on {remote}/{branch}."
+        )
+
+    # Step 4: walk the full range oldest-first and limit in Python.
     out = _run_git(
         repo_path,
         [
             "log", "--reverse",
-            f"{since}..{branch}",
-            "--max-count", str(n),
+            f"{since}..FETCH_HEAD",
             "--format=%H",
         ],
     )
-    return [line.strip() for line in out.splitlines() if line.strip()]
+    commits = [line.strip() for line in out.splitlines() if line.strip()]
+    return commits[:n]
 
 
 def commit_subject(repo_path: str, commit: str) -> str:
