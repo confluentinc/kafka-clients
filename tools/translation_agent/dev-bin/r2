@@ -84,6 +84,16 @@ DISALLOWED_TOOLS=(
     "Bash(git push)"
     "Bash(git push:*)"
     "Bash(git push *)"
+    # `gh` is not in the allow-list, so `gh pr edit` is already denied
+    # by absence. The explicit deny is defense in depth: it documents
+    # the rule and survives an inadvertent allow-list expansion (e.g.
+    # if someone adds `Bash(gh *)` to allow `gh pr view` later).
+    # Same rationale as the `git push` deny: every PR body update must
+    # go through the orchestrator (Python) so we can keep state in
+    # sync with what the remote actually has.
+    "Bash(gh pr edit)"
+    "Bash(gh pr edit:*)"
+    "Bash(gh pr edit *)"
 )
 
 # --permission-mode dontAsk: never prompt for permissions. Anything not

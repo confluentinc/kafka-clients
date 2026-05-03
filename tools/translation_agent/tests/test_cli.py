@@ -514,6 +514,192 @@ def test_synthetic_pr_number_is_deterministic_and_negative():
     assert cli._synthetic_pr_number("abc") != cli._synthetic_pr_number("def")
 
 
+# --- _update_pr_description_via_r2 -----------------------------------------
+#
+# These tests opt out of the autouse no-op patch by depending on the
+# `real_pr_description` fixture (defined in conftest.py).
+
+def _desc_args(dry_run=False):
+    """Minimal namespace for _update_pr_description_via_r2 tests."""
+    from types import SimpleNamespace
+    return SimpleNamespace(
+        rust_repo_path=".",
+        rust_branch="dev/milestone-7",
+        dry_run=dry_run,
+    )
+
+
+def _desc_row(pr_number=42, ak_commit="abc123"):
+    return {"pr_number": pr_number, "ak_commit": ak_commit, "ak_branch": "trunk"}
+
+
+def test_update_pr_description_writes_pr_body_and_publishes(tmp_path, real_pr_description):
+    """Happy path: r2 produces ./pr_body.md, helper reads it, calls
+    github.update_pr_body with the captured body. Returns None."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def fake_streaming(cmd, pr_number, cwd):
+        # Simulate claude writing the body to ./pr_body.md inside the worktree.
+        Path(cwd, "pr_body.md").write_text("## Plan summary\n\nThe plan covers X.")
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is None
+    mupd.assert_called_once_with(".", 42, "## Plan summary\n\nThe plan covers X.")
+
+
+def test_update_pr_description_noop_for_synthetic_pr_number(tmp_path, real_pr_description):
+    """Negative pr_numbers come from dry-run synthetic ids; no real PR
+    exists to edit, so the helper returns None without invoking r2 or gh."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    with patch("translation_agent.cli.streaming.run_with_prefix") as mstream, \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(pr_number=-12345), "plan", wt,
+        )
+    assert err is None
+    mstream.assert_not_called()
+    mupd.assert_not_called()
+
+
+def test_update_pr_description_noop_in_dry_run(tmp_path, real_pr_description):
+    """Dry-run never makes remote writes. Helper logs intent and returns."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    with patch("translation_agent.cli.streaming.run_with_prefix") as mstream, \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(dry_run=True), _desc_row(), "impl", wt,
+        )
+    assert err is None
+    mstream.assert_not_called()
+    mupd.assert_not_called()
+
+
+def test_update_pr_description_returns_error_when_pr_body_md_missing(tmp_path, real_pr_description):
+    """If r2 returns 0 but didn't produce ./pr_body.md, the helper
+    surfaces a clear error instead of silently calling gh with empty body."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is not None
+    assert "did not produce" in err
+    mupd.assert_not_called()
+
+
+def test_update_pr_description_returns_error_on_r2_nonzero_exit(tmp_path, real_pr_description):
+    wt = tmp_path / "wt"
+    wt.mkdir()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(1, "")), \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is not None
+    assert "rc=1" in err
+    mupd.assert_not_called()
+
+
+def test_update_pr_description_propagates_gh_error(tmp_path, real_pr_description):
+    """A failure from `gh pr edit` is surfaced as the returned error
+    string -- the orchestrator logs it as a warning, not a hard failure."""
+    from translation_agent import github as gh
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text("body")
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body",
+               side_effect=gh.GhError("not authorized")):
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is not None
+    assert "not authorized" in err
+
+
+# --- approval prepend in _run_pr_mode --------------------------------------
+
+def test_plan_approve_prepends_approval_marker_before_impl(tmp_path, real_pr_description):
+    """`--plan-approve` flips 2->3 then runs impl. Between those steps
+    the orchestrator prepends an approval marker line via
+    github.prepend_pr_body. The impl phase later overwrites the body
+    via update_pr_body -- both calls should fire in order."""
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+
+    # Override the autouse fake worktree with a real tmp dir so the
+    # description helper can actually write + read pr_body.md.
+    real_wt = tmp_path / "wt"
+    real_wt.mkdir()
+
+    @contextmanager
+    def real_dir_wt(repo_path, branch_name, **_kwargs):
+        yield real_wt
+
+    def fake_streaming(cmd, pr_number, cwd):
+        # Simulate claude writing the body inside the worktree (impl phase).
+        Path(cwd, "pr_body.md").write_text("## Implementation done")
+        return 0, ""
+
+    with patch("translation_agent.cli.worktree.worktree_for_branch",
+               new=real_dir_wt), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_new_sha"), \
+         patch("translation_agent.cli.github.prepend_pr_body") as mprep, \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
+
+    assert rc == 0
+    # Approval prepend fires exactly once with a date-bearing marker.
+    mprep.assert_called_once()
+    args_call = mprep.call_args.args
+    assert args_call[0] == "."           # rust_repo_path
+    assert args_call[1] == 42            # pr_number
+    assert "Plan approved" in args_call[2]
+    # Impl description update also fires (after the impl r2 call).
+    mupd.assert_called_once()
+    assert mupd.call_args.args[1] == 42  # pr_number
+    assert mupd.call_args.args[2] == "## Implementation done"
+
+
+def test_plan_approve_skips_prepend_for_synthetic_pr(tmp_path, real_pr_description):
+    """Synthetic dry-run PR numbers are negative; no real PR to edit."""
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, -1, "abc", db.STATUS_PLAN_CREATED)
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.git_ops.rev_parse", return_value="sha"), \
+         patch("translation_agent.cli.github.prepend_pr_body") as mprep, \
+         patch("translation_agent.cli.github.update_pr_body") as mupd:
+        rc = _run("--pr", "-1", "--plan-approve", db_path=db_path)
+    assert rc == 0
+    mprep.assert_not_called()
+    mupd.assert_not_called()
+
+
 def test_sweep_recovers_pr_number_on_already_exists(tmp_path):
     from translation_agent import github as gh
 

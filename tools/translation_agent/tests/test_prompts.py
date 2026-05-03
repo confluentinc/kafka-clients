@@ -24,6 +24,28 @@ def test_dep_eval_template_substitutes():
     assert "- d" in p
 
 
+def test_pr_description_template_substitutes_and_forbids_remote_writes():
+    """The PR-description prompt must (a) interpolate phase / pr_number
+    / branch / base / ak_commit, (b) tell claude to write to ./pr_body.md,
+    and (c) explicitly forbid the remote-write commands the orchestrator
+    owns (gh, git push)."""
+    p = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(
+        phase="plan",
+        pr_number=42,
+        branch_name="kafka-translate/abc",
+        base_branch="dev/milestone-7",
+        ak_commit="abc123",
+    )
+    assert "plan" in p
+    assert "42" in p
+    assert "kafka-translate/abc" in p
+    assert "dev/milestone-7" in p
+    assert "abc123" in p
+    assert "./pr_body.md" in p
+    assert "Do NOT run `gh`" in p
+    assert "Do NOT run `git push`" in p
+
+
 def test_plan_and_impl_prompts_forbid_git_push():
     """Push must always go through the orchestrator (Python), never from
     inside the R2 sandbox. The prompts must reflect that contract: they
