@@ -61,6 +61,17 @@ use crate::producer::ProducerConfig;
 use crate::producer::ProducerRecord;
 use crate::producer::RecordMetadata;
 
+/// Initialize the default stderr log backend if RUST_LOG is set.
+/// Idempotent: succeeds once, silently no-ops on subsequent calls.
+/// A custom log backend (e.g. Python logging bridge) can be set before
+/// the first producer is created to override this default.
+fn init_default_logger() {
+    #[cfg(feature = "ffi")]
+    {
+        let _ = env_logger::try_init();
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Internal types
 // ---------------------------------------------------------------------------
@@ -244,15 +255,33 @@ unsafe fn metadata_ref(metadata: *const kafka_producer_RecordMetadata_t) -> &'st
     unsafe { &*(metadata as *const RecordMetadataInner) }
 }
 
-/// Calls `Producer::send` on the given `ProducerKind`, blocking on the async method.
+/// Send a record through the producer.
+///
+/// For [`ProducerKind::Kafka`] this builds a `ProducerRecord<&[u8], &[u8]>`
+/// from the borrowed slices and sends via the zero-copy path.
+///
+/// For [`ProducerKind::Mock`] this falls back to the allocating path
+/// since `MockProducer` expects owned records.
 fn producer_send(
     kind: &ProducerKind,
-    record: ProducerRecord<Vec<u8>, Vec<u8>>,
+    record: ProducerRecord<&[u8], &[u8]>,
 ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
     let rt = kind.runtime();
     match kind {
-        ProducerKind::Mock(mock, _) => rt.block_on(mock.send(record)),
-        ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record)),
+        ProducerKind::Mock(mock, _) => {
+            let (topic, partition, timestamp, _headers, key, value) = record.into_parts();
+            let owned_record = ProducerRecord::new(
+                topic,
+                partition,
+                timestamp,
+                key.map(|k| k.to_vec()),
+                value.map(|v| v.to_vec()),
+                None,
+            )
+            .map_err(|e| KafkaError::illegal_argument(e.message()))?;
+            rt.block_on(mock.send(owned_record))
+        },
+        ProducerKind::Kafka(producer, _) => rt.block_on(producer.send(record, None)),
     }
 }
 
@@ -295,51 +324,6 @@ unsafe fn properties_ref(props: *const kafka_producer_ProducerProperties_t) -> &
 /// [`kafka_producer_ProducerProperties_from_configs`].
 unsafe fn properties_mut(props: *mut kafka_producer_ProducerProperties_t) -> &'static mut HashMap<String, String> {
     unsafe { &mut *(props as *mut HashMap<String, String>) }
-}
-
-/// Builds a [`ProducerRecord`] from raw C FFI parameters.
-///
-/// # Safety
-///
-/// - `topic` must be a valid, non-null, null-terminated C string.
-/// - `key` must be valid for `key_len` bytes if `key_len >= 0`.
-/// - `value` must be valid for `value_len` bytes if `value_len >= 0`.
-unsafe fn build_record(
-    topic: *const c_char,
-    partition: i32,
-    timestamp: i64,
-    key: *const u8,
-    key_len: i32,
-    value: *const u8,
-    value_len: i32,
-) -> Result<ProducerRecord<Vec<u8>, Vec<u8>>, KafkaError> {
-    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy();
-
-    let partition_opt = if partition >= 0 { Some(partition) } else { None };
-    let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
-
-    let key_opt = if key_len >= 0 {
-        if key.is_null() {
-            return Err(KafkaError::new(Errors::InvalidRequest));
-        }
-        let key_slice = unsafe { std::slice::from_raw_parts(key, key_len as usize) };
-        Some(key_slice.to_vec())
-    } else {
-        None
-    };
-
-    let value_opt = if value_len >= 0 {
-        if value.is_null() {
-            return Err(KafkaError::new(Errors::InvalidRequest));
-        }
-        let value_slice = unsafe { std::slice::from_raw_parts(value, value_len as usize) };
-        Some(value_slice.to_vec())
-    } else {
-        None
-    };
-
-    ProducerRecord::new(topic_str.to_string(), partition_opt, timestamp_opt, key_opt, value_opt, None)
-        .map_err(|e| KafkaError::illegal_argument(e.message()))
 }
 
 /// Wraps a `KafkaFuture<RecordMetadata>` and the producer's runtime handle
@@ -547,6 +531,8 @@ pub unsafe extern "C" fn kafka_producer_KafkaProducer_new(
     props: *const kafka_producer_ProducerProperties_t,
     out_error: *mut *mut kafka_common_KafkaError_t,
 ) -> *mut kafka_producer_Producer_t {
+    init_default_logger();
+
     if props.is_null() {
         if !out_error.is_null() {
             unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
@@ -669,11 +655,40 @@ pub unsafe extern "C" fn kafka_producer_Producer_send(
         return std::ptr::null_mut();
     }
 
-    let record = match unsafe { build_record(topic, partition, timestamp, key, key_len, value, value_len) } {
+    let topic_str = unsafe { CStr::from_ptr(topic) }.to_string_lossy().into_owned();
+
+    let key_slice: Option<&[u8]> = if key_len >= 0 {
+        if key.is_null() {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            }
+            return std::ptr::null_mut();
+        }
+        Some(unsafe { std::slice::from_raw_parts(key, key_len as usize) })
+    } else {
+        None
+    };
+
+    let value_slice: Option<&[u8]> = if value_len >= 0 {
+        if value.is_null() {
+            if !out_error.is_null() {
+                unsafe { *out_error = box_error(KafkaError::new(Errors::InvalidRequest)) };
+            }
+            return std::ptr::null_mut();
+        }
+        Some(unsafe { std::slice::from_raw_parts(value, value_len as usize) })
+    } else {
+        None
+    };
+
+    let partition_opt = if partition >= 0 { Some(partition) } else { None };
+    let timestamp_opt = if timestamp >= 0 { Some(timestamp) } else { None };
+
+    let record = match ProducerRecord::new(topic_str, partition_opt, timestamp_opt, key_slice, value_slice, None) {
         Ok(r) => r,
         Err(e) => {
             if !out_error.is_null() {
-                unsafe { *out_error = box_error(e) };
+                unsafe { *out_error = box_error(KafkaError::illegal_argument(e.message())) };
             }
             return std::ptr::null_mut();
         },
@@ -742,22 +757,43 @@ unsafe fn send_batch_inner(
             continue;
         }
 
-        let record = match unsafe {
-            build_record(
-                rec.topic,
-                rec.partition,
-                rec.timestamp,
-                rec.key,
-                rec.key_len,
-                rec.value,
-                rec.value_len,
-            )
-        } {
+        let topic_str = unsafe { CStr::from_ptr(rec.topic) }.to_string_lossy().into_owned();
+
+        let key: Option<&[u8]> = if rec.key_len >= 0 {
+            if rec.key.is_null() {
+                unsafe {
+                    *out_futures.add(i) = std::ptr::null_mut();
+                    *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
+                }
+                continue;
+            }
+            Some(unsafe { std::slice::from_raw_parts(rec.key, rec.key_len as usize) })
+        } else {
+            None
+        };
+
+        let value: Option<&[u8]> = if rec.value_len >= 0 {
+            if rec.value.is_null() {
+                unsafe {
+                    *out_futures.add(i) = std::ptr::null_mut();
+                    *out_errors.add(i) = box_error(KafkaError::new(Errors::InvalidRequest));
+                }
+                continue;
+            }
+            Some(unsafe { std::slice::from_raw_parts(rec.value, rec.value_len as usize) })
+        } else {
+            None
+        };
+
+        let partition = if rec.partition >= 0 { Some(rec.partition) } else { None };
+        let timestamp = if rec.timestamp >= 0 { Some(rec.timestamp) } else { None };
+
+        let record = match ProducerRecord::new(topic_str, partition, timestamp, key, value, None) {
             Ok(r) => r,
             Err(e) => {
                 unsafe {
                     *out_futures.add(i) = std::ptr::null_mut();
-                    *out_errors.add(i) = box_error(e);
+                    *out_errors.add(i) = box_error(KafkaError::illegal_argument(e.message()));
                 }
                 continue;
             },
