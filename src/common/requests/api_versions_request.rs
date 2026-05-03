@@ -92,6 +92,11 @@ impl ApiVersionsRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut ApiVersionsRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -198,7 +203,7 @@ impl RequestBuilder for ApiVersionsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         Ok(ConcreteRequest::ApiVersions(ApiVersionsRequest::new(
             self.data.clone(),
             version,

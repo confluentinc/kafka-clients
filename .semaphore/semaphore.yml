@@ -1,0 +1,83 @@
+version: v1.0
+name: Translation agent
+
+# Single CI pipeline that conditionally:
+#  - on the configured main branch -> runs the full sweep
+#    (dependency evaluation, plan generation, implementation)
+#  - on a PR build -> runs `translation-agent --pr <N>` (status check only)
+#  - otherwise -> no-op
+#
+# A manual promotion ("Approve plan and implement") triggers
+# plan-approve.yml, which flips the PR's status from 2 (plan_created) to 3
+# (plan_approved) and immediately runs the implementation step.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-2
+
+global_job_config:
+  prologue:
+    commands:
+      - checkout
+      # When the Task is triggered manually with a "Run on branch" override,
+      # Semaphore exposes the desired branch as SEMAPHORE_GIT_BRANCH_CHECKOUT
+      # but `checkout` still lands on the build's original ref. Switch to the
+      # requested branch so submodule init + pip install operate against the
+      # right tree.
+      - |
+        if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+          echo "SEMAPHORE_GIT_BRANCH_CHECKOUT=${SEMAPHORE_GIT_BRANCH_CHECKOUT} -- switching working tree"
+          # Semaphore's shallow single-branch clone doesn't create
+          # refs/remotes/origin/<other-branch>, so origin/<branch> isn't a
+          # valid start point. Use FETCH_HEAD (which the explicit fetch
+          # above does update) and -B so re-runs reset an existing local
+          # branch instead of failing.
+          git fetch origin "${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+          git checkout -B "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" FETCH_HEAD
+        fi
+      - git submodule update --init --depth=1 kafka
+      - sem-version python 3.10
+      - sudo apt install -y cmake rustup && rustup default stable
+      - cd tools/translation_agent
+      - pip install -e '.[dev]'
+      # First sweep on a fresh project will have no artifact yet -- allow
+      # the pull to fail so the orchestrator can create the DB from scratch.
+      - artifact pull project translation_agent.db || true
+
+blocks:
+  - name: Run translation-agent
+    task:
+      env_vars:
+        # Override in the Semaphore project's "Environment Variables" or
+        # Secrets tab to track a different mainline branch. The sweep runs
+        # only when the build is for this exact branch.
+        - name: MAIN_BRANCH
+          value: dev/milestone-7
+        # Path to the AK repo, relative to the translation_agent cwd set in
+        # the prologue (which is `tools/translation_agent`). Defaults to the
+        # `kafka` git submodule at the repo root.
+        - name: AK_REPO_PATH
+          value: ../../kafka
+      jobs:
+        - name: sweep-or-per-pr
+          commands:
+            - |
+              if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
+                echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+                SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
+              fi
+              if [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ]; then
+                echo "On main branch (${MAIN_BRANCH}) -- running sweep"
+                translation-agent \
+                  --ak-repo-path "${AK_REPO_PATH}" \
+                  --rust-branch "${MAIN_BRANCH}"
+              elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} (status check only)"
+                translation-agent --pr "${SEMAPHORE_GIT_PR_NUMBER}"
+              else
+                echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
+              fi
+
+promotions:
+  - name: Approve plan and implement
+    pipeline_file: plan-approve.yml

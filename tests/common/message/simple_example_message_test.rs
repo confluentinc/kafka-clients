@@ -44,7 +44,7 @@ fn deserialize(buf: &[u8], version: i16) -> SimpleExampleMessageData {
 
 /// Serialize a SimpleExampleMessageData to a buffer at a given version,
 /// also verifying that the computed size matches the actual serialized size.
-fn round_trip_serde(message: &SimpleExampleMessageData, version: i16) -> SimpleExampleMessageData {
+fn round_trip_serde(message: &mut SimpleExampleMessageData, version: i16) -> SimpleExampleMessageData {
     let acc = to_byte_buffer_accessor(message, version).unwrap();
     let buf = acc.buffer();
     // Check size calculation
@@ -61,7 +61,8 @@ fn round_trip_serde(message: &SimpleExampleMessageData, version: i16) -> SimpleE
 fn test_round_trip(message: &SimpleExampleMessageData, validator: &dyn Fn(&SimpleExampleMessageData), version: i16) {
     validator(message);
 
-    let message2 = round_trip_serde(message, version);
+    let mut msg_clone = message.clone();
+    let message2 = round_trip_serde(&mut msg_clone, version);
     validator(&message2);
     assert_eq!(message, &message2);
     assert_eq!(hash_of(message), hash_of(&message2));
@@ -114,7 +115,7 @@ fn test_should_return_error_if_cannot_write_non_ignorable_field() {
     let size_result = out.size(&mut cache, 0);
     if let Ok(size) = size_result {
         let mut buf = ByteBufferAccessor::new(size as usize);
-        let write_result = Message::write(&out, &mut buf, &cache, 0);
+        let write_result = Message::write(&mut out, &mut buf, &cache, 0);
         if write_result.is_ok() {
             // Field was silently dropped - verify round-trip loses processId
             buf.set_position(0).unwrap();
@@ -151,7 +152,7 @@ fn test_should_round_trip_field_through_buffer() {
     out.set_process_id(uuid);
     out.set_zero_copy_byte_buffer(buf.clone());
 
-    let acc = to_byte_buffer_accessor(&out, 1).unwrap();
+    let acc = to_byte_buffer_accessor(&mut out, 1).unwrap();
     let buffer = acc.buffer();
 
     let read_in = deserialize(buffer, 1);
@@ -175,7 +176,7 @@ fn test_should_round_trip_field_through_buffer_with_nullable() {
     out.set_zero_copy_byte_buffer(buf1.clone());
     out.set_nullable_zero_copy_byte_buffer(Some(buf2.clone()));
 
-    let acc = to_byte_buffer_accessor(&out, 1).unwrap();
+    let acc = to_byte_buffer_accessor(&mut out, 1).unwrap();
     let buffer = acc.buffer();
 
     let read_in = deserialize(buffer, 1);
@@ -429,7 +430,7 @@ fn test_my_struct_unsupported_version() {
     let size_result = msg.size(&mut cache, 1);
     if let Ok(size) = size_result {
         let mut buf = ByteBufferAccessor::new(size as usize);
-        let result = Message::write(&msg, &mut buf, &cache, 1);
+        let result = Message::write(&mut msg, &mut buf, &cache, 1);
         // At version 1, myStruct should not be written (version < 2),
         // so even if non-default, it's silently dropped.
         // The Java test expects UnsupportedVersionException for non-default struct
@@ -511,7 +512,7 @@ fn test_tagged_fields_should_support_flexible_version_subset() {
 
     // At version 1, taggedLongFlexibleVersionSubset is not supported (taggedVersions: 2+),
     // so it should be dropped during serialization and read back as default (0).
-    let deserialized = round_trip_serde(&message, 1);
+    let deserialized = round_trip_serde(&mut message, 1);
     assert_eq!(SimpleExampleMessageData::new(), deserialized);
     assert_eq!(0, deserialized.tagged_long_flexible_version_subset);
 }
