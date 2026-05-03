@@ -78,6 +78,9 @@ blocks:
               # clause (PR_NUMBER set). Without this guard the sweep
               # clause would win and publish new translation PRs while
               # a human is still reviewing the PR against main.
+              echo "SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH}"
+              echo "SEMAPHORE_GIT_PR_NUMBER=${SEMAPHORE_GIT_PR_NUMBER}"
+              echo "MAIN_BRANCH=${MAIN_BRANCH}"
               if [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ] && [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "Skipping: PR build (#${SEMAPHORE_GIT_PR_NUMBER}) on ${MAIN_BRANCH} -- neither sweep nor per-PR phase runs for this combination"
               elif [ "${SEMAPHORE_GIT_BRANCH}" = "${MAIN_BRANCH}" ]; then
