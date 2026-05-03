@@ -52,13 +52,105 @@ def rev_parse(repo_path: str, rev: str) -> str:
     return _run_git(repo_path, ["rev-parse", rev]).strip()
 
 
+def _is_shallow(repo_path: str) -> bool:
+    """True iff `repo_path` is a shallow clone (has a `.git/shallow` file)."""
+    try:
+        out = _run_git(repo_path, ["rev-parse", "--is-shallow-repository"])
+    except GitError:
+        return False
+    return out.strip() == "true"
+
+
+def _commit_present(repo_path: str, commit: str) -> bool:
+    """True iff `commit` exists in the local object DB.
+
+    Uses `git cat-file -e <commit>^{{commit}}` -- the canonical
+    object-existence probe. Side-effect-free; safe to call repeatedly.
+    """
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "cat-file", "-e", f"{commit}^{{commit}}"],
+        capture_output=True,
+    )
+    return proc.returncode == 0
+
+
+def _ensure_commit_reachable(
+    repo_path: str,
+    commit: str,
+    branch: str,
+    *,
+    remote: str = "origin",
+    deepen_step: int = 50,
+    max_deepens: int = 200,
+) -> None:
+    """Deepen the shallow clone of `branch` until `commit` is in the
+    local object DB.
+
+    No-op if `commit` is already present, or if the repo isn't shallow
+    (full clones already have everything).
+
+    On a shallow clone, runs `git fetch --deepen=<deepen_step> <remote>
+    <branch>` repeatedly until: (a) `commit` appears, (b) the repo is
+    no longer shallow (we've fetched the full history), or (c) we've
+    done `max_deepens` rounds. Cases (b) and (c) without finding the
+    commit raise GitError -- the cursor is not on this branch.
+
+    Required because Semaphore's `git submodule update --init --depth=1`
+    leaves the AK submodule with only 1 commit, while the orchestrator's
+    branch_commit cursor can be hundreds/thousands of commits older.
+    """
+    if _commit_present(repo_path, commit):
+        return
+    if not _is_shallow(repo_path):
+        raise GitError(
+            f"commit {commit} not found in {repo_path}; the repo is not "
+            f"shallow, so this commit is not reachable from {remote}/{branch}"
+        )
+    for round_idx in range(max_deepens):
+        try:
+            _run_git(
+                repo_path,
+                ["fetch", f"--deepen={deepen_step}", remote, branch],
+            )
+        except GitError as e:
+            raise GitError(
+                f"failed to deepen shallow clone (round {round_idx + 1}): {e}"
+            ) from e
+        if _commit_present(repo_path, commit):
+            return
+        if not _is_shallow(repo_path):
+            # The deepen exhausted the remote's history; if we still
+            # don't have the commit, it's not on this branch.
+            raise GitError(
+                f"commit {commit} not found after fully unshallowing "
+                f"{remote}/{branch}; commit is not on that branch"
+            )
+    raise GitError(
+        f"commit {commit} not found after {max_deepens} deepen rounds "
+        f"(~{max_deepens * deepen_step} commits) of {remote}/{branch}"
+    )
+
+
 def next_commits(
     repo_path: str, since: str, branch: str, n: int = 10,
+    *,
+    remote: str = "origin",
+    deepen_step: int = 50,
+    max_deepens: int = 200,
 ) -> List[str]:
     """Return up to n commit SHAs on `branch`, oldest-to-newest, after `since`.
 
     Equivalent to `git log --reverse <since>..<branch> --max-count=N --format=%H`.
+
+    If `repo_path` is a shallow clone and `since` isn't in the local
+    object DB (the common case under Semaphore's `--depth=1` submodule
+    init), deepens the clone progressively until `since` becomes
+    reachable. See `_ensure_commit_reachable`.
     """
+    _ensure_commit_reachable(
+        repo_path, since, branch,
+        remote=remote, deepen_step=deepen_step, max_deepens=max_deepens,
+    )
     out = _run_git(
         repo_path,
         [
