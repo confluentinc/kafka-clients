@@ -103,6 +103,58 @@ def test_seed_missing_args_returns_2(tmp_path):
     assert rc == 2
 
 
+def test_seed_with_cleanup_prs_deletes_branch_rows_and_seeds_cursor(tmp_path):
+    """`--seed --cleanup-prs` clears the supplied rust_branch's pr_commit
+    rows BEFORE seeding the cursor, leaves other branches untouched, and
+    still returns rc=0 after a successful seed."""
+    db_path = str(tmp_path / "t.db")
+    # Pre-populate stale rows on two branches.
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 1, "master",      "trunk", "ak1")
+    db.insert_pr_commit(conn, 2, "master",      "trunk", "ak2")
+    db.insert_pr_commit(conn, 3, "dev/feature", "trunk", "ak3")
+    conn.commit()
+    conn.close()
+
+    rc = _run(
+        "--seed", "--cleanup-prs",
+        "--ak-branch", "trunk", "--ak-commit", "akseed",
+        "--rust-branch", "master", "--rust-commit", "rustseed",
+        db_path=db_path,
+    )
+    assert rc == 0
+
+    conn = db.connect(db_path)
+    # master's PRs were wiped; dev/feature's row survived.
+    rows = [dict(r) for r in
+            conn.execute("SELECT * FROM pr_commit ORDER BY pr_number").fetchall()]
+    assert len(rows) == 1
+    assert rows[0]["pr_number"] == 3
+    assert rows[0]["rust_branch"] == "dev/feature"
+    # The seed itself still ran -- branch_commit has the master cursor.
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc is not None
+    assert bc["ak_commit"] == "akseed"
+    assert bc["rust_commit"] == "rustseed"
+
+
+def test_seed_cleanup_prs_no_rows_is_noop(tmp_path):
+    """When the branch has no pr_commit rows, --cleanup-prs is a clean
+    no-op (still returns 0, still seeds)."""
+    db_path = str(tmp_path / "t.db")
+    rc = _run(
+        "--seed", "--cleanup-prs",
+        "--ak-branch", "trunk", "--ak-commit", "abc",
+        "--rust-branch", "master", "--rust-commit", "def",
+        db_path=db_path,
+    )
+    assert rc == 0
+    conn = db.connect(db_path)
+    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 0
+    assert db.get_latest_correspondence(conn, "master") is not None
+
+
 def test_pr_mode_missing_returns_1(tmp_path):
     db_path = str(tmp_path / "t.db")
     rc = _run("--pr", "42", db_path=db_path)

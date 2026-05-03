@@ -21,8 +21,10 @@ Three invocation modes per the design:
   `branch_commit` cursor row whose primary key is `--rust-branch`.
 - Per-PR mode: `translation-agent --pr <N> [--plan-approve]` — design step 7.
 - Seed mode: `translation-agent --seed --ak-branch ... --ak-commit ...
-  --rust-branch ... --rust-commit ...` — bootstraps the `branch_commit`
-  table on first use.
+  --rust-branch ... --rust-commit ... [--force] [--cleanup-prs]` --
+  bootstraps the `branch_commit` table on first use. `--force`
+  overwrites an existing cursor; `--cleanup-prs` deletes every
+  `pr_commit` row for `--rust-branch` before seeding.
 """
 
 import argparse
@@ -141,6 +143,14 @@ def _build_parser() -> argparse.ArgumentParser:
              "different ak/rust commits. Without --force, an existing "
              "row with different values causes an error.",
     )
+    parser.add_argument(
+        "--cleanup-prs", action="store_true",
+        help="With --seed: delete every pr_commit row for --rust-branch "
+             "before seeding. Used to reset a branch's PR queue when "
+             "stale/failed rows would otherwise be picked up by the "
+             "next sweep's unblocked-predicate checks. Independent of "
+             "--force; the two compose.",
+    )
 
     return parser
 
@@ -151,6 +161,20 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
     if missing:
         log.error("--seed requires: %s", ", ".join(missing))
         return 2
+
+    if args.cleanup_prs:
+        # Run before the seed so the seed log line is the last thing
+        # the operator sees and matches the post-state of the DB.
+        # Always log the count (even 0) so the operator gets
+        # confirmation the flag took effect.
+        deleted = db.cleanup_pr_commits_for_rust_branch(
+            conn, args.rust_branch,
+        )
+        log.info(
+            "Cleaned up %d pr_commit row(s) for rust_branch=%s",
+            deleted, args.rust_branch,
+        )
+
     try:
         result = db.seed_correspondence(
             conn,
