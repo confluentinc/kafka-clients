@@ -124,24 +124,69 @@ def test_next_commits_limits_in_python_returning_oldest_n():
     assert commits == ["c0", "c1", "c2"]
 
 
-def test_next_commits_raises_when_cursor_not_ancestor():
-    """If the cursor isn't reachable from FETCH_HEAD (e.g. on an
-    unmerged branch or pre-rewrite history), `<cursor>..FETCH_HEAD`
-    silently degrades to all of FETCH_HEAD's history. The merge-base
-    --is-ancestor probe must catch this and raise loudly so the
-    operator re-seeds, instead of returning random commits."""
+def test_next_commits_raises_when_cursor_not_reachable_in_full_clone():
+    """If the repo is a full clone and the cursor object is present but
+    isn't an ancestor of FETCH_HEAD (e.g. cursor on an unmerged branch
+    or rewritten history), no amount of deepening helps -- we must
+    raise immediately with a clear message."""
     def router(args, **_kwargs):
         if "fetch" in args and not any(a.startswith("--deepen=") for a in args):
             return _completed(0)
         if "cat-file" in args:
             return _completed(0)  # cursor IS present in DB
         if "merge-base" in args and "--is-ancestor" in args:
-            return _completed(1)  # NOT an ancestor
+            return _completed(1)  # NOT an ancestor of FETCH_HEAD
+        if "rev-parse" in args and "--is-shallow-repository" in args:
+            return _completed(0, "false\n")  # full clone
         raise AssertionError(f"unexpected git call: {args}")
 
     with patch.object(git_ops.subprocess, "run", side_effect=router):
-        with pytest.raises(git_ops.GitError, match="not an ancestor"):
+        with pytest.raises(git_ops.GitError, match="not reachable from origin/trunk"):
             git_ops.next_commits("/repo", "wrongsha", "trunk")
+
+
+def test_next_commits_deepens_when_cursor_present_but_disconnected_from_tip():
+    """The Semaphore submodule scenario this whole story is about:
+    `git submodule update --init --depth=1 kafka` lands the cursor
+    commit as a separate shallow root (the submodule pointer SHA),
+    AND `git fetch origin trunk` lands trunk's tip as ANOTHER shallow
+    root. Both objects exist locally but they're disconnected.
+    `_commit_present(cursor)` returns True, but
+    `merge-base --is-ancestor cursor FETCH_HEAD` returns 1.
+
+    `_ensure_commit_reachable` must NOT exit early in this case --
+    it has to keep deepening until the path between the two roots
+    is materialized. After enough deepens, is-ancestor returns 0
+    and the log walk produces real commits."""
+    state = {"deepen_rounds": 0, "ancestry_present_after": 3}
+
+    def router(args, **_kwargs):
+        if "fetch" in args and not any(a.startswith("--deepen=") for a in args):
+            return _completed(0)  # initial fetch: tip lands as shallow root
+        if "cat-file" in args:
+            return _completed(0)  # cursor object is ALWAYS present (init pinned it)
+        if "merge-base" in args and "--is-ancestor" in args:
+            # Ancestry only proven once enough deepen rounds have
+            # materialized the connecting commits.
+            rc = 0 if state["deepen_rounds"] >= state["ancestry_present_after"] else 1
+            return _completed(rc)
+        if "rev-parse" in args and "--is-shallow-repository" in args:
+            return _completed(0, "true\n")
+        if "fetch" in args and any(a.startswith("--deepen=") for a in args):
+            state["deepen_rounds"] += 1
+            return _completed(0)
+        if "log" in args and "--reverse" in args:
+            return _completed(0, "newsha1\nnewsha2\n")
+        raise AssertionError(f"unexpected git call: {args}")
+
+    with patch.object(git_ops.subprocess, "run", side_effect=router):
+        commits = git_ops.next_commits("/repo", "cursorsha", "trunk")
+
+    assert commits == ["newsha1", "newsha2"]
+    assert state["deepen_rounds"] == 3, (
+        "expected 3 deepens to materialize the path; got "
+        f"{state['deepen_rounds']}"
+    )
 
 
 def test_next_commits_initial_fetch_failure_propagates():
