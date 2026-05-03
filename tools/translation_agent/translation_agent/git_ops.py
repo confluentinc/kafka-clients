@@ -21,11 +21,22 @@ exit so the caller can surface a single exception type.
 """
 
 import subprocess
+import time
 from typing import List
 
 
 class GitError(RuntimeError):
     pass
+
+
+# Git's "shallow file has changed since we read it" race: another process
+# (concurrent submodule update, parallel deepen on the same .git/modules/<sub>,
+# or Semaphore housekeeping) mutated .git/shallow between our fetch's read
+# and write phases. Transient -- a retry typically lands cleanly because
+# the conflicting writer is finished by then.
+_SHALLOW_RACE_FRAGMENT = "shallow file has changed"
+_DEEPEN_RETRY_ATTEMPTS = 3
+_DEEPEN_RETRY_BACKOFF_SECONDS = 0.1
 
 
 def _run_git(repo_path: str, args: list) -> str:
@@ -74,6 +85,35 @@ def _commit_present(repo_path: str, commit: str) -> bool:
     return proc.returncode == 0
 
 
+def _deepen_with_shallow_race_retry(
+    repo_path: str,
+    deepen_step: int,
+    remote: str,
+    branch: str,
+) -> None:
+    """Run `git fetch --deepen=<step> <remote> <branch>`, retrying the
+    specific "shallow file has changed since we read it" race up to
+    `_DEEPEN_RETRY_ATTEMPTS` times with a small backoff.
+
+    Other GitError messages propagate immediately -- we don't want to
+    mask network/auth failures or revision-not-found errors with a
+    retry loop.
+    """
+    for attempt in range(_DEEPEN_RETRY_ATTEMPTS):
+        try:
+            _run_git(
+                repo_path,
+                ["fetch", f"--deepen={deepen_step}", remote, branch],
+            )
+            return
+        except GitError as e:
+            is_last = attempt == _DEEPEN_RETRY_ATTEMPTS - 1
+            if _SHALLOW_RACE_FRAGMENT in str(e) and not is_last:
+                time.sleep(_DEEPEN_RETRY_BACKOFF_SECONDS)
+                continue
+            raise
+
+
 def _ensure_commit_reachable(
     repo_path: str,
     commit: str,
@@ -108,9 +148,8 @@ def _ensure_commit_reachable(
         )
     for round_idx in range(max_deepens):
         try:
-            _run_git(
-                repo_path,
-                ["fetch", f"--deepen={deepen_step}", remote, branch],
+            _deepen_with_shallow_race_retry(
+                repo_path, deepen_step, remote, branch,
             )
         except GitError as e:
             raise GitError(
