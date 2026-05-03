@@ -1,0 +1,105 @@
+#!/usr/bin/env bash
+# Local-development emulation of the Semaphore `r2 sandbox claude` runner.
+#
+# Translates the orchestrator's invocation:
+#     r2 sandbox claude -p "<prompt>"
+# into a direct call to the local Claude Code CLI:
+#     claude --allowedTools <list> -p "<prompt>"
+#
+# The pre-approved tool list lets headless claude actually do dep
+# analysis (read AK source, query git in the kafka submodule) and, in
+# plan/impl mode, commit and push from within the per-PR worktree the
+# orchestrator created. Without these, headless `claude -p` denies its
+# own tool calls and degrades to "I cannot complete the analysis".
+#
+# Note: this list is broader than claude's default deny-everything floor
+# but narrower than `--dangerously-skip-permissions`. The blast radius
+# is bounded by the per-PR worktree (for plan/impl) and by the
+# operator's filesystem permissions (for dep-eval, which only reads).
+# Edit the ALLOWED_TOOLS array below if your prompts need more.
+#
+# Usage:
+#   1. Add this directory to PATH:
+#        export PATH="$(git rev-parse --show-toplevel)/tools/translation_agent/dev-bin:$PATH"
+#   2. Run translation-agent normally; r2 invocations are intercepted by
+#      this wrapper and dispatched to the local `claude` CLI.
+
+set -euo pipefail
+
+if [ "${1:-}" != "sandbox" ] || [ "${2:-}" != "claude" ]; then
+    echo "r2 (local emulation): expected 'sandbox claude' as first two args; got '${1:-}' '${2:-}'" >&2
+    exit 2
+fi
+shift 2
+
+if ! command -v claude >/dev/null 2>&1; then
+    echo "r2 (local emulation): \`claude\` CLI not on PATH. Install Claude Code first." >&2
+    exit 127
+fi
+
+# Tool allow-list. Covers both dep-eval (read AK + git inspect) and
+# plan/impl (commit-only from the per-PR worktree -- the orchestrator
+# pushes after this invocation returns, see DISALLOWED_TOOLS below).
+ALLOWED_TOOLS=(
+    Read
+    Edit
+    Write
+    # ExitPlanMode is needed because the prompt for plan generation
+    # contains the word "plan" which auto-triggers Claude Code's plan
+    # mode. Without this in the allow-list, claude writes the plan
+    # file but can't commit it (still in plan mode). With it, claude
+    # can exit plan mode itself and proceed with `git add` + `git commit`.
+    ExitPlanMode
+    "Bash(git *)"
+    "Bash(cargo *)"
+    "Bash(ls *)"
+    "Bash(cat *)"
+    "Bash(grep *)"
+    "Bash(find *)"
+    "Bash(head *)"
+    "Bash(tail *)"
+    "Bash(wc *)"
+    "Bash(sed *)"
+    "Bash(awk *)"
+    "Bash(make *)"
+    "Bash(cmake *)"
+    "Bash(rustup *)"
+    "Bash(rustc *)"
+    "Bash(mkdir *)"
+    "Bash(pytest *)"
+    "Bash(python3 *)"
+)
+
+# Deny-list. Deny patterns take precedence over allow patterns, so
+# even though Bash(git *) above permits any git command, the patterns
+# here carve `git push` back out. Both forms are listed because Claude
+# Code's pattern matcher distinguishes the bare command from the
+# command-with-args form. Rationale: every push to origin must go
+# through the orchestrator (Python) so the state machine stays in
+# sync with what the remote actually has -- the agent inside R2
+# committing-and-pushing on its own is the kind of side effect we
+# want denied at the sandbox boundary, not just discouraged in the
+# prompt.
+DISALLOWED_TOOLS=(
+    "Bash(git push)"
+    "Bash(git push:*)"
+    "Bash(git push *)"
+)
+
+# --permission-mode dontAsk: never prompt for permissions. Anything not
+# in --allowedTools is denied silently rather than blocking on a prompt
+# that has nowhere to go in headless `-p` mode. Combined with
+# ExitPlanMode in the allow-list, this should let claude exit plan mode
+# autonomously instead of waiting for an approval that will never come.
+#
+# --verbose makes claude emit per-tool-call events into the output
+# stream. The streaming wrapper merges stderr -> stdout, so these
+# events show up in the orchestrator's captured output. Critical for
+# diagnosing hangs: without --verbose, "claude is silent" can mean
+# either "claude is thinking" or "claude is in an invisible
+# permission-denial retry loop". With --verbose, the loop becomes
+# visible (each denial logs a line).
+exec claude --permission-mode dontAsk --verbose \
+    --allowedTools "${ALLOWED_TOOLS[@]}" \
+    --disallowedTools "${DISALLOWED_TOOLS[@]}" \
+    "$@"
