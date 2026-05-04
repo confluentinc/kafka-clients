@@ -12,19 +12,11 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-// Fail on warnings in development
-#![deny(warnings)]
-
-//! Confluent Kafka Rust — translation of the Apache Kafka 4.2 Java client.
+//! Translation of `org.apache.kafka.clients.producer`.
 //!
-//! Phase 1 surfaces only the foundational utilities (errors, time, headers,
-//! configuration, UUID, byte/varint encoding, CRC, exponential backoff,
-//! topic-name validation). Higher-level types (records, network, producer)
-//! are added in subsequent phases.
+//! Phase 4b lays only the producer-side metadata cache
+//! ([`internals::ProducerMetadata`]). Phase 5 wires the rest of the
+//! producer (Sender, RecordAccumulator, KafkaProducer).
 
-pub mod common;
-pub mod metadata;
-pub mod metadata_recovery_strategy;
-pub mod metadata_snapshot;
-pub mod producer;
-pub mod stale_metadata_error;
+// `internals` packages are `pub(crate)` per CLAUDE.md naming rules.
+pub(crate) mod internals;

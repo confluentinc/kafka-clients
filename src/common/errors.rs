@@ -117,6 +117,10 @@ pub enum KafkaError {
     /// `org.apache.kafka.common.errors.NotEnoughReplicasAfterAppendException`
     /// — wire code `20`. Direct `RetriableException` subclass.
     NotEnoughReplicasAfterAppend(String),
+    /// `org.apache.kafka.clients.StaleMetadataException` — internal client-side
+    /// signal that current metadata cannot be used. Subclass of
+    /// `InvalidMetadataException`, so retriable. No wire code (client-only).
+    StaleMetadata(String),
 
     // ----- Non-retriable `ApiException` subclasses -----
     /// `org.apache.kafka.common.errors.InvalidRequiredAcksException` — wire
@@ -203,6 +207,7 @@ impl KafkaError {
                 | KafkaError::KafkaStorage(_)
                 | KafkaError::NotEnoughReplicas(_)
                 | KafkaError::NotEnoughReplicasAfterAppend(_)
+                | KafkaError::StaleMetadata(_)
         )
     }
 
@@ -260,6 +265,7 @@ impl KafkaError {
             KafkaError::KafkaStorage(_) => 56,
             KafkaError::NotEnoughReplicas(_) => 19,
             KafkaError::NotEnoughReplicasAfterAppend(_) => 20,
+            KafkaError::StaleMetadata(_) => ERR_CODE_UNKNOWN,
             KafkaError::InvalidRequiredAcks(_) => 21,
 
             KafkaError::RecordTooLarge(_) => 10,
@@ -307,6 +313,7 @@ impl KafkaError {
             KafkaError::KafkaStorage(_) => "KafkaStorageException",
             KafkaError::NotEnoughReplicas(_) => "NotEnoughReplicasException",
             KafkaError::NotEnoughReplicasAfterAppend(_) => "NotEnoughReplicasAfterAppendException",
+            KafkaError::StaleMetadata(_) => "StaleMetadataException",
             KafkaError::InvalidRequiredAcks(_) => "InvalidRequiredAcksException",
             KafkaError::RecordTooLarge(_) => "RecordTooLargeException",
             KafkaError::RecordTooLargeClient(_) => "RecordTooLargeException",
@@ -350,6 +357,7 @@ impl KafkaError {
             | KafkaError::KafkaStorage(m)
             | KafkaError::NotEnoughReplicas(m)
             | KafkaError::NotEnoughReplicasAfterAppend(m)
+            | KafkaError::StaleMetadata(m)
             | KafkaError::InvalidRequiredAcks(m)
             | KafkaError::RecordTooLarge(m)
             | KafkaError::RecordTooLargeClient(m)
