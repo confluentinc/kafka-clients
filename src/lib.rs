@@ -22,7 +22,11 @@
 //! topic-name validation). Higher-level types (records, network, producer)
 //! are added in subsequent phases.
 
+pub mod client_dns_lookup;
 pub mod common;
+pub mod common_client_configs;
+pub mod default_host_resolver;
+pub mod host_resolver;
 pub mod metadata;
 pub mod metadata_recovery_strategy;
 pub mod metadata_snapshot;
