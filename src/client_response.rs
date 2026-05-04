@@ -75,11 +75,9 @@ impl ClientResponse {
 
     /// Mirrors the 10-arg Java constructor with explicit `timedOut`.
     /// Java throws `IllegalStateException` if `timedOut == true` and
-    /// `disconnected == false`; we return [`KafkaError::IllegalState`]
-    /// since constructors cannot return `Result` directly. To preserve
-    /// the Java contract we still expose the panicking call as
-    /// [`Self::with_timed_out`] (panics in violation of the invariant)
-    /// and a checked variant [`Self::try_with_timed_out`].
+    /// `disconnected == false`; we mirror that contract by panicking,
+    /// matching CLAUDE.md rule 10.1 (panic for unrecoverable invariant
+    /// violations).
     #[allow(clippy::too_many_arguments)]
     pub fn with_timed_out(
         request_header: RequestHeader,
@@ -97,8 +95,7 @@ impl ClientResponse {
             // Mirrors Java's `throw new IllegalStateException(...)`. This
             // is a programmer-error invariant violation (the same way Java
             // raises an unchecked `IllegalStateException`), so panicking
-            // matches the Java contract exactly. Callers that want a
-            // recoverable error path should use `try_with_timed_out`.
+            // matches the Java contract exactly.
             panic!("The client response can't be in the state of connected, yet timed out");
         }
         ClientResponse {
@@ -113,41 +110,6 @@ impl ClientResponse {
             authentication_exception,
             response_body,
         }
-    }
-
-    /// Checked variant of [`Self::with_timed_out`]. Returns
-    /// `Err(KafkaError::IllegalState)` instead of panicking when the
-    /// `disconnected`/`timed_out` invariant is violated.
-    #[allow(clippy::too_many_arguments)]
-    pub fn try_with_timed_out(
-        request_header: RequestHeader,
-        callback: Option<Arc<dyn RequestCompletionHandler>>,
-        destination: Arc<str>,
-        created_time_ms: i64,
-        received_time_ms: i64,
-        disconnected: bool,
-        timed_out: bool,
-        version_mismatch: Option<KafkaError>,
-        authentication_exception: Option<KafkaError>,
-        response_body: Option<Box<dyn AbstractResponse>>,
-    ) -> Result<Self, KafkaError> {
-        if !disconnected && timed_out {
-            return Err(KafkaError::IllegalState(
-                "The client response can't be in the state of connected, yet timed out".to_owned(),
-            ));
-        }
-        Ok(ClientResponse {
-            request_header,
-            callback,
-            destination,
-            received_time_ms,
-            latency_ms: received_time_ms - created_time_ms,
-            disconnected,
-            timed_out,
-            version_mismatch,
-            authentication_exception,
-            response_body,
-        })
     }
 
     /// Mirrors `ClientResponse.receivedTimeMs()`.
@@ -306,23 +268,5 @@ mod tests {
             None,
             None,
         );
-    }
-
-    #[test]
-    fn try_with_timed_out_returns_illegal_state_on_invariant_violation() {
-        let err = ClientResponse::try_with_timed_out(
-            header(),
-            None,
-            Arc::from("broker-1"),
-            100,
-            150,
-            false,
-            true,
-            None,
-            None,
-            None,
-        )
-        .expect_err("should be illegal state");
-        assert!(matches!(err, KafkaError::IllegalState(_)));
     }
 }
