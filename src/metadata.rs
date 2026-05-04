@@ -1377,19 +1377,45 @@ mod tests {
         assert_eq!(metadata.time_to_next_update(10_000), 0);
     }
 
-    /// Add-listener smoke: a registered listener fires on `update`.
+    /// Java: `testClusterListenerGetsNotifiedOfUpdate`
+    /// (`MetadataTest.java:299-322`). After `bootstrap`, the listener
+    /// is **not** notified. After `update`, the listener **is**
+    /// notified with the correct `cluster_resource`. Captures the
+    /// most-recent `on_update` argument via `Arc<Mutex<Option<...>>>`.
     #[test]
-    fn cluster_listener_fires_on_close() {
-        // Verifies the Arc<ClusterResourceListeners> wiring; the
-        // listener is never invoked from `close()` (Java doesn't either)
-        // but registering should not panic. Real on_update dispatch is
-        // covered by `ClusterResourceListenersTest`.
-        let metadata = fresh_metadata();
-        struct NoOp;
-        impl ClusterResourceListener for NoOp {
-            fn on_update(&self, _cluster_resource: &crate::common::cluster_resource::ClusterResource) {}
+    fn cluster_listener_notified_on_update_not_on_bootstrap() {
+        use crate::common::cluster_resource::ClusterResource;
+
+        struct CapturingListener {
+            last: Mutex<Option<ClusterResource>>,
         }
-        metadata.add_cluster_update_listener(Arc::new(NoOp));
+        impl ClusterResourceListener for CapturingListener {
+            fn on_update(&self, cluster_resource: &ClusterResource) {
+                *self.last.lock().expect("listener mutex poisoned") = Some(cluster_resource.clone());
+            }
+        }
+
+        let listener = Arc::new(CapturingListener { last: Mutex::new(None) });
+        let listeners = Arc::new(ClusterResourceListeners::default());
+        listeners.add(Arc::clone(&listener) as Arc<dyn ClusterResourceListener>);
+        let metadata = Metadata::new(50, 100, 1000, LogContext::default(), listeners).expect("metadata constructs");
+
+        // After bootstrap, listener should NOT be notified.
+        metadata.bootstrap(vec![("www.example.com".to_owned(), 9002)]);
+        assert!(
+            listener.last.lock().unwrap().is_none(),
+            "ClusterResourceListener should not be called when metadata is updated with bootstrap Cluster"
+        );
+
+        // After update, listener IS notified with cluster id "dummy".
+        let mut topic_ids = HashMap::new();
+        topic_ids.insert("topic".to_owned(), Uuid::random());
+        topic_ids.insert("topic1".to_owned(), Uuid::random());
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic", 1), ("topic1", 1)], |_, _| Some(1), &topic_ids);
+        metadata.update_with_current_request_version(&resp, false, 100).unwrap();
+
+        let captured = listener.last.lock().unwrap().clone().expect("listener notified");
+        assert_eq!(captured.cluster_id(), Some("dummy"));
     }
 
     /// Java: `testCurrentLeaderReturnsNoLeader`.
@@ -1485,20 +1511,64 @@ mod tests {
         assert_eq!(metadata.time_to_next_update(now2 + 1), 0);
     }
 
-    /// Java: `testFailedUpdate`.
+    /// Java: `testFailedUpdate` (`MetadataTest.java:282-297`).
+    /// After a failed update bumps `attempts`, a subsequent successful
+    /// update must reset `attempts` to 0 — proven by observing that a
+    /// later `failed_update` produces a `time_to_next_update` value
+    /// bounded by the **base** `refresh_backoff_ms` (within jitter),
+    /// not the post-attempts exponential value.
+    ///
+    /// Mirrors Java's structure: successful update at t=100, then
+    /// failed_update at a later time, then assert backoff is in base
+    /// band (proving attempts reset on the prior success).
     #[test]
     fn failed_update_resets_attempts_on_subsequent_success() {
-        let metadata = fresh_metadata();
+        // Use Java's `refreshBackoffMs=100`, `refreshBackoffMaxMs=1000`
+        // so the bounded jitter window is observable.
+        let refresh_backoff_ms: i64 = 100;
+        let metadata = Metadata::new(
+            refresh_backoff_ms,
+            1000,
+            1000,
+            LogContext::default(),
+            Arc::new(ClusterResourceListeners::default()),
+        )
+        .unwrap();
+
+        // Java jitter band: refreshBackoffMs * (1 ± 0.2) = [80, 120].
+        let lower = (refresh_backoff_ms as f64 * 0.8) as i64;
+        let upper = (refresh_backoff_ms as f64 * 1.2) as i64;
+
+        // Phase 1: bump attempts to a high count via several failures.
+        // After 3 failures, attempts=3 — exponential backoff is
+        // `refreshBackoffMs * 2^(attempts-1) = 100 * 4 = 400` (within
+        // jitter), well outside the base [80, 120] band.
         metadata.failed_update(0);
-        // After a successful update, attempts is reset (Java sets it to 0).
+        metadata.failed_update(0);
+        metadata.failed_update(0);
+
+        // Phase 2: successful update at t=100. This must reset
+        // `attempts` to 0 (Java: `attempts = 0` inside `update`).
         let resp = empty_metadata_response();
         metadata.update_with_current_request_version(&resp, false, 100).unwrap();
-        // After success, time_to_allow_update is constrained only by
-        // the configured backoff, not by exponential attempts growth.
-        // With baseline backoff 50 (initial_interval), the 100 - 50 = 50ms
-        // hasn't elapsed: depending on jitter, the clamp window is small.
-        // Just verify no panic + non-error result.
-        assert!(metadata.last_successful_update() == 100);
+        assert_eq!(metadata.last_successful_update(), 100);
+
+        // Phase 3: subsequent failed_update at t=1100. This bumps
+        // `attempts` from 0 (post-reset) to 1. After this single
+        // failure, the backoff term is in the **base** band — i.e.
+        // attempts was indeed reset on the earlier success. If attempts
+        // was NOT reset, attempts would be 4 and backoff would be in
+        // the [640, 960] band.
+        //
+        // At t=1100, time_to_expire = (100 + 1000) - 1100 = 0, so
+        // `time_to_next_update` is gated only by the backoff term.
+        metadata.failed_update(1100);
+        let observed = metadata.time_to_next_update(1100);
+        assert!(
+            (lower..=upper).contains(&observed),
+            "after success resets attempts, expected base backoff in [{lower}, {upper}], got {observed} \
+             (a value above {upper} would prove attempts was NOT reset on success)"
+        );
     }
 
     /// Java: `testUpdateLastEpoch`.
