@@ -42,6 +42,9 @@ def test_worktree_for_branch_yields_path_runs_setup_and_teardown():
     calls = []
 
     def record(args, **kwargs):
+        if "ls-remote" in args:
+            # No remote branch -> fall through to local check / fresh.
+            return _completed(0, stdout="")
         if "show-ref" in args:
             # Branch doesn't exist locally -> take the fetch+create path.
             return _completed(1)
@@ -82,6 +85,8 @@ def test_worktree_for_branch_propagates_setup_failure_no_cleanup_call():
 
     def maybe_fail(args, **kwargs):
         nonlocal fetch_failed
+        if "ls-remote" in args:
+            return _completed(0, stdout="")  # no remote branch
         if "show-ref" in args:
             return _completed(1)  # local branch doesn't exist -> fetch path
         if "fetch" in args:
@@ -139,10 +144,12 @@ def test_worktree_with_ak_commit_runs_make_build_and_bumps_submodule():
     calls = []
 
     def record(args, **kwargs):
-        # Skip the worktree-list pre-check call so existing index
-        # assertions remain stable.
+        # Skip the worktree-list and ls-remote pre-check calls so
+        # existing index assertions remain stable.
         if args[0] == "git" and "worktree" in args and "list" in args:
             return _completed(0, stdout="")
+        if args[0] == "git" and "ls-remote" in args:
+            return _completed(0, stdout="")  # no remote branch
         # Record the full argv for git calls; for `make` record the
         # tool name + any args so we can spot it in the sequence.
         if args[0] == "make":
@@ -199,6 +206,8 @@ def test_worktree_branch_name_with_slash_sanitized_in_temp_prefix():
     seen_paths = []
 
     def record(args, **kwargs):
+        if "ls-remote" in args:
+            return _completed(0, stdout="")  # no remote branch
         if "show-ref" in args:
             return _completed(1)  # take the fetch+create path
         if args[3:5] == ["worktree", "add"]:
@@ -225,6 +234,8 @@ def test_push_branch_with_kafka_bump_skips_make_runs_submodule_init_and_pushes()
     def record(args, **kwargs):
         if args[0] == "git" and "worktree" in args and "list" in args:
             return _completed(0, stdout="")
+        if args[0] == "git" and "ls-remote" in args:
+            return _completed(0, stdout="")  # no remote branch
         if args[0] == "make":
             calls.append(("make", tuple(args[1:])))
         elif args[0] == "git":
@@ -274,13 +285,63 @@ def test_push_branch_with_kafka_bump_skips_make_runs_submodule_init_and_pushes()
     assert pushes[0][2] == ("push", "-u", "origin", "kafka-translate/abc")
 
 
+def test_worktree_for_branch_bases_on_origin_branch_when_remote_exists():
+    """When the PR branch already exists on origin (e.g. previous sweep
+    created the PR but didn't complete), the worktree must base its
+    local branch on origin/<branch_name> -- NOT on the rust-branch base.
+    Otherwise the worktree's local branch would be missing the existing
+    bump commit, and the subsequent push would be rejected as non-FF."""
+    calls = []
+
+    def record(args, **kwargs):
+        if "ls-remote" in args:
+            # Remote branch exists -- gh ls-remote returns "<sha>\trefs/heads/<name>".
+            return _completed(0, stdout="abc123\trefs/heads/kafka-translate/abc\n")
+        if "worktree" in args and "list" in args:
+            return _completed(0, stdout="")
+        calls.append(args[3:])
+        return _completed(0)
+
+    with patch.object(worktree.subprocess, "run", side_effect=record):
+        with worktree.worktree_for_branch(
+            "/repo", "kafka-translate/abc",
+            base_remote_branch="dev/milestone-7",
+        ):
+            pass
+
+    # Sequence we expect:
+    #   1. fetch origin kafka-translate/abc   (NOT origin dev/milestone-7)
+    #   2. worktree add -B kafka-translate/abc <wt> origin/kafka-translate/abc
+    fetch_calls = [c for c in calls if c[:2] == ["fetch", "origin"]]
+    assert fetch_calls, f"expected a fetch call; got {calls}"
+    assert fetch_calls[0] == ["fetch", "origin", "kafka-translate/abc"], (
+        f"fetch must target the existing remote branch, not the base branch; "
+        f"got {fetch_calls[0]}"
+    )
+    add_calls = [c for c in calls if c[:2] == ["worktree", "add"]]
+    assert add_calls, f"expected a worktree-add call; got {calls}"
+    add = add_calls[0]
+    assert "-B" in add, f"need -B to force-reset local branch; got {add}"
+    assert "origin/kafka-translate/abc" in add, (
+        f"worktree must be based on origin/<branch_name>; got {add}"
+    )
+    # The local-branch show-ref check must NOT have happened (remote
+    # check short-circuits the priority chain).
+    assert not any("show-ref" in c for c in calls), (
+        f"local-branch check should be skipped when remote exists; got {calls}"
+    )
+
+
 def test_worktree_for_branch_uses_local_branch_when_it_exists():
     """When the branch exists locally (e.g. dry-run cascade after a prior
-    plan run), use it directly without fetching from origin."""
+    plan run) AND there's no remote branch, use the local one directly
+    without fetching from origin."""
     calls = []
 
     def record(args, **kwargs):
         calls.append(args[3:])  # strip ["git", "-C", "/repo"]
+        if "ls-remote" in args:
+            return _completed(0, stdout="")  # no remote branch
         if "show-ref" in args:
             return _completed(0)  # branch DOES exist locally
         return _completed(0)
