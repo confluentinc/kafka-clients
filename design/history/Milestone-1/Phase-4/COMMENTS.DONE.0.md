@@ -437,3 +437,62 @@ All Phase 4b BLOCKER, MAJOR, and MINOR issues resolved. Test count
 673 → 684. New `arc-swap` dependency added (Cargo.toml change is
 the only structural change; reviewer should re-validate the dep
 choice in Round 2).
+
+---
+
+# Phase 4c Review — Resolved Items (Critic N=0)
+
+Reviewed commits: `6713037` (4c-1: ClientDnsLookup, HostResolver,
+DefaultHostResolver, CommonClientConfigs), `b64b30a` (4c-2: dedupe
+RETRY_BACKOFF constants), `e932fd9` (4c-3: ClientUtils) against
+base `e6b4858`. Round 1 verdict: APPROVED with 1 MINOR.
+
+---
+
+### Issue 17 — `ClientDnsLookup::ResolveCanonicalBootstrapServersOnly` rustdoc did not flag the reverse-DNS fallback
+
+- **File:** `src/client_dns_lookup.rs:32-34` (Round 1 line range)
+- **Severity:** MINOR
+- **Java reference:** `kafka/clients/src/main/java/org/apache/kafka/clients/ClientUtils.java:76-86`
+  — canonical-name lookup uses `InetAddress.getCanonicalHostName()`,
+  which performs reverse DNS.
+- **Description:** The Phase 4c deviation — Rust always falls back to
+  the IP textual form for the canonical-name slot because `std::net`
+  exposes no reverse-DNS API — was documented at the call site
+  (`client_utils.rs:195-200`) and on the regression test
+  (`test_parse_and_validate_addresses_with_reverse_lookup`) but not
+  on the public-API surface of the `ClientDnsLookup` variant itself.
+  A future SASL/Kerberos consumer reading only the variant doc would
+  not learn about the deviation; the resulting SPN would silently be
+  `kafka/<ip>@REALM` instead of `kafka/<canonical-hostname>@REALM`,
+  which fails Kerberos auth unless every broker IP has a host
+  principal in the KDC.
+
+**Resolution:** Fixed in `7e201af`. Added a
+`# Note — deviation from Java behavior` paragraph on the
+`ResolveCanonicalBootstrapServersOnly` variant rustdoc in
+`src/client_dns_lookup.rs` covering all four points the Round 1
+review asked for:
+
+1. What Java does — `InetAddress.getCanonicalHostName()` reverse
+   DNS.
+2. What Rust does in Phase 4c — IP-literal fallback because
+   `std::net` exposes no reverse-DNS API; cross-references the
+   call-site implementation in
+   `client_utils::parse_and_validate_addresses_with_resolver`.
+3. The implication for SASL/Kerberos — wrong SPN
+   (`kafka/<ip>@REALM` vs `kafka/<canonical-hostname>@REALM`),
+   plus a note that no caller is currently affected because the
+   SASL stack is not yet implemented.
+4. Where to revisit — Phase 5+ SASL stack — with two candidate
+   crates (`dns-lookup`, `hickory-resolver`) and the fix shape:
+   route the resolver through reverse-DNS only for this variant,
+   preserving the cheap synchronous `to_socket_addrs` path for
+   `UseAllDnsIps`.
+
+Comment-only change. No public API change. 720 library tests still
+passing; format-check, lint, check-generated all clean.
+
+---
+
+All Phase 4c BLOCKER, MAJOR, and MINOR issues resolved.

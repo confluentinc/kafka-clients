@@ -31,6 +31,34 @@ pub enum ClientDnsLookup {
     UseAllDnsIps,
     /// Resolve each bootstrap address into a list of canonical names.
     /// After bootstrap, behaves the same as `UseAllDnsIps`.
+    ///
+    /// # Note — deviation from Java behavior
+    ///
+    /// In Java, `RESOLVE_CANONICAL_BOOTSTRAP_SERVERS_ONLY` performs a
+    /// real reverse-DNS lookup via `InetAddress.getCanonicalHostName()`
+    /// to derive the canonical hostname for each resolved IP. The Rust
+    /// translation in Phase 4c does **not** perform reverse-DNS:
+    /// `std::net` exposes no reverse-DNS API, so the canonical-name slot
+    /// is always populated with the IP textual form (the same fallback
+    /// Java exhibits when reverse-DNS fails). See
+    /// [`crate::client_utils::parse_and_validate_addresses_with_resolver`]
+    /// for the implementation.
+    ///
+    /// **Implication for SASL/Kerberos**: the original motivation for
+    /// this variant is SASL/Kerberos, where the Service Principal Name
+    /// (SPN) is computed from the canonical hostname. With the IP-literal
+    /// fallback, the resulting SPN will be `kafka/<ip>@REALM` rather than
+    /// `kafka/<canonical-hostname>@REALM` and Kerberos authentication will
+    /// fail unless every broker IP has a corresponding host principal in
+    /// the KDC. The SASL stack itself is not yet implemented in this
+    /// crate, so no caller is currently affected.
+    ///
+    /// **Where to revisit**: this deviation must be addressed when the
+    /// SASL/Kerberos stack lands (Phase 5 or later). The likely fix is
+    /// to add a popular Rust crate that provides reverse-DNS (e.g.
+    /// `dns-lookup`, `hickory-resolver`) and route the resolver through
+    /// it for this variant only — preserving the cheap synchronous
+    /// `to_socket_addrs` path for `UseAllDnsIps`.
     ResolveCanonicalBootstrapServersOnly,
 }
 
