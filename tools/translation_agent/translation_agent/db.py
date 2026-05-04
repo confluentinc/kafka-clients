@@ -1,0 +1,418 @@
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+"""SQLite schema and persistence helpers for the translation agent.
+
+Tables track:
+
+- `branch_commit`: which AK commit on which AK branch corresponds to which
+  Rust commit on which Rust branch. Seeded once with `--seed` and updated
+  by the orchestrator each time a Rust commit lands.
+- `pr_commit`: per-PR state machine, status enum 0..4 per design step 3.
+"""
+
+try:
+    import sqlite3
+except ImportError as _e:
+    # pyenv-built Pythons sometimes lack the _sqlite3 C extension because
+    # libsqlite3-dev was missing at compile time. Fall back to the
+    # pip-installable `pysqlite3` binary so dev environments work without
+    # rebuilding the interpreter. No effect on environments with a working
+    # stdlib sqlite3 (the common case).
+    try:
+        import pysqlite3 as sqlite3
+    except ImportError:
+        raise ImportError(
+            "Neither stdlib sqlite3 nor pysqlite3 is available. Either "
+            "rebuild your Python with libsqlite3-dev installed, or run "
+            "`pip install pysqlite3-binary`."
+        ) from _e
+
+from typing import Optional
+
+
+# Status enum values match design step 3.
+STATUS_NO_PLAN = 0
+STATUS_DEPENDENCIES_EVALUATED = 1
+STATUS_PLAN_CREATED = 2
+STATUS_PLAN_APPROVED = 3
+STATUS_IMPLEMENTATION_DONE = 4
+
+STATUS_NAMES = {
+    STATUS_NO_PLAN: "no_plan",
+    STATUS_DEPENDENCIES_EVALUATED: "dependencies_evaluated",
+    STATUS_PLAN_CREATED: "plan_created",
+    STATUS_PLAN_APPROVED: "plan_approved",
+    STATUS_IMPLEMENTATION_DONE: "implementation_done",
+}
+
+
+_SCHEMA = [
+    # branch_commit's PK is `rust_branch` alone -- each Rust branch tracks
+    # exactly one (ak_branch, ak_commit) at a time. The row IS the
+    # current cursor; updates replace it in place.
+    """
+    CREATE TABLE IF NOT EXISTS branch_commit (
+        rust_branch  TEXT NOT NULL PRIMARY KEY,
+        ak_branch    TEXT NOT NULL,
+        ak_commit    TEXT NOT NULL,
+        rust_commit  TEXT NOT NULL
+    )
+    """,
+    """
+    CREATE TABLE IF NOT EXISTS pr_commit (
+        pr_number                  INTEGER PRIMARY KEY,
+        rust_branch                TEXT NOT NULL,
+        ak_branch                  TEXT,
+        ak_commit                  TEXT NOT NULL,
+        plan_dependency            TEXT,
+        implementation_dependency  TEXT,
+        status                     INTEGER NOT NULL DEFAULT 0,
+        last_error                 TEXT
+    )
+    """,
+    "CREATE INDEX IF NOT EXISTS idx_pr_commit_status ON pr_commit(status)",
+    "CREATE INDEX IF NOT EXISTS idx_pr_commit_rust_branch ON pr_commit(rust_branch)",
+]
+
+
+def connect(db_path: str) -> sqlite3.Connection:
+    conn = sqlite3.connect(db_path)
+    conn.row_factory = sqlite3.Row
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
+
+
+def migrate(conn: sqlite3.Connection) -> None:
+    """Idempotently create all tables and indexes, and migrate any old
+    branch_commit schema (multi-column PK) to the new single-column PK.
+    """
+    with conn:
+        # Migrate first so the CREATE-IF-NOT-EXISTS below sees the right
+        # shape on a pre-existing DB.
+        _migrate_branch_commit_pk(conn)
+        for stmt in _SCHEMA:
+            conn.execute(stmt)
+
+
+def _migrate_branch_commit_pk(conn: sqlite3.Connection) -> None:
+    """Convert old branch_commit schema (PK on `(ak_branch, ak_commit, rust_branch)`)
+    to the new schema (PK on `rust_branch` alone). No-op if the table
+    doesn't exist yet or is already on the new schema.
+
+    Collapses any duplicate rows for the same `rust_branch` by picking the
+    most recently inserted (max rowid).
+    """
+    row = conn.execute(
+        "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_commit'"
+    ).fetchone()
+    if row is None:
+        return
+    sql = row["sql"] or ""
+    if "PRIMARY KEY (ak_branch, ak_commit, rust_branch)" not in sql:
+        return  # already on the new schema
+    conn.executescript(
+        """
+        CREATE TABLE branch_commit_new (
+            rust_branch  TEXT NOT NULL PRIMARY KEY,
+            ak_branch    TEXT NOT NULL,
+            ak_commit    TEXT NOT NULL,
+            rust_commit  TEXT NOT NULL
+        );
+        INSERT INTO branch_commit_new (rust_branch, ak_branch, ak_commit, rust_commit)
+        SELECT rust_branch, ak_branch, ak_commit, rust_commit
+        FROM branch_commit
+        WHERE rowid IN (
+            SELECT MAX(rowid) FROM branch_commit GROUP BY rust_branch
+        );
+        DROP INDEX IF EXISTS idx_branch_commit_rust;
+        DROP TABLE branch_commit;
+        ALTER TABLE branch_commit_new RENAME TO branch_commit;
+        """
+    )
+
+
+def seed_correspondence(
+    conn: sqlite3.Connection,
+    ak_branch: str,
+    ak_commit: str,
+    rust_branch: str,
+    rust_commit: str,
+    *,
+    force: bool = False,
+) -> str:
+    """Insert or update the cursor row for `rust_branch`.
+
+    Returns one of:
+      - "inserted" -- new row added.
+      - "unchanged" -- row already exists with identical values.
+      - "updated" -- row existed with different values AND `force=True`.
+
+    Raises ValueError if a row already exists with different values and
+    `force=False` (the operator must opt in to overwriting the cursor).
+    """
+    with conn:
+        existing = conn.execute(
+            "SELECT ak_branch, ak_commit, rust_commit FROM branch_commit "
+            "WHERE rust_branch = ?",
+            (rust_branch,),
+        ).fetchone()
+        if existing is None:
+            conn.execute(
+                "INSERT INTO branch_commit "
+                "(rust_branch, ak_branch, ak_commit, rust_commit) "
+                "VALUES (?, ?, ?, ?)",
+                (rust_branch, ak_branch, ak_commit, rust_commit),
+            )
+            return "inserted"
+        same = (
+            existing["ak_branch"] == ak_branch
+            and existing["ak_commit"] == ak_commit
+            and existing["rust_commit"] == rust_commit
+        )
+        if same:
+            return "unchanged"
+        if not force:
+            raise ValueError(
+                f"branch_commit row for rust_branch={rust_branch!r} already "
+                f"exists (ak={existing['ak_branch']}/{existing['ak_commit']}, "
+                f"rust_commit={existing['rust_commit']}). Pass force=True to "
+                f"update."
+            )
+        conn.execute(
+            "UPDATE branch_commit SET ak_branch = ?, ak_commit = ?, "
+            "rust_commit = ? WHERE rust_branch = ?",
+            (ak_branch, ak_commit, rust_commit, rust_branch),
+        )
+        return "updated"
+
+
+def get_pr(conn: sqlite3.Connection, pr_number: int) -> Optional[dict]:
+    row = conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = ?", (pr_number,)
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def get_pr_commits_by_status(
+    conn: sqlite3.Connection,
+    status: int,
+    rust_branch: Optional[str] = None,
+) -> list:
+    """Return all `pr_commit` rows in `status`, optionally filtered by Rust branch.
+
+    Ordered by pr_number for deterministic test/log output.
+    """
+    if rust_branch is None:
+        rows = conn.execute(
+            "SELECT * FROM pr_commit WHERE status = ? ORDER BY pr_number",
+            (status,),
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT * FROM pr_commit WHERE status = ? AND rust_branch = ? "
+            "ORDER BY pr_number",
+            (status, rust_branch),
+        ).fetchall()
+    return [dict(r) for r in rows]
+
+
+def update_dependencies(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    plan_dependency: Optional[str],
+    implementation_dependency: Optional[str],
+) -> None:
+    """Set the two dependency columns and transition status 0 -> 1."""
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET plan_dependency = ?, "
+            "implementation_dependency = ?, status = ?, last_error = NULL "
+            "WHERE pr_number = ?",
+            (
+                plan_dependency,
+                implementation_dependency,
+                STATUS_DEPENDENCIES_EVALUATED,
+                pr_number,
+            ),
+        )
+
+
+def set_last_error(
+    conn: sqlite3.Connection, pr_number: int, error: str
+) -> None:
+    """Persist a failure message on the row without changing status."""
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET last_error = ? WHERE pr_number = ?",
+            (error, pr_number),
+        )
+
+
+def get_latest_correspondence(
+    conn: sqlite3.Connection, rust_branch: str
+) -> Optional[dict]:
+    """Return the `branch_commit` row for `rust_branch`, or None.
+
+    Used by the sweep mode (design step 2) to find the AK commit
+    corresponding to the current Rust-branch cursor. Each Rust branch
+    has at most one row (PK on rust_branch).
+    """
+    row = conn.execute(
+        "SELECT * FROM branch_commit WHERE rust_branch = ?",
+        (rust_branch,),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def insert_pr_commit(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    rust_branch: str,
+    ak_branch: str,
+    ak_commit: str,
+) -> bool:
+    """Insert a status-0 row for a newly created PR.
+
+    Idempotent on `pr_number`: returns True if a new row was inserted, False
+    if a row already existed for the PR.
+    """
+    with conn:
+        cursor = conn.execute(
+            "INSERT OR IGNORE INTO pr_commit "
+            "(pr_number, rust_branch, ak_branch, ak_commit, status) "
+            "VALUES (?, ?, ?, ?, ?)",
+            (pr_number, rust_branch, ak_branch, ak_commit, STATUS_NO_PLAN),
+        )
+        return cursor.rowcount > 0
+
+
+def cleanup_pr_commits_for_rust_branch(
+    conn: sqlite3.Connection, rust_branch: str,
+) -> int:
+    """Delete every pr_commit row matching `rust_branch`. Returns the
+    number of rows removed.
+
+    Used by `--seed --cleanup-prs` to reset a branch's PR queue when
+    stale/failed/dry-run rows would otherwise be picked up by the next
+    sweep's unblocked-predicate checks. Idempotent: 0 rows when the
+    branch has no PRs. Index-backed via idx_pr_commit_rust_branch.
+    """
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM pr_commit WHERE rust_branch = ?",
+            (rust_branch,),
+        )
+        return cursor.rowcount
+
+
+def get_unblocked_for_status(
+    conn: sqlite3.Connection,
+    status: int,
+    blocking_status_min: int,
+    dep_column: str,
+    rust_branch: Optional[str] = None,
+) -> list:
+    """Return `pr_commit` rows in `status` whose dep_column is unblocked.
+
+    Unblocked means any of:
+    - `dep_column` IS NULL (no dependency declared)
+    - the dependency SHA is not present in pr_commit at all (out of batch)
+    - the dependency row's status is >= blocking_status_min
+
+    For step 6 (plan generation), use `dep_column="plan_dependency"` and
+    `blocking_status_min=STATUS_PLAN_APPROVED` (3).
+
+    For step 8 (implementation), use `dep_column="implementation_dependency"`
+    and `blocking_status_min=STATUS_IMPLEMENTATION_DONE` (4).
+    """
+    if dep_column not in ("plan_dependency", "implementation_dependency"):
+        raise ValueError(f"invalid dep_column: {dep_column!r}")
+    parts = ["SELECT * FROM pr_commit p WHERE p.status = ?"]
+    params: list = [status]
+    if rust_branch is not None:
+        parts.append("AND p.rust_branch = ?")
+        params.append(rust_branch)
+    parts.append(
+        f"AND (p.{dep_column} IS NULL "
+        f"OR NOT EXISTS (SELECT 1 FROM pr_commit d WHERE d.ak_commit = p.{dep_column}) "
+        f"OR EXISTS (SELECT 1 FROM pr_commit d WHERE d.ak_commit = p.{dep_column} "
+        f"AND d.status >= ?))"
+    )
+    params.append(blocking_status_min)
+    parts.append("ORDER BY p.pr_number")
+    rows = conn.execute(" ".join(parts), params).fetchall()
+    return [dict(r) for r in rows]
+
+
+def mark_plan_created(conn: sqlite3.Connection, pr_number: int) -> None:
+    """Status 1 -> 2."""
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET status = ?, last_error = NULL WHERE pr_number = ?",
+            (STATUS_PLAN_CREATED, pr_number),
+        )
+
+
+def mark_implementation_done(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    ak_branch: str,
+    ak_commit: str,
+    rust_branch: str,
+    rust_commit: str,
+) -> None:
+    """Status 3 -> 4 AND advance the branch_commit cursor for `rust_branch`.
+
+    Single sqlite transaction so the two writes are atomic -- avoids the
+    risk of advancing the PR status without recording the new cursor.
+    Uses INSERT OR REPLACE because branch_commit's PK is rust_branch
+    alone -- each Rust branch tracks exactly one (ak_branch, ak_commit)
+    at a time, so a successful impl moves the cursor in place.
+    """
+    with conn:
+        conn.execute(
+            "UPDATE pr_commit SET status = ?, last_error = NULL WHERE pr_number = ?",
+            (STATUS_IMPLEMENTATION_DONE, pr_number),
+        )
+        conn.execute(
+            "INSERT OR REPLACE INTO branch_commit "
+            "(rust_branch, ak_branch, ak_commit, rust_commit) "
+            "VALUES (?, ?, ?, ?)",
+            (rust_branch, ak_branch, ak_commit, rust_commit),
+        )
+
+
+def mark_plan_approved(conn: sqlite3.Connection, pr_number: int) -> None:
+    """Transition a pr_commit row from status 2 (plan_created) to 3 (plan_approved).
+
+    Raises ValueError if the row does not exist or is not in status 2.
+    Clears `last_error` on success.
+    """
+    with conn:
+        row = conn.execute(
+            "SELECT status FROM pr_commit WHERE pr_number = ?", (pr_number,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"No pr_commit row for PR {pr_number}")
+        if row["status"] != STATUS_PLAN_CREATED:
+            raise ValueError(
+                f"PR {pr_number} is in status {row['status']} "
+                f"({STATUS_NAMES.get(row['status'], 'unknown')}), "
+                f"expected {STATUS_PLAN_CREATED} (plan_created)"
+            )
+        conn.execute(
+            "UPDATE pr_commit SET status = ?, last_error = NULL WHERE pr_number = ?",
+            (STATUS_PLAN_APPROVED, pr_number),
+        )

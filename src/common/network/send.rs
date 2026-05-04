@@ -54,6 +54,16 @@ pub trait KafkaSend: Send {
         channel: &'a mut dyn TransportLayer,
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
+    /// Attempts a non-blocking write without creating a Future.
+    ///
+    /// Returns `WouldBlock` if the transport cannot write immediately
+    /// (e.g., SSL connections). Callers should fall back to the async
+    /// [`write_to`](Self::write_to) when this returns `WouldBlock`.
+    fn try_write_to(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize> {
+        let _ = channel;
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+
     /// Returns the total size of this send in bytes.
     fn size(&self) -> usize;
 }
