@@ -32,15 +32,24 @@
 //! 4. (For wakers / async callers) `notify_waiters` on a `Notify` cloned out
 //!    of the state.
 //!
-//! `MetadataSnapshot` is exposed as `Arc<MetadataSnapshot>` to keep
-//! `Metadata::fetch_snapshot()` cheap on the producer hot path: callers
-//! get an `Arc::clone`-bumped handle without touching the mutex's data.
+//! `MetadataSnapshot` is read on the producer hot path (every
+//! `KafkaProducer.send` looks up partitioning metadata via
+//! [`Metadata::fetch`]). To preserve Java's lock-free read semantics —
+//! `Metadata.java:79,129-138` declares `metadataSnapshot` as `volatile`
+//! and the `fetch()` / `fetchMetadataSnapshot()` accessors are *not*
+//! `synchronized` — this field is hoisted out of the inner mutex into an
+//! [`arc_swap::ArcSwap`]. Readers do an atomic load (no lock acquisition);
+//! writers, which always run inside `update()` / `update_partition_leadership()`
+//! / `bootstrap()` while holding the inner mutex (so writers serialize
+//! with each other just like Java's `synchronized`), call `store` to
+//! publish the new snapshot.
 
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
+use arc_swap::ArcSwap;
 use log::{debug, error, info, trace};
 use tokio::sync::Notify;
 
@@ -88,6 +97,13 @@ pub struct Metadata {
     /// All mutable state lives behind a single mutex (mirrors Java's
     /// `synchronized` monitor on `Metadata`).
     inner: Mutex<MetadataInner>,
+    /// `volatile Arc<MetadataSnapshot>` analogue. Read lock-free by
+    /// `fetch()` / `fetch_metadata_snapshot()` (producer hot path),
+    /// written by `update()` / `update_partition_leadership()` /
+    /// `bootstrap()` while the writer holds [`Metadata::inner`] (so
+    /// writers serialize with each other just like Java's
+    /// `synchronized`). See module docs.
+    metadata_snapshot: ArcSwap<MetadataSnapshot>,
     /// Notify waiters whenever the update version is bumped, the metadata
     /// instance is closed, or `fatalError` is raised. Producers' async
     /// `await_update` waits on this signal.
@@ -98,6 +114,12 @@ pub struct Metadata {
 }
 
 /// Mutable state guarded by [`Metadata::inner`]'s mutex.
+///
+/// Note: `metadata_snapshot` is *not* in here — it lives on [`Metadata`]
+/// directly inside an [`ArcSwap`] so producer-hot-path readers
+/// (`fetch()` / `fetch_metadata_snapshot()`) don't acquire this mutex.
+/// Writers still run with this mutex held, so writer-vs-writer
+/// serialization is preserved (matches Java's `synchronized` semantics).
 struct MetadataInner {
     refresh_backoff: ExponentialBackoff,
     metadata_expire_ms: i64,
@@ -109,7 +131,6 @@ struct MetadataInner {
     fatal_exception: Option<KafkaError>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
-    metadata_snapshot: Arc<MetadataSnapshot>,
     need_full_update: bool,
     need_partial_update: bool,
     equivalent_response_count: i64,
@@ -203,7 +224,6 @@ impl Metadata {
             fatal_exception: None,
             invalid_topics: HashSet::new(),
             unauthorized_topics: HashSet::new(),
-            metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
             need_full_update: false,
             need_partial_update: false,
             equivalent_response_count: 0,
@@ -214,7 +234,12 @@ impl Metadata {
             retain_topic: None,
         };
 
-        Ok(Metadata { inner: Mutex::new(inner), notify: Arc::new(Notify::new()), log_context })
+        Ok(Metadata {
+            inner: Mutex::new(inner),
+            metadata_snapshot: ArcSwap::from(Arc::new(MetadataSnapshot::empty())),
+            notify: Arc::new(Notify::new()),
+            log_context,
+        })
     }
 
     /// Inject a custom `retainTopic` predicate. Java uses subclass override;
@@ -232,15 +257,19 @@ impl Metadata {
     }
 
     /// Get the current cluster info without blocking. Mirrors `fetch()`.
+    ///
+    /// Lock-free: reads via [`ArcSwap::load_full`] (Java's `volatile`
+    /// read of `metadataSnapshot` followed by `clusterFromMetadataSnapshot`).
     pub fn fetch(&self) -> Arc<Cluster> {
-        let inner = self.inner.lock().expect("metadata mutex poisoned");
-        inner.metadata_snapshot.cluster()
+        self.metadata_snapshot.load_full().cluster()
     }
 
     /// Get the current metadata cache. Mirrors `fetchMetadataSnapshot()`.
+    ///
+    /// Lock-free: reads via [`ArcSwap::load_full`] (Java's `volatile`
+    /// read of `metadataSnapshot`).
     pub fn fetch_metadata_snapshot(&self) -> Arc<MetadataSnapshot> {
-        let inner = self.inner.lock().expect("metadata mutex poisoned");
-        Arc::clone(&inner.metadata_snapshot)
+        self.metadata_snapshot.load_full()
     }
 
     /// Mirrors `metadataExpireMs()`.
@@ -354,7 +383,8 @@ impl Metadata {
     pub fn partition_metadata_if_current(&self, topic_partition: &TopicPartition) -> Option<PartitionMetadata> {
         let inner = self.inner.lock().expect("metadata mutex poisoned");
         let epoch = inner.last_seen_leader_epochs.get(topic_partition).copied();
-        let pm = inner.metadata_snapshot.partition_metadata(topic_partition).cloned();
+        let snapshot = self.metadata_snapshot.load_full();
+        let pm = snapshot.partition_metadata(topic_partition).cloned();
         match epoch {
             None => pm, // old cluster format, no epochs
             Some(e) => pm.filter(|p| p.leader_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH) == e),
@@ -363,21 +393,20 @@ impl Metadata {
 
     /// Mirrors `topicIds()`.
     pub fn topic_ids(&self) -> HashMap<String, Uuid> {
-        let inner = self.inner.lock().expect("metadata mutex poisoned");
-        inner.metadata_snapshot.topic_ids().clone()
+        self.metadata_snapshot.load_full().topic_ids().clone()
     }
 
     /// Mirrors `topicNames()`.
     pub fn topic_names(&self) -> HashMap<Uuid, String> {
-        let inner = self.inner.lock().expect("metadata mutex poisoned");
-        inner.metadata_snapshot.topic_names().clone()
+        self.metadata_snapshot.load_full().topic_names().clone()
     }
 
     /// Mirrors `currentLeader(TopicPartition)`.
     pub fn current_leader(&self, topic_partition: &TopicPartition) -> LeaderAndEpoch {
         let inner = self.inner.lock().expect("metadata mutex poisoned");
         let epoch = inner.last_seen_leader_epochs.get(topic_partition).copied();
-        let pm = inner.metadata_snapshot.partition_metadata(topic_partition).cloned();
+        let snapshot = self.metadata_snapshot.load_full();
+        let pm = snapshot.partition_metadata(topic_partition).cloned();
         let pm = match epoch {
             None => pm,
             Some(e) => pm.filter(|p| p.leader_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH) == e),
@@ -385,7 +414,7 @@ impl Metadata {
         match pm {
             None => LeaderAndEpoch::new(None, inner.last_seen_leader_epochs.get(topic_partition).copied()),
             Some(pm) => {
-                let leader_node = pm.leader_id.and_then(|id| inner.metadata_snapshot.node_by_id(id).cloned());
+                let leader_node = pm.leader_id.and_then(|id| snapshot.node_by_id(id).cloned());
                 LeaderAndEpoch::new(leader_node, pm.leader_epoch)
             },
         }
@@ -396,7 +425,8 @@ impl Metadata {
         let mut inner = self.inner.lock().expect("metadata mutex poisoned");
         inner.need_full_update = true;
         inner.update_version += 1;
-        inner.metadata_snapshot = Arc::new(MetadataSnapshot::bootstrap(&addresses));
+        let new_snapshot = MetadataSnapshot::bootstrap(&addresses);
+        self.metadata_snapshot.store(Arc::new(new_snapshot));
         inner.bootstrap_addresses = addresses;
         drop(inner);
         self.notify.notify_waiters();
@@ -457,12 +487,23 @@ impl Metadata {
             }
             inner.equivalent_response_count += 1;
 
-            let previous_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(str::to_owned);
+            // Take a consistent view of the current snapshot. Safe to
+            // store it once: only writers can swap, and we hold the
+            // writer lock.
+            let current_snapshot = self.metadata_snapshot.load_full();
+            let previous_cluster_id = current_snapshot.cluster_resource().cluster_id().map(str::to_owned);
 
-            let new_snapshot = self.handle_metadata_response_locked(&mut inner, response, is_partial_update, now_ms);
-            inner.metadata_snapshot = Arc::new(new_snapshot);
+            let new_snapshot = self.handle_metadata_response_locked(
+                &mut inner,
+                &current_snapshot,
+                response,
+                is_partial_update,
+                now_ms,
+            );
+            let new_snapshot = Arc::new(new_snapshot);
+            self.metadata_snapshot.store(Arc::clone(&new_snapshot));
 
-            let cluster = inner.metadata_snapshot.cluster();
+            let cluster = new_snapshot.cluster();
             inner.maybe_set_metadata_error(&cluster, prefix);
 
             // Drop any cached leader epochs whose topic is no longer
@@ -477,16 +518,16 @@ impl Metadata {
                 inner.last_seen_leader_epochs.remove(&tp);
             }
 
-            let new_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(str::to_owned);
+            let new_cluster_id = new_snapshot.cluster_resource().cluster_id().map(str::to_owned);
             if previous_cluster_id != new_cluster_id {
                 info!("{prefix}Cluster ID: {new_cluster_id:?}");
             }
 
             listeners_to_notify = Arc::clone(&inner.cluster_resource_listeners);
-            new_resource = inner.metadata_snapshot.cluster_resource();
+            new_resource = new_snapshot.cluster_resource();
             debug!(
                 "{prefix}Updated cluster metadata updateVersion {} to {:?}",
-                inner.update_version, inner.metadata_snapshot
+                inner.update_version, new_snapshot
             );
         }
 
@@ -507,10 +548,13 @@ impl Metadata {
         let updated_partitions;
         {
             let mut inner = self.inner.lock().expect("metadata mutex poisoned");
+            // Take a consistent snapshot view (writers serialize via
+            // `inner` so it cannot be swapped under us).
+            let current_snapshot = self.metadata_snapshot.load_full();
             // Build the new-nodes map starting from the leader_nodes input.
             let mut new_nodes: HashMap<i32, Node> = leader_nodes.into_iter().map(|n| (n.id(), n)).collect();
             // Insert non-overlapping nodes from the existing snapshot.
-            for n in inner.metadata_snapshot.cluster_ref().nodes() {
+            for n in current_snapshot.cluster_ref().nodes() {
                 new_nodes.entry(n.id()).or_insert_with(|| n.clone());
             }
 
@@ -520,7 +564,7 @@ impl Metadata {
                 // lock — emulate by computing inline.
                 let current_leader = {
                     let epoch = inner.last_seen_leader_epochs.get(partition).copied();
-                    let pm = inner.metadata_snapshot.partition_metadata(partition).cloned();
+                    let pm = current_snapshot.partition_metadata(partition).cloned();
                     let pm = match epoch {
                         None => pm,
                         Some(e) => pm.filter(|p| p.leader_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH) == e),
@@ -528,8 +572,7 @@ impl Metadata {
                     match pm {
                         None => LeaderAndEpoch::new(None, inner.last_seen_leader_epochs.get(partition).copied()),
                         Some(pm) => {
-                            let leader_node =
-                                pm.leader_id.and_then(|id| inner.metadata_snapshot.node_by_id(id).cloned());
+                            let leader_node = pm.leader_id.and_then(|id| current_snapshot.node_by_id(id).cloned());
                             LeaderAndEpoch::new(leader_node, pm.leader_epoch)
                         },
                     }
@@ -553,7 +596,7 @@ impl Metadata {
                     );
                     continue;
                 }
-                let existing = match inner.metadata_snapshot.partition_metadata(partition) {
+                let existing = match current_snapshot.partition_metadata(partition) {
                     Some(p) => p.clone(),
                     None => {
                         debug!(
@@ -586,7 +629,7 @@ impl Metadata {
                 update_partition_metadata.iter().map(|m| m.topic().to_owned()).collect();
 
             // Get topic-ids for updated topics from existing topic-ids.
-            let existing_topic_ids = inner.metadata_snapshot.topic_ids().clone();
+            let existing_topic_ids = current_snapshot.topic_ids().clone();
             let mut topic_ids_for_updated_topics: HashMap<String, Uuid> = HashMap::new();
             for topic in &updated_topics {
                 if let Some(id) = existing_topic_ids.get(topic) {
@@ -603,9 +646,9 @@ impl Metadata {
 
             updated_partitions = update_partition_metadata.iter().map(|m| m.topic_partition.clone()).collect();
 
-            let cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(str::to_owned);
-            let controller = inner.metadata_snapshot.cluster_ref().controller().cloned();
-            let new_snapshot = inner.metadata_snapshot.merge_with(
+            let cluster_id = current_snapshot.cluster_resource().cluster_id().map(str::to_owned);
+            let controller = current_snapshot.cluster_ref().controller().cloned();
+            let new_snapshot = current_snapshot.merge_with(
                 cluster_id,
                 new_nodes,
                 update_partition_metadata,
@@ -616,9 +659,10 @@ impl Metadata {
                 topic_ids_for_updated_topics,
                 |_, _| true,
             );
-            inner.metadata_snapshot = Arc::new(new_snapshot);
+            let new_snapshot = Arc::new(new_snapshot);
+            self.metadata_snapshot.store(Arc::clone(&new_snapshot));
             listeners_to_notify = Arc::clone(&inner.cluster_resource_listeners);
-            cluster_resource = inner.metadata_snapshot.cluster_resource();
+            cluster_resource = new_snapshot.cluster_resource();
         }
 
         listeners_to_notify.on_update(&cluster_resource);
@@ -629,9 +673,15 @@ impl Metadata {
     /// Internal: build the next snapshot from a metadata response while
     /// holding the inner lock. Mirrors the private
     /// `handleMetadataResponse(MetadataResponse, boolean, long)`.
+    ///
+    /// `current_snapshot` must be the value loaded from
+    /// [`Metadata::metadata_snapshot`] at the start of the writer
+    /// section — it is taken once and reused so all reads in this
+    /// function see a consistent view.
     fn handle_metadata_response_locked(
         &self,
         inner: &mut MetadataInner,
+        current_snapshot: &Arc<MetadataSnapshot>,
         response: &MetadataResponse,
         is_partial_update: bool,
         now_ms: i64,
@@ -643,7 +693,7 @@ impl Metadata {
         let mut invalid_topics: HashSet<String> = HashSet::new();
         let mut partitions: Vec<PartitionMetadata> = Vec::new();
         let mut topic_ids: HashMap<String, Uuid> = HashMap::new();
-        let old_topic_ids = inner.metadata_snapshot.topic_ids().clone();
+        let old_topic_ids = current_snapshot.topic_ids().clone();
 
         for metadata in response.topic_metadata() {
             let topic_name = metadata.topic().to_owned();
@@ -675,6 +725,7 @@ impl Metadata {
             if metadata.error() == Errors::None {
                 for partition_metadata in metadata.partition_metadata() {
                     let updated = inner.update_latest_metadata(
+                        current_snapshot,
                         partition_metadata,
                         response.has_reliable_leader_epochs(),
                         if topic_id == ZERO_UUID { None } else { Some(topic_id) },
@@ -718,12 +769,11 @@ impl Metadata {
         let controller = response.controller();
         if is_partial_update {
             let topics_set = topics;
-            let snap = Arc::clone(&inner.metadata_snapshot);
             // Capture `retain_topic` clone for the predicate closure below
             // — Java's lambda over the outer-method's `topics` and the
             // outer `retainTopic`.
             let retain_topic_fn = inner.retain_topic.clone();
-            snap.merge_with(
+            current_snapshot.merge_with(
                 cluster_id,
                 nodes,
                 partitions,
@@ -949,9 +999,12 @@ impl MetadataInner {
         }
     }
 
-    /// Mirrors `updateLatestMetadata(...)`.
+    /// Mirrors `updateLatestMetadata(...)`. `current_snapshot` is the
+    /// snapshot loaded at the start of the writer section — see
+    /// [`Metadata::handle_metadata_response_locked`].
     fn update_latest_metadata(
         &mut self,
+        current_snapshot: &Arc<MetadataSnapshot>,
         partition_metadata: &PartitionMetadata,
         has_reliable_leader_epoch: bool,
         topic_id: Option<Uuid>,
@@ -993,7 +1046,7 @@ impl MetadataInner {
                     debug!(
                         "{prefix}Got metadata for an older epoch {new_epoch} (current is {current_epoch}) for partition {tp}, not updating"
                     );
-                    self.metadata_snapshot.partition_metadata(&tp).cloned()
+                    current_snapshot.partition_metadata(&tp).cloned()
                 },
             }
         } else {

@@ -43,6 +43,14 @@ dashmap = "6"
 futures-util = "0.3"
 base64 = "0.22"
 bytes = "1"
+# `arc-swap` provides lock-free atomic Arc reads/swaps, which is the closest
+# Rust analogue of Java's `volatile Arc<T>` semantics. Used in
+# `crate::metadata::Metadata` to replace mutex-guarded reads of
+# `metadata_snapshot` on the producer hot path (every `KafkaProducer.send`
+# looks up partitioning metadata via `Metadata::fetch`); see
+# `Metadata.java:79,129-138` where `metadataSnapshot` is `volatile` and the
+# accessors are not `synchronized`.
+arc-swap = "1"
 
 [dev-dependencies]
 testcontainers = "0.27"
