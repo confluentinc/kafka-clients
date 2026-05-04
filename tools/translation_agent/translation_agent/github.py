@@ -104,6 +104,48 @@ def create_draft_pr(
     return pr_number
 
 
+def get_pr_state(
+    repo_path: str, pr_number: int,
+) -> "tuple[str, Optional[str]]":
+    """Return (state, merge_commit_sha) for `pr_number`.
+
+    `state` is one of "OPEN", "CLOSED", "MERGED" (gh's exact strings).
+    `merge_commit_sha` is the SHA of the resulting commit on the base
+    branch when state is MERGED, otherwise None.
+
+    Wraps `gh pr view <N> --json state,mergeCommit`. Raises GhError on
+    non-zero exit; the caller decides whether to abort or skip.
+
+    Merge-style coverage: gh's `mergeCommit` field returns the
+    appropriate commit on the base branch for ALL three GitHub merge
+    styles. For squash merges it's the single squash commit on base;
+    for merge commits it's the actual merge commit; for rebase merges
+    it's the tip of the rebased commits added to base. In every case
+    `state` is MERGED and `mergeCommit.oid` is the right SHA to record
+    as `branch_commit.rust_commit`, so this helper does not need
+    merge-style-specific branching.
+    """
+    proc = subprocess.run(
+        [
+            "gh", "pr", "view", str(pr_number),
+            "--json", "state,mergeCommit",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh pr view failed (rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+    import json
+    data = json.loads(proc.stdout)
+    state = data.get("state", "")
+    merge_commit = data.get("mergeCommit") or {}
+    merge_sha = merge_commit.get("oid") if isinstance(merge_commit, dict) else None
+    return state, merge_sha
+
+
 def find_pr_number_for_branch(repo_path: str, head_branch: str) -> Optional[int]:
     """Return the PR number for `head_branch`, or None if none exists.
 

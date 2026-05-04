@@ -299,6 +299,73 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
     return 0
 
 
+def _check_pr_closures_and_advance_cursor(
+    args: argparse.Namespace, conn, ak_commits, cursor,
+) -> "Optional[str]":
+    """Walk `ak_commits` in chronological order; for each one whose
+    pr_commit row is present AND whose GitHub PR is CLOSED or MERGED,
+    delete the row and remember the AK commit as the new cursor
+    candidate. Stop at the first row that's missing, synthetic
+    (pr_number < 0), still OPEN, or hits a gh-view failure.
+
+    On any cleanup, advance `branch_commit` for `args.rust_branch`
+    via `db.seed_correspondence(..., force=True)`. For MERGED PRs the
+    cursor's `rust_commit` is updated to the merge commit's SHA on
+    the base branch (works for merge / squash / rebase merges
+    uniformly because gh's `mergeCommit` field returns the right
+    commit in all three cases). For CLOSED-without-merge PRs the
+    `rust_commit` is unchanged from the previous cursor.
+
+    Returns the new cursor `ak_commit` value if advanced, or None
+    otherwise. No-ops in dry-run mode and when ak_commits is empty.
+    """
+    if args.dry_run or not ak_commits:
+        return None
+
+    new_ak = None
+    new_rust = cursor["rust_commit"]
+
+    for ak in ak_commits:
+        row = db.get_pr_commit_by_branch_and_ak(conn, args.rust_branch, ak)
+        if row is None:
+            break  # unprocessed commit -> stop
+        if row["pr_number"] is None or row["pr_number"] < 0:
+            break  # synthetic dry-run row -> stop
+        try:
+            state, merge_sha = github.get_pr_state(
+                args.rust_repo_path, row["pr_number"],
+            )
+        except github.GhError as e:
+            log.warning(
+                "PR closure check: gh failed for #%d: %s -- "
+                "stopping walk, proceeding with the rest of the sweep",
+                row["pr_number"], e,
+            )
+            break
+        if state == "OPEN":
+            break  # still in flight -> stop
+        # CLOSED or MERGED -> clean up
+        db.delete_pr_commit(conn, row["pr_number"])
+        new_ak = ak
+        if state == "MERGED" and merge_sha:
+            new_rust = merge_sha
+        log.info(
+            "PR #%d (%s) for AK %s: removed pr_commit row",
+            row["pr_number"], state, ak[:12],
+        )
+
+    if new_ak is not None:
+        db.seed_correspondence(
+            conn, cursor["ak_branch"], new_ak,
+            args.rust_branch, new_rust, force=True,
+        )
+        log.info(
+            "Cursor advanced: ak=%s, rust=%s",
+            new_ak[:12], (new_rust or "")[:12],
+        )
+    return new_ak
+
+
 def _run_sweep(args: argparse.Namespace, conn) -> int:
     required = ("ak_repo_path", "rust_branch")
     missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
@@ -335,6 +402,30 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
         log.info("No new AK commits to translate; will still process existing rows.")
     else:
         log.info("Found %d new AK commit(s) on %s", len(ak_commits), ak_branch)
+
+    # Prune the contiguous prefix of ak_commits whose PRs are already
+    # CLOSED or MERGED on GitHub: delete each pr_commit row and advance
+    # the branch_commit cursor accordingly. If the cursor moved, re-fetch
+    # the next batch from the new position before creating new PRs.
+    new_cursor_ak = _check_pr_closures_and_advance_cursor(
+        args, conn, ak_commits, cursor,
+    )
+    if new_cursor_ak is not None:
+        cursor = db.get_latest_correspondence(conn, args.rust_branch)
+        try:
+            ak_commits = git_ops.next_commits(
+                args.ak_repo_path, since=cursor["ak_commit"],
+                branch=ak_branch, n=10,
+            )
+        except git_ops.GitError as e:
+            log.error(
+                "Failed to re-read AK commits after cursor advance: %s", e,
+            )
+            return 1
+        log.info(
+            "Re-fetched %d AK commit(s) after cursor advance to %s",
+            len(ak_commits), new_cursor_ak[:12],
+        )
 
     # Step 3 (cont): create branches + draft PRs, insert into pr_commit.
     new_pr_count = 0

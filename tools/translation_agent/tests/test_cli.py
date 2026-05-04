@@ -14,7 +14,7 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -738,6 +738,267 @@ def test_sweep_recovers_pr_number_on_already_exists(tmp_path):
     ).fetchone()
     assert row is not None
     assert row["ak_commit"] == "ak_a"
+
+
+# --- PR closure check (sweep prefix-prune + cursor advance) ---------------
+
+def _seed_with_existing_prs(db_path, ak_to_pr):
+    """Helper: seed branch_commit at ak_seed and pre-insert pr_commit
+    rows for each (ak_commit -> pr_number) entry in `ak_to_pr`."""
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.seed_correspondence(conn, "trunk", "ak_seed", "master", "rust_seed")
+    for i, (ak, pr) in enumerate(ak_to_pr.items()):
+        db.insert_pr_commit(conn, pr, "master", "trunk", ak)
+    conn.commit()
+    conn.close()
+
+
+def test_sweep_closure_check_prunes_merged_prefix_and_advances_cursor(tmp_path):
+    """The core happy path: ak_a/ak_b/ak_c all have PR rows, gh
+    reports them MERGED. Walk should delete all three rows, advance
+    cursor to ak_c with the merge SHA of PR #103, and re-fetch the
+    next batch from the new cursor."""
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101, "ak_b": 102, "ak_c": 103})
+
+    # next_commits is called TWICE: first with the original cursor
+    # (returns the closed batch), then again after the cursor advance
+    # (returns ak_d, which is new and unprocessed).
+    next_commits_mock = MagicMock(side_effect=[
+        ["ak_a", "ak_b", "ak_c"],   # initial fetch
+        ["ak_d"],                    # re-fetch after cursor advance
+    ])
+    with patch("translation_agent.cli.git_ops.next_commits", next_commits_mock), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               side_effect=[201]), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=[
+                   ("MERGED", "merge_sha_a"),
+                   ("MERGED", "merge_sha_b"),
+                   ("MERGED", "merge_sha_c"),
+               ]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+
+    conn = db.connect(db_path)
+    # All three pruned rows are gone.
+    pruned = conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number IN (101, 102, 103)"
+    ).fetchall()
+    assert len(pruned) == 0
+    # Cursor advanced to ak_c, with rust_commit = merge SHA of the
+    # last (newest) merged PR.
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_c"
+    assert bc["rust_commit"] == "merge_sha_c"
+    # Re-fetched batch was used: ak_d's row exists with the new pr_number.
+    new_row = conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 201"
+    ).fetchone()
+    assert new_row is not None
+    assert new_row["ak_commit"] == "ak_d"
+    # next_commits was called twice (initial + re-fetch).
+    assert next_commits_mock.call_count == 2
+
+
+def test_sweep_closure_check_stops_at_first_open_pr(tmp_path):
+    """ak_a is MERGED, ak_b is OPEN, ak_c is also MERGED but should
+    NOT be pruned (we only prune the contiguous closed prefix).
+    Cursor advances to ak_a only."""
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101, "ak_b": 102, "ak_c": 103})
+
+    next_commits_mock = MagicMock(side_effect=[
+        ["ak_a", "ak_b", "ak_c"],
+        ["ak_b", "ak_c", "ak_d"],  # re-fetch after advancing past ak_a
+    ])
+    with patch("translation_agent.cli.git_ops.next_commits", next_commits_mock), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               return_value=999), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=[
+                   ("MERGED", "merge_sha_a"),
+                   ("OPEN", None),  # walk stops here
+               ]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+
+    conn = db.connect(db_path)
+    # Only ak_a's row was pruned; ak_b (OPEN) and ak_c (not yet
+    # checked) remain.
+    surviving_pr_numbers = sorted(
+        r["pr_number"] for r in conn.execute(
+            "SELECT pr_number FROM pr_commit ORDER BY pr_number"
+        ).fetchall()
+    )
+    assert 101 not in surviving_pr_numbers
+    assert 102 in surviving_pr_numbers
+    assert 103 in surviving_pr_numbers
+    # Cursor advanced to ak_a, NOT to ak_c.
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_a"
+
+
+def test_sweep_closure_check_stops_at_first_missing_row(tmp_path):
+    """ak_a has a MERGED PR row, ak_b has NO row at all (it's a new
+    commit). Walk advances cursor to ak_a then stops."""
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101})
+
+    next_commits_mock = MagicMock(side_effect=[
+        ["ak_a", "ak_b", "ak_c"],
+        ["ak_b", "ak_c", "ak_d"],
+    ])
+    with patch("translation_agent.cli.git_ops.next_commits", next_commits_mock), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               return_value=999), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=[("MERGED", "merge_sha_a")]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_a"
+
+
+def test_sweep_closure_check_stops_on_gh_failure(tmp_path):
+    """Transient gh failure on PR #102: walk stops at ak_b, cursor
+    advance reflects only what we processed before (ak_a). Sweep
+    proceeds (rc=0) -- closure check is best-effort."""
+    from translation_agent import github as gh
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101, "ak_b": 102, "ak_c": 103})
+
+    next_commits_mock = MagicMock(side_effect=[
+        ["ak_a", "ak_b", "ak_c"],
+        ["ak_b", "ak_c", "ak_d"],  # re-fetch
+    ])
+    with patch("translation_agent.cli.git_ops.next_commits", next_commits_mock), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               return_value=999), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=[
+                   ("MERGED", "merge_sha_a"),
+                   gh.GhError("rate limit hit"),
+               ]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    bc = db.get_latest_correspondence(conn, "master")
+    # Only ak_a was processed before the failure.
+    assert bc["ak_commit"] == "ak_a"
+
+
+def test_sweep_closure_check_skipped_in_dry_run(tmp_path):
+    """Dry-run never makes remote queries: get_pr_state must not be
+    called at all."""
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101})
+
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr"), \
+         patch("translation_agent.cli.github.get_pr_state") as mstate, \
+         patch("translation_agent.cli._r2_available", return_value=False):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master", "--dry-run",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_not_called()
+    # Cursor unchanged.
+    conn = db.connect(db_path)
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_seed"
+
+
+def test_sweep_closure_check_skips_synthetic_pr_rows(tmp_path):
+    """Synthetic dry-run rows (pr_number < 0) have no real PR; walk
+    must stop at them without calling gh."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.seed_correspondence(conn, "trunk", "ak_seed", "master", "rust_seed")
+    db.insert_pr_commit(conn, -12345, "master", "trunk", "ak_a")  # synthetic
+    conn.commit()
+    conn.close()
+
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               return_value=999), \
+         patch("translation_agent.cli.github.get_pr_state") as mstate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_not_called()
+    # Synthetic row is preserved; cursor unchanged.
+    conn = db.connect(db_path)
+    assert conn.execute(
+        "SELECT count(*) FROM pr_commit WHERE pr_number = -12345"
+    ).fetchone()[0] == 1
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_seed"
+
+
+def test_sweep_closure_check_keeps_rust_commit_for_closed_without_merge(tmp_path):
+    """CLOSED-without-merge PRs have no merge SHA; cursor's rust_commit
+    must stay at the previous value, not be set to None."""
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101})
+
+    next_commits_mock = MagicMock(side_effect=[["ak_a"], []])
+    with patch("translation_agent.cli.git_ops.next_commits", next_commits_mock), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               return_value=999), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=[("CLOSED", None)]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    bc = db.get_latest_correspondence(conn, "master")
+    assert bc["ak_commit"] == "ak_a"
+    # rust_commit unchanged from seed.
+    assert bc["rust_commit"] == "rust_seed"
 
 
 # --- dep-eval flow ----------------------------------------------------------

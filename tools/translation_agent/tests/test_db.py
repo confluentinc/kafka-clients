@@ -226,6 +226,54 @@ def test_insert_pr_commit_idempotent(conn):
     assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 1
 
 
+def test_get_pr_commit_by_branch_and_ak_returns_matching_row(conn):
+    """The sweep PR-closure check looks up rows by (rust_branch,
+    ak_commit) -- not by pr_number -- so the helper must scope to
+    both columns."""
+    db.insert_pr_commit(conn, 1, "master",      "trunk", "akA")
+    db.insert_pr_commit(conn, 2, "master",      "trunk", "akB")
+    db.insert_pr_commit(conn, 3, "dev/feature", "trunk", "akA")  # same ak, diff branch
+
+    row = db.get_pr_commit_by_branch_and_ak(conn, "master", "akB")
+    assert row is not None
+    assert row["pr_number"] == 2
+
+    # Same ak on a different rust branch: distinct row.
+    row = db.get_pr_commit_by_branch_and_ak(conn, "dev/feature", "akA")
+    assert row is not None
+    assert row["pr_number"] == 3
+
+
+def test_get_pr_commit_by_branch_and_ak_returns_none_when_missing(conn):
+    db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
+    assert db.get_pr_commit_by_branch_and_ak(conn, "master", "akZ") is None
+    assert db.get_pr_commit_by_branch_and_ak(conn, "other-branch", "akA") is None
+
+
+def test_delete_pr_commit_removes_one_row_returns_true(conn):
+    db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
+    db.insert_pr_commit(conn, 2, "master", "trunk", "akB")
+
+    assert db.delete_pr_commit(conn, 1) is True
+    remaining = [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM pr_commit ORDER BY pr_number"
+        ).fetchall()
+    ]
+    assert len(remaining) == 1
+    assert remaining[0]["pr_number"] == 2
+
+
+def test_delete_pr_commit_returns_false_when_no_match(conn):
+    """Idempotent: deleting a non-existent row is a no-op + False."""
+    db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
+    assert db.delete_pr_commit(conn, 999) is False
+    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 1
+    # And re-deleting an already-removed row returns False too.
+    assert db.delete_pr_commit(conn, 1) is True
+    assert db.delete_pr_commit(conn, 1) is False
+
+
 def test_cleanup_pr_commits_for_rust_branch_deletes_only_matching_branch(conn):
     """Used by --seed --cleanup-prs. Must delete exactly the supplied
     branch's PR rows and leave other branches untouched."""

@@ -172,6 +172,78 @@ def test_prepend_pr_body_round_trips_get_then_update():
     assert edit_kwargs["input"] == "Approved on 2026-05-03\n\nOriginal body line."
 
 
+# --- get_pr_state ----------------------------------------------------------
+#
+# `gh pr view --json state,mergeCommit` is the contract probed here.
+# Pin all three real-world response shapes so the closure-check sweep
+# can rely on the return tuple without merge-style branching.
+
+def test_get_pr_state_open_returns_state_and_none_merge_sha():
+    out = '{"state":"OPEN","mergeCommit":null}'
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0, stdout=out)) as mrun:
+        state, sha = github.get_pr_state("/repo", 42)
+    assert state == "OPEN"
+    assert sha is None
+    mrun.assert_called_once_with(
+        ["gh", "pr", "view", "42", "--json", "state,mergeCommit"],
+        capture_output=True, text=True, cwd="/repo",
+    )
+
+
+def test_get_pr_state_closed_without_merge_returns_state_and_none():
+    """Closed-without-merge: state=CLOSED, mergeCommit=null. Operator
+    abandoned the PR; no commit on base for us to point cursor at."""
+    out = '{"state":"CLOSED","mergeCommit":null}'
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0, stdout=out)):
+        state, sha = github.get_pr_state("/repo", 42)
+    assert state == "CLOSED"
+    assert sha is None
+
+
+def test_get_pr_state_merged_squash_returns_squash_commit_sha():
+    """The most common merge style on this repo. Squash produces a
+    single commit on base; gh exposes its SHA via mergeCommit.oid."""
+    out = '{"state":"MERGED","mergeCommit":{"oid":"abc123squashsha"}}'
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0, stdout=out)):
+        state, sha = github.get_pr_state("/repo", 42)
+    assert state == "MERGED"
+    assert sha == "abc123squashsha"
+
+
+def test_get_pr_state_merged_via_merge_commit_returns_merge_commit_sha():
+    """Same return shape as squash: gh's mergeCommit field is the
+    base-branch commit containing the merge -- whether it's an actual
+    merge commit, a squash, or the tip of a rebase. The closure-check
+    code path doesn't need to differentiate."""
+    out = '{"state":"MERGED","mergeCommit":{"oid":"def456mergecommit"}}'
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0, stdout=out)):
+        state, sha = github.get_pr_state("/repo", 42)
+    assert state == "MERGED"
+    assert sha == "def456mergecommit"
+
+
+def test_get_pr_state_merged_via_rebase_returns_rebased_tip_sha():
+    """Rebase merges put new commits on base; mergeCommit is the tip
+    (newest) of those. Same JSON shape as the other merge styles."""
+    out = '{"state":"MERGED","mergeCommit":{"oid":"789rebasetipsha"}}'
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0, stdout=out)):
+        state, sha = github.get_pr_state("/repo", 42)
+    assert state == "MERGED"
+    assert sha == "789rebasetipsha"
+
+
+def test_get_pr_state_raises_on_nonzero_exit():
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(1, stderr="not found")):
+        with pytest.raises(github.GhError, match="not found"):
+            github.get_pr_state("/repo", 42)
+
+
 def test_prepend_pr_body_handles_empty_existing_body():
     """When the current body is empty, prepend_pr_body just writes
     the line with no leading separator."""
