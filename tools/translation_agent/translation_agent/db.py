@@ -298,6 +298,40 @@ def insert_pr_commit(
         return cursor.rowcount > 0
 
 
+def get_pr_commit_by_branch_and_ak(
+    conn: sqlite3.Connection, rust_branch: str, ak_commit: str,
+) -> Optional[dict]:
+    """Return the pr_commit row matching `(rust_branch, ak_commit)`, or
+    None.
+
+    Used by the sweep PR-closure check. The (rust_branch, ak_commit)
+    combination is naturally unique in practice (one PR per AK commit
+    per rust branch), but the schema has no UNIQUE constraint on it,
+    so we LIMIT 1 defensively. Index-backed via
+    `idx_pr_commit_rust_branch`.
+    """
+    row = conn.execute(
+        "SELECT * FROM pr_commit WHERE rust_branch = ? AND ak_commit = ? LIMIT 1",
+        (rust_branch, ak_commit),
+    ).fetchone()
+    return dict(row) if row else None
+
+
+def delete_pr_commit(conn: sqlite3.Connection, pr_number: int) -> bool:
+    """Delete the pr_commit row with `pr_number`. Returns True if a row
+    was removed, False if no row matched. Idempotent.
+
+    Used by the sweep PR-closure check after confirming the
+    corresponding GitHub PR is CLOSED or MERGED.
+    """
+    with conn:
+        cursor = conn.execute(
+            "DELETE FROM pr_commit WHERE pr_number = ?",
+            (pr_number,),
+        )
+        return cursor.rowcount > 0
+
+
 def cleanup_pr_commits_for_rust_branch(
     conn: sqlite3.Connection, rust_branch: str,
 ) -> int:
