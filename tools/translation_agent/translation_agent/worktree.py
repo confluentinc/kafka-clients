@@ -114,20 +114,40 @@ def worktree_for_branch(
                 _git(repo_path, "worktree", "remove", "--force", prior)
             except WorktreeError:
                 pass  # best-effort; if remove fails the next add will too
-        if _local_branch_exists(repo_path, branch_name):
-            # Reuse the existing local branch. Important for dry-run cascades
-            # (per-PR --plan-approve, sweep impl after a prior plan run) where
-            # the local branch carries plan/impl commits that origin doesn't
-            # have because dry-run never pushed.
+        if _remote_branch_exists(repo_path, branch_name):
+            # The PR branch already exists on origin (e.g. a previous
+            # sweep created it but didn't complete, or this is a re-run
+            # after the operator restarted CI). Base the worktree on
+            # origin/<branch_name> so:
+            #   - we have the existing bump commit and any subsequent
+            #     plan/impl commits the remote already carries,
+            #   - `_bump_kafka_submodule`'s diff-quiet guard makes a
+            #     no-op when the kafka pointer is already correct, and
+            #   - the eventual `git push` is a clean fast-forward (or
+            #     a no-op) instead of being rejected as non-FF.
+            # `-B` force-resets the local branch in case a stale ref
+            # exists from a previous run.
+            _git(repo_path, "fetch", "origin", branch_name)
+            _git(
+                repo_path, "worktree", "add",
+                "-B", branch_name,
+                str(worktree_dir),
+                f"origin/{branch_name}",
+            )
+        elif _local_branch_exists(repo_path, branch_name):
+            # No remote branch but local exists -- the dry-run cascade
+            # case (per-PR --plan-approve, sweep impl after a prior plan
+            # run) where the local branch carries plan/impl commits
+            # that origin doesn't have because dry-run never pushed.
             _git(
                 repo_path, "worktree", "add",
                 str(worktree_dir),
                 branch_name,
             )
         else:
-            # First-time setup: fetch the base from origin and create the
-            # local branch reset to it. `-B` makes the create-or-reset
-            # idempotent if a stale ref happens to exist (defensive).
+            # First-time setup: fetch the base from origin and create
+            # the local branch reset to it. `-B` makes the create-or-
+            # reset idempotent if a stale ref happens to exist.
             base = (
                 base_remote_branch
                 if base_remote_branch is not None
@@ -190,6 +210,28 @@ def _find_worktree_for_branch(
         elif line == f"branch refs/heads/{branch_name}" and current_path:
             return current_path
     return None
+
+
+def _remote_branch_exists(
+    repo_path: str, branch_name: str, remote: str = "origin",
+) -> bool:
+    """True iff `branch_name` exists on `remote`.
+
+    Probes via `git ls-remote --heads <remote> <branch_name>`. Output
+    is non-empty if and only if the branch exists on the remote.
+
+    On a non-zero exit (network failure, auth issue) we return False
+    rather than raise: the caller treats "remote unknown" the same as
+    "remote doesn't exist" -- the subsequent `git push` will surface
+    any real connectivity issue with a clear error.
+    """
+    proc = subprocess.run(
+        ["git", "-C", repo_path, "ls-remote", "--heads", remote, branch_name],
+        capture_output=True, text=True,
+    )
+    if proc.returncode != 0:
+        return False
+    return bool(proc.stdout.strip())
 
 
 def _local_branch_exists(repo_path: str, branch_name: str) -> bool:
