@@ -1091,6 +1091,25 @@ fn err_to_kafka_error(error: Errors) -> Option<KafkaError> {
 
 /// True iff the error type extends `InvalidMetadataException` in Java
 /// (i.e. retriable + indicates a metadata refresh is needed).
+///
+/// **Coverage gap (deferred until `KafkaError` is expanded — likely
+/// Phase 4c or Phase 5):** Java has 13 subclasses of
+/// `InvalidMetadataException` (`kafka/clients/src/main/java/org/apache/kafka/common/errors/`),
+/// of which 7 are matched here. The other 6 are not yet represented
+/// in `KafkaError` and so cannot be matched:
+///
+/// - `FencedLeaderEpoch` — leader epoch fenced by broker.
+/// - `ReplicaNotAvailable` — partition replica temporarily unavailable.
+/// - `ListenerNotFound` — broker listener missing.
+/// - `ElectionNotNeeded` — preferred leader election not needed.
+/// - `InconsistentTopicId` — topic-id mismatch with broker view.
+/// - `PreferredLeaderNotAvailable` — preferred leader is offline.
+/// - `EligibleLeadersNotAvailable` — KIP-966: no eligible replicas.
+///
+/// All seven are retriable in Java and should trigger
+/// `need_full_update = true` exactly like the others matched here.
+/// When `KafkaError` gains the corresponding variants, extend the
+/// `matches!` arm below to include them.
 fn is_invalid_metadata_kafka_error(err: &KafkaError) -> bool {
     matches!(
         err,
