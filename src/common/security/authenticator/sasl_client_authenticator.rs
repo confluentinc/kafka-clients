@@ -55,7 +55,8 @@ use crate::common::requests::SaslHandshakeResponse;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
-use log::debug;
+use crate::common::utils::LogContext;
+use crate::kafka_debug;
 
 use std::future::Future;
 use std::io;
@@ -156,6 +157,8 @@ pub struct SaslClientAuthenticator {
     net_in_buffer: Option<NetworkReceive>,
     /// Next SASL state to be set when outgoing writes complete.
     pending_sasl_state: Option<SaslState>,
+    /// Contextual log message prefix.
+    log_context: LogContext,
 }
 
 impl SaslClientAuthenticator {
@@ -169,7 +172,15 @@ impl SaslClientAuthenticator {
     /// * `node` - Node identifier for this connection
     /// * `host` - Broker hostname
     /// * `client_id` - Kafka client ID for request headers
-    pub fn new(mechanism: &str, username: &str, password: &str, node: &str, host: &str, client_id: &str) -> Self {
+    pub fn new(
+        mechanism: &str,
+        username: &str,
+        password: &str,
+        node: &str,
+        host: &str,
+        client_id: &str,
+        log_context: LogContext,
+    ) -> Self {
         let mut authenticator = Self {
             state: SaslState::SendApiVersionsRequest,
             mechanism: mechanism.to_string(),
@@ -185,6 +196,7 @@ impl SaslClientAuthenticator {
             net_out_buffer: None,
             net_in_buffer: None,
             pending_sasl_state: None,
+            log_context,
         };
         authenticator.set_sasl_state(SaslState::SendApiVersionsRequest);
         authenticator
@@ -281,7 +293,7 @@ impl SaslClientAuthenticator {
             data.set_auth_bytes(sasl_token);
             let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
             let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
-            let concrete = ConcreteRequest::SaslAuthenticate(request);
+            let mut concrete = ConcreteRequest::SaslAuthenticate(request);
             let byte_buffer_send = concrete.to_send(&header)?;
             Box::new(byte_buffer_send)
         };
@@ -355,7 +367,10 @@ impl SaslClientAuthenticator {
             Ok(Some(bytes)) => bytes,
             Ok(None) => return Ok(None),
             Err(e) => {
-                debug!("Invalid SASL mechanism response, server may be expecting only GSSAPI tokens");
+                kafka_debug!(
+                    self.log_context,
+                    "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
+                );
                 self.set_sasl_state(SaslState::Failed);
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidData,
@@ -370,7 +385,10 @@ impl SaslClientAuthenticator {
             .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
         let mut buffer = ByteBufferAccessor::from_bytes(response_bytes);
         let response = ConcreteResponse::parse_response(&mut buffer, request_header).map_err(|e| {
-            debug!("Invalid SASL mechanism response, server may be expecting only GSSAPI tokens");
+            kafka_debug!(
+                self.log_context,
+                "Invalid SASL mechanism response, server may be expecting only GSSAPI tokens"
+            );
             self.set_sasl_state(SaslState::Failed);
             io::Error::new(
                 io::ErrorKind::InvalidData,
@@ -416,7 +434,7 @@ impl SaslClientAuthenticator {
         }
         self.pending_sasl_state = None;
         self.state = sasl_state;
-        debug!("Set SASL client state to {:?}", sasl_state);
+        kafka_debug!(self.log_context, "Set SASL client state to {:?}", sasl_state);
         if sasl_state == SaslState::Complete {
             // In the full Java implementation, this would set session
             // re-authentication times and update interest ops. For the
@@ -487,8 +505,8 @@ impl SaslClientAuthenticator {
             SaslState::SendApiVersionsRequest => {
                 // Always use version 0 request since brokers treat requests with
                 // schema exceptions as GSSAPI tokens
-                let builder = ApiVersionsRequestBuilder::for_version(0);
-                let request = builder.build()?;
+                let mut builder = ApiVersionsRequestBuilder::for_version(0);
+                let mut request = builder.build()?;
                 let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
                 let send = Box::new(request.to_send(&header)?);
                 self.send_request(send, transport).await?;
@@ -577,7 +595,7 @@ impl SaslClientAuthenticator {
         data.set_mechanism(self.mechanism.clone());
         let request = SaslHandshakeRequest::new(data, self.sasl_handshake_version);
         let header = self.next_request_header(&ApiKeys::SASL_HANDSHAKE, request.version())?;
-        let concrete = ConcreteRequest::SaslHandshake(request);
+        let mut concrete = ConcreteRequest::SaslHandshake(request);
         let send = Box::new(concrete.to_send(&header)?);
         self.send_request(send, transport).await
     }
@@ -767,7 +785,7 @@ mod tests {
         data.set_api_keys(vec![hs_version, auth_version]);
 
         // Serialize header + body
-        let response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
+        let mut response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
@@ -775,8 +793,9 @@ mod tests {
 
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, 0).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, 0).unwrap();
         buf.buffer().to_vec()
     }
 
@@ -793,7 +812,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_HANDSHAKE;
         let header_version = api_key.response_header_version(version);
-        let response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -802,8 +821,9 @@ mod tests {
 
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, version).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, version).unwrap();
         buf.buffer().to_vec()
     }
 
@@ -822,7 +842,7 @@ mod tests {
 
         let api_key = &ApiKeys::SASL_AUTHENTICATE;
         let header_version = api_key.response_header_version(version);
-        let response_header = ResponseHeader::new(correlation_id, header_version);
+        let mut response_header = ResponseHeader::new(correlation_id, header_version);
 
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
@@ -831,8 +851,9 @@ mod tests {
 
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, version).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, version).unwrap();
         buf.buffer().to_vec()
     }
 
@@ -843,7 +864,15 @@ mod tests {
     /// Test 1: PLAIN token generation matches RFC 4616 format.
     #[test]
     fn test_plain_token_generation() {
-        let auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
+        let auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "client-1",
+            LogContext::empty(),
+        );
         let token = auth.create_sasl_token();
         assert_eq!(token, b"\0alice\0secret");
     }
@@ -851,7 +880,15 @@ mod tests {
     /// Test 2: Initial state is SendApiVersionsRequest and complete() is false.
     #[test]
     fn test_initial_state() {
-        let auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
+        let auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "client-1",
+            LogContext::empty(),
+        );
         assert_eq!(auth.sasl_state(), SaslState::SendApiVersionsRequest);
         assert!(!auth.complete());
     }
@@ -859,7 +896,15 @@ mod tests {
     /// Test 3: Correlation ID management uses reserved range.
     #[test]
     fn test_correlation_id_management() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "client-1",
+            LogContext::empty(),
+        );
         let id1 = auth.next_correlation_id();
         assert!(is_reserved(id1));
         assert_eq!(id1, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
@@ -878,7 +923,15 @@ mod tests {
     /// debug and release builds.
     #[test]
     fn test_correlation_id_wraps_on_overflow() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "client-1",
+            LogContext::empty(),
+        );
         // Exhaust all 8 reserved IDs
         for i in 0..8 {
             let id = auth.next_correlation_id();
@@ -906,7 +959,15 @@ mod tests {
     /// Test 5: Version negotiation extracts SASL versions from ApiVersionsResponse.
     #[test]
     fn test_version_negotiation() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "client-1",
+            LogContext::empty(),
+        );
 
         let mut data = ApiVersionsResponseData::new();
         data.set_error_code(Errors::None.code());
@@ -934,7 +995,15 @@ mod tests {
     /// Test 6: Successful full authentication flow with mock transport.
     #[tokio::test]
     async fn test_successful_authentication() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
         let mut transport = MockTransportLayer::new();
 
         // Step 1: Send ApiVersionsRequest
@@ -990,7 +1059,15 @@ mod tests {
     /// Test 7: Unsupported mechanism error in handshake response.
     #[tokio::test]
     async fn test_unsupported_mechanism() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
         let mut transport = MockTransportLayer::new();
 
         // Send ApiVersionsRequest
@@ -1024,7 +1101,15 @@ mod tests {
     /// Test 8: Authentication failure in SaslAuthenticateResponse.
     #[tokio::test]
     async fn test_auth_failure() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "wrong", "node-0", "broker1", "test-client");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "wrong",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
         let mut transport = MockTransportLayer::new();
 
         // Send ApiVersionsRequest
@@ -1069,7 +1154,15 @@ mod tests {
     /// Test 9: Legacy raw token mode (sasl_authenticate_version == -1).
     #[tokio::test]
     async fn test_raw_token_mode() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
         let mut transport = MockTransportLayer::new();
 
         // Send ApiVersionsRequest
@@ -1087,15 +1180,16 @@ mod tests {
 
         data.set_api_keys(vec![hs_version]);
 
-        let response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
+        let mut response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
         let mut cache = ObjectSerializationCache::new();
         let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
         let body_size = Message::size(&data, &mut cache, 0).unwrap();
         let total_size = header_size + body_size;
         let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
         buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, 0).unwrap();
+        let hv = response_header.header_version();
+        Message::write(response_header.data_mut(), &mut buf, &cache, hv).unwrap();
+        Message::write(&mut data, &mut buf, &cache, 0).unwrap();
         transport.enqueue_read_data(buf.buffer());
         transport.write_data.clear();
 
@@ -1130,7 +1224,15 @@ mod tests {
     /// Test 10: Illegal SASL state error in handshake response.
     #[tokio::test]
     async fn test_handle_sasl_handshake_illegal_state() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
         let mut transport = MockTransportLayer::new();
 
         // Send ApiVersionsRequest
@@ -1167,7 +1269,15 @@ mod tests {
     /// the Java try-catch in `receiveKafkaResponse()`.
     #[tokio::test]
     async fn test_parse_error_sets_state_to_failed() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
+        let mut auth = SaslClientAuthenticator::new(
+            "PLAIN",
+            "alice",
+            "secret",
+            "node-0",
+            "broker1",
+            "test-client",
+            LogContext::empty(),
+        );
         let mut transport = MockTransportLayer::new();
 
         // Send ApiVersionsRequest to advance state and set current_request_header
