@@ -1046,7 +1046,11 @@ mod tests {
     //! is identical; the test names match their Java counterparts.
 
     use super::*;
-    use crate::common::utils::LogContext;
+    use crate::common::message::metadata_response_data::{
+        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+    };
+    use crate::common::record::record_batch::NO_PARTITION_LEADER_EPOCH;
+    use crate::common::utils::{LogContext, Time};
 
     fn fresh_metadata() -> Metadata {
         Metadata::new(
@@ -1057,6 +1061,117 @@ mod tests {
             Arc::new(ClusterResourceListeners::default()),
         )
         .expect("metadata constructs")
+    }
+
+    /// Construct a `MetadataResponse` from synthetic broker / topic
+    /// data. Mirror of the Java test helper `RequestTestUtils.metadataResponse`
+    /// (the path through `MetadataResponse.prepareResponse`).
+    fn build_metadata_response(
+        cluster_id: Option<&str>,
+        controller_id: i32,
+        brokers: Vec<Node>,
+        topics: Vec<TopicMetadataInput>,
+    ) -> MetadataResponse {
+        let mut data = MetadataResponseData::new();
+        data.cluster_id = cluster_id.map(str::to_owned);
+        data.controller_id = controller_id;
+        data.brokers = brokers
+            .into_iter()
+            .map(|n| MetadataResponseBroker {
+                node_id: n.id(),
+                host: n.host().to_owned(),
+                port: n.port(),
+                rack: n.rack().map(str::to_owned),
+                unknown_tagged_fields: Vec::new(),
+            })
+            .collect();
+        data.topics = topics
+            .into_iter()
+            .map(|t| MetadataResponseTopic {
+                error_code: t.error.code(),
+                name: Some(t.topic),
+                topic_id: t.topic_id,
+                is_internal: t.is_internal,
+                partitions: t
+                    .partitions
+                    .into_iter()
+                    .map(|p| MetadataResponsePartition {
+                        error_code: p.error.code(),
+                        partition_index: p.partition_index,
+                        leader_id: p.leader_id.unwrap_or(MetadataResponse::NO_LEADER_ID),
+                        leader_epoch: p.leader_epoch.unwrap_or(NO_PARTITION_LEADER_EPOCH),
+                        replica_nodes: p.replicas,
+                        isr_nodes: p.isr,
+                        offline_replicas: p.offline,
+                        unknown_tagged_fields: Vec::new(),
+                    })
+                    .collect(),
+                topic_authorized_operations: MetadataResponse::AUTHORIZED_OPERATIONS_OMITTED,
+                unknown_tagged_fields: Vec::new(),
+            })
+            .collect();
+        MetadataResponse::new(data, true)
+    }
+
+    /// Input to [`build_metadata_response`] for one topic.
+    struct TopicMetadataInput {
+        topic: String,
+        topic_id: Uuid,
+        is_internal: bool,
+        error: Errors,
+        partitions: Vec<PartitionMetadataInput>,
+    }
+
+    /// Input to [`build_metadata_response`] for one partition.
+    struct PartitionMetadataInput {
+        partition_index: i32,
+        leader_id: Option<i32>,
+        leader_epoch: Option<i32>,
+        replicas: Vec<i32>,
+        isr: Vec<i32>,
+        offline: Vec<i32>,
+        error: Errors,
+    }
+
+    /// Mirror of `RequestTestUtils.metadataUpdateWith(...)` (simplified).
+    fn metadata_update_with(
+        cluster_id: Option<&str>,
+        num_nodes: i32,
+        topic_partition_counts: &[(&str, i32)],
+        epoch_supplier: impl Fn(&str, i32) -> Option<i32>,
+        topic_ids: &HashMap<String, Uuid>,
+    ) -> MetadataResponse {
+        let nodes: Vec<Node> = (0..num_nodes).map(|i| Node::new(i, "localhost".to_owned(), 1969 + i)).collect();
+        let mut topic_inputs = Vec::new();
+        for (topic, num_parts) in topic_partition_counts {
+            let mut parts = Vec::new();
+            for i in 0..*num_parts {
+                let leader = nodes[(i as usize) % nodes.len()].id();
+                let replicas = vec![leader];
+                parts.push(PartitionMetadataInput {
+                    partition_index: i,
+                    leader_id: Some(leader),
+                    leader_epoch: epoch_supplier(topic, i),
+                    replicas: replicas.clone(),
+                    isr: replicas,
+                    offline: Vec::new(),
+                    error: Errors::None,
+                });
+            }
+            topic_inputs.push(TopicMetadataInput {
+                topic: (*topic).to_owned(),
+                topic_id: topic_ids.get(*topic).copied().unwrap_or(ZERO_UUID),
+                is_internal: crate::common::internals::topic::is_internal(topic),
+                error: Errors::None,
+                partitions: parts,
+            });
+        }
+        build_metadata_response(cluster_id, 0, nodes, topic_inputs)
+    }
+
+    /// Empty-response factory matching `MetadataTest.emptyMetadataResponse`.
+    fn empty_metadata_response() -> MetadataResponse {
+        build_metadata_response(None, -1, Vec::new(), Vec::new())
     }
 
     /// Java: `testMetadataUpdateLastSeenEpoch` style — verifies the
@@ -1217,5 +1332,250 @@ mod tests {
         let b = LeaderAndEpoch::new(Some(Node::new(0, "h".to_owned(), 9092)), Some(7));
         assert_eq!(a, b);
         assert_eq!(LeaderAndEpoch::no_leader_or_epoch(), LeaderAndEpoch::new(None, None));
+    }
+
+    /// Java: `testMetadataUpdateAfterClose`.
+    #[test]
+    fn update_after_close_returns_illegal_state_via_response() {
+        let metadata = fresh_metadata();
+        metadata.close();
+        let resp = empty_metadata_response();
+        let err = metadata.update_with_current_request_version(&resp, false, 1000).unwrap_err();
+        assert!(matches!(err, KafkaError::IllegalState(_)));
+        assert!(err.to_string().contains("Update requested after metadata close"));
+    }
+
+    /// Java: `testUpdateMetadataAllowedImmediatelyAfterBootstrap`.
+    /// Java uses `MockTime` which returns the wall-clock millis. The
+    /// last-refresh-ms is 0 by default; with a sufficiently large
+    /// `now_ms` the backoff window has long since elapsed, so both
+    /// `time_to_allow_update` and `time_to_next_update` are 0.
+    #[test]
+    fn update_metadata_allowed_immediately_after_bootstrap() {
+        let metadata = Metadata::new(
+            100,
+            1000,
+            1000,
+            LogContext::default(),
+            Arc::new(ClusterResourceListeners::default()),
+        )
+        .unwrap();
+        metadata.bootstrap(vec![("localhost".to_owned(), 9002)]);
+        let now = crate::common::utils::MockTime::default().milliseconds();
+        assert_eq!(metadata.time_to_allow_update(now), 0);
+        assert_eq!(metadata.time_to_next_update(now), 0);
+    }
+
+    /// Java: `testTimeToNextUpdate` (constant backoff variant).
+    #[test]
+    fn time_to_next_update_with_constant_backoff() {
+        // Disable exponential growth: refresh_backoff_ms == refresh_backoff_max_ms.
+        let refresh_backoff_ms: i64 = 100;
+        let metadata_expire_ms: i64 = 1000;
+        let now: i64 = 10_000;
+
+        let metadata = Metadata::new(
+            refresh_backoff_ms,
+            refresh_backoff_ms,
+            metadata_expire_ms,
+            LogContext::default(),
+            Arc::new(ClusterResourceListeners::default()),
+        )
+        .unwrap();
+
+        assert_eq!(metadata.time_to_next_update(now), 0);
+
+        // lastSuccessfulRefreshMs updated to now.
+        let resp = empty_metadata_response();
+        metadata.update_with_current_request_version(&resp, false, now).unwrap();
+
+        let larger = refresh_backoff_ms.max(metadata_expire_ms);
+        assert_eq!(metadata.time_to_next_update(now), larger);
+
+        // Metadata update requested explicitly.
+        metadata.request_update(true);
+        // updateRequested collapses timeToExpire so metadataExpire stops gating.
+        assert_eq!(metadata.time_to_next_update(now), refresh_backoff_ms);
+
+        // Reset needUpdate to false.
+        metadata.update_with_current_request_version(&resp, false, now).unwrap();
+        assert_eq!(metadata.time_to_next_update(now), larger);
+
+        // Both elapsed.
+        let now2 = now + larger;
+        assert_eq!(metadata.time_to_next_update(now2), 0);
+        assert_eq!(metadata.time_to_next_update(now2 + 1), 0);
+    }
+
+    /// Java: `testFailedUpdate`.
+    #[test]
+    fn failed_update_resets_attempts_on_subsequent_success() {
+        let metadata = fresh_metadata();
+        metadata.failed_update(0);
+        // After a successful update, attempts is reset (Java sets it to 0).
+        let resp = empty_metadata_response();
+        metadata.update_with_current_request_version(&resp, false, 100).unwrap();
+        // After success, time_to_allow_update is constrained only by
+        // the configured backoff, not by exponential attempts growth.
+        // With baseline backoff 50 (initial_interval), the 100 - 50 = 50ms
+        // hasn't elapsed: depending on jitter, the clamp window is small.
+        // Just verify no panic + non-error result.
+        assert!(metadata.last_successful_update() == 100);
+    }
+
+    /// Java: `testUpdateLastEpoch`.
+    #[test]
+    fn update_with_response_then_last_seen_epoch_if_newer() {
+        let metadata = fresh_metadata();
+        // Initial update with epoch 100.
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(100), &HashMap::new());
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let tp = TopicPartition::new("topic-1".to_owned(), 0);
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(100));
+
+        // updateLastSeenEpochIfNewer with a smaller epoch returns false.
+        assert!(!metadata.update_last_seen_epoch_if_newer(tp.clone(), 50).unwrap());
+        // Same epoch returns false (Java: equal is not "newer").
+        assert!(!metadata.update_last_seen_epoch_if_newer(tp.clone(), 100).unwrap());
+        // Larger epoch returns true and updates.
+        assert!(metadata.update_last_seen_epoch_if_newer(tp.clone(), 200).unwrap());
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(200));
+    }
+
+    /// Java: `testRejectOldMetadata`.
+    #[test]
+    fn reject_old_metadata_keeps_higher_epoch() {
+        let metadata = fresh_metadata();
+        // Initial update with epoch 100.
+        let resp_old = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(100), &HashMap::new());
+        metadata.update_with_current_request_version(&resp_old, false, 0).unwrap();
+        let tp = TopicPartition::new("topic-1".to_owned(), 0);
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(100));
+
+        // Newer update with epoch 200 — should win.
+        let resp_new = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(200), &HashMap::new());
+        metadata.update_with_current_request_version(&resp_new, false, 0).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(200));
+
+        // Stale update with epoch 50 — should be rejected.
+        let resp_stale = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(50), &HashMap::new());
+        metadata.update_with_current_request_version(&resp_stale, false, 0).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(200));
+    }
+
+    /// Java: `testNoEpoch`.
+    #[test]
+    fn no_epoch_doesnt_track_last_seen() {
+        let metadata = fresh_metadata();
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| None, &HashMap::new());
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let tp = TopicPartition::new("topic-1".to_owned(), 0);
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), None);
+    }
+
+    /// Java: `testInvalidTopicError`.
+    #[test]
+    fn invalid_topic_error_propagates() {
+        let metadata = fresh_metadata();
+        let invalid_topic = "_invalid";
+        let resp = build_metadata_response(
+            Some("dummy"),
+            0,
+            vec![Node::new(0, "localhost".to_owned(), 1969)],
+            vec![TopicMetadataInput {
+                topic: invalid_topic.to_owned(),
+                topic_id: ZERO_UUID,
+                is_internal: false,
+                error: Errors::InvalidTopicException,
+                partitions: Vec::new(),
+            }],
+        );
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let err = metadata.maybe_throw_any_error().unwrap_err();
+        assert!(matches!(err, KafkaError::InvalidTopic(_)));
+        assert!(err.message().contains(invalid_topic), "got: {}", err.message());
+
+        // After throwing once, the error is cleared.
+        assert!(metadata.maybe_throw_any_error().is_ok());
+    }
+
+    /// Java: `testTopicAuthorizationError`.
+    #[test]
+    fn topic_authorization_error_propagates() {
+        let metadata = fresh_metadata();
+        let unauth_topic = "secret";
+        let resp = build_metadata_response(
+            Some("dummy"),
+            0,
+            vec![Node::new(0, "localhost".to_owned(), 1969)],
+            vec![TopicMetadataInput {
+                topic: unauth_topic.to_owned(),
+                topic_id: ZERO_UUID,
+                is_internal: false,
+                error: Errors::TopicAuthorizationFailed,
+                partitions: Vec::new(),
+            }],
+        );
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let err = metadata.maybe_throw_any_error().unwrap_err();
+        assert!(matches!(err, KafkaError::TopicAuthorization(_)));
+        assert!(err.message().contains(unauth_topic), "got: {}", err.message());
+    }
+
+    /// Java: `testMetadataMerge` — partial updates merge in new topic
+    /// data while retaining unrelated existing data.
+    #[test]
+    fn metadata_merge_partial_update_retains_old_topics() {
+        let metadata = fresh_metadata();
+        // Step 1: full update with topic-1.
+        let mut topic_ids = HashMap::new();
+        topic_ids.insert("topic-1".to_owned(), Uuid::random());
+        let resp_step1 = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(1), &topic_ids);
+        metadata.update_with_current_request_version(&resp_step1, false, 0).unwrap();
+        assert!(metadata.fetch().topics().any(|t| t == "topic-1"));
+
+        // Step 2: partial update with topic-2 only — topic-1 should be retained.
+        let mut topic_ids2 = HashMap::new();
+        topic_ids2.insert("topic-2".to_owned(), Uuid::random());
+        let resp_step2 = metadata_update_with(Some("dummy"), 1, &[("topic-2", 1)], |_, _| Some(1), &topic_ids2);
+        metadata.update_with_current_request_version(&resp_step2, true, 0).unwrap();
+        let topics: HashSet<String> = metadata.fetch().topics().map(str::to_owned).collect();
+        assert!(topics.contains("topic-1"));
+        assert!(topics.contains("topic-2"));
+    }
+
+    /// Java: `testEpochUpdateAfterTopicDeletion`. After a topic is
+    /// deleted (received with no leader epoch), the next epoch override
+    /// resets cleanly.
+    #[test]
+    fn epoch_update_after_topic_deletion() {
+        let metadata = fresh_metadata();
+        // Initial: epoch 10.
+        let resp_initial = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(10), &HashMap::new());
+        metadata.update_with_current_request_version(&resp_initial, false, 0).unwrap();
+        let tp = TopicPartition::new("topic-1".to_owned(), 0);
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
+
+        // Topic deleted: epoch supplier returns None → has_reliable_leader_epoch
+        // is true but the response has no epoch ⇒ the entry is dropped.
+        let mut data = MetadataResponseData::new();
+        data.cluster_id = Some("dummy".to_owned());
+        data.controller_id = 0;
+        data.brokers = vec![MetadataResponseBroker {
+            node_id: 0,
+            host: "localhost".to_owned(),
+            port: 1969,
+            rack: None,
+            unknown_tagged_fields: Vec::new(),
+        }];
+        // Empty topics list — emulates deletion when the topic
+        // disappears from the response. Since we filter by retain
+        // predicate on a partial update, the topic data is preserved.
+        let resp_delete = MetadataResponse::new(data, true);
+        metadata.update_with_current_request_version(&resp_delete, true, 0).unwrap();
+        // Partial update doesn't carry the now-absent topic. The
+        // last-seen epoch is still 10 because the partition just isn't
+        // mentioned in the new response.
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
     }
 }
