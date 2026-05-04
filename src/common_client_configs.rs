@@ -165,8 +165,7 @@ pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_DOC: &str = concat!(
 );
 pub const DEFAULT_SOCKET_CONNECTION_SETUP_TIMEOUT_MS: i64 = 10 * 1000;
 
-pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &str =
-    "socket.connection.setup.timeout.max.ms";
+pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG: &str = "socket.connection.setup.timeout.max.ms";
 pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_DOC: &str = concat!(
     "The maximum amount of time the client will wait for the socket connection to be established. ",
     "The connection setup timeout will increase exponentially for each consecutive connection failure up to this maximum. To avoid connection storms, ",
@@ -292,8 +291,7 @@ pub const METADATA_RECOVERY_STRATEGY_DOC: &str = concat!(
 /// `MetadataRecoveryStrategy.REBOOTSTRAP.name`.
 pub const DEFAULT_METADATA_RECOVERY_STRATEGY: &str = "rebootstrap";
 
-pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &str =
-    "metadata.recovery.rebootstrap.trigger.ms";
+pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG: &str = "metadata.recovery.rebootstrap.trigger.ms";
 pub const METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_DOC: &str = concat!(
     "If a client configured to rebootstrap using ",
     "<code>metadata.recovery.strategy=rebootstrap</code> is unable to obtain metadata from any of the brokers in the last known ",
@@ -337,8 +335,7 @@ pub fn post_process_reconnect_backoff_configs(
     originals_contains_reconnect_backoff_ms: bool,
     originals_contains_reconnect_backoff_max_ms: bool,
 ) -> ReconnectBackoffOverrides {
-    let override_max_to_base =
-        !originals_contains_reconnect_backoff_max_ms && originals_contains_reconnect_backoff_ms;
+    let override_max_to_base = !originals_contains_reconnect_backoff_max_ms && originals_contains_reconnect_backoff_ms;
     if override_max_to_base {
         log::warn!(
             "Disabling exponential reconnect backoff because {RECONNECT_BACKOFF_MS_CONFIG} is set, but {RECONNECT_BACKOFF_MAX_MS_CONFIG} is not.",
@@ -381,8 +378,7 @@ pub fn post_validate_sasl_mechanism_config(
     security_protocol: &str,
     sasl_mechanism: Option<&str>,
 ) -> Result<(), KafkaError> {
-    let is_sasl =
-        security_protocol == "SASL_PLAINTEXT" || security_protocol == "SASL_SSL";
+    let is_sasl = security_protocol == "SASL_PLAINTEXT" || security_protocol == "SASL_SSL";
     if !is_sasl {
         return Ok(());
     }
@@ -409,6 +405,41 @@ const _: () = {
     }
 };
 
+// Java test mapping (kafka/clients/.../CommonClientConfigsTest.java):
+//
+// * `testExponentialBackoffDefaults` (lines 91-115) — Java exercises
+//   `AbstractConfig` defaults plus `postProcessReconnectBackoffConfigs`
+//   wired through `postProcessParsedConfig`. The `AbstractConfig` /
+//   `ConfigDef` types are Phase-5 territory. The pure backoff logic
+//   that test exercises is covered here by
+//   `post_process_reconnect_backoff_overrides_max_when_only_base_set`,
+//   `post_process_reconnect_backoff_no_override_when_both_set`,
+//   `post_process_reconnect_backoff_no_override_when_neither_set`, and
+//   `post_process_reconnect_backoff_no_override_when_only_max_set`.
+//   Re-translate the full integration test in Phase 5 once
+//   `AbstractConfig` lands.
+//
+// * `testInvalidSaslMechanism` (lines 117-128) — Java exercises
+//   `postValidateSaslMechanismConfig` through `AbstractConfig`. The
+//   pure validation logic is covered here by
+//   `post_validate_sasl_requires_mechanism_for_sasl_plaintext`,
+//   `post_validate_sasl_requires_mechanism_for_sasl_ssl`,
+//   `post_validate_sasl_ok_for_plaintext`, and
+//   `post_validate_sasl_accepts_non_empty_mechanism`. Re-translate
+//   the integration test in Phase 5 once `AbstractConfig` lands.
+//
+// * `testMetricsReporters` (lines 130-151) — DEFERRED to Phase 5.
+//   Java calls `CommonClientConfigs.metricsReporters(String, AbstractConfig)`
+//   which instantiates `MetricsReporter` plugin classes from the
+//   `metric.reporters` config. Both the `metricsReporters` static
+//   method and the `MetricsReporter` trait it depends on are not
+//   translated in Phase 4c (they are Phase 5/6). When the trait
+//   lands, this test re-translates as: with `metric.reporters=`
+//   defaulting to `JmxReporter`, the helper returns 1 reporter; with
+//   it set to "", it returns 0; with it set to `JmxReporter`, it
+//   returns 1; with it set to `JmxReporter,MyJmxReporter`, it
+//   returns 2.
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -420,10 +451,7 @@ mod tests {
     // verifies the same equality through the Rust enum.
     #[test]
     fn default_metadata_recovery_strategy_matches_enum() {
-        assert_eq!(
-            DEFAULT_METADATA_RECOVERY_STRATEGY,
-            MetadataRecoveryStrategy::Rebootstrap.name(),
-        );
+        assert_eq!(DEFAULT_METADATA_RECOVERY_STRATEGY, MetadataRecoveryStrategy::Rebootstrap.name(),);
     }
 
     #[test]

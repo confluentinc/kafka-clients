@@ -41,9 +41,7 @@ impl ClientDnsLookup {
     pub fn as_config_str(&self) -> &'static str {
         match self {
             ClientDnsLookup::UseAllDnsIps => "use_all_dns_ips",
-            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => {
-                "resolve_canonical_bootstrap_servers_only"
-            }
+            ClientDnsLookup::ResolveCanonicalBootstrapServersOnly => "resolve_canonical_bootstrap_servers_only",
         }
     }
 
@@ -53,12 +51,8 @@ impl ClientDnsLookup {
     pub fn for_config(config: &str) -> Result<Self, KafkaError> {
         match config.to_ascii_uppercase().as_str() {
             "USE_ALL_DNS_IPS" => Ok(ClientDnsLookup::UseAllDnsIps),
-            "RESOLVE_CANONICAL_BOOTSTRAP_SERVERS_ONLY" => {
-                Ok(ClientDnsLookup::ResolveCanonicalBootstrapServersOnly)
-            }
-            other => Err(KafkaError::IllegalArgument(format!(
-                "No enum constant ClientDnsLookup.{other}"
-            ))),
+            "RESOLVE_CANONICAL_BOOTSTRAP_SERVERS_ONLY" => Ok(ClientDnsLookup::ResolveCanonicalBootstrapServersOnly),
+            other => Err(KafkaError::IllegalArgument(format!("No enum constant ClientDnsLookup.{other}"))),
         }
     }
 }

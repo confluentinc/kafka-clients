@@ -23,6 +23,7 @@
 //! are added in subsequent phases.
 
 pub mod client_dns_lookup;
+pub mod client_utils;
 pub mod common;
 pub mod common_client_configs;
 pub mod default_host_resolver;

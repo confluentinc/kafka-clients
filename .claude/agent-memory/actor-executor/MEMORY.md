@@ -23,4 +23,5 @@
 - [Phase 4a cluster data types](phase4a_cluster_data_types.md) — Arc<str> interning, null-topic empty-string substitution, Cluster shuffle/equality scope, bootstrap_with_hosts
 - [Phase 4b metadata stack](phase4b_metadata_stack.md) — single-mutex sync, retain-topic predicate via composition, await_update wall-clock deadline, KafkaError::StaleMetadata
 - [Phase 4b Round 2 patterns](phase4b_round2_patterns.md) — ArcSwap as `volatile Arc<T>`, listener-under-lock, "covered elsewhere" deferral trap, slice .len() vs iterator .count()
+- [Phase 4c client utils](phase4c_client_utils.md) — InetSocketAddress shim, sync HostResolver+spawn_blocking, file-level deferral rustdoc, ClientDnsLookup 2-variant truth
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it

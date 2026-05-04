@@ -42,9 +42,9 @@ impl HostResolver for DefaultHostResolver {
         // Java's `InetAddress.getAllByName(host)` resolves a bare
         // hostname; `ToSocketAddrs` requires a port, so we pass 0 and
         // discard it from each `SocketAddr` to recover the IP only.
-        let resolved = (host, 0u16).to_socket_addrs().map_err(|e| {
-            KafkaError::Network(format!("Unknown host: {host}: {e}"))
-        })?;
+        let resolved = (host, 0u16)
+            .to_socket_addrs()
+            .map_err(|e| KafkaError::Network(format!("Unknown host: {host}: {e}")))?;
         Ok(resolved.map(|sa| sa.ip()).collect())
     }
 }
