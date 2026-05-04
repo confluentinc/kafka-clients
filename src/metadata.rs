@@ -93,6 +93,24 @@ pub type RetainTopicFn = Arc<dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + Sen
 /// Metadata is maintained for only a subset of topics, which can be added
 /// to over time. When we request metadata for a topic we don't have any
 /// metadata for it will trigger a metadata update.
+///
+/// ## Listener constraint
+///
+/// `update()` / `update_partition_leadership()` invoke
+/// [`ClusterResourceListeners::on_update`] **while holding the inner
+/// mutex**, matching Java's `synchronized` listener-dispatch ordering at
+/// `Metadata.java:367` so a listener observing the post-update state
+/// sees no in-flight writer interleaved between version-N notification
+/// and the snapshot it reads. Java's `synchronized` is reentrant — Rust
+/// `std::sync::Mutex` is not — so the consequence for callers is:
+///
+/// **Cluster resource listeners must NOT call back into the same
+/// [`Metadata`] instance from inside `on_update`.** Specifically: do
+/// not call `update()`, `bootstrap()`, `request_update()`,
+/// `time_to_next_update()`, or any other `&self` method that takes
+/// `inner.lock()` — doing so will deadlock. Reading
+/// `cluster_resource` (the argument passed to `on_update`) is the
+/// supported access pattern.
 pub struct Metadata {
     /// All mutable state lives behind a single mutex (mirrors Java's
     /// `synchronized` monitor on `Metadata`).
@@ -468,9 +486,10 @@ impl Metadata {
     ) -> Result<(), KafkaError> {
         let prefix = self.log_context.log_prefix();
         // Step 1: take the lock, compute the new snapshot, drop topics
-        // that the predicate no longer wants.
-        let listeners_to_notify: Arc<ClusterResourceListeners>;
-        let new_resource;
+        // that the predicate no longer wants. Java holds the
+        // `synchronized` monitor for the entire method including the
+        // `clusterResourceListeners.onUpdate` call (`Metadata.java:367`);
+        // we mirror that — see the type-level "Listener constraint" doc.
         {
             let mut inner = self.inner.lock().expect("metadata mutex poisoned");
             if inner.is_closed {
@@ -523,28 +542,36 @@ impl Metadata {
                 info!("{prefix}Cluster ID: {new_cluster_id:?}");
             }
 
-            listeners_to_notify = Arc::clone(&inner.cluster_resource_listeners);
-            new_resource = new_snapshot.cluster_resource();
             debug!(
                 "{prefix}Updated cluster metadata updateVersion {} to {:?}",
                 inner.update_version, new_snapshot
             );
+
+            // Java invokes listeners while holding the synchronized
+            // monitor — see the type-level "Listener constraint" doc.
+            // The Arc-cloned `cluster_resource_listeners` is borrowed
+            // from `inner` *just* long enough to invoke `on_update`;
+            // we hold the lock during the call so a concurrent writer
+            // cannot publish version N+1 between our store and the
+            // notification.
+            inner
+                .cluster_resource_listeners
+                .on_update(&new_snapshot.cluster_resource());
         }
 
-        listeners_to_notify.on_update(&new_resource);
         self.notify.notify_waiters();
         Ok(())
     }
 
-    /// Mirrors `updatePartitionLeadership(...)`.
+    /// Mirrors `updatePartitionLeadership(...)`. As with `update`, the
+    /// listener invocation runs while the inner lock is held — see the
+    /// type-level "Listener constraint" doc.
     pub fn update_partition_leadership(
         &self,
         partition_leaders: HashMap<TopicPartition, LeaderIdAndEpoch>,
         leader_nodes: Vec<Node>,
     ) -> HashSet<TopicPartition> {
         let prefix = self.log_context.log_prefix();
-        let listeners_to_notify;
-        let cluster_resource;
         let updated_partitions;
         {
             let mut inner = self.inner.lock().expect("metadata mutex poisoned");
@@ -661,11 +688,13 @@ impl Metadata {
             );
             let new_snapshot = Arc::new(new_snapshot);
             self.metadata_snapshot.store(Arc::clone(&new_snapshot));
-            listeners_to_notify = Arc::clone(&inner.cluster_resource_listeners);
-            cluster_resource = new_snapshot.cluster_resource();
+            // Listener dispatch runs while the lock is held — see the
+            // type-level "Listener constraint" doc.
+            inner
+                .cluster_resource_listeners
+                .on_update(&new_snapshot.cluster_resource());
         }
 
-        listeners_to_notify.on_update(&cluster_resource);
         self.notify.notify_waiters();
         updated_partitions
     }
