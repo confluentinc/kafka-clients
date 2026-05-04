@@ -66,6 +66,11 @@ impl ResponseHeader {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub fn data_mut(&mut self) -> &mut ResponseHeaderData {
+        &mut self.data
+    }
+
     /// Calculates the size of this header in bytes using the given serialization cache.
     ///
     /// This method recalculates the size on each invocation. Prefer [`size`](Self::size)
@@ -101,8 +106,8 @@ impl ResponseHeader {
     /// # Errors
     ///
     /// Returns an error if writing fails.
-    pub fn write(&self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
-        Message::write(&self.data, buffer, cache, self.header_version)
+    pub fn write(&mut self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
+        Message::write(&mut self.data, buffer, cache, self.header_version)
     }
 
     /// Parses a `ResponseHeader` from the given buffer.
