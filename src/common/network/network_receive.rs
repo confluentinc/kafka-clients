@@ -44,8 +44,17 @@ pub struct NetworkReceive {
     /// Once the size header is parsed, set to the requested payload size
     /// (may be 0).  Mirrors Java's `requestedBufferSize` initialised to -1.
     requested_buffer_size: i32,
-    /// Payload buffer once allocated. Mirrors Java's `buffer`.
+    /// Payload buffer once allocated. Mirrors Java's `buffer`. Allocated to
+    /// the full `requested_buffer_size` capacity once known and read into
+    /// directly via `&mut buf[payload_pos..]` — no per-call scratch buffer.
     buffer: Option<BytesMut>,
+    /// Number of payload bytes filled so far (mirrors Java's
+    /// `buffer.position()` for the payload buffer). Used to determine the
+    /// next write window into [`Self::buffer`] without relying on
+    /// `BytesMut::len`, which we keep equal to `requested_buffer_size`
+    /// once allocated so the receive owns a single contiguous, zeroed
+    /// region (matching Java's `ByteBuffer` allocation pattern).
+    payload_pos: usize,
 }
 
 impl NetworkReceive {
@@ -58,6 +67,7 @@ impl NetworkReceive {
             max_size,
             requested_buffer_size: -1,
             buffer: None,
+            payload_pos: 0,
         }
     }
 
@@ -72,41 +82,63 @@ impl NetworkReceive {
     }
 
     /// Mirrors `new NetworkReceive(String source, ByteBuffer buffer)` — a
-    /// receive pre-populated with a payload, used by tests. The size header
-    /// is treated as fully written (`size_pos = 4`).
+    /// receive pre-populated with a payload, used by tests. Mirrors the
+    /// Java semantics exactly: the `size` ByteBuffer is left fresh
+    /// (`position=0`, `limit=4`), so `complete()` returns `false`,
+    /// `bytes_read()` returns `buffer.position()` (== 0 in Java since
+    /// the caller hasn't moved the buffer's position), and `size()`
+    /// returns `buffer.limit() + 4`. The size header is **not**
+    /// synthesised from the payload length.
     pub fn with_buffer(source: impl Into<String>, buffer: BytesMut) -> Self {
-        let len = buffer.len() as i32;
-        let mut size_buf = [0u8; 4];
-        size_buf.copy_from_slice(&len.to_be_bytes());
         NetworkReceive {
             source: source.into(),
-            size_buf,
-            size_pos: 4,
+            size_buf: [0; 4],
+            size_pos: 0,
             max_size: UNLIMITED,
-            requested_buffer_size: len,
+            requested_buffer_size: -1,
             buffer: Some(buffer),
+            payload_pos: 0,
         }
     }
 
-    /// Mirrors `NetworkReceive.bytesRead()`.
+    /// Mirrors `NetworkReceive.bytesRead()`. Java returns
+    /// `size.position()` when buffer is null, else
+    /// `buffer.position() + size.position()`.
     pub fn bytes_read(&self) -> i32 {
-        self.size_pos as i32 + self.buffer.as_ref().map(|b| b.len() as i32).unwrap_or(0)
+        if self.buffer.is_none() {
+            self.size_pos as i32
+        } else {
+            self.payload_pos as i32 + self.size_pos as i32
+        }
     }
 
     /// Mirrors `NetworkReceive.size()` — total receive size including the
-    /// 4-byte length header. Java requires the payload buffer to be set
-    /// before it's safe to call (`payload().limit()` would NPE otherwise).
-    /// We mirror that contract by panicking only if the size header has
-    /// not been parsed; once it's parsed, `requested_buffer_size` is the
-    /// authoritative payload size even before the payload bytes have been
-    /// fully read (matching Java's `payload().limit()` after `flip`).
+    /// 4-byte length header. Java implements this as
+    /// `payload().limit() + size.limit()` and NPEs if `payload() == null`.
+    ///
+    /// **Precondition (mirrors Java):** the payload buffer must be set
+    /// before calling — either by completing the size-header parse or via
+    /// the `with_buffer` constructor. Callers that compute metrics during
+    /// the lifecycle of a receive should gate on
+    /// [`Receive::complete`] or [`Receive::memory_allocated`] first
+    /// (see CLAUDE.md rule 10.1: panic mirrors the Java unchecked
+    /// `NullPointerException`, since the only legitimate caller is
+    /// metrics emission which already knows how to gate).
     pub fn size(&self) -> i32 {
-        // 4 byte size header + payload size.
-        if self.requested_buffer_size < 0 {
+        // Mirrors Java's `payload().limit() + size.limit()`. When the size
+        // header has been parsed, `requested_buffer_size` is the authoritative
+        // payload limit. When the receive was constructed with a pre-populated
+        // buffer (Java sets `buffer = ByteBuffer.allocate(N)` directly, leaving
+        // `size` fresh), the payload's `limit()` equals the buffer's length.
+        let payload_limit = if self.requested_buffer_size >= 0 {
+            self.requested_buffer_size
+        } else if let Some(buf) = self.buffer.as_ref() {
+            buf.len() as i32
+        } else {
             // Mirrors Java's NPE on `payload().limit()` when buffer == null.
             panic!("NetworkReceive.size() called before the size header was parsed");
-        }
-        4 + self.requested_buffer_size
+        };
+        4 + payload_limit
     }
 
     /// The parsed payload (the `N` bytes after the size header). Mirrors
@@ -138,10 +170,9 @@ impl Receive for NetworkReceive {
 
     fn complete(&self) -> bool {
         self.size_pos == 4
-            && self
-                .buffer
-                .as_ref()
-                .is_some_and(|b| b.len() as i32 == self.requested_buffer_size)
+            && self.buffer.is_some()
+            && self.requested_buffer_size >= 0
+            && self.payload_pos as i32 == self.requested_buffer_size
     }
 
     fn read_from(&mut self, src: &mut dyn io::Read) -> io::Result<u64> {
@@ -188,23 +219,30 @@ impl Receive for NetworkReceive {
             }
         }
 
-        // Allocate the payload buffer once we know the size.
+        // Allocate the payload buffer once we know the size. Allocate once
+        // at the full requested size (zero-initialised so the spare slice
+        // is a valid `&mut [u8]`); subsequent reads fill `&mut buf[pos..]`
+        // in place — no per-call scratch buffer, mirroring Java's
+        // `channel.read(buffer)` directly into the backing `ByteBuffer`.
         if self.buffer.is_none() && self.requested_buffer_size > 0 {
             let cap = self.requested_buffer_size as usize;
             let mut buf = BytesMut::with_capacity(cap);
             buf.resize(cap, 0);
-            // Reset to empty so we can fill with successive reads.
-            buf.clear();
             self.buffer = Some(buf);
         }
 
-        // Fill the payload buffer.
-        if let Some(buf) = self.buffer.as_mut() {
-            let needed = self.requested_buffer_size as usize - buf.len();
-            if needed > 0 {
-                let mut scratch = vec![0u8; needed];
-                let n = src.read(&mut scratch)?;
-                buf.extend_from_slice(&scratch[..n]);
+        // Fill the payload buffer in place. Skip when the size header
+        // hasn't been parsed yet (e.g. a fixture constructed via
+        // `with_buffer`) — Java behaves the same: `requestedBufferSize`
+        // remains -1 and the channel.read call still happens, but no
+        // size is known.
+        if self.requested_buffer_size > 0
+            && let Some(buf) = self.buffer.as_mut()
+        {
+            let total = self.requested_buffer_size as usize;
+            if self.payload_pos < total {
+                let n = src.read(&mut buf[self.payload_pos..total])?;
+                self.payload_pos += n;
                 read += n as u64;
             }
         }
@@ -224,6 +262,7 @@ impl Receive for NetworkReceive {
         // Drop the payload buffer. Equivalent to Java's
         // `memoryPool.release(buffer); buffer = null;`.
         self.buffer = None;
+        self.payload_pos = 0;
         Ok(())
     }
 }
@@ -327,6 +366,34 @@ mod tests {
             receive.size() as usize,
             4 + payload_size,
             "The total size should be the sum of the size buffer and payload."
+        );
+    }
+
+    /// Java parity check for the `with_buffer` constructor: the size header
+    /// is left fresh (not synthesised), so `complete()` is `false` and
+    /// `bytes_read()` excludes the unread size header. Mirrors Java's
+    /// `new NetworkReceive(source, ByteBuffer.allocate(8).put(...))`
+    /// behaviour where `size.position() == 0` and `buffer.position() == 0`
+    /// (caller hasn't moved the position).
+    #[test]
+    fn with_buffer_does_not_synthesise_size_header() {
+        let payload_size = 8usize;
+        let mut buf = BytesMut::with_capacity(payload_size);
+        buf.extend_from_slice(&(0..payload_size as u8).collect::<Vec<u8>>());
+
+        let receive = NetworkReceive::with_buffer("0", buf);
+        assert!(
+            !receive.complete(),
+            "complete() must be false: size.hasRemaining() in Java is true"
+        );
+        // bytes_read in Java = buffer.position() + size.position() = 0 + 0 = 0
+        // for a freshly-wrapped ByteBuffer whose position the caller did not
+        // advance. Our BytesMut doesn't track a separate position; we mirror
+        // the Java `bytesRead` == 0 when nothing has been read off the wire.
+        assert_eq!(
+            receive.bytes_read(),
+            0,
+            "bytes_read should be 0 (size_pos=0, payload_pos=0) before any read_from call"
         );
     }
 
