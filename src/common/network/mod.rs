@@ -22,7 +22,10 @@
 //! in Phase 5b/5c.
 
 pub mod byte_buffer_send;
+pub mod channel_metadata_registry;
 pub mod channel_state;
+pub mod cipher_information;
+pub mod client_information;
 pub mod connection_mode;
 pub mod invalid_receive_error;
 pub mod listener_name;
@@ -30,10 +33,14 @@ pub mod network_receive;
 pub mod network_send;
 pub mod receive;
 pub mod send;
+pub mod server_connection_id;
 pub mod transferable_channel;
 
 pub use byte_buffer_send::ByteBufferSend;
+pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
 pub use channel_state::{ChannelState, ChannelStateName};
+pub use cipher_information::CipherInformation;
+pub use client_information::ClientInformation;
 pub use connection_mode::ConnectionMode;
 pub use invalid_receive_error::InvalidReceiveError;
 pub use listener_name::ListenerName;
@@ -41,4 +48,5 @@ pub use network_receive::NetworkReceive;
 pub use network_send::NetworkSend;
 pub use receive::Receive;
 pub use send::Send;
+pub use server_connection_id::ServerConnectionId;
 pub use transferable_channel::TransferableChannel;
