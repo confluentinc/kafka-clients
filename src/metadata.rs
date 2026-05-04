@@ -554,9 +554,7 @@ impl Metadata {
             // we hold the lock during the call so a concurrent writer
             // cannot publish version N+1 between our store and the
             // notification.
-            inner
-                .cluster_resource_listeners
-                .on_update(&new_snapshot.cluster_resource());
+            inner.cluster_resource_listeners.on_update(&new_snapshot.cluster_resource());
         }
 
         self.notify.notify_waiters();
@@ -690,9 +688,7 @@ impl Metadata {
             self.metadata_snapshot.store(Arc::clone(&new_snapshot));
             // Listener dispatch runs while the lock is held — see the
             // type-level "Listener constraint" doc.
-            inner
-                .cluster_resource_listeners
-                .on_update(&new_snapshot.cluster_resource());
+            inner.cluster_resource_listeners.on_update(&new_snapshot.cluster_resource());
         }
 
         self.notify.notify_waiters();
@@ -1626,38 +1622,361 @@ mod tests {
         assert!(topics.contains("topic-2"));
     }
 
-    /// Java: `testEpochUpdateAfterTopicDeletion`. After a topic is
-    /// deleted (received with no leader epoch), the next epoch override
-    /// resets cleanly.
+    /// Java: `testEpochUpdateAfterTopicDeletion`
+    /// (`MetadataTest.java:388-411`). Three-phase test:
+    /// 1. Empty → topic with topic-id A, epoch 10. last-seen = 10.
+    /// 2. Same topic returned with `UNKNOWN_TOPIC_OR_PARTITION` error
+    ///    response. last-seen still = 10.
+    /// 3. Topic recreated with **different topic id B**, epoch 5.
+    ///    last-seen = 5 (lower epoch wins because topic id changed).
     #[test]
     fn epoch_update_after_topic_deletion() {
         let metadata = fresh_metadata();
-        // Initial: epoch 10.
-        let resp_initial = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(10), &HashMap::new());
-        metadata.update_with_current_request_version(&resp_initial, false, 0).unwrap();
         let tp = TopicPartition::new("topic-1".to_owned(), 0);
+
+        // Phase 0: empty.
+        let resp_empty = empty_metadata_response();
+        metadata.update_with_current_request_version(&resp_empty, false, 0).unwrap();
+
+        // Phase 1: topic with topic-id A, epoch 10.
+        let topic_id_a = Uuid::random();
+        let mut topic_ids = HashMap::new();
+        topic_ids.insert("topic-1".to_owned(), topic_id_a);
+        let resp_initial = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(10), &topic_ids);
+        metadata.update_with_current_request_version(&resp_initial, false, 1).unwrap();
         assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
 
-        // Topic deleted: epoch supplier returns None → has_reliable_leader_epoch
-        // is true but the response has no epoch ⇒ the entry is dropped.
-        let mut data = MetadataResponseData::new();
-        data.cluster_id = Some("dummy".to_owned());
-        data.controller_id = 0;
-        data.brokers = vec![MetadataResponseBroker {
-            node_id: 0,
-            host: "localhost".to_owned(),
-            port: 1969,
-            rack: None,
-            unknown_tagged_fields: Vec::new(),
-        }];
-        // Empty topics list — emulates deletion when the topic
-        // disappears from the response. Since we filter by retain
-        // predicate on a partial update, the topic data is preserved.
-        let resp_delete = MetadataResponse::new(data, true);
-        metadata.update_with_current_request_version(&resp_delete, true, 0).unwrap();
-        // Partial update doesn't carry the now-absent topic. The
-        // last-seen epoch is still 10 because the partition just isn't
-        // mentioned in the new response.
+        // Phase 2: topic returned with `UNKNOWN_TOPIC_OR_PARTITION`.
+        // The error response carries the topic name + the error code
+        // and no partitions. last-seen epoch is preserved.
+        let resp_err = build_metadata_response(
+            Some("dummy"),
+            0,
+            vec![Node::new(0, "localhost".to_owned(), 1969)],
+            vec![TopicMetadataInput {
+                topic: "topic-1".to_owned(),
+                topic_id: ZERO_UUID,
+                is_internal: false,
+                error: Errors::UnknownTopicOrPartition,
+                partitions: Vec::new(),
+            }],
+        );
+        metadata.update_with_current_request_version(&resp_err, false, 1).unwrap();
         assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
+
+        // Phase 3: same topic recreated with different topic-id B,
+        // lower epoch 5 — but since topic id changed, the lower epoch
+        // wins per `update_latest_metadata`'s "topic id changed"
+        // branch.
+        let topic_id_b = Uuid::random();
+        assert_ne!(topic_id_a, topic_id_b);
+        let mut new_topic_ids = HashMap::new();
+        new_topic_ids.insert("topic-1".to_owned(), topic_id_b);
+        let resp_new = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(5), &new_topic_ids);
+        metadata.update_with_current_request_version(&resp_new, false, 1).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(5));
+    }
+
+    /// Java: `testEpochUpdateOnChangedTopicIds`
+    /// (`MetadataTest.java:413-452`). 6-phase test exercising the
+    /// "topic id changed" branch of `update_latest_metadata` across
+    /// progressively newer epochs and topic-id changes.
+    #[test]
+    fn epoch_update_on_changed_topic_ids() {
+        let metadata = fresh_metadata();
+        let tp = TopicPartition::new("topic-1".to_owned(), 0);
+        let topic_id_a = Uuid::random();
+        let mut topic_ids_a = HashMap::new();
+        topic_ids_a.insert("topic-1".to_owned(), topic_id_a);
+
+        // Phase 0: empty.
+        metadata
+            .update_with_current_request_version(&empty_metadata_response(), false, 0)
+            .unwrap();
+
+        // Phase 1: topic with no topic id, epoch 100.
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(100), &HashMap::new());
+        metadata.update_with_current_request_version(&resp, false, 1).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(100));
+
+        // Phase 2: introduce topic id A with epoch 10. Since the old
+        // topic id was null, the new one wins even with a lower epoch.
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(10), &topic_ids_a);
+        metadata.update_with_current_request_version(&resp, false, 2).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
+
+        // Phase 3: same topic id, same epoch — no change.
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(10), &topic_ids_a);
+        metadata.update_with_current_request_version(&resp, false, 3).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
+
+        // Phase 4: same topic id, newer epoch wins.
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(12), &topic_ids_a);
+        metadata.update_with_current_request_version(&resp, false, 4).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(12));
+
+        // Phase 5: new topic id B, lower epoch 3 — wins because topic
+        // id changed.
+        let topic_id_b = Uuid::random();
+        let mut topic_ids_b = HashMap::new();
+        topic_ids_b.insert("topic-1".to_owned(), topic_id_b);
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(3), &topic_ids_b);
+        metadata.update_with_current_request_version(&resp, false, 5).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(3));
+
+        // Phase 6: another new topic id with higher epoch 20.
+        let topic_id_c = Uuid::random();
+        let mut topic_ids_c = HashMap::new();
+        topic_ids_c.insert("topic-1".to_owned(), topic_id_c);
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(20), &topic_ids_c);
+        metadata.update_with_current_request_version(&resp, false, 6).unwrap();
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(20));
+    }
+
+    /// Java: `testMetadataMergeOnIdDowngrade`
+    /// (`MetadataTest.java:1019-1064`). Tests the topic-id downgrade
+    /// scenario (id present → id absent in the next response): the
+    /// topic stays but its cached topic id is cleared. Uses
+    /// `set_retain_topic_fn` to mirror Java's anonymous subclass
+    /// override of `retainTopic`.
+    #[test]
+    fn metadata_merge_on_id_downgrade() {
+        let metadata = fresh_metadata();
+        let retain: Arc<Mutex<HashSet<String>>> =
+            Arc::new(Mutex::new(HashSet::from(["validTopic1".to_owned(), "validTopic2".to_owned()])));
+        let retain_for_predicate = Arc::clone(&retain);
+        metadata.set_retain_topic_fn(Arc::new(move |topic, _topic_id, _is_internal, _now_ms| {
+            retain_for_predicate.lock().expect("retain set poisoned").contains(topic)
+        }));
+
+        // Initial response: two topics with topic ids.
+        let topic_id_1 = Uuid::random();
+        let topic_id_2 = Uuid::random();
+        let mut topic_ids = HashMap::new();
+        topic_ids.insert("validTopic1".to_owned(), topic_id_1);
+        topic_ids.insert("validTopic2".to_owned(), topic_id_2);
+        let resp = metadata_update_with(
+            Some("clusterId"),
+            2,
+            &[("validTopic1", 2), ("validTopic2", 3)],
+            |_, _| Some(100),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&resp, true, 0).unwrap();
+        let topic_ids_after = metadata.topic_ids();
+        assert_eq!(topic_ids_after.get("validTopic1"), Some(&topic_id_1));
+        assert_eq!(topic_ids_after.get("validTopic2"), Some(&topic_id_2));
+
+        // Downgrade: topic id removed from validTopic1; topic itself
+        // remains but its id is no longer cached.
+        let mut downgrade_topic_ids = HashMap::new();
+        downgrade_topic_ids.insert("validTopic2".to_owned(), topic_id_2);
+        let resp = metadata_update_with(
+            Some("clusterId"),
+            2,
+            &[("validTopic1", 2), ("validTopic2", 3)],
+            |_, _| Some(200),
+            &downgrade_topic_ids,
+        );
+        metadata.update_with_current_request_version(&resp, true, 1).unwrap();
+
+        let cluster = metadata.fetch();
+        let topics: HashSet<String> = cluster.topics().map(str::to_owned).collect();
+        assert!(topics.contains("validTopic1"));
+        assert!(topics.contains("validTopic2"));
+        assert_eq!(cluster.partitions_for_topic("validTopic1").len(), 2);
+        // validTopic1 no longer has a topic id.
+        let topic_ids_final = metadata.topic_ids();
+        assert!(!topic_ids_final.contains_key("validTopic1"));
+        assert_eq!(topic_ids_final.get("validTopic2"), Some(&topic_id_2));
+    }
+
+    /// Java: `testTopicMetadataOnUpdatePartitionLeadership`
+    /// (`MetadataTest.java:1066-1139`). Verifies that
+    /// `update_partition_leadership` can change a partition's leader id
+    /// without losing other partition data.
+    #[test]
+    fn topic_metadata_on_update_partition_leadership() {
+        let metadata = fresh_metadata();
+        let topic = "input-topic";
+        let topic_id = Uuid::random();
+        let node1 = Node::new(1, "localhost".to_owned(), 9091);
+        let node2 = Node::new(2, "localhost".to_owned(), 9091);
+
+        let tp0 = TopicPartition::new(topic.to_owned(), 0);
+        let tp1 = TopicPartition::new(topic.to_owned(), 1);
+
+        // Build a response with two partitions for `input-topic`,
+        // both led by node 1.
+        let resp = build_metadata_response(
+            Some("clusterId"),
+            node1.id(),
+            vec![node1.clone(), node2.clone()],
+            vec![TopicMetadataInput {
+                topic: topic.to_owned(),
+                topic_id,
+                is_internal: false,
+                error: Errors::None,
+                partitions: vec![
+                    PartitionMetadataInput {
+                        partition_index: 0,
+                        leader_id: Some(1),
+                        leader_epoch: Some(1),
+                        replicas: vec![1, 2],
+                        isr: vec![1, 2],
+                        offline: Vec::new(),
+                        error: Errors::None,
+                    },
+                    PartitionMetadataInput {
+                        partition_index: 1,
+                        leader_id: Some(1),
+                        leader_epoch: Some(1),
+                        replicas: vec![1, 2],
+                        isr: vec![1, 2],
+                        offline: Vec::new(),
+                        error: Errors::None,
+                    },
+                ],
+            }],
+        );
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        assert_eq!(metadata.fetch().partitions_for_topic(topic).len(), 2);
+        assert_eq!(metadata.fetch().partition(&tp0).unwrap().leader().unwrap().id(), 1);
+        assert_eq!(metadata.fetch().partition(&tp1).unwrap().leader().unwrap().id(), 1);
+
+        // partition 1 leader changes from node 1 to node 2 (epoch 3).
+        let mut leaders = HashMap::new();
+        leaders.insert(tp1.clone(), LeaderIdAndEpoch::new(Some(2), Some(3)));
+        metadata.update_partition_leadership(leaders, vec![node1.clone()]);
+
+        assert_eq!(metadata.fetch().partitions_for_topic(topic).len(), 2);
+        assert_eq!(metadata.fetch().partition(&tp0).unwrap().leader().unwrap().id(), 1);
+        assert_eq!(metadata.fetch().partition(&tp1).unwrap().leader().unwrap().id(), 2);
+    }
+
+    /// Java: `testConcurrentUpdateAndFetchForSnapshotAndCluster`
+    /// (`MetadataTest.java:1145-1232`). Spawns 6 OS threads (3 writers,
+    /// 3 readers) and asserts that after all complete, the snapshot and
+    /// cluster reflect the higher node count, partition counts, and
+    /// leader epoch from the writers.
+    ///
+    /// Translation note: Java uses `ExecutorService` + `CountDownLatch`;
+    /// we use `std::thread::spawn` + `std::sync::Barrier` because the
+    /// `Metadata` mutex is `std::sync::Mutex` (synchronous). The
+    /// post-test assertions compare `>` (strictly greater than) just
+    /// like the Java equivalent.
+    #[test]
+    fn concurrent_update_and_fetch_for_snapshot_and_cluster() {
+        use std::sync::{Arc as StdArc, Barrier, Mutex as StdMutex};
+
+        let metadata = StdArc::new(fresh_metadata());
+
+        let topic1 = "test_topic1";
+        let topic2 = "test_topic2";
+        let old_node_count = 10;
+        let old_partition_count = 1;
+        let old_leader_epoch = 100;
+        let topic1_part0 = TopicPartition::new(topic1.to_owned(), 0);
+
+        let mut topic_ids = HashMap::new();
+        topic_ids.insert(topic1.to_owned(), Uuid::random());
+        topic_ids.insert(topic2.to_owned(), Uuid::random());
+
+        // Initial setup.
+        let resp = metadata_update_with(
+            Some("cluster"),
+            old_node_count,
+            &[(topic1, old_partition_count), (topic2, old_partition_count)],
+            |_, _| Some(old_leader_epoch),
+            &topic_ids,
+        );
+        metadata.update_with_current_request_version(&resp, true, 0).unwrap();
+        let snapshot = metadata.fetch_metadata_snapshot();
+        let cluster = metadata.fetch();
+        assert_eq!(*cluster, *snapshot.cluster());
+        assert_eq!(snapshot.cluster_ref().nodes().len(), old_node_count as usize);
+        assert_eq!(
+            snapshot.cluster_ref().partitions_for_topic(topic1).len(),
+            old_partition_count as usize
+        );
+        assert_eq!(
+            snapshot.cluster_ref().partitions_for_topic(topic2).len(),
+            old_partition_count as usize
+        );
+        assert_eq!(snapshot.leader_epoch_for(&topic1_part0), Some(old_leader_epoch));
+
+        // 3 writer threads + 3 reader threads, coordinated via Barrier.
+        let num_threads = 6;
+        let metadata_updated_once = StdArc::new(Barrier::new(num_threads));
+        let new_snapshot: StdArc<StdMutex<Option<Arc<MetadataSnapshot>>>> = StdArc::new(StdMutex::new(None));
+        let new_cluster: StdArc<StdMutex<Option<Arc<Cluster>>>> = StdArc::new(StdMutex::new(None));
+
+        let mut handles = Vec::new();
+        for i in 0..num_threads {
+            let id = (i + 1) as i32;
+            let metadata = StdArc::clone(&metadata);
+            let topic_ids = topic_ids.clone();
+            let barrier = StdArc::clone(&metadata_updated_once);
+            let new_snapshot = StdArc::clone(&new_snapshot);
+            let new_cluster = StdArc::clone(&new_cluster);
+            handles.push(std::thread::spawn(move || {
+                if id % 2 == 0 {
+                    // Writer thread.
+                    let n_nodes = old_node_count + id;
+                    let resp = metadata_update_with(
+                        Some("clusterId"),
+                        n_nodes,
+                        &[(topic1, old_partition_count + id), (topic2, old_partition_count + id)],
+                        move |_, _| Some(old_leader_epoch + id),
+                        &topic_ids,
+                    );
+                    metadata.update_with_current_request_version(&resp, true, 0).unwrap();
+                    barrier.wait();
+                } else {
+                    // Reader thread — wait until at least one writer
+                    // has finished, then snapshot.
+                    barrier.wait();
+                    *new_snapshot.lock().unwrap() = Some(metadata.fetch_metadata_snapshot());
+                    *new_cluster.lock().unwrap() = Some(metadata.fetch());
+                }
+            }));
+        }
+        for h in handles {
+            h.join().expect("worker thread panicked");
+        }
+
+        let final_snapshot = new_snapshot.lock().unwrap().clone().expect("reader recorded snapshot");
+        let final_cluster = new_cluster.lock().unwrap().clone().expect("reader recorded cluster");
+
+        // Validate snapshot.
+        let new_node_count = final_snapshot.cluster_ref().nodes().len();
+        assert!(
+            (old_node_count as usize) < new_node_count,
+            "Unexpected snapshot node count: {new_node_count}"
+        );
+        let new_partition_count_topic1 = final_snapshot.cluster_ref().partitions_for_topic(topic1).len();
+        assert!(
+            (old_partition_count as usize) < new_partition_count_topic1,
+            "Unexpected snapshot partition count for {topic1}: {new_partition_count_topic1}"
+        );
+        let new_partition_count_topic2 = final_snapshot.cluster_ref().partitions_for_topic(topic2).len();
+        assert!(
+            (old_partition_count as usize) < new_partition_count_topic2,
+            "Unexpected snapshot partition count for {topic2}: {new_partition_count_topic2}"
+        );
+        let new_leader_epoch = final_snapshot.leader_epoch_for(&topic1_part0).expect("leader epoch present");
+        assert!(
+            old_leader_epoch < new_leader_epoch,
+            "Unexpected snapshot leader epoch: {new_leader_epoch}"
+        );
+
+        // Validate cluster.
+        let new_node_count = final_cluster.nodes().len();
+        assert!(
+            (old_node_count as usize) < new_node_count,
+            "Unexpected cluster node count: {new_node_count}"
+        );
+        assert!((old_partition_count as usize) < final_cluster.partitions_for_topic(topic1).len());
+        assert!((old_partition_count as usize) < final_cluster.partitions_for_topic(topic2).len());
     }
 }

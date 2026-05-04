@@ -258,6 +258,21 @@ impl ProducerMetadata {
         }
     }
 
+    /// Mirrors `Metadata.updateWithCurrentRequestVersion(MetadataResponse, boolean, long)`
+    /// (inherited; visible for testing). Resolves the current request
+    /// version from the underlying [`Metadata`] then calls
+    /// [`Self::update`] so producer-side state (per-topic errors, the
+    /// new-topic set) is refreshed.
+    pub(crate) fn update_with_current_request_version(
+        &self,
+        response: &MetadataResponse,
+        is_partial_update: bool,
+        now_ms: i64,
+    ) -> Result<(), KafkaError> {
+        let request_version = self.metadata.new_metadata_request_and_version(now_ms).request_version;
+        self.update(request_version, response, is_partial_update, now_ms)
+    }
+
     /// Mirrors `update(int, MetadataResponse, boolean, long)`. Calls
     /// the parent `update` then updates producer-specific state and
     /// wakes any `await_update` callers.
@@ -335,13 +350,93 @@ mod tests {
     //! Translation of `ProducerMetadataTest`.
 
     use super::*;
+    use crate::common::message::metadata_response_data::{
+        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+    };
+    use crate::common::node::Node;
+    use crate::common::record::record_batch::NO_PARTITION_LEADER_EPOCH;
     use crate::common::utils::MockTime;
+    use crate::common::uuid::ZERO_UUID;
     use std::time::Duration as StdDuration;
+
+    /// Construct a `MetadataResponse` matching Java's
+    /// `RequestTestUtils.metadataUpdateWith(numNodes, partitionCounts)`
+    /// — the helper used by `responseWithTopics` /
+    /// `responseWithCurrentTopics` in `ProducerMetadataTest`.
+    fn metadata_response_with_topics(num_nodes: i32, topic_partition_counts: &[(&str, i32)]) -> MetadataResponse {
+        let nodes: Vec<Node> = (0..num_nodes).map(|i| Node::new(i, "localhost".to_owned(), 1969 + i)).collect();
+        let mut data = MetadataResponseData::new();
+        data.cluster_id = Some("dummy".to_owned());
+        data.controller_id = 0;
+        data.brokers = nodes
+            .iter()
+            .map(|n| MetadataResponseBroker {
+                node_id: n.id(),
+                host: n.host().to_owned(),
+                port: n.port(),
+                rack: n.rack().map(str::to_owned),
+                unknown_tagged_fields: Vec::new(),
+            })
+            .collect();
+        data.topics = topic_partition_counts
+            .iter()
+            .map(|(topic, num_parts)| MetadataResponseTopic {
+                error_code: 0,
+                name: Some((*topic).to_owned()),
+                topic_id: ZERO_UUID,
+                is_internal: false,
+                partitions: (0..*num_parts)
+                    .map(|i| {
+                        let leader = nodes[(i as usize) % nodes.len().max(1)].id();
+                        MetadataResponsePartition {
+                            error_code: 0,
+                            partition_index: i,
+                            leader_id: leader,
+                            leader_epoch: NO_PARTITION_LEADER_EPOCH,
+                            replica_nodes: vec![leader],
+                            isr_nodes: vec![leader],
+                            offline_replicas: Vec::new(),
+                            unknown_tagged_fields: Vec::new(),
+                        }
+                    })
+                    .collect(),
+                topic_authorized_operations: -1,
+                unknown_tagged_fields: Vec::new(),
+            })
+            .collect();
+        MetadataResponse::new(data, true)
+    }
+
+    /// Mirrors `responseWithCurrentTopics()` — builds a single-partition
+    /// metadata response covering exactly the topics currently held by
+    /// the producer-metadata instance.
+    fn response_with_current_topics(pm: &ProducerMetadata) -> MetadataResponse {
+        let topics: Vec<String> = pm.topics().into_iter().collect();
+        let counts: Vec<(&str, i32)> = topics.iter().map(|t| (t.as_str(), 1)).collect();
+        metadata_response_with_topics(1, &counts)
+    }
 
     fn fresh_producer_metadata(time: Arc<dyn Time>) -> Arc<ProducerMetadata> {
         ProducerMetadata::new(
             50,
             100,
+            1000,
+            60_000,
+            LogContext::default(),
+            Arc::new(ClusterResourceListeners::default()),
+            time,
+        )
+        .expect("producer metadata constructs")
+    }
+
+    /// Like [`fresh_producer_metadata`] but with the same backoff /
+    /// expiry constants Java's `ProducerMetadataTest` uses
+    /// (`refreshBackoffMs=100`, `refreshBackoffMaxMs=1000`,
+    /// `metadataExpireMs=1000`, `METADATA_IDLE_MS=60_000`).
+    fn java_compat_producer_metadata(time: Arc<dyn Time>) -> Arc<ProducerMetadata> {
+        ProducerMetadata::new(
+            100,
+            1000,
             1000,
             60_000,
             LogContext::default(),
@@ -471,5 +566,163 @@ mod tests {
         let pm = fresh_producer_metadata(time);
         let err = pm.await_update(pm.metadata().update_version(), 50).await.unwrap_err();
         assert!(matches!(err, KafkaError::Timeout(_)), "got {err:?}");
+    }
+
+    /// Java: `testTopicExpiry` (`ProducerMetadataTest.java:182-213`).
+    /// Three-phase contract:
+    /// 1. add → wait METADATA_IDLE_MS → next update drops the topic.
+    /// 2. add → repeated re-add inside the idle window keeps the topic.
+    /// 3. add a new topic, then update only after expiry would have
+    ///    elapsed — topic is still retained because it never had a
+    ///    chance to expire (the predicate runs only on update).
+    #[test]
+    fn topic_expiry() {
+        let time: Arc<dyn Time> = MockTime::arc();
+        let pm = java_compat_producer_metadata(time);
+        let metadata_idle_ms = pm.metadata_idle_ms();
+
+        // Phase 1: topic added, then expires after the idle window.
+        let mut now: i64 = 0;
+        let topic1 = "topic1";
+        pm.add(topic1, now);
+        let resp = response_with_current_topics(&pm);
+        pm.update_with_current_request_version(&resp, false, now).unwrap();
+        assert!(pm.contains_topic(topic1));
+
+        now += metadata_idle_ms;
+        let resp = response_with_current_topics(&pm);
+        pm.update_with_current_request_version(&resp, false, now).unwrap();
+        assert!(!pm.contains_topic(topic1), "Unused topic not expired");
+
+        // Phase 2: re-adding inside the window keeps the topic alive.
+        let topic2 = "topic2";
+        pm.add(topic2, now);
+        let resp = response_with_current_topics(&pm);
+        pm.update_with_current_request_version(&resp, false, now).unwrap();
+        for _ in 0..3 {
+            now += metadata_idle_ms / 2;
+            let resp = response_with_current_topics(&pm);
+            pm.update_with_current_request_version(&resp, false, now).unwrap();
+            assert!(pm.contains_topic(topic2), "Topic expired even though in use");
+            pm.add(topic2, now);
+        }
+
+        // Phase 3: adding a topic and updating after the would-be
+        // expiry — the topic is still retained because the response
+        // (which carries it) prevents its predicate from removing it.
+        let topic3 = "topic3";
+        pm.add(topic3, now);
+        now += metadata_idle_ms * 2;
+        let resp = response_with_current_topics(&pm);
+        pm.update_with_current_request_version(&resp, false, now).unwrap();
+        assert!(pm.contains_topic(topic3), "Topic expired while awaiting metadata");
+    }
+
+    /// Java: `testMetadataWaitAbortedOnFatalException`
+    /// (`ProducerMetadataTest.java:216-219`). When a fatal error is
+    /// raised, `await_update` returns the error immediately on the
+    /// next predicate check.
+    #[tokio::test]
+    async fn metadata_wait_aborted_on_fatal_error() {
+        let time: Arc<dyn Time> = MockTime::arc();
+        let pm = fresh_producer_metadata(time);
+        pm.fatal_error(KafkaError::Authentication("Fatal exception from test".to_owned()));
+        let err = pm.await_update(0, 1000).await.unwrap_err();
+        assert!(matches!(err, KafkaError::Authentication(_)), "got {err:?}");
+    }
+
+    /// Java: `testTimeToNextUpdateOverwriteBackoff`
+    /// (`ProducerMetadataTest.java:163-180`). Adding a new topic
+    /// overrides the backoff so the next update can fire immediately.
+    #[test]
+    fn time_to_next_update_overwrite_backoff() {
+        let time: Arc<dyn Time> = MockTime::arc();
+        let pm = java_compat_producer_metadata(time);
+        let now: i64 = 10_000;
+
+        // New topic added to fetch set and update requested. It should
+        // allow immediate update.
+        let resp = response_with_current_topics(&pm);
+        pm.update_with_current_request_version(&resp, false, now).unwrap();
+        pm.add("new-topic", now);
+        assert_eq!(pm.metadata().time_to_next_update(now), 0);
+
+        // Even though `add` is called, immediate update isn't necessary
+        // if the new-topic set isn't growing.
+        let resp = response_with_current_topics(&pm);
+        pm.update_with_current_request_version(&resp, false, now).unwrap();
+        pm.add("new-topic", now);
+        // After update, the new-topic set is empty, the topic is
+        // already known, time-to-next-update is bounded by metadata
+        // expire ms (1000) which is >= refresh_backoff_ms (100), so it
+        // returns the larger of those.
+        assert_eq!(pm.metadata().time_to_next_update(now), 1000);
+
+        // If the new set of topics contains a new topic, allow
+        // immediate update again.
+        pm.add("another-new-topic", now);
+        assert_eq!(pm.metadata().time_to_next_update(now), 0);
+    }
+
+    /// Java: `testMetadataPartialUpdate`
+    /// (`ProducerMetadataTest.java:222-267`). Drives the new-topic vs.
+    /// retained-topic transitions through several partial updates.
+    #[test]
+    fn metadata_partial_update_lifecycle() {
+        let time: Arc<dyn Time> = MockTime::arc();
+        let pm = java_compat_producer_metadata(time);
+        let mut now: i64 = 10_000;
+
+        // Add a new topic and fetch its metadata in a partial update.
+        let topic1 = "topic-one";
+        pm.add(topic1, now);
+        assert!(pm.metadata().update_requested());
+        assert_eq!(pm.metadata().time_to_next_update(now), 0);
+        assert_eq!(pm.topics(), HashSet::from([topic1.to_owned()]));
+        assert_eq!(pm.new_topics(), HashSet::from([topic1.to_owned()]));
+
+        // Perform the partial update. Verify the topic is no longer
+        // considered "new".
+        now += 1000;
+        let resp = metadata_response_with_topics(1, &[(topic1, 1)]);
+        pm.update_with_current_request_version(&resp, true, now).unwrap();
+        assert!(!pm.metadata().update_requested());
+        assert_eq!(pm.topics(), HashSet::from([topic1.to_owned()]));
+        assert_eq!(pm.new_topics(), HashSet::new());
+
+        // Add the topic again. It should not be considered "new".
+        pm.add(topic1, now);
+        assert!(!pm.metadata().update_requested());
+        assert!(pm.metadata().time_to_next_update(now) > 0);
+        assert_eq!(pm.topics(), HashSet::from([topic1.to_owned()]));
+        assert_eq!(pm.new_topics(), HashSet::new());
+
+        // Add two new topics, but apply a partial update for only one.
+        now += 1000;
+        let topic2 = "topic-two";
+        pm.add(topic2, now);
+
+        now += 1000;
+        let topic3 = "topic-three";
+        pm.add(topic3, now);
+
+        assert!(pm.metadata().update_requested());
+        assert_eq!(pm.metadata().time_to_next_update(now), 0);
+        assert_eq!(
+            pm.topics(),
+            HashSet::from([topic1.to_owned(), topic2.to_owned(), topic3.to_owned()])
+        );
+        assert_eq!(pm.new_topics(), HashSet::from([topic2.to_owned(), topic3.to_owned()]));
+
+        // Perform the partial update for a subset of the new topics.
+        now += 1000;
+        assert!(pm.metadata().update_requested());
+        let resp = metadata_response_with_topics(1, &[(topic2, 1)]);
+        pm.update_with_current_request_version(&resp, true, now).unwrap();
+        assert_eq!(
+            pm.topics(),
+            HashSet::from([topic1.to_owned(), topic2.to_owned(), topic3.to_owned()])
+        );
+        assert_eq!(pm.new_topics(), HashSet::from([topic3.to_owned()]));
     }
 }
