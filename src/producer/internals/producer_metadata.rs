@@ -272,7 +272,22 @@ impl ProducerMetadata {
 
         let mut state = self.state.lock().expect("producer metadata mutex poisoned");
         // Refresh the per-topic error map.
-        state.errors = response.errors().unwrap_or_default();
+        //
+        // Java's `ProducerMetadata.update` propagates any
+        // `IllegalArgumentException` from `MetadataResponse.errors()` —
+        // see `ProducerMetadata.java:136`. The exception is only thrown
+        // when a topic in the response has no name (the response was
+        // built with topic IDs only and the caller should be using
+        // `errorsByTopicId()`). The producer client always operates on
+        // name-keyed responses, so receiving a topic-id-only response
+        // here is a programming error in the calling stack — `expect()`
+        // matches Java's "throw the unchecked IllegalArgumentException"
+        // behavior. Replacing the previous `unwrap_or_default()` which
+        // silently swallowed malformed-response errors and left
+        // `get_error()` returning `None` (CLAUDE.md rule 5).
+        state.errors = response
+            .errors()
+            .expect("ProducerMetadata.update received a topic-id-only MetadataResponse; use errorsByTopicId");
 
         // Remove all topics in the response that are in the new topic
         // set. Note that if an error was encountered for a new topic's
