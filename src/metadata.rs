@@ -65,15 +65,8 @@ use crate::common::topic_partition::TopicPartition;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::common::uuid::{Uuid, ZERO_UUID};
+use crate::common_client_configs::{RETRY_BACKOFF_EXP_BASE, RETRY_BACKOFF_JITTER};
 use crate::metadata_snapshot::MetadataSnapshot;
-
-/// `CommonClientConfigs.RETRY_BACKOFF_EXP_BASE` — Java constant. Phase 4c
-/// will translate the full `CommonClientConfigs`; we inline these two
-/// values here so [`Metadata`] does not depend on the not-yet-translated
-/// module.
-const RETRY_BACKOFF_EXP_BASE: i32 = 2;
-/// `CommonClientConfigs.RETRY_BACKOFF_JITTER` — Java constant.
-const RETRY_BACKOFF_JITTER: f64 = 0.2;
 
 /// Predicate deciding whether topic metadata received in a metadata
 /// response should be retained. Mirrors the Java overridable
