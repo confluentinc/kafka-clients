@@ -155,9 +155,22 @@ def test_seed_cleanup_prs_no_rows_is_noop(tmp_path):
     assert db.get_latest_correspondence(conn, "master") is not None
 
 
-def test_pr_mode_missing_returns_1(tmp_path):
+def test_pr_mode_missing_returns_0_for_status_check(tmp_path):
+    """`--pr <N>` (no --plan-approve) is the auto-triggered Semaphore
+    status check that runs on every PR build. Most PRs in this repo
+    aren't translation PRs managed by the orchestrator, so a missing
+    row is the NORMAL case -- return 0 (green CI), not 1 (red CI)."""
     db_path = str(tmp_path / "t.db")
     rc = _run("--pr", "42", db_path=db_path)
+    assert rc == 0
+
+
+def test_pr_mode_missing_with_plan_approve_returns_1(tmp_path):
+    """`--pr <N> --plan-approve` is a deliberate manual promotion;
+    approving a plan for a PR the orchestrator doesn't know about is
+    an operator error and must fail loudly."""
+    db_path = str(tmp_path / "t.db")
+    rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
     assert rc == 1
 
 

@@ -209,8 +209,25 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
 def _run_pr_mode(args: argparse.Namespace, conn) -> int:
     pr = db.get_pr(conn, args.pr)
     if pr is None:
-        log.error("No pr_commit row for PR %d", args.pr)
-        return 1
+        # Behavior diverges by intent:
+        # - `--pr <N>` (status check, auto-triggered by Semaphore on
+        #   every PR build): missing rows are the NORMAL case for any
+        #   PR that isn't a translation PR managed by the orchestrator.
+        #   Return 0 so we don't fail CI for unrelated PRs.
+        # - `--pr <N> --plan-approve` (manual promotion): approving a
+        #   plan for a non-existent PR is a real operator error;
+        #   surface it loudly with rc=1.
+        if args.plan_approve:
+            log.error(
+                "No pr_commit row for PR %d -- cannot --plan-approve a PR "
+                "the orchestrator doesn't know about", args.pr,
+            )
+            return 1
+        log.info(
+            "No pr_commit row for PR %d -- not a translation PR managed "
+            "by the orchestrator, skipping", args.pr,
+        )
+        return 0
     if not args.plan_approve:
         for k, v in pr.items():
             print(f"{k}: {v}")
