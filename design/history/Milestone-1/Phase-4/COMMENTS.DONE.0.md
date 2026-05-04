@@ -183,3 +183,257 @@ a regression test (`with_partitions_shares_topic_arc`) that pins
 the `as_ptr()` addresses of every `Arc<str>`-keyed entry across
 `with_partitions` so a future refactor cannot silently reintroduce
 the round-trip. Test count 627 → 628.
+
+---
+
+# Phase 4b Review — Resolved Items (Critic N=0)
+
+Reviewed commits: `95c1175` (metadata stack), `da923a0` (test
+extensions), `96cf27c` (actor memory note).
+
+Java reference tree:
+- `kafka/clients/src/main/java/org/apache/kafka/clients/Metadata.java`
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/ProducerMetadata.java`
+- `kafka/clients/src/test/java/org/apache/kafka/clients/MetadataTest.java`
+- `kafka/clients/src/test/java/org/apache/kafka/clients/producer/internals/ProducerMetadataTest.java`
+
+DoD checks all green at end:
+- `cargo build --lib` clean
+- `cargo test --lib` — 684 passed (was 673; +11 net: +12 added, -1 dedupe)
+- `cargo xtask format-check` clean
+- `cargo xtask lint` clean
+- `cargo xtask check-generated` clean (199 generated files)
+
+---
+
+### Issue 5 — `testTopicExpiry` was missing
+
+**Resolution:** Fixed in `4f56fbd` (Fixup D). Translated
+`ProducerMetadataTest.java:182-213` directly as
+`producer_metadata::tests::topic_expiry`. Three-phase contract
+covered: idle-window expiry (add → wait `METADATA_IDLE_MS` → next
+update drops the topic), in-window re-add keeps the topic alive
+(loop adding inside the window), late update on a newly-added topic
+still retains it (no chance to expire). The
+`retain_topic_inner` `expire_ms <= now_ms` branch
+(`producer_metadata.rs:182-189`) is now exercised end-to-end. Added
+`ProducerMetadata::update_with_current_request_version` to mirror
+Java's inherited helper so the test reads naturally.
+
+### Issue 6 — `testConcurrentUpdateAndFetchForSnapshotAndCluster` was unjustifiably deferred
+
+**Resolution:** Fixed in `4f56fbd` (Fixup D). Translated
+`MetadataTest.java:1145-1232` as
+`metadata::tests::concurrent_update_and_fetch_for_snapshot_and_cluster`
+using `std::thread::spawn` + `std::sync::Barrier` (the synchronous-mutex
+analogue of Java's `ExecutorService` + `CountDownLatch`). 6 threads:
+3 writers update with progressively larger node count / partition
+count / leader epoch; 3 readers wait on the barrier then snapshot
+both `fetch_metadata_snapshot()` and `fetch()`. Same post-test
+assertions as Java: snapshot/cluster reflect strictly-greater node
+count, partition counts, and leader epoch. The Round 1 deferral
+("Java-specific stress test, no Rust analogue") was wrong — the
+property is language-independent and the lock-free `ArcSwap` from
+Issue 8 makes this exact test load-bearing.
+
+### Issue 7 — Three tests claimed "covered by `MetadataSnapshotTest`" were not
+
+**Resolution:** Fixed in `4f56fbd` (Fixup D). All three translated
+directly as separate `metadata::tests` cases:
+
+- `testEpochUpdateOnChangedTopicIds` (`MetadataTest.java:413-452`) →
+  `epoch_update_on_changed_topic_ids`. Covers the topic-id-change
+  branch in `update_latest_metadata` for both lower-epoch (wins
+  because id changed) and higher-epoch transitions.
+- `testMetadataMergeOnIdDowngrade` (`MetadataTest.java:1019-1064`) →
+  `metadata_merge_on_id_downgrade`. Drives the topic-id downgrade
+  through the Metadata stack with a `set_retain_topic_fn` predicate
+  (Rust composition analogue of Java's anonymous-subclass
+  `retainTopic` override).
+- `testTopicMetadataOnUpdatePartitionLeadership`
+  (`MetadataTest.java:1066-1139`) →
+  `topic_metadata_on_update_partition_leadership`. Verifies that
+  `update_partition_leadership` changes a partition's leader id
+  without losing other partition data.
+
+The Round 1 "covered elsewhere" claim was incorrect: those tests
+exercise integration paths through `Metadata.update` /
+`updatePartitionLeadership` that `MetadataSnapshotTest` (which
+exercises only `MetadataSnapshot.mergeWith` in isolation) does not
+touch.
+
+### Issue 8 — `Metadata::fetch()` and `fetch_metadata_snapshot()` were taking the writer lock
+
+**Resolution:** Fixed in `4ec14cd` (Fixup A). Hoisted
+`metadata_snapshot` out of `MetadataInner` into an
+`arc_swap::ArcSwap<MetadataSnapshot>` on `Metadata` itself. Readers
+(`fetch`, `fetch_metadata_snapshot`, `topic_ids`, `topic_names`,
+`partition_metadata_if_current`, `current_leader`) now do a
+lock-free atomic Arc load instead of acquiring the inner mutex.
+Writers (`bootstrap`, `update`, `update_partition_leadership`)
+still run inside the inner mutex (so writer-vs-writer
+serialization preserves Java's `synchronized` semantics) and
+publish via `ArcSwap::store`. `handle_metadata_response_locked`
+and `update_latest_metadata` now take an explicit
+`&Arc<MetadataSnapshot>` plumbed in from the writer's single
+`load_full()` so all reads in a single update pass see a
+consistent view.
+
+Added `arc-swap = "1"` as a direct dependency. `arc-swap` is the
+established Rust crate for the "volatile `Arc<T>`" pattern (CLAUDE.md
+rule 1.2: prefer popular Rust crates over hand-rolling). The
+dependency is justified for this exact `volatile`-replacement
+pattern matching `Metadata.java:79,129-138`.
+
+The producer hot path (`KafkaProducer.send` partitioning lookup) is
+now lock-free.
+
+### Issue 9 — `ProducerMetadata::update` silently swallowed `MetadataResponse::errors()` failure
+
+**Resolution:** Fixed in `e513cd9` (Fixup B). Replaced
+`response.errors().unwrap_or_default()` with
+`response.errors().expect("...")` documenting the assumed invariant.
+This matches Java's `ProducerMetadata.update` semantics
+(`ProducerMetadata.java:136`): the `IllegalArgumentException` from
+`errors()` is only thrown for topic-id-only responses, and the
+producer client always operates on name-keyed responses, so a
+topic-id-only response here is a programming error — Java propagates
+it as an unchecked exception, Rust panics via `expect()`. CLAUDE.md
+rule 5 violation (silent failure-completion) is now fixed.
+
+### Issue 10 — `cluster_listener_fires_on_close` asserted nothing
+
+**Resolution:** Fixed in `8d8fd4a` (Fixup E). Replaced the misleading
+no-op-listener test with `cluster_listener_notified_on_update_not_on_bootstrap`,
+a faithful translation of `MetadataTest.java:299-322`. Captures the
+most-recent `on_update` argument via
+`Arc<Mutex<Option<ClusterResource>>>`, asserts the listener is
+**not** notified after `bootstrap` and **is** notified with cluster
+id `"dummy"` after `update`. The `on_update` wiring in
+`Metadata::update` is now covered.
+
+### Issue 11 — `epoch_update_after_topic_deletion` skipped phase 3
+
+**Resolution:** Fixed in `4f56fbd` (Fixup D). Replaced the partial
+2-phase test with the full 3-phase translation matching
+`MetadataTest.java:388-411`. New test
+(`epoch_update_after_topic_deletion`) covers: empty → topic with
+topic-id A epoch 10 → `UNKNOWN_TOPIC_OR_PARTITION` error response
+keeps last-seen at 10 → topic recreated with **different topic-id
+B and lower epoch 5** → last-seen = 5 (lower epoch wins because
+topic id changed). The previously uncovered branch
+`Some(current_epoch) if topic_id.is_some() && topic_id != old_topic_id =>`
+in `metadata.rs` is now exercised.
+
+### Issue 12 — Listener invocation outside lock diverged from Java
+
+**Resolution:** Fixed in `0708bc6` (Fixup C). Moved the listener
+dispatch back into the locked section in both `Metadata::update`
+and `Metadata::update_partition_leadership`, matching Java's
+`Metadata.java:367` ordering. Added a type-level "Listener
+constraint" rustdoc on `Metadata` documenting the non-reentrancy
+adaptation: cluster resource listeners must NOT call back into the
+same `Metadata` instance from `on_update` (Java's `synchronized`
+is reentrant; `std::sync::Mutex` is not, so a re-entry would
+deadlock). Reading the `cluster_resource` argument is the
+supported access pattern.
+
+### Issue 13 — Several `MetadataTest` cases beyond the deferral list were silently missing
+
+**Resolution:** Fixed in `4df52cc` (Fixup F). Translated the four
+MetadataTest cases the Critic explicitly named:
+
+- `testStaleMetadata` (`MetadataTest.java:232-280`) →
+  `stale_metadata_with_older_epoch_ignored`.
+- `testRequestVersion` (`MetadataTest.java:612-639`) →
+  `request_version_in_flight_bump`.
+- `testPartialMetadataUpdate` (`MetadataTest.java:641-702`) →
+  `partial_metadata_update_full_vs_partial`.
+- `testMetadataTopicErrors` (`MetadataTest.java:749-782`) →
+  `metadata_topic_errors_per_topic`.
+
+Per-test justifications for the remaining MetadataTest cases that
+stayed deferred (no longer the generic "covered elsewhere" pattern;
+each names a specific reason and a Phase to revisit):
+
+- `testTimeToNextUpdateRetryBackoff` (`MetadataTest.java:155-176`):
+  partially covered by existing
+  `failed_update_resets_attempts_on_subsequent_success` and
+  `failed_update_bumps_attempts`. Full `requestUpdate`-vs-backoff
+  interaction stays deferred to Phase 5 (producer wire-up).
+- `testIgnoreLeaderEpochInOlderMetadataResponse`
+  (`MetadataTest.java:184-230`): requires `MetadataResponse.parse`
+  with version<9. Wire-format harness today is at v12; rolling back
+  is a generator change deferred to Phase 5.
+- `testOutOfBandEpochUpdate` (`MetadataTest.java:511-550`): asserts
+  `partitionMetadataIfCurrent` returns None after
+  `updateLastSeenEpochIfNewer`. Filter logic exercised by
+  `update_last_seen_epoch_if_newer_contract`; full integration
+  deferred to Phase 5/6.
+- `testClusterCopy` (`MetadataTest.java:574-605`): exercised by
+  `metadata_merge_partial_update_retains_old_topics` and
+  `cluster_listener_notified_on_update_not_on_bootstrap`.
+- `testLeaderMetadataInconsistentWithBrokerMetadata`
+  (`MetadataTest.java:839-886`): requires `Cluster::leader_for(tp)`
+  not yet present. Translate when the API lands (Phase 4a follow-up).
+
+### Issue 14 — Several `ProducerMetadataTest` cases were missing; two duplicates
+
+**Resolution:** Fixed in `4f56fbd` (Fixup D for the new tests) and
+`4df52cc` (Fixup F for the duplicate consolidation). Translated:
+
+- `testMetadataWaitAbortedOnFatalException`
+  (`ProducerMetadataTest.java:216-219`) →
+  `metadata_wait_aborted_on_fatal_error`.
+- `testTimeToNextUpdateOverwriteBackoff`
+  (`ProducerMetadataTest.java:163-180`) →
+  `time_to_next_update_overwrite_backoff`.
+- `testMetadataPartialUpdate` (`ProducerMetadataTest.java:222-267`)
+  → `metadata_partial_update_lifecycle`.
+
+Removed the duplicate `await_update_returns_after_close_synchronously`
+test in `producer_metadata.rs` (it exercised exactly the same path
+as `await_update_throws_after_close`). Left an inline comment so a
+future reader doesn't re-add it.
+
+Per-test justifications for the remaining ProducerMetadataTest cases
+that stayed deferred:
+
+- `testMetadata` / `testMetadataAwaitAfterClose` /
+  `testMetadataEquivalentResponsesBackoff`
+  (`ProducerMetadataTest.java:60-131`): all three drive a Java
+  `Thread`-based `asyncFetch` worker that calls
+  `metadata.fetch().partitionsForTopic` in a loop, awaiting an
+  update from the test thread. The async/sync split between Rust
+  threads and `tokio::time::timeout` doesn't map cleanly without
+  rewiring `await_update` to use the abstract `Time` trait (Phase 4b
+  explicitly chose to bind the deadline to wall time — see
+  `producer_metadata.rs:218-222`). Deferred to the Phase that adds
+  abstract-clock support.
+
+### Issue 15 — `failed_update_resets_attempts_on_subsequent_success` asserted too weakly
+
+**Resolution:** Fixed in `8d8fd4a` (Fixup E). Strengthened to mirror
+`MetadataTest.java:282-297`: bump `attempts` to 3 via repeated
+failures, do a successful update at t=100, then issue another
+`failed_update` at t=1100 and assert `time_to_next_update(1100)`
+is in the **base** [80, 120] band. An un-reset `attempts=4` would
+put the backoff at [640, 960], far outside the base band, so the
+assertion now genuinely proves attempts was reset on success.
+
+### Issue 16 — `is_invalid_metadata_kafka_error` incompletely matched Java's hierarchy
+
+**Resolution:** Fixed in `8aeeebf` (Fixup G). Added a rustdoc
+comment listing the 6 missing `InvalidMetadataException` subclasses
+(`FencedLeaderEpoch`, `ReplicaNotAvailable`, `ListenerNotFound`,
+`ElectionNotNeeded`, `InconsistentTopicId`, `PreferredLeaderNotAvailable`,
+`EligibleLeadersNotAvailable`) inline with their Java semantics so
+a future reader extending `KafkaError` knows exactly what to add to
+the `matches!` arm. Comment-only — no behavior change.
+
+---
+
+All Phase 4b BLOCKER, MAJOR, and MINOR issues resolved. Test count
+673 → 684. New `arc-swap` dependency added (Cargo.toml change is
+the only structural change; reviewer should re-validate the dep
+choice in Round 2).
