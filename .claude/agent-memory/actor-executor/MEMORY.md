@@ -21,3 +21,5 @@
 - [Phase 3d-4 streaming codec](phase3d4_streaming_codec.md) — self-borrow pattern: Box the borrowee + 'static-erased writer + explicit Drop impl for "appendStream wraps bufferStream" Java idiom
 - [Phase 3e wire fixtures](phase3e_wire_fixtures.md) — Java-derived byte vectors + codec close-path fixes (gzip flush removal, zstd flush+finish chain)
 - [Phase 4a cluster data types](phase4a_cluster_data_types.md) — Arc<str> interning, null-topic empty-string substitution, Cluster shuffle/equality scope, bootstrap_with_hosts
+- [Phase 4b metadata stack](phase4b_metadata_stack.md) — single-mutex sync, retain-topic predicate via composition, await_update wall-clock deadline, KafkaError::StaleMetadata
+- [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
