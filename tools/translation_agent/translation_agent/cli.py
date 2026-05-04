@@ -565,7 +565,30 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
         rust_branch=args.rust_branch,
     )
     if not plan_rows and not impl_rows:
-        log.info("No unblocked plan or implementation work this sweep.")
+        # Surface row counts at every status so the operator can see
+        # WHY there's nothing to do this sweep. E.g. "plan_created=10"
+        # means everything is waiting for manual --plan-approve, not
+        # that the sweep is broken.
+        breakdown = {
+            s: len(db.get_pr_commits_by_status(
+                conn, status=s, rust_branch=args.rust_branch,
+            ))
+            for s in (
+                db.STATUS_NO_PLAN,
+                db.STATUS_DEPENDENCIES_EVALUATED,
+                db.STATUS_PLAN_CREATED,
+                db.STATUS_PLAN_APPROVED,
+                db.STATUS_IMPLEMENTATION_DONE,
+            )
+        }
+        breakdown_str = ", ".join(
+            f"{db.STATUS_NAMES[s]}={breakdown[s]}" for s in sorted(breakdown)
+        )
+        log.info(
+            "No unblocked plan or implementation work this sweep "
+            "(rust_branch=%s row counts: %s)",
+            args.rust_branch, breakdown_str,
+        )
         return
     log.info(
         "Dispatching %d plan-generation task(s) and %d implementation task(s) "
@@ -935,10 +958,48 @@ def _create_pr_for_ak_commit(
     )
     label = "[dry-run] " if args.dry_run else ""
     if inserted:
-        log.info("%sCreated PR #%d for AK commit %s", label, pr_number, ak_commit[:12])
+        log.info(
+            "%sCreated PR #%d for AK commit %s -- status=%d (%s), %s",
+            label, pr_number, ak_commit[:12],
+            db.STATUS_NO_PLAN,
+            db.STATUS_NAMES.get(db.STATUS_NO_PLAN, "?"),
+            _next_sweep_action_for_status(db.STATUS_NO_PLAN),
+        )
     else:
-        log.info("%sPR #%d already in pr_commit -- left unchanged", label, pr_number)
+        existing = db.get_pr(conn, pr_number)
+        status = existing["status"] if existing is not None else None
+        if status is None:
+            log.info(
+                "%sPR #%d already in pr_commit -- left unchanged",
+                label, pr_number,
+            )
+        else:
+            log.info(
+                "%sPR #%d already in pr_commit -- status=%d (%s), %s",
+                label, pr_number,
+                status, db.STATUS_NAMES.get(status, "?"),
+                _next_sweep_action_for_status(status),
+            )
     return inserted
+
+
+def _next_sweep_action_for_status(status: int) -> str:
+    """Human-readable description of what (if anything) this sweep will
+    do for a row at `status`. Used by the per-PR log line in
+    `_create_pr_for_ak_commit` so operators can see at a glance what
+    each existing row is destined for without having to read the
+    state machine in their head."""
+    if status == db.STATUS_NO_PLAN:
+        return "will dep-eval next"
+    if status == db.STATUS_DEPENDENCIES_EVALUATED:
+        return "will generate plan when its plan_dependency is approved"
+    if status == db.STATUS_PLAN_CREATED:
+        return "waiting for manual --plan-approve (no automatic action)"
+    if status == db.STATUS_PLAN_APPROVED:
+        return "will run implementation when its impl_dependency is done"
+    if status == db.STATUS_IMPLEMENTATION_DONE:
+        return "complete (no automatic action)"
+    return f"unknown status -- no automatic action"
 
 
 def main(argv: Sequence[str] | None = None) -> int:

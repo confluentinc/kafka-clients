@@ -713,6 +713,69 @@ def test_plan_approve_skips_prepend_for_synthetic_pr(tmp_path, real_pr_descripti
     mupd.assert_not_called()
 
 
+def test_next_sweep_action_for_status_covers_all_statuses():
+    """Every status code defined in db must have a human-readable
+    next-action string. Catches regressions when a new status is added
+    without updating the per-PR log helper."""
+    for status, name in db.STATUS_NAMES.items():
+        action = cli._next_sweep_action_for_status(status)
+        assert isinstance(action, str) and action, (
+            f"status={status} ({name}) returned empty action"
+        )
+    # Spot-check a couple of specific strings: this is what reviewers
+    # actually see in production logs and what motivated the change.
+    assert "dep-eval" in cli._next_sweep_action_for_status(db.STATUS_NO_PLAN)
+    assert "plan-approve" in cli._next_sweep_action_for_status(db.STATUS_PLAN_CREATED)
+    assert "complete" in cli._next_sweep_action_for_status(db.STATUS_IMPLEMENTATION_DONE)
+
+
+def test_sweep_logs_existing_pr_status_and_next_action(tmp_path, caplog):
+    """When a sweep encounters a pr_commit row that already exists,
+    the log line must surface the row's STATUS (numeric + symbolic
+    name) AND a description of what the sweep will do next for that
+    status. Without this, operators see "PR #N already in pr_commit"
+    and have to query sqlite to understand the orchestrator's plan."""
+    import logging
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    # Pre-insert a row at status PLAN_CREATED -- the most common
+    # "stuck waiting" state in production.
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 99, "master", "trunk", "ak_a")
+    conn.execute(
+        "UPDATE pr_commit SET status = ? WHERE pr_number = ?",
+        (db.STATUS_PLAN_CREATED, 99),
+    )
+    conn.commit()
+    conn.close()
+
+    from translation_agent import github as gh
+    with patch("translation_agent.cli.git_ops.next_commits",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               side_effect=gh.GhPrAlreadyExists("already exists")), \
+         patch("translation_agent.cli.github.find_pr_number_for_branch",
+               return_value=99), \
+         patch("translation_agent.cli.github.get_pr_state",
+               return_value=("OPEN", None)), \
+         caplog.at_level(logging.INFO, logger="translation_agent.cli"):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    # The log must mention status=2, plan_created, and the
+    # "waiting for manual --plan-approve" hint.
+    log_text = "\n".join(r.getMessage() for r in caplog.records)
+    assert "PR #99 already in pr_commit" in log_text
+    assert "status=2" in log_text
+    assert "plan_created" in log_text
+    assert "plan-approve" in log_text
+
+
 def test_sweep_recovers_pr_number_on_already_exists(tmp_path):
     from translation_agent import github as gh
 
