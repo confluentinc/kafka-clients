@@ -77,14 +77,14 @@ async fn connect_and_wait(selector: &mut Selector, addr: SocketAddr) {
 /// Helper: send a request and wait for a response, returning the payload.
 async fn send_and_receive(
     selector: &mut Selector,
-    builder: &dyn RequestBuilder,
+    builder: &mut dyn RequestBuilder,
     client_id: &str,
     correlation_id: i32,
 ) -> (Vec<u8>, RequestHeader) {
     let api_key = builder.api_key();
     // Use oldest allowed version for maximum broker compatibility.
     let version = builder.oldest_allowed_version();
-    let request = builder.build_version(version).expect("Failed to build request");
+    let mut request = builder.build_version(version).expect("Failed to build request");
 
     let header =
         RequestHeader::new(api_key, version, client_id, correlation_id).expect("Failed to create request header");
@@ -115,8 +115,8 @@ async fn send_and_receive(
 /// Helper: perform the initial ApiVersions handshake and return the max
 /// supported Metadata version from the broker.
 async fn handshake_and_get_metadata_version(selector: &mut Selector) -> i16 {
-    let builder = ApiVersionsRequestBuilder::new();
-    let (payload, header) = send_and_receive(selector, &builder, "metadata-test", 1).await;
+    let mut builder = ApiVersionsRequestBuilder::new();
+    let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", 1).await;
 
     let mut buffer = ByteBufferAccessor::from_bytes(payload);
     let response = ConcreteResponse::parse_response(&mut buffer, &header).expect("Failed to parse response");
@@ -138,9 +138,9 @@ async fn send_metadata_request(
     topics: Option<&[&str]>,
     correlation_id: i32,
 ) -> MetadataResponse {
-    let builder = MetadataRequestBuilder::new_with_version(topics, true, metadata_version);
+    let mut builder = MetadataRequestBuilder::new_with_version(topics, true, metadata_version);
 
-    let (payload, header) = send_and_receive(selector, &builder, "metadata-test", correlation_id).await;
+    let (payload, header) = send_and_receive(selector, &mut builder, "metadata-test", correlation_id).await;
 
     let mut buffer = ByteBufferAccessor::from_bytes(payload);
     let response = ConcreteResponse::parse_response(&mut buffer, &header).expect("Failed to parse response");
