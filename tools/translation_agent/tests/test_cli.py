@@ -732,19 +732,21 @@ def test_next_sweep_action_for_status_covers_all_statuses():
 def test_sweep_logs_existing_pr_status_and_next_action(tmp_path, caplog):
     """When a sweep encounters a pr_commit row that already exists,
     the log line must surface the row's STATUS (numeric + symbolic
-    name) AND a description of what the sweep will do next for that
-    status. Without this, operators see "PR #N already in pr_commit"
-    and have to query sqlite to understand the orchestrator's plan."""
+    name), the resolved dependency SHAs, AND a description of what
+    the sweep will do next. Without this, operators see "PR #N
+    already in pr_commit" and have to query sqlite to understand
+    the orchestrator's plan."""
     import logging
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    # Pre-insert a row at status PLAN_CREATED -- the most common
-    # "stuck waiting" state in production.
+    # Pre-insert a row at status PLAN_CREATED with concrete deps --
+    # the most common "stuck waiting" state in production.
     conn = db.connect(db_path)
     db.insert_pr_commit(conn, 99, "master", "trunk", "ak_a")
     conn.execute(
-        "UPDATE pr_commit SET status = ? WHERE pr_number = ?",
-        (db.STATUS_PLAN_CREATED, 99),
+        "UPDATE pr_commit SET status = ?, plan_dependency = ?, "
+        "implementation_dependency = ? WHERE pr_number = ?",
+        (db.STATUS_PLAN_CREATED, "plandepsha1234", "impldepsha5678", 99),
     )
     conn.commit()
     conn.close()
@@ -767,13 +769,42 @@ def test_sweep_logs_existing_pr_status_and_next_action(tmp_path, caplog):
             db_path=db_path,
         )
     assert rc == 0
-    # The log must mention status=2, plan_created, and the
-    # "waiting for manual --plan-approve" hint.
+    # The log must mention status=2, plan_created, the next-action
+    # hint, AND the truncated dependency SHAs.
     log_text = "\n".join(r.getMessage() for r in caplog.records)
     assert "PR #99 already in pr_commit" in log_text
     assert "status=2" in log_text
     assert "plan_created" in log_text
     assert "plan-approve" in log_text
+    # Deps shown with 12-char short SHAs.
+    assert "plan_dep=plandepsha12" in log_text
+    assert "impl_dep=impldepsha56" in log_text
+
+
+def test_dep_summary_formats_short_sha_and_dash_for_none():
+    """Helper that the per-PR sweep log uses to summarize a row's two
+    dependencies. 12-char SHA matches the orchestrator's convention
+    everywhere else; `-` for None reads cleaner than `None` in a
+    key=value context."""
+    row_both = {
+        "plan_dependency": "abcdef0123456789",
+        "implementation_dependency": "fedcba9876543210",
+    }
+    assert cli._dep_summary(row_both) == (
+        "plan_dep=abcdef012345, impl_dep=fedcba987654"
+    )
+    row_neither = {
+        "plan_dependency": None,
+        "implementation_dependency": None,
+    }
+    assert cli._dep_summary(row_neither) == "plan_dep=-, impl_dep=-"
+    row_only_plan = {
+        "plan_dependency": "abcdef0123456789",
+        "implementation_dependency": None,
+    }
+    assert cli._dep_summary(row_only_plan) == (
+        "plan_dep=abcdef012345, impl_dep=-"
+    )
 
 
 def test_sweep_recovers_pr_number_on_already_exists(tmp_path):

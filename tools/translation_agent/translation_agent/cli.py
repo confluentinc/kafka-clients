@@ -974,13 +974,34 @@ def _create_pr_for_ak_commit(
                 label, pr_number,
             )
         else:
+            # Show dep SHAs only for status >= 1 (status 0 hasn't been
+            # dep-evaluated yet, so both are always NULL there).
+            dep_str = (
+                _dep_summary(existing) + ", "
+                if status >= db.STATUS_DEPENDENCIES_EVALUATED else ""
+            )
             log.info(
-                "%sPR #%d already in pr_commit -- status=%d (%s), %s",
+                "%sPR #%d already in pr_commit -- status=%d (%s), %s%s",
                 label, pr_number,
                 status, db.STATUS_NAMES.get(status, "?"),
+                dep_str,
                 _next_sweep_action_for_status(status),
             )
     return inserted
+
+
+def _dep_summary(row) -> str:
+    """Compact one-liner of a row's two dependencies, formatted as
+    `plan_dep=<sha12 or ->, impl_dep=<sha12 or ->`. Used in the
+    per-PR sweep log so the operator can see WHICH commits a row is
+    waiting on without querying sqlite. 12-char SHA matches the
+    convention used elsewhere in orchestrator logs."""
+    def _fmt(sha):
+        return sha[:12] if sha else "-"
+    return (
+        f"plan_dep={_fmt(row['plan_dependency'])}, "
+        f"impl_dep={_fmt(row['implementation_dependency'])}"
+    )
 
 
 def _next_sweep_action_for_status(status: int) -> str:
