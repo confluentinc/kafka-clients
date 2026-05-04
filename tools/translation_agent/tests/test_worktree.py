@@ -61,7 +61,9 @@ def test_worktree_for_branch_yields_path_runs_setup_and_teardown():
     assert calls[0] == ["fetch", "origin", "kafka-translate/abc"]
     assert calls[1][:2] == ["worktree", "add"]
     assert "kafka-translate/abc" in calls[1]
-    assert "origin/kafka-translate/abc" in calls[1]
+    # FETCH_HEAD (not origin/<branch>) -- shallow clones restrict
+    # the refspec, so origin/<other-branch> often doesn't resolve.
+    assert "FETCH_HEAD" in calls[1]
     assert calls[-1][:3] == ["worktree", "remove", "--force"]
     # Yielded path is gone after cleanup.
     assert not yielded.exists()
@@ -212,7 +214,7 @@ def test_worktree_branch_name_with_slash_sanitized_in_temp_prefix():
             return _completed(1)  # take the fetch+create path
         if args[3:5] == ["worktree", "add"]:
             # In the fetch+create path argv is:
-            # git -C /repo worktree add -B <branch> <path> origin/<base>
+            # git -C /repo worktree add -B <branch> <path> FETCH_HEAD
             # so args[7] is the path.
             seen_paths.append(args[7])
         return _completed(0)
@@ -322,8 +324,10 @@ def test_worktree_for_branch_bases_on_origin_branch_when_remote_exists():
     assert add_calls, f"expected a worktree-add call; got {calls}"
     add = add_calls[0]
     assert "-B" in add, f"need -B to force-reset local branch; got {add}"
-    assert "origin/kafka-translate/abc" in add, (
-        f"worktree must be based on origin/<branch_name>; got {add}"
+    # FETCH_HEAD as the source ref -- works even in a shallow single-
+    # branch clone where origin/<branch_name> wouldn't resolve.
+    assert "FETCH_HEAD" in add, (
+        f"worktree must be based on FETCH_HEAD (not origin/<branch>); got {add}"
     )
     # The local-branch show-ref check must NOT have happened (remote
     # check short-circuits the priority chain).
