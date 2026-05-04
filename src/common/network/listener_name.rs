@@ -113,10 +113,7 @@ mod tests {
     #[test]
     fn sasl_mechanism_prefix_round_trip() {
         let listener = ListenerName::new("EXTERNAL");
-        assert_eq!(
-            listener.sasl_mechanism_config_prefix("PLAIN"),
-            "listener.name.external.plain."
-        );
+        assert_eq!(listener.sasl_mechanism_config_prefix("PLAIN"), "listener.name.external.plain.");
         assert_eq!(ListenerName::sasl_mechanism_prefix("OAUTHBEARER"), "oauthbearer.");
     }
 

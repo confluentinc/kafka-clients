@@ -118,14 +118,7 @@ impl ServerConnectionId {
         let processor_id: i32 = split[2].parse().ok()?;
         let index: i32 = split[3].parse().ok()?;
 
-        Some(ServerConnectionId {
-            local_host,
-            local_port,
-            remote_host,
-            remote_port,
-            processor_id,
-            index,
-        })
+        Some(ServerConnectionId { local_host, local_port, remote_host, remote_port, processor_id, index })
     }
 
     /// Format a connection id from already-resolved endpoint addresses.
@@ -146,9 +139,7 @@ impl ServerConnectionId {
         processor_id: i32,
         connection_index: i32,
     ) -> String {
-        format!(
-            "{local_host}:{local_port}-{remote_host}:{remote_port}-{processor_id}-{connection_index}"
-        )
+        format!("{local_host}:{local_port}-{remote_host}:{remote_port}-{processor_id}-{connection_index}")
     }
 }
 
@@ -168,8 +159,7 @@ mod tests {
         assert_eq!(id.processor_id(), 1);
         assert_eq!(id.index(), 2);
 
-        let id =
-            ServerConnectionId::from_string("localhost:9092-127.0.0.1:9093-0-0").expect("present");
+        let id = ServerConnectionId::from_string("localhost:9092-127.0.0.1:9093-0-0").expect("present");
         assert_eq!(id.local_host(), "localhost");
         assert_eq!(id.local_port(), 9092);
         assert_eq!(id.remote_host(), "127.0.0.1");
@@ -178,8 +168,7 @@ mod tests {
         assert_eq!(id.index(), 0);
 
         // IPv6 endpoints.
-        let id = ServerConnectionId::from_string("2001:db8:0:0:0:0:0:1:9092-127.0.0.1:9093-1-2")
-            .expect("present");
+        let id = ServerConnectionId::from_string("2001:db8:0:0:0:0:0:1:9092-127.0.0.1:9093-1-2").expect("present");
         assert_eq!(id.local_host(), "2001:db8:0:0:0:0:0:1");
         assert_eq!(id.local_port(), 9092);
         assert_eq!(id.remote_host(), "127.0.0.1");
@@ -187,8 +176,7 @@ mod tests {
         assert_eq!(id.processor_id(), 1);
         assert_eq!(id.index(), 2);
 
-        let id = ServerConnectionId::from_string("2002:db9:1:0:0:0:0:1:9092-2001:db8::1:9093-0-1")
-            .expect("present");
+        let id = ServerConnectionId::from_string("2002:db9:1:0:0:0:0:1:9092-2001:db8::1:9093-0-1").expect("present");
         assert_eq!(id.local_host(), "2002:db9:1:0:0:0:0:1");
         assert_eq!(id.local_port(), 9092);
         assert_eq!(id.remote_host(), "2001:db8::1");
@@ -217,10 +205,7 @@ mod tests {
         // Invalid index.
         assert!(ServerConnectionId::from_string("localhost:9092-localhost:9093-1-b").is_none());
         // Invalid IPv6 address (brackets aren't part of the host charset).
-        assert!(
-            ServerConnectionId::from_string("[2001:db8:0:0:0:0:0:1]:9092-127.0.0.1:9093-1-2")
-                .is_none()
-        );
+        assert!(ServerConnectionId::from_string("[2001:db8:0:0:0:0:0:1]:9092-127.0.0.1:9093-1-2").is_none());
     }
 
     /// Translation of `ServerConnectionIdTest.testGenerateConnectionId`.
@@ -245,14 +230,7 @@ mod tests {
     #[test]
     fn generate_connection_id_ipv6() {
         assert_eq!(
-            ServerConnectionId::generate_connection_id(
-                "2001:db8:0:0:0:0:0:1",
-                9092,
-                "127.0.0.1",
-                9093,
-                1,
-                2
-            ),
+            ServerConnectionId::generate_connection_id("2001:db8:0:0:0:0:0:1", 9092, "127.0.0.1", 9093, 1, 2),
             "2001:db8:0:0:0:0:0:1:9092-127.0.0.1:9093-1-2"
         );
         assert_eq!(

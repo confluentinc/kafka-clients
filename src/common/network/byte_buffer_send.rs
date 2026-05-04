@@ -79,7 +79,6 @@ impl ByteBufferSend {
         let header_buf = Bytes::copy_from_slice(&header);
         Self::from_buffers(vec![header_buf, payload])
     }
-
 }
 
 impl Send for ByteBufferSend {
@@ -221,10 +220,7 @@ mod tests {
 
     #[test]
     fn multi_buffer_concatenation() {
-        let mut send = ByteBufferSend::from_buffers(vec![
-            Bytes::from_static(b"head"),
-            Bytes::from_static(b"-tail"),
-        ]);
+        let mut send = ByteBufferSend::from_buffers(vec![Bytes::from_static(b"head"), Bytes::from_static(b"-tail")]);
         assert_eq!(send.size(), 9);
         let mut channel = MockChannel::new();
         let written = send.write_to(&mut channel).expect("write");
@@ -235,10 +231,7 @@ mod tests {
 
     #[test]
     fn partial_write_then_resume() {
-        let mut send = ByteBufferSend::from_buffers(vec![
-            Bytes::from_static(b"hello"),
-            Bytes::from_static(b"world"),
-        ]);
+        let mut send = ByteBufferSend::from_buffers(vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")]);
         let mut channel = MockChannel::with_cap(3);
         // First call: 3 bytes from buffer 0.
         let n1 = send.write_to(&mut channel).expect("w1");

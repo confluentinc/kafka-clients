@@ -338,7 +338,7 @@ mod tests {
         let mut r = ChunkedReader::new(vec![payload_size.to_be_bytes().to_vec()]);
         receive.read_from(&mut r).expect("read");
         assert_eq!(
-            receive.size() as i32,
+            receive.size(),
             4 + payload_size,
             "The total size should be the sum of the size buffer and receive size."
         );

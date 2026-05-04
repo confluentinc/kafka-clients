@@ -72,11 +72,7 @@ impl ChannelState {
 
     /// Mirrors `new ChannelState(State, AuthenticationException, String)`.
     /// The exception is required to be an authentication failure.
-    pub fn with_exception(
-        state: ChannelStateName,
-        exception: KafkaError,
-        remote_address: Option<String>,
-    ) -> Self {
+    pub fn with_exception(state: ChannelStateName, exception: KafkaError, remote_address: Option<String>) -> Self {
         ChannelState { state, exception: Some(exception), remote_address }
     }
 

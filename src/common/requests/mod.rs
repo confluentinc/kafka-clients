@@ -20,6 +20,7 @@
 //! and the helpers in `RequestUtils`.
 
 pub mod abstract_request;
+pub mod abstract_request_builder;
 pub mod abstract_request_response;
 pub mod abstract_response;
 pub mod api_versions_request;
@@ -34,6 +35,7 @@ pub mod request_utils;
 pub mod response_header;
 
 pub use abstract_request::AbstractRequest;
+pub use abstract_request_builder::AbstractRequestBuilder;
 pub use abstract_request_response::AbstractRequestResponse;
 pub use abstract_response::AbstractResponse;
 pub use api_versions_request::ApiVersionsRequest;

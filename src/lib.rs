@@ -23,6 +23,8 @@
 //! are added in subsequent phases.
 
 pub mod client_dns_lookup;
+pub mod client_request;
+pub mod client_response;
 pub mod client_utils;
 pub mod common;
 pub mod common_client_configs;
@@ -32,4 +34,9 @@ pub mod metadata;
 pub mod metadata_recovery_strategy;
 pub mod metadata_snapshot;
 pub mod producer;
+pub mod request_completion_handler;
 pub mod stale_metadata_error;
+
+pub use client_request::ClientRequest;
+pub use client_response::ClientResponse;
+pub use request_completion_handler::RequestCompletionHandler;

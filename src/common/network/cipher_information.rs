@@ -32,7 +32,11 @@ impl CipherInformation {
         let protocol = protocol.into();
         CipherInformation {
             cipher: if cipher.is_empty() { UNKNOWN.to_owned() } else { cipher },
-            protocol: if protocol.is_empty() { UNKNOWN.to_owned() } else { protocol },
+            protocol: if protocol.is_empty() {
+                UNKNOWN.to_owned()
+            } else {
+                protocol
+            },
         }
     }
 

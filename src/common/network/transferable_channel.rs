@@ -49,12 +49,7 @@ pub trait TransferableChannel {
     ///
     /// Default implementation returns `Ok(0)` — the producer does not use
     /// zero-copy file transfer.
-    fn transfer_from(
-        &mut self,
-        _file: &mut std::fs::File,
-        _position: u64,
-        _count: u64,
-    ) -> io::Result<u64> {
+    fn transfer_from(&mut self, _file: &mut std::fs::File, _position: u64, _count: u64) -> io::Result<u64> {
         Ok(0)
     }
 }
