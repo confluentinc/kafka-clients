@@ -22,7 +22,10 @@
 //! in Phase 5b/5c.
 
 pub mod byte_buffer_send;
+pub mod channel_state;
+pub mod connection_mode;
 pub mod invalid_receive_error;
+pub mod listener_name;
 pub mod network_receive;
 pub mod network_send;
 pub mod receive;
@@ -30,7 +33,10 @@ pub mod send;
 pub mod transferable_channel;
 
 pub use byte_buffer_send::ByteBufferSend;
+pub use channel_state::{ChannelState, ChannelStateName};
+pub use connection_mode::ConnectionMode;
 pub use invalid_receive_error::InvalidReceiveError;
+pub use listener_name::ListenerName;
 pub use network_receive::NetworkReceive;
 pub use network_send::NetworkSend;
 pub use receive::Receive;
