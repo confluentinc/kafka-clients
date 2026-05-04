@@ -2049,4 +2049,218 @@ mod tests {
         assert!((old_partition_count as usize) < final_cluster.partitions_for_topic(topic1).len());
         assert!((old_partition_count as usize) < final_cluster.partitions_for_topic(topic2).len());
     }
+
+    /// Java: `testStaleMetadata` (`MetadataTest.java:232-280`). An
+    /// older leader epoch with a changed ISR is ignored — the cached
+    /// epoch and replica list stick at the higher-epoch values.
+    #[test]
+    fn stale_metadata_with_older_epoch_ignored() {
+        let metadata = fresh_metadata();
+        let tp = TopicPartition::new("topic".to_owned(), 0);
+
+        // First update: epoch 10, ISR=[1,2,3].
+        let resp_first = build_metadata_response(
+            Some("clusterId"),
+            0,
+            Vec::new(), // empty broker list (matches Java's empty MetadataResponseBrokerCollection)
+            vec![TopicMetadataInput {
+                topic: "topic".to_owned(),
+                topic_id: ZERO_UUID,
+                is_internal: false,
+                error: Errors::None,
+                partitions: vec![PartitionMetadataInput {
+                    partition_index: 0,
+                    leader_id: Some(1),
+                    leader_epoch: Some(10),
+                    replicas: vec![1, 2, 3],
+                    isr: vec![1, 2, 3],
+                    offline: Vec::new(),
+                    error: Errors::None,
+                }],
+            }],
+        );
+        metadata.update_with_current_request_version(&resp_first, false, 100).unwrap();
+
+        // Second update: older epoch 9 with changed ISR=[1,2]. Should
+        // be rejected.
+        let resp_stale = build_metadata_response(
+            Some("clusterId"),
+            0,
+            Vec::new(),
+            vec![TopicMetadataInput {
+                topic: "topic".to_owned(),
+                topic_id: ZERO_UUID,
+                is_internal: false,
+                error: Errors::None,
+                partitions: vec![PartitionMetadataInput {
+                    partition_index: 0,
+                    leader_id: Some(1),
+                    leader_epoch: Some(9),
+                    replicas: vec![1, 2, 3],
+                    isr: vec![1, 2],
+                    offline: Vec::new(),
+                    error: Errors::None,
+                }],
+            }],
+        );
+        metadata.update_with_current_request_version(&resp_stale, false, 101).unwrap();
+
+        // Last seen epoch still 10.
+        assert_eq!(metadata.last_seen_leader_epoch(&tp), Some(10));
+
+        let pm = metadata.partition_metadata_if_current(&tp).expect("partition still present");
+        // ISR stays at the higher-epoch value [1, 2, 3].
+        assert_eq!(pm.in_sync_replica_ids, vec![1, 2, 3]);
+        assert_eq!(pm.leader_epoch, Some(10));
+    }
+
+    /// Java: `testRequestVersion` (`MetadataTest.java:612-639`). The
+    /// `request_version` increments on each `request_update_for_new_topics`,
+    /// and an in-flight bump (between `new_metadata_request_and_version`
+    /// and `update`) keeps `update_requested` true until the response
+    /// catches up.
+    #[test]
+    fn request_version_in_flight_bump() {
+        let metadata = fresh_metadata();
+        metadata.request_update(true);
+        let v0 = metadata.new_metadata_request_and_version(0);
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic", 1)], |_, _| Some(1), &HashMap::new());
+        metadata.update(v0.request_version, &resp, false, 0).unwrap();
+        assert!(!metadata.update_requested());
+
+        // Bump the request version for new topics.
+        metadata.request_update_for_new_topics();
+        // Simulate an in-flight bump.
+        let v1 = metadata.new_metadata_request_and_version(0);
+        metadata.request_update_for_new_topics();
+        metadata.update(v1.request_version, &resp, true, 0).unwrap();
+        // Update still needed (the response was for the older
+        // request_version).
+        assert!(metadata.update_requested());
+
+        // The next update will resolve it.
+        let v2 = metadata.new_metadata_request_and_version(0);
+        metadata.update(v2.request_version, &resp, true, 0).unwrap();
+        assert!(!metadata.update_requested());
+    }
+
+    /// Java: `testPartialMetadataUpdate` (`MetadataTest.java:641-702`).
+    /// Drives the partial-vs-full update transitions.
+    #[test]
+    fn partial_metadata_update_full_vs_partial() {
+        let metadata = fresh_metadata();
+        assert!(!metadata.update_requested());
+
+        // Request a metadata update — must be full.
+        metadata.request_update(true);
+        let v = metadata.new_metadata_request_and_version(0);
+        assert!(!v.is_partial_update);
+        let resp = metadata_update_with(Some("dummy"), 1, &[("topic", 1)], |_, _| Some(1), &HashMap::new());
+        metadata.update(v.request_version, &resp, false, 0).unwrap();
+        assert!(!metadata.update_requested());
+
+        // Request an update for a new topic — partial.
+        metadata.request_update_for_new_topics();
+        let v = metadata.new_metadata_request_and_version(0);
+        assert!(v.is_partial_update);
+        metadata.update(v.request_version, &resp, true, 0).unwrap();
+        assert!(!metadata.update_requested());
+
+        // Request both kinds of updates — must be full.
+        metadata.request_update(true);
+        metadata.request_update_for_new_topics();
+        let v = metadata.new_metadata_request_and_version(0);
+        assert!(!v.is_partial_update);
+        metadata.update(v.request_version, &resp, false, 0).unwrap();
+        assert!(!metadata.update_requested());
+
+        // Partial-only request, but with elapsed time → must still be full.
+        metadata.request_update_for_new_topics();
+        let refresh_time_ms = metadata.metadata_expire_ms() + 1;
+        let v = metadata.new_metadata_request_and_version(refresh_time_ms);
+        assert!(!v.is_partial_update);
+        metadata.update(v.request_version, &resp, true, refresh_time_ms).unwrap();
+        assert!(!metadata.update_requested());
+
+        // Two overlapping partial updates.
+        metadata.request_update_for_new_topics();
+        let v_first = metadata.new_metadata_request_and_version(0);
+        assert!(v_first.is_partial_update);
+        metadata.request_update_for_new_topics();
+        let v_overlap = metadata.new_metadata_request_and_version(0);
+        assert!(v_overlap.is_partial_update);
+        assert!(metadata.update_requested());
+
+        let resp1 = metadata_update_with(Some("dummy"), 1, &[("topic-1", 1)], |_, _| Some(1), &HashMap::new());
+        metadata.update(v_first.request_version, &resp1, true, 0).unwrap();
+        assert!(metadata.update_requested());
+
+        let resp2 = metadata_update_with(Some("dummy"), 1, &[("topic-2", 1)], |_, _| Some(1), &HashMap::new());
+        metadata.update(v_overlap.request_version, &resp2, true, 0).unwrap();
+        assert!(!metadata.update_requested());
+    }
+
+    /// Java: `testMetadataTopicErrors` (`MetadataTest.java:749-782`).
+    /// Per-topic error propagation: invalid topics and unauthorized
+    /// topics in the same response. `maybe_throw_error_for_topic`
+    /// throws specifically for that topic; other topics see no error.
+    #[test]
+    fn metadata_topic_errors_per_topic() {
+        let metadata = fresh_metadata();
+        let resp = build_metadata_response(
+            Some("clusterId"),
+            0,
+            vec![Node::new(0, "localhost".to_owned(), 1969)],
+            vec![
+                TopicMetadataInput {
+                    topic: "invalidTopic".to_owned(),
+                    topic_id: ZERO_UUID,
+                    is_internal: false,
+                    error: Errors::InvalidTopicException,
+                    partitions: Vec::new(),
+                },
+                TopicMetadataInput {
+                    topic: "sensitiveTopic1".to_owned(),
+                    topic_id: ZERO_UUID,
+                    is_internal: false,
+                    error: Errors::TopicAuthorizationFailed,
+                    partitions: Vec::new(),
+                },
+                TopicMetadataInput {
+                    topic: "sensitiveTopic2".to_owned(),
+                    topic_id: ZERO_UUID,
+                    is_internal: false,
+                    error: Errors::TopicAuthorizationFailed,
+                    partitions: Vec::new(),
+                },
+            ],
+        );
+
+        // Per-topic throw for sensitiveTopic1.
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let err = metadata.maybe_throw_error_for_topic("sensitiveTopic1").unwrap_err();
+        assert!(matches!(err, KafkaError::TopicAuthorization(_)));
+        assert!(err.message().contains("sensitiveTopic1"), "got: {}", err.message());
+        // Clearing on subsequent call.
+        assert!(metadata.maybe_throw_any_error().is_ok());
+
+        // Per-topic throw for sensitiveTopic2.
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let err = metadata.maybe_throw_error_for_topic("sensitiveTopic2").unwrap_err();
+        assert!(matches!(err, KafkaError::TopicAuthorization(_)));
+        assert!(err.message().contains("sensitiveTopic2"), "got: {}", err.message());
+        assert!(metadata.maybe_throw_any_error().is_ok());
+
+        // Per-topic throw for invalidTopic.
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        let err = metadata.maybe_throw_error_for_topic("invalidTopic").unwrap_err();
+        assert!(matches!(err, KafkaError::InvalidTopic(_)));
+        assert!(err.message().contains("invalidTopic"), "got: {}", err.message());
+        assert!(metadata.maybe_throw_any_error().is_ok());
+
+        // Other topics: no exception, but state still cleared.
+        metadata.update_with_current_request_version(&resp, false, 0).unwrap();
+        assert!(metadata.maybe_throw_error_for_topic("anotherTopic").is_ok());
+        assert!(metadata.maybe_throw_any_error().is_ok());
+    }
 }

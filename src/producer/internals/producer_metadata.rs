@@ -545,18 +545,13 @@ mod tests {
         assert_eq!(pm.metadata_idle_ms(), 60_000);
     }
 
-    /// Java: `testWaitForMetadataAfterClose` — `awaitUpdate` resolves with
-    /// `KafkaError::Generic` if the metadata was already closed.
-    #[tokio::test]
-    async fn await_update_returns_after_close_synchronously() {
-        let time: Arc<dyn Time> = MockTime::arc();
-        let pm = fresh_producer_metadata(time);
-        pm.close();
-        let err = pm.await_update(pm.metadata().update_version(), 100).await.unwrap_err();
-        // After close, the predicate returns Err(Generic) before the
-        // sleep returns.
-        assert!(matches!(err, KafkaError::Generic(_)));
-    }
+    // Note: previously had a second test named
+    // `await_update_returns_after_close_synchronously` that exercised
+    // exactly the same path as `await_update_throws_after_close`
+    // above (close → await with `update_version()` as last_version
+    // → expect KafkaError::Generic). Removed in Phase 4b review
+    // (Issue 14) as a duplicate; the path is fully covered by the
+    // first test.
 
     /// Java: `testTimeoutOnAwaitUpdate` — `awaitUpdate` returns a
     /// `KafkaError::Timeout` if the deadline elapses.
