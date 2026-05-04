@@ -24,6 +24,7 @@ pub mod header;
 pub mod internals;
 pub mod kafka_exception;
 pub mod message;
+pub mod network;
 pub mod node;
 pub mod partition_info;
 pub mod protocol;
