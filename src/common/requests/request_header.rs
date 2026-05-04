@@ -157,8 +157,8 @@ impl RequestHeader {
     /// # Errors
     ///
     /// Returns an error if writing fails.
-    pub fn write(&self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
-        Message::write(&self.data, buffer, cache, self.header_version)
+    pub fn write(&mut self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
+        Message::write(&mut self.data, buffer, cache, self.header_version)
     }
 
     /// Parses a `RequestHeader` from the given buffer.
@@ -321,7 +321,7 @@ mod tests {
         let mut cache = ObjectSerializationCache::new();
         let size = Message::size(&header_data, &mut cache, 2).unwrap();
         let mut buffer = ByteBufferAccessor::new(size as usize);
-        Message::write(&header_data, &mut buffer, &cache, 2).unwrap();
+        Message::write(&mut header_data, &mut buffer, &cache, 2).unwrap();
         buffer.flip();
 
         let parsed = RequestHeader::parse(&mut buffer).unwrap();
@@ -348,7 +348,7 @@ mod tests {
         let mut cache = ObjectSerializationCache::new();
         let size = Message::size(&header_data, &mut cache, 2).unwrap();
         let mut buffer = ByteBufferAccessor::new(size as usize);
-        Message::write(&header_data, &mut buffer, &cache, 2).unwrap();
+        Message::write(&mut header_data, &mut buffer, &cache, 2).unwrap();
         buffer.flip();
 
         let mut parsed = RequestHeader::parse(&mut buffer).unwrap();
