@@ -11,7 +11,10 @@ The workflow should be a Python application that does these things, using a sqli
 the AK branch and commit hash, Rust client branch and commit hash
 2. it runs with a Rust branch. It takes the latest commit and gets the corresponding commit
    in the corresponding AK branch looking in `branch_commit` table.
-3. it get the next 10 commits on AK branch and for each commit it creates a branch and a PR, starting from the initial AK branch.
+3. after checking the next 10 commits of the base AK commit it must verify, scanning the commits in order, if they're present in the          
+  `pr_commit` table and if the corresponding PR was closed or merged. In this case it continues checking the next commit until it finds one where the PR is missing or still open. For the commits with PRs closed it removes the row from the table and finally updates the corresponding AK commit in the `branch_commit` table to the last closed one.
+  or merged. After that it selects the next N commits again and continues the sweep phase.
+4. it get the next 10 commits on AK branch and for each commit it creates a branch and a PR, starting from the initial AK branch.
    It inserts into a table `pr_commit`. This table has the PR number, the Rust branch, the corresponding AK commit
    and two optional columns `plan_dependency` and `implementation_dependency` that contain commits (hashes) that
    are a precondition before planning this commit translation or before starting the implementation.
@@ -21,14 +24,14 @@ the AK branch and commit hash, Rust client branch and commit hash
    - 2: plan created
    - 3: plan approved
    - 4: implementation done
-4. for each PR that has status (0: no plan) it starts Claude Code with r2 command, like:
+5. for each PR that has status (0: no plan) it starts Claude Code with r2 command, like:
    `r2 sandbox claude -p "Claude Code prompt"`, to identify the dependencies
    of that commit for planning or for implementing. It outputs the dependencies in a JSON file.
    There should be only a single `plan_dependency` and a single `implementation_dependency`:
    the latest commit that is a dependency.
-5. the application reads the dependencies and updates the `pr_commit` table with those
+6. the application reads the dependencies and updates the `pr_commit` table with those
    and sets the status to (1: dependencies evaluated)
-6. for each PR that has status (1: dependencies evaluated) and has no `plan_dependency`
+7. for each PR that has status (1: dependencies evaluated) and has no `plan_dependency`
    or the plan dependency is not among those in the table (open ones) or present but with
    status >= (3: plan approved), it runs claude with `r2` and asks the manager
    agent to create a plan and to save it to `./design/history/<pr_number>_description/plan.md`.
@@ -38,11 +41,11 @@ the AK branch and commit hash, Rust client branch and commit hash
    Each agent commits the plan and pushes it to the branch corresponding to the AK commit.
    The commit message should be "Design document". It updates the status for that PRs to
    (2: plan created). 
-7. when run with `--pr <number>` and `--plan-approve` it changes the status of the corresponding
+8. when run with `--pr <number>` and `--plan-approve` it changes the status of the corresponding
    PR from (2: plan created) to (3: plan approved) and continues with (8).
    When run with `--pr <number>` only it just checks the status of that PR.
    `--plan-approve` happens when the Semaphore CI PR pipeline is running and a manual promotion is triggered.
-8. for each PR that has status (3: plan approved) and has no `implementation_dependency`
+9. for each PR that has status (3: plan approved) and has no `implementation_dependency`
    or the implementation dependency is not among those in the table (open ones),
    it runs claude with `r2` and asks the manager
    agent to start the implementation of the plan at `./design/history/<pr_number>_description/plan.md`.
@@ -52,8 +55,8 @@ the AK branch and commit hash, Rust client branch and commit hash
    ">>>>> From agent #<pr_number>".
    It pushes the generated commits to the branch corresponding to the AK commit.
    It updates the status for that PR to (4: implementation done).
-9. last two steps can be done in parallel.
-10. finally after all agents complete successfully with a semaphore command it saves the sqlite database as a project artifact.
+10. last two steps can be done in parallel.
+11. finally after all agents complete successfully with a semaphore command it saves the sqlite database as a project artifact.
 
 ---
 
@@ -75,7 +78,7 @@ preserved on disk in `--dry-run` for operator inspection.
 
 ### Worktree bootstrap: `make` + submodule bump commit
 
-Before spawning claude in each worktree, the orchestrator:
+Before spawning claude in each plan/impl worktree, the orchestrator:
 
 1. Runs `make` (the Makefile's default target, which transitively runs
    `git submodule update --init --recursive`, builds the Rust crate,
@@ -83,10 +86,184 @@ Before spawning claude in each worktree, the orchestrator:
    a fully-built workspace with the C headers it might reference.
 2. Checks out `<ak_commit>` in the `kafka/` submodule and commits the
    submodule pointer bump as a standalone commit:
-   `Bump kafka submodule to <ak_commit>`.
+   `Bump kafka submodule to <ak_commit>`. Idempotent: the commit is
+   skipped when the submodule pointer is already at `<ak_commit>`
+   (`git diff --cached --quiet` guard) so re-runs don't double-commit.
 3. THEN invokes claude. Claude's `Design document` commit (step 6) or
    implementation commits (step 8) sit on top of the bump commit. Each
    PR's branch ends with a clean two-commit (or N+1-commit) shape.
+
+A lighter variant of the same flow is used in step 3 (PR creation,
+see below) -- it skips `make` and only runs
+`git submodule update --init kafka` so it's seconds rather than
+minutes.
+
+### Worktree base-ref resolution
+
+The worktree manager picks the source ref for `git worktree add` in
+this priority order:
+
+1. **Remote branch exists** (probed via `git ls-remote --heads
+   origin <branch>`): fetch it and base on `FETCH_HEAD`. Handles the
+   re-run case where a previous sweep created the PR branch but
+   didn't complete -- the new worktree picks up the existing bump
+   commit and any plan/impl commits already on origin, so the bump
+   becomes a no-op and the eventual push is a clean fast-forward.
+2. **Local branch exists, no remote**: reuse the local branch. This
+   is the dry-run cascade case where prior plan/impl commits live
+   only locally because dry-run never pushed.
+3. **Brand new**: fetch `origin/<base_remote_branch>` (the rust
+   branch) and base on `FETCH_HEAD`.
+
+Both fetch paths use `FETCH_HEAD` rather than `origin/<branch>`
+because Semaphore's depth-50 single-branch clone has a refspec
+restricted to the original branch -- fetching any other branch
+updates `FETCH_HEAD` but does NOT create
+`refs/remotes/origin/<other-branch>`, so `origin/<branch>` doesn't
+resolve. `-B` is used to force-reset the local branch in case a
+stale ref exists from a previous run.
+
+Stale worktrees on the same branch (typically left over from a
+previous dry-run with `cleanup=False`) are evicted via
+`git worktree remove --force` before adding a new one, otherwise
+`git worktree add` errors with "branch is already used by worktree."
+
+### Step 3 PR creation includes a kafka-submodule bump commit
+
+GitHub's `createPullRequest` GraphQL refuses to open a PR when the
+head branch is at the same commit as the base. So before
+`gh pr create`, the orchestrator opens a lightweight worktree
+(no `make`, just `git submodule update --init kafka`), runs the same
+`_bump_kafka_submodule` helper to record the pointer commit, and
+pushes. The new branch lands on origin with one real commit (the
+bump), giving GitHub a non-empty diff to PR.
+
+### Sandbox contract: agent commits, orchestrator publishes
+
+`git push` is denied at the R2 sandbox boundary; the orchestrator
+runs every push itself after the R2 invocation returns. Same for
+`gh pr edit`. Three layers enforce this:
+
+1. The plan/impl prompts explicitly tell claude not to push and
+   explain that the orchestrator does it.
+2. `dev-bin/r2`'s deny-list has explicit `Bash(git push)` /
+   `Bash(git push:*)` / `Bash(git push *)` and the same triple for
+   `gh pr edit`. (`gh` is also absent from the allow-list, so it's
+   already denied by exclusion — the explicit deny is defense in
+   depth and survives an inadvertent allow-list expansion.)
+3. The orchestrator owns the publish: `_run_plan_one` and
+   `_run_impl_one` call `git_ops.push_branch` after R2 returns rc=0;
+   PR-body updates flow through `github.update_pr_body` /
+   `prepend_pr_body`.
+
+The implementation reads the new commit SHA from the LOCAL ref
+(`git rev-parse <branch_name>`) rather than fetching `origin/<branch>`
+— since the orchestrator just performed the push, no round-trip
+through the remote is needed.
+
+### PR description refresh on each transition
+
+The PR description is regenerated to reflect the latest progress at
+each state transition:
+
+| Transition | Body update mechanism |
+|---|---|
+| Plan created (1 → 2) | `r2 sandbox claude` reads `plan.md`, writes `./pr_body.md`; orchestrator publishes via `gh pr edit <N> --body-file -` |
+| Plan approved (2 → 3) | Programmatic prepend `✓ Plan approved on YYYY-MM-DD` (no LLM call — no new content vs status 2) |
+| Implementation done (3 → 4) | `r2 sandbox claude` reads commits + plan.md, writes `./pr_body.md`; orchestrator publishes |
+
+Description-update failures are logged as WARNING and do NOT reverse
+the state transition — the body is cosmetic, not load-bearing. The
+next phase transition naturally overwrites stale bodies, so transient
+gh failures self-heal without a retry loop coupling the queue to
+GitHub API availability.
+
+Synthetic dry-run rows (`pr_number < 0`) and dry-run mode skip the
+update entirely (no real PR to edit).
+
+### Sweep PR-closure check (prefix-prune + cursor advance)
+
+After fetching the next N AK commits, the sweep walks them in
+chronological order and prunes the contiguous prefix of commits whose
+`pr_commit` row exists AND whose GitHub PR is CLOSED or MERGED. For
+each pruned commit:
+
+- Delete the `pr_commit` row via `db.delete_pr_commit(pr_number)`.
+- Remember the AK commit as the new cursor candidate.
+- For MERGED PRs: capture `gh pr view --json mergeCommit` to advance
+  `branch_commit.rust_commit` to the merge SHA on the base branch.
+  This works uniformly across all three GitHub merge styles (merge
+  commit / squash / rebase) — gh's `mergeCommit.oid` is the right
+  base-branch commit in every case, no merge-style-specific
+  branching needed.
+- For CLOSED-without-merge PRs: keep the previous `rust_commit`
+  unchanged.
+
+The walk stops at the first commit whose row is missing, synthetic
+(`pr_number < 0`), still OPEN, or hits a `gh pr view` failure. After
+the walk, if any rows were pruned, the sweep re-fetches the next N
+AK commits from the advanced cursor before creating new PRs.
+
+Prefix-only (not middle-of-batch) is deliberate: a CLOSED row
+sandwiched between OPEN ones may be referenced as a `plan_dependency`
+or `implementation_dependency` by the open ones, so deleting it
+mid-batch would invalidate the dep graph. The next sweep naturally
+compacts further closures as the prefix advances.
+
+`gh pr view` transient failures log a WARNING and stop the walk —
+the closure check is best-effort and shouldn't abort the sweep.
+Dry-run skips the entire check.
+
+### `next_commits`: shallow-clone-aware range over the AK repo
+
+Semaphore's prologue does `git submodule update --init --depth=1
+kafka`, leaving the AK submodule with a single-commit history. The
+orchestrator's cursor is almost always older than that. `next_commits`
+handles the shallow case end-to-end:
+
+1. Always run `git fetch <remote> <branch>` first so `FETCH_HEAD`
+   reflects the remote's actual current tip — without this, the local
+   `origin/<branch>` ref is stuck at the submodule pointer SHA and
+   the range's upper bound stays months stale.
+2. Ensure the cursor is **reachable** from `FETCH_HEAD`, not merely
+   present in the local DB. The probe is `_commit_present` AND
+   `merge-base --is-ancestor`. The Semaphore submodule init can land
+   the cursor object as a separate shallow root, disconnected from
+   the branch tip; only deepening materializes the path between
+   them. The deepen loop uses `git fetch --deepen=50 <remote>
+   <branch>` and retries the transient
+   `fatal: shallow file has changed since we read it` race up to
+   three times with a 100ms backoff.
+3. Use `FETCH_HEAD` (not bare `<branch>`) as the range upper bound
+   so the log walks against the just-fetched tip.
+4. Drop `--max-count` from the `git log --reverse` call and slice in
+   Python to return the N OLDEST in range. Git's `--max-count` is
+   applied during the default newest-first walk, so
+   `git log --reverse <range> --max-count=N` returns the N NEWEST in
+   range (displayed oldest-first) — wrong for sweep ordering, where
+   we need the next N chronologically after the cursor so the cursor
+   advances commit-by-commit rather than skipping the middle.
+
+If the cursor genuinely isn't on the branch (full clone, or shallow
+clone fully unshallowed without finding ancestry), `next_commits`
+raises GitError with a message that pinpoints the failure mode and
+suggests `--seed --force`.
+
+### Per-PR sweep log shows status, deps, next action
+
+For each AK commit in the batch, the sweep log surfaces:
+
+- Status code + symbolic name (`db.STATUS_NAMES`).
+- Plan/impl dependency SHAs (`plan_dep=<sha12 or ->,
+  impl_dep=<sha12 or ->`) for status ≥ 1.
+- A one-liner describing what the sweep will do next for that
+  status — e.g. `waiting for manual --plan-approve (no automatic
+  action)` — so operators can see the orchestrator's plan without
+  querying sqlite.
+
+When `_run_plan_and_impl` finds nothing unblocked, it logs the row
+counts at every status (`no_plan=N, plan_created=M, ...`) so the
+operator can see WHY there's nothing to do.
 
 ### Dependency evaluation does NOT use a worktree
 
@@ -95,30 +272,56 @@ to stdout, so it runs in the orchestrator's own working directory with
 no per-PR isolation. Cheaper, and there's nothing to push or commit
 that could conflict.
 
-### `branch_commit` cursor advance after step 8
+### `branch_commit` schema and cursor advance
 
-When step 8 succeeds for a PR, the orchestrator inserts a new row into
-`branch_commit` recording `(rust_branch, new_rust_commit) ↔
-(ak_branch, ak_commit)`. This is what makes the orchestrator
-**resumable across sweeps** — without it, the next sweep would re-walk
-the same 10 AK commits from the original seed. The status update and
-the `branch_commit` insert happen in a single sqlite transaction.
+The `branch_commit` table's primary key is `rust_branch` alone (one
+cursor row per Rust branch — there is no scenario where a single
+Rust branch tracks multiple AK branches simultaneously). The schema
+also auto-migrates from an earlier multi-column-PK shape, so DBs
+seeded before this change are upgraded in place.
+
+When step 8 succeeds for a PR, the orchestrator updates the
+`branch_commit` row for `rust_branch` via `INSERT OR REPLACE` to
+record the new `(ak_branch, ak_commit, rust_commit)`. This is what
+makes the orchestrator **resumable across sweeps** — without it, the
+next sweep would re-walk the same 10 AK commits from the original
+seed. The status update and the `branch_commit` write happen in a
+single sqlite transaction.
+
+The cursor also advances during the sweep PR-closure check (see
+below) when one or more PRs at the front of the batch are found
+already CLOSED or MERGED on GitHub.
 
 ### Initial seed of `branch_commit`
 
 Bootstrapped via a CLI subcommand:
 `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch
-<> --rust-commit <>` (idempotent — re-runs are no-ops). The Semaphore
-`seed.yml` task wraps this for first-time setup of a new project.
+<> --rust-commit <> [--force] [--cleanup-prs]` — idempotent on the
+same values. Two optional flags compose:
+
+- `--force`: overwrite the cursor when a row already exists with
+  different values. Without `--force`, a mismatched re-seed errors
+  out so the operator notices.
+- `--cleanup-prs`: delete every `pr_commit` row matching
+  `--rust-branch` before seeding. Used to reset a branch's PR queue
+  when stale/failed/dry-run rows would otherwise be picked up by
+  the next sweep.
+
+The Semaphore `seed.yml` task wraps this for first-time setup of a
+new project. The Task exposes `AK_BRANCH`, `AK_COMMIT`, `RUST_BRANCH`,
+`RUST_COMMIT`, `FORCE`, `CLEANUP_PRS` as parameters; defaults are
+applied shell-side via `${VAR:-default}` rather than via task-level
+`env_vars` (the latter would shadow Task-parameter values supplied at
+trigger time).
 
 ### CLI shape (single binary, four invocation modes)
 
 | Mode | Command shape | Triggers |
 |---|---|---|
-| Sweep | `translation-agent --ak-repo-path <> --ak-branch <> --rust-branch <>` | Steps 1–6, 8, 10 |
-| Per-PR status | `translation-agent --pr <N>` | Read-only check (step 7) |
-| Per-PR approve | `translation-agent --pr <N> --plan-approve` | Step 7 + cascade into step 8 for that PR |
-| Seed | `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch <> --rust-commit <>` | Bootstrap `branch_commit` |
+| Sweep | `translation-agent --ak-repo-path <> --rust-branch <>` | Steps 1–6, 8, 10 (the AK branch is read from the `branch_commit` cursor row, not from a CLI flag) |
+| Per-PR status | `translation-agent --pr <N>` | Read-only check (step 7). Returns 0 (not 1) when the PR row is missing — most PRs in this repo aren't translation PRs and Semaphore auto-runs this on every PR build. |
+| Per-PR approve | `translation-agent --pr <N> --plan-approve` | Step 7 + cascade into step 8 for that PR. Returns 1 on missing PR row (deliberate manual promotion is an operator error if the PR isn't tracked). |
+| Seed | `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch <> --rust-commit <> [--force] [--cleanup-prs]` | Bootstrap `branch_commit` |
 
 Cross-cutting flags: `--db-path`, `--max-parallel` (default 4),
 `--no-artifact-push`, `--dry-run`, `--verbose`, `--artifact-name`,
@@ -157,12 +360,24 @@ dependency-safe — no two-pass scan needed.
 
 A bash wrapper at `tools/translation_agent/dev-bin/r2` translates the
 orchestrator's `r2 sandbox claude -p "<prompt>"` invocations into
-`claude --permission-mode dontAsk --verbose --allowedTools <list> -p
-"<prompt>"` against the locally-installed Claude Code CLI. Lets the
-full pipeline be tested end-to-end on a developer workstation without
-the real Semaphore `r2 sandbox` runner. The allow-list grants
-`Read`, `Edit`, `Write`, `ExitPlanMode`, `Bash(git *)`, `Bash(cargo
-*)`, plus a few common shell utilities.
+`claude --permission-mode dontAsk --verbose --allowedTools <list>
+--disallowedTools <denylist> -p "<prompt>"` against the locally-
+installed Claude Code CLI. Lets the full pipeline be tested
+end-to-end on a developer workstation without the real Semaphore
+`r2 sandbox` runner.
+
+- **Allow-list**: `Read`, `Edit`, `Write`, `ExitPlanMode`,
+  `Bash(git *)`, `Bash(cargo *)`, plus common shell utilities
+  (`ls`, `cat`, `grep`, `find`, `head`, `tail`, `wc`, `sed`, `awk`,
+  `make`, `cmake`, `rustup`, `rustc`, `mkdir`, `pytest`, `python3`).
+  `ExitPlanMode` is required because plan-generation prompts contain
+  the word "plan" and would otherwise auto-trigger Claude Code's
+  plan mode.
+- **Deny-list**: `Bash(git push)`, `Bash(git push:*)`,
+  `Bash(git push *)` and the same triple for `Bash(gh pr edit)`.
+  Carves remote-write commands back out of the broad `Bash(git *)`
+  / out of the absent `gh` allow-list so the orchestrator stays the
+  sole publisher (see "Sandbox contract" above).
 
 ### Semaphore CI configuration
 
@@ -170,12 +385,36 @@ Three pipeline files under `.semaphore/`:
 
 | File | Trigger | What it runs |
 |---|---|---|
-| `semaphore.yml` | every push / PR | Conditional: sweep on `${MAIN_BRANCH}`; `--pr <N>` on PR builds; no-op otherwise |
+| `semaphore.yml` | every push / PR | Four-cell dispatch (truth table below) |
 | `plan-approve.yml` | manual promotion from a PR build | `translation-agent --pr <N> --plan-approve` |
 | `seed.yml` | manual Task | `translation-agent --seed ...` |
 
 Each pipeline pulls the artifact at start (`artifact pull project ...`)
 and lets the orchestrator handle `artifact push` itself.
+
+**`semaphore.yml` dispatch truth table** (PR-on-main is the
+most-specific case and must be tested first to avoid the sweep
+clause swallowing it):
+
+| `SEMAPHORE_GIT_BRANCH` | `SEMAPHORE_GIT_PR_NUMBER` | Action |
+|---|---|---|
+| = MAIN_BRANCH | set | **skip both** (PR review against main; we don't want sweep to publish new translation PRs mid-review, and the PR isn't a translation PR managed by the orchestrator) |
+| = MAIN_BRANCH | empty | run sweep |
+| ≠ MAIN_BRANCH | set | run `translation-agent --pr <N>` (status check) |
+| ≠ MAIN_BRANCH | empty | skip |
+
+Note Semaphore reports `SEMAPHORE_GIT_BRANCH` as the **target**
+branch on PR builds (not the head), so a PR opened against main
+shows `branch == MAIN_BRANCH` AND a PR number — exactly the case the
+PR-on-main skip rule catches.
+
+The prologue also handles `SEMAPHORE_GIT_BRANCH_CHECKOUT` (set when
+a Task is triggered manually with a "Run on branch" override): if
+present, the prologue fetches and `git checkout -B <branch>
+FETCH_HEAD` (FETCH_HEAD because shallow single-branch clones don't
+create `refs/remotes/origin/<other-branch>`), then the job command
+shadows `SEMAPHORE_GIT_BRANCH` with the override before the dispatch
+if-block fires.
 
 ### Implementation phase breakdown
 
@@ -187,4 +426,12 @@ Built in five Actor/Critic cycles per `.claude/rules/agent-roles.md`:
 - **Phase D** — steps 6, 7, 8 (plan, plan-approve cascade, impl).
 - **Phase E** — end-to-end glue, artifact push, README, integration tests.
 
-108 unit + integration tests at `tools/translation_agent/tests/`.
+Subsequent **production-hardening iterations** (driven by real
+Semaphore CI runs) added the items above this section: shallow-clone
+correctness in `next_commits`, no-push-from-R2 contract,
+`--cleanup-prs` flag, PR-on-main skip rule, sweep PR-closure check,
+worktree base resolution for re-runs over existing PR branches,
+SEMAPHORE_GIT_BRANCH_CHECKOUT support, PR description refresh on each
+transition, and per-PR sweep log enrichment.
+
+170 unit + integration tests at `tools/translation_agent/tests/`.
