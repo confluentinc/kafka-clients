@@ -22,6 +22,9 @@ pub mod buffer_exhausted_error;
 pub mod callback;
 pub mod record_metadata;
 
+#[cfg(test)]
+mod record_send_test;
+
 // `internals` packages are `pub(crate)` per CLAUDE.md naming rules.
 pub(crate) mod internals;
 

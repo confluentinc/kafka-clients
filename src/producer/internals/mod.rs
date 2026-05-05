@@ -18,11 +18,17 @@
 
 pub(crate) mod buffer_pool;
 pub(crate) mod error_logging_callback;
+pub(crate) mod future_record_metadata;
+pub(crate) mod produce_request_result;
 pub(crate) mod producer_metadata;
 
 #[allow(unused_imports)]
 pub(crate) use buffer_pool::BufferPool;
 #[allow(unused_imports)]
 pub(crate) use error_logging_callback::ErrorLoggingCallback;
+#[allow(unused_imports)]
+pub(crate) use future_record_metadata::FutureRecordMetadata;
+#[allow(unused_imports)]
+pub(crate) use produce_request_result::ProduceRequestResult;
 #[allow(unused_imports)]
 pub(crate) use producer_metadata::ProducerMetadata;
