@@ -19,7 +19,9 @@
 pub(crate) mod buffer_pool;
 pub(crate) mod error_logging_callback;
 pub(crate) mod future_record_metadata;
+pub(crate) mod incomplete_batches;
 pub(crate) mod produce_request_result;
+pub(crate) mod producer_batch;
 pub(crate) mod producer_metadata;
 
 #[allow(unused_imports)]
@@ -29,6 +31,10 @@ pub(crate) use error_logging_callback::ErrorLoggingCallback;
 #[allow(unused_imports)]
 pub(crate) use future_record_metadata::FutureRecordMetadata;
 #[allow(unused_imports)]
+pub(crate) use incomplete_batches::IncompleteBatches;
+#[allow(unused_imports)]
 pub(crate) use produce_request_result::ProduceRequestResult;
+#[allow(unused_imports)]
+pub(crate) use producer_batch::ProducerBatch;
 #[allow(unused_imports)]
 pub(crate) use producer_metadata::ProducerMetadata;
