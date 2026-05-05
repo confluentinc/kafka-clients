@@ -772,8 +772,16 @@ def _run_plan_one(args, row):
             else:
                 # The R2 sandbox denies `git push`, so claude only
                 # committed locally. Publish the plan commit ourselves.
+                # force=True: kafka-translate/<sha> is exclusively
+                # orchestrator-owned, and the plan worktree's local tip
+                # IS the authoritative state -- if origin diverged
+                # (e.g. master advanced and an earlier sweep step
+                # rebased the branch, or a prior failed run left a
+                # stale tip), unconditionally overwrite.
                 try:
-                    git_ops.push_branch(args.rust_repo_path, branch_name)
+                    git_ops.push_branch(
+                        args.rust_repo_path, branch_name, force=True,
+                    )
                 except git_ops.GitError as e:
                     return (
                         f"failed to push plan branch {branch_name}: {e}",
@@ -852,9 +860,13 @@ def _run_impl_one(args, row):
                 return None, sha
             # Real run: the R2 sandbox denies `git push`, so publish
             # the impl commits ourselves before returning the SHA that
-            # branch_commit will record.
+            # branch_commit will record. force=True for the same reason
+            # as the plan push (orchestrator-owned branch, local tip is
+            # authoritative).
             try:
-                git_ops.push_branch(args.rust_repo_path, branch_name)
+                git_ops.push_branch(
+                    args.rust_repo_path, branch_name, force=True,
+                )
             except git_ops.GitError as e:
                 return (
                     f"failed to push impl branch {branch_name}: {e}",
