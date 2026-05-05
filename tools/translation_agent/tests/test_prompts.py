@@ -68,6 +68,33 @@ def test_pr_description_template_plan_phase_instructs_implementation_needed_mark
     # do-not-include guidance, not as an instruction to emit it
 
 
+def test_pr_description_template_plan_phase_documents_no_op_marker():
+    """The plan-phase prompt must document the no-op marker and tell
+    claude to emit EXACTLY ONE of the two canonical markers. The
+    orchestrator's label logic keys off whichever marker appears, so
+    the prompt must give claude both options literally and forbid
+    emitting both / neither."""
+    p_plan = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(
+        phase="plan", pr_number=1, branch_name="b",
+        base_branch="m", ak_commit="ak",
+    )
+    # Both verbatim markers must appear in the plan-phase prompt.
+    assert prompts.IMPLEMENTATION_NEEDED_MARKER in p_plan
+    assert prompts.NO_IMPLEMENTATION_NEEDED_MARKER in p_plan
+    # And the prompt must require exactly one of them, never both /
+    # never neither (so the orchestrator's label decision is
+    # well-defined).
+    assert "EXACTLY ONE" in p_plan
+    assert "never both" in p_plan
+    assert "never neither" in p_plan
+    # Impl-phase prompt forbids both markers, not just the original.
+    p_impl = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(
+        phase="impl", pr_number=1, branch_name="b",
+        base_branch="m", ak_commit="ak",
+    )
+    assert "Do NOT include either" in p_impl
+
+
 def test_plan_and_impl_prompts_forbid_git_push():
     """Push must always go through the orchestrator (Python), never from
     inside the R2 sandbox. The prompts must reflect that contract: they

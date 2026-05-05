@@ -107,18 +107,24 @@ locally on `{branch_name}`.
 """
 
 
-# Literal trailer the plan-phase PR-description prompt asks claude to
-# end the body with. The orchestrator scans the resulting body for an
-# exact match of this string; if present, it applies
-# LABEL_IMPLEMENTATION_NEEDED to the PR. Keep this constant and the
-# string baked into PR_DESCRIPTION_PROMPT_TEMPLATE in lockstep.
+# Literal trailers the plan-phase PR-description prompt asks claude to
+# pick exactly one of, depending on whether the plan calls for any
+# Rust-file changes. The orchestrator scans the resulting body for an
+# exact match: IMPLEMENTATION_NEEDED_MARKER applies
+# LABEL_IMPLEMENTATION_NEEDED; NO_IMPLEMENTATION_NEEDED_MARKER skips
+# the label (and proactively removes it, in case a previous body had
+# it). Keep these constants and the strings baked into
+# PR_DESCRIPTION_PROMPT_TEMPLATE in lockstep.
 IMPLEMENTATION_NEEDED_MARKER = "Next steps: **Implementation needed**"
+NO_IMPLEMENTATION_NEEDED_MARKER = "Next steps: **No implementation needed**"
 
 # Per-state PR labels applied by the orchestrator at state transitions.
 # Sequence (applied / removed at the corresponding sweep step):
 #   status 0 -> 1 (dep-eval done):  +LABEL_DEPENDENCIES_EVALUATED
 #   status 1 -> 2 (plan created):   -LABEL_DEPENDENCIES_EVALUATED, +LABEL_PLAN_CREATED
-#   plan body has marker:           +LABEL_IMPLEMENTATION_NEEDED
+#   plan body has impl marker:      +LABEL_IMPLEMENTATION_NEEDED
+#   plan body has no-op marker:     -LABEL_IMPLEMENTATION_NEEDED (defensive,
+#                                     covers re-plan after a non-no-op body)
 #   status 3 -> 4 (impl done):      -{deps-evaluated, plan-created,
 #                                     implementation-needed}, +LABEL_IMPLEMENTATION_DONE
 LABEL_DEPENDENCIES_EVALUATED = "dependencies-evaluated"
@@ -151,16 +157,29 @@ Body shape (~400 words max, reviewers shouldn't have to scroll):
 - Open with one sentence summarizing the change.
 - Cite the AK commit it translates (link form).
 - For the "plan" phase: summarize the plan's scope, approach, and any
-  notable risks. Close the body with this exact line as the final
-  paragraph (the orchestrator scans for it verbatim to label the PR
-  as awaiting implementation):
+  notable risks. Close the body with EXACTLY ONE of the following two
+  lines as the final paragraph (the orchestrator scans for it verbatim
+  to decide whether to label the PR as awaiting implementation):
 
       Next steps: **Implementation needed**
 
+  Use this when the plan calls for at least one Rust file to be
+  created or modified. OR:
+
+      Next steps: **No implementation needed**
+
+  Use this when the plan concludes the change is a no-op for the Rust
+  client (e.g. the Java change has no Rust counterpart, the behavior
+  is already covered, or no Rust file needs to be created or
+  modified). Include exactly one of these markers -- never both,
+  never neither. Picking the no-op marker tells the orchestrator to
+  skip applying the implementation-needed label so the PR stays in a
+  human-review state.
+
 - For the "impl" phase: summarize what was implemented, what tests
-  cover it, and any follow-up TODOs. Do NOT include the
-  "Next steps: **Implementation needed**" line in the impl-phase
-  body -- the implementation is no longer needed at that point.
+  cover it, and any follow-up TODOs. Do NOT include either of the
+  "Next steps: **...**" lines in the impl-phase body -- the
+  implementation is no longer needed at that point.
 """
 
 
