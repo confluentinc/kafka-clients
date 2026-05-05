@@ -22,6 +22,7 @@ use crate::common::message::metadata_response_data::{MetadataResponseData, Metad
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
 use crate::common::protocol::{ApiKey, ApiKeys, Errors, Message};
 use crate::common::requests::AbstractRequest;
+use crate::common::requests::AbstractRequestBuilder;
 use crate::common::requests::AbstractRequestResponse;
 use crate::common::requests::AbstractResponse;
 use crate::common::requests::MetadataResponse;
@@ -225,6 +226,76 @@ impl AbstractRequest for MetadataRequest {
             unknown_tagged_fields: Vec::new(),
         };
         Some(Box::new(MetadataResponse::new(data, true)))
+    }
+}
+
+/// Translation of `org.apache.kafka.common.requests.MetadataRequest.Builder`.
+///
+/// Java declares this as `public static class Builder extends
+/// AbstractRequest.Builder<MetadataRequest>`. Rust models it as a concrete
+/// struct implementing the type-erased [`AbstractRequestBuilder`] trait.
+#[derive(Debug, Clone)]
+pub struct MetadataRequestBuilder {
+    /// Topic names to fetch metadata for. `None` means "all topics".
+    topics: Option<Vec<String>>,
+    allow_auto_topic_creation: bool,
+    oldest_allowed_version: i16,
+    latest_allowed_version: i16,
+}
+
+impl MetadataRequestBuilder {
+    /// Mirrors `Builder.allTopics()` — request metadata for every topic.
+    pub fn all_topics() -> Self {
+        let api_key = ApiKeys::for_id(3).expect("METADATA api_key always present");
+        MetadataRequestBuilder {
+            topics: None,
+            allow_auto_topic_creation: true,
+            oldest_allowed_version: api_key.oldest_version(),
+            latest_allowed_version: api_key.latest_version(),
+        }
+    }
+
+    /// Mirrors `Builder.forTopicNames(List<String>, boolean)`.
+    pub fn for_topic_names(topics: Vec<String>, allow_auto_topic_creation: bool) -> Self {
+        let api_key = ApiKeys::for_id(3).expect("METADATA api_key always present");
+        MetadataRequestBuilder {
+            topics: Some(topics),
+            allow_auto_topic_creation,
+            oldest_allowed_version: api_key.oldest_version(),
+            latest_allowed_version: api_key.latest_version(),
+        }
+    }
+
+    /// Mirrors `Builder(List<String>, boolean, short, short)` —
+    /// pin the version range explicitly.
+    pub fn with_versions(
+        topics: Option<Vec<String>>,
+        allow_auto_topic_creation: bool,
+        oldest_allowed_version: i16,
+        latest_allowed_version: i16,
+    ) -> Self {
+        MetadataRequestBuilder {
+            topics,
+            allow_auto_topic_creation,
+            oldest_allowed_version,
+            latest_allowed_version,
+        }
+    }
+}
+
+impl AbstractRequestBuilder for MetadataRequestBuilder {
+    fn api_key(&self) -> &'static ApiKey {
+        ApiKeys::for_id(3).expect("METADATA api_key always present")
+    }
+    fn oldest_allowed_version(&self) -> i16 {
+        self.oldest_allowed_version
+    }
+    fn latest_allowed_version(&self) -> i16 {
+        self.latest_allowed_version
+    }
+    fn build(&self, version: i16) -> Result<Box<dyn AbstractRequest>, KafkaError> {
+        let req = MetadataRequest::build(self.topics.clone(), self.allow_auto_topic_creation, version)?;
+        Ok(Box::new(req))
     }
 }
 

@@ -36,7 +36,7 @@ use crate::common::requests::request_utils;
 /// `api_key`, `data`) are required and the helpers built on top
 /// (`serialize`, `serialize_with_header`, `size_in_bytes`,
 /// `error_counts`) are provided default methods.
-pub trait AbstractRequest: AbstractRequestResponse {
+pub trait AbstractRequest: AbstractRequestResponse + std::marker::Send + std::marker::Sync {
     /// The API version this request will be encoded at. Mirrors
     /// `AbstractRequest.version()`.
     fn version(&self) -> i16;

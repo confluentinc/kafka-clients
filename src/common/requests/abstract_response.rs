@@ -37,7 +37,7 @@ pub const DEFAULT_THROTTLE_TIME: i32 = 0;
 /// `maybeSetThrottleTimeMs(int)`). In Rust we model it as a trait whose
 /// state-bearing methods are required and helpers (`serialize`,
 /// `serialize_with_header`) are provided.
-pub trait AbstractResponse: AbstractRequestResponse {
+pub trait AbstractResponse: AbstractRequestResponse + std::marker::Send + std::marker::Sync {
     /// The API key of this response. Mirrors `AbstractResponse.apiKey()`.
     fn api_key(&self) -> &'static ApiKey;
 

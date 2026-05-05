@@ -146,8 +146,16 @@ pub trait KafkaClient: std::marker::Send {
 
     /// Create a new `ClientRequest` (no callback / default timeout).
     /// Mirrors `KafkaClient.newClientRequest(String, AbstractRequest.Builder<?>, long, boolean)`.
+    ///
+    /// **Mutability divergence from Java**: Java declares the method
+    /// without an explicit synchronized/mutability qualifier, but the
+    /// implementation bumps the per-`NetworkClient` `int correlation`
+    /// counter — i.e. it *does* mutate (the class as a whole is
+    /// documented as not thread-safe). The Rust trait makes that
+    /// explicit by taking `&mut self` so the correlation counter need
+    /// not be wrapped in an `AtomicI32` for this call site.
     fn new_client_request(
-        &self,
+        &mut self,
         node_id: Arc<str>,
         request_builder: Arc<dyn AbstractRequestBuilder>,
         created_time_ms: i64,
@@ -156,9 +164,10 @@ pub trait KafkaClient: std::marker::Send {
 
     /// Create a new `ClientRequest` with explicit timeout and callback.
     /// Mirrors `KafkaClient.newClientRequest(String, AbstractRequest.Builder<?>,
-    /// long, boolean, int, RequestCompletionHandler)`.
+    /// long, boolean, int, RequestCompletionHandler)`. See
+    /// [`Self::new_client_request`] for the mutability divergence.
     fn new_client_request_with_callback(
-        &self,
+        &mut self,
         node_id: Arc<str>,
         request_builder: Arc<dyn AbstractRequestBuilder>,
         created_time_ms: i64,

@@ -22,9 +22,85 @@ use crate::common::message::api_versions_response_data::ApiVersionsResponseData;
 use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
 use crate::common::protocol::{ApiKey, ApiKeys, Errors, Message};
 use crate::common::requests::AbstractRequest;
+use crate::common::requests::AbstractRequestBuilder;
 use crate::common::requests::AbstractRequestResponse;
 use crate::common::requests::AbstractResponse;
 use crate::common::requests::ApiVersionsResponse;
+
+/// Mirrors the `Builder.DEFAULT_CLIENT_SOFTWARE_NAME` constant.
+const DEFAULT_CLIENT_SOFTWARE_NAME: &str = "apache-kafka-java";
+
+/// Mirrors `AppInfoParser.getVersion()`. Java reads from
+/// `kafka/kafka-clients-version.properties` at JAR build time; we use the
+/// crate version for the same role.
+fn default_client_software_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
+}
+
+/// Translation of `org.apache.kafka.common.requests.ApiVersionsRequest.Builder`.
+///
+/// Java declares this as a `public static class Builder extends
+/// AbstractRequest.Builder<ApiVersionsRequest>`. Rust models it as a
+/// concrete struct implementing the type-erased
+/// [`AbstractRequestBuilder`] trait (the trait surface is the lowest
+/// common denominator that `NetworkClient::send` consumes).
+#[derive(Debug, Clone)]
+pub struct ApiVersionsRequestBuilder {
+    data: ApiVersionsRequestData,
+    oldest_allowed_version: i16,
+    latest_allowed_version: i16,
+}
+
+impl ApiVersionsRequestBuilder {
+    /// Mirrors `new Builder()` — no-arg constructor with
+    /// `[oldestVersion, latestVersion]` from `ApiKeys.API_VERSIONS`.
+    pub fn new() -> Self {
+        let api_key = ApiKeys::for_id(18).expect("API_VERSIONS api_key always present");
+        Self::with_versions(api_key.oldest_version(), api_key.latest_version())
+    }
+
+    /// Mirrors `new Builder(short version)` — pin to a single version.
+    pub fn with_version(version: i16) -> Self {
+        Self::with_versions(version, version)
+    }
+
+    /// Mirrors the 3-arg `Builder(ApiVersionsRequestData, short, short)`.
+    pub fn with_data(data: ApiVersionsRequestData, oldest_allowed_version: i16, latest_allowed_version: i16) -> Self {
+        ApiVersionsRequestBuilder { data, oldest_allowed_version, latest_allowed_version }
+    }
+
+    /// Construct with a default `ApiVersionsRequestData` populated from the
+    /// crate identification fields and an explicit version range.
+    pub fn with_versions(oldest_allowed_version: i16, latest_allowed_version: i16) -> Self {
+        let data = ApiVersionsRequestData {
+            client_software_name: DEFAULT_CLIENT_SOFTWARE_NAME.to_owned(),
+            client_software_version: default_client_software_version().to_owned(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        ApiVersionsRequestBuilder { data, oldest_allowed_version, latest_allowed_version }
+    }
+}
+
+impl Default for ApiVersionsRequestBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl AbstractRequestBuilder for ApiVersionsRequestBuilder {
+    fn api_key(&self) -> &'static ApiKey {
+        ApiKeys::for_id(18).expect("API_VERSIONS api_key always present")
+    }
+    fn oldest_allowed_version(&self) -> i16 {
+        self.oldest_allowed_version
+    }
+    fn latest_allowed_version(&self) -> i16 {
+        self.latest_allowed_version
+    }
+    fn build(&self, version: i16) -> Result<Box<dyn AbstractRequest>, KafkaError> {
+        Ok(Box::new(ApiVersionsRequest::new(self.data.clone(), version)))
+    }
+}
 
 /// Translation of `org.apache.kafka.common.requests.ApiVersionsRequest`.
 pub struct ApiVersionsRequest {
