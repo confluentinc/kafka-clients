@@ -18,5 +18,9 @@
 //! ([`internals::ProducerMetadata`]). Phase 5 wires the rest of the
 //! producer (Sender, RecordAccumulator, KafkaProducer).
 
+pub mod buffer_exhausted_error;
+
 // `internals` packages are `pub(crate)` per CLAUDE.md naming rules.
 pub(crate) mod internals;
+
+pub use buffer_exhausted_error::BufferExhaustedError;

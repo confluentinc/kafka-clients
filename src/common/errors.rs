@@ -208,6 +208,7 @@ impl KafkaError {
                 | KafkaError::NotEnoughReplicas(_)
                 | KafkaError::NotEnoughReplicasAfterAppend(_)
                 | KafkaError::StaleMetadata(_)
+                | KafkaError::BufferExhausted(_)
         )
     }
 
