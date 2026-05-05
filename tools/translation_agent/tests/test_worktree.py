@@ -284,7 +284,9 @@ def test_push_branch_with_kafka_bump_skips_make_runs_submodule_init_and_pushes()
         if c[0] == "git" and c[1] == "/repo" and c[2][:1] == ("push",)
     ]
     assert pushes, f"expected push call; got {calls}"
-    assert pushes[0][2] == ("push", "-u", "origin", "kafka-translate/abc")
+    assert pushes[0][2] == (
+        "push", "-u", "--force", "origin", "kafka-translate/abc",
+    )
 
 
 def test_worktree_for_branch_bases_on_origin_branch_when_remote_exists():

@@ -303,6 +303,7 @@ def push_branch(
     branch_name: str,
     remote: str = "origin",
     set_upstream: bool = True,
+    force: bool = False,
 ) -> None:
     """Push the local `branch_name` to `remote`.
 
@@ -312,12 +313,18 @@ def push_branch(
     (made by claude inside the worktree) are still on the local ref --
     this just publishes them.
 
-    Idempotent fast-forward: if origin already has the branch at the
-    same SHA, this is a no-op. If origin's tip diverges, raises GitError
-    so the caller can decide.
+    With `force=False` (default), behaves as a fast-forward push:
+    idempotent if origin is at the same SHA, raises GitError if
+    origin's tip diverges. With `force=True`, passes `--force` to
+    unconditionally overwrite origin's tip with the local one --
+    appropriate only for orchestrator-owned branches (e.g.
+    `kafka-translate/<sha>`) where the orchestrator is the sole
+    writer; do NOT use for shared branches.
     """
     args = ["push"]
     if set_upstream:
         args.append("-u")
+    if force:
+        args.append("--force")
     args.extend([remote, branch_name])
     _run_git(repo_path, args)

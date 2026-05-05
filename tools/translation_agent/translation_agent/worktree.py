@@ -340,7 +340,10 @@ def push_branch_with_kafka_bump(
 
     Idempotent: if origin already has the branch with this exact bump
     commit, the inner `_bump_kafka_submodule` is a no-op (no diff to
-    commit) and the push is a no-op (same SHA).
+    commit) and the push is a no-op (same SHA). The push is `--force`
+    because kafka-translate/<sha> is orchestrator-owned -- if a prior
+    failed run left origin's tip at a divergent bump SHA, the current
+    worktree's local tip is authoritative.
     """
     with worktree_for_branch(
         rust_repo_path, branch_name,
@@ -350,4 +353,4 @@ def push_branch_with_kafka_bump(
         ak_branch=ak_branch,
         build=False,
     ):
-        _git(rust_repo_path, "push", "-u", "origin", branch_name)
+        _git(rust_repo_path, "push", "-u", "--force", "origin", branch_name)

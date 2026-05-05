@@ -409,3 +409,25 @@ def test_push_branch_set_upstream_false_omits_dash_u():
         ["git", "-C", "/repo", "push", "origin", "kafka-translate/abc"],
         capture_output=True, text=True,
     )
+
+
+def test_push_branch_force_appends_force_flag():
+    """force=True passes --force to git push so the orchestrator can
+    overwrite an out-of-date origin tip on its own translation
+    branches (e.g. after a divergent prior bump or a master advance
+    that effectively rebased the local branch)."""
+    with patch.object(git_ops.subprocess, "run", return_value=_completed(0)) as mrun:
+        git_ops.push_branch("/repo", "kafka-translate/abc", force=True)
+    mrun.assert_called_once_with(
+        ["git", "-C", "/repo", "push", "-u", "--force", "origin",
+         "kafka-translate/abc"],
+        capture_output=True, text=True,
+    )
+
+
+def test_push_branch_force_default_false_omits_force_flag():
+    with patch.object(git_ops.subprocess, "run", return_value=_completed(0)) as mrun:
+        git_ops.push_branch("/repo", "kafka-translate/abc")
+    sent = mrun.call_args[0][0]
+    assert "--force" not in sent
+    assert "--force-with-lease" not in sent
