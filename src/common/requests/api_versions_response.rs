@@ -65,6 +65,42 @@ impl ApiVersionsResponse {
         }
     }
 
+    /// Compute the intersection of two `ApiVersion` ranges. Returns
+    /// `None` when there is no overlap, or when either input is `None`.
+    /// Mirrors the static
+    /// `ApiVersionsResponse.intersect(ApiVersion, ApiVersion)`.
+    ///
+    /// # Errors
+    ///
+    /// [`KafkaError::IllegalArgument`] when the two `ApiVersion` entries
+    /// disagree on the api key (Java throws `IllegalArgumentException`).
+    pub fn intersect(
+        this_version: Option<&ApiVersion>,
+        other: Option<&ApiVersion>,
+    ) -> Result<Option<ApiVersion>, KafkaError> {
+        let (Some(this_version), Some(other)) = (this_version, other) else {
+            return Ok(None);
+        };
+        if this_version.api_key != other.api_key {
+            return Err(KafkaError::IllegalArgument(format!(
+                "thisVersion.apiKey: {} must be equal to other.apiKey: {}",
+                this_version.api_key, other.api_key
+            )));
+        }
+        let min_version = this_version.min_version.max(other.min_version);
+        let max_version = this_version.max_version.min(other.max_version);
+        if min_version > max_version {
+            Ok(None)
+        } else {
+            Ok(Some(ApiVersion {
+                api_key: this_version.api_key,
+                min_version,
+                max_version,
+                unknown_tagged_fields: Vec::new(),
+            }))
+        }
+    }
+
     /// Mirrors the static `ApiVersionsResponse.parse(Readable, short)`. If
     /// parsing fails at a non-zero version the broker may have replied with
     /// a v0 response (KIP-511); fall back to v0 in that case.

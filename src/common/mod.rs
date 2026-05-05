@@ -20,6 +20,7 @@ pub mod cluster_resource_listener;
 pub mod compress;
 pub mod config;
 pub mod errors;
+pub mod feature;
 pub mod header;
 pub mod internals;
 pub mod kafka_exception;

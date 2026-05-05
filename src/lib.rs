@@ -22,21 +22,38 @@
 //! topic-name validation). Higher-level types (records, network, producer)
 //! are added in subsequent phases.
 
+pub mod api_versions;
 pub mod client_dns_lookup;
 pub mod client_request;
 pub mod client_response;
 pub mod client_utils;
+pub mod cluster_connection_states;
 pub mod common;
 pub mod common_client_configs;
+pub mod connection_state;
 pub mod default_host_resolver;
 pub mod host_resolver;
+pub mod in_flight_requests;
+pub mod kafka_client;
+pub mod least_loaded_node;
+pub mod manual_metadata_updater;
 pub mod metadata;
 pub mod metadata_recovery_strategy;
 pub mod metadata_snapshot;
+pub mod metadata_updater;
+pub mod node_api_versions;
 pub mod producer;
 pub mod request_completion_handler;
 pub mod stale_metadata_error;
 
+pub use api_versions::ApiVersions;
 pub use client_request::ClientRequest;
 pub use client_response::ClientResponse;
+pub use cluster_connection_states::ClusterConnectionStates;
+pub use connection_state::ConnectionState;
+pub use kafka_client::KafkaClient;
+pub use least_loaded_node::LeastLoadedNode;
+pub use manual_metadata_updater::ManualMetadataUpdater;
+pub use metadata_updater::MetadataUpdater;
+pub use node_api_versions::NodeApiVersions;
 pub use request_completion_handler::RequestCompletionHandler;
