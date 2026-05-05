@@ -195,6 +195,30 @@ def update_pr_body(repo_path: str, pr_number: int, body: str) -> None:
         )
 
 
+def add_pr_label(repo_path: str, pr_number: int, label: str) -> None:
+    """Apply `label` to PR `pr_number` via `gh pr edit <N> --add-label`.
+
+    Idempotent on GitHub's side -- adding a label that's already on
+    the PR is a no-op (gh returns success). Raises GhError on
+    non-zero exit (e.g. label doesn't exist on the repo, network
+    failure); the caller decides whether to log+continue or fail.
+
+    The orchestrator uses this for state markers like
+    `implementation-needed` after a plan-phase PR description update.
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "edit", str(pr_number), "--add-label", label],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh pr edit --add-label {label} failed "
+            f"(rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+
+
 def get_pr_body(repo_path: str, pr_number: int) -> str:
     """Return PR `pr_number`'s current body via `gh pr view --json body`.
 

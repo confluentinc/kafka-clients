@@ -126,6 +126,30 @@ def test_update_pr_body_raises_on_nonzero_exit():
             github.update_pr_body("/repo", 42, "x")
 
 
+def test_add_pr_label_invokes_gh_pr_edit_add_label():
+    """add_pr_label wraps `gh pr edit <N> --add-label <label>` and runs
+    it in `repo_path`. argv is positional and stdin-free."""
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0)) as mrun:
+        github.add_pr_label("/repo", 42, "implementation-needed")
+    mrun.assert_called_once_with(
+        ["gh", "pr", "edit", "42", "--add-label", "implementation-needed"],
+        capture_output=True, text=True,
+        cwd="/repo",
+    )
+
+
+def test_add_pr_label_raises_on_nonzero_exit():
+    """A missing label or auth failure surfaces as GhError so the caller
+    can log+continue (it's cosmetic) without crashing the sweep."""
+    with patch.object(
+        github.subprocess, "run",
+        return_value=_completed(1, stderr="label 'implementation-needed' not found"),
+    ):
+        with pytest.raises(github.GhError, match="not found"):
+            github.add_pr_label("/repo", 42, "implementation-needed")
+
+
 def test_get_pr_body_returns_stripped_string():
     """`gh pr view --json body --jq '.body'` emits the body with one
     trailing newline; we strip just that."""

@@ -107,6 +107,15 @@ locally on `{branch_name}`.
 """
 
 
+# Literal trailer the plan-phase PR-description prompt asks claude to
+# end the body with. The orchestrator scans the resulting body for an
+# exact match of this string; if present, it applies
+# IMPLEMENTATION_NEEDED_LABEL to the PR. Keep both constants and the
+# string baked into PR_DESCRIPTION_PROMPT_TEMPLATE in lockstep.
+IMPLEMENTATION_NEEDED_MARKER = "Next steps: **Implementation needed**"
+IMPLEMENTATION_NEEDED_LABEL = "implementation-needed"
+
+
 PR_DESCRIPTION_PROMPT_TEMPLATE = """\
 You are the Manager agent for the Confluent Kafka Rust translation
 project, following the workflow in `.claude/rules/agent-roles.md`.
@@ -131,9 +140,16 @@ Body shape (~400 words max, reviewers shouldn't have to scroll):
 - Open with one sentence summarizing the change.
 - Cite the AK commit it translates (link form).
 - For the "plan" phase: summarize the plan's scope, approach, and any
-  notable risks.
+  notable risks. Close the body with this exact line as the final
+  paragraph (the orchestrator scans for it verbatim to label the PR
+  as awaiting implementation):
+
+      Next steps: **Implementation needed**
+
 - For the "impl" phase: summarize what was implemented, what tests
-  cover it, and any follow-up TODOs.
+  cover it, and any follow-up TODOs. Do NOT include the
+  "Next steps: **Implementation needed**" line in the impl-phase
+  body -- the implementation is no longer needed at that point.
 """
 
 
