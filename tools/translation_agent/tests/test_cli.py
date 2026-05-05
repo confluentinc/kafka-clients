@@ -888,6 +888,21 @@ def test_sweep_closure_check_prunes_merged_prefix_and_advances_cursor(tmp_path):
     # Cursor advanced through the entire MERGED prefix to ak_c.
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_c"
+    # Each MERGED PR was archived to pr_commit_history with its merge SHA.
+    history = sorted(
+        (dict(r) for r in conn.execute(
+            "SELECT * FROM pr_commit_history ORDER BY ak_commit"
+        ).fetchall()),
+        key=lambda r: r["ak_commit"],
+    )
+    assert history == [
+        {"rust_branch": "master", "ak_branch": "trunk",
+         "ak_commit": "ak_a", "rust_commit": "merge_sha_a"},
+        {"rust_branch": "master", "ak_branch": "trunk",
+         "ak_commit": "ak_b", "rust_commit": "merge_sha_b"},
+        {"rust_branch": "master", "ak_branch": "trunk",
+         "ak_commit": "ak_c", "rust_commit": "merge_sha_c"},
+    ]
     # Re-fetched batch was used: ak_d's row exists with the new pr_number.
     new_row = conn.execute(
         "SELECT * FROM pr_commit WHERE pr_number = 201"
@@ -1067,7 +1082,8 @@ def test_sweep_closure_check_skips_synthetic_pr_rows(tmp_path):
 def test_sweep_closure_check_advances_cursor_for_closed_without_merge(tmp_path):
     """CLOSED-without-merge PRs still advance the cursor by ak_commit
     just like MERGED ones -- the row is removed and the next sweep
-    moves on."""
+    moves on. No pr_commit_history row is written (only MERGED PRs
+    are archived)."""
     db_path = str(tmp_path / "t.db")
     _seed_with_existing_prs(db_path, {"ak_a": 101})
 
@@ -1088,6 +1104,57 @@ def test_sweep_closure_check_advances_cursor_for_closed_without_merge(tmp_path):
     conn = db.connect(db_path)
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_a"
+    # CLOSED-without-merge: no archive row.
+    assert conn.execute(
+        "SELECT count(*) FROM pr_commit_history"
+    ).fetchone()[0] == 0
+
+
+def test_sweep_closure_check_nulls_out_dependents_when_archiving(tmp_path):
+    """When the closure walker archives PR #101 (ak_a), any other
+    pr_commit row on the same rust_branch that references ak_a as a
+    plan_dependency or implementation_dependency must be nulled out
+    in place. The downstream PR remains; only its dep columns clear."""
+    db_path = str(tmp_path / "t.db")
+    _seed_with_existing_prs(db_path, {"ak_a": 101})
+    # Add a downstream PR with deps on ak_a -- and a same-branch PR
+    # with an unrelated dep that must be left alone.
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 200, "master", "trunk", "ak_x")
+    db.update_dependencies(conn, 200, "ak_a", "ak_a")  # both deps on ak_a
+    db.insert_pr_commit(conn, 201, "master", "trunk", "ak_y")
+    db.update_dependencies(conn, 201, "ak_other", None)  # unrelated dep
+    conn.commit()
+    conn.close()
+
+    next_commits_mock = MagicMock(side_effect=[["ak_a"], []])
+    with patch("translation_agent.cli.git_ops.next_commits", next_commits_mock), \
+         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+         patch("translation_agent.cli.github.create_draft_pr",
+               return_value=999), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=[("MERGED", "merge_sha_a")]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, '{"plan_dependency": null, '
+                                '"implementation_dependency": null}')), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_x_sha"):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    pr200 = db.get_pr(conn, 200)
+    pr201 = db.get_pr(conn, 201)
+    # Dependent PR's both columns nulled in place.
+    assert pr200["plan_dependency"] is None
+    assert pr200["implementation_dependency"] is None
+    # Unrelated dep on a different ak_commit was NOT touched.
+    assert pr201["plan_dependency"] == "ak_other"
 
 
 # --- dep-eval flow ----------------------------------------------------------

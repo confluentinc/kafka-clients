@@ -324,7 +324,7 @@ def _check_pr_closures_and_advance_cursor(
         if row["pr_number"] is None or row["pr_number"] < 0:
             break  # synthetic dry-run row -> stop
         try:
-            state, _ = github.get_pr_state(
+            state, merge_sha = github.get_pr_state(
                 args.rust_repo_path, row["pr_number"],
             )
         except github.GhError as e:
@@ -336,13 +336,24 @@ def _check_pr_closures_and_advance_cursor(
             break
         if state == "OPEN":
             break  # still in flight -> stop
-        # CLOSED or MERGED -> clean up
-        db.delete_pr_commit(conn, row["pr_number"])
-        new_ak = ak
-        log.info(
-            "PR #%d (%s) for AK %s: removed pr_commit row",
-            row["pr_number"], state, ak[:12],
+        # CLOSED or MERGED -> archive (MERGED only) + null-out deps + delete.
+        db.archive_pr_commit(
+            conn, row["pr_number"],
+            rust_commit=merge_sha if state == "MERGED" else None,
         )
+        new_ak = ak
+        if state == "MERGED":
+            log.info(
+                "PR #%d (MERGED) for AK %s: archived rust=%s to "
+                "pr_commit_history; nulled dependents; removed pr_commit row",
+                row["pr_number"], ak[:12], (merge_sha or "")[:12],
+            )
+        else:
+            log.info(
+                "PR #%d (CLOSED) for AK %s: nulled dependents; removed "
+                "pr_commit row (no merge SHA to archive)",
+                row["pr_number"], ak[:12],
+            )
 
     if new_ak is not None:
         db.seed_correspondence(
