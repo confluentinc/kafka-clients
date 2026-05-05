@@ -150,6 +150,106 @@ def test_add_pr_label_raises_on_nonzero_exit():
             github.add_pr_label("/repo", 42, "implementation-needed")
 
 
+def test_remove_pr_label_invokes_gh_pr_edit_remove_label():
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0)) as mrun:
+        github.remove_pr_label("/repo", 42, "dependencies-evaluated")
+    mrun.assert_called_once_with(
+        ["gh", "pr", "edit", "42", "--remove-label", "dependencies-evaluated"],
+        capture_output=True, text=True,
+        cwd="/repo",
+    )
+
+
+def test_remove_pr_label_raises_on_nonzero_exit():
+    with patch.object(
+        github.subprocess, "run",
+        return_value=_completed(1, stderr="not authorized"),
+    ):
+        with pytest.raises(github.GhError, match="not authorized"):
+            github.remove_pr_label("/repo", 42, "dependencies-evaluated")
+
+
+# --- format_dep_section / replace_dep_section -------------------------------
+
+def test_format_dep_section_both_deps_renders_both_lines():
+    """Both PR numbers present produces the full two-line dep block."""
+    s = github.format_dep_section(plan_dep_pr_number=123, impl_dep_pr_number=456)
+    assert s == "**Dependencies:**\n- Plan: #123\n- Implementation: #456"
+
+
+def test_format_dep_section_only_plan_dep_omits_impl_line():
+    """Skip the impl line when impl dep is None (and vice versa)."""
+    assert github.format_dep_section(plan_dep_pr_number=123) == (
+        "**Dependencies:**\n- Plan: #123"
+    )
+    assert github.format_dep_section(impl_dep_pr_number=456) == (
+        "**Dependencies:**\n- Implementation: #456"
+    )
+
+
+def test_format_dep_section_no_deps_returns_empty_string():
+    """No deps -> empty string so callers can short-circuit (and
+    replace_dep_section will then just strip any existing block)."""
+    assert github.format_dep_section() == ""
+    assert github.format_dep_section(None, None) == ""
+
+
+def test_replace_dep_section_prepends_when_no_existing_block():
+    """Body has no orchestrator markers yet -> the new block lands at
+    the top with a blank-line separator before the existing body."""
+    body = "## Summary\n\nOriginal body."
+    section = "**Dependencies:**\n- Plan: #1"
+    out = github.replace_dep_section(body, section)
+    assert out == (
+        f"{github.DEP_SECTION_START}\n"
+        f"**Dependencies:**\n- Plan: #1\n"
+        f"{github.DEP_SECTION_END}\n\n"
+        f"## Summary\n\nOriginal body."
+    )
+
+
+def test_replace_dep_section_replaces_existing_block_in_place():
+    """Calling twice replaces, never accumulates -- the markers delimit
+    a single block. This is what makes the helper safe to retry on
+    network failures during dep-eval."""
+    body = "## Summary\n\nBody."
+    first = github.replace_dep_section(
+        body, "**Dependencies:**\n- Plan: #1",
+    )
+    second = github.replace_dep_section(
+        first, "**Dependencies:**\n- Plan: #2",
+    )
+    assert "#1" not in second
+    assert "#2" in second
+    # Markers appear exactly once.
+    assert second.count(github.DEP_SECTION_START) == 1
+    assert second.count(github.DEP_SECTION_END) == 1
+
+
+def test_replace_dep_section_empty_section_strips_existing_block():
+    """Passing '' as the section is the way to clear the block (for
+    cases where dep-eval discovers both deps are None)."""
+    body_with = github.replace_dep_section(
+        "## Summary", "**Dependencies:**\n- Plan: #1",
+    )
+    out = github.replace_dep_section(body_with, "")
+    assert github.DEP_SECTION_START not in out
+    assert github.DEP_SECTION_END not in out
+    assert out.endswith("## Summary")
+
+
+def test_replace_dep_section_only_block_no_other_body():
+    """Edge: an otherwise empty body should just hold the block,
+    without trailing blank-line ceremony."""
+    out = github.replace_dep_section("", "**Dependencies:**\n- Plan: #1")
+    assert out == (
+        f"{github.DEP_SECTION_START}\n"
+        f"**Dependencies:**\n- Plan: #1\n"
+        f"{github.DEP_SECTION_END}"
+    )
+
+
 def test_get_pr_body_returns_stripped_string():
     """`gh pr view --json body --jq '.body'` emits the body with one
     trailing newline; we strip just that."""

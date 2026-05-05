@@ -56,7 +56,7 @@ def test_pr_description_template_plan_phase_instructs_implementation_needed_mark
         base_branch="m", ak_commit="ak",
     )
     assert prompts.IMPLEMENTATION_NEEDED_MARKER in p
-    assert prompts.IMPLEMENTATION_NEEDED_LABEL == "implementation-needed"
+    assert prompts.LABEL_IMPLEMENTATION_NEEDED == "implementation-needed"
     # Impl-phase rendering uses the same template; the explicit
     # do-not-include guidance must mention the marker too.
     p_impl = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(

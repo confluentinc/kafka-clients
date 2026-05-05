@@ -219,6 +219,76 @@ def add_pr_label(repo_path: str, pr_number: int, label: str) -> None:
         )
 
 
+def remove_pr_label(repo_path: str, pr_number: int, label: str) -> None:
+    """Remove `label` from PR `pr_number` via
+    `gh pr edit <N> --remove-label`.
+
+    Idempotent: removing a label the PR doesn't have returns success.
+    Raises GhError on real failures (auth, network, etc.).
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "edit", str(pr_number), "--remove-label", label],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh pr edit --remove-label {label} failed "
+            f"(rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+
+
+# Markers delimiting the orchestrator-managed dependency section in a
+# PR body. HTML-comment form so they render invisibly on github.com but
+# are still grep-able for replace_dep_section's read-modify-write.
+DEP_SECTION_START = "<!-- deps:start -->"
+DEP_SECTION_END = "<!-- deps:end -->"
+
+_DEP_SECTION_RE = re.compile(
+    re.escape(DEP_SECTION_START) + r".*?" + re.escape(DEP_SECTION_END) + r"\n*",
+    re.DOTALL,
+)
+
+
+def format_dep_section(
+    plan_dep_pr_number: Optional[int] = None,
+    impl_dep_pr_number: Optional[int] = None,
+) -> str:
+    """Build the markdown dep-section body (without the start/end
+    markers). Returns "" when both deps are None so callers can short-
+    circuit and just strip any existing block.
+
+    PR numbers are rendered as bare `#N` references; GitHub auto-links
+    these to the corresponding PR within the same repo.
+    """
+    if plan_dep_pr_number is None and impl_dep_pr_number is None:
+        return ""
+    lines = ["**Dependencies:**"]
+    if plan_dep_pr_number is not None:
+        lines.append(f"- Plan: #{plan_dep_pr_number}")
+    if impl_dep_pr_number is not None:
+        lines.append(f"- Implementation: #{impl_dep_pr_number}")
+    return "\n".join(lines)
+
+
+def replace_dep_section(body: str, dep_section: str) -> str:
+    """Idempotently set the dep section in `body`.
+
+    Strips any existing `DEP_SECTION_START..DEP_SECTION_END` block, then
+    prepends the new block (markers + section). If `dep_section` is the
+    empty string, just strips. Safe to call repeatedly: the block is
+    replaced in place rather than accumulated.
+    """
+    stripped = _DEP_SECTION_RE.sub("", body)
+    if not dep_section:
+        return stripped
+    block = f"{DEP_SECTION_START}\n{dep_section}\n{DEP_SECTION_END}"
+    if stripped:
+        return f"{block}\n\n{stripped}"
+    return block
+
+
 def get_pr_body(repo_path: str, pr_number: int) -> str:
     """Return PR `pr_number`'s current body via `gh pr view --json body`.
 
