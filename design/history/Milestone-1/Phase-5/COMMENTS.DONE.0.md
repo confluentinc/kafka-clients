@@ -562,3 +562,29 @@ will need it for disconnect log lines.
   `socketDescription()` — peer address if available, captured
   remote, then local address fallback (Java's `getLocalAddress`
   fallback when `getInetAddress()` is null).
+
+## Issue 6: `socket_description()` local-fallback includes port — Java does not
+
+- **File**: `src/common/network/kafka_channel.rs:551-563`
+- **Severity**: Suggestion (Behavior Mismatch — log format only)
+- **Java Reference**:
+  `kafka/clients/src/main/java/org/apache/kafka/common/network/KafkaChannel.java:382-387`
+- **Originating commit**: `253c383`
+- **Disposition**: **Fixed**
+
+Java's `socketDescription()` returns either
+`socket.getInetAddress().toString()` or
+`socket.getLocalAddress().toString()`. Both call
+`InetAddress.toString()`, which is host-only — `InetAddress` has no
+port. The Rust translation was asymmetric: the peer and
+captured-remote branches used `addr.ip().to_string()` (host only),
+but the `local_addr()` fallback used `local.to_string()` on a
+`SocketAddr`, which renders as `host:port`. That made the local
+fallback the only branch with a port, diverging from Java and from
+the function's other branches.
+
+**Fix**: Changed the local-fallback arm to `local.ip().to_string()`
+so all three branches emit host-only strings, matching Java's
+`InetAddress.toString()` shape. Log format only — no protocol-level
+behavior change. Verified via the existing 842-test suite (all
+green) and the four gates (build / test / format-check / lint).

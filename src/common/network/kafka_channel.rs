@@ -557,7 +557,7 @@ impl KafkaChannel {
             return addr.ip().to_string();
         }
         match self.transport_layer.local_addr() {
-            Ok(local) => local.to_string(),
+            Ok(local) => local.ip().to_string(),
             Err(_) => String::from("<unknown>"),
         }
     }
