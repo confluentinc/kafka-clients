@@ -20,6 +20,10 @@ Tables track:
   (branch, commit) pair currently tracked. Seeded once with `--seed` and
   advanced by the orchestrator each time a Rust commit lands.
 - `pr_commit`: per-PR state machine, status enum 0..4 per design step 3.
+- `pr_commit_history`: append-style audit log of MERGED PR resolutions.
+  Written by the sweep PR-closure walk (`archive_pr_commit`) so that
+  the AK->Rust commit correspondence is preserved after the live
+  `pr_commit` row is removed.
 """
 
 try:
@@ -83,6 +87,15 @@ _SCHEMA = [
     """,
     "CREATE INDEX IF NOT EXISTS idx_pr_commit_status ON pr_commit(status)",
     "CREATE INDEX IF NOT EXISTS idx_pr_commit_rust_branch ON pr_commit(rust_branch)",
+    """
+    CREATE TABLE IF NOT EXISTS pr_commit_history (
+        rust_branch  TEXT NOT NULL,
+        ak_branch    TEXT NOT NULL,
+        ak_commit    TEXT NOT NULL,
+        rust_commit  TEXT NOT NULL,
+        PRIMARY KEY (rust_branch, ak_branch, ak_commit)
+    )
+    """,
 ]
 
 
@@ -322,19 +335,66 @@ def get_pr_commit_by_branch_and_ak(
     return dict(row) if row else None
 
 
-def delete_pr_commit(conn: sqlite3.Connection, pr_number: int) -> bool:
-    """Delete the pr_commit row with `pr_number`. Returns True if a row
-    was removed, False if no row matched. Idempotent.
+def archive_pr_commit(
+    conn: sqlite3.Connection,
+    pr_number: int,
+    rust_commit: Optional[str] = None,
+) -> bool:
+    """Atomically retire a pr_commit row after its GitHub PR is CLOSED
+    or MERGED. Three steps in a single transaction:
 
-    Used by the sweep PR-closure check after confirming the
-    corresponding GitHub PR is CLOSED or MERGED.
+    1. If `rust_commit` is not None (PR was MERGED with a known merge
+       SHA), record the AK->Rust correspondence in `pr_commit_history`.
+       INSERT OR REPLACE on `(rust_branch, ak_branch, ak_commit)` --
+       a re-archive (e.g. after `--cleanup-prs` and a fresh re-merge)
+       overwrites with the latest merge SHA. CLOSED-without-merge is
+       NOT archived.
+    2. NULL out `plan_dependency` and `implementation_dependency` in
+       any other pr_commit row on the same `rust_branch` that referenced
+       this row's `ak_commit` -- the dependency is logically discharged
+       once the dep PR is gone, regardless of whether it merged.
+    3. Delete the pr_commit row.
+
+    Returns True if the row was found and deleted, False if no row
+    matched (idempotent on re-run).
+
+    Used by the sweep PR-closure walk; bulk resets via
+    `cleanup_pr_commits_for_rust_branch` deliberately bypass this and
+    skip both the history insert and the dep null-out.
     """
     with conn:
-        cursor = conn.execute(
+        row = conn.execute(
+            "SELECT rust_branch, ak_branch, ak_commit FROM pr_commit "
+            "WHERE pr_number = ?",
+            (pr_number,),
+        ).fetchone()
+        if row is None:
+            return False
+        rust_branch = row["rust_branch"]
+        ak_branch = row["ak_branch"]
+        ak_commit = row["ak_commit"]
+        if rust_commit is not None:
+            conn.execute(
+                "INSERT OR REPLACE INTO pr_commit_history "
+                "(rust_branch, ak_branch, ak_commit, rust_commit) "
+                "VALUES (?, ?, ?, ?)",
+                (rust_branch, ak_branch, ak_commit, rust_commit),
+            )
+        conn.execute(
+            "UPDATE pr_commit SET plan_dependency = NULL "
+            "WHERE rust_branch = ? AND plan_dependency = ?",
+            (rust_branch, ak_commit),
+        )
+        conn.execute(
+            "UPDATE pr_commit SET implementation_dependency = NULL "
+            "WHERE rust_branch = ? AND implementation_dependency = ?",
+            (rust_branch, ak_commit),
+        )
+        conn.execute(
             "DELETE FROM pr_commit WHERE pr_number = ?",
             (pr_number,),
         )
-        return cursor.rowcount > 0
+        return True
 
 
 def cleanup_pr_commits_for_rust_branch(

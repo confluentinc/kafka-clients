@@ -280,11 +280,13 @@ def test_get_pr_commit_by_branch_and_ak_returns_none_when_missing(conn):
     assert db.get_pr_commit_by_branch_and_ak(conn, "other-branch", "akA") is None
 
 
-def test_delete_pr_commit_removes_one_row_returns_true(conn):
+def test_archive_pr_commit_merged_writes_history_and_deletes(conn):
+    """MERGED PRs (rust_commit not None) record the AK->Rust pair in
+    pr_commit_history and remove the live pr_commit row."""
     db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
     db.insert_pr_commit(conn, 2, "master", "trunk", "akB")
 
-    assert db.delete_pr_commit(conn, 1) is True
+    assert db.archive_pr_commit(conn, 1, rust_commit="rust_a_sha") is True
     remaining = [
         dict(r) for r in conn.execute(
             "SELECT * FROM pr_commit ORDER BY pr_number"
@@ -293,15 +295,106 @@ def test_delete_pr_commit_removes_one_row_returns_true(conn):
     assert len(remaining) == 1
     assert remaining[0]["pr_number"] == 2
 
+    history = [
+        dict(r) for r in conn.execute(
+            "SELECT * FROM pr_commit_history"
+        ).fetchall()
+    ]
+    assert history == [{
+        "rust_branch": "master", "ak_branch": "trunk",
+        "ak_commit": "akA", "rust_commit": "rust_a_sha",
+    }]
 
-def test_delete_pr_commit_returns_false_when_no_match(conn):
-    """Idempotent: deleting a non-existent row is a no-op + False."""
+
+def test_archive_pr_commit_closed_without_merge_skips_history(conn):
+    """CLOSED-without-merge (rust_commit=None) deletes the row but
+    leaves pr_commit_history empty."""
     db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
-    assert db.delete_pr_commit(conn, 999) is False
+    assert db.archive_pr_commit(conn, 1, rust_commit=None) is True
+    assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 0
+    assert conn.execute("SELECT count(*) FROM pr_commit_history").fetchone()[0] == 0
+
+
+def test_archive_pr_commit_returns_false_when_no_match(conn):
+    """Idempotent: archiving a non-existent pr_number is a no-op + False
+    and writes no history."""
+    db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
+    assert db.archive_pr_commit(conn, 999, rust_commit="x") is False
     assert conn.execute("SELECT count(*) FROM pr_commit").fetchone()[0] == 1
-    # And re-deleting an already-removed row returns False too.
-    assert db.delete_pr_commit(conn, 1) is True
-    assert db.delete_pr_commit(conn, 1) is False
+    assert conn.execute("SELECT count(*) FROM pr_commit_history").fetchone()[0] == 0
+    # Re-archiving an already-removed row also returns False.
+    assert db.archive_pr_commit(conn, 1, rust_commit="rust1") is True
+    assert db.archive_pr_commit(conn, 1, rust_commit="rust2") is False
+
+
+def test_archive_pr_commit_re_archive_replaces_rust_commit(conn):
+    """If the same (rust_branch, ak_branch, ak_commit) is archived
+    twice (e.g. after --cleanup-prs and a fresh re-merge), the second
+    insert overwrites the first via INSERT OR REPLACE."""
+    db.insert_pr_commit(conn, 1, "master", "trunk", "akA")
+    db.archive_pr_commit(conn, 1, rust_commit="first_merge_sha")
+    # Re-create and re-archive the same logical PR with a new merge SHA.
+    db.insert_pr_commit(conn, 2, "master", "trunk", "akA")
+    db.archive_pr_commit(conn, 2, rust_commit="second_merge_sha")
+
+    rows = [dict(r) for r in conn.execute("SELECT * FROM pr_commit_history")]
+    assert rows == [{
+        "rust_branch": "master", "ak_branch": "trunk",
+        "ak_commit": "akA", "rust_commit": "second_merge_sha",
+    }]
+
+
+def test_archive_pr_commit_nulls_dependents_on_same_branch(conn):
+    """Other rows on the same rust_branch with plan_dependency or
+    implementation_dependency = the archived ak_commit get nulled out."""
+    db.insert_pr_commit(conn, 10, "master", "trunk", "akDep")
+    db.insert_pr_commit(conn, 11, "master", "trunk", "akX")
+    db.insert_pr_commit(conn, 12, "master", "trunk", "akY")
+    db.insert_pr_commit(conn, 13, "master", "trunk", "akZ")
+    db.update_dependencies(conn, 11, "akDep", None)        # plan dep on akDep
+    db.update_dependencies(conn, 12, None,    "akDep")     # impl dep on akDep
+    db.update_dependencies(conn, 13, "akDep", "akDep")     # both
+
+    assert db.archive_pr_commit(conn, 10, rust_commit="rust_dep") is True
+
+    pr11 = db.get_pr(conn, 11)
+    pr12 = db.get_pr(conn, 12)
+    pr13 = db.get_pr(conn, 13)
+    assert pr11["plan_dependency"] is None
+    assert pr11["implementation_dependency"] is None  # was already None
+    assert pr12["plan_dependency"] is None
+    assert pr12["implementation_dependency"] is None
+    assert pr13["plan_dependency"] is None
+    assert pr13["implementation_dependency"] is None
+
+
+def test_archive_pr_commit_does_not_null_deps_on_other_branches(conn):
+    """Dep null-out is scoped to the same rust_branch; other branches'
+    dependents that happen to reference the same ak_commit are
+    untouched (branches are independent translation queues)."""
+    db.insert_pr_commit(conn, 10, "master",      "trunk", "akDep")
+    db.insert_pr_commit(conn, 20, "master",      "trunk", "akSame")
+    db.insert_pr_commit(conn, 21, "dev/feature", "trunk", "akSame")
+    db.update_dependencies(conn, 20, "akDep", None)  # same-branch dependent
+    db.update_dependencies(conn, 21, "akDep", None)  # other-branch dependent
+
+    db.archive_pr_commit(conn, 10, rust_commit="rust_dep")
+
+    assert db.get_pr(conn, 20)["plan_dependency"] is None
+    assert db.get_pr(conn, 21)["plan_dependency"] == "akDep"
+
+
+def test_archive_pr_commit_nulls_deps_even_when_skipping_history(conn):
+    """CLOSED-without-merge still discharges dependents -- the dep PR
+    is gone, downstream PRs shouldn't wait forever."""
+    db.insert_pr_commit(conn, 10, "master", "trunk", "akDep")
+    db.insert_pr_commit(conn, 11, "master", "trunk", "akX")
+    db.update_dependencies(conn, 11, "akDep", None)
+
+    db.archive_pr_commit(conn, 10, rust_commit=None)
+
+    assert db.get_pr(conn, 11)["plan_dependency"] is None
+    assert conn.execute("SELECT count(*) FROM pr_commit_history").fetchone()[0] == 0
 
 
 def test_cleanup_pr_commits_for_rust_branch_deletes_only_matching_branch(conn):

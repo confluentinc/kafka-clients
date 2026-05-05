@@ -186,30 +186,71 @@ update entirely (no real PR to edit).
 After fetching the next N AK commits, the sweep walks them in
 chronological order and prunes the contiguous prefix of commits whose
 `pr_commit` row exists AND whose GitHub PR is CLOSED or MERGED. For
-each pruned commit:
+each pruned commit, `db.archive_pr_commit(pr_number, rust_commit=...)`
+runs three steps in a single transaction:
 
-- Delete the `pr_commit` row via `db.delete_pr_commit(pr_number)`.
-- Remember the AK commit as the new cursor candidate.
+1. **Archive (MERGED only)**: insert
+   `(rust_branch, ak_branch, ak_commit, merge_sha)` into the
+   `pr_commit_history` audit table via `INSERT OR REPLACE` keyed on
+   `(rust_branch, ak_branch, ak_commit)`. The merge SHA comes from
+   `gh pr view --json state,mergeCommit` and works uniformly across
+   GitHub's three merge styles (merge commit / squash / rebase) —
+   `mergeCommit.oid` is the right base-branch commit in every case.
+   CLOSED-without-merge PRs have no merge SHA and are NOT archived.
+2. **Discharge dependents**: NULL out `plan_dependency` and
+   `implementation_dependency` in any other `pr_commit` row on the
+   **same `rust_branch`** that referenced this row's `ak_commit`. The
+   dependency is logically discharged once the dep PR is gone — the
+   downstream PR shouldn't wait forever. Scoped to the same
+   `rust_branch` because branches are independent translation queues.
+3. **Delete** the `pr_commit` row.
 
-CLOSED and MERGED are treated identically — both advance the cursor
-by `ak_commit`. The Rust-side commit SHA is no longer recorded
-(the `branch_commit` cursor is keyed only on the AK side now), so
-there's no need to consult `gh pr view --json mergeCommit`.
+The AK commit is then remembered as the new cursor candidate, and
+the `branch_commit` cursor for `rust_branch` advances after the
+walk.
 
 The walk stops at the first commit whose row is missing, synthetic
 (`pr_number < 0`), still OPEN, or hits a `gh pr view` failure. After
 the walk, if any rows were pruned, the sweep re-fetches the next N
 AK commits from the advanced cursor before creating new PRs.
 
-Prefix-only (not middle-of-batch) is deliberate: a CLOSED row
-sandwiched between OPEN ones may be referenced as a `plan_dependency`
-or `implementation_dependency` by the open ones, so deleting it
-mid-batch would invalidate the dep graph. The next sweep naturally
-compacts further closures as the prefix advances.
+Prefix-only (not middle-of-batch) is deliberate. Walking the entire
+batch would either need N `gh pr view` calls per sweep or would
+discharge dependents in an unexpected order; the prefix-only rule
+keeps the closure check predictable, cheap, and easy to reason
+about. The next sweep naturally compacts further closures as the
+prefix advances.
 
 `gh pr view` transient failures log a WARNING and stop the walk —
 the closure check is best-effort and shouldn't abort the sweep.
-Dry-run skips the entire check.
+Dry-run skips the entire check. `--seed --cleanup-prs` (a manual
+queue reset) also bypasses `archive_pr_commit` entirely: it does a
+bulk DELETE without writing history rows or nulling dependents,
+because those rows are typically stale/failed/dry-run garbage rather
+than real PR resolutions.
+
+### `pr_commit_history`: AK→Rust merge audit log
+
+A separate, append-style table records every MERGED PR's AK→Rust
+correspondence after the live `pr_commit` row is removed:
+
+```
+CREATE TABLE pr_commit_history (
+    rust_branch  TEXT NOT NULL,
+    ak_branch    TEXT NOT NULL,
+    ak_commit    TEXT NOT NULL,
+    rust_commit  TEXT NOT NULL,
+    PRIMARY KEY (rust_branch, ak_branch, ak_commit)
+)
+```
+
+The PK on `(rust_branch, ak_branch, ak_commit)` enforces one entry
+per AK commit per branch. `INSERT OR REPLACE` semantics mean a
+re-archive (e.g. operator did `--cleanup-prs`, recreated the PR,
+re-merged) overwrites with the latest merge SHA — the row reflects
+the *current* truth, not the first archive. The `branch_commit`
+cursor itself stays AK-only; this table is what holds the Rust SHA
+so it survives the live row's deletion.
 
 ### `next_commits`: shallow-clone-aware range over the AK repo
 
