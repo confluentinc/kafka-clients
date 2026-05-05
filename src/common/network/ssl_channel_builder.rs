@@ -111,12 +111,13 @@ impl SslChannelBuilder {
         // transport on error.
         let transport = SslTransportLayer::new(id.as_ref(), stream, Arc::clone(&self.client_config), server_name)
             .map_err(|e| KafkaError::Network(e.to_string()))?;
-        // SslAuthenticator captures the peer principal eagerly; on a
-        // fresh transport the handshake hasn't completed so the principal
-        // is anonymous (Java behaves identically — `peerPrincipal()`
-        // throws `SSLPeerUnverifiedException` until handshake completes,
-        // so Java callers must call `principal()` post-handshake).
-        let authenticator = SslAuthenticator::new(&transport).map_err(|e| KafkaError::Network(e.to_string()))?;
+        // SslAuthenticator is stateless — it queries
+        // `transport.peer_principal()` lazily on every `principal()`
+        // call (mirrors Java's `transportLayer.sslSession()` lookup).
+        // This is intentional: at construction time the TLS handshake
+        // has not run yet, so an eager fetch would freeze the
+        // pre-handshake anonymous principal forever.
+        let authenticator = SslAuthenticator::new();
         Ok(KafkaChannel::new(
             id,
             Box::new(transport),

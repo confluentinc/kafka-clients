@@ -176,10 +176,31 @@ mod tests {
     use super::*;
 
     /// Translation of `ChannelBuildersTest.testChannelBuilderConfigs`.
-    /// Mirrors the listener-prefix override semantics over a plain
-    /// `HashMap<String, String>` instead of an `AbstractConfig`. The
-    /// `Properties` keys are loaded as bare strings (no schema parse);
-    /// the listener-prefix unwrapping is the only logic under test.
+    ///
+    /// Java's helper consults an `AbstractConfig` schema in two stages:
+    /// `valuesWithPrefixOverride` (typed fields only — listener-prefixed
+    /// keys are unwrapped, others fall back to `values()`), then a
+    /// filter that drops `<mechanism>.some.prop` keys when the bare
+    /// `some.prop` exists in the typed parsed map. Both stages depend
+    /// on a `ConfigDef` schema we have not translated yet (deferred to
+    /// Phase 9 SASL). This Rust translation reproduces only the
+    /// data-shuffling shape over a flat `HashMap`.
+    ///
+    /// **Documented divergences from the Java test**, both of which
+    /// require a `ConfigDef` translation to fix and will be revisited
+    /// when SASL ships:
+    ///
+    /// 1. Java line 74: `assertNull(configs.get("plain.sasl.server.callback.handler.class"))`.
+    ///    Java drops the key because `TestSecurityConfig`'s schema lists
+    ///    `sasl.server.callback.handler.class` as a typed field and the
+    ///    second-stage filter prunes the `plain.`-prefixed shadow. Our
+    ///    schema-less helper preserves the key.
+    /// 2. Java line 77: `assertEquals("custom.config1", configs.get("listener.name.listener1.gssapi.config1.key"))`.
+    ///    Java keeps the original prefixed key for non-typed fields
+    ///    (since `valuesWithPrefixOverride` only unwraps typed fields).
+    ///    Our helper unwraps every `listener.name.<name>.` prefix
+    ///    unconditionally, so the prefixed key is gone and only the
+    ///    unwrapped form (`gssapi.config1.key`) survives.
     #[test]
     fn channel_builder_configs_listener_prefix() {
         let mut props: HashMap<String, String> = HashMap::new();
@@ -198,102 +219,43 @@ mod tests {
         );
         props.insert("custom.config2.key".to_owned(), "custom.config2".to_owned());
 
-        // With listener prefix: unwrapped keys take precedence; the
-        // raw `listener.name.listener1.*` keys are dropped from the
-        // output; the `plain.sasl.*` key is dropped because
-        // `sasl.server.callback.handler.class` would be an unwrapped
-        // shadow-form (Java's "exclude keys like `{mechanism}.some.prop`
-        // if `listener.name.` prefix is present and key `some.prop`
-        // exists in parsed configs"). Wait — the Java test asserts
-        // that `plain.sasl.server.callback.handler.class` is NOT in
-        // the output. The reason is the Java filter: any key whose
-        // suffix (after the first `.`) matches a parsed key is
-        // dropped. `plain.sasl.server.callback.handler.class` →
-        // suffix `sasl.server.callback.handler.class`. There's no
-        // such parsed key in the test, but the Java assertion is
-        // `assertNull(configs.get(...))`. Read carefully: actually
-        // the Java filter excludes keys like `{mechanism}.some.prop`
-        // if the bare `some.prop` exists in parsed configs. The
-        // Java test sets up `plain.sasl.server.callback.handler.class`
-        // — `plain` looks like a SASL mechanism. But the listener
-        // prefix is `listener.name.listener1.`, and the SASL-mechanism
-        // prefixing logic is what filters this out. Let's mirror the
-        // assertion exactly.
         let listener = ListenerName::new("listener1");
         let configs = channel_builder_configs(&props, Some(&listener));
 
-        // Listener-prefixed keys do NOT appear verbatim.
+        // Java line 62: prefixed key dropped from the parsed configs.
         assert!(!configs.contains_key("listener.name.listener1.gssapi.sasl.kerberos.service.name"));
-        assert!(!configs.contains_key("listener.name.listener1.sasl.kerberos.service.name"));
-        // Their unwrapped forms do.
+        // Java line 65: unwrapped form retains the listener-prefix value.
         assert_eq!(
             configs.get("gssapi.sasl.kerberos.service.name").map(|s| s.as_str()),
             Some("testkafka")
         );
+        // Java line 68: the second prefixed key is also unwrapped.
         assert_eq!(
             configs.get("sasl.kerberos.service.name").map(|s| s.as_str()),
             Some("testkafkaglobal")
         );
-        // The listener-prefixed gssapi.config1.key is in output as
-        // `gssapi.config1.key` (Java: same).
-        assert_eq!(configs.get("gssapi.config1.key").map(|s| s.as_str()), Some("custom.config1"));
-        // Custom non-prefixed key is kept.
+        // Java line 71: the listener-prefixed `sasl.kerberos.service.name`
+        // is gone from the parsed map.
+        assert!(!configs.contains_key("listener.name.listener1.sasl.kerberos.service.name"));
+        // Java line 80: the non-listener-prefixed custom key is kept verbatim.
         assert_eq!(configs.get("custom.config2.key").map(|s| s.as_str()), Some("custom.config2"));
-        // Java-test assertion: `plain.sasl.server.callback.handler.class`
-        // is NOT in the parsed configs (and Java further asserts
-        // `unused` does not contain it — irrelevant in our translation
-        // which has no usage tracking).
-        // Java drops it because `sasl.server.callback.handler.class`
-        // exists as a parsed key... wait, it's `plain.sasl...` and
-        // the parsed `sasl.kerberos.service.name` is different.
-        // Looking at the Java filter exactly:
-        //
-        //     .filter(e -> !(listenerName != null && parsedConfigs.containsKey(
-        //         e.getKey().substring(e.getKey().indexOf('.') + 1))))
-        //
-        // For `plain.sasl.server.callback.handler.class` the substring
-        // after the first `.` is `sasl.server.callback.handler.class`
-        // which is NOT in parsed configs. So Java actually keeps it!
-        // Let me re-read the test assertion...
-        //
-        // The Java assertion is `assertNull(configs.get("plain.sasl.server.callback.handler.class"))`.
-        // That's checking the original prefixed form is absent — but
-        // the original key IS `plain.sasl.server.callback.handler.class`.
-        // This is checking the listener-prefix unwrapping has NOT
-        // turned it into something else. It's still in the map under
-        // the same key — the assertion is wrong-looking unless we
-        // re-read it carefully.
-        //
-        // Actually re-reading:
-        // > assertNull(configs.get("plain.sasl.server.callback.handler.class"));
-        //
-        // This is asserting the key is NOT in the parsed configs. So
-        // Java DOES filter it out. Why? Looking at the Java code path
-        // for `valuesWithPrefixOverride`: it strips the listener
-        // prefix and merges into a copy of `values()`. The original
-        // `plain.sasl.server.callback.handler.class` is in
-        // `originals()`, and the filter `parsedConfigs.containsKey(
-        // e.getKey().substring(e.getKey().indexOf('.') + 1))` would
-        // strip `plain.` and check for `sasl.server.callback.handler.class`.
-        // Not in parsed. So why does Java drop it?
-        //
-        // Looking at `AbstractConfig.values()` — that's a typed map
-        // populated only with config-defs. `TestSecurityConfig` is
-        // probably an `AbstractConfig` with a SASL-related config-def
-        // that includes `plain.sasl.server.callback.handler.class` as a
-        // typed field, and `valuesWithPrefixOverride` only retains
-        // typed fields. The Java test setup uses a non-trivial
-        // config-def schema we don't have.
-        //
-        // For Phase 5b-3 we don't have AbstractConfig — our flat-map
-        // helper preserves the key. Mirror Java's user-visible
-        // behaviour for the keys the test asserts (gssapi.*,
-        // sasl.kerberos, custom.config2) and document the
-        // `plain.sasl.*` divergence.
-        //
-        // We DO assert the same logic-driven facts: listener-prefixed
-        // keys are unwrapped, bare keys are kept, custom non-prefixed
-        // keys are preserved.
+
+        // Documented divergence #1 (Java line 74): without a ConfigDef
+        // schema we cannot drop this key. The bare assertion that
+        // matches our actual behaviour:
+        assert_eq!(
+            configs.get("plain.sasl.server.callback.handler.class").map(|s| s.as_str()),
+            Some("callback"),
+            "schema-less helper preserves the key Java's typed-field filter would drop"
+        );
+
+        // Documented divergence #2 (Java line 77): we unwrap the prefix
+        // so the original key is gone, only the bare form survives.
+        assert!(
+            !configs.contains_key("listener.name.listener1.gssapi.config1.key"),
+            "schema-less helper unwraps every listener-prefixed key, including non-typed ones"
+        );
+        assert_eq!(configs.get("gssapi.config1.key").map(|s| s.as_str()), Some("custom.config1"));
     }
 
     /// Listener-prefix `None` returns the originals verbatim.

@@ -41,7 +41,7 @@
 //! "out of memory" because there is no pool.
 
 use std::io;
-use std::net::SocketAddr;
+use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::common::errors::KafkaError;
@@ -228,9 +228,14 @@ impl KafkaChannel {
     }
 
     /// Returns the principal returned by `authenticator.principal()`.
-    /// Mirrors Java's `principal()`.
+    /// Mirrors Java's `principal()` — the lookup is lazy, mirroring
+    /// Java's `SslAuthenticator` re-reading `transportLayer.sslSession()`
+    /// on every call. The owning channel forwards its transport
+    /// reference into the authenticator so SSL impls can read the
+    /// post-handshake peer certificate without holding the transport
+    /// themselves.
     pub fn principal(&self) -> KafkaPrincipal {
-        self.authenticator.principal()
+        self.authenticator.principal(self.transport_layer.as_ref())
     }
 
     /// Drives the transport handshake and authentication. Mirrors Java's
@@ -361,11 +366,13 @@ impl KafkaChannel {
 
     /// Externally muting a channel should be done via the Selector to
     /// ensure proper state handling. Mirrors Java's package-private
-    /// `mute()` — exposed as `pub` because Java's package boundary
-    /// (the `network` package) maps to the `crate::common::network`
-    /// module in Rust; the Phase 5c `Selector` (sibling module) drives
-    /// this on the muted-channel re-tick path.
-    pub fn mute(&mut self) {
+    /// `mute()`. `pub(crate)` matches Java's package-private boundary —
+    /// the Phase 5c `Selector` (sibling module in the same crate) drives
+    /// this on the muted-channel re-tick path; downstream consumers
+    /// outside the crate must not call it. `dead_code` is allowed
+    /// because no in-crate caller exists until Phase 5c lands.
+    #[allow(dead_code)]
+    pub(crate) fn mute(&mut self) {
         if self.mute_state == ChannelMuteState::NotMuted {
             if !self.disconnected {
                 self.transport_layer.remove_interest_ops(OP_READ);
@@ -379,8 +386,10 @@ impl KafkaChannel {
     /// (`MutedAnd*`), this is a no-op. Returns whether the channel is
     /// in the [`ChannelMuteState::NotMuted`] state after the call.
     /// Mirrors Java's package-private `maybeUnmute()` — see [`Self::mute`]
-    /// for why `pub` is the right Rust visibility.
-    pub fn maybe_unmute(&mut self) -> bool {
+    /// for why `pub(crate)` is the right Rust visibility. `dead_code`
+    /// allowed until the Phase 5c Selector wires it up.
+    #[allow(dead_code)]
+    pub(crate) fn maybe_unmute(&mut self) -> bool {
         if self.mute_state == ChannelMuteState::Muted {
             if !self.disconnected {
                 self.transport_layer.add_interest_ops(OP_READ);
@@ -454,10 +463,13 @@ impl KafkaChannel {
 
     /// Re-arm the OP_WRITE interest after an authentication-failure
     /// delay. Mirrors Java's package-private
-    /// `completeCloseOnAuthenticationFailure` — exposed as `pub`
-    /// because the Phase 5c `Selector` (sibling module) calls this
-    /// during its disconnect-with-delay path.
-    pub fn complete_close_on_authentication_failure(&mut self) -> io::Result<()> {
+    /// `completeCloseOnAuthenticationFailure` — `pub(crate)` matches
+    /// Java's package-private boundary; the Phase 5c `Selector`
+    /// (sibling module) calls this during its disconnect-with-delay
+    /// path. `dead_code` allowed until the Phase 5c Selector wires
+    /// it up.
+    #[allow(dead_code)]
+    pub(crate) fn complete_close_on_authentication_failure(&mut self) -> io::Result<()> {
         self.transport_layer.add_interest_ops(OP_WRITE);
         // Java calls `authenticator.handleAuthenticationFailure()`; the
         // Phase 5b-3 non-SASL authenticators do not have that hook.
@@ -502,20 +514,51 @@ impl KafkaChannel {
         self.send.is_some()
     }
 
-    /// Borrow the local socket address of the underlying transport (or
-    /// the latest captured address if the socket is now closed).
-    /// Mirrors Java's `socketAddress()`.
-    pub fn socket_address(&self) -> io::Result<SocketAddr> {
-        // Java returns `transportLayer.socketChannel().socket().getInetAddress()`
-        // which is the *peer* address, not the local one. We mirror Java
-        // exactly by reading the peer address from the transport, falling
-        // back to the captured `remote_address` if the underlying socket
-        // is no longer accessible (post-disconnect).
-        match self.transport_layer.peer_addr() {
-            Ok(addr) => Ok(addr),
+    /// Returns the peer host (IP address only). Mirrors Java's
+    /// `socketAddress()` which returns
+    /// `transportLayer.socketChannel().socket().getInetAddress()` — the
+    /// remote `InetAddress`, with no port. Falls back to the captured
+    /// `remote_address` if the underlying socket is no longer accessible
+    /// (post-disconnect).
+    pub fn socket_address(&self) -> io::Result<IpAddr> {
+        let addr = match self.transport_layer.peer_addr() {
+            Ok(addr) => addr,
             Err(_) => self
                 .remote_address
-                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "peer address unknown — never connected")),
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "peer address unknown — never connected"))?,
+        };
+        Ok(addr.ip())
+    }
+
+    /// Returns the peer port, or `0` if the socket has never been
+    /// connected. Mirrors Java's `socketPort()`. The Java doc states
+    /// "If the socket was connected prior to being closed, then this
+    /// method will continue to return the connected port number after
+    /// the socket is closed", which we mirror through the captured
+    /// `remote_address` fallback.
+    pub fn socket_port(&self) -> u16 {
+        match self.transport_layer.peer_addr() {
+            Ok(addr) => addr.port(),
+            Err(_) => self.remote_address.map(|a| a.port()).unwrap_or(0),
+        }
+    }
+
+    /// Returns a stable string suitable for log lines. Mirrors Java's
+    /// `socketDescription()` which falls back to the local socket
+    /// address when the peer address is unknown.
+    ///
+    /// Phase 5c's `Selector` uses this in disconnect log lines.
+    pub fn socket_description(&self) -> String {
+        if let Ok(addr) = self.transport_layer.peer_addr() {
+            return addr.ip().to_string();
+        }
+        // No peer — fall back to captured remote, then local.
+        if let Some(addr) = self.remote_address {
+            return addr.ip().to_string();
+        }
+        match self.transport_layer.local_addr() {
+            Ok(local) => local.to_string(),
+            Err(_) => String::from("<unknown>"),
         }
     }
 
@@ -713,6 +756,12 @@ mod tests {
         connected: bool,
         is_open: bool,
         interest_ops: i32,
+        /// Optional cap on bytes accepted by a single `write_vectored`
+        /// call. `None` writes everything at once (the default — fastest
+        /// path); `Some(n)` truncates the call to at most `n` bytes,
+        /// mirroring Java's mocked `transport.write(...)` returning
+        /// partial counts in `KafkaChannelTest.testSending`.
+        max_bytes_per_write: Option<usize>,
     }
 
     /// Mock transport that records writes into a `Vec<u8>` and serves
@@ -732,9 +781,18 @@ mod tests {
                 connected: true,
                 is_open: true,
                 interest_ops: OP_READ,
+                max_bytes_per_write: None,
             }));
             (MockTransport { state: Arc::clone(&state) }, state)
         }
+    }
+
+    /// Configure the per-call write cap. Mirrors Mockito stubbing
+    /// `when(transport.write(any())).thenReturn(4, 64, 64)` in
+    /// `KafkaChannelTest.testSending` — letting a single test drive the
+    /// write loop through multiple ticks of partial progress.
+    fn set_max_bytes_per_write(state: &Arc<std::sync::Mutex<MockState>>, cap: usize) {
+        state.lock().expect("mock state").max_bytes_per_write = Some(cap);
     }
 
     /// Convenience: enqueue a canned-read chunk on a shared mock state.
@@ -745,10 +803,27 @@ mod tests {
     impl crate::common::network::TransferableChannel for MockTransport {
         fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
             let mut s = self.state.lock().expect("mock state");
-            let mut total = 0;
+            // When the cap is set, accept up to `cap` bytes of the
+            // vectored input. This faithfully mirrors a kernel-buffer-
+            // exhausted write in Java's `SocketChannel.write` returning a
+            // partial byte count.
+            let cap = s.max_bytes_per_write;
+            let mut total: usize = 0;
             for buf in bufs {
-                s.writes.extend_from_slice(buf);
-                total += buf.len();
+                let remaining_cap = match cap {
+                    Some(c) => c.saturating_sub(total),
+                    None => buf.len(),
+                };
+                if remaining_cap == 0 {
+                    break;
+                }
+                let take = buf.len().min(remaining_cap);
+                s.writes.extend_from_slice(&buf[..take]);
+                total += take;
+                if take < buf.len() {
+                    // Hit the cap mid-buffer — stop iterating.
+                    break;
+                }
             }
             Ok(total)
         }
@@ -838,10 +913,12 @@ mod tests {
 
     /// Translation of `KafkaChannelTest.testSending`. The Java version
     /// uses `transport.write(ByteBuffer[])` returning a partial-byte
-    /// count; our `MockTransport::write_vectored` writes everything at
-    /// once, so we exercise the same lifecycle (`setSend`, `write`,
-    /// `maybeCompleteSend`, `IllegalStateException` on double-set) but
-    /// in fewer ticks.
+    /// count; the default `MockTransport::write_vectored` writes
+    /// everything at once, so this single-tick test exercises the
+    /// lifecycle (`setSend`, `write`, `maybeCompleteSend`,
+    /// `IllegalStateException` on double-set). The multi-tick partial-
+    /// write contract is exercised by
+    /// [`sending_partial_writes_progress_across_multiple_ticks`].
     #[test]
     fn sending_lifecycle() {
         let (mut channel, _state) = build_channel();
@@ -863,6 +940,54 @@ mod tests {
         let written = channel.write().expect("write");
         assert_eq!(written, 4 + 128);
         let completed = channel.maybe_complete_send().expect("complete");
+        assert_eq!(completed.size(), 4 + 128);
+        assert!(!channel.has_send());
+    }
+
+    /// Mirrors the Java `KafkaChannelTest.testSending` partial-write
+    /// progression: with `transport.write` capped to return 4, then 64,
+    /// then 64 bytes, drive three ticks asserting `maybe_complete_send`
+    /// returns `None` until the third tick. This locks in the
+    /// `bytes_remaining > 0 → maybe_complete_send() == None` invariant
+    /// the Selector relies on to schedule another write tick when the
+    /// kernel TCP buffer is full.
+    #[test]
+    fn sending_partial_writes_progress_across_multiple_ticks() {
+        let (mut channel, state) = build_channel();
+        let payload = (0..128u8).collect::<Vec<u8>>();
+        let send = ByteBufferSend::size_prefixed(Bytes::from(payload));
+        let network_send = NetworkSend::new(channel.id_arc(), Box::new(send));
+
+        channel.set_send(network_send).expect("set send");
+        assert!(channel.has_send());
+
+        // Tick 1: cap at 4 bytes — only the size header lands.
+        set_max_bytes_per_write(&state, 4);
+        let written = channel.write().expect("write 1");
+        assert_eq!(written, 4);
+        // Send is not complete yet — must return None so the Selector
+        // re-schedules OP_WRITE on the next tick.
+        assert!(
+            channel.maybe_complete_send().is_none(),
+            "partial send (4/132 bytes written) must not return a completed send"
+        );
+        assert!(channel.has_send());
+
+        // Tick 2: cap at 64 bytes — half the payload.
+        set_max_bytes_per_write(&state, 64);
+        let written = channel.write().expect("write 2");
+        assert_eq!(written, 64);
+        assert!(
+            channel.maybe_complete_send().is_none(),
+            "partial send (68/132 bytes written) must not return a completed send"
+        );
+        assert!(channel.has_send());
+
+        // Tick 3: cap at 64 bytes — the remaining payload finishes the send.
+        set_max_bytes_per_write(&state, 64);
+        let written = channel.write().expect("write 3");
+        assert_eq!(written, 64);
+        let completed = channel.maybe_complete_send().expect("send completes on tick 3");
         assert_eq!(completed.size(), 4 + 128);
         assert!(!channel.has_send());
     }

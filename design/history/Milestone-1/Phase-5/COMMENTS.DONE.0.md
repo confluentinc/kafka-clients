@@ -435,3 +435,130 @@ Added regression test `has_bytes_buffered_true_when_step1_drain_fills_dst`:
 
 All 4 gates green. Fixup chain: `5fa1bed` → fixup of `faa61cc`, this fixup
 chains on top.
+
+# Critic 0 — Phase 5b-3 (KafkaChannel + ChannelBuilders) — Done
+
+Round 1 of `253c383` filed 5 Suggestions; this fixup addresses all 5.
+
+## Issue 1: `SslAuthenticator` caches `peer_principal()` at pre-handshake construction time
+
+- **File**: `src/common/network/ssl_channel_builder.rs:119`,
+  `src/common/network/authenticator.rs:138-140`
+- **Severity**: Suggestion
+- **Originating commit**: `253c383`
+- **Disposition**: **Fixed**
+
+`SslAuthenticator` was holding a `KafkaPrincipal` field captured at
+construction time, before the TLS handshake had run. Every subsequent
+`KafkaChannel::principal()` call returned the frozen anonymous value
+even after the handshake completed and `peer_certificates()` was
+populated.
+
+**Fix**: Made `SslAuthenticator` stateless — removed the cached
+`principal: KafkaPrincipal` field. Changed `Authenticator::principal`
+to take a `&dyn TransportLayer` argument so the SSL impl can re-query
+`transport.peer_principal()` lazily on every call (mirrors Java's
+`SslAuthenticator.principal()` reading `transportLayer.sslSession()`
+on demand). The owning `KafkaChannel::principal()` now forwards
+`self.transport_layer.as_ref()` into the authenticator. The
+plaintext impl ignores the argument and returns
+`KafkaPrincipal::anonymous()` as before.
+
+New regression test
+`authenticator::tests::ssl_authenticator_principal_is_lazy` flips a
+stub transport's handshake state mid-test and asserts the second
+`principal()` call returns the new identity — locking in lazy
+semantics.
+
+## Issue 2: `channel_builder_configs` test silently elides two Java assertions
+
+- **File**: `src/common/network/channel_builders.rs:184-297`
+- **Severity**: Suggestion
+- **Originating commit**: `253c383`
+- **Disposition**: **Fixed (test cleanup + explicit divergence assertions)**
+
+The test docstring/comment block was a 90-line stream-of-consciousness
+re-derivation of Java's filter logic that ended up not asserting two
+Java facts (lines 74 and 77 of the Java test). The diverged behaviour
+is real (Java's `valuesWithPrefixOverride` consults a `ConfigDef`
+schema that we have not translated; the helper here is schema-less),
+but the prior comment buried the divergence rather than locking it in.
+
+**Fix**: Replaced the long comment with a concise docstring listing
+the two divergences with line references (Java lines 74 and 77) and
+the underlying cause (`ConfigDef` schema not translated until SASL).
+Added explicit assertions for the actual Rust behaviour for both
+keys, so the divergence is now part of the test contract — Phase 9
+SASL will need to update both assertions when the typed-config helper
+lands.
+
+## Issue 3: `sending_lifecycle` test does not exercise multi-tick partial-write progression
+
+- **File**: `src/common/network/kafka_channel.rs:845-868`
+- **Severity**: Suggestion
+- **Originating commit**: `253c383`
+- **Disposition**: **Fixed**
+
+Java's `KafkaChannelTest.testSending` configures the mock to return
+partial byte counts (4, 64, 64) across three writes and asserts the
+in-progress send remains incomplete after each partial. The Rust
+`MockTransport::write_vectored` always wrote everything in one call,
+collapsing the progression to a single tick. A regression where
+`maybe_complete_send` always returned `Some(...)` would not have
+been caught.
+
+**Fix**: Extended `MockState` with an optional `max_bytes_per_write`
+cap and a helper `set_max_bytes_per_write`. `write_vectored` now
+truncates the call to at most the cap (mirroring a kernel-buffer-
+exhausted `SocketChannel.write` returning a partial count). Added a
+new test `sending_partial_writes_progress_across_multiple_ticks`
+that drives 3 ticks with caps `4 / 64 / 64` and asserts
+`maybe_complete_send() == None` after the first two ticks and
+`Some(send)` only on the third — locking in the
+`bytes_remaining > 0 → maybe_complete_send() == None` invariant the
+Selector relies on.
+
+## Issue 4: `mute()`, `maybe_unmute()`, `complete_close_on_authentication_failure()` are `pub` instead of `pub(crate)`
+
+- **File**: `src/common/network/kafka_channel.rs:368, 383, 460`
+- **Severity**: Suggestion
+- **Originating commit**: `253c383`
+- **Disposition**: **Fixed**
+
+Java's `KafkaChannel.mute`, `maybeUnmute`, and
+`completeCloseOnAuthenticationFailure` are package-private. The Rust
+translation exposed them as `pub`, widening the trust boundary
+beyond Java's. The Phase 5c Selector (sibling module in the same
+crate) is the only legitimate caller — `pub(crate)` is the closer
+mirror.
+
+**Fix**: Tightened all three to `pub(crate)`. Added
+`#[allow(dead_code)]` annotations because the Selector that exercises
+them lands in Phase 5c; the existing tests cover the methods through
+private-test access. Updated rustdoc to reference `pub(crate)`.
+
+## Issue 5: `socket_address()` returns full `SocketAddr` instead of host-only equivalent of `InetAddress`
+
+- **File**: `src/common/network/kafka_channel.rs:508-520`
+- **Severity**: Suggestion
+- **Originating commit**: `253c383`
+- **Disposition**: **Fixed**
+
+Java's `KafkaChannel.socketAddress()` returns `InetAddress` (host
+only); the Rust translation returned `SocketAddr` (host + port),
+collapsing two distinct Java methods (`socketAddress` and
+`socketPort`) into one with a different return type.
+`socketDescription()` was missing entirely — the Phase 5c Selector
+will need it for disconnect log lines.
+
+**Fix**:
+- `socket_address()` now returns `io::Result<IpAddr>` (the host-only
+  equivalent of Java's `InetAddress`).
+- Added `socket_port() -> u16` mirroring Java's `socketPort()` —
+  returns `0` if never connected, falls back to the captured
+  `remote_address.port()` after disconnect (matches Java's "continue
+  to return the connected port number after the socket is closed").
+- Added `socket_description() -> String` mirroring Java's
+  `socketDescription()` — peer address if available, captured
+  remote, then local address fallback (Java's `getLocalAddress`
+  fallback when `getInetAddress()` is null).

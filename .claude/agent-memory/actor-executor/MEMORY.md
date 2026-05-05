@@ -30,5 +30,6 @@
 - [Phase 5b-2 SSL transport](phase5b2_ssl_transport.md) — rustls low-level state machine, Tokio↔rustls adapter, handshake test harness gotchas
 - [Phase 5b-2 rustls bookkeeping](phase5b2_rustls_bookkeeping.md) — set_buffer_limit + IoState capture + IANA cipher-name mapping bridges where rustls defaults diverge from Java SSLEngine
 - [Phase 5b-3 kafka channel](phase5b3_kafka_channel.md) — KafkaChannel + ChannelBuilders trait shape; Authenticator stub design; pub-not-pub(crate) for sibling-Selector callers
+- [Phase 5b-3 review fixes](phase5b3_review_fixes.md) — lazy-lookup via trait method arg; mock partial-write cap; Java package-private → pub(crate)+#[allow(dead_code)]
 - [Tokio↔Java NIO read bridge](tokio_nio_read_bridge.md) — three-way `try_read` outcome translation; never collapse `WouldBlock` and `Ok(0)`/EOF
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
