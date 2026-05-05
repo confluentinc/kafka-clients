@@ -67,16 +67,38 @@ per `connect()` call, which mirrors Java's `OP_CONNECT` notification.
    `maybeReadFromClosingChannel`). The drain happens in
    `process_closing_channels` at the top of the next `poll()`.
 
-7. **Idle-expiry**: `IdleExpiryManager` uses a `HashMap<id, ns>` +
-   `VecDeque<id>` for LRU order (Java uses `LinkedHashMap` with
-   `accessOrder=true`). On `update`, the id is removed from its
-   prior position and pushed to the back. `poll_expired_connection`
-   inspects only the front. Algorithm preserved verbatim.
+7. **Idle-expiry** (Round 1 fixup): `IdleExpiryManager` uses
+   `BTreeSet<(timestamp, id)>` + `HashMap<id, timestamp>` — O(log n)
+   update/remove. The `(timestamp, id)` key avoids collision on
+   simultaneous touches. **Critical**: `update` is called ONLY for
+   channels that had I/O activity this tick (read bytes > 0, write
+   bytes > 0, or completed a receive/send) — mirroring Java's
+   per-ready-key `idleExpiryManager.update` at
+   `pollSelectionKeys:525-526`. Updating every open channel
+   unconditionally (the Round 0 implementation) defeats
+   `connections.max.idle.ms` because every poll resets every
+   channel's idle clock. `drive_channel_io` returns the
+   `made_progress` flag; `poll` collects io-active ids inline and
+   updates LRU only for those before the expiry sweep. Regression
+   test: `busy_poll_does_not_reset_idle_clock`.
 
-8. **Per-poll output collections** (`completed_sends`,
-   `completed_receives`, `connected`, `disconnected`): `Vec`/`HashMap`,
-   cleared at the top of each `poll()`. `failed_sends` is a side
-   list that drains into `disconnected` during the clear.
+8. **Per-poll output collections + clear() ordering** (Round 1
+   fixup): `completed_sends`, `completed_receives`, `connected`,
+   `disconnected` are `Vec`/`HashMap`, cleared by
+   `clear_per_poll_outputs` at the top of `poll()`. `failed_sends`
+   is a side list. **Critical ordering** mirroring Java
+   `Selector.clear():842-863`:
+   1. `clear_per_poll_outputs` (vec clears) — does NOT drain
+      `failed_sends` (the Round 0 bug).
+   2. `process_closing_channels` — `swap_remove`s any matching id
+      from `failed_sends` (Java's `failedSends.remove(channel.id())`
+      both reads and consumes); on hit, skip
+      `maybeReadFromClosingChannel`.
+   3. `drain_failed_sends` — drains the remaining `failed_sends`
+      into `disconnected`.
+   Doing the failed_sends drain too early (step 1 + step 3 merged)
+   killed the closing-channel sendFailed short-circuit. Regression
+   test: `closing_channel_failed_send_short_circuits_read`.
 
 9. **`completed_receives` is `Vec`, not `LinkedHashMap`**. The
    Java guarantee "at most one entry per channel per poll" is
@@ -99,7 +121,20 @@ per `connect()` call, which mirrors Java's `OP_CONNECT` notification.
 - `register(String, SocketChannel)`: server-side accept path.
 - `lowestPriorityChannel()`: server-side `max.connections` helper.
 
-## Tests written (20 selector tests, all <1s total)
+11. **Connect-path socket options** (Round 1 fixup): the connect
+    task uses `TcpSocket::new_v4`/`new_v6` then
+    `set_keepalive(true)` / `set_send_buffer_size` /
+    `set_recv_buffer_size` BEFORE `connect(addr).await`. Java's
+    `configureSocketChannel` runs these on the unconnected socket
+    so the kernel TCP-window auto-tuning picks them up. Buffer
+    sizes use `Selectable::USE_DEFAULT_BUFFER_SIZE` (`-1`) as the
+    sentinel — anything else is set verbatim. The
+    `connect_socket(addr, snd, rcv)` helper centralises the
+    configuration so future options (SO_LINGER, etc.) land in one
+    place. Regression test:
+    `connect_applies_keepalive_and_buffer_sizes`.
+
+## Tests written (24 selector tests after Round 1, all <1s total)
 
 Translations of `SelectorTest.java`:
 - `connect_send_receive_round_trip` ← `testNormalOperation` (single-channel)

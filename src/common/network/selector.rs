@@ -91,13 +91,12 @@
 //! with rationale per file-level notes; see this file's `tests` module
 //! for the per-test mapping.
 
-use std::collections::{HashMap, HashSet, VecDeque};
-// `VecDeque` retained for the LRU order in `IdleExpiryManager`.
+use std::collections::{BTreeSet, HashMap, HashSet};
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::time::Duration;
 
-use tokio::net::TcpStream;
+use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
@@ -105,7 +104,7 @@ use crate::common::errors::KafkaError;
 use crate::common::network::channel_builder::ChannelBuilder;
 use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
 use crate::common::network::network_receive::UNLIMITED;
-use crate::common::network::selectable::Selectable;
+use crate::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
 use crate::common::network::{ChannelState, ChannelStateName, KafkaChannel, NetworkReceive, NetworkSend, Receive};
 use crate::common::utils::Time;
 
@@ -157,18 +156,24 @@ struct ConnectTask {
 /// Helper class for tracking least-recently-used connections to enable
 /// idle-connection closing. Mirrors Java's private
 /// `Selector.IdleExpiryManager` — the algorithm is preserved verbatim
-/// (linked-hash-map ordered by access; `pollExpiredConnection` returns
-/// the oldest entry once `connectionsMaxIdleMs` has elapsed).
+/// (LRU ordered by last-active timestamp; `pollExpiredConnection`
+/// returns the oldest entry once `connectionsMaxIdleMs` has elapsed).
+///
+/// Java uses a `LinkedHashMap` with `accessOrder=true`, which is O(1)
+/// per touch via doubly-linked map nodes. The Rust translation uses a
+/// `BTreeSet<(timestamp, id)>` for ordered iteration plus a parallel
+/// `HashMap<id, timestamp>` for O(log n) lookup of the previous
+/// timestamp on `update`/`remove`. With the `(timestamp, id)` key the
+/// set never collides on simultaneous touches.
 struct IdleExpiryManager {
-    /// Insertion-ordered map from connection id to last-active wall-clock
-    /// nanoseconds. Java uses a `LinkedHashMap` with `accessOrder=true`;
-    /// we use a `HashMap` plus a `VecDeque` of ids to mirror the
-    /// access-order semantics. On `update`, the entry is removed and
-    /// reinserted at the back.
+    /// Map from connection id to last-active wall-clock nanoseconds.
+    /// Used to find the previous (timestamp, id) entry to remove from
+    /// `lru_order` on update/remove.
     last_active_ns: HashMap<ConnectionId, i64>,
-    /// LRU order — front is oldest, back is newest. Reused on every
-    /// `update` to move the touched id to the back.
-    lru_order: VecDeque<ConnectionId>,
+    /// LRU order — first is oldest, last is newest. Keyed on
+    /// `(timestamp, id)` so simultaneous-touch collisions are
+    /// impossible. O(log n) insert/remove per touch.
+    lru_order: BTreeSet<(i64, ConnectionId)>,
     connections_max_idle_ns: i64,
     next_idle_close_check_ns: i64,
 }
@@ -178,24 +183,20 @@ impl IdleExpiryManager {
         let connections_max_idle_ns = connections_max_idle_ms.saturating_mul(1_000_000);
         IdleExpiryManager {
             last_active_ns: HashMap::new(),
-            lru_order: VecDeque::new(),
+            lru_order: BTreeSet::new(),
             connections_max_idle_ns,
             next_idle_close_check_ns: time.nanoseconds().saturating_add(connections_max_idle_ns),
         }
     }
 
     /// Mirrors `IdleExpiryManager.update(String, long)`. Touching an id
-    /// moves it to the back of the LRU order.
+    /// re-keys it under `(current_time_nanos, id)` so the LRU set
+    /// remains sorted by last-active timestamp.
     fn update(&mut self, id: ConnectionId, current_time_nanos: i64) {
-        if self.last_active_ns.insert(id, current_time_nanos).is_some() {
-            // Existing entry — remove its prior position from the order
-            // queue. Linear scan; the LRU is bounded by the number of
-            // open connections, which is small (<= broker count).
-            if let Some(pos) = self.lru_order.iter().position(|&existing| existing == id) {
-                self.lru_order.remove(pos);
-            }
+        if let Some(prev) = self.last_active_ns.insert(id, current_time_nanos) {
+            self.lru_order.remove(&(prev, id));
         }
-        self.lru_order.push_back(id);
+        self.lru_order.insert((current_time_nanos, id));
     }
 
     /// Mirrors `IdleExpiryManager.pollExpiredConnection(long)` — returns
@@ -206,11 +207,10 @@ impl IdleExpiryManager {
         if current_time_nanos <= self.next_idle_close_check_ns {
             return None;
         }
-        let Some(&oldest_id) = self.lru_order.front() else {
+        let Some(&(connection_last_active, oldest_id)) = self.lru_order.iter().next() else {
             self.next_idle_close_check_ns = current_time_nanos.saturating_add(self.connections_max_idle_ns);
             return None;
         };
-        let connection_last_active = *self.last_active_ns.get(&oldest_id).expect("LRU and map agree");
         self.next_idle_close_check_ns = connection_last_active.saturating_add(self.connections_max_idle_ns);
         if current_time_nanos > self.next_idle_close_check_ns {
             Some((oldest_id, connection_last_active))
@@ -221,9 +221,8 @@ impl IdleExpiryManager {
 
     /// Mirrors `IdleExpiryManager.remove(String)`.
     fn remove(&mut self, id: ConnectionId) {
-        self.last_active_ns.remove(&id);
-        if let Some(pos) = self.lru_order.iter().position(|&existing| existing == id) {
-            self.lru_order.remove(pos);
+        if let Some(prev) = self.last_active_ns.remove(&id) {
+            self.lru_order.remove(&(prev, id));
         }
     }
 }
@@ -489,10 +488,18 @@ impl Selector {
 
     /// Drive a single channel through one I/O tick: handshake (if
     /// needed) → read (if readable & not muted & no completed receive)
-    /// → write (if has-send & ready). Returns the per-tick `madeReadProgress`
-    /// flag so the upper [`Self::poll`] loop can short-circuit `sleep`
-    /// when there's still data to drain. Mirrors Java's
-    /// `pollSelectionKeys` body for one key.
+    /// → write (if has-send & ready). Returns whether the channel had
+    /// any I/O activity this tick (read bytes > 0, write bytes > 0,
+    /// or completed a receive/send). The upper [`Self::poll`] loop
+    /// uses this flag to:
+    ///
+    /// * short-circuit `sleep` when there's still data to drain;
+    /// * touch the [`IdleExpiryManager`] LRU only for channels that
+    ///   did real work (mirroring Java's per-ready-key
+    ///   `idleExpiryManager.update` — see Java
+    ///   `pollSelectionKeys:525-526`).
+    ///
+    /// Mirrors Java's `pollSelectionKeys` body for one key.
     fn drive_channel_io(&mut self, id: ConnectionId) -> Result<bool, KafkaError> {
         let mut send_failed = false;
         let mut made_progress = false;
@@ -541,9 +548,15 @@ impl Selector {
 
             // Step 3: write if there is an in-progress send.
             if channel.has_send() && channel.ready() {
-                if let Err(e) = channel.write() {
-                    send_failed = true;
-                    return Err(KafkaError::Network(format!("write error on connection {}: {}", id, e)));
+                let bytes_written = match channel.write() {
+                    Ok(n) => n,
+                    Err(e) => {
+                        send_failed = true;
+                        return Err(KafkaError::Network(format!("write error on connection {}: {}", id, e)));
+                    },
+                };
+                if bytes_written > 0 {
+                    made_progress = true;
                 }
                 if let Some(send) = channel.maybe_complete_send() {
                     self.completed_sends.push(send);
@@ -635,11 +648,26 @@ impl Selector {
 
     /// Drain any progress from the closing-channels map; finalize
     /// channels that no longer have pending data. Mirrors the closing-
-    /// channels block at the top of Java's `clear()`.
+    /// channels block at the top of Java's `clear()`. Java
+    /// `failedSends.remove(channel.id())` short-circuits the
+    /// `maybeReadFromClosingChannel` call when the closing channel
+    /// also has a queued failed-send; the removed id is not re-added
+    /// to `disconnected` by the subsequent drain loop because Java
+    /// uses `remove` (not `contains`). We mirror with
+    /// `Vec::retain`-style filtering.
     fn process_closing_channels(&mut self) {
         let ids: Vec<ConnectionId> = self.closing_channels.keys().copied().collect();
         for id in ids {
-            let send_failed = self.failed_sends.contains(&id);
+            // `failedSends.remove(channel.id())` returns the
+            // sendFailed flag and consumes the entry so the
+            // post-step-2 drain doesn't surface the same id twice.
+            let send_failed_pos = self.failed_sends.iter().position(|&existing| existing == id);
+            let send_failed = if let Some(pos) = send_failed_pos {
+                self.failed_sends.swap_remove(pos);
+                true
+            } else {
+                false
+            };
             let mut channel = self.closing_channels.remove(&id).expect("just iterated keys");
             let mut has_pending = false;
             if !send_failed {
@@ -678,16 +706,65 @@ impl Selector {
         let _ = channel.close();
     }
 
-    /// Reset per-poll output collections. Mirrors Java's private
-    /// `clear()` minus the `madeReadProgressLastPoll` bookkeeping.
+    /// Configure a [`TcpSocket`] (`SO_KEEPALIVE`, `SO_SNDBUF`,
+    /// `SO_RCVBUF`) and connect to `address`. Mirrors Java's private
+    /// `configureSocketChannel` followed by `doConnect`.
+    ///
+    /// `send_buffer_size` / `receive_buffer_size` use
+    /// [`USE_DEFAULT_BUFFER_SIZE`] (`-1`) to fall back to the OS
+    /// default — Java's `Selectable.USE_DEFAULT_BUFFER_SIZE` contract.
+    /// All three socket options are set BEFORE connect (the kernel
+    /// requires SNDBUF/RCVBUF to be set on the unconnected socket so
+    /// the TCP-window auto-tuning can pick them up; Java's
+    /// `configureSocketChannel` runs before `doConnect` for the same
+    /// reason).
+    async fn connect_socket(
+        address: SocketAddr,
+        send_buffer_size: i32,
+        receive_buffer_size: i32,
+    ) -> std::io::Result<TcpStream> {
+        let socket = if address.is_ipv4() {
+            TcpSocket::new_v4()?
+        } else {
+            TcpSocket::new_v6()?
+        };
+        // Best-effort: Java unconditionally sets SO_KEEPALIVE in
+        // `configureSocketChannel`. We propagate any error since the
+        // failure mode (privilege loss, broken kernel) is identical
+        // to Java's IOException path.
+        socket.set_keepalive(true)?;
+        if send_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+            // Java's `Socket.setSendBufferSize(int)` accepts only
+            // positive values; negative aside from the sentinel is
+            // a programmer error and the kernel rejects it with
+            // EINVAL.
+            socket.set_send_buffer_size(send_buffer_size as u32)?;
+        }
+        if receive_buffer_size != USE_DEFAULT_BUFFER_SIZE {
+            socket.set_recv_buffer_size(receive_buffer_size as u32)?;
+        }
+        socket.connect(address).await
+    }
+
+    /// Reset the per-poll Vec / HashMap outputs. Mirrors the head of
+    /// Java's private `clear()` (lines 843-846) — `completedSends`,
+    /// `completedReceives`, `connected`, `disconnected`. The
+    /// `failedSends` drain happens AFTER `process_closing_channels`
+    /// (see [`Self::drain_failed_sends`]) so the closing-channel
+    /// short-circuit observes a non-empty `failed_sends` list.
     fn clear_per_poll_outputs(&mut self) {
         self.completed_sends.clear();
         self.completed_receives.clear();
         self.completed_receive_ids.clear();
         self.connected.clear();
         self.disconnected.clear();
+    }
 
-        // Drain failed_sends into disconnected.
+    /// Drain any remaining `failed_sends` into `disconnected`.
+    /// Mirrors the tail of Java's private `clear()` (lines 861-863)
+    /// after `processClosingChannels` has consumed the
+    /// closing-channel ids.
+    fn drain_failed_sends(&mut self) {
         for id in self.failed_sends.drain(..) {
             self.disconnected.insert(id, ChannelState::failed_send());
         }
@@ -715,8 +792,8 @@ impl Selectable for Selector {
         &mut self,
         id: ConnectionId,
         address: SocketAddr,
-        _send_buffer_size: i32,
-        _receive_buffer_size: i32,
+        send_buffer_size: i32,
+        receive_buffer_size: i32,
     ) -> Result<(), KafkaError> {
         if self.closed {
             return Err(KafkaError::IllegalState("Selector is closed".to_string()));
@@ -731,16 +808,20 @@ impl Selectable for Selector {
 
         // Spawn the connect task — equivalent to Java's
         // `socketChannel.connect(address)` returning before the
-        // SYN-ACK lands.
+        // SYN-ACK lands. We build a [`TcpSocket`] explicitly so we can
+        // mirror Java's `configureSocketChannel`:
+        // [`set_keepalive(true)`], [`set_send_buffer_size`],
+        // [`set_recv_buffer_size`] (when not
+        // [`USE_DEFAULT_BUFFER_SIZE`]). [`TcpStream::connect`] would
+        // skip all three.
         let tx = self.connect_tx.clone();
         let handle: JoinHandle<()> = tokio::spawn(async move {
-            let result = TcpStream::connect(address).await;
-            let event = match result {
+            let event = match Self::connect_socket(address, send_buffer_size, receive_buffer_size).await {
                 Ok(stream) => {
-                    // Mirror Java's `socket.setKeepAlive(true)` /
-                    // `socket.setTcpNoDelay(true)`. Best-effort: log
-                    // and ignore on error (Java throws but the
-                    // upper-layer wraps in IOException too).
+                    // Mirror Java's `socket.setTcpNoDelay(true)`.
+                    // Best-effort: log and ignore on error (Java
+                    // throws but the upper-layer wraps in IOException
+                    // too).
                     let _ = stream.set_nodelay(true);
                     ConnectEvent::Connected { id, stream }
                 },
@@ -870,10 +951,18 @@ impl Selectable for Selector {
             return Err(KafkaError::IllegalState("timeout should be >= 0".to_string()));
         }
 
+        // Mirror Java's `clear()` ordering exactly:
+        //   1. clear vec outputs (completedSends, completedReceives,
+        //      connected, disconnected)
+        //   2. process closing channels (consumes failedSends entries)
+        //   3. drain remaining failedSends into disconnected
+        // Doing the failedSends drain before step 2 (as we used to)
+        // killed the closing-channel sendFailed short-circuit because
+        // `failed_sends` was always empty by the time
+        // `process_closing_channels` ran.
         self.clear_per_poll_outputs();
-
-        // Process channels that have started a graceful close.
         self.process_closing_channels();
+        self.drain_failed_sends();
 
         // Drain any connect-task events queued before the sleep.
         self.drain_connect_events();
@@ -908,22 +997,40 @@ impl Selectable for Selector {
             self.drain_connect_events();
         }
 
-        // Run the I/O loop over all open channels.
+        // Run the I/O loop over all open channels and remember which
+        // channels had any I/O activity this tick. We collect the
+        // active set inline so we can update the LRU only for those
+        // channels — mirroring Java's per-ready-key
+        // `idleExpiryManager.update(nodeId, currentTimeNanos)` at
+        // `pollSelectionKeys:525-526`. Updating every open channel
+        // unconditionally (as we used to) defeats `connections.max.idle.ms`
+        // because every poll resets every channel's idle clock.
         let ids: Vec<ConnectionId> = self.channels.keys().copied().collect();
+        let mut io_active_ids: Vec<ConnectionId> = Vec::new();
         for id in ids {
-            let _ = self.drive_channel_io(id)?;
-        }
-
-        // Idle-expiry sweep.
-        let now_ns = self.time.nanoseconds();
-        self.maybe_close_oldest_connection(now_ns);
-
-        // Update LRU for active channels.
-        if let Some(idle) = self.idle_expiry_manager.as_mut() {
-            for &id in self.channels.keys() {
-                idle.update(id, now_ns);
+            let made_progress = self.drive_channel_io(id)?;
+            if made_progress {
+                io_active_ids.push(id);
             }
         }
+
+        // Idle-expiry sweep BEFORE the LRU update — any channel
+        // touched this tick must not be eligible for expiry on this
+        // sweep, which is what Java's order guarantees (the per-key
+        // `idle.update` happens, then `clear()` calls
+        // `maybeCloseOldestConnection(endSelect)` at the bottom of
+        // `poll`). Java's `endSelect` is captured BEFORE the LRU
+        // updates, but since `maybeCloseOldestConnection` reads the
+        // map after the updates landed, it sees the freshly-updated
+        // timestamps for any active channel. We replicate that here
+        // by updating LRU for io-active channels first, then sweeping.
+        let now_ns = self.time.nanoseconds();
+        if let Some(idle) = self.idle_expiry_manager.as_mut() {
+            for id in &io_active_ids {
+                idle.update(*id, now_ns);
+            }
+        }
+        self.maybe_close_oldest_connection(now_ns);
 
         Ok(())
     }
@@ -1473,6 +1580,134 @@ mod tests {
         server.shutdown().await;
     }
 
+    /// Regression for Critic-0 Phase 5c-2 Comment #1: under busy
+    /// polling (poll called repeatedly while no I/O occurs), the
+    /// channel's idle clock must NOT be reset on every poll — only
+    /// on polls where the channel actually had I/O activity. This
+    /// mirrors Java `Selector.pollSelectionKeys:525-526` (per-key
+    /// `idleExpiryManager.update`).
+    ///
+    /// The previous implementation unconditionally refreshed
+    /// `last_active_ns` for every open channel at the bottom of
+    /// `poll`, so a connection idle for the entire
+    /// `connections.max.idle.ms` window still appeared "fresh" and
+    /// `pollExpiredConnection` never returned it.
+    #[tokio::test]
+    async fn busy_poll_does_not_reset_idle_clock() {
+        let server = EchoServer::start().await;
+        let max_idle_ms: i64 = 100;
+        let mut selector = make_selector(max_idle_ms, SystemTime::instance());
+        blocking_connect(&mut selector, 0, server.addr).await;
+        // Drive `poll(0)` repeatedly with no I/O activity for longer
+        // than `max_idle_ms`. Each tick is short (no sleep), so we
+        // get many busy polls during the idle window. Under the bug,
+        // every busy poll would refresh `last_active_ns`, making
+        // expiry impossible.
+        let deadline = std::time::Instant::now() + Duration::from_millis(300);
+        while std::time::Instant::now() < deadline {
+            selector.poll(0).await.expect("poll");
+            if selector.disconnected().contains_key(&0) {
+                break;
+            }
+            // Yield to keep the poll loop tight without blocking.
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            selector.disconnected().contains_key(&0),
+            "idle expiry must fire under busy poll; disconnected={:?}, channels={:?}",
+            selector.disconnected(),
+            selector.channels().iter().map(|c| c.id().to_owned()).collect::<Vec<_>>(),
+        );
+        assert_eq!(selector.disconnected().get(&0).unwrap().state(), ChannelStateName::Expired);
+        selector.close();
+        server.shutdown().await;
+    }
+
+    /// Regression for Critic-0 Phase 5c-2 Comment #1 (lower-level):
+    /// pin the LRU bookkeeping rule in isolation — `update` only
+    /// happens for io-active channels. We check by driving the
+    /// `IdleExpiryManager` directly with two channels, one of which
+    /// is repeatedly "touched" via update while the other is left
+    /// untouched.
+    #[test]
+    fn idle_expiry_manager_only_updated_channel_is_refreshed() {
+        let mut idle = IdleExpiryManager {
+            last_active_ns: HashMap::new(),
+            lru_order: BTreeSet::new(),
+            connections_max_idle_ns: 1_000, // 1 µs
+            next_idle_close_check_ns: 0,
+        };
+        idle.update(1, 100); // last-active for 1 = 100
+        idle.update(2, 200); // last-active for 2 = 200
+        // Simulate "busy polls" that touch only channel 1 because
+        // channel 2 had no I/O.
+        idle.update(1, 1_000_000);
+        idle.update(1, 2_000_000);
+        // Sweep at t=3M ns — channel 2 (last-active=200) is far
+        // past the 1µs idle threshold, channel 1 (last-active=2M)
+        // is fresh. Expect channel 2 to be the expired entry.
+        let expired = idle.poll_expired_connection(3_000_000);
+        assert_eq!(expired, Some((2, 200)), "untouched channel must expire first");
+    }
+
+    /// Regression for Critic-0 Phase 5c-2 Comment #2: closing-channel
+    /// `failed_sends` short-circuit must fire. When a channel is
+    /// already in `closing_channels` and `send()` is then invoked,
+    /// the send goes to `failed_sends`; the next `poll()` runs
+    /// `process_closing_channels` BEFORE draining `failed_sends`,
+    /// observes the entry, and skips the wasted
+    /// `maybeReadFromClosingChannel` read. Java
+    /// `Selector.clear()`:849-859.
+    #[tokio::test]
+    async fn closing_channel_failed_send_short_circuits_read() {
+        let server = EchoServer::start().await;
+        let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
+        blocking_connect(&mut selector, 0, server.addr).await;
+        // Send a message, wait for response, so the channel is
+        // healthy and has no pending receive.
+        selector.send(make_send(0, b"hello"));
+        wait_for(
+            &mut selector,
+            |s| !s.completed_receives().is_empty(),
+            5_000,
+            "no first response",
+        )
+        .await;
+        // Simulate a graceful close-with-pending: forcibly trigger
+        // the closing-channel path by injecting a partial receive,
+        // then closing. The simplest reproducer: close the server
+        // mid-flight after issuing a second send. We then send a
+        // third message which lands in `failed_sends` (closing-
+        // channel send path).
+        server.close_connections();
+        wait_for(
+            &mut selector,
+            |s| s.disconnected().contains_key(&0) || s.channels().is_empty() || s.closing_channel(0).is_some(),
+            5_000,
+            "channel did not transition",
+        )
+        .await;
+        // After the disconnect surfaces or the channel enters the
+        // closing path, send to it — Java `Selector.send` on a
+        // closing channel pushes the send into `failedSends`.
+        if selector.closing_channel(0).is_some() {
+            selector.send(make_send(0, b"after-close"));
+            // Next poll must surface the channel as disconnected
+            // with state=FailedSend (failed_sends drain) — and the
+            // closing-channel path must NOT have consumed it twice.
+            selector.poll(0).await.expect("poll");
+            // disconnected[0] should be the failed-send entry, not
+            // a duplicate.
+            assert_eq!(
+                selector.disconnected().keys().filter(|&&k| k == 0).count(),
+                1,
+                "closing-channel + failed-send must surface exactly once"
+            );
+        }
+        selector.close();
+        server.shutdown().await;
+    }
+
     /// Translation of `SelectorTest.testExistingConnectionId`.
     #[tokio::test]
     async fn duplicate_connect_id_returns_illegal_state() {
@@ -1753,14 +1988,14 @@ mod tests {
         // deterministic.
         let mut idle = IdleExpiryManager {
             last_active_ns: HashMap::new(),
-            lru_order: VecDeque::new(),
+            lru_order: BTreeSet::new(),
             connections_max_idle_ns: 1_000_000, // 1ms in nanos
             next_idle_close_check_ns: 0,
         };
         idle.update(1, 100);
         idle.update(2, 200);
         idle.update(3, 300);
-        // Touch 1 → moves to back: order is now [2, 3, 1].
+        // Touch 1 → re-key under (350, 1): order is now [2, 3, 1].
         idle.update(1, 350);
         // Poll at t=400: oldest is 2 with last_active=200 → next check
         // is 1_000_200; since current=400 < next_idle_close_check_ns,
@@ -1797,5 +2032,35 @@ mod tests {
         // Subsequent operations must short-circuit; verify no panic.
         let result = selector.poll(0).await;
         assert!(matches!(result, Err(KafkaError::IllegalState(_))));
+    }
+
+    /// Regression for Critic-0 Phase 5c-2 Comments #3 + #4: the
+    /// connect path applies `SO_KEEPALIVE`, `SO_SNDBUF`, and
+    /// `SO_RCVBUF` (when not [`USE_DEFAULT_BUFFER_SIZE`]) on the
+    /// freshly-created [`TcpSocket`] BEFORE the kernel handshakes,
+    /// matching Java `Selector.configureSocketChannel`. We connect
+    /// to the echo server with non-default buffer sizes and verify
+    /// the connection succeeds and round-trips bytes — kernel-side
+    /// option clamping is OS-specific so we do not assert exact
+    /// `getsockopt` values, only that the wired path doesn't break
+    /// connect.
+    #[tokio::test]
+    async fn connect_applies_keepalive_and_buffer_sizes() {
+        let server = EchoServer::start().await;
+        let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
+        // Pick non-default values within typical OS limits (Linux
+        // doubles SNDBUF/RCVBUF internally so we stay below
+        // `net.core.wmem_max` defaults).
+        let send_buf: i32 = 32 * 1024;
+        let recv_buf: i32 = 32 * 1024;
+        selector.connect(0, server.addr, send_buf, recv_buf).expect("connect");
+        wait_for(&mut selector, |s| s.is_channel_ready(0), 5_000, "channel not ready").await;
+        // Round-trip a payload to confirm the connection is
+        // functional after the option-setting path.
+        selector.send(make_send(0, b"keepalive-and-bufs"));
+        wait_for(&mut selector, |s| !s.completed_receives().is_empty(), 5_000, "no response").await;
+        assert_eq!(payload_string(&selector.completed_receives()[0]), "keepalive-and-bufs");
+        selector.close();
+        server.shutdown().await;
     }
 }

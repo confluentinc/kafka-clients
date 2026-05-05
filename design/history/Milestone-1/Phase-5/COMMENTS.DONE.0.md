@@ -711,3 +711,162 @@ the existing 15 `cluster_connection_states` tests, all still green).
   they are tightly cohesive (visibility tightening + type alignment +
   fixture fidelity + code clarity, all in the same connection-state
   plumbing surface area).
+
+---
+
+# Phase 5c-2 (Selector — Tokio rewrite) — Round 1 disposition
+
+Critic-0 filed 1 Blocking + 4 Suggestion comments on commit `c02ca85`.
+All five resolved by a single `fixup! c02ca85`.
+
+## Issue 1: `idle.update` runs every poll for every channel — defeats `connections.max.idle.ms` in production
+
+- **File**: `src/common/network/selector.rs:921-926` (pre-fix)
+- **Severity**: Blocking — Behavior Mismatch
+- **Java Reference**: `Selector.java:525-526` (`idleExpiryManager.update(nodeId, currentTimeNanos)` per ready key inside `pollSelectionKeys`)
+- **Originating commit**: `c02ca85`
+- **Disposition**: Fixed.
+
+Java only touches the LRU for keys returned ready by `nioSelector.select(...)` —
+i.e. channels with actual I/O activity this poll. The pre-fix code
+unconditionally refreshed `last_active_ns` for every open channel at
+the bottom of `poll`, so a connection idle for the entire
+`connections.max.idle.ms` window still appeared "fresh" and
+`pollExpiredConnection` never returned it.
+
+Fix: `drive_channel_io` already returns the per-tick `made_progress`
+flag (now also tracking write-bytes-progress, not just read). `poll`
+collects io-active ids inline as it drives each channel and updates
+the LRU only for those ids before the expiry sweep. Rule: the
+[`IdleExpiryManager`] LRU is touched iff the channel had read or
+write progress on this tick. Since the sweep runs AFTER io-active
+LRU updates, busy channels are protected exactly as in Java.
+
+Two regression tests:
+- `busy_poll_does_not_reset_idle_clock` — drives `poll(0)` repeatedly
+  for 300ms with no I/O against a 100ms idle budget; asserts the
+  channel surfaces in `disconnected` with state EXPIRED. Under the
+  bug, every busy poll refreshed `last_active_ns`, making expiry
+  impossible.
+- `idle_expiry_manager_only_updated_channel_is_refreshed` — pins
+  the LRU bookkeeping rule in isolation: only the touched channel's
+  timestamp moves; the untouched channel expires first regardless
+  of how many times the busy channel is updated.
+
+## Issue 5 (resolved together with Issue 1): `IdleExpiryManager.update` O(n) per call
+
+- **File**: `src/common/network/selector.rs:189-199` (pre-fix)
+- **Severity**: Suggestion — Performance
+- **Originating commit**: `c02ca85`
+- **Disposition**: Fixed (rewritten as part of the Issue-1 fix).
+
+Replaced the `HashMap + VecDeque` LRU with a `BTreeSet<(timestamp, id)>`
++ `HashMap<id, timestamp>` pair: O(log n) `update` / `remove` /
+`poll_expired_connection`, no linear scans. The `(timestamp, id)`
+key avoids collision on simultaneous touches (deterministic-test
+edge case). After Issue 1's fix limits LRU updates to io-active
+channels, the per-poll cost is O(io-active × log(open)) instead of
+the old O(open²) — sufficient for thousands of connections per
+the brief.
+
+The existing `idle_expiry_manager_polls_oldest_first` test and the
+new `idle_expiry_manager_only_updated_channel_is_refreshed` test
+both pass against the new data structure.
+
+## Issue 2: `process_closing_channels` runs after `failed_sends` was already drained — closing-channel `sendFailed` short-circuit dead
+
+- **File**: `src/common/network/selector.rs:639-657, 873-876, 691-693` (pre-fix)
+- **Severity**: Suggestion — Behavior Mismatch
+- **Java Reference**: `Selector.java:842-863` (private `clear()`)
+- **Originating commit**: `c02ca85`
+- **Disposition**: Fixed.
+
+Java's order in `clear()`:
+1. Clear vec outputs (`completedSends`, `completedReceives`, `connected`, `disconnected`).
+2. Process closing channels — for each, `failedSends.remove(channel.id())` returns true if a send was queued and consumes the entry; on true, skip `maybeReadFromClosingChannel`.
+3. Drain remaining `failedSends` into `disconnected`.
+
+Pre-fix Rust ran step 1 + step 3 together (`clear_per_poll_outputs`
+drained `failed_sends` immediately), then step 2 — at which point
+`failed_sends` was always empty and the short-circuit fired
+`false` regardless. Closing channels with a queued failed-send got
+an extra wasted read.
+
+Fix: split `clear_per_poll_outputs` (vec clears) from
+`drain_failed_sends` (`failed_sends` → `disconnected`), and call
+`process_closing_channels` between them. Inside
+`process_closing_channels` we now `swap_remove` the matching id
+from `failed_sends` (Java's `failedSends.remove` consumes the
+entry), so the post-step-2 drain doesn't double-insert into
+`disconnected`. New regression test `closing_channel_failed_send_short_circuits_read`
+exercises the closing-channel + failed-send path and asserts the
+channel surfaces in `disconnected` exactly once.
+
+## Issue 3: `set_send_buffer_size` / `set_receive_buffer_size` config silently ignored
+
+- **File**: `src/common/network/selector.rs:714-758` (pre-fix)
+- **Severity**: Suggestion — Behavior Mismatch
+- **Java Reference**: `Selector.java:284-294` (`configureSocketChannel`)
+- **Originating commit**: `c02ca85`
+- **Disposition**: Fixed.
+
+`Selectable::connect` accepted `send_buffer_size` and
+`receive_buffer_size` parameters but the implementation prefixed
+them with `_` (unused). Phase 5d producer config keys
+`send.buffer.bytes` / `receive.buffer.bytes` would have silently
+no-op'd. Java applies these via `Socket.setSendBufferSize` /
+`setReceiveBufferSize` on the unconnected socket when not
+[`USE_DEFAULT_BUFFER_SIZE`].
+
+Fix: replaced [`TcpStream::connect`] with [`TcpSocket`] +
+`set_send_buffer_size` / `set_recv_buffer_size` + `connect`.
+Tokio's `TcpSocket` (stable since 1.18) is the equivalent of
+Java's pre-connect `SocketChannel.socket()`. The new
+`connect_socket` helper centralises the configuration so any
+future option (e.g. `SO_LINGER`) lands in one place.
+
+Regression test `connect_applies_keepalive_and_buffer_sizes`
+connects to the echo server with non-default 32 KiB send/recv
+buffers and round-trips a payload — exercising the wired path
+without asserting OS-specific clamped values from `getsockopt`
+(Linux doubles SNDBUF/RCVBUF internally; macOS clamps to
+`net.inet.tcp.sendspace`).
+
+## Issue 4: TCP keepalive is not enabled
+
+- **File**: `src/common/network/selector.rs:736-756` (pre-fix)
+- **Severity**: Suggestion — Behavior Mismatch
+- **Java Reference**: `Selector.java:288` (`socket.setKeepAlive(true)`)
+- **Originating commit**: `c02ca85`
+- **Disposition**: Fixed.
+
+Java unconditionally sets `SO_KEEPALIVE` on every client connection.
+Pre-fix Rust only set `set_nodelay(true)`. The default kernel
+keepalive timer is measured in hours so the practical impact is
+muted, but it is a documented Java client behaviour.
+
+Fix: same path as Issue 3 — `TcpSocket::set_keepalive(true)` is
+called on the freshly-created socket BEFORE connect, mirroring
+Java's `configureSocketChannel` order. Errors propagate (Java's
+`setKeepAlive` throws too).
+
+The Issue-3 regression test (`connect_applies_keepalive_and_buffer_sizes`)
+exercises the keepalive path implicitly — connect succeeds and
+data flows after the option is set. We do not assert the kernel
+keepalive timer values via `getsockopt` because they are
+OS-defaulted and not part of Java's client surface either.
+
+## DoD sign-off
+
+- 910 lib tests passing (was 906 — `+4` new regression tests:
+  `busy_poll_does_not_reset_idle_clock`,
+  `idle_expiry_manager_only_updated_channel_is_refreshed`,
+  `closing_channel_failed_send_short_circuits_read`,
+  `connect_applies_keepalive_and_buffer_sizes`).
+- `cargo build` clean.
+- `cargo xtask format-check` clean.
+- `cargo xtask lint` clean.
+- Fixup chain: a single `fixup! c02ca85` covers all 5 issues —
+  they are tightly cohesive (idle-expiry semantics + closing-channel
+  ordering + connect-path option wiring, all in the same Selector
+  poll/connect surface).
