@@ -19,8 +19,12 @@
 //! producer (Sender, RecordAccumulator, KafkaProducer).
 
 pub mod buffer_exhausted_error;
+pub mod callback;
+pub mod record_metadata;
 
 // `internals` packages are `pub(crate)` per CLAUDE.md naming rules.
 pub(crate) mod internals;
 
 pub use buffer_exhausted_error::BufferExhaustedError;
+pub use callback::Callback;
+pub use record_metadata::RecordMetadata;
