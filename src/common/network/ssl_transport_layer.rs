@@ -84,7 +84,7 @@ use std::io::{self, IoSlice, Read as IoRead, Write as IoWrite};
 use std::net::SocketAddr;
 use std::sync::Arc;
 
-use rustls::{ClientConfig, ClientConnection};
+use rustls::{CipherSuite, ClientConfig, ClientConnection, ProtocolVersion};
 use tokio::net::TcpStream;
 
 use crate::common::network::TransferableChannel;
@@ -92,6 +92,26 @@ use crate::common::network::cipher_information::CipherInformation;
 use crate::common::network::transport_layer::{OP_CONNECT, OP_READ, OP_WRITE, TransportLayer};
 use crate::common::security::auth::KafkaPrincipal;
 use crate::common::security::auth::kafka_principal::USER_TYPE;
+
+/// Plaintext buffer limit applied to the rustls `ClientConnection`.
+///
+/// Java's `SslTransportLayer.write(ByteBuffer src)` is bounded by a
+/// fixed-size `netWriteBuffer` (typically the SSL record size, 16 KiB)
+/// because each `wrap()` call writes at most one TLS record. When the
+/// network is backed up Java's `write` returns 0 and the producer's
+/// `Sender` stops accumulating. Rustls's plaintext sink is unbounded by
+/// default — without a cap, a slow broker can balloon arbitrary MB of
+/// buffered plaintext per channel before the producer-side BufferPool
+/// admission control kicks in. We pin both `sendable_plaintext` and
+/// `sendable_tls` to this size via `ClientConnection::set_buffer_limit`,
+/// so once the queue is full `writer().write_vectored` returns
+/// `Ok(n < total)` and the Selector applies backpressure analogous to
+/// Java's `netWriteBuffer.hasRemaining()` gate.
+///
+/// 64 KiB sized to comfortably hold a couple of full TLS records' worth
+/// of pending plaintext while keeping per-channel memory bounded — same
+/// order of magnitude as rustls's internal `DEFAULT_BUFFER_LIMIT`.
+const PLAINTEXT_BUFFER_LIMIT: usize = 64 * 1024;
 
 /// Internal state machine of the SSL transport. Mirrors Java's
 /// `SslTransportLayer.State` enum, collapsed where rustls handles the
@@ -144,8 +164,13 @@ pub struct SslTransportLayer {
     connected: bool,
     /// Mirrors Java's `hasBytesBuffered`. `true` when rustls has
     /// decrypted plaintext queued in its receive buffer that has not
-    /// yet been pulled by `reader().read()`. Updated lazily from
-    /// `process_new_packets` results (`IoState::plaintext_bytes_to_read`).
+    /// yet been pulled by `reader().read()`. Updated at the end of every
+    /// [`TransportLayer::read`] call from
+    /// `IoState::plaintext_bytes_to_read` returned by the most recent
+    /// `process_new_packets` invocation, after subtracting whatever was
+    /// drained into the caller's `dst`. Phase 5c's `Selector` reads this
+    /// to schedule a same-poll re-tick of the channel — getting the
+    /// answer wrong stalls the channel until external readiness fires.
     has_bytes_buffered: bool,
     /// Cipher information harvested from the rustls session once the
     /// handshake completes. Mirrors Java's
@@ -174,8 +199,9 @@ impl SslTransportLayer {
         config: Arc<ClientConfig>,
         server_name: rustls::pki_types::ServerName<'static>,
     ) -> io::Result<Self> {
-        let conn =
+        let mut conn =
             ClientConnection::new(config, server_name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        conn.set_buffer_limit(Some(PLAINTEXT_BUFFER_LIMIT));
         Ok(SslTransportLayer {
             channel_id: channel_id.into(),
             stream: Some(stream),
@@ -204,8 +230,9 @@ impl SslTransportLayer {
         config: Arc<ClientConfig>,
         server_name: rustls::pki_types::ServerName<'static>,
     ) -> io::Result<Self> {
-        let conn =
+        let mut conn =
             ClientConnection::new(config, server_name).map_err(|e| io::Error::new(io::ErrorKind::InvalidInput, e))?;
+        conn.set_buffer_limit(Some(PLAINTEXT_BUFFER_LIMIT));
         Ok(SslTransportLayer {
             channel_id: channel_id.into(),
             stream: Some(stream),
@@ -429,13 +456,73 @@ impl IoWrite for TcpStreamWriteAdapter<'_> {
 /// Pull cipher / protocol info out of a freshly-handshaken rustls
 /// session. Mirrors Java's
 /// `new CipherInformation(session.getCipherSuite(), session.getProtocol())`.
+///
+/// Java's `SSLSession::getCipherSuite()` returns the IANA-canonical name
+/// like `"TLS_AES_128_GCM_SHA256"` and `getProtocol()` returns
+/// `"TLSv1.3"`. Rustls's `Debug` impl on `CipherSuite` / `ProtocolVersion`
+/// uses non-IANA forms (`"TLS13_AES_128_GCM_SHA256"`, `"TLSv1_3"`) — we
+/// remap to the IANA strings so that downstream consumers (channel
+/// metadata registry, future `ChannelBuilder` logging) see the same
+/// values a Java client would expose. Unknown cipher / protocol values
+/// fall back to the `Debug` output rather than an empty string so a
+/// regression is obvious in logs.
 fn extract_cipher_info(conn: &ClientConnection) -> CipherInformation {
     let cipher = conn
         .negotiated_cipher_suite()
-        .map(|s| format!("{:?}", s.suite()))
+        .map(|s| iana_cipher_name(s.suite()))
         .unwrap_or_default();
-    let protocol = conn.protocol_version().map(|v| format!("{v:?}")).unwrap_or_default();
+    let protocol = conn.protocol_version().map(iana_protocol_name).unwrap_or_default();
     CipherInformation::new(cipher, protocol)
+}
+
+/// IANA-canonical name for a cipher suite, mirroring Java's
+/// `SSLSession::getCipherSuite()` output. Covers the cipher suites
+/// rustls negotiates by default with `aws_lc_rs` (TLS 1.3 + the modern
+/// TLS 1.2 ECDHE suites). For anything else we fall back to the rustls
+/// `Debug` form so the caller can still tell what was negotiated.
+fn iana_cipher_name(suite: CipherSuite) -> String {
+    match suite {
+        // TLS 1.3 — IANA strips the `13` infix that rustls's variant
+        // names carry.
+        CipherSuite::TLS13_AES_128_GCM_SHA256 => "TLS_AES_128_GCM_SHA256".to_string(),
+        CipherSuite::TLS13_AES_256_GCM_SHA384 => "TLS_AES_256_GCM_SHA384".to_string(),
+        CipherSuite::TLS13_CHACHA20_POLY1305_SHA256 => "TLS_CHACHA20_POLY1305_SHA256".to_string(),
+        CipherSuite::TLS13_AES_128_CCM_SHA256 => "TLS_AES_128_CCM_SHA256".to_string(),
+        CipherSuite::TLS13_AES_128_CCM_8_SHA256 => "TLS_AES_128_CCM_8_SHA256".to_string(),
+        // TLS 1.2 — rustls's variant names already match IANA. Listed
+        // explicitly for the suites rustls accepts in TLS 1.2 by
+        // default (ECDHE-RSA / ECDHE-ECDSA with AES-GCM or
+        // CHACHA20-POLY1305).
+        CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256 => "TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256".to_string(),
+        CipherSuite::TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384 => "TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384".to_string(),
+        CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256 => "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256".to_string(),
+        CipherSuite::TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384 => "TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384".to_string(),
+        CipherSuite::TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256 => {
+            "TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305_SHA256".to_string()
+        },
+        CipherSuite::TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256 => {
+            "TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305_SHA256".to_string()
+        },
+        // Unknown / unmapped — fall back to rustls's Debug form. Better
+        // than an empty string because the operator can grep for it in
+        // logs.
+        other => format!("{other:?}"),
+    }
+}
+
+/// IANA-canonical protocol version name, mirroring Java's
+/// `SSLSession::getProtocol()` output (`"TLSv1.3"`, `"TLSv1.2"`, …).
+fn iana_protocol_name(version: ProtocolVersion) -> String {
+    match version {
+        ProtocolVersion::TLSv1_3 => "TLSv1.3".to_string(),
+        ProtocolVersion::TLSv1_2 => "TLSv1.2".to_string(),
+        ProtocolVersion::TLSv1_1 => "TLSv1.1".to_string(),
+        ProtocolVersion::TLSv1_0 => "TLSv1".to_string(),
+        ProtocolVersion::SSLv3 => "SSLv3".to_string(),
+        ProtocolVersion::SSLv2 => "SSLv2".to_string(),
+        // DTLS / Unknown — rustls Debug fallback.
+        other => format!("{other:?}"),
+    }
 }
 
 impl TransferableChannel for SslTransportLayer {
@@ -590,6 +677,15 @@ impl TransportLayer for SslTransportLayer {
             Err(e) => return Err(e),
         };
 
+        // Track the most recent IoState::plaintext_bytes_to_read so we
+        // can answer `has_bytes_buffered` accurately. Mirrors Java's
+        // `appReadBuffer.position() != 0` snapshot. If we never call
+        // `process_new_packets` on this read (e.g. all data came out of
+        // the rustls reader on the first call), there are no new IoState
+        // values to harvest, so default to 0.
+        let mut last_plaintext_pending: usize = 0;
+        let mut read_from_network = false;
+
         // 2. Loop: read encrypted bytes from socket → process → drain
         //    plaintext into `dst`. Mirrors Java's outer
         //    `while (dst.remaining() > 0)` loop in `read(ByteBuffer)`.
@@ -627,14 +723,21 @@ impl TransportLayer for SslTransportLayer {
                 },
                 Err(e) => return Err(e),
             };
+            read_from_network = true;
 
-            // 2b. Process records and drain plaintext.
-            if let Err(e) = conn.process_new_packets() {
-                // Post-handshake protocol error. Java treats this as
-                // an SslAuthenticationException for TLSv1.3
-                // post-handshake messages. Surface as Other.
-                return Err(io::Error::other(format!("SSL processing failed: {e}")));
-            }
+            // 2b. Process records and drain plaintext. Capture the
+            //     IoState so we know whether more plaintext remains
+            //     queued after this call's `reader().read`.
+            let io_state = match conn.process_new_packets() {
+                Ok(state) => state,
+                Err(e) => {
+                    // Post-handshake protocol error. Java treats this as
+                    // an SslAuthenticationException for TLSv1.3
+                    // post-handshake messages. Surface as Other.
+                    return Err(io::Error::other(format!("SSL processing failed: {e}")));
+                },
+            };
+            last_plaintext_pending = io_state.plaintext_bytes_to_read();
 
             let bytes_now = match conn.reader().read(&mut dst[total_read..]) {
                 Ok(n) => n,
@@ -642,6 +745,10 @@ impl TransportLayer for SslTransportLayer {
                 Err(e) => return Err(e),
             };
             total_read += bytes_now;
+            // Whatever we just pulled out has been removed from rustls's
+            // queue; subtract it from our running estimate of pending
+            // plaintext.
+            last_plaintext_pending = last_plaintext_pending.saturating_sub(bytes_now);
 
             if socket_read == 0 && bytes_now == 0 {
                 // No forward progress — give up this call.
@@ -650,23 +757,20 @@ impl TransportLayer for SslTransportLayer {
         }
 
         // 3. Update has_bytes_buffered cache. Mirrors Java's
-        //    `updateBytesBuffered(...)`.
-        let conn = self.conn.as_ref().expect("conn checked above");
-        // rustls Reader.read returning WouldBlock means no plaintext
-        // pending; conversely, if we hit `total_read == dst.len()` and
-        // there is more in the receive buffer, has_bytes_buffered should
-        // be true. We use `wants_read` as a coarse proxy: if rustls is
-        // still expecting more *encrypted* bytes the receive buffer is
-        // exhausted; if `process_new_packets` left plaintext queued, the
-        // next reader.read() will deliver it.
-        // For accuracy mirroring Java's check, we'd track it from
-        // `IoState::plaintext_bytes_to_read` — but that field requires
-        // capturing the IoState from the last process_new_packets call.
-        // Lacking a cheap accessor we approximate: bytes-buffered is
-        // true if we made any forward progress this call (matching
-        // Java's `madeProgress` branch).
-        let _ = conn;
-        self.has_bytes_buffered = total_read > 0;
+        //    `updateBytesBuffered(madeProgress)`:
+        //      if (madeProgress) hasBytesBuffered = netReadBuffer.position() != 0
+        //                                        || appReadBuffer.position() != 0;
+        //      else hasBytesBuffered = false;
+        //
+        //    `appReadBuffer.position() != 0` ↔ `IoState::plaintext_bytes_to_read > 0`.
+        //    `netReadBuffer.position() != 0` is implicit in rustls — if
+        //    `process_new_packets` left an undecoded partial record, it
+        //    will surface on the next read once more bytes arrive, and
+        //    rustls's own `wants_read` is a coarse proxy. We use
+        //    `last_plaintext_pending > 0` as the load-bearing signal
+        //    (this is what triggers Phase 5c's same-poll re-tick).
+        let made_progress = read_from_network || total_read > 0;
+        self.has_bytes_buffered = made_progress && last_plaintext_pending > 0;
 
         Ok(total_read)
     }
@@ -1013,6 +1117,55 @@ mod tests {
         let info = layer.cipher_information().expect("cipher info populated");
         assert!(!info.cipher().is_empty(), "cipher name set");
         assert!(!info.protocol().is_empty(), "protocol set");
+
+        // IANA-canonical names (matching Java's `SSLSession::getCipherSuite()` /
+        // `getProtocol()` output): TLS 1.3 cipher names have no `13`
+        // infix, and the protocol uses a dot rather than an underscore.
+        assert!(
+            !info.cipher().contains("TLS13_"),
+            "cipher should be IANA-named (no TLS13_ infix), got: {}",
+            info.cipher()
+        );
+        assert!(info.cipher().starts_with("TLS_"), "IANA cipher name starts with TLS_");
+        assert!(
+            !info.protocol().contains('_'),
+            "protocol should be dotted (TLSv1.x), got: {}",
+            info.protocol()
+        );
+        assert!(
+            info.protocol().starts_with("TLSv"),
+            "protocol should be TLSv-prefixed, got: {}",
+            info.protocol()
+        );
+    }
+
+    #[test]
+    fn iana_cipher_name_strips_tls13_infix() {
+        assert_eq!(
+            iana_cipher_name(CipherSuite::TLS13_AES_128_GCM_SHA256),
+            "TLS_AES_128_GCM_SHA256"
+        );
+        assert_eq!(
+            iana_cipher_name(CipherSuite::TLS13_AES_256_GCM_SHA384),
+            "TLS_AES_256_GCM_SHA384"
+        );
+        assert_eq!(
+            iana_cipher_name(CipherSuite::TLS13_CHACHA20_POLY1305_SHA256),
+            "TLS_CHACHA20_POLY1305_SHA256"
+        );
+        // TLS 1.2 ECDHE suite — rustls's variant name already matches IANA.
+        assert_eq!(
+            iana_cipher_name(CipherSuite::TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256),
+            "TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256"
+        );
+    }
+
+    #[test]
+    fn iana_protocol_name_uses_dotted_form() {
+        assert_eq!(iana_protocol_name(ProtocolVersion::TLSv1_3), "TLSv1.3");
+        assert_eq!(iana_protocol_name(ProtocolVersion::TLSv1_2), "TLSv1.2");
+        assert_eq!(iana_protocol_name(ProtocolVersion::TLSv1_1), "TLSv1.1");
+        assert_eq!(iana_protocol_name(ProtocolVersion::TLSv1_0), "TLSv1");
     }
 
     #[tokio::test]
@@ -1158,12 +1311,19 @@ mod tests {
         let err = TransportLayer::read(&mut layer, &mut buf).expect_err("peer dropped — read should surface as error");
         // rustls surfaces ungraceful close as InvalidData ("peer closed
         // connection without sending TLS close_notify") via its Reader.
-        // Our wrapper passes that through; the kind is permitted to be
-        // either `UnexpectedEof` or `InvalidData` depending on when the
-        // FIN lands relative to process_new_packets.
+        // Our wrapper passes that through; the kind may also be
+        // `UnexpectedEof` (FIN landed before process_new_packets) or
+        // `ConnectionReset` (peer's drop was observed as a RST from the
+        // kernel under load — common on macOS in heavily parallel test
+        // runs). Any of the three is a legitimate "peer is gone"
+        // signal — the upper layer translates all of them into a
+        // channel-disconnected event.
         assert!(
-            matches!(err.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData),
-            "expected EOF/InvalidData on ungraceful peer close, got {:?}",
+            matches!(
+                err.kind(),
+                io::ErrorKind::UnexpectedEof | io::ErrorKind::InvalidData | io::ErrorKind::ConnectionReset
+            ),
+            "expected EOF/InvalidData/ConnectionReset on ungraceful peer close, got {:?}",
             err.kind()
         );
     }
@@ -1336,5 +1496,112 @@ mod tests {
         // close() sets state = Closing, so we expect UnexpectedEof.
         let err = TransportLayer::read(&mut layer, &mut buf).expect_err("read after close errors");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+    }
+
+    /// Regression test for the rustls plaintext-sink unbounded-queue
+    /// concern. Without `set_buffer_limit`, a slow/blocked broker can
+    /// balloon to many MB of buffered plaintext per channel — Java caps
+    /// this implicitly via the fixed-size `netWriteBuffer`. We assert
+    /// the rustls connection has the limit applied so backpressure
+    /// surfaces as `Ok(n < total)` from `writer().write_vectored`.
+    #[tokio::test]
+    async fn plaintext_buffer_limit_applied_on_construction() {
+        let (client_cfg, _server_cfg) = build_tls_configs();
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let stream = TcpStream::connect(addr).await.expect("connect");
+        let server_name = ServerName::try_from("localhost").unwrap();
+        let mut layer = SslTransportLayer::new("test", stream, client_cfg, server_name).expect("new");
+
+        // Pump plaintext directly into the rustls writer without
+        // draining the socket. With the cap in place, repeated writes
+        // must eventually return `n < bigger than total` — i.e. the
+        // queue refuses to grow unboundedly. We bound the test loop so
+        // a regression where the cap is not applied surfaces as a
+        // `panic!` rather than an OOM.
+        let conn = layer.conn.as_mut().expect("conn");
+        let chunk = vec![0u8; 8 * 1024];
+        let mut total_accepted = 0usize;
+        for _ in 0..32 {
+            match conn.writer().write(&chunk) {
+                Ok(n) if n < chunk.len() => {
+                    total_accepted += n;
+                    // Backpressure kicked in — limit is enforced. Done.
+                    assert!(
+                        total_accepted <= PLAINTEXT_BUFFER_LIMIT + chunk.len(),
+                        "queue grew past limit ({} > {})",
+                        total_accepted,
+                        PLAINTEXT_BUFFER_LIMIT
+                    );
+                    return;
+                },
+                Ok(n) => total_accepted += n,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => return,
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        panic!(
+            "writer accepted {} bytes without back-pressuring; expected limit at ~{}",
+            total_accepted, PLAINTEXT_BUFFER_LIMIT
+        );
+    }
+
+    /// Regression test for the `has_bytes_buffered` IoState semantic.
+    /// Before this fix, `has_bytes_buffered` was set to `total_read > 0`
+    /// — true even when the receive buffer was fully drained. After
+    /// this fix, `has_bytes_buffered` returns true only when rustls's
+    /// `IoState::plaintext_bytes_to_read` reports remaining queued
+    /// plaintext after the call. Phase 5c's Selector reads this exact
+    /// signal to schedule a same-poll re-tick.
+    #[tokio::test]
+    async fn has_bytes_buffered_false_after_full_drain() {
+        let (client_cfg, server_cfg) = build_tls_configs();
+        let addr = spawn_echo_server(server_cfg).await;
+        let server_name = ServerName::try_from("localhost").unwrap();
+        let mut layer = connect_client(addr, client_cfg, server_name).await;
+        complete_handshake(&mut layer).await;
+
+        // Send and echo back a small payload, then drain it all into a
+        // generously-sized buffer. After the read fully drains rustls's
+        // queue, `has_bytes_buffered` must be false.
+        let payload = b"hello, tls";
+        let n = layer.write_vectored(&[IoSlice::new(payload)]).expect("write");
+        assert_eq!(n, payload.len());
+
+        // Drain encrypted bytes to the wire.
+        for _ in 0..32 {
+            if !layer.has_pending_writes() {
+                break;
+            }
+            let stream = layer.stream.as_mut().expect("stream");
+            stream.writable().await.expect("writable");
+            let conn = layer.conn.as_mut().expect("conn");
+            let mut adapter = TcpStreamWriteAdapter { stream };
+            let _ = conn.write_tls(&mut adapter);
+        }
+
+        // Wait for the echo, then drain the entire payload in one
+        // generously-sized read.
+        let mut buf = [0u8; 4096];
+        let mut total = 0usize;
+        for _ in 0..32 {
+            if total >= payload.len() {
+                break;
+            }
+            let stream = layer.stream.as_mut().expect("stream");
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stream.readable()).await;
+            let read = TransportLayer::read(&mut layer, &mut buf[total..]).expect("read");
+            total += read;
+        }
+        assert_eq!(&buf[..payload.len()], payload, "echo round-trip");
+
+        // Critical assertion: after a fully-drained read, the receive
+        // queue is empty and `has_bytes_buffered` must be false. Before
+        // this fix, the implementation returned `total_read > 0` which
+        // would have been `true` here (false positive).
+        assert!(
+            !layer.has_bytes_buffered(),
+            "has_bytes_buffered must be false after fully draining the receive queue"
+        );
     }
 }

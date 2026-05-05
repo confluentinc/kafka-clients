@@ -128,6 +128,15 @@ pub trait TransportLayer: TransferableChannel {
     /// `true` iff `OP_READ` is *not* in the interest-op set (and the
     /// channel is still open). Mirrors Java's
     /// `selectionKey.isValid() && (interestOps() & OP_READ) == 0`.
+    ///
+    /// **Connect-pending caveat**: a freshly-`pending_connect`-constructed
+    /// channel reports `is_mute() == true` because its initial interest-op
+    /// set is `OP_CONNECT` only — `OP_READ` is added by `finish_connect`.
+    /// Callers that need to distinguish "actively muted by the upper
+    /// layer" from "not yet eligible to read because the connect has not
+    /// completed" should pair this with [`Self::is_connected`] /
+    /// [`Self::ready`] rather than treating `is_mute() == true` as a
+    /// monolithic signal.
     fn is_mute(&self) -> bool;
 
     /// `true` iff this transport has bytes buffered internally that may be

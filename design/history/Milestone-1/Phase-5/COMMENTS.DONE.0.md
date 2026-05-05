@@ -214,3 +214,161 @@ to cache the singleton and returns `.clone()` of the cached value (one cheap
 Added a `pub const ANONYMOUS_NAME: &str = "ANONYMOUS"` constant so the
 literal is reused. Added a `anonymous_is_idempotent` test to lock in the
 singleton-equivalent contract.
+
+---
+
+# Critic 0 — Phase 5b-2 (SslTransportLayer) — Done
+
+## Issue: rustls plaintext sink is unbounded — `write_vectored` has no backpressure
+
+- **File**: `src/common/network/ssl_transport_layer.rs:441-490` (pre-fix)
+- **Severity**: Suggestion (Performance / Behavior)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:709-742`
+- **Originating commit**: `faa61cc`
+
+Java's `write(ByteBuffer src)` is bounded: the `netWriteBuffer` is a fixed-size
+(typically 16 KiB) buffer, so when the network is backed up Java's `write` returns
+0 and the producer's `Sender` stops accumulating. Rust's `writer().write_vectored`
+appended *all* IoSlice content into rustls's internal `sendable_plaintext` queue,
+which is unbounded by default. A slow/blocked broker connection could balloon to
+many MB of buffered plaintext per channel before producer-side BufferPool
+admission control kicks in.
+
+**Resolution:** Fixed. Both constructors call
+`conn.set_buffer_limit(Some(PLAINTEXT_BUFFER_LIMIT))` immediately after
+`ClientConnection::new`, where `PLAINTEXT_BUFFER_LIMIT = 64 * 1024`. Once the
+queue is full `writer().write_vectored` returns `Ok(n < total)`, providing the
+same backpressure as Java's `netWriteBuffer.hasRemaining()` gate. Added the
+constant with a doc-comment explaining the rationale and the 64 KiB sizing
+(comfortably holds a couple of full TLS records' worth of pending plaintext).
+Added regression test `plaintext_buffer_limit_applied_on_construction` that
+pumps 8 KiB chunks into the writer without draining the socket and asserts the
+queue refuses to grow past the cap.
+
+## Issue: `has_bytes_buffered` set to `total_read > 0` ignores remaining buffered plaintext
+
+- **File**: `src/common/network/ssl_transport_layer.rs:561-672` (pre-fix)
+- **Severity**: Suggestion (Behavior Mismatch)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:991-1000`
+- **Originating commit**: `faa61cc`
+
+Java's `updateBytesBuffered(madeProgress)` reflects whether buffered plaintext or
+unprocessed TLS bytes remain *after* this call so the next poll can deliver them
+without going to the network. The Rust translation set
+`has_bytes_buffered = total_read > 0`, which:
+1. Returned `true` when we delivered some plaintext but the receive buffer was
+   now empty — Java would return `false`. Result: spurious wakeup.
+2. Returned `false` when we delivered 0 plaintext but rustls still had plaintext
+   pending in `IoState` — Java would return `true`. Result: missed wakeup, the
+   channel stalls until external readiness fires again.
+
+The (2) case is the load-bearing one because Phase 5c's Selector uses
+`hasBytesBuffered()` exactly to schedule a same-poll re-tick of the channel.
+
+**Resolution:** Fixed. The `read` method now captures
+`IoState::plaintext_bytes_to_read()` from each `process_new_packets` call and
+subtracts the bytes it just drained into the caller's `dst`. The final
+`has_bytes_buffered` is computed as
+`(read_from_network || total_read > 0) && last_plaintext_pending > 0`, mirroring
+Java's `updateBytesBuffered(madeProgress)` semantics — `madeProgress` AND there
+is queued plaintext post-drain. Updated the `has_bytes_buffered` field rustdoc
+to reflect the new accuracy. Added regression test
+`has_bytes_buffered_false_after_full_drain` that drains a full echo round-trip
+into a generously-sized buffer and asserts `has_bytes_buffered() == false`
+afterwards (the previous `total_read > 0` heuristic would have returned true).
+
+## Issue: cipher information uses Debug format ("TLS13_AES_256_GCM_SHA384") not IANA name
+
+- **File**: `src/common/network/ssl_transport_layer.rs:432-439` (pre-fix)
+- **Severity**: Suggestion (Behavior Mismatch — cosmetic)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:469`
+- **Originating commit**: `faa61cc`
+
+Java's `session.getCipherSuite()` returns the IANA name
+(`"TLS_AES_256_GCM_SHA384"`); rustls's `Debug` impl returns
+`"TLS13_AES_256_GCM_SHA384"` (with `13_` instead of `_`). Same for
+`ProtocolVersion`: rustls Debug gives `"TLSv1_3"` vs Java's `"TLSv1.3"`. This
+surfaces in the channel metadata registry (Phase 5b-3+).
+
+**Resolution:** Fixed. Added two pure helper functions `iana_cipher_name`
+(maps `CipherSuite` → IANA-canonical `String`) and `iana_protocol_name` (maps
+`ProtocolVersion` → dotted form like `"TLSv1.3"`). They cover the cipher suites
+rustls negotiates by default with `aws_lc_rs` (the 5 TLS 1.3 suites + the modern
+TLS 1.2 ECDHE-RSA / ECDHE-ECDSA ones — AES-GCM and CHACHA20-POLY1305).
+`extract_cipher_info` now routes through them. Unmapped cipher / protocol
+values fall back to the rustls `Debug` form so a regression is obvious in logs
+(rather than an empty string). Added two unit tests
+(`iana_cipher_name_strips_tls13_infix`, `iana_protocol_name_uses_dotted_form`)
+plus three new assertions in the existing `handshake_populates_cipher_information`
+test verifying the negotiated session reports IANA-canonical strings.
+
+## Issue: `is_mute()` returns `true` for a not-yet-ready SSL channel
+
+- **File**: `src/common/network/ssl_transport_layer.rs:731-734`
+- **Severity**: Suggestion (Behavior Mismatch — clarification)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:981-984`
+- **Originating commit**: `faa61cc`
+
+Critic verified the behaviour matches Java exactly (a freshly-`pending_connect`-
+constructed channel has `interest_ops == OP_CONNECT`, no `OP_READ`, so `is_mute()`
+returns `true`). The concern was the rustdoc didn't disambiguate "actively muted
+by upper layer" from "not yet eligible to read because connect hasn't completed".
+
+**Resolution:** Fixed. Added rustdoc on `TransportLayer::is_mute` documenting
+the connect-pending caveat and recommending callers pair the predicate with
+`is_connected` / `ready` rather than treating it as a monolithic signal. The
+implementation itself is unchanged because the behaviour matches Java.
+
+## Issue: `add_interest_ops`/`remove_interest_ops` no-op when not ready (Java throws)
+
+- **File**: `src/common/network/ssl_transport_layer.rs:708-725`
+- **Severity**: Suggestion (Behavior Mismatch — Selector-time concern)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:815-837`
+- **Originating commit**: `faa61cc`
+
+Java throws `IllegalStateException("handshake is not completed")` when
+`addInterestOps`/`removeInterestOps` is called pre-handshake-complete, and
+`CancelledKeyException` if the key is invalid. The Rust translation silently
+no-ops with only a doc-comment ("the Phase 5b-3 KafkaChannel will check
+`ready()` before calling these"). Critic flagged this as fragile.
+
+**Resolution:** Deferred to Phase 5c. Tokio doesn't have the
+`SelectionKey`/`CancelledKeyException` model that Java's interest-op
+manipulation predicates on — the runtime drives readiness directly. Whether
+the trait surface should expose `Result<()>` (with explicit error variants for
+not-ready / cancelled) versus retaining the no-op shape is a question the
+Selector implementation will answer once it has a concrete caller. Until then,
+adding `Result<()>` returns to all three impls (Plaintext + SSL + future
+mocks) without a consumer is design speculation.
+
+The current SSL impl already gates on `is_open` (silent no-op when closed),
+which prevents the most dangerous misuse — call after `disconnect()`. The
+rustdoc on the SSL impl already documents the "Phase 5b-3 KafkaChannel will
+check `ready()` before calling these" contract. Filed as a tracking note for
+Phase 5c review: when the Selector lands, decide whether to (a) keep the
+silent gate, (b) split into `try_add_interest_ops`/`add_interest_ops`, or
+(c) propagate `Result<()>` through the trait.
+
+## Issue: `disconnect()` flips `is_open=false` (carryover from 5b-1 deferral)
+
+- **File**: `src/common/network/ssl_transport_layer.rs:513-519`
+- **Severity**: Suggestion (Behavior Mismatch — same defer rationale as 5b-1 Comment 2)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:149-152`
+- **Originating commit**: `faa61cc`
+
+Same divergence as `PlaintextTransportLayer` — Java's `disconnect()` calls
+`key.cancel()` only; the underlying socket remains open until `close()`. The
+Rust SSL layer flips `is_open = false`, `connected = false`, `interest_ops = 0`,
+but does NOT drop `stream`/`conn`. So `is_open()` returns `false` even though
+`stream.is_some()` is still true. Critic correctly noted the additional SSL
+wrinkle: between `disconnect()` and `close()`, `peer_principal()` walks
+`self.conn` (still `Some`) and would happily return a principal for a socket
+the upper layer thinks is gone.
+
+**Resolution:** Deferred — same rationale as 5b-1 Comment 2. No caller in
+5b-2 observes the divergence. The defer is filed in lockstep with the 5b-1
+plaintext-layer defer so when the underlying semantic is finally split (e.g.
+into `key_valid: bool` + `socket_open: bool`, or by documenting the joint
+semantic on the trait), both transports are addressed in the same change.
+Filed as a tracking note in Phase 5c review so the Selector implementation
+doesn't accidentally call `peer_principal` after `disconnect`.
