@@ -444,7 +444,9 @@ mod tests {
             0,
             destination,
             None,
-            true,
+            // Match Java fixture (`expectResponse = false`,
+            // `isInternalRequest = false`).
+            false,
             false,
             None,
             None,

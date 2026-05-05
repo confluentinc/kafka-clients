@@ -71,7 +71,7 @@ impl MetadataUpdater for ManualMetadataUpdater {
         i64::MAX
     }
 
-    fn handle_server_disconnect(&mut self, _now: i64, _node_id: &str, _maybe_auth_error: Option<KafkaError>) {
+    fn handle_server_disconnect(&mut self, _now: i64, _node_id: i32, _maybe_auth_error: Option<KafkaError>) {
         // We don't fail the broker on failures. There should be sufficient
         // information from the NetworkClient logs to indicate the reason
         // for the failure.

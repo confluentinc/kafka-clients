@@ -42,7 +42,13 @@ pub struct FinalizedFeaturesInfo {
 
 #[derive(Default)]
 struct ApiVersionsInner {
-    node_api_versions: HashMap<String, Arc<NodeApiVersions>>,
+    /// Java keys this map by the connection id `String`
+    /// (`Integer.toString(node.id())`); the Rust translation keys by
+    /// `i32` directly. See `design/history/Milestone-1/Phase-5/NOTES.md`
+    /// "Hot-path identifier interning" — the producer hot path looks up
+    /// usable versions per request via [`ApiVersions::get`] and a
+    /// `String` key would force a per-call allocation.
+    node_api_versions: HashMap<i32, Arc<NodeApiVersions>>,
     /// The maximum finalized feature epoch of all the node api
     /// versions. Mirrors Java's `private long maxFinalizedFeaturesEpoch = -1;`.
     max_finalized_features_epoch: i64,
@@ -76,30 +82,35 @@ impl ApiVersions {
 
     /// Mirrors `ApiVersions.update(String, NodeApiVersions)`.
     ///
+    /// Java keys by `Integer.toString(node.id())`; the Rust signature
+    /// takes `i32` directly to avoid the per-call `String` allocation
+    /// the producer hot path would otherwise pay (CLAUDE.md rule 11,
+    /// NOTES.md "Hot-path identifier interning").
+    ///
     /// Java passes the `NodeApiVersions` by value; we accept an
     /// `Arc<NodeApiVersions>` so the cache can hand out cheap clones via
     /// [`Self::get`]. Pre-existing callers can wrap a fresh
     /// `NodeApiVersions` with `Arc::new` at the call site.
-    pub fn update(&self, node_id: &str, node_api_versions: Arc<NodeApiVersions>) {
+    pub fn update(&self, node_id: i32, node_api_versions: Arc<NodeApiVersions>) {
         let mut inner = self.inner.lock().expect("ApiVersions inner not poisoned");
         if inner.max_finalized_features_epoch < node_api_versions.finalized_features_epoch() {
             inner.max_finalized_features_epoch = node_api_versions.finalized_features_epoch();
             inner.finalized_features = node_api_versions.finalized_features().clone();
         }
-        inner.node_api_versions.insert(node_id.to_owned(), node_api_versions);
+        inner.node_api_versions.insert(node_id, node_api_versions);
     }
 
     /// Mirrors `ApiVersions.remove(String)`.
-    pub fn remove(&self, node_id: &str) {
+    pub fn remove(&self, node_id: i32) {
         let mut inner = self.inner.lock().expect("ApiVersions inner not poisoned");
-        inner.node_api_versions.remove(node_id);
+        inner.node_api_versions.remove(&node_id);
     }
 
     /// Mirrors `ApiVersions.get(String)`. Returns `None` if no entry is
     /// known for the given node id.
-    pub fn get(&self, node_id: &str) -> Option<Arc<NodeApiVersions>> {
+    pub fn get(&self, node_id: i32) -> Option<Arc<NodeApiVersions>> {
         let inner = self.inner.lock().expect("ApiVersions inner not poisoned");
-        inner.node_api_versions.get(node_id).cloned()
+        inner.node_api_versions.get(&node_id).cloned()
     }
 
     /// Mirrors `ApiVersions.getMaxFinalizedFeaturesEpoch()`.
@@ -162,7 +173,7 @@ mod tests {
             )
             .expect("ctor"),
         );
-        api_versions.update("2", node_2);
+        api_versions.update(2, node_2);
         let info = api_versions.finalized_features_info();
         assert_eq!(info.finalized_features_epoch, 1);
         assert_eq!(*info.finalized_features.get("transaction.version").expect("present"), 2);
@@ -188,7 +199,7 @@ mod tests {
             )
             .expect("ctor"),
         );
-        api_versions.update("1", node_1);
+        api_versions.update(1, node_1);
         let info = api_versions.finalized_features_info();
         assert_eq!(info.finalized_features_epoch, 1);
         assert_eq!(*info.finalized_features.get("transaction.version").expect("present"), 2);

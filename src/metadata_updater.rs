@@ -49,12 +49,19 @@ pub trait MetadataUpdater: std::marker::Send {
     /// Handle a server disconnect. Mirrors
     /// `MetadataUpdater.handleServerDisconnect(long, String, Optional<AuthenticationException>)`.
     ///
+    /// Java keys by `String` (the `Integer.toString(node.id())` connection
+    /// id); the Rust signature takes `i32` directly to match the rest of
+    /// the network plumbing (`Selectable`, `KafkaClient`,
+    /// `InFlightRequests`, `ClusterConnectionStates`) and avoid a per-call
+    /// `String` allocation at the network-loop call site (CLAUDE.md rule
+    /// 11, NOTES.md "Hot-path identifier interning").
+    ///
     /// `maybe_auth_error` mirrors Java's `Optional<AuthenticationException>`
     /// — `Some(...)` only when the disconnect was driven by an auth
     /// failure. The Rust translation projects all `KafkaError`s onto
     /// `Option<KafkaError>`; callers should pass an
     /// [`KafkaError::Authentication`] variant.
-    fn handle_server_disconnect(&mut self, now: i64, node_id: &str, maybe_auth_error: Option<KafkaError>);
+    fn handle_server_disconnect(&mut self, now: i64, node_id: i32, maybe_auth_error: Option<KafkaError>);
 
     /// Handle a metadata request failure. Mirrors
     /// `MetadataUpdater.handleFailedRequest(long, Optional<KafkaException>)`.

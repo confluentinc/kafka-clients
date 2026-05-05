@@ -44,25 +44,34 @@ use crate::common::utils::{ExponentialBackoff, LogContext};
 use crate::host_resolver::HostResolver;
 
 /// Mirrors `ClusterConnectionStates.RECONNECT_BACKOFF_EXP_BASE`.
-pub const RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
+pub(crate) const RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
 
 /// Mirrors `ClusterConnectionStates.RECONNECT_BACKOFF_JITTER`.
-pub const RECONNECT_BACKOFF_JITTER: f64 = 0.2;
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
+pub(crate) const RECONNECT_BACKOFF_JITTER: f64 = 0.2;
 
 /// Mirrors `ClusterConnectionStates.CONNECTION_SETUP_TIMEOUT_EXP_BASE`.
-pub const CONNECTION_SETUP_TIMEOUT_EXP_BASE: i32 = 2;
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
+pub(crate) const CONNECTION_SETUP_TIMEOUT_EXP_BASE: i32 = 2;
 
 /// Mirrors `ClusterConnectionStates.CONNECTION_SETUP_TIMEOUT_JITTER`.
-pub const CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
+pub(crate) const CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
 
 /// The state of our connection to each node in the cluster.
 ///
-/// Mirrors `org.apache.kafka.clients.ClusterConnectionStates`. **Java's
-/// contract**: this class is *not* thread-safe (every public method is
-/// invoked under the `NetworkClient`'s exclusive ownership). The Rust
+/// Mirrors `org.apache.kafka.clients.ClusterConnectionStates`. Java declares
+/// this `final class` (package-private) — only `NetworkClient` and
+/// same-package code see it. The Rust translation matches that boundary
+/// with `pub(crate)`.
+///
+/// **Java's contract**: this class is *not* thread-safe (every public method
+/// is invoked under the `NetworkClient`'s exclusive ownership). The Rust
 /// translation reflects that — every state-mutating method takes
 /// `&mut self`.
-pub struct ClusterConnectionStates {
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
+pub(crate) struct ClusterConnectionStates {
     node_state: HashMap<i32, NodeConnectionState>,
     log_prefix: String,
     host_resolver: Box<dyn HostResolver>,
@@ -71,6 +80,7 @@ pub struct ClusterConnectionStates {
     connection_setup_timeout: ExponentialBackoff,
 }
 
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
 impl ClusterConnectionStates {
     /// Mirrors `new ClusterConnectionStates(long, long, long, long,
     /// LogContext, HostResolver)`.
@@ -174,8 +184,8 @@ impl ClusterConnectionStates {
     /// a new resolved address if necessary. Mirrors
     /// `ClusterConnectionStates.connecting(String, long, String)`.
     pub fn connecting(&mut self, id: i32, now: i64, host: &str) {
-        let host_changed = match self.node_state.get_mut(&id) {
-            Some(state) if state.host == host => {
+        if let Some(state) = self.node_state.get_mut(&id) {
+            if state.host == host {
                 state.last_connect_attempt_ms = now;
                 state.state = ConnectionState::Connecting;
                 // Move to next resolved address, or if addresses are
@@ -183,23 +193,20 @@ impl ClusterConnectionStates {
                 state.move_to_next_address();
                 self.connecting_nodes.insert(id);
                 return;
-            },
-            Some(state) => {
-                info!(
-                    "{prefix}Hostname for node {id} changed from {old_host} to {host}.",
-                    prefix = self.log_prefix,
-                    id = id,
-                    old_host = state.host,
-                    host = host
-                );
-                true
-            },
-            None => false,
-        };
+            }
+            // Hostname changed — log and fall through to replace the
+            // existing state with a freshly-constructed one.
+            info!(
+                "{prefix}Hostname for node {id} changed from {old_host} to {host}.",
+                prefix = self.log_prefix,
+                id = id,
+                old_host = state.host,
+                host = host
+            );
+        }
         // Create a new NodeConnectionState if nodeState does not already
         // contain one for the specified id, or if the hostname
         // associated with the node id changed.
-        let _ = host_changed; // Java: log only; replace below
         let new_state = NodeConnectionState::new(
             ConnectionState::Connecting,
             now,
@@ -454,6 +461,7 @@ impl ClusterConnectionStates {
 
 /// The state of our connection to a node. Mirrors the private inner
 /// class `ClusterConnectionStates.NodeConnectionState`.
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
 struct NodeConnectionState {
     host: String,
 
@@ -471,6 +479,7 @@ struct NodeConnectionState {
     last_attempted_address: Option<IpAddr>,
 }
 
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
 impl NodeConnectionState {
     fn new(
         state: ConnectionState,

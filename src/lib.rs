@@ -49,7 +49,6 @@ pub mod stale_metadata_error;
 pub use api_versions::ApiVersions;
 pub use client_request::ClientRequest;
 pub use client_response::ClientResponse;
-pub use cluster_connection_states::ClusterConnectionStates;
 pub use connection_state::ConnectionState;
 pub use kafka_client::KafkaClient;
 pub use least_loaded_node::LeastLoadedNode;

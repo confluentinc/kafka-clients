@@ -433,12 +433,18 @@ mod tests {
         for scope in [ListenerType::Broker, ListenerType::Controller] {
             // Mirror Java's `TestUtils.defaultApiVersionsResponse(scope)`
             // — Java's helper synthesises a default `ApiVersionsResponse`
-            // covering every api key in the listener scope at its current
-            // min/max version.
-            let mut version_list: Vec<ApiVersion> = ApiKeys::apis_for_listener(scope)
+            // via `filterApis`, which goes through
+            // `toApiVersionForApiResponse(enableUnstableLastVersion=true,
+            // listenerType)`. That helper drops keys with no valid
+            // version (`max < min`), so the fixture is filtered before
+            // the loop iterates. Mirror the filter here so the loop
+            // assertion below can be unconditional, matching Java.
+            let scoped_keys: Vec<&'static ApiKey> = ApiKeys::apis_for_listener(scope)
                 .into_iter()
-                .map(ApiVersionsResponse::to_api_version)
+                .filter(|k| k.has_valid_version())
                 .collect();
+            let mut version_list: Vec<ApiVersion> =
+                scoped_keys.iter().map(|k| ApiVersionsResponse::to_api_version(k)).collect();
             // Add an API key that we don't know about.
             version_list.push(ApiVersion {
                 api_key: 100,
@@ -447,14 +453,7 @@ mod tests {
                 unknown_tagged_fields: Vec::new(),
             });
             let versions = NodeApiVersions::new(version_list, Vec::new()).expect("constructor");
-            for api_key in ApiKeys::apis_for_listener(scope) {
-                if !api_key.has_valid_version() {
-                    // Java skips keys with no valid version (ApiVersionsResponse
-                    // omits them too); our helper-generated ApiVersion would
-                    // have min=0, max=-1 which ApiVersionsResponse.intersect
-                    // returns None for.
-                    continue;
-                }
+            for api_key in &scoped_keys {
                 assert_eq!(
                     versions.latest_usable_version(api_key).unwrap(),
                     api_key.latest_version(),

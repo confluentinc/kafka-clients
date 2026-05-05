@@ -588,3 +588,126 @@ so all three branches emit host-only strings, matching Java's
 `InetAddress.toString()` shape. Log format only — no protocol-level
 behavior change. Verified via the existing 842-test suite (all
 green) and the four gates (build / test / format-check / lint).
+
+---
+
+# Critic 0 — Phase 5c-1 (Round 1) — Done
+
+All 5 actionable Suggestion comments on commit `c66c3b3` resolved. Issue 6
+was self-withdrawn by the Critic in Round 1 (Java has the same triple
+HashMap lookup) and is archived here for completeness.
+
+## Issue 1: `ClusterConnectionStates` is `pub`, but Java is package-private
+
+- **File**: `src/cluster_connection_states.rs:65`
+- **Severity**: Suggestion
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/ClusterConnectionStates.java:39`
+- **Originating commit**: `c66c3b3`
+- **Disposition**: Fixed.
+
+`ClusterConnectionStates`, the four `RECONNECT_*` / `CONNECTION_SETUP_TIMEOUT_*`
+constants, and the inner `NodeConnectionState` are now `pub(crate)` (Java is
+package-private). The `pub use cluster_connection_states::ClusterConnectionStates`
+re-export from `lib.rs` was dropped — sister `InFlightRequests` is also
+`pub(crate)` with no re-export, so the conventions now match.
+`#[allow(dead_code)]` lint annotations track the same "Phase 5d NetworkClient
+is the first non-test caller" rationale that `InFlightRequests` already uses.
+
+## Issue 2: Hot-path identifier interning inconsistency between sibling classes
+
+- **File**: `src/api_versions.rs:83`, `:93`, `:100`, `src/metadata_updater.rs:57`,
+  `src/manual_metadata_updater.rs:74`
+- **Severity**: Suggestion (hot-path performance + API consistency)
+- **Java Reference**: `NetworkClient.java:1052`
+- **Originating commit**: `c66c3b3`
+- **Disposition**: Fixed.
+
+`ApiVersions::update / remove / get` now take `i32` instead of `&str`.
+`MetadataUpdater::handle_server_disconnect` and the `ManualMetadataUpdater`
+impl now take `i32`. The `ApiVersionsInner.node_api_versions` HashMap key
+flipped from `String` → `i32`. Test fixture in `api_versions_test` (Java
+`testFinalizedFeaturesUpdate`) updated from `"2"` / `"1"` literals to
+`2` / `1`. The `i32` flow is now unbroken end-to-end across all sibling
+classes — the producer hot path, when Phase 5d wires it up, will not pay
+a per-request `String` clone for connection-id keying. Documented inline
+on each method's rustdoc + on the `ApiVersionsInner.node_api_versions`
+field.
+
+## Issue 3: `testUsableVersionLatestVersions` silently skipped invalid api keys
+
+- **File**: `src/node_api_versions.rs:451-457`
+- **Severity**: Suggestion (test-fidelity)
+- **Java Reference**: `NodeApiVersionsTest.java:147-161`
+- **Originating commit**: `c66c3b3`
+- **Disposition**: Fixed.
+
+Removed the `if !api_key.has_valid_version() { continue; }` guard. To
+match Java's contract, the *fixture* now filters on `has_valid_version()`
+when synthesising the `version_list` (mirroring Java's
+`filterApis` / `toApiVersionForApiResponse` pipeline that
+`defaultApiVersionsResponse` runs through). The loop assertion is
+unconditional, identical to Java. If a future spec change introduces a
+listener-scoped key without a valid version, the assertion fires loudly
+— same signal Java's test gives.
+
+The Critic's hint "drop the `continue`" was the right diagnosis but the
+direct fix would have failed locally because `StreamsGroupHeartbeat`
+(id=88) is currently flagged unstable (`max=-1` with
+`enable_unstable_last_version=false`). Filtering the fixture instead
+preserves the no-skip loop contract while keeping the test green for
+the current spec — the equivalent change Java's `filterApis` makes.
+
+## Issue 4: `make_request` test fixture used `expect_response = true` while Java uses `false`
+
+- **File**: `src/in_flight_requests.rs:441-453`
+- **Severity**: Suggestion (test-fidelity)
+- **Java Reference**: `InFlightRequestsTest.java:122-125`
+- **Originating commit**: `c66c3b3`
+- **Disposition**: Fixed.
+
+Trivial flip: `true` → `false`. Inline comment now references the Java
+fixture (`expectResponse = false`, `isInternalRequest = false`) so a
+future Phase 5d test that copies this fixture as a starting point cannot
+silently inherit the wrong default. None of the existing translated
+tests assert on `expect_response`, so the change is observation-neutral
+today.
+
+## Issue 5: Dead `host_changed` variable in `ClusterConnectionStates::connecting`
+
+- **File**: `src/cluster_connection_states.rs:177-202`
+- **Severity**: Suggestion (code clarity)
+- **Java Reference**: `ClusterConnectionStates.java:147-165`
+- **Originating commit**: `c66c3b3`
+- **Disposition**: Fixed.
+
+Restructured `connecting()` to mirror Java's shape: an `if let Some(state)`
+guard with an inner same-host early-return (with `state.last_connect_attempt_ms`
+update + `move_to_next_address` + `connecting_nodes.insert`); on hostname
+change, log via `info!` and fall through to the unconditional
+"create new state" block. The previous `let host_changed = match { … } true;
+… let _ = host_changed;` dance is gone. Behaviour identical (verified by
+the existing 15 `cluster_connection_states` tests, all still green).
+
+## Issue 6: `is_connection_setup_timeout` HashMap lookups (self-withdrawn)
+
+- **File**: `src/cluster_connection_states.rs:435-441`
+- **Severity**: Suggestion (Performance) — Critic withdrew in Round 1
+- **Originating commit**: `c66c3b3`
+- **Disposition**: No action — Java has the same triple HashMap lookup
+  shape (`nodeState(id)` + `lastConnectAttemptMs(id)` +
+  `connectionSetupTimeoutMs(id)`, all of which dispatch through
+  `nodeState.get(id)`). Fidelity to Java's structure trumps the
+  micro-optimisation.
+
+## DoD sign-off
+
+- 886 lib tests passing (no delta — same fixture count, in_flight_requests
+  test still passes with the new `expect_response = false`, the other
+  fixes are visibility/typing/restructuring only).
+- `cargo build` clean.
+- `cargo xtask format-check` clean.
+- `cargo xtask lint` clean.
+- Fixup chain: a single `fixup! c66c3b3` commit covers all 5 issues —
+  they are tightly cohesive (visibility tightening + type alignment +
+  fixture fidelity + code clarity, all in the same connection-state
+  plumbing surface area).
