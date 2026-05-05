@@ -18,8 +18,11 @@
 //! transport: the `Send`/`Receive` traits, their plain-buffer
 //! implementations (`ByteBufferSend`, `NetworkSend`, `NetworkReceive`), the
 //! `TransferableChannel` trait, channel-state value types, and `ListenerName`.
-//! The TLS/PLAINTEXT transport layers, `KafkaChannel`, and `Selector` arrive
-//! in Phase 5b/5c.
+//!
+//! Phase 5b adds the concrete transport layers (`TransportLayer` trait,
+//! `PlaintextTransportLayer`, future `SslTransportLayer`) and
+//! `KafkaChannel`. The `Selector` and connection-state plumbing arrive in
+//! Phase 5c.
 
 pub mod byte_buffer_send;
 pub mod channel_metadata_registry;
@@ -31,10 +34,12 @@ pub mod invalid_receive_error;
 pub mod listener_name;
 pub mod network_receive;
 pub mod network_send;
+pub mod plaintext_transport_layer;
 pub mod receive;
 pub mod send;
 pub mod server_connection_id;
 pub mod transferable_channel;
+pub mod transport_layer;
 
 pub use byte_buffer_send::ByteBufferSend;
 pub use channel_metadata_registry::{ChannelMetadataRegistry, DefaultChannelMetadataRegistry};
@@ -46,7 +51,9 @@ pub use invalid_receive_error::InvalidReceiveError;
 pub use listener_name::ListenerName;
 pub use network_receive::NetworkReceive;
 pub use network_send::NetworkSend;
+pub use plaintext_transport_layer::PlaintextTransportLayer;
 pub use receive::Receive;
 pub use send::Send;
 pub use server_connection_id::ServerConnectionId;
 pub use transferable_channel::TransferableChannel;
+pub use transport_layer::TransportLayer;

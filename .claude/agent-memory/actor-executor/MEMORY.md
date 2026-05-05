@@ -24,4 +24,7 @@
 - [Phase 4b metadata stack](phase4b_metadata_stack.md) — single-mutex sync, retain-topic predicate via composition, await_update wall-clock deadline, KafkaError::StaleMetadata
 - [Phase 4b Round 2 patterns](phase4b_round2_patterns.md) — ArcSwap as `volatile Arc<T>`, listener-under-lock, "covered elsewhere" deferral trap, slice .len() vs iterator .count()
 - [Phase 4c client utils](phase4c_client_utils.md) — InetSocketAddress shim, sync HostResolver+spawn_blocking, file-level deferral rustdoc, ClientDnsLookup 2-variant truth
+- [Phase 5a network primitives](phase5a_network_primitives.md) — Send/Receive/TransferableChannel traits, ByteBufferSend zero-copy, Ok(0)≠EOF, AbstractRequestBuilder erasure
+- [Phase 5a review fixes](phase5a_review_fixes.md) — NetworkReceive `with_buffer` semantics + payload_pos field for zero-alloc fill; `try_with_timed_out` removal
+- [Phase 5b-1 transport layer](phase5b1_transport_layer.md) — TransportLayer trait + PlaintextTransportLayer + KafkaPrincipal; how SSL (5b-2) slots in
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
