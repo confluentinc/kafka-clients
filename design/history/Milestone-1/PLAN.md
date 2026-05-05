@@ -257,7 +257,7 @@ src/common/
 
 **Tokio-specific structure:**
 - `Selector` becomes a struct that owns a `tokio::sync::Mutex<HashMap<NodeId, KafkaChannel>>` and a per-channel send/recv loop spawned with `tokio::spawn`.
-- Each `KafkaChannel` holds a `tokio::net::TcpStream` (or `tokio_rustls::client::TlsStream<TcpStream>`).
+- Each `KafkaChannel` holds a `tokio::net::TcpStream`. SSL channels additionally hold a raw `rustls::ClientConnection` driven via `read_tls`/`write_tls` (mirroring Java's `SSLEngine.wrap`/`unwrap` decoupling). **Do NOT use `tokio_rustls::TlsStream`** — it couples crypto with TCP I/O on a single task and breaks the architectural mirror with Java's `SslTransportLayer`.
 - Wire reads use length-prefix framing (4-byte big-endian size header) — `tokio::io::AsyncReadExt::read_exact`.
 - Wire writes use vectored I/O (`writev_all` / `write_vectored`) so framing header + payload are not concatenated (CLAUDE.md rule 12).
 - **Cancellation safety (CLAUDE.md rule 9.6):** the read loop must NOT share a `tokio::select!` arm with state mutations. Pattern: dedicated read task per channel, write side holds an `mpsc::UnboundedSender<Send>`. Never hold a `MutexGuard` across `.await`.

@@ -27,4 +27,6 @@
 - [Phase 5a network primitives](phase5a_network_primitives.md) — Send/Receive/TransferableChannel traits, ByteBufferSend zero-copy, Ok(0)≠EOF, AbstractRequestBuilder erasure
 - [Phase 5a review fixes](phase5a_review_fixes.md) — NetworkReceive `with_buffer` semantics + payload_pos field for zero-alloc fill; `try_with_timed_out` removal
 - [Phase 5b-1 transport layer](phase5b1_transport_layer.md) — TransportLayer trait + PlaintextTransportLayer + KafkaPrincipal; how SSL (5b-2) slots in
+- [Phase 5b-2 SSL transport](phase5b2_ssl_transport.md) — rustls low-level state machine, Tokio↔rustls adapter, handshake test harness gotchas
+- [Tokio↔Java NIO read bridge](tokio_nio_read_bridge.md) — three-way `try_read` outcome translation; never collapse `WouldBlock` and `Ok(0)`/EOF
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it

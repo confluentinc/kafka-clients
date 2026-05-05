@@ -20,7 +20,7 @@
 //! `TransferableChannel` trait, channel-state value types, and `ListenerName`.
 //!
 //! Phase 5b adds the concrete transport layers (`TransportLayer` trait,
-//! `PlaintextTransportLayer`, future `SslTransportLayer`) and
+//! `PlaintextTransportLayer`, `SslTransportLayer`) and
 //! `KafkaChannel`. The `Selector` and connection-state plumbing arrive in
 //! Phase 5c.
 
@@ -38,6 +38,7 @@ pub mod plaintext_transport_layer;
 pub mod receive;
 pub mod send;
 pub mod server_connection_id;
+pub mod ssl_transport_layer;
 pub mod transferable_channel;
 pub mod transport_layer;
 
@@ -55,5 +56,6 @@ pub use plaintext_transport_layer::PlaintextTransportLayer;
 pub use receive::Receive;
 pub use send::Send;
 pub use server_connection_id::ServerConnectionId;
+pub use ssl_transport_layer::SslTransportLayer;
 pub use transferable_channel::TransferableChannel;
 pub use transport_layer::TransportLayer;
