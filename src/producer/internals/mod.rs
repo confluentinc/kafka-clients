@@ -16,7 +16,10 @@
 
 #![allow(dead_code)]
 
+pub(crate) mod buffer_pool;
 pub(crate) mod producer_metadata;
 
+#[allow(unused_imports)]
+pub(crate) use buffer_pool::BufferPool;
 #[allow(unused_imports)]
 pub(crate) use producer_metadata::ProducerMetadata;
