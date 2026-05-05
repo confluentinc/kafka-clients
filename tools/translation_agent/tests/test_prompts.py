@@ -46,6 +46,28 @@ def test_pr_description_template_substitutes_and_forbids_remote_writes():
     assert "Do NOT run `git push`" in p
 
 
+def test_pr_description_template_plan_phase_instructs_implementation_needed_marker():
+    """The plan-phase prompt must instruct claude to close the body
+    with the IMPLEMENTATION_NEEDED_MARKER. The orchestrator scans for
+    the marker verbatim, so the literal string baked into the
+    template must equal the constant."""
+    p = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(
+        phase="plan", pr_number=1, branch_name="b",
+        base_branch="m", ak_commit="ak",
+    )
+    assert prompts.IMPLEMENTATION_NEEDED_MARKER in p
+    assert prompts.IMPLEMENTATION_NEEDED_LABEL == "implementation-needed"
+    # Impl-phase rendering uses the same template; the explicit
+    # do-not-include guidance must mention the marker too.
+    p_impl = prompts.PR_DESCRIPTION_PROMPT_TEMPLATE.format(
+        phase="impl", pr_number=1, branch_name="b",
+        base_branch="m", ak_commit="ak",
+    )
+    assert "Do NOT include" in p_impl
+    assert prompts.IMPLEMENTATION_NEEDED_MARKER in p_impl  # in the
+    # do-not-include guidance, not as an instruction to emit it
+
+
 def test_plan_and_impl_prompts_forbid_git_push():
     """Push must always go through the orchestrator (Python), never from
     inside the R2 sandbox. The prompts must reflect that contract: they

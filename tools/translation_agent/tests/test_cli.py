@@ -646,6 +646,123 @@ def test_update_pr_description_propagates_gh_error(tmp_path, real_pr_description
     assert "not authorized" in err
 
 
+def test_update_pr_description_plan_phase_with_marker_applies_label(
+    tmp_path, real_pr_description,
+):
+    """When phase='plan' and the body claude wrote ends with the
+    IMPLEMENTATION_NEEDED_MARKER, the helper applies the
+    IMPLEMENTATION_NEEDED_LABEL via github.add_pr_label after a
+    successful update_pr_body."""
+    from translation_agent import prompts
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    body = (
+        "## Plan summary\n\nThe plan covers X.\n\n"
+        + prompts.IMPLEMENTATION_NEEDED_MARKER + "\n"
+    )
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text(body)
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body") as mupd, \
+         patch("translation_agent.cli.github.add_pr_label") as mlabel:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is None
+    mupd.assert_called_once_with(".", 42, body)
+    mlabel.assert_called_once_with(
+        ".", 42, prompts.IMPLEMENTATION_NEEDED_LABEL,
+    )
+
+
+def test_update_pr_description_plan_phase_without_marker_skips_label(
+    tmp_path, real_pr_description,
+):
+    """If claude omitted the marker (e.g. the prompt failed to produce
+    the trailer), no label is applied."""
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text("## Summary\n\nNo marker here.")
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body"), \
+         patch("translation_agent.cli.github.add_pr_label") as mlabel:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is None
+    mlabel.assert_not_called()
+
+
+def test_update_pr_description_impl_phase_does_not_apply_label_even_if_marker_present(
+    tmp_path, real_pr_description,
+):
+    """The label-add is scoped to phase='plan'. If an impl-phase body
+    happens to contain the marker (stale or copy-paste), don't apply
+    the label -- impl is no longer 'needed'."""
+    from translation_agent import prompts
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text(
+            "## Impl summary\n\n" + prompts.IMPLEMENTATION_NEEDED_MARKER,
+        )
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body"), \
+         patch("translation_agent.cli.github.add_pr_label") as mlabel:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "impl", wt,
+        )
+    assert err is None
+    mlabel.assert_not_called()
+
+
+def test_update_pr_description_label_failure_logged_not_returned(
+    tmp_path, real_pr_description, caplog,
+):
+    """A label-add failure is cosmetic: warn and continue, do NOT
+    surface it as an error to the caller (the description was
+    successfully published)."""
+    import logging
+    from translation_agent import github as gh, prompts
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text(
+            "body\n" + prompts.IMPLEMENTATION_NEEDED_MARKER,
+        )
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body"), \
+         patch("translation_agent.cli.github.add_pr_label",
+               side_effect=gh.GhError("label not found")):
+        with caplog.at_level(logging.WARNING, logger="translation_agent.cli"):
+            err = cli._update_pr_description_via_r2(
+                _desc_args(), _desc_row(), "plan", wt,
+            )
+    assert err is None
+    assert any(
+        "implementation-needed" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
+
+
 # --- approval prepend in _run_pr_mode --------------------------------------
 
 def test_plan_approve_prepends_approval_marker_before_impl(tmp_path, real_pr_description):

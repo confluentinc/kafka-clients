@@ -722,6 +722,27 @@ def _update_pr_description_via_r2(
     except github.GhError as e:
         return f"gh pr edit failed: {e}"
     log.info("PR #%d: updated description (%s phase)", pr_number, phase)
+    # Plan-phase post-publish: if claude closed the body with the
+    # configured marker, apply the implementation-needed label so
+    # operators can filter the PR queue. Cosmetic -- a labeling
+    # failure (e.g. the label hasn't been created on the repo yet)
+    # is logged as a warning and does not roll back the description
+    # update.
+    if phase == "plan" and prompts.IMPLEMENTATION_NEEDED_MARKER in body:
+        try:
+            github.add_pr_label(
+                args.rust_repo_path, pr_number,
+                prompts.IMPLEMENTATION_NEEDED_LABEL,
+            )
+            log.info(
+                "PR #%d: labeled %r",
+                pr_number, prompts.IMPLEMENTATION_NEEDED_LABEL,
+            )
+        except github.GhError as e:
+            log.warning(
+                "PR #%d: failed to add %r label: %s",
+                pr_number, prompts.IMPLEMENTATION_NEEDED_LABEL, e,
+            )
     return None
 
 
