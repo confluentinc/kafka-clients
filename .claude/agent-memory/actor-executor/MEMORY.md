@@ -34,4 +34,5 @@
 - [Phase 5c-1 connection state](phase5c1_connection_state.md) — i32 connection ids end-to-end, async-poll Selectable, Arc<NodeApiVersions> for the cache, SupportedVersionRange new module
 - [Tokio↔Java NIO read bridge](tokio_nio_read_bridge.md) — three-way `try_read` outcome translation; never collapse `WouldBlock` and `Ok(0)`/EOF
 - [Phase 5c-1 review fixes](phase5c1_review_fixes.md) — Java test-fixture parity, end-to-end i32 sibling consistency, pub(crate) + dead_code allow lint annotation pattern
+- [Phase 5c-2 Selector](phase5c2_selector.md) — single-task design + connect-task pattern + IdleExpiryManager LRU + EchoServer test harness
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
