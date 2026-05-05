@@ -763,6 +763,111 @@ def test_update_pr_description_label_failure_logged_not_returned(
     )
 
 
+def test_update_pr_description_plan_phase_with_no_op_marker_skips_label_and_removes_existing(
+    tmp_path, real_pr_description,
+):
+    """When the plan-phase body claude wrote contains the
+    NO_IMPLEMENTATION_NEEDED_MARKER, the helper must NOT call
+    add_pr_label, and must call remove_pr_label so any
+    implementation-needed label set by a previous body is cleared
+    on re-plan."""
+    from translation_agent import prompts
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    body = (
+        "## Plan summary\n\nNo Rust changes needed.\n\n"
+        + prompts.NO_IMPLEMENTATION_NEEDED_MARKER + "\n"
+    )
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text(body)
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body") as mupd, \
+         patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrm:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is None
+    mupd.assert_called_once_with(".", 42, body)
+    madd.assert_not_called()
+    mrm.assert_called_once_with(
+        ".", 42, prompts.LABEL_IMPLEMENTATION_NEEDED,
+    )
+
+
+def test_update_pr_description_plan_phase_with_both_markers_treats_as_no_op(
+    tmp_path, real_pr_description,
+):
+    """Defensive: if claude somehow emits both markers, the no-op
+    branch wins. Triggering an implementation run on a body whose
+    author hedged is the worse failure mode."""
+    from translation_agent import prompts
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    body = (
+        "## Plan summary\n\nMixed signals.\n\n"
+        + prompts.IMPLEMENTATION_NEEDED_MARKER + "\n\n"
+        + prompts.NO_IMPLEMENTATION_NEEDED_MARKER + "\n"
+    )
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text(body)
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body"), \
+         patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrm:
+        err = cli._update_pr_description_via_r2(
+            _desc_args(), _desc_row(), "plan", wt,
+        )
+    assert err is None
+    madd.assert_not_called()
+    mrm.assert_called_once_with(
+        ".", 42, prompts.LABEL_IMPLEMENTATION_NEEDED,
+    )
+
+
+def test_update_pr_description_plan_phase_no_op_remove_label_failure_logged_not_returned(
+    tmp_path, real_pr_description, caplog,
+):
+    """Mirror of the add-label cosmetic-failure test for the no-op
+    branch: a remove_pr_label failure must be logged at WARNING and
+    must NOT be returned to the caller."""
+    import logging
+    from translation_agent import github as gh, prompts
+    wt = tmp_path / "wt"
+    wt.mkdir()
+
+    def fake_streaming(cmd, pr_number, cwd):
+        Path(cwd, "pr_body.md").write_text(
+            "body\n" + prompts.NO_IMPLEMENTATION_NEEDED_MARKER,
+        )
+        return 0, ""
+
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=fake_streaming), \
+         patch("translation_agent.cli.github.update_pr_body"), \
+         patch("translation_agent.cli.github.remove_pr_label",
+               side_effect=gh.GhError("label not found")):
+        with caplog.at_level(logging.WARNING, logger="translation_agent.cli"):
+            err = cli._update_pr_description_via_r2(
+                _desc_args(), _desc_row(), "plan", wt,
+            )
+    assert err is None
+    assert any(
+        "implementation-needed" in r.message and r.levelno == logging.WARNING
+        for r in caplog.records
+    )
+
+
 # --- approval prepend in _run_pr_mode --------------------------------------
 
 def test_plan_approve_prepends_approval_marker_before_impl(tmp_path, real_pr_description):

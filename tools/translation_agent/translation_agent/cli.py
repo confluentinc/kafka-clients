@@ -867,27 +867,50 @@ def _update_pr_description_via_r2(
     except github.GhError as e:
         return f"gh pr edit failed: {e}"
     log.info("PR #%d: updated description (%s phase)", pr_number, phase)
-    # Plan-phase post-publish: if claude closed the body with the
-    # configured marker, apply the implementation-needed label so
-    # operators can filter the PR queue. Cosmetic -- a labeling
-    # failure (e.g. the label hasn't been created on the repo yet)
-    # is logged as a warning and does not roll back the description
-    # update.
-    if phase == "plan" and prompts.IMPLEMENTATION_NEEDED_MARKER in body:
-        try:
-            github.add_pr_label(
-                args.rust_repo_path, pr_number,
-                prompts.LABEL_IMPLEMENTATION_NEEDED,
-            )
+    # Plan-phase post-publish: choose the label action based on which
+    # of the two canonical markers claude emitted in the body.
+    #   - NO_IMPLEMENTATION_NEEDED_MARKER (no-op plan): skip the
+    #     implementation-needed label and proactively remove it (in case
+    #     a previous body had set it on a re-plan). PR stays at
+    #     STATUS_PLAN_CREATED for human review.
+    #   - IMPLEMENTATION_NEEDED_MARKER: apply the label as before.
+    #   - Neither: leave the label state untouched (matches the existing
+    #     "claude omitted the marker" branch).
+    # If both markers somehow appear, the no-op branch wins -- safer
+    # default than triggering an unwanted implementation run. Label
+    # failures are cosmetic; warn and continue rather than rolling back
+    # the description update.
+    if phase == "plan":
+        if prompts.NO_IMPLEMENTATION_NEEDED_MARKER in body:
             log.info(
-                "PR #%d: labeled %r",
+                "PR #%d: plan declared no-op; skipping %r label",
                 pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED,
             )
-        except github.GhError as e:
-            log.warning(
-                "PR #%d: failed to add %r label: %s",
-                pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED, e,
-            )
+            try:
+                github.remove_pr_label(
+                    args.rust_repo_path, pr_number,
+                    prompts.LABEL_IMPLEMENTATION_NEEDED,
+                )
+            except github.GhError as e:
+                log.warning(
+                    "PR #%d: failed to remove %r label: %s",
+                    pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED, e,
+                )
+        elif prompts.IMPLEMENTATION_NEEDED_MARKER in body:
+            try:
+                github.add_pr_label(
+                    args.rust_repo_path, pr_number,
+                    prompts.LABEL_IMPLEMENTATION_NEEDED,
+                )
+                log.info(
+                    "PR #%d: labeled %r",
+                    pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED,
+                )
+            except github.GhError as e:
+                log.warning(
+                    "PR #%d: failed to add %r label: %s",
+                    pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED, e,
+                )
     return None
 
 
