@@ -807,6 +807,7 @@ where
                     );
                     let header = client_request.make_header(builder.latest_allowed_version());
                     let label = client_request.destination_arc();
+                    let api_key_id = client_request.api_key().id;
                     let response = ClientResponse::new(
                         header,
                         client_request.callback().cloned(),
@@ -814,13 +815,23 @@ where
                         client_request.created_time_ms(),
                         now,
                         false,
-                        Some(e),
+                        Some(e.clone()),
                         None,
                         None,
                     );
                     if !is_internal_request {
                         self.aborted_sends.push(response);
+                    } else if api_key_id == ApiKeys::for_id(3).expect("METADATA").id {
+                        // Java's `doSend` UnsupportedVersion path forwards
+                        // the failure to the metadata updater so an
+                        // in-progress fetch is retired and backoff
+                        // advances; mirrors `cancel_in_flight_requests`
+                        // for the disconnect case (see line 326).
+                        self.metadata_updater.handle_failed_request(now, Some(e));
                     }
+                    // Telemetry api keys
+                    // (`GET_TELEMETRY_SUBSCRIPTIONS=71`,
+                    // `PUSH_TELEMETRY=72`) — skipped per Phase 5d scope.
                     return Ok(());
                 },
                 Err(other) => return Err(other),
@@ -831,6 +842,7 @@ where
             Err(e @ KafkaError::UnsupportedVersion(_)) => {
                 let header = client_request.make_header(builder.latest_allowed_version());
                 let label = client_request.destination_arc();
+                let api_key_id = client_request.api_key().id;
                 let response = ClientResponse::new(
                     header,
                     client_request.callback().cloned(),
@@ -838,12 +850,16 @@ where
                     client_request.created_time_ms(),
                     now,
                     false,
-                    Some(e),
+                    Some(e.clone()),
                     None,
                     None,
                 );
                 if !is_internal_request {
                     self.aborted_sends.push(response);
+                } else if api_key_id == ApiKeys::for_id(3).expect("METADATA").id {
+                    // See sibling-arm comment above — same Java contract
+                    // for the `builder.build(version)` failure path.
+                    self.metadata_updater.handle_failed_request(now, Some(e));
                 }
                 return Ok(());
             },
@@ -1290,8 +1306,15 @@ mod tests {
             s.disconnected.clear();
             s.connected.clear();
         }
-        /// Reset everything including `ready`. Mirrors
-        /// `MockSelector.reset()` (only used by test setup).
+        /// Reset everything including `ready`.
+        ///
+        /// Diverges from Java's `MockSelector.reset()` (which clears
+        /// `clear()` + `initiatedSends` + `delayedReceives` only — it
+        /// does **not** touch the `ready` set). The Rust translation
+        /// also clears `ready` for symmetry with the explicit `clear`
+        /// semantic; if a future test relies on Java semantics it must
+        /// call `clear()` followed by manual init-sends / delayed-
+        /// receives clears instead.
         #[allow(dead_code)]
         fn reset(&self) {
             self.clear();
@@ -1799,10 +1822,18 @@ mod tests {
     }
 
     /// Java: `testCallDisconnect` — `client.disconnect(...)` flips the
-    /// connection state and forbids further sends until the backoff
-    /// expires.
+    /// connection state, forbids further sends until the backoff
+    /// expires, and a re-disconnect on an already-disconnected node
+    /// must not reset the backoff window.
     #[tokio::test]
     async fn disconnect_marks_node_failed_and_respects_backoff() {
+        // The `create_client` fixture configures the backoff range as
+        // `[10_000, 100_000]` ms (matching Java's `reconnectBackoffMsTest`
+        // / `reconnectBackoffMaxMsTest`). The first disconnect therefore
+        // produces a backoff of `~10_000` ms ± 20% jitter; sleeping past
+        // `reconnect_backoff_max_ms_test` is sufficient to clear any
+        // value the backoff curve could ever produce.
+        let reconnect_backoff_max_ms_test: i64 = 100_000;
         let time = Arc::new(MockTime::default());
         let selector = MockSelector::new(Arc::clone(&time));
         let view = MockSelectorView::new(selector.clone());
@@ -1815,9 +1846,31 @@ mod tests {
             client.poll(0, time.milliseconds()).await;
         }
         assert!(client.is_ready(&node, time.milliseconds()));
+        assert!(!client.connection_failed(&node), "did not expect connection to be failed");
+
         client.disconnect(node.id());
         assert!(!client.is_ready(&node, time.milliseconds()));
         assert!(client.connection_failed(&node));
+        // Backoff is in effect immediately after `disconnect`.
+        assert!(
+            !client.can_connect(&node, time.milliseconds()),
+            "expected can_connect=false during reconnect-backoff window"
+        );
+
+        // Sleep past the maximum reconnect backoff; we can connect again.
+        time.sleep(reconnect_backoff_max_ms_test);
+        assert!(
+            client.can_connect(&node, time.milliseconds()),
+            "expected can_connect=true after reconnect-backoff window expires"
+        );
+
+        // A re-disconnect on an already-disconnected node must NOT reset
+        // the backoff window.
+        client.disconnect(node.id());
+        assert!(
+            client.can_connect(&node, time.milliseconds()),
+            "re-disconnect on an already-disconnected node must not reset reconnect-backoff"
+        );
     }
 
     /// Java does not have a direct equivalent — Rust-specific check.
@@ -1848,6 +1901,395 @@ mod tests {
         let mut serialized = AbstractRequest::serialize(request.as_ref()).expect("serialize");
         let parsed = ApiVersionsRequest::parse(&mut serialized, 3).expect("parse");
         assert_eq!(parsed.request_data().client_software_name, "apache-kafka-java");
+    }
+
+    /// A [`MetadataUpdater`] that defers to [`ManualMetadataUpdater`] for
+    /// `fetch_nodes` / `is_update_due` / `maybe_update`, and records every
+    /// `handle_failed_request` call so assertions can verify the
+    /// `do_send` UnsupportedVersion path forwarded the failure.
+    ///
+    /// Mirrors the role of Java's mock `MetadataUpdater` used by
+    /// `testUnsupportedVersionDuringInternalMetadataRequest` (the test
+    /// scenario the original Phase 5d translation skipped).
+    struct RecordingMetadataUpdater {
+        inner: ManualMetadataUpdater,
+        failed_request_calls: Arc<Mutex<Vec<Option<KafkaError>>>>,
+    }
+
+    impl RecordingMetadataUpdater {
+        fn new(nodes: Vec<Node>) -> (Self, Arc<Mutex<Vec<Option<KafkaError>>>>) {
+            let calls = Arc::new(Mutex::new(Vec::new()));
+            let updater = RecordingMetadataUpdater {
+                inner: ManualMetadataUpdater::with_nodes(nodes),
+                failed_request_calls: Arc::clone(&calls),
+            };
+            (updater, calls)
+        }
+    }
+
+    impl MetadataUpdater for RecordingMetadataUpdater {
+        fn fetch_nodes(&self) -> Vec<Node> {
+            self.inner.fetch_nodes()
+        }
+        fn is_update_due(&self, now: i64) -> bool {
+            self.inner.is_update_due(now)
+        }
+        fn maybe_update(&mut self, now: i64) -> i64 {
+            self.inner.maybe_update(now)
+        }
+        fn handle_server_disconnect(&mut self, now: i64, node_id: i32, maybe_auth_error: Option<KafkaError>) {
+            self.inner.handle_server_disconnect(now, node_id, maybe_auth_error);
+        }
+        fn handle_failed_request(&mut self, _now: i64, maybe_fatal_error: Option<KafkaError>) {
+            self.failed_request_calls.lock().unwrap().push(maybe_fatal_error);
+        }
+        fn handle_successful_response(
+            &mut self,
+            request_header: &crate::common::requests::RequestHeader,
+            now: i64,
+            metadata_response: crate::common::requests::MetadataResponse,
+        ) {
+            self.inner.handle_successful_response(request_header, now, metadata_response);
+        }
+        fn close(&mut self) {
+            self.inner.close();
+        }
+    }
+
+    /// Java: regression for `NetworkClient.doSend` UnsupportedVersion +
+    /// internal METADATA path. Mirrors the corresponding `else if
+    /// (apiKey == ApiKeys.METADATA)` branch of `doSend` (line 594 in
+    /// `NetworkClient.java`): the metadata-updater's
+    /// `handleFailedRequest` callback must fire so an in-progress fetch
+    /// is retired.
+    ///
+    /// The Phase 5d translation initially dropped this callback (the
+    /// `is_internal_request=true` arm only handled `aborted_sends`); a
+    /// `DefaultMetadataUpdater` (Phase 6+) would have stuck waiting for
+    /// a response that will never arrive.
+    #[tokio::test]
+    async fn do_send_unsupported_version_internal_metadata_fires_failed_request() {
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        let node = test_node();
+        let (updater, recorded) = RecordingMetadataUpdater::new(vec![node.clone()]);
+
+        let mut client = NetworkClient::new(
+            view,
+            updater,
+            Arc::from("mock-client"),
+            i32::MAX,
+            10_000,
+            100_000,
+            64 * 1024,
+            64 * 1024,
+            1_000,
+            5_000,
+            127_000,
+            Arc::clone(&time) as Arc<dyn crate::common::utils::Time>,
+            /* discover= */ false,
+            ApiVersions::new(),
+            Box::new(DefaultHostResolver),
+            i64::MAX,
+            MetadataRecoveryStrategy::None,
+        )
+        .expect("NetworkClient::new");
+
+        // Drive the connect → READY.
+        for _ in 0..3 {
+            if client.ready(&node, time.milliseconds()) {
+                break;
+            }
+            client.poll(0, time.milliseconds()).await;
+        }
+        assert!(client.is_ready(&node, time.milliseconds()));
+
+        // Pin the broker's METADATA range to v20..v20 (an island far
+        // above what `MetadataRequestBuilder::all_topics()` allows). The
+        // intersection with `[oldest_allowed, latest_allowed]` is empty
+        // → `latest_usable_version_in_range` returns `UnsupportedVersion`.
+        let metadata_api_id = ApiKeys::for_id(3).expect("METADATA").id;
+        let high_version_only = NodeApiVersions::create_single(metadata_api_id, 20, 20).expect("single api version");
+        client.api_versions.update(node.id(), Arc::new(high_version_only));
+
+        let builder: Arc<dyn AbstractRequestBuilder> = Arc::new(MetadataRequestBuilder::all_topics());
+        let req = client.new_client_request_with_callback_internal(
+            Arc::from(node.id().to_string()),
+            builder,
+            time.milliseconds(),
+            true,
+            5_000,
+            None,
+        );
+        // Send as `is_internal_request=true` to exercise the METADATA arm.
+        let now = time.milliseconds();
+        client
+            .do_send(req, true, now)
+            .expect("do_send returns Ok even on UnsupportedVersion");
+
+        // The METADATA UnsupportedVersion arm must:
+        //   1. NOT push to `aborted_sends` (those are only for non-internal).
+        //   2. Fire `metadata_updater.handle_failed_request` with `Some(err)`.
+        assert!(
+            client.aborted_sends.is_empty(),
+            "aborted_sends must be untouched for internal requests"
+        );
+        let calls = recorded.lock().unwrap();
+        assert_eq!(calls.len(), 1, "expected exactly one handle_failed_request call");
+        assert!(
+            matches!(&calls[0], Some(KafkaError::UnsupportedVersion(_))),
+            "expected an UnsupportedVersion error, got {:?}",
+            calls[0]
+        );
+    }
+
+    /// Java: `testDisconnectWithMultipleInFlights`. Verifies that
+    /// `cancel_in_flight_requests` (driven by `disconnect`) fans the
+    /// disconnect out to every in-flight request on the affected node,
+    /// preserves their FIFO order, and flags each response with
+    /// `was_disconnected=true`.
+    #[tokio::test]
+    async fn disconnect_with_multiple_in_flights_fans_out_in_order() {
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        let node = test_node();
+        let mut client = create_client(Arc::clone(&time), view, vec![node.clone()], /* discover= */ false);
+        for _ in 0..3 {
+            if client.ready(&node, time.milliseconds()) {
+                break;
+            }
+            client.poll(0, time.milliseconds()).await;
+        }
+        assert!(client.is_ready(&node, time.milliseconds()));
+
+        // Send three (distinct correlation ids) MetadataRequests on the
+        // same connection. Use `expect_response=true` so each request
+        // is added to the in-flight deque.
+        let now = time.milliseconds();
+        let mut correlation_ids: Vec<i32> = Vec::new();
+        for _ in 0..3 {
+            let builder: Arc<dyn AbstractRequestBuilder> = Arc::new(MetadataRequestBuilder::all_topics());
+            let req = client.new_client_request_with_callback_internal(
+                Arc::from(node.id().to_string()),
+                builder,
+                now,
+                true,
+                10_000,
+                None,
+            );
+            correlation_ids.push(req.correlation_id());
+            client.send(req, now);
+        }
+        // Distinct correlation ids.
+        assert_eq!(correlation_ids.len(), 3);
+        let mut sorted = correlation_ids.clone();
+        sorted.sort_unstable();
+        sorted.dedup();
+        assert_eq!(sorted.len(), 3, "correlation ids must be distinct");
+
+        assert_eq!(client.in_flight_request_count(), 3);
+        assert_eq!(client.in_flight_request_count_for(node.id()), 3);
+
+        client.disconnect(node.id());
+
+        let responses = client.poll(0, time.milliseconds()).await;
+        assert_eq!(responses.len(), 3, "all 3 in-flight requests must surface");
+        assert_eq!(client.in_flight_request_count(), 0);
+        assert_eq!(client.in_flight_request_count_for(node.id()), 0);
+
+        // Returned in FIFO order (Java's `clearAll` drains the deque
+        // head-first).
+        for (i, resp) in responses.iter().enumerate() {
+            assert_eq!(
+                resp.request_header().correlation_id(),
+                correlation_ids[i],
+                "response[{}] correlation should match request[{}]",
+                i,
+                i,
+            );
+            assert!(resp.was_disconnected(), "response[{}] must be flagged disconnected", i);
+        }
+    }
+
+    /// Java: `testUnsupportedApiVersionsRequestWithVersionProvidedByTheBroker`.
+    /// Exercises the KIP-511 fallback: the broker rejects the latest
+    /// ApiVersions request with `UNSUPPORTED_VERSION` and returns its
+    /// own supported `[min, max]` range; the client must downgrade
+    /// (re-queue an `ApiVersionsRequestBuilder::with_version(broker_max)`)
+    /// and re-send.
+    #[tokio::test]
+    async fn unsupported_api_versions_request_with_broker_version_falls_back_and_resends() {
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        let node = test_node();
+        let mut client = create_client(Arc::clone(&time), view, vec![node.clone()], /* discover= */ true);
+
+        // Initial connect → first ApiVersions request goes out at
+        // correlation id 0 (the latest version supported by the client).
+        client.ready(&node, time.milliseconds());
+        client.poll(0, time.milliseconds()).await;
+        assert!(client.has_in_flight_requests_for(node.id()));
+
+        // Build an ApiVersionsResponse that reports UNSUPPORTED_VERSION
+        // and advertises `api_key=18, min=0, max=2` — KIP-511 form.
+        let broker_supported_max: i16 = 2;
+        let kip511_response =
+            ApiVersionsResponse::new(crate::common::message::api_versions_response_data::ApiVersionsResponseData {
+                error_code: crate::common::protocol::Errors::UnsupportedVersion.code(),
+                api_keys: vec![crate::common::message::api_versions_response_data::ApiVersion {
+                    api_key: 18,
+                    min_version: 0,
+                    max_version: broker_supported_max,
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                throttle_time_ms: 0,
+                supported_features: Vec::new(),
+                finalized_features_epoch: -1,
+                finalized_features: Vec::new(),
+                zk_migration_ready: false,
+                unknown_tagged_fields: Vec::new(),
+            });
+        // The first ApiVersionsRequest was sent at version
+        // `ApiKeys.API_VERSIONS.latestVersion()` — Java's parse path
+        // honours this `apiVersion` for the response header. We use 0 as
+        // the response correlation id (matching the first id
+        // `next_correlation_id` returns).
+        let api_version_for_response =
+            ApiVersionsResponse::to_api_version(crate::common::protocol::ApiKeys::for_id(18).expect("API_VERSIONS"))
+                .max_version;
+        let bytes = serialize_response_with_header(&kip511_response, api_version_for_response, 0);
+        let mut buf = BytesMut::with_capacity(bytes.len());
+        buf.extend_from_slice(&bytes);
+        selector.delayed_receive(node.id(), NetworkReceive::with_buffer(node.id().to_string(), buf));
+
+        // Drive a poll: the response is consumed, the connection MUST
+        // remain open (no close). Within the same poll, the client
+        // schedules and dispatches the KIP-511 fallback
+        // ApiVersionsRequest at v2 — `handle_initiate_api_version_requests`
+        // runs after `handle_completed_receives`, so the in-flight
+        // request is replaced rather than left in `nodes_needing_*`.
+        client.poll(0, time.milliseconds()).await;
+        assert!(
+            !client.connection_failed(&node),
+            "KIP-511 fallback must NOT close the connection (only mismatching error codes do)",
+        );
+        // The previous in-flight ApiVersionsRequest has cleared (response
+        // surfaced), and a fresh fallback is in-flight at the broker's
+        // max_version.
+        assert!(
+            client.has_in_flight_requests_for(node.id()),
+            "KIP-511 fallback ApiVersionsRequest should be queued in-flight after the same poll",
+        );
+        // The in-flight buffer is now the v2 fallback. Inspect it via the
+        // package-private accessor to confirm.
+        let last_in_flight = client.in_flight_requests.last_sent(node.id());
+        assert_eq!(
+            last_in_flight.header.api_key().expect("known").id,
+            18,
+            "fallback in-flight must be an ApiVersionsRequest",
+        );
+        assert_eq!(
+            last_in_flight.header.api_version(),
+            broker_supported_max,
+            "fallback in-flight must be pinned to broker's max_version (KIP-511)",
+        );
+    }
+
+    /// Java: `testLeastLoadedNode` — among `can_send_request` nodes, the
+    /// node with 0 in-flight requests must win over a node with non-zero
+    /// in-flight, regardless of ordering. Exercises the
+    /// `curr_inflight == 0` fast-path return and the `flag` field.
+    #[tokio::test]
+    async fn least_loaded_node_prefers_zero_in_flight() {
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        // Both nodes resolve to `localhost` so the real
+        // `DefaultHostResolver` (used inside `MockSelectorView::connect`)
+        // succeeds; the i32 ids keep the two nodes distinct end-to-end.
+        let node_a = Node::new(0, "localhost".to_owned(), 9092);
+        let node_b = Node::new(1, "localhost".to_owned(), 9093);
+        let mut client = create_client(
+            Arc::clone(&time),
+            view,
+            vec![node_a.clone(), node_b.clone()],
+            /* discover= */ false,
+        );
+        // Make both nodes READY.
+        for _ in 0..3 {
+            let ready_a = client.ready(&node_a, time.milliseconds());
+            let ready_b = client.ready(&node_b, time.milliseconds());
+            if ready_a && ready_b {
+                break;
+            }
+            client.poll(0, time.milliseconds()).await;
+        }
+        assert!(client.is_ready(&node_a, time.milliseconds()));
+        assert!(client.is_ready(&node_b, time.milliseconds()));
+
+        // Send one request to node_a so its in-flight count is 1, leaving
+        // node_b at 0. `least_loaded_node` must return node_b (the
+        // 0-in-flight winner) regardless of the random offset.
+        let builder: Arc<dyn AbstractRequestBuilder> = Arc::new(MetadataRequestBuilder::all_topics());
+        let req = client.new_client_request_with_callback_internal(
+            Arc::from(node_a.id().to_string()),
+            builder,
+            time.milliseconds(),
+            true,
+            5_000,
+            None,
+        );
+        client.send(req, time.milliseconds());
+        assert_eq!(client.in_flight_request_count_for(node_a.id()), 1);
+        assert_eq!(client.in_flight_request_count_for(node_b.id()), 0);
+
+        // Loop several times to defeat the random offset chosen by
+        // `least_loaded_node`: node_b must always win because of the
+        // zero-in-flight fast path.
+        for _ in 0..16 {
+            let lln = client.least_loaded_node(time.milliseconds());
+            assert!(lln.has_node_available_or_connection_ready());
+            let chosen = lln.node().expect("least loaded node should exist");
+            assert_eq!(
+                chosen.id(),
+                node_b.id(),
+                "node with 0 in-flight must always win over a node with 1 in-flight"
+            );
+        }
+    }
+
+    /// Java: `testLeastLoadedNode` (close path) — when every node is
+    /// disconnected and all are still in their reconnect-backoff
+    /// window, `least_loaded_node` returns `None` and
+    /// `has_node_available_or_connection_ready` is `false`.
+    #[tokio::test]
+    async fn least_loaded_node_returns_none_when_all_in_backoff() {
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        let node = test_node();
+        let mut client = create_client(Arc::clone(&time), view, vec![node.clone()], /* discover= */ false);
+        // Connect, ready, then disconnect — `can_connect` is false until
+        // the backoff window passes.
+        for _ in 0..3 {
+            if client.ready(&node, time.milliseconds()) {
+                break;
+            }
+            client.poll(0, time.milliseconds()).await;
+        }
+        assert!(client.is_ready(&node, time.milliseconds()));
+        client.disconnect(node.id());
+        assert!(!client.can_connect(&node, time.milliseconds()), "backoff must be in effect");
+
+        let lln = client.least_loaded_node(time.milliseconds());
+        assert!(lln.node().is_none(), "no node should be selectable while all are in backoff");
+        assert!(
+            !lln.has_node_available_or_connection_ready(),
+            "no node ready and no connection in progress"
+        );
     }
 }
 

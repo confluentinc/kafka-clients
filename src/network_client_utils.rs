@@ -257,4 +257,285 @@ mod tests {
         let mut client = AlwaysReadyClient { connection_failed: false, delay: 0 };
         assert!(await_ready(&mut client, &node, &time, 100).await.unwrap());
     }
+
+    // ---- send_and_receive integration tests --------------------------------
+    //
+    // Java has no dedicated `NetworkClientUtilsTest` (the helpers are
+    // covered as a side effect of `NetworkClientTest`'s flow tests). We
+    // pin each of the four exit paths of `sendAndReceive` here with a
+    // `Vec<ClientResponse>`-queue mock client: the mock is enough to
+    // exercise the four error-translation arms without spinning up a
+    // real `Selector`.
+
+    use std::collections::VecDeque;
+
+    use super::send_and_receive;
+    use crate::ClientResponse;
+    use crate::common::protocol::ApiKeys;
+    use crate::common::requests::{
+        AbstractRequestBuilder, ApiVersionsRequestBuilder, MetadataResponse, RequestHeader, ResponseHeader,
+    };
+
+    /// A `KafkaClient` whose `poll` drains a pre-loaded queue of
+    /// `Vec<ClientResponse>` slices. Tracks `active` so we can simulate
+    /// `initiate_close()` mid-call.
+    struct MockKafkaClient {
+        responses: VecDeque<Vec<ClientResponse>>,
+        active: bool,
+        sent: Vec<i32>, // recorded correlation ids
+    }
+
+    impl MockKafkaClient {
+        fn new(responses: Vec<Vec<ClientResponse>>) -> Self {
+            MockKafkaClient { responses: VecDeque::from(responses), active: true, sent: Vec::new() }
+        }
+    }
+
+    impl KafkaClient for MockKafkaClient {
+        fn is_ready(&self, _: &Node, _: i64) -> bool {
+            true
+        }
+        fn ready(&mut self, _: &Node, _: i64) -> bool {
+            true
+        }
+        fn connection_delay(&self, _: &Node, _: i64) -> i64 {
+            0
+        }
+        fn poll_delay_ms(&self, _: &Node, _: i64) -> i64 {
+            0
+        }
+        fn connection_failed(&self, _: &Node) -> bool {
+            false
+        }
+        fn authentication_error(&self, _: &Node) -> Option<KafkaError> {
+            None
+        }
+        fn send(&mut self, request: ClientRequest, _: i64) {
+            self.sent.push(request.correlation_id());
+        }
+        async fn poll(&mut self, _: i64, _: i64) -> Vec<ClientResponse> {
+            self.responses.pop_front().unwrap_or_default()
+        }
+        fn disconnect(&mut self, _: i32) {}
+        fn close_connection(&mut self, _: i32) {}
+        fn least_loaded_node(&mut self, _: i64) -> crate::LeastLoadedNode {
+            crate::LeastLoadedNode::new(None, false)
+        }
+        fn in_flight_request_count(&self) -> i32 {
+            0
+        }
+        fn has_in_flight_requests(&self) -> bool {
+            false
+        }
+        fn in_flight_request_count_for(&self, _: i32) -> i32 {
+            0
+        }
+        fn has_in_flight_requests_for(&self, _: i32) -> bool {
+            false
+        }
+        fn has_ready_nodes(&self, _: i64) -> bool {
+            true
+        }
+        fn wakeup(&self) {}
+        fn new_client_request(
+            &mut self,
+            _: Arc<str>,
+            _: Arc<dyn AbstractRequestBuilder>,
+            _: i64,
+            _: bool,
+        ) -> ClientRequest {
+            unreachable!("not exercised in these tests")
+        }
+        fn new_client_request_with_callback(
+            &mut self,
+            _: Arc<str>,
+            _: Arc<dyn AbstractRequestBuilder>,
+            _: i64,
+            _: bool,
+            _: i32,
+            _: Option<Arc<dyn crate::RequestCompletionHandler>>,
+        ) -> ClientRequest {
+            unreachable!("not exercised in these tests")
+        }
+        fn initiate_close(&mut self) {
+            self.active = false;
+        }
+        fn active(&self) -> bool {
+            self.active
+        }
+        fn close(&mut self) {
+            self.active = false;
+        }
+    }
+
+    /// Construct an empty `MetadataResponseData` (needed because the
+    /// generated struct has no `Default` impl).
+    fn empty_metadata_response_data() -> crate::common::message::metadata_response_data::MetadataResponseData {
+        crate::common::message::metadata_response_data::MetadataResponseData {
+            throttle_time_ms: 0,
+            brokers: Vec::new(),
+            cluster_id: Some(String::new()),
+            controller_id: -1,
+            topics: Vec::new(),
+            cluster_authorized_operations: 0,
+            error_code: 0,
+            unknown_tagged_fields: Vec::new(),
+        }
+    }
+
+    fn make_client_request(correlation_id: i32) -> ClientRequest {
+        let builder: Arc<dyn AbstractRequestBuilder> = Arc::new(ApiVersionsRequestBuilder::new());
+        ClientRequest::new(
+            Arc::from("0"),
+            builder,
+            correlation_id,
+            Arc::from("test-client"),
+            0,
+            true,
+            10_000,
+            None,
+        )
+    }
+
+    fn make_client_response(
+        correlation_id: i32,
+        disconnected: bool,
+        version_mismatch: Option<KafkaError>,
+        body: Option<Box<dyn crate::common::requests::AbstractResponse>>,
+    ) -> ClientResponse {
+        let api_key = ApiKeys::for_id(18).expect("API_VERSIONS");
+        let header = RequestHeader::new(api_key, api_key.latest_version(), "test-client", correlation_id);
+        ClientResponse::new(header, None, Arc::from("0"), 0, 0, disconnected, version_mismatch, None, body)
+    }
+
+    /// Java: `sendAndReceive` happy path — matching response is returned.
+    #[tokio::test]
+    async fn send_and_receive_returns_matching_response() {
+        let time = MockTime::default();
+        let correlation_id = 42;
+        let response_body: Box<dyn crate::common::requests::AbstractResponse> =
+            Box::new(MetadataResponse::new(empty_metadata_response_data(), true));
+        let response = make_client_response(correlation_id, false, None, Some(response_body));
+        let mut client = MockKafkaClient::new(vec![vec![response]]);
+        let request = make_client_request(correlation_id);
+
+        let resp = send_and_receive(&mut client, request, &time).await.expect("send_and_receive");
+        assert_eq!(resp.request_header().correlation_id(), correlation_id);
+        assert!(resp.has_response());
+        assert_eq!(client.sent, vec![correlation_id]);
+    }
+
+    /// Java: `sendAndReceive` disconnect arm — response with
+    /// `wasDisconnected=true` translates to
+    /// `IOException("Connection ... was disconnected ...")`. The Rust
+    /// translation surfaces `KafkaError::Network`.
+    #[tokio::test]
+    async fn send_and_receive_disconnected_response_returns_network_error() {
+        let time = MockTime::default();
+        let correlation_id = 7;
+        let response = make_client_response(correlation_id, /* disconnected= */ true, None, None);
+        let mut client = MockKafkaClient::new(vec![vec![response]]);
+        let request = make_client_request(correlation_id);
+
+        let err = send_and_receive(&mut client, request, &time)
+            .await
+            .expect_err("disconnected response must surface as KafkaError::Network");
+        match err {
+            KafkaError::Network(msg) => {
+                assert!(
+                    msg.contains("disconnected"),
+                    "error message must reference the disconnect: {msg}"
+                );
+            },
+            other => panic!("expected KafkaError::Network, got {other:?}"),
+        }
+    }
+
+    /// Java: `sendAndReceive` version-mismatch arm — when the
+    /// `ClientResponse.versionMismatch()` is set, that exception is
+    /// rethrown verbatim. The Rust translation returns the stored
+    /// `KafkaError::UnsupportedVersion`.
+    #[tokio::test]
+    async fn send_and_receive_version_mismatch_returns_stored_error() {
+        let time = MockTime::default();
+        let correlation_id = 11;
+        let mismatch = KafkaError::UnsupportedVersion("test ver mismatch".to_owned());
+        let response = make_client_response(correlation_id, false, Some(mismatch), None);
+        let mut client = MockKafkaClient::new(vec![vec![response]]);
+        let request = make_client_request(correlation_id);
+
+        let err = send_and_receive(&mut client, request, &time)
+            .await
+            .expect_err("version-mismatch response must surface as KafkaError::UnsupportedVersion");
+        match err {
+            KafkaError::UnsupportedVersion(msg) => {
+                assert_eq!(msg, "test ver mismatch", "error message must round-trip the stored cause");
+            },
+            other => panic!("expected KafkaError::UnsupportedVersion, got {other:?}"),
+        }
+    }
+
+    /// Java: `sendAndReceive` shutdown arm — when `client.active()`
+    /// becomes `false` mid-loop, the helper exits with
+    /// `IOException("Client was shutdown ...")`. The Rust translation
+    /// surfaces `KafkaError::Network`.
+    #[tokio::test]
+    async fn send_and_receive_returns_error_when_client_shut_down() {
+        let time = MockTime::default();
+        let correlation_id = 99;
+
+        // First poll yields nothing AND flips `active` to false (the mock
+        // simulates this by feeding a pre-pop hook via the response
+        // queue: an empty Vec on the first pop, then `active=false`).
+        // We model it by pre-loading an empty response Vec and explicitly
+        // setting `active=false` after sending.
+        let mut client = MockKafkaClient::new(vec![Vec::new(), Vec::new()]);
+        let request = make_client_request(correlation_id);
+        client.active = false;
+
+        let err = send_and_receive(&mut client, request, &time)
+            .await
+            .expect_err("inactive client must surface as KafkaError::Network");
+        match err {
+            KafkaError::Network(msg) => {
+                assert!(
+                    msg.contains("shutdown") || msg.contains("Client"),
+                    "error message must reference the shutdown: {msg}"
+                );
+            },
+            other => panic!("expected KafkaError::Network, got {other:?}"),
+        }
+    }
+
+    /// Java: a non-matching correlation id must NOT be returned, and the
+    /// loop must continue polling until either a match or shutdown.
+    /// Verifies the inner `for response in responses` filter semantics.
+    #[tokio::test]
+    async fn send_and_receive_skips_non_matching_responses() {
+        let time = MockTime::default();
+        let target_correlation_id = 50;
+        let body: Box<dyn crate::common::requests::AbstractResponse> =
+            Box::new(MetadataResponse::new(empty_metadata_response_data(), true));
+        // First poll: response for a *different* correlation id (e.g.
+        // an earlier in-flight request from another caller). Second poll:
+        // the matching response.
+        let bystander = make_client_response(target_correlation_id - 1, false, None, None);
+        let target = make_client_response(target_correlation_id, false, None, Some(body));
+        let mut client = MockKafkaClient::new(vec![vec![bystander], vec![target]]);
+        let request = make_client_request(target_correlation_id);
+
+        let resp = send_and_receive(&mut client, request, &time)
+            .await
+            .expect("send_and_receive should match on second poll");
+        assert_eq!(resp.request_header().correlation_id(), target_correlation_id);
+        assert!(resp.has_response());
+    }
+
+    /// Helper trait surface — `ResponseHeader` exists and `RequestHeader`
+    /// is constructible. Pull these into the namespace so the rustdoc
+    /// links resolve.
+    #[allow(dead_code)]
+    fn _resolve_doc_links() -> ResponseHeader {
+        ResponseHeader::new(0, 1)
+    }
 }

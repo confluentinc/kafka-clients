@@ -36,4 +36,5 @@
 - [Phase 5c-1 review fixes](phase5c1_review_fixes.md) — Java test-fixture parity, end-to-end i32 sibling consistency, pub(crate) + dead_code allow lint annotation pattern
 - [Phase 5c-2 Selector](phase5c2_selector.md) — single-task design + connect-task pattern + IdleExpiryManager LRU + EchoServer test harness
 - [Phase 5d NetworkClient](phase5d_network_client.md) — KafkaClient `&mut self` divergence, internal metadata response re-parse, AbstractRequest+Send/Sync trait change
+- [Phase 5d review fixes](phase5d_review_fixes.md) — MockTime jitter math, MetadataUpdater test mocks, KIP-511 same-poll re-dispatch
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it

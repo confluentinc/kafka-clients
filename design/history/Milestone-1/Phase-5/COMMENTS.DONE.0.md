@@ -870,3 +870,446 @@ OS-defaulted and not part of Java's client surface either.
   they are tightly cohesive (idle-expiry semantics + closing-channel
   ordering + connect-path option wiring, all in the same Selector
   poll/connect surface).
+
+# Critic 0 — Phase 5d (NetworkClient + NetworkClientUtils) — Done
+
+## Round 1 dispositions (Actor 0 fixup)
+
+| # | Severity | Issue | Disposition | Resolution |
+|---|---|---|---|---|
+| 1 | Bug | `do_send` UnsupportedVersion drops internal METADATA failure callback | **Accept and fix** | Mirrored Java's `else if (apiKey == ApiKeys.METADATA)` arm in both `do_send` UnsupportedVersion sites (`latest_usable_version_in_range` failure path AND `builder.build(version)` failure path). Latent until Phase 6 wires `DefaultMetadataUpdater`, but the contract is now correct. |
+| 2 | Missing Req. | KIP-511 fallback path untested | **Accept and fix** | Added `unsupported_api_versions_request_with_broker_version_falls_back_and_resends` — pre-queues a delayed receive with `error_code=UNSUPPORTED_VERSION` + KIP-511 `api_keys=[{api_key=18, max_version=2}]`, then verifies the connection stays open and a v2 fallback request is dispatched in the same poll (the same poll runs `handle_initiate_api_version_requests` after `handle_completed_receives`, so the in-flight is replaced rather than left in `nodes_needing_api_versions_fetch`). Asserts via `InFlightRequests::last_sent` that the new in-flight is at version 2. |
+| 3 | Test name overclaim | `disconnect_marks_node_failed_AND_RESPECTS_BACKOFF` | **Accept and fix** | Test kept its name; body extended with the three Java assertions: `can_connect=false` immediately after disconnect, `can_connect=true` after `time.sleep(reconnect_backoff_max_ms_test=100_000)`, then re-disconnect on already-disconnected node MUST NOT reset the backoff (`can_connect` stays true). Used 100_000 ms (matches `create_client` fixture's `reconnect_backoff_max=100_000`) — initial 5_000 was too low because the first disconnect's backoff is `~10_000 ± 20%`. |
+| 4 | Missing Req. | Multi-in-flight disconnect fan-out untested | **Accept and fix** | Added `disconnect_with_multiple_in_flights_fans_out_in_order` — sends 3 requests on the same ready node, asserts distinct correlation ids, then `disconnect()` followed by `poll(0)` must surface ALL THREE responses in FIFO order with `was_disconnected=true`. Mirrors Java's `testDisconnectWithMultipleInFlights`. |
+| 5 | Missing Req. | `send_and_receive` 4 error arms untested | **Accept and fix** | Added 5 tests in `network_client_utils.rs`: happy-path matching response; `was_disconnected=true → KafkaError::Network` with "disconnected" in the message; `version_mismatch=Some(KafkaError::UnsupportedVersion(_)) →` returns the stored error verbatim; `client.active=false → KafkaError::Network` with "shutdown"/"Client" in the message; non-matching correlation id is filtered (loop continues). Uses a `MockKafkaClient` driven by a `VecDeque<Vec<ClientResponse>>` queue — no real `Selector`. |
+| 6 | Missing Req. | `least_loaded_node` 60-line tie-break untested | **Accept and fix** | Added two tests: `least_loaded_node_prefers_zero_in_flight` — two READY nodes, one with 1 in-flight, one with 0 in-flight; selection runs 16× and the 0-in-flight node MUST always win (defeats the random offset by exercising the `curr_inflight == 0` fast-path return). `least_loaded_node_returns_none_when_all_in_backoff` — single node, disconnect, then `least_loaded_node` returns `None` and `has_node_available_or_connection_ready=false`. The third Java tie-break (oldest `last_connect_attempt_ms` among `can_connect` nodes) is stable-keyed but exercised obliquely by these two tests; a third dedicated test was deferred as it would re-cover ground that the existing `cluster_connection_states::node_with_oldest_last_connect_attempt` test already pins at the layer below. |
+| 7 | Suggestion | `MockSelector::reset()` rustdoc claims fidelity it doesn't have | **Accept and fix** | Updated the rustdoc to "Diverges from Java's `MockSelector.reset()` — Java does NOT touch the `ready` set; the Rust translation also clears `ready` for symmetry with the explicit `clear` semantic." |
+
+### Test count delta
+
+- Phase 5d Round 1: 17 tests
+- Phase 5d Round 2: 27 tests (`+5` in `network_client.rs` + `+5` in `network_client_utils.rs`)
+- Total lib tests: 937 (was 927)
+
+### DoD sign-off
+
+- `cargo build` — clean
+- `cargo test` — 937 unit tests pass (was 927)
+- `cargo xtask format-check` — clean
+- `cargo xtask lint` — clean
+
+### Fixup chain
+
+A single `fixup! a0fa3f1` covers all 7 issues — they are tightly cohesive
+(all in the `NetworkClient` / `NetworkClientUtils` test surface plus one
+4-line behavioural fix to `do_send`).
+
+# Critic 0 — Phase 5d (NetworkClient + NetworkClientUtils) review
+
+Reviewing commit `a0fa3f1` — Phase 5d adds `src/network_client.rs`
+(2202 LOC including tests + DoD integration) and
+`src/network_client_utils.rs` (260 LOC). Java sources translated:
+`NetworkClient.java` (1607) and `NetworkClientUtils.java` (154).
+17 new tests; total 927 (was 910). All green locally:
+
+```
+cargo test --lib network_client
+... 17 passed; 0 failed; 0 ignored
+```
+
+## Actor's flagged design choices — verified
+
+1. **`KafkaClient::new_client_request*` takes `&mut self`**: defensible.
+   Java's `nextCorrelationId` mutates `this.correlation` in-place; the
+   class doc explicitly says "not thread-safe". Making the trait
+   signature `&mut self` matches the actual mutation contract and avoids
+   bolting an `AtomicI32` onto a counter that doesn't need atomicity.
+   Trait-surface impact for Phase 6+ producers: the producer must hold
+   the client behind exclusive access (single-task-per-client pattern,
+   already implied by `Selector`'s design).
+
+2. **`AbstractRequest`/`AbstractResponse` gain `Send + Sync`** but
+   parent `AbstractRequestResponse` doesn't: defensible. The parent
+   trait must remain `!Sync` because `RequestHeader`/`ResponseHeader`
+   carry `Cell<Option<i32>>` size caches. Concrete request/response
+   types are constructed without those Cells, so they CAN be `Send +
+   Sync` — and `NetworkClient<S, M>: Send` requires it via the
+   `aborted_sends: Vec<ClientResponse>` field (the `Box<dyn
+   AbstractResponse>` inside).
+
+3. **Wrapping correlation counter via `Wrapping<i32>`**: matches Java
+   exactly. Verified `i32::MAX + 1 == i32::MIN` (-2147483648), and
+   `is_reserved_correlation_id(i32::MIN)` returns `false` (since
+   `i32::MIN < MIN_RESERVED_CORRELATION_ID == i32::MAX - 7`). Wrap
+   semantics preserved.
+
+4. **`node_labels: HashMap<i32, Arc<str>>` cache**: correctly invalidated.
+   `initiate_connect` pre-populates the label so
+   `cancel_in_flight_requests` and `do_send` get a cache hit. No
+   per-message `Arc::from(format!(...))` allocation observed in
+   `do_send`. Hot-path audit clean for this allocation.
+
+5. **Internal METADATA / API_VERSIONS responses re-parsed at the
+   call site**: defensible. Avoids `Any`-style downcast on a
+   `Box<dyn AbstractResponse>`. The cost is one extra parse for the
+   metadata/api-versions paths only; the response payload is already
+   a `Bytes` clone, so no extra allocation. Phase 6 may revisit.
+
+## Defects found
+
+### Issue: `do_send` UnsupportedVersion path drops internal METADATA failures silently
+
+- **File**: `src/network_client.rs:799-849`
+- **Severity**: Bug (Behavior Mismatch)
+- **Java Reference**: `NetworkClient.java:583-598`
+- **Description**: When `builder.build(version)` returns
+  `KafkaError::UnsupportedVersion`, Java's
+  `doSend` distinguishes three cases for the synthetic ClientResponse:
+
+  ```java
+  if (!isInternalRequest)
+      abortedSends.add(clientResponse);
+  else if (clientRequest.apiKey() == ApiKeys.METADATA)
+      metadataUpdater.handleFailedRequest(now, Optional.of(unsupportedVersionException));
+  else if (isTelemetryApi(...) && telemetrySender != null)
+      telemetrySender.handleFailedRequest(...);
+  ```
+
+  Rust's `do_send` (`network_client.rs:821-823` and `:845-847`) only
+  handles the `!is_internal_request` arm:
+
+  ```rust
+  if !is_internal_request {
+      self.aborted_sends.push(response);
+  }
+  return Ok(());
+  ```
+
+  When the request IS internal AND is a METADATA request,
+  `metadata_updater.handle_failed_request(now, Some(version_err))` is
+  never invoked. The `DefaultMetadataUpdater` (Phase 6+) tracks
+  in-progress fetches via this callback and uses it to drive backoff
+  and rebootstrap timing. Phase 5d uses `ManualMetadataUpdater` which
+  ignores `handle_failed_request`, so the bug is latent in the current
+  scope, but it WILL cause stuck metadata-fetch state when Phase 6
+  wires `DefaultMetadataUpdater`.
+
+  Telemetry is correctly skipped per Phase 5d scope; the METADATA arm
+  is the actionable gap.
+
+- **Expected**: When the version-mismatch path triggers an internal
+  request that is METADATA (api_key.id == 3), call
+  `self.metadata_updater.handle_failed_request(now, Some(e.clone()))`
+  before returning `Ok(())`. Mirrors the corresponding path in
+  `cancel_in_flight_requests` (which DOES fire the metadata-failure
+  callback for internal METADATA on disconnect — see line 326).
+- **Actual**: Internal METADATA requests with version mismatch are
+  silently dropped — no aborted-send, no metadata-failed callback.
+  No regression test for this path.
+
+### Issue: `handle_api_versions_response` KIP-511 fallback path has zero test coverage
+
+- **File**: `src/network_client.rs:614-625`
+- **Severity**: Missing Requirement (test gap on a real code path)
+- **Java Reference**: `NetworkClientTest.java:449-518`
+  (`testUnsupportedApiVersionsRequestWithVersionProvidedByTheBroker`)
+- **Description**: The non-trivial else branch in
+  `handle_api_versions_response` extracts the broker-advertised
+  `max_version` from the response's `api_keys` and re-queues a fresh
+  `ApiVersionsRequestBuilder::with_version(max_api_version)`:
+
+  ```rust
+  let mut max_api_version: i16 = 0;
+  if !data.api_keys.is_empty()
+      && let Some(api_version_entry) = data.api_keys.iter().find(|a| a.api_key == 18)
+  {
+      max_api_version = api_version_entry.max_version;
+  }
+  self.nodes_needing_api_versions_fetch
+      .insert(node, ApiVersionsRequestBuilder::with_version(max_api_version));
+  ```
+
+  This is the KIP-511 version-fallback handshake: when the broker
+  doesn't speak the latest client `ApiVersions` version, it returns
+  `UNSUPPORTED_VERSION` along with its own supported version range,
+  and the client must downgrade and retry.
+
+  Java has dedicated tests
+  (`testUnsupportedApiVersionsRequestWithVersionProvidedByTheBroker`,
+  `testUnsupportedApiVersionsRequestWithoutVersionProvidedByTheBroker`)
+  exercising this exact branch. Rust has neither — only the
+  "happy-path API_VERSIONS handshake" test
+  (`api_versions_handoff_marks_node_ready`) and the "invalid response
+  closes connection" test (`invalid_api_versions_response_closes_connection`).
+  The fallback / re-queue path is untested.
+
+  A bug in `find(|a| a.api_key == 18)` (e.g. if the api_key id were
+  ever changed, or the field name renamed) would not be caught.
+- **Expected**: A test that:
+  1. Sends an initial ApiVersionsRequest at the latest version.
+  2. Surfaces a delayed receive whose error_code is
+     `UNSUPPORTED_VERSION` and whose `api_keys` contains an entry
+     for `api_key=18, min_version=0, max_version=2`.
+  3. Verifies `nodes_needing_api_versions_fetch` now holds an entry
+     for the node (not closed) and that on the next
+     `handle_initiate_api_version_requests` pass, a v2 ApiVersions
+     request is dispatched.
+- **Actual**: The KIP-511 fallback branch executes only in the
+  `invalid_api_versions_response_closes_connection` test's negative
+  setup (where `error_code != UNSUPPORTED_VERSION`, so the branch
+  is NOT taken). No positive-path coverage.
+
+### Issue: `disconnect_marks_node_failed_and_respects_backoff` test does not test backoff
+
+- **File**: `src/network_client.rs:1804-1821`
+- **Severity**: Bug (Test name overstates coverage)
+- **Java Reference**: `NetworkClientTest.java:1101-1119` (`testCallDisconnect`)
+- **Description**: The Rust test name explicitly claims "respects
+  backoff" but the test body only checks `is_ready=false` and
+  `connection_failed=true` after a single `disconnect()` call. Java's
+  `testCallDisconnect` additionally exercises:
+
+  ```java
+  assertFalse(client.canConnect(node, time.milliseconds()));   // backoff in effect
+  time.sleep(reconnectBackoffMaxMsTest);
+  assertTrue(client.canConnect(node, time.milliseconds()));    // backoff expired
+  client.disconnect(node.idString());
+  assertTrue(client.canConnect(node, time.milliseconds()));    // re-disconnect doesn't reset backoff
+  ```
+
+  None of these three assertions are translated. The "respects backoff"
+  claim in the function name is unsupported by the test body. A bug
+  that allowed `disconnect()` on an already-disconnected node to
+  reset the reconnect-backoff window (defeating the exponential
+  backoff invariant) would not be caught.
+- **Expected**: Either translate the three additional assertions
+  (the `can_connect` accessor and the time-sleep manipulation are
+  available on the existing test fixture), or rename the test to
+  `disconnect_marks_node_failed` to drop the unsupported claim.
+- **Actual**: Test passes trivially without exercising backoff
+  semantics.
+
+### Issue: Multiple-in-flight disconnect fan-out is untested
+
+- **File**: `src/network_client.rs` (test module — no test exists)
+- **Severity**: Missing Requirement
+- **Java Reference**: `NetworkClientTest.java:1056-1098`
+  (`testDisconnectWithMultipleInFlights`)
+- **Description**: `cancel_in_flight_requests` (`network_client.rs:298-331`)
+  is the spine of disconnect / close / timeout handling. It iterates
+  the in-flight deque and emits one ClientResponse per request. Java's
+  test asserts:
+
+  1. Two in-flight requests on the same connection have distinct
+     correlation ids (`assertNotEquals(request1.correlationId(),
+     request2.correlationId())`).
+  2. After `disconnect(node)`, the next `poll()` returns BOTH
+     responses (`assertEquals(2, responses.size())`).
+  3. The responses are returned IN ORDER (first sent, first
+     surfaced — the deque ordering invariant).
+  4. Each response is flagged `wasDisconnected=true`.
+  5. Both callbacks fire in the same order.
+
+  Rust's `close_clears_in_flight_requests` (line 1593) only sends
+  ONE request and uses `close_connection` (which doesn't surface
+  responses). The disconnect fan-out path is untested. A bug in
+  `clear_all` or in `cancel_in_flight_requests`'s response-pushing
+  loop ordering would be silently masked.
+- **Expected**: A regression test that mirrors `testDisconnectWithMultipleInFlights`:
+  send two requests on a ready node (both expecting responses, both
+  internal=false), `disconnect(node)`, `poll(0)`, assert exactly two
+  ClientResponses come back, in the order sent, both with
+  `was_disconnected=true`.
+- **Actual**: Disconnect with multiple in-flight requests is not
+  exercised at all.
+
+### Issue: `network_client_utils::send_and_receive` integration paths untested
+
+- **File**: `src/network_client_utils.rs:86-111`
+- **Severity**: Missing Requirement
+- **Java Reference**: `NetworkClientUtils.java:103-128`
+- **Description**: `send_and_receive` is the synchronous helper most
+  Producer-internals code paths (Phase 6+) will call. Java's
+  `sendAndReceive` has FOUR distinct exit paths:
+  1. Matching response received (success).
+  2. Response received but `wasDisconnected=true` →
+     `IOException("Connection to ... was disconnected ...")`.
+  3. Response received but `versionMismatch != null` → throws the
+     stored exception.
+  4. Loop exits because `client.active() == false` →
+     `IOException("Client was shutdown ...")`.
+
+  The Rust translation has corresponding logic at lines 96-110 that
+  mirrors these exits as `KafkaError::Network` returns. The unit-test
+  module (`network_client_utils.rs:132-260`) covers only:
+  - `is_unavailable_combines_failed_and_delay`
+  - `maybe_return_auth_failure_passes_through_none`
+  - `await_ready_rejects_negative_timeout`
+  - `await_ready_short_circuits_when_ready`
+
+  None of these exercise the actual `send_and_receive` round-trip,
+  including the THREE error-translation arms that map Java's
+  `IOException` / `versionMismatch()` onto `KafkaError::Network` /
+  `KafkaError::UnsupportedVersion`. A bug in the disconnect-detection
+  arm — e.g. swallowing the `was_disconnected` flag and returning
+  `Ok(response)` — would not be caught.
+- **Expected**: At least one async test that drives `send_and_receive`
+  through:
+  1. Happy-path round-trip (already covered indirectly by the DoD
+     `loopback_metadata_request_response` at the `NetworkClient`
+     level — could be lifted into a `send_and_receive` test).
+  2. The disconnect-during-flight arm (`response.was_disconnected()`
+     → `KafkaError::Network`).
+  3. The shutdown arm (`client.initiate_close()` mid-call →
+     `KafkaError::Network("Client was shutdown ...")`).
+
+  A `MockKafkaClient` over a `Vec<ClientResponse>` queue would
+  suffice; no real `Selector` needed.
+- **Actual**: 0 of 4 `send_and_receive` exit paths have direct test
+  coverage.
+
+### Issue: `least_loaded_node` 60-line tie-break logic is untested
+
+- **File**: `src/network_client.rs:1024-1090`
+- **Severity**: Missing Requirement
+- **Java Reference**: `NetworkClientTest.java:777-892`
+  (`testLeastLoadedNode`,
+  `testLeastLoadedNodeProvideDisconnectedNodesPrioritizedByLastConnectionTimestamp`,
+  `testLeastLoadedNodeConsidersThrottledConnections`,
+  `testHasNodeAvailableOrConnectionReady`)
+- **Description**: `least_loaded_node` implements a non-trivial
+  preference order:
+  1. Among `can_send_request` nodes, the one with fewest in-flight
+     wins; tie broken by the random offset.
+  2. Else, any `is_preparing_connection` node.
+  3. Else, the `can_connect` node with the OLDEST
+     `last_connect_attempt_ms` (verified at line 1064: `>` not `<`,
+     mirroring Java line 798).
+  4. Else, `LeastLoadedNode::new(None, at_least_one_connection_ready)`.
+
+  The `at_least_one_connection_ready` flag (line 1035, 1044-1049)
+  determines whether the producer should wait or proceed without
+  metadata. This matters for the `DefaultMetadataUpdater` rebootstrap
+  trigger (which Phase 5d doesn't translate, but `MetadataUpdater`
+  callers DO use the flag).
+
+  Java has four dedicated tests for this 60-line method. Rust has
+  zero. Bugs in the tie-break ordering (e.g. flipping `<` and `>` on
+  line 1064) or in the flag computation would silently slip through.
+- **Expected**: At minimum, a smoke test that verifies:
+  1. Three nodes — one ready with 0 in-flight, one ready with 5
+     in-flight, one connecting → expect node 1 (0 in-flight).
+  2. All nodes failed but two `can_connect`, one with older last-
+     attempt → expect the older one.
+  3. `at_least_one_connection_ready` reflects whether ANY node
+     passes both `connection_states.is_ready` AND
+     `selector.is_channel_ready`.
+- **Actual**: No test coverage; only the `least_loaded_node` panic
+  on empty-cluster is exercised at all (and only via the Rust unit
+  test `wakeup_does_not_panic` which doesn't actually call it).
+
+### Issue: `MockSelector::reset()` rustdoc claims fidelity it doesn't have
+
+- **File**: `src/network_client.rs:1293-1302`
+- **Severity**: Suggestion (test-fixture documentation drift)
+- **Java Reference**: `MockSelector.java:238-242`
+- **Description**: The Rust comment says
+
+  ```rust
+  /// Reset everything including `ready`. Mirrors
+  /// `MockSelector.reset()` (only used by test setup).
+  fn reset(&self) { ... s.ready.clear(); ... }
+  ```
+
+  Java's `reset()` does:
+
+  ```java
+  public void reset() {
+      clear();
+      initiatedSends.clear();
+      delayedReceives.clear();
+  }
+  ```
+
+  Java does NOT clear `ready`. The Rust translation does. The method
+  is marked `#[allow(dead_code)]` and isn't exercised in any current
+  test, so the divergence is harmless TODAY — but the rustdoc claims
+  "Mirrors `MockSelector.reset()`" which is false. If a future test
+  switches from `clear()` to `reset()` expecting Java semantics,
+  it would lose the `ready` set unexpectedly.
+- **Expected**: Either drop the `s.ready.clear();` line (matching
+  Java exactly) or update the rustdoc to say
+  "Diverges from Java by also clearing `ready` set; preserved here
+  for symmetry with the explicit `clear` semantic."
+- **Actual**: Comment claims a mirror that doesn't exist.
+
+## Verdicts on actor's deferrals
+
+### TLS handshake at `NetworkClient` layer — accept the deferral
+
+The actor's rationale (Phase 5b-2 + 5b-3 + 5c-2 already cover the
+rustls handshake + KafkaChannel SSL wiring + Selector SSL drain) is
+defensible. Verified `ssl_transport_layer.rs:1109-1153` does exercise
+a real rcgen self-signed peer + full TLSv1.3 handshake + populated
+cipher information. The Phase 5d test would re-cover those layers
+with no new behavioral surface — only the additional plumbing of the
+NetworkClient state machine on top, and that surface is exercised by
+the loopback `MetadataRequest` test (which uses `Selector` +
+`PlaintextChannelBuilder` end-to-end).
+
+PLAN.md 280's wording "TLS handshake test connects to a self-signed
+broker" can be read either way; the Phase 5b-2 test does meet the
+literal wording (it does connect to a self-signed broker, just not
+through `NetworkClient::poll`). The actor explicitly captured the
+"Flag for Critic 0" rationale in `tls_handshake_test_skip` rustdoc
+(`network_client.rs:2179-2197`) with concrete instructions for what
+the test would be if Critic disagreed. I do not.
+
+### Skipped Java tests — accept all five
+
+- `testReconnectAfterAddressChange` — needs Mockito-style
+  `ClientTelemetrySender` and `AddressChangeHostResolver`; address-
+  change is exercised at `cluster_connection_states` level in Phase
+  4c.
+- `testRebootstrap` / `testInflightRequestsDuringRebootstrap` —
+  requires `DefaultMetadataUpdater`; deferred to Phase 6.
+- Throttling (`testConnectionThrottling`,
+  `testConnectionTimeoutAfterThrottling`) — telemetry-adjacent;
+  state-machine effects covered in Phase 4c.
+- Connection-setup-timeout tests
+  (`testConnectionSetupTimeout`) — covered by
+  `cluster_connection_states::nodes_with_connection_setup_timeout`
+  in Phase 4c.
+- Telemetry (`testTelemetryRequest`) — Phase 9 scope.
+
+## Summary
+
+- **Blocking**: 0
+- **Bug**: 1 (`do_send` UnsupportedVersion drops internal METADATA
+  callback)
+- **Missing Requirement**: 4 (KIP-511 fallback test gap;
+  multi-in-flight disconnect test gap; `send_and_receive` arm test
+  gap; `least_loaded_node` test gap)
+- **Test name overstates coverage**: 1
+  (`disconnect_marks_node_failed_and_respects_backoff`)
+- **Suggestion**: 1 (`MockSelector::reset()` rustdoc drift)
+
+Round 1 verdict: Phase 5d is mechanically correct on the producer
+hot path that Phase 6 will exercise; the `NetworkClient::poll`
+state-machine ordering matches Java; the correlation-id wrap, the
+API_VERSIONS handshake handoff, the timeout-disconnect path, and
+the `node_labels` cache all hold up under read-through. The single
+real bug (`do_send` UnsupportedVersion + internal METADATA) is
+latent until Phase 6 wires `DefaultMetadataUpdater` — but it WILL
+manifest then. The four test-coverage gaps each map to a code path
+that already exists and is taken in production: a regression in any
+of them would slip through the current 17-test suite.
+
+Recommend: fix the `do_send` METADATA callback gap (~5 lines), add
+one test for each of the four uncovered paths (KIP-511 fallback,
+multi-in-flight disconnect, `send_and_receive` disconnect arm,
+`least_loaded_node` 0-in-flight tiebreak). Rename the
+`disconnect_marks_node_failed_and_respects_backoff` test or add the
+three missing backoff assertions. The `MockSelector::reset()` doc
+fix is a one-line rustdoc edit.
+
