@@ -188,12 +188,13 @@ impl Receive for NetworkReceive {
         //   * -1 on end-of-stream (close), at which point Java throws
         //     `EOFException`.
         //
-        // In Rust, `io::Read::read` returns `Ok(0)` for either case
-        // (well-behaved non-blocking adapters like Tokio surface "would
-        // block" through `Err(WouldBlock)` instead). The translation
-        // therefore treats `Ok(0)` as "no more progress on this call";
-        // upper-layer EOF detection lives in the Phase 5b/5c transport,
-        // which can distinguish a closed socket from a quiet one.
+        // In Rust, `io::Read::read` is required to surface "no progress" via
+        // `Ok(0)`; the Phase 5b transport (`PlaintextTransportLayer::read`)
+        // handles that by mapping Tokio's `WouldBlock` → `Ok(0)` and Tokio's
+        // `Ok(0)` (peer closed) → `Err(UnexpectedEof)` — the Java NIO
+        // equivalent of `channel.read(buf) == -1 → throw EOFException`. So
+        // here `Ok(0)` reliably means "quiet socket, retry on next select
+        // wake"; EOF propagates through the `?` and out to the caller.
         if self.size_pos < 4 {
             let n = src.read(&mut self.size_buf[self.size_pos..])?;
             self.size_pos += n;

@@ -15,10 +15,15 @@
 //! Translation of `org.apache.kafka.common.security.auth.KafkaPrincipal`.
 
 use std::fmt;
+use std::sync::OnceLock;
 
 /// The standard principal type used by Kafka's default authorizer. Mirrors
 /// Java's `KafkaPrincipal.USER_TYPE`.
 pub const USER_TYPE: &str = "User";
+
+/// The well-known anonymous principal name. Mirrors Java's literal
+/// `"ANONYMOUS"` argument to the static `ANONYMOUS` field.
+pub const ANONYMOUS_NAME: &str = "ANONYMOUS";
 
 /// Principals in Kafka are defined by a type and a name. The principal type
 /// is always `"User"` for the simple authorizer enabled by default;
@@ -62,25 +67,30 @@ impl KafkaPrincipal {
 
     /// Mirrors `new KafkaPrincipal(String principalType, String name,
     /// boolean tokenAuthenticated)`.
+    ///
+    /// Java's constructor uses `requireNonNull` on the type/name strings;
+    /// in Rust the parameter type already excludes `null`, so no further
+    /// validation is performed. Empty strings are accepted, matching the
+    /// Java contract exactly.
     pub fn with_token_authenticated(
         principal_type: impl Into<String>,
         name: impl Into<String>,
         token_authenticated: bool,
     ) -> Self {
-        let principal_type = principal_type.into();
-        let name = name.into();
-        // Mirrors Java's `requireNonNull` — Rust's `String` cannot be null,
-        // so we instead reject empty strings, which is the closest moral
-        // equivalent and matches the Java intent that the type/name be
-        // present.
-        assert!(!principal_type.is_empty(), "Principal type cannot be empty");
-        assert!(!name.is_empty(), "Principal name cannot be empty");
-        KafkaPrincipal { principal_type, name, token_authenticated }
+        KafkaPrincipal { principal_type: principal_type.into(), name: name.into(), token_authenticated }
     }
 
-    /// The well-known anonymous principal. Mirrors `KafkaPrincipal.ANONYMOUS`.
+    /// The well-known anonymous principal. Mirrors Java's
+    /// `public static final KafkaPrincipal ANONYMOUS`. Java caches a single
+    /// instance; in Rust we cache the base `(type, name)` strings via a
+    /// `OnceLock` so each call clones the cached instance instead of
+    /// allocating two fresh `String`s. The result is by-value because
+    /// callers (e.g. `peer_principal()`) expect ownership; the underlying
+    /// strings are short, so the per-call cost is two `String::clone`s of
+    /// `"User"` / `"ANONYMOUS"`.
     pub fn anonymous() -> Self {
-        KafkaPrincipal::new(USER_TYPE, "ANONYMOUS")
+        static ANONYMOUS: OnceLock<KafkaPrincipal> = OnceLock::new();
+        ANONYMOUS.get_or_init(|| KafkaPrincipal::new(USER_TYPE, ANONYMOUS_NAME)).clone()
     }
 
     /// Mirrors `KafkaPrincipal.getName()`.
@@ -141,5 +151,34 @@ mod tests {
         let mut d = KafkaPrincipal::new("User", "alice");
         d.set_token_authenticated(true);
         assert_eq!(a, d, "token_authenticated must not affect equality");
+    }
+
+    /// Java's `requireNonNull` only rejects `null`; empty `String`s are
+    /// accepted. Rust must match — `String` is non-nullable already, so
+    /// no further validation is needed.
+    #[test]
+    fn empty_strings_are_accepted() {
+        let p = KafkaPrincipal::new("", "");
+        assert_eq!(p.principal_type(), "");
+        assert_eq!(p.name(), "");
+        assert_eq!(p.to_string(), ":");
+
+        let p = KafkaPrincipal::new("User", "");
+        assert_eq!(p.principal_type(), "User");
+        assert_eq!(p.name(), "");
+        assert_eq!(p.to_string(), "User:");
+    }
+
+    /// `anonymous()` returns the singleton-equivalent: every call yields an
+    /// equal value, mirroring Java's `public static final ANONYMOUS`. The
+    /// strings are cached via `OnceLock`, so callers don't pay for two
+    /// fresh `String` allocations on every invocation.
+    #[test]
+    fn anonymous_is_idempotent() {
+        let a = KafkaPrincipal::anonymous();
+        let b = KafkaPrincipal::anonymous();
+        assert_eq!(a, b);
+        assert_eq!(a.principal_type(), USER_TYPE);
+        assert_eq!(a.name(), ANONYMOUS_NAME);
     }
 }

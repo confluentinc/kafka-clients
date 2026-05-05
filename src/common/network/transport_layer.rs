@@ -15,6 +15,7 @@
 //! Translation of `org.apache.kafka.common.network.TransportLayer`.
 
 use std::io;
+use std::net::SocketAddr;
 
 use crate::common::network::TransferableChannel;
 use crate::common::security::auth::KafkaPrincipal;
@@ -53,10 +54,11 @@ pub const OP_CONNECT: i32 = 1 << 3;
 /// `read` is sync and treats `WouldBlock` as `Ok(0)` (Java NIO's "would
 /// block" signal) so that it composes with [`io::Read`] adapters and
 /// with [`crate::common::network::Receive::read_from`], which expects
-/// `Ok(0)` to mean "no progress on this call". End-of-stream is signalled
-/// by an explicit `EOFException`-equivalent on the upper layer; concrete
-/// transports return `Ok(0)` on a closed peer too — the Selector
-/// distinguishes EOF from quiet via `is_connected()`/`finish_connect()`.
+/// `Ok(0)` to mean "no progress on this call". End-of-stream (peer
+/// closed the socket) is surfaced as `Err(io::ErrorKind::UnexpectedEof)`,
+/// mirroring Java's `EOFException` thrown by `NetworkReceive.readFrom`
+/// when `channel.read()` returns `-1`. The upper layer (`KafkaChannel`,
+/// `Selector`) translates that error into a channel-disconnected event.
 ///
 /// **Java SocketChannel/SelectionKey accessors are intentionally absent
 /// from this trait.** Java's `socketChannel()` / `selectionKey()` getters
@@ -95,8 +97,10 @@ pub trait TransportLayer: TransferableChannel {
 
     /// Read a sequence of bytes from this channel into the given buffer.
     /// Mirrors `ReadableByteChannel.read(ByteBuffer)`. Returns the number
-    /// of bytes read (possibly zero, e.g. when the underlying socket has
-    /// no bytes ready — Java's NIO "would block" signal).
+    /// of bytes read; `Ok(0)` means the underlying socket has no bytes
+    /// ready (Java NIO's "would block" signal). End-of-stream (peer
+    /// closed) is surfaced as `Err(io::ErrorKind::UnexpectedEof)` to
+    /// mirror Java's `channel.read() == -1 → throw EOFException`.
     fn read(&mut self, dst: &mut [u8]) -> io::Result<usize>;
 
     /// Performs SSL handshake. No-op for the PLAINTEXT implementation.
@@ -132,4 +136,14 @@ pub trait TransportLayer: TransferableChannel {
     /// decrypted-but-not-yet-consumed data is available; the plaintext
     /// implementation always returns `false`.
     fn has_bytes_buffered(&self) -> bool;
+
+    /// Local address of the underlying socket. Mirrors Java's
+    /// `transportLayer.socketChannel().socket().getLocalSocketAddress()`,
+    /// which `KafkaChannel` reads for connection-introspection metadata
+    /// (selector logging, idle-expiry, channel id computation).
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Peer (remote) address of the underlying socket. Mirrors Java's
+    /// `transportLayer.socketChannel().socket().getRemoteSocketAddress()`.
+    fn peer_addr(&self) -> io::Result<SocketAddr>;
 }

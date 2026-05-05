@@ -67,23 +67,6 @@ impl PlaintextTransportLayer {
         PlaintextTransportLayer { stream: Some(stream), interest_ops: OP_CONNECT, is_open: true, connected: false }
     }
 
-    /// Local address of the underlying socket, when the socket is open.
-    pub fn local_addr(&self) -> io::Result<SocketAddr> {
-        self.stream
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?
-            .local_addr()
-    }
-
-    /// Peer (remote) address of the underlying socket, when the socket is
-    /// open.
-    pub fn peer_addr(&self) -> io::Result<SocketAddr> {
-        self.stream
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?
-            .peer_addr()
-    }
-
     fn stream_mut(&mut self) -> io::Result<&mut TcpStream> {
         self.stream
             .as_mut()
@@ -185,11 +168,28 @@ impl TransportLayer for PlaintextTransportLayer {
             return Ok(0);
         }
         let stream = self.stream_mut()?;
+        // Tokio↔Java NIO bridge: `TcpStream::try_read(non_empty_buf)` has
+        // three outcomes that map onto Java's `SocketChannel.read(buf)`:
+        //
+        //   * `Ok(n)` with `n > 0`           → bytes copied (Java: positive).
+        //   * `Err(WouldBlock)`              → no bytes ready (Java: 0).
+        //   * `Ok(0)` with non-empty `dst`   → peer closed/EOF (Java: -1,
+        //                                      which `NetworkReceive` translates
+        //                                      into `EOFException`).
+        //
+        // We surface the EOF case as `Err(io::ErrorKind::UnexpectedEof)` so
+        // the upper layer (Phase 5b-3 `KafkaChannel`, Phase 5c `Selector`)
+        // can detect a half-closed socket — Java throws `EOFException` in
+        // exactly the same place. Returning `Ok(0)` for an EOF would make
+        // `Selector::poll` spin on a dead socket forever, since
+        // `NetworkReceive::read_from` already treats `Ok(0)` as "no progress
+        // this call".
         match stream.try_read(dst) {
+            Ok(0) => Err(io::Error::new(io::ErrorKind::UnexpectedEof, "peer closed connection")),
             Ok(n) => Ok(n),
             // WouldBlock → Ok(0): same Java NIO semantic as on the write
-            // path. NetworkReceive::read_from already handles `Ok(0)` as
-            // "no progress this call".
+            // path. NetworkReceive::read_from handles `Ok(0)` as "no
+            // progress this call".
             Err(e) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
             Err(e) => Err(e),
         }
@@ -232,6 +232,20 @@ impl TransportLayer for PlaintextTransportLayer {
     fn has_bytes_buffered(&self) -> bool {
         // PLAINTEXT has no internal buffering — always `false`.
         false
+    }
+
+    fn local_addr(&self) -> io::Result<SocketAddr> {
+        self.stream
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?
+            .local_addr()
+    }
+
+    fn peer_addr(&self) -> io::Result<SocketAddr> {
+        self.stream
+            .as_ref()
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?
+            .peer_addr()
     }
 }
 
@@ -428,6 +442,56 @@ mod tests {
         let mut buf = [0u8; 64];
         let n = IoRead::read(&mut layer, &mut buf).expect("read should not error on quiet socket");
         assert_eq!(n, 0, "no data ready → Ok(0), not WouldBlock");
+    }
+
+    /// Verify peer-closed EOF surfaces as `UnexpectedEof`, not `Ok(0)`.
+    /// Java's `SocketChannel.read()` returns `-1` on EOF, which
+    /// `NetworkReceive.readFrom` translates into `EOFException`. The Rust
+    /// transport must produce an equivalent error so the upper layer can
+    /// detect a half-closed socket — otherwise `Selector::poll` would
+    /// spin on a dead socket since `Ok(0)` is interpreted as
+    /// `WouldBlock`-equivalent.
+    #[tokio::test]
+    async fn read_returns_unexpected_eof_on_peer_close() {
+        let (client, server) = connected_pair().await;
+        let mut layer = PlaintextTransportLayer::new(client);
+
+        // Drop the server side and wait for FIN to land on the client.
+        drop(server);
+        // `readable()` resolves on either incoming bytes or close (FIN).
+        let stream = layer.stream_mut().expect("stream");
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream.readable())
+            .await
+            .expect("readable timeout — FIN should land within 2s")
+            .expect("readable");
+
+        let mut buf = [0u8; 64];
+        let err =
+            TransportLayer::read(&mut layer, &mut buf).expect_err("peer-closed read must surface as UnexpectedEof");
+        assert_eq!(
+            err.kind(),
+            io::ErrorKind::UnexpectedEof,
+            "Tokio Ok(0) on non-empty buf must map to UnexpectedEof, not Ok(0)"
+        );
+    }
+
+    /// Same EOF semantic, exercised through the `io::Read` forwarder used
+    /// by `NetworkReceive::read_from`. This is the path that
+    /// `KafkaChannel`/`Selector` will rely on in 5b-3/5c.
+    #[tokio::test]
+    async fn io_read_adapter_propagates_eof() {
+        let (client, server) = connected_pair().await;
+        let mut layer = PlaintextTransportLayer::new(client);
+        drop(server);
+        let stream = layer.stream_mut().expect("stream");
+        tokio::time::timeout(std::time::Duration::from_secs(2), stream.readable())
+            .await
+            .expect("readable timeout")
+            .expect("readable");
+
+        let mut buf = [0u8; 32];
+        let err = IoRead::read(&mut layer, &mut buf).expect_err("io::Read forwarder must propagate the EOF");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
     }
 
     /// Verify that `write_vectored` honours `Ok(0)` for empty input.

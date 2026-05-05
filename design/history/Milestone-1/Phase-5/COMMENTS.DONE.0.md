@@ -97,3 +97,120 @@ of full Unicode tables. While `normalised` is called once at startup, the
 operator-supplied listener name space is conventionally ASCII; the
 divergence on Turkish dotted-I etc. is theoretical and unlikely in
 practice for a Kafka deployment.
+
+---
+
+# Critic 0 — Phase 5b-1 (TransportLayer + PlaintextTransportLayer) — Done
+
+## Issue: `PlaintextTransportLayer::read` collapses peer-EOF into "no data ready", losing the `EOFException` signal Java relies on
+
+- **File**: `src/common/network/plaintext_transport_layer.rs:181-196` (also the `io::Read` forwarder)
+- **Severity**: Blocking (Behavior Mismatch — DoD #1, contract divergence from Java)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/NetworkReceive.java:85-87, 109-111`
+- **Originating commit**: `63fac0c`
+
+Tokio's `TcpStream::try_read(non_empty_buf)` returns `Ok(0)` to mean
+peer-closed/EOF; the original implementation collapsed both `WouldBlock`
+and `Ok(0)` into `Ok(0)` for the caller, so a half-closed socket looked
+identical to a quiet socket. Java's `SocketChannel.read()` returns `-1` on
+EOF, which `NetworkReceive.readFrom` translates into `EOFException`.
+
+**Resolution:** Fixed. `PlaintextTransportLayer::read` now distinguishes
+the three Tokio outcomes:
+
+| Tokio outcome | Adapter result | Java NIO equivalent |
+| --- | --- | --- |
+| `Ok(n)` with `n > 0` | `Ok(n)` | `read() == n` |
+| `Err(WouldBlock)` | `Ok(0)` | `read() == 0` |
+| `Ok(0)` (peer closed) | `Err(io::ErrorKind::UnexpectedEof)` | `read() == -1 → EOFException` |
+
+The trait rustdoc on `TransportLayer::read` and the `NetworkReceive::read_from`
+comment were updated to document the EOF semantic. Two regression tests were
+added: `read_returns_unexpected_eof_on_peer_close` (drops the server side and
+asserts the next `TransportLayer::read` returns `UnexpectedEof`) and
+`io_read_adapter_propagates_eof` (same path through the `io::Read`
+forwarder used by `NetworkReceive`).
+
+## Issue: `is_open()` and `interest_ops()` desync after `disconnect()`
+
+- **File**: `src/common/network/plaintext_transport_layer.rs:148-156, 167-169, 209-225`
+- **Severity**: Suggestion (Java Behavior Divergence — minor, may matter in 5c)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/PlaintextTransportLayer.java:56-58, 71-73, 188-205`
+- **Originating commit**: `63fac0c`
+
+Java's `disconnect()` cancels the SelectionKey but leaves the
+`socketChannel` open until `close()`. Rust's `disconnect()` flips
+`is_open = false` immediately, so `is_open()` after `disconnect()` returns
+`false` in Rust but `true` in Java.
+
+**Resolution:** Rejected (deferred to Phase 5b-3/5c per Critic's own
+recommendation). The Critic explicitly tagged this comment as "Filed as
+Suggestion — defer the fix until 5b-3/5c demonstrates a real caller
+diverging." There is no current caller of `is_open()` between `disconnect()`
+and `close()`, so the divergence is unobservable at the present surface.
+Once `KafkaChannel` lands and exercises the disconnect→close window we
+will revisit either by splitting `is_open` into a `selection_key_cancelled`
++ `socket_open` pair, or by documenting the combined Rust semantic on
+the trait. Preferring to defer rather than speculatively reshape the
+state machine without a concrete caller.
+
+## Issue: Trait surface lacks `peer_addr`/`local_addr` accessors that `KafkaChannel` will need in 5b-3
+
+- **File**: `src/common/network/transport_layer.rs:67-135`
+- **Severity**: Suggestion (Missing Requirement — DoD #2 forecast)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/KafkaChannel.java:368-388`
+- **Originating commit**: `63fac0c`
+
+Java's `KafkaChannel` reads `transportLayer.socketChannel().socket()`
+peer/local addresses for connection-introspection metadata. The
+Rust trait omitted them, leaving Phase 5b-3 with the choice of
+downcasting the trait object (CLAUDE.md rule 7 violation) or making
+`KafkaChannel` generic over the concrete transport. Critic recommended
+adding the accessors now to avoid a forced refactor.
+
+**Resolution:** Fixed. `TransportLayer` gained
+`fn local_addr(&self) -> io::Result<SocketAddr>` and
+`fn peer_addr(&self) -> io::Result<SocketAddr>`. The two methods
+`PlaintextTransportLayer::local_addr` / `::peer_addr` previously declared
+as inherent moved into the trait `impl`, with no behaviour change
+(forwarding to `TcpStream::local_addr` / `::peer_addr`). The future
+`SslTransportLayer` will trivially forward to its inner `TcpStream` the
+same way. Existing tests (`local_and_peer_addr_round_trip`,
+`ops_on_closed_transport_error`) continue to pass.
+
+## Issue: `KafkaPrincipal::new` rejects empty strings; Java accepts them
+
+- **File**: `src/common/security/auth/kafka_principal.rs:65-79`
+- **Severity**: Suggestion (Behavior Mismatch — public API contract)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/security/auth/KafkaPrincipal.java:55-59`
+- **Originating commit**: `63fac0c`
+
+Java's constructor uses `requireNonNull` only — empty strings are
+accepted. Rust panicked on empty strings, which CLAUDE.md rule 4
+forbids ("Never change the contract of public API"). `String` is
+already non-nullable in Rust, so no further validation is needed.
+
+**Resolution:** Fixed. The `assert!(!principal_type.is_empty(), ...)`
+and `assert!(!name.is_empty(), ...)` were removed. `with_token_authenticated`
+now constructs the `KafkaPrincipal` directly from the converted strings.
+Added a `empty_strings_are_accepted` regression test that exercises both
+`("", "")` and `("User", "")` — both must succeed and produce the
+expected `to_string()` output. Java's constructor `requireNonNull`
+behavior is now mirrored exactly.
+
+## Issue: `KafkaPrincipal::anonymous()` allocates two `String`s per call
+
+- **File**: `src/common/security/auth/kafka_principal.rs:81-84`
+- **Severity**: Suggestion (Performance — minor, off the per-message hot path)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/security/auth/KafkaPrincipal.java:45`
+- **Originating commit**: `63fac0c`
+
+Java caches `public static final KafkaPrincipal ANONYMOUS = new KafkaPrincipal(...)`.
+Rust allocated fresh `String`s on every `anonymous()` call.
+
+**Resolution:** Fixed. `anonymous()` now uses a `static OnceLock<KafkaPrincipal>`
+to cache the singleton and returns `.clone()` of the cached value (one cheap
+`KafkaPrincipal::clone` per call instead of two `String::from` allocations).
+Added a `pub const ANONYMOUS_NAME: &str = "ANONYMOUS"` constant so the
+literal is reused. Added a `anonymous_is_idempotent` test to lock in the
+singleton-equivalent contract.
