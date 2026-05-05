@@ -190,14 +190,11 @@ each pruned commit:
 
 - Delete the `pr_commit` row via `db.delete_pr_commit(pr_number)`.
 - Remember the AK commit as the new cursor candidate.
-- For MERGED PRs: capture `gh pr view --json mergeCommit` to advance
-  `branch_commit.rust_commit` to the merge SHA on the base branch.
-  This works uniformly across all three GitHub merge styles (merge
-  commit / squash / rebase) — gh's `mergeCommit.oid` is the right
-  base-branch commit in every case, no merge-style-specific
-  branching needed.
-- For CLOSED-without-merge PRs: keep the previous `rust_commit`
-  unchanged.
+
+CLOSED and MERGED are treated identically — both advance the cursor
+by `ak_commit`. The Rust-side commit SHA is no longer recorded
+(the `branch_commit` cursor is keyed only on the AK side now), so
+there's no need to consult `gh pr view --json mergeCommit`.
 
 The walk stops at the first commit whose row is missing, synthetic
 (`pr_number < 0`), still OPEN, or hits a `gh pr view` failure. After
@@ -282,11 +279,11 @@ seeded before this change are upgraded in place.
 
 When step 8 succeeds for a PR, the orchestrator updates the
 `branch_commit` row for `rust_branch` via `INSERT OR REPLACE` to
-record the new `(ak_branch, ak_commit, rust_commit)`. This is what
-makes the orchestrator **resumable across sweeps** — without it, the
-next sweep would re-walk the same 10 AK commits from the original
-seed. The status update and the `branch_commit` write happen in a
-single sqlite transaction.
+record the new `(ak_branch, ak_commit)`. This is what makes the
+orchestrator **resumable across sweeps** — without it, the next
+sweep would re-walk the same 10 AK commits from the original seed.
+The status update and the `branch_commit` write happen in a single
+sqlite transaction.
 
 The cursor also advances during the sweep PR-closure check (see
 below) when one or more PRs at the front of the batch are found
@@ -296,8 +293,8 @@ already CLOSED or MERGED on GitHub.
 
 Bootstrapped via a CLI subcommand:
 `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch
-<> --rust-commit <> [--force] [--cleanup-prs]` — idempotent on the
-same values. Two optional flags compose:
+<> [--force] [--cleanup-prs]` — idempotent on the same values. Two
+optional flags compose:
 
 - `--force`: overwrite the cursor when a row already exists with
   different values. Without `--force`, a mismatched re-seed errors
@@ -309,10 +306,9 @@ same values. Two optional flags compose:
 
 The Semaphore `seed.yml` task wraps this for first-time setup of a
 new project. The Task exposes `AK_BRANCH`, `AK_COMMIT`, `RUST_BRANCH`,
-`RUST_COMMIT`, `FORCE`, `CLEANUP_PRS` as parameters; defaults are
-applied shell-side via `${VAR:-default}` rather than via task-level
-`env_vars` (the latter would shadow Task-parameter values supplied at
-trigger time).
+`FORCE`, `CLEANUP_PRS` as parameters; defaults are applied shell-side
+via `${VAR:-default}` rather than via task-level `env_vars` (the
+latter would shadow Task-parameter values supplied at trigger time).
 
 ### CLI shape (single binary, four invocation modes)
 
@@ -321,7 +317,7 @@ trigger time).
 | Sweep | `translation-agent --ak-repo-path <> --rust-branch <>` | Steps 1–6, 8, 10 (the AK branch is read from the `branch_commit` cursor row, not from a CLI flag) |
 | Per-PR status | `translation-agent --pr <N>` | Read-only check (step 7). Returns 0 (not 1) when the PR row is missing — most PRs in this repo aren't translation PRs and Semaphore auto-runs this on every PR build. |
 | Per-PR approve | `translation-agent --pr <N> --plan-approve` | Step 7 + cascade into step 8 for that PR. Returns 1 on missing PR row (deliberate manual promotion is an operator error if the PR isn't tracked). |
-| Seed | `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch <> --rust-commit <> [--force] [--cleanup-prs]` | Bootstrap `branch_commit` |
+| Seed | `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch <> [--force] [--cleanup-prs]` | Bootstrap `branch_commit` |
 
 Cross-cutting flags: `--db-path`, `--max-parallel` (default 4),
 `--no-artifact-push`, `--dry-run`, `--verbose`, `--artifact-name`,

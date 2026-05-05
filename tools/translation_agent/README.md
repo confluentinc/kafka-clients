@@ -87,11 +87,11 @@ Bootstraps the `branch_commit` correspondence on first run:
 ```bash
 translation-agent --seed \
   --ak-branch trunk --ak-commit <full-ak-sha> \
-  --rust-branch master --rust-commit <full-rust-sha>
+  --rust-branch master
 ```
 
-Idempotent — a row already present for `(ak_branch, ak_commit, rust_branch)`
-is left unchanged.
+Idempotent — a row already present for `rust_branch` with the same
+`(ak_branch, ak_commit)` is left unchanged.
 
 ## State machine
 
@@ -215,7 +215,7 @@ manually-triggered Task, defined under `.semaphore/` at the repo root:
 |---|---|---|
 | `.semaphore/semaphore.yml` | every push / PR | Sweep on the configured `${MAIN_BRANCH}` (default `master`); `--pr <N>` status check on PR builds; no-op otherwise. |
 | `.semaphore/plan-approve.yml` | manual promotion from a PR build | `translation-agent --pr <N> --plan-approve` (flips status 2→3 and cascades into implementation for that PR). |
-| `.semaphore/seed.yml` | manual Task in the Semaphore project's Tasks tab | `translation-agent --seed ...` to bootstrap `branch_commit` on first use. Required Task parameters: `AK_COMMIT`, `RUST_COMMIT`; optional: `AK_BRANCH`, `RUST_BRANCH`. |
+| `.semaphore/seed.yml` | manual Task in the Semaphore project's Tasks tab | `translation-agent --seed ...` to bootstrap `branch_commit` on first use. Required Task parameter: `AK_COMMIT`; optional: `AK_BRANCH`, `RUST_BRANCH`. |
 
 Each pipeline:
 - runs `artifact pull project translation_agent.db || true` in its

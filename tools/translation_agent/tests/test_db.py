@@ -31,61 +31,61 @@ def test_migrate_is_idempotent(conn):
 
 
 def test_seed_correspondence_inserts_then_idempotent(conn):
-    assert db.seed_correspondence(conn, "trunk", "abc", "master", "def") == "inserted"
-    assert db.seed_correspondence(conn, "trunk", "abc", "master", "def") == "unchanged"
+    assert db.seed_correspondence(conn, "trunk", "abc", "master") == "inserted"
+    assert db.seed_correspondence(conn, "trunk", "abc", "master") == "unchanged"
     rows = conn.execute("SELECT * FROM branch_commit").fetchall()
     assert len(rows) == 1
     assert dict(rows[0]) == {
-        "rust_branch": "master", "ak_branch": "trunk",
-        "ak_commit": "abc", "rust_commit": "def",
+        "rust_branch": "master", "ak_branch": "trunk", "ak_commit": "abc",
     }
 
 
 def test_seed_correspondence_distinct_rust_branches_coexist(conn):
-    assert db.seed_correspondence(conn, "trunk", "abc", "master", "def") == "inserted"
-    assert db.seed_correspondence(conn, "trunk", "abc", "feature", "ghi") == "inserted"
+    assert db.seed_correspondence(conn, "trunk", "abc", "master") == "inserted"
+    assert db.seed_correspondence(conn, "trunk", "abc", "feature") == "inserted"
     assert conn.execute("SELECT count(*) FROM branch_commit").fetchone()[0] == 2
 
 
 def test_seed_correspondence_same_rust_branch_different_values_errors(conn):
     """PK is rust_branch alone -- a second seed for the same rust_branch
     with different values must error unless `force=True`."""
-    db.seed_correspondence(conn, "trunk", "abc", "master", "def")
+    db.seed_correspondence(conn, "trunk", "abc", "master")
     with pytest.raises(ValueError, match="already exists"):
-        db.seed_correspondence(conn, "trunk", "newak", "master", "newrust")
+        db.seed_correspondence(conn, "trunk", "newak", "master")
 
 
 def test_seed_correspondence_force_updates_in_place(conn):
     """With force=True, existing rust_branch row is updated to new
-    ak/rust values."""
-    db.seed_correspondence(conn, "trunk", "abc", "master", "def")
+    ak values."""
+    db.seed_correspondence(conn, "trunk", "abc", "master")
     assert db.seed_correspondence(
-        conn, "trunk", "newak", "master", "newrust", force=True,
+        conn, "trunk", "newak", "master", force=True,
     ) == "updated"
     row = dict(conn.execute(
         "SELECT * FROM branch_commit WHERE rust_branch = 'master'"
     ).fetchone())
     assert row == {
-        "rust_branch": "master", "ak_branch": "trunk",
-        "ak_commit": "newak", "rust_commit": "newrust",
+        "rust_branch": "master", "ak_branch": "trunk", "ak_commit": "newak",
     }
 
 
 def test_seed_correspondence_force_no_change_returns_unchanged(conn):
     """force=True is a no-op if values match the existing row."""
-    db.seed_correspondence(conn, "trunk", "abc", "master", "def")
+    db.seed_correspondence(conn, "trunk", "abc", "master")
     assert db.seed_correspondence(
-        conn, "trunk", "abc", "master", "def", force=True,
+        conn, "trunk", "abc", "master", force=True,
     ) == "unchanged"
 
 
 def test_migrate_old_branch_commit_pk_is_collapsed(conn):
     """A pre-existing branch_commit table with the old multi-column PK
-    gets rebuilt with the new single-column PK, keeping only the most
-    recent row per rust_branch."""
-    # Drop and recreate with the OLD schema, plus two rows for the same
-    # rust_branch (representing what an older orchestrator would have
-    # accumulated as the cursor advanced).
+    AND the now-removed rust_commit column gets rebuilt with the
+    current schema, keeping only the most recent row per rust_branch
+    and dropping the column."""
+    # Drop and recreate with the OLD schema (multi-PK + rust_commit
+    # column), plus two rows for the same rust_branch (representing
+    # what an older orchestrator would have accumulated as the cursor
+    # advanced).
     conn.execute("DROP TABLE branch_commit")
     conn.execute("""
         CREATE TABLE branch_commit (
@@ -105,9 +105,41 @@ def test_migrate_old_branch_commit_pk_is_collapsed(conn):
     rows = conn.execute("SELECT * FROM branch_commit").fetchall()
     assert len(rows) == 1
     assert dict(rows[0]) == {
-        "rust_branch": "master", "ak_branch": "trunk",
-        "ak_commit": "new_ak", "rust_commit": "new_rust",
+        "rust_branch": "master", "ak_branch": "trunk", "ak_commit": "new_ak",
     }
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(branch_commit)")}
+    assert cols == {"rust_branch", "ak_branch", "ak_commit"}
+
+
+def test_migrate_drops_rust_commit_column_from_single_pk_schema(conn):
+    """A DB on the intermediate schema (single-column PK on rust_branch
+    BUT still with the vestigial rust_commit column) gets the column
+    dropped in place. Rows are preserved verbatim across the rebuild."""
+    conn.execute("DROP TABLE branch_commit")
+    conn.execute("""
+        CREATE TABLE branch_commit (
+            rust_branch  TEXT NOT NULL PRIMARY KEY,
+            ak_branch    TEXT NOT NULL,
+            ak_commit    TEXT NOT NULL,
+            rust_commit  TEXT NOT NULL
+        )
+    """)
+    conn.execute(
+        "INSERT INTO branch_commit VALUES ('master', 'trunk', 'ak1', 'rust1')")
+    conn.execute(
+        "INSERT INTO branch_commit VALUES ('feature', 'trunk', 'ak2', 'rust2')")
+    conn.commit()
+    db.migrate(conn)
+    rows = sorted(
+        (dict(r) for r in conn.execute("SELECT * FROM branch_commit")),
+        key=lambda r: r["rust_branch"],
+    )
+    assert rows == [
+        {"rust_branch": "feature", "ak_branch": "trunk", "ak_commit": "ak2"},
+        {"rust_branch": "master",  "ak_branch": "trunk", "ak_commit": "ak1"},
+    ]
+    cols = {r["name"] for r in conn.execute("PRAGMA table_info(branch_commit)")}
+    assert cols == {"rust_branch", "ak_branch", "ak_commit"}
 
 
 def test_get_pr_missing_returns_none(conn):
@@ -193,22 +225,20 @@ def test_get_latest_correspondence_none_when_empty(conn):
 
 def test_get_latest_correspondence_returns_row_per_branch(conn):
     """Each rust_branch has at most one row (PK on rust_branch)."""
-    db.seed_correspondence(conn, "trunk", "ak1", "master", "rust1")
-    db.seed_correspondence(conn, "trunk", "ak3", "feature", "rust3")
+    db.seed_correspondence(conn, "trunk", "ak1", "master")
+    db.seed_correspondence(conn, "trunk", "ak3", "feature")
     row = db.get_latest_correspondence(conn, "master")
     assert row["ak_commit"] == "ak1"
-    assert row["rust_commit"] == "rust1"
     row2 = db.get_latest_correspondence(conn, "feature")
     assert row2["ak_commit"] == "ak3"
 
 
 def test_get_latest_correspondence_after_force_update(conn):
     """After a force-update, get_latest reflects the new values."""
-    db.seed_correspondence(conn, "trunk", "ak1", "master", "rust1")
-    db.seed_correspondence(conn, "trunk", "ak2", "master", "rust2", force=True)
+    db.seed_correspondence(conn, "trunk", "ak1", "master")
+    db.seed_correspondence(conn, "trunk", "ak2", "master", force=True)
     row = db.get_latest_correspondence(conn, "master")
     assert row["ak_commit"] == "ak2"
-    assert row["rust_commit"] == "rust2"
 
 
 def test_insert_pr_commit_sets_status_zero(conn):
@@ -317,13 +347,12 @@ def test_mark_implementation_done_inserts_branch_commit_atomically(conn):
     conn.commit()
     db.mark_implementation_done(
         conn, 42, ak_branch="trunk", ak_commit="ak42",
-        rust_branch="master", rust_commit="rust42",
+        rust_branch="master",
     )
     pr = db.get_pr(conn, 42)
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak42"
-    assert bc["rust_commit"] == "rust42"
 
 
 # --- unblocked predicate ----------------------------------------------------

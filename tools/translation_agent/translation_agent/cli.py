@@ -21,10 +21,10 @@ Three invocation modes per the design:
   `branch_commit` cursor row whose primary key is `--rust-branch`.
 - Per-PR mode: `translation-agent --pr <N> [--plan-approve]` — design step 7.
 - Seed mode: `translation-agent --seed --ak-branch ... --ak-commit ...
-  --rust-branch ... --rust-commit ... [--force] [--cleanup-prs]` --
-  bootstraps the `branch_commit` table on first use. `--force`
-  overwrites an existing cursor; `--cleanup-prs` deletes every
-  `pr_commit` row for `--rust-branch` before seeding.
+  --rust-branch ... [--force] [--cleanup-prs]` -- bootstraps the
+  `branch_commit` table on first use. `--force` overwrites an existing
+  cursor; `--cleanup-prs` deletes every `pr_commit` row for
+  `--rust-branch` before seeding.
 """
 
 import argparse
@@ -137,7 +137,6 @@ def _build_parser() -> argparse.ArgumentParser:
     # Seed-mode args (--rust-branch is shared with sweep mode; --ak-branch
     # is required for seed only).
     parser.add_argument("--ak-commit", help="AK commit hash (for --seed).")
-    parser.add_argument("--rust-commit", help="Rust commit hash (for --seed).")
     parser.add_argument(
         "--force", action="store_true",
         help="With --seed: overwrite the branch_commit cursor for the "
@@ -158,7 +157,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
 
 def _run_seed(args: argparse.Namespace, conn) -> int:
-    required = ("ak_branch", "ak_commit", "rust_branch", "rust_commit")
+    required = ("ak_branch", "ak_commit", "rust_branch")
     missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
     if missing:
         log.error("--seed requires: %s", ", ".join(missing))
@@ -180,7 +179,7 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
     try:
         result = db.seed_correspondence(
             conn,
-            args.ak_branch, args.ak_commit, args.rust_branch, args.rust_commit,
+            args.ak_branch, args.ak_commit, args.rust_branch,
             force=args.force,
         )
     except ValueError as e:
@@ -188,20 +187,20 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
         return 1
     if result == "inserted":
         log.info(
-            "Inserted branch_commit (rust=%s -> ak=%s/%s, rust_commit=%s)",
-            args.rust_branch, args.ak_branch, args.ak_commit, args.rust_commit,
+            "Inserted branch_commit (rust=%s -> ak=%s/%s)",
+            args.rust_branch, args.ak_branch, args.ak_commit,
         )
     elif result == "updated":
         log.info(
-            "Updated branch_commit cursor for rust_branch=%s -> ak=%s/%s, "
-            "rust_commit=%s [--force]",
-            args.rust_branch, args.ak_branch, args.ak_commit, args.rust_commit,
+            "Updated branch_commit cursor for rust_branch=%s -> ak=%s/%s "
+            "[--force]",
+            args.rust_branch, args.ak_branch, args.ak_commit,
         )
     else:  # "unchanged"
         log.info(
-            "branch_commit cursor for rust_branch=%s already at ak=%s/%s, "
-            "rust_commit=%s -- no change",
-            args.rust_branch, args.ak_branch, args.ak_commit, args.rust_commit,
+            "branch_commit cursor for rust_branch=%s already at ak=%s/%s "
+            "-- no change",
+            args.rust_branch, args.ak_branch, args.ak_commit,
         )
     return 0
 
@@ -289,11 +288,10 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         ak_branch=pr["ak_branch"],
         ak_commit=pr["ak_commit"],
         rust_branch=pr["rust_branch"],
-        rust_commit=sha,
     )
     label = " [dry-run]" if args.dry_run else ""
     log.info(
-        "PR #%d -> status %d (implementation_done) rust_commit=%s%s",
+        "PR #%d -> status %d (implementation_done) sha=%s%s",
         args.pr, db.STATUS_IMPLEMENTATION_DONE, sha[:12], label,
     )
     return 0
@@ -309,12 +307,7 @@ def _check_pr_closures_and_advance_cursor(
     (pr_number < 0), still OPEN, or hits a gh-view failure.
 
     On any cleanup, advance `branch_commit` for `args.rust_branch`
-    via `db.seed_correspondence(..., force=True)`. For MERGED PRs the
-    cursor's `rust_commit` is updated to the merge commit's SHA on
-    the base branch (works for merge / squash / rebase merges
-    uniformly because gh's `mergeCommit` field returns the right
-    commit in all three cases). For CLOSED-without-merge PRs the
-    `rust_commit` is unchanged from the previous cursor.
+    via `db.seed_correspondence(..., force=True)`.
 
     Returns the new cursor `ak_commit` value if advanced, or None
     otherwise. No-ops in dry-run mode and when ak_commits is empty.
@@ -323,7 +316,6 @@ def _check_pr_closures_and_advance_cursor(
         return None
 
     new_ak = None
-    new_rust = cursor["rust_commit"]
 
     for ak in ak_commits:
         row = db.get_pr_commit_by_branch_and_ak(conn, args.rust_branch, ak)
@@ -332,7 +324,7 @@ def _check_pr_closures_and_advance_cursor(
         if row["pr_number"] is None or row["pr_number"] < 0:
             break  # synthetic dry-run row -> stop
         try:
-            state, merge_sha = github.get_pr_state(
+            state, _ = github.get_pr_state(
                 args.rust_repo_path, row["pr_number"],
             )
         except github.GhError as e:
@@ -347,8 +339,6 @@ def _check_pr_closures_and_advance_cursor(
         # CLOSED or MERGED -> clean up
         db.delete_pr_commit(conn, row["pr_number"])
         new_ak = ak
-        if state == "MERGED" and merge_sha:
-            new_rust = merge_sha
         log.info(
             "PR #%d (%s) for AK %s: removed pr_commit row",
             row["pr_number"], state, ak[:12],
@@ -357,12 +347,9 @@ def _check_pr_closures_and_advance_cursor(
     if new_ak is not None:
         db.seed_correspondence(
             conn, cursor["ak_branch"], new_ak,
-            args.rust_branch, new_rust, force=True,
+            args.rust_branch, force=True,
         )
-        log.info(
-            "Cursor advanced: ak=%s, rust=%s",
-            new_ak[:12], (new_rust or "")[:12],
-        )
+        log.info("Cursor advanced: ak=%s", new_ak[:12])
     return new_ak
 
 
@@ -385,9 +372,8 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
         return 1
     ak_branch = cursor["ak_branch"]
     log.info(
-        "Cursor: rust=%s/%s -> AK=%s/%s",
-        cursor["rust_branch"], cursor["rust_commit"],
-        ak_branch, cursor["ak_commit"],
+        "Cursor: rust=%s -> AK=%s/%s",
+        cursor["rust_branch"], ak_branch, cursor["ak_commit"],
     )
 
     # Step 3: get the next 10 AK commits.
@@ -660,10 +646,9 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                     ak_branch=ak_branch,
                     ak_commit=row["ak_commit"],
                     rust_branch=row["rust_branch"],
-                    rust_commit=sha,
                 )
                 log.info(
-                    "PR #%d -> status %d (implementation_done) rust_commit=%s%s",
+                    "PR #%d -> status %d (implementation_done) sha=%s%s",
                     pr_number, db.STATUS_IMPLEMENTATION_DONE,
                     sha[:12] if sha else "??", label,
                 )
