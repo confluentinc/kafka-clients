@@ -110,10 +110,21 @@ locally on `{branch_name}`.
 # Literal trailer the plan-phase PR-description prompt asks claude to
 # end the body with. The orchestrator scans the resulting body for an
 # exact match of this string; if present, it applies
-# IMPLEMENTATION_NEEDED_LABEL to the PR. Keep both constants and the
+# LABEL_IMPLEMENTATION_NEEDED to the PR. Keep this constant and the
 # string baked into PR_DESCRIPTION_PROMPT_TEMPLATE in lockstep.
 IMPLEMENTATION_NEEDED_MARKER = "Next steps: **Implementation needed**"
-IMPLEMENTATION_NEEDED_LABEL = "implementation-needed"
+
+# Per-state PR labels applied by the orchestrator at state transitions.
+# Sequence (applied / removed at the corresponding sweep step):
+#   status 0 -> 1 (dep-eval done):  +LABEL_DEPENDENCIES_EVALUATED
+#   status 1 -> 2 (plan created):   -LABEL_DEPENDENCIES_EVALUATED, +LABEL_PLAN_CREATED
+#   plan body has marker:           +LABEL_IMPLEMENTATION_NEEDED
+#   status 3 -> 4 (impl done):      -{deps-evaluated, plan-created,
+#                                     implementation-needed}, +LABEL_IMPLEMENTATION_DONE
+LABEL_DEPENDENCIES_EVALUATED = "dependencies-evaluated"
+LABEL_PLAN_CREATED = "plan-created"
+LABEL_IMPLEMENTATION_NEEDED = "implementation-needed"
+LABEL_IMPLEMENTATION_DONE = "implementation-done"
 
 
 PR_DESCRIPTION_PROMPT_TEMPLATE = """\

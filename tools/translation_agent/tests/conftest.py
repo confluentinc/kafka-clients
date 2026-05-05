@@ -25,9 +25,11 @@ def _no_pr_description_update_by_default(request):
     side_effect lists; the description-update path adds an extra
     streaming call after each successful plan/impl r2 invocation,
     which would break those tests for reasons unrelated to what
-    they're actually testing. Default the helper to a no-op (returns
-    None == success) so plan/impl tests don't have to think about
-    PR-description internals.
+    they're actually testing. Default the helper AND every gh-side
+    PR-state mutator to a no-op (returns None == success) so plan/
+    impl/dep-eval tests don't have to think about PR-description
+    or label internals -- and so the suite never invokes a real
+    `gh` subprocess against an unauthenticated environment.
 
     Scoped to `test_cli.py` only -- other test files (test_github,
     test_prompts, etc.) exercise the underlying modules directly and
@@ -52,6 +54,12 @@ def _no_pr_description_update_by_default(request):
         "translation_agent.cli.github.prepend_pr_body",
     ), patch(
         "translation_agent.cli.github.update_pr_body",
+    ), patch(
+        "translation_agent.cli.github.get_pr_body", return_value="",
+    ), patch(
+        "translation_agent.cli.github.add_pr_label",
+    ), patch(
+        "translation_agent.cli.github.remove_pr_label",
     ):
         yield
 
@@ -63,8 +71,9 @@ def real_pr_description():
     Add `real_pr_description` as a parameter to a test to disable the
     default no-op patches and exercise the real
     `_update_pr_description_via_r2` / `github.update_pr_body` /
-    `github.prepend_pr_body` code paths. The fixture itself is a
-    no-op at runtime; its only role is to be detectable in the
-    autouse fixture's `request.fixturenames`.
+    `github.prepend_pr_body` / `github.add_pr_label` /
+    `github.remove_pr_label` / `github.get_pr_body` code paths. The
+    fixture itself is a no-op at runtime; its only role is to be
+    detectable in the autouse fixture's `request.fixturenames`.
     """
     yield

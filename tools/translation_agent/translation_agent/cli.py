@@ -294,6 +294,15 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         "PR #%d -> status %d (implementation_done) sha=%s%s",
         args.pr, db.STATUS_IMPLEMENTATION_DONE, sha[:12], label,
     )
+    _apply_label_transition(
+        args, args.pr,
+        remove=(
+            prompts.LABEL_DEPENDENCIES_EVALUATED,
+            prompts.LABEL_PLAN_CREATED,
+            prompts.LABEL_IMPLEMENTATION_NEEDED,
+        ),
+        add=(prompts.LABEL_IMPLEMENTATION_DONE,),
+    )
     return 0
 
 
@@ -507,6 +516,21 @@ def _run_dep_eval(args: argparse.Namespace, conn) -> None:
                 (plan_dep[:12] if plan_dep else None),
                 (impl_dep[:12] if impl_dep else None),
             )
+            # Resolve dep AK SHAs to PR numbers within the same rust
+            # branch (out-of-batch deps were already coerced to None
+            # above, so any non-None dep here has a pr_commit row).
+            plan_dep_pr = _lookup_dep_pr_number(
+                conn, args.rust_branch, plan_dep,
+            )
+            impl_dep_pr = _lookup_dep_pr_number(
+                conn, args.rust_branch, impl_dep,
+            )
+            _update_pr_dep_section(
+                args, pr_number, plan_dep_pr, impl_dep_pr,
+            )
+            _apply_label_transition(
+                args, pr_number, add=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
+            )
 
 
 def _dep_eval_one(args, row, batch_aks):
@@ -649,6 +673,11 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                     "PR #%d -> status %d (plan_created)%s",
                     pr_number, db.STATUS_PLAN_CREATED, label,
                 )
+                _apply_label_transition(
+                    args, pr_number,
+                    remove=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
+                    add=(prompts.LABEL_PLAN_CREATED,),
+                )
             else:
                 # impl: row["ak_branch"] should be populated by the sweep.
                 ak_branch = row["ak_branch"] or args.ak_branch
@@ -663,6 +692,122 @@ def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
                     pr_number, db.STATUS_IMPLEMENTATION_DONE,
                     sha[:12] if sha else "??", label,
                 )
+                _apply_label_transition(
+                    args, pr_number,
+                    remove=(
+                        prompts.LABEL_DEPENDENCIES_EVALUATED,
+                        prompts.LABEL_PLAN_CREATED,
+                        prompts.LABEL_IMPLEMENTATION_NEEDED,
+                    ),
+                    add=(prompts.LABEL_IMPLEMENTATION_DONE,),
+                )
+
+
+def _lookup_dep_pr_number(
+    conn, rust_branch: str, ak_commit: Optional[str],
+) -> Optional[int]:
+    """Resolve a dep AK SHA to its pr_commit.pr_number on `rust_branch`,
+    or None if the SHA is None or no row matches. Synthetic dry-run
+    rows (negative pr_number) are returned as-is and treated as None
+    by callers (the dep section won't render a #-link for them)."""
+    if not ak_commit:
+        return None
+    row = db.get_pr_commit_by_branch_and_ak(conn, rust_branch, ak_commit)
+    if row is None:
+        return None
+    pr_number = row["pr_number"]
+    if pr_number is None or pr_number < 0:
+        return None
+    return pr_number
+
+
+def _apply_label_transition(
+    args: argparse.Namespace,
+    pr_number: int,
+    *,
+    add: "tuple[str, ...]" = (),
+    remove: "tuple[str, ...]" = (),
+) -> None:
+    """Apply +add / -remove labels to PR `pr_number`. Per-label failures
+    log a warning and continue (the orchestrator never fails the sweep
+    over a cosmetic labeling problem). No-ops in dry-run and for
+    synthetic pr_numbers (< 0).
+    """
+    if pr_number is None or pr_number < 0:
+        return
+    if args.dry_run:
+        if add or remove:
+            log.info(
+                "[dry-run] PR #%d: would +%s -%s",
+                pr_number, list(add), list(remove),
+            )
+        return
+    for label in remove:
+        try:
+            github.remove_pr_label(args.rust_repo_path, pr_number, label)
+            log.info("PR #%d: removed label %r", pr_number, label)
+        except github.GhError as e:
+            log.warning(
+                "PR #%d: failed to remove %r label: %s",
+                pr_number, label, e,
+            )
+    for label in add:
+        try:
+            github.add_pr_label(args.rust_repo_path, pr_number, label)
+            log.info("PR #%d: added label %r", pr_number, label)
+        except github.GhError as e:
+            log.warning(
+                "PR #%d: failed to add %r label: %s",
+                pr_number, label, e,
+            )
+
+
+def _update_pr_dep_section(
+    args: argparse.Namespace,
+    pr_number: int,
+    plan_dep_pr_number: Optional[int],
+    impl_dep_pr_number: Optional[int],
+) -> None:
+    """Read PR `pr_number`'s body, replace the orchestrator-managed
+    dependency section in place, and write the result back.
+
+    Idempotent on retry (replace_dep_section strips any existing block
+    before prepending). No-ops in dry-run and for synthetic pr_numbers.
+    Failures log a warning and continue (cosmetic).
+    """
+    if pr_number is None or pr_number < 0:
+        return
+    if args.dry_run:
+        log.info(
+            "[dry-run] PR #%d: would set dep section (plan=#%s, impl=#%s)",
+            pr_number, plan_dep_pr_number, impl_dep_pr_number,
+        )
+        return
+    section = github.format_dep_section(
+        plan_dep_pr_number, impl_dep_pr_number,
+    )
+    try:
+        body = github.get_pr_body(args.rust_repo_path, pr_number)
+    except github.GhError as e:
+        log.warning(
+            "PR #%d: failed to read body for dep-section update: %s",
+            pr_number, e,
+        )
+        return
+    new_body = github.replace_dep_section(body, section)
+    if new_body == body:
+        return
+    try:
+        github.update_pr_body(args.rust_repo_path, pr_number, new_body)
+        log.info(
+            "PR #%d: dep section updated (plan=#%s, impl=#%s)",
+            pr_number, plan_dep_pr_number, impl_dep_pr_number,
+        )
+    except github.GhError as e:
+        log.warning(
+            "PR #%d: failed to update body with dep section: %s",
+            pr_number, e,
+        )
 
 
 def _update_pr_description_via_r2(
@@ -732,16 +877,16 @@ def _update_pr_description_via_r2(
         try:
             github.add_pr_label(
                 args.rust_repo_path, pr_number,
-                prompts.IMPLEMENTATION_NEEDED_LABEL,
+                prompts.LABEL_IMPLEMENTATION_NEEDED,
             )
             log.info(
                 "PR #%d: labeled %r",
-                pr_number, prompts.IMPLEMENTATION_NEEDED_LABEL,
+                pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED,
             )
         except github.GhError as e:
             log.warning(
                 "PR #%d: failed to add %r label: %s",
-                pr_number, prompts.IMPLEMENTATION_NEEDED_LABEL, e,
+                pr_number, prompts.LABEL_IMPLEMENTATION_NEEDED, e,
             )
     return None
 

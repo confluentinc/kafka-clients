@@ -14,7 +14,7 @@
 
 from contextlib import contextmanager
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import ANY, MagicMock, patch
 
 import pytest
 
@@ -651,7 +651,7 @@ def test_update_pr_description_plan_phase_with_marker_applies_label(
 ):
     """When phase='plan' and the body claude wrote ends with the
     IMPLEMENTATION_NEEDED_MARKER, the helper applies the
-    IMPLEMENTATION_NEEDED_LABEL via github.add_pr_label after a
+    LABEL_IMPLEMENTATION_NEEDED via github.add_pr_label after a
     successful update_pr_body."""
     from translation_agent import prompts
     wt = tmp_path / "wt"
@@ -676,7 +676,7 @@ def test_update_pr_description_plan_phase_with_marker_applies_label(
     assert err is None
     mupd.assert_called_once_with(".", 42, body)
     mlabel.assert_called_once_with(
-        ".", 42, prompts.IMPLEMENTATION_NEEDED_LABEL,
+        ".", 42, prompts.LABEL_IMPLEMENTATION_NEEDED,
     )
 
 
@@ -1524,6 +1524,250 @@ def test_sweep_impl_step_transitions_status_3_to_4_and_updates_branch_commit(tmp
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_y"
+
+
+# --- per-state label transitions -------------------------------------------
+
+def test_sweep_dep_eval_adds_dependencies_evaluated_label_and_writes_dep_section(
+    tmp_path, real_pr_description,
+):
+    """After dep-eval moves a row to status 1, the orchestrator (a)
+    adds the 'dependencies-evaluated' label, and (b) writes the dep
+    section to the PR body resolving dep AK SHAs to their pr_commit
+    pr_numbers within the same rust_branch."""
+    from translation_agent import prompts
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    # Two PRs in the batch: ak_a (depended on) and ak_b (depends on ak_a).
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 100, "master", "trunk", "ak_a")
+    db.insert_pr_commit(conn, 200, "master", "trunk", "ak_b")
+    conn.close()
+    # ak_a -> no deps; ak_b -> plan_dep=ak_a, impl_dep=ak_a.
+    json_a = '{"plan_dependency": null, "implementation_dependency": null}'
+    json_b = '{"plan_dependency": "ak_a", "implementation_dependency": "ak_a"}'
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=[(0, json_a), (0, json_b)]), \
+         patch("translation_agent.cli.github.get_pr_body",
+               return_value="## Summary"), \
+         patch("translation_agent.cli.github.update_pr_body") as mupd, \
+         patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrem:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    # Both rows transitioned to status 1.
+    conn = db.connect(db_path)
+    assert dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 100"
+    ).fetchone())["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    assert dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 200"
+    ).fetchone())["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    # Both got the dependencies-evaluated label.
+    assert madd.call_count == 2
+    for call in madd.call_args_list:
+        assert call.args[2] == prompts.LABEL_DEPENDENCIES_EVALUATED
+    # No removals at the dep-eval stage.
+    mrem.assert_not_called()
+    # PR 200 got a dep section update referencing PR #100; PR 100 has
+    # no deps so update_pr_body MAY or may not be called depending on
+    # whether the body changed (replace_dep_section is a no-op then).
+    body_writes_for_200 = [
+        c for c in mupd.call_args_list if c.args[1] == 200
+    ]
+    assert len(body_writes_for_200) == 1
+    new_body = body_writes_for_200[0].args[2]
+    assert "**Dependencies:**" in new_body
+    assert "- Plan: #100" in new_body
+    assert "- Implementation: #100" in new_body
+
+
+def test_sweep_plan_step_swaps_dependencies_evaluated_for_plan_created_label(
+    tmp_path, real_pr_description,
+):
+    """After plan generation transitions status 1 -> 2, the orchestrator
+    removes 'dependencies-evaluated' (if present) and adds
+    'plan-created'."""
+    from translation_agent import prompts
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 50, "master", "trunk", "ak_x")
+    db.update_dependencies(conn, 50, None, None)  # status -> 1
+    conn.close()
+    # Make _update_pr_description_via_r2 a no-op so the label assertions
+    # aren't muddied by the description-update path.
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli._update_pr_description_via_r2",
+               return_value=None), \
+         patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrem:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mrem.assert_called_once_with(
+        ANY, 50, prompts.LABEL_DEPENDENCIES_EVALUATED,
+    )
+    madd.assert_called_once_with(ANY, 50, prompts.LABEL_PLAN_CREATED)
+
+
+def test_sweep_impl_step_clears_intermediate_labels_and_marks_implementation_done(
+    tmp_path, real_pr_description,
+):
+    """After impl transitions 3 -> 4, the orchestrator strips the three
+    intermediate labels (dependencies-evaluated, plan-created,
+    implementation-needed) and sets implementation-done."""
+    from translation_agent import prompts
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    conn = db.connect(db_path)
+    db.insert_pr_commit(conn, 60, "master", "trunk", "ak_y")
+    conn.execute("UPDATE pr_commit SET status = ? WHERE pr_number = 60",
+                 (db.STATUS_PLAN_APPROVED,))
+    conn.commit()
+    conn.close()
+    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_y_sha"), \
+         patch("translation_agent.cli._update_pr_description_via_r2",
+               return_value=None), \
+         patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrem:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
+            "--rust-branch", "master",
+            db_path=db_path,
+        )
+    assert rc == 0
+    removed_labels = [c.args[2] for c in mrem.call_args_list]
+    assert removed_labels == [
+        prompts.LABEL_DEPENDENCIES_EVALUATED,
+        prompts.LABEL_PLAN_CREATED,
+        prompts.LABEL_IMPLEMENTATION_NEEDED,
+    ]
+    madd.assert_called_once_with(ANY, 60, prompts.LABEL_IMPLEMENTATION_DONE)
+
+
+def test_pr_plan_approve_impl_clears_intermediate_labels_and_marks_done(
+    tmp_path, real_pr_description,
+):
+    """The --plan-approve cascade (per-PR mode) takes the same
+    label-cleanup path as the sweep impl step: -3 intermediates,
+    +implementation-done."""
+    from translation_agent import prompts
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_new_sha"), \
+         patch("translation_agent.cli._update_pr_description_via_r2",
+               return_value=None), \
+         patch("translation_agent.cli.github.prepend_pr_body"), \
+         patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrem:
+        rc = _run("--pr", "42", "--plan-approve", db_path=db_path)
+    assert rc == 0
+    assert [c.args[2] for c in mrem.call_args_list] == [
+        prompts.LABEL_DEPENDENCIES_EVALUATED,
+        prompts.LABEL_PLAN_CREATED,
+        prompts.LABEL_IMPLEMENTATION_NEEDED,
+    ]
+    madd.assert_called_once_with(ANY, 42, prompts.LABEL_IMPLEMENTATION_DONE)
+
+
+def test_apply_label_transition_skips_synthetic_pr_number(real_pr_description):
+    """Synthetic dry-run pr_numbers (< 0) have no real PR; the helper
+    must not invoke any gh subprocess for them."""
+    from types import SimpleNamespace
+    args = SimpleNamespace(rust_repo_path=".", dry_run=False)
+    with patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrem:
+        cli._apply_label_transition(
+            args, -12345, add=("a",), remove=("b",),
+        )
+    madd.assert_not_called()
+    mrem.assert_not_called()
+
+
+def test_apply_label_transition_skips_in_dry_run(real_pr_description):
+    """Dry-run never touches GitHub. Helper logs intent and returns."""
+    from types import SimpleNamespace
+    args = SimpleNamespace(rust_repo_path=".", dry_run=True)
+    with patch("translation_agent.cli.github.add_pr_label") as madd, \
+         patch("translation_agent.cli.github.remove_pr_label") as mrem:
+        cli._apply_label_transition(
+            args, 42, add=("a",), remove=("b",),
+        )
+    madd.assert_not_called()
+    mrem.assert_not_called()
+
+
+def test_apply_label_transition_swallows_per_label_errors(
+    real_pr_description, caplog,
+):
+    """One label failing to add/remove must not block the others, and
+    must not raise -- labeling is cosmetic."""
+    import logging
+    from types import SimpleNamespace
+    from translation_agent import github as gh
+    args = SimpleNamespace(rust_repo_path=".", dry_run=False)
+    with patch(
+        "translation_agent.cli.github.remove_pr_label",
+        side_effect=[gh.GhError("not authorized"), None],
+    ), patch(
+        "translation_agent.cli.github.add_pr_label",
+        side_effect=gh.GhError("label not found"),
+    ):
+        with caplog.at_level(logging.WARNING, logger="translation_agent.cli"):
+            cli._apply_label_transition(
+                args, 42, add=("c",), remove=("a", "b"),
+            )
+    msgs = [r.message for r in caplog.records]
+    assert any("'a'" in m for m in msgs)
+    assert any("'c'" in m for m in msgs)
+
+
+def test_update_pr_dep_section_idempotent_on_repeated_calls(real_pr_description):
+    """A retry of dep-eval (same plan/impl deps) must NOT accumulate
+    dep blocks in the body. Two consecutive calls produce identical
+    content."""
+    from types import SimpleNamespace
+    args = SimpleNamespace(rust_repo_path=".", dry_run=False)
+    bodies = []  # capture each new_body that update_pr_body would write
+
+    def fake_get():
+        return bodies[-1] if bodies else "## Summary"
+
+    def fake_update(repo, pr, new):
+        bodies.append(new)
+
+    with patch("translation_agent.cli.github.get_pr_body",
+               side_effect=lambda r, n: fake_get()), \
+         patch("translation_agent.cli.github.update_pr_body",
+               side_effect=fake_update):
+        cli._update_pr_dep_section(args, 42, 100, 200)
+        cli._update_pr_dep_section(args, 42, 100, 200)
+    # Second call: replace_dep_section sees an identical dep block, the
+    # produced body equals the current one, and the helper short-
+    # circuits without calling update_pr_body again.
+    assert len(bodies) == 1
+    assert bodies[0].count("<!-- deps:start -->") == 1
 
 
 def test_sweep_plan_blocked_by_unapproved_dep_skipped(tmp_path):
