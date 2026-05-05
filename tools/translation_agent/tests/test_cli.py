@@ -77,7 +77,7 @@ def test_seed_creates_branch_commit_row(tmp_path):
     rc = _run(
         "--seed",
         "--ak-branch", "trunk", "--ak-commit", "abc",
-        "--rust-branch", "master", "--rust-commit", "def",
+        "--rust-branch", "master",
         db_path=db_path,
     )
     assert rc == 0
@@ -89,7 +89,7 @@ def test_seed_idempotent(tmp_path):
     db_path = str(tmp_path / "t.db")
     args = [
         "--seed", "--ak-branch", "trunk", "--ak-commit", "abc",
-        "--rust-branch", "master", "--rust-commit", "def",
+        "--rust-branch", "master",
     ]
     assert _run(*args, db_path=db_path) == 0
     assert _run(*args, db_path=db_path) == 0
@@ -120,7 +120,7 @@ def test_seed_with_cleanup_prs_deletes_branch_rows_and_seeds_cursor(tmp_path):
     rc = _run(
         "--seed", "--cleanup-prs",
         "--ak-branch", "trunk", "--ak-commit", "akseed",
-        "--rust-branch", "master", "--rust-commit", "rustseed",
+        "--rust-branch", "master",
         db_path=db_path,
     )
     assert rc == 0
@@ -136,7 +136,6 @@ def test_seed_with_cleanup_prs_deletes_branch_rows_and_seeds_cursor(tmp_path):
     bc = db.get_latest_correspondence(conn, "master")
     assert bc is not None
     assert bc["ak_commit"] == "akseed"
-    assert bc["rust_commit"] == "rustseed"
 
 
 def test_seed_cleanup_prs_no_rows_is_noop(tmp_path):
@@ -146,7 +145,7 @@ def test_seed_cleanup_prs_no_rows_is_noop(tmp_path):
     rc = _run(
         "--seed", "--cleanup-prs",
         "--ak-branch", "trunk", "--ak-commit", "abc",
-        "--rust-branch", "master", "--rust-commit", "def",
+        "--rust-branch", "master",
         db_path=db_path,
     )
     assert rc == 0
@@ -209,7 +208,7 @@ def test_pr_plan_approve_transitions_2_to_3_and_runs_impl(tmp_path):
     pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 42").fetchone())
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = dict(conn.execute(
-        "SELECT * FROM branch_commit WHERE rust_commit = 'rust_new_sha'"
+        "SELECT * FROM branch_commit WHERE rust_branch = 'master'"
     ).fetchone())
     assert bc["ak_commit"] == "abc"
     assert bc["ak_branch"] == "trunk"
@@ -249,9 +248,9 @@ def test_pr_plan_approve_dry_run_r2_present_runs_impl_advances_status_locally(tm
     conn = db.connect(db_path)
     pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 42").fetchone())
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
-    # branch_commit gets a row pointing at the local dry-run SHA.
+    # branch_commit cursor advanced to the impl's ak_commit.
     bc = dict(conn.execute(
-        "SELECT * FROM branch_commit WHERE rust_commit = 'local_dry_run_sha'"
+        "SELECT * FROM branch_commit WHERE rust_branch = 'master'"
     ).fetchone())
     assert bc["ak_commit"] == "abc"
 
@@ -288,7 +287,7 @@ def test_seed_pushes_artifact(tmp_path):
     db_path = str(tmp_path / "t.db")
     with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
         rc = _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
-                  "--rust-branch", "master", "--rust-commit", "r",
+                  "--rust-branch", "master",
                   db_path=db_path)
     assert rc == 0
     mpush.assert_called_once_with("translation_agent.db", db_path)
@@ -299,7 +298,7 @@ def test_no_artifact_push_skips(tmp_path):
     with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
         rc = _run("--no-artifact-push",
                   "--seed", "--ak-branch", "trunk", "--ak-commit", "a",
-                  "--rust-branch", "master", "--rust-commit", "r",
+                  "--rust-branch", "master",
                   db_path=db_path)
     assert rc == 0
     mpush.assert_not_called()
@@ -333,7 +332,7 @@ def test_artifact_push_failure_does_not_crash(tmp_path):
     with patch("translation_agent.cli.semaphore.push_project_artifact",
                side_effect=Exception("artifact server down")):
         rc = _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
-                  "--rust-branch", "master", "--rust-commit", "r",
+                  "--rust-branch", "master",
                   db_path=db_path)
     # Seed succeeded; artifact push failed but logged. RC reflects the seed.
     assert rc == 0
@@ -357,7 +356,7 @@ def test_artifact_push_runs_even_when_sweep_fails(tmp_path):
 def test_end_to_end_full_lifecycle(tmp_path):
     """One sweep + one --plan-approve drives a row through 0 -> 1 -> 2 -> 3 -> 4."""
     db_path = str(tmp_path / "t.db")
-    _seed_db(db_path, ak_commit="ak_seed", rust_commit="rust_seed")
+    _seed_db(db_path, ak_commit="ak_seed")
 
     # Sweep run: creates PR for ak_a, dep-evals, plans it. Stops at status 2
     # (no auto plan-approve).
@@ -399,7 +398,6 @@ def test_end_to_end_full_lifecycle(tmp_path):
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_a"
-    assert bc["rust_commit"] == "rust_a_sha"
 
 
 def test_help_runs():
@@ -410,10 +408,10 @@ def test_help_runs():
 
 # --- sweep mode -------------------------------------------------------------
 
-def _seed_db(db_path, ak_commit="ak0", rust_commit="r0"):
+def _seed_db(db_path, ak_commit="ak0"):
     conn = db.connect(db_path)
     db.migrate(conn)
-    db.seed_correspondence(conn, "trunk", ak_commit, "master", rust_commit)
+    db.seed_correspondence(conn, "trunk", ak_commit, "master")
     conn.close()
 
 
@@ -841,7 +839,7 @@ def _seed_with_existing_prs(db_path, ak_to_pr):
     rows for each (ak_commit -> pr_number) entry in `ak_to_pr`."""
     conn = db.connect(db_path)
     db.migrate(conn)
-    db.seed_correspondence(conn, "trunk", "ak_seed", "master", "rust_seed")
+    db.seed_correspondence(conn, "trunk", "ak_seed", "master")
     for i, (ak, pr) in enumerate(ak_to_pr.items()):
         db.insert_pr_commit(conn, pr, "master", "trunk", ak)
     conn.commit()
@@ -887,11 +885,9 @@ def test_sweep_closure_check_prunes_merged_prefix_and_advances_cursor(tmp_path):
         "SELECT * FROM pr_commit WHERE pr_number IN (101, 102, 103)"
     ).fetchall()
     assert len(pruned) == 0
-    # Cursor advanced to ak_c, with rust_commit = merge SHA of the
-    # last (newest) merged PR.
+    # Cursor advanced through the entire MERGED prefix to ak_c.
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_c"
-    assert bc["rust_commit"] == "merge_sha_c"
     # Re-fetched batch was used: ak_d's row exists with the new pr_number.
     new_row = conn.execute(
         "SELECT * FROM pr_commit WHERE pr_number = 201"
@@ -1040,7 +1036,7 @@ def test_sweep_closure_check_skips_synthetic_pr_rows(tmp_path):
     db_path = str(tmp_path / "t.db")
     conn = db.connect(db_path)
     db.migrate(conn)
-    db.seed_correspondence(conn, "trunk", "ak_seed", "master", "rust_seed")
+    db.seed_correspondence(conn, "trunk", "ak_seed", "master")
     db.insert_pr_commit(conn, -12345, "master", "trunk", "ak_a")  # synthetic
     conn.commit()
     conn.close()
@@ -1068,9 +1064,10 @@ def test_sweep_closure_check_skips_synthetic_pr_rows(tmp_path):
     assert bc["ak_commit"] == "ak_seed"
 
 
-def test_sweep_closure_check_keeps_rust_commit_for_closed_without_merge(tmp_path):
-    """CLOSED-without-merge PRs have no merge SHA; cursor's rust_commit
-    must stay at the previous value, not be set to None."""
+def test_sweep_closure_check_advances_cursor_for_closed_without_merge(tmp_path):
+    """CLOSED-without-merge PRs still advance the cursor by ak_commit
+    just like MERGED ones -- the row is removed and the next sweep
+    moves on."""
     db_path = str(tmp_path / "t.db")
     _seed_with_existing_prs(db_path, {"ak_a": 101})
 
@@ -1091,8 +1088,6 @@ def test_sweep_closure_check_keeps_rust_commit_for_closed_without_merge(tmp_path
     conn = db.connect(db_path)
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_a"
-    # rust_commit unchanged from seed.
-    assert bc["rust_commit"] == "rust_seed"
 
 
 # --- dep-eval flow ----------------------------------------------------------
@@ -1345,7 +1340,6 @@ def test_sweep_impl_step_transitions_status_3_to_4_and_updates_branch_commit(tmp
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_y"
-    assert bc["rust_commit"] == "rust_y_sha"
 
 
 def test_sweep_plan_blocked_by_unapproved_dep_skipped(tmp_path):

@@ -16,9 +16,9 @@
 
 Tables track:
 
-- `branch_commit`: which AK commit on which AK branch corresponds to which
-  Rust commit on which Rust branch. Seeded once with `--seed` and updated
-  by the orchestrator each time a Rust commit lands.
+- `branch_commit`: per-Rust-branch cursor pointing at the AK
+  (branch, commit) pair currently tracked. Seeded once with `--seed` and
+  advanced by the orchestrator each time a Rust commit lands.
 - `pr_commit`: per-PR state machine, status enum 0..4 per design step 3.
 """
 
@@ -66,8 +66,7 @@ _SCHEMA = [
     CREATE TABLE IF NOT EXISTS branch_commit (
         rust_branch  TEXT NOT NULL PRIMARY KEY,
         ak_branch    TEXT NOT NULL,
-        ak_commit    TEXT NOT NULL,
-        rust_commit  TEXT NOT NULL
+        ak_commit    TEXT NOT NULL
     )
     """,
     """
@@ -95,24 +94,32 @@ def connect(db_path: str) -> sqlite3.Connection:
 
 
 def migrate(conn: sqlite3.Connection) -> None:
-    """Idempotently create all tables and indexes, and migrate any old
-    branch_commit schema (multi-column PK) to the new single-column PK.
+    """Idempotently create all tables and indexes, and migrate any older
+    branch_commit schema to the current shape.
+
+    Two historical shapes are upgraded in place:
+      1. Multi-column PK `(ak_branch, ak_commit, rust_branch)` (collapsed to
+         the single-column `rust_branch` PK, keeping the most recent row
+         per branch).
+      2. Single-column PK with a vestigial `rust_commit TEXT` column (the
+         column is dropped; rows preserved unchanged).
     """
     with conn:
         # Migrate first so the CREATE-IF-NOT-EXISTS below sees the right
         # shape on a pre-existing DB.
-        _migrate_branch_commit_pk(conn)
+        _migrate_branch_commit(conn)
         for stmt in _SCHEMA:
             conn.execute(stmt)
 
 
-def _migrate_branch_commit_pk(conn: sqlite3.Connection) -> None:
-    """Convert old branch_commit schema (PK on `(ak_branch, ak_commit, rust_branch)`)
-    to the new schema (PK on `rust_branch` alone). No-op if the table
-    doesn't exist yet or is already on the new schema.
+def _migrate_branch_commit(conn: sqlite3.Connection) -> None:
+    """Rebuild `branch_commit` to `(rust_branch PK, ak_branch, ak_commit)`
+    if the existing table has either the old multi-column PK shape OR a
+    `rust_commit` column. No-op if the table doesn't exist yet or is
+    already on the current shape.
 
-    Collapses any duplicate rows for the same `rust_branch` by picking the
-    most recently inserted (max rowid).
+    For the multi-column-PK case, collapses duplicate rows for the same
+    `rust_branch` by picking the most recently inserted (max rowid).
     """
     row = conn.execute(
         "SELECT sql FROM sqlite_master WHERE type='table' AND name='branch_commit'"
@@ -120,18 +127,19 @@ def _migrate_branch_commit_pk(conn: sqlite3.Connection) -> None:
     if row is None:
         return
     sql = row["sql"] or ""
-    if "PRIMARY KEY (ak_branch, ak_commit, rust_branch)" not in sql:
-        return  # already on the new schema
+    has_old_pk = "PRIMARY KEY (ak_branch, ak_commit, rust_branch)" in sql
+    has_rust_commit = "rust_commit" in sql
+    if not has_old_pk and not has_rust_commit:
+        return  # already on the current shape
     conn.executescript(
         """
         CREATE TABLE branch_commit_new (
             rust_branch  TEXT NOT NULL PRIMARY KEY,
             ak_branch    TEXT NOT NULL,
-            ak_commit    TEXT NOT NULL,
-            rust_commit  TEXT NOT NULL
+            ak_commit    TEXT NOT NULL
         );
-        INSERT INTO branch_commit_new (rust_branch, ak_branch, ak_commit, rust_commit)
-        SELECT rust_branch, ak_branch, ak_commit, rust_commit
+        INSERT INTO branch_commit_new (rust_branch, ak_branch, ak_commit)
+        SELECT rust_branch, ak_branch, ak_commit
         FROM branch_commit
         WHERE rowid IN (
             SELECT MAX(rowid) FROM branch_commit GROUP BY rust_branch
@@ -148,7 +156,6 @@ def seed_correspondence(
     ak_branch: str,
     ak_commit: str,
     rust_branch: str,
-    rust_commit: str,
     *,
     force: bool = False,
 ) -> str:
@@ -164,36 +171,34 @@ def seed_correspondence(
     """
     with conn:
         existing = conn.execute(
-            "SELECT ak_branch, ak_commit, rust_commit FROM branch_commit "
+            "SELECT ak_branch, ak_commit FROM branch_commit "
             "WHERE rust_branch = ?",
             (rust_branch,),
         ).fetchone()
         if existing is None:
             conn.execute(
                 "INSERT INTO branch_commit "
-                "(rust_branch, ak_branch, ak_commit, rust_commit) "
-                "VALUES (?, ?, ?, ?)",
-                (rust_branch, ak_branch, ak_commit, rust_commit),
+                "(rust_branch, ak_branch, ak_commit) "
+                "VALUES (?, ?, ?)",
+                (rust_branch, ak_branch, ak_commit),
             )
             return "inserted"
         same = (
             existing["ak_branch"] == ak_branch
             and existing["ak_commit"] == ak_commit
-            and existing["rust_commit"] == rust_commit
         )
         if same:
             return "unchanged"
         if not force:
             raise ValueError(
                 f"branch_commit row for rust_branch={rust_branch!r} already "
-                f"exists (ak={existing['ak_branch']}/{existing['ak_commit']}, "
-                f"rust_commit={existing['rust_commit']}). Pass force=True to "
-                f"update."
+                f"exists (ak={existing['ak_branch']}/{existing['ak_commit']}). "
+                f"Pass force=True to update."
             )
         conn.execute(
-            "UPDATE branch_commit SET ak_branch = ?, ak_commit = ?, "
-            "rust_commit = ? WHERE rust_branch = ?",
-            (ak_branch, ak_commit, rust_commit, rust_branch),
+            "UPDATE branch_commit SET ak_branch = ?, ak_commit = ? "
+            "WHERE rust_branch = ?",
+            (ak_branch, ak_commit, rust_branch),
         )
         return "updated"
 
@@ -405,7 +410,6 @@ def mark_implementation_done(
     ak_branch: str,
     ak_commit: str,
     rust_branch: str,
-    rust_commit: str,
 ) -> None:
     """Status 3 -> 4 AND advance the branch_commit cursor for `rust_branch`.
 
@@ -422,9 +426,9 @@ def mark_implementation_done(
         )
         conn.execute(
             "INSERT OR REPLACE INTO branch_commit "
-            "(rust_branch, ak_branch, ak_commit, rust_commit) "
-            "VALUES (?, ?, ?, ?)",
-            (rust_branch, ak_branch, ak_commit, rust_commit),
+            "(rust_branch, ak_branch, ak_commit) "
+            "VALUES (?, ?, ?)",
+            (rust_branch, ak_branch, ak_commit),
         )
 
 

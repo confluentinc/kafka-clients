@@ -6,7 +6,6 @@ name: Seed translation_agent DB
 #
 # Required Task parameters (set when triggering the Task):
 #   AK_COMMIT     -- full SHA in the AK repo
-#   RUST_COMMIT   -- full SHA in the Rust repo
 # Optional (defaults below match the main pipeline):
 #   AK_BRANCH     -- defaults to trunk
 #   RUST_BRANCH   -- defaults to master
@@ -40,7 +39,6 @@ blocks:
             - artifact pull project translation_agent.db || true
             - |
               : "${AK_COMMIT:?AK_COMMIT must be set as a Task parameter}"
-              : "${RUST_COMMIT:?RUST_COMMIT must be set as a Task parameter}"
             - |
               FORCE_FLAG=""
               if [ "${FORCE:-False}" = "True" ]; then
@@ -53,5 +51,4 @@ blocks:
               translation-agent --seed $FORCE_FLAG $CLEANUP_PRS_FLAG \
                 --ak-branch "${AK_BRANCH:-trunk}" \
                 --ak-commit "${AK_COMMIT}" \
-                --rust-branch "${RUST_BRANCH:-master}" \
-                --rust-commit "${RUST_COMMIT}"
+                --rust-branch "${RUST_BRANCH:-master}"

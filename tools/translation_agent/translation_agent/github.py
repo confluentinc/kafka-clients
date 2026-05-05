@@ -115,15 +115,6 @@ def get_pr_state(
 
     Wraps `gh pr view <N> --json state,mergeCommit`. Raises GhError on
     non-zero exit; the caller decides whether to abort or skip.
-
-    Merge-style coverage: gh's `mergeCommit` field returns the
-    appropriate commit on the base branch for ALL three GitHub merge
-    styles. For squash merges it's the single squash commit on base;
-    for merge commits it's the actual merge commit; for rebase merges
-    it's the tip of the rebased commits added to base. In every case
-    `state` is MERGED and `mergeCommit.oid` is the right SHA to record
-    as `branch_commit.rust_commit`, so this helper does not need
-    merge-style-specific branching.
     """
     proc = subprocess.run(
         [
