@@ -318,7 +318,7 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
+                    config.bootstrap_servers = Self::parse_list_dedup(key, value);
                 },
                 Self::CLIENT_ID_CONFIG => {
                     config.client_id = value.to_string();
@@ -462,6 +462,30 @@ impl ProducerConfig {
         }
     }
 
+    /// Parses a comma-separated list value, deduplicating entries while preserving
+    /// first-occurrence order. If duplicates are found, emits a `warn!` log.
+    ///
+    /// Mirrors the deduplication behavior added to `ConfigDef.parse()` in
+    /// KAFKA-19875 for `ValidList`-typed configs.
+    fn parse_list_dedup(key: &str, value: &str) -> Vec<String> {
+        use std::collections::HashSet;
+        let original: Vec<String> = value.split(',').map(|s| s.trim().to_string()).collect();
+        let mut seen = HashSet::new();
+        let deduped: Vec<String> = original
+            .iter()
+            .filter(|s| seen.insert((*s).clone()))
+            .cloned()
+            .collect();
+        if deduped.len() != original.len() {
+            warn!(
+                "Configuration key \"{}\" contains duplicate values. Duplicates will be removed. \
+                 The original value is: {:?}, the updated value is: {:?}",
+                key, original, deduped
+            );
+        }
+        deduped
+    }
+
     /// Parses the acks string, converting "all" to -1.
     pub fn parse_acks(acks_string: &str) -> Result<i16, String> {
         let trimmed = acks_string.trim();
@@ -510,7 +534,7 @@ impl ProducerConfig {
                 ssl.endpoint_identification_algorithm = value.to_string();
             },
             ssl_configs::SSL_ENABLED_PROTOCOLS_CONFIG => {
-                ssl.enabled_protocols = value.split(',').map(|s| s.trim().to_string()).collect();
+                ssl.enabled_protocols = Self::parse_list_dedup(key, value);
             },
             _ => {
                 warn!("Unknown SSL configuration key: {}", key);
@@ -665,6 +689,38 @@ mod tests {
         assert_eq!(config.sasl_config.mechanism, "PLAIN");
         assert_eq!(config.sasl_config.resolve_username(), Some("alice"));
         assert_eq!(config.sasl_config.resolve_password(), Some("secret"));
+    }
+
+    /// Translated from the spirit of `ConfigDefTest.testParsedValueWillRemoveDuplicatesInValidList`.
+    /// Verifies that duplicate `bootstrap.servers` entries are silently dropped.
+    #[test]
+    fn test_bootstrap_servers_dedup() {
+        let mut props = HashMap::new();
+        props.insert(
+            "bootstrap.servers".to_string(),
+            "host1:9092,host2:9093,host1:9092".to_string(),
+        );
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.bootstrap_servers, vec!["host1:9092", "host2:9093"]);
+    }
+
+    /// Verifies that duplicate `ssl.enabled.protocols` entries are silently dropped.
+    #[test]
+    fn test_ssl_enabled_protocols_dedup() {
+        let mut props = HashMap::new();
+        props.insert(
+            "ssl.enabled.protocols".to_string(),
+            "TLSv1.3,TLSv1.2,TLSv1.3".to_string(),
+        );
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.ssl_config.enabled_protocols, vec!["TLSv1.3", "TLSv1.2"]);
+    }
+
+    /// Verifies that a list with no duplicates passes through unchanged.
+    #[test]
+    fn test_parse_list_dedup_no_duplicates() {
+        let result = ProducerConfig::parse_list_dedup("test.key", "a,b,c");
+        assert_eq!(result, vec!["a", "b", "c"]);
     }
 
     #[test]
