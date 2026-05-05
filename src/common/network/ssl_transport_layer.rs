@@ -659,11 +659,29 @@ impl TransportLayer for SslTransportLayer {
             return Ok(0);
         }
 
-        // 1. Drain any plaintext already buffered in rustls.
         let conn = self
             .conn
             .as_mut()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?;
+
+        // Snapshot rustls's queued-plaintext count BEFORE the step-1
+        // drain. Mirrors Java's `appReadBuffer.position()` read at the
+        // top of `SslTransportLayer::read`. We must capture this *before*
+        // the step-1 drain — if step 1 fully fills `dst`, the loop's
+        // top guard exits without ever calling `process_new_packets`,
+        // and the only authoritative source for "is there still pending
+        // plaintext" is this pre-drain snapshot minus what we drained.
+        // `process_new_packets` is documented as cheap when idle (no new
+        // TLS records to surface), so the call cost on the steady-state
+        // path is bounded.
+        let mut last_plaintext_pending: usize = match conn.process_new_packets() {
+            Ok(state) => state.plaintext_bytes_to_read(),
+            Err(e) => {
+                return Err(io::Error::other(format!("SSL processing failed: {e}")));
+            },
+        };
+
+        // 1. Drain any plaintext already buffered in rustls.
         let mut total_read = match conn.reader().read(dst) {
             Ok(n) => n,
             // rustls signals "no plaintext ready" with WouldBlock — that
@@ -676,14 +694,10 @@ impl TransportLayer for SslTransportLayer {
             // CLOSED && appReadBuffer.position() == 0 && read == 0`.
             Err(e) => return Err(e),
         };
-
-        // Track the most recent IoState::plaintext_bytes_to_read so we
-        // can answer `has_bytes_buffered` accurately. Mirrors Java's
-        // `appReadBuffer.position() != 0` snapshot. If we never call
-        // `process_new_packets` on this read (e.g. all data came out of
-        // the rustls reader on the first call), there are no new IoState
-        // values to harvest, so default to 0.
-        let mut last_plaintext_pending: usize = 0;
+        // Whatever step 1 just removed from rustls's queue is no longer
+        // "pending" — subtract it before any later loop iteration
+        // overwrites the snapshot.
+        last_plaintext_pending = last_plaintext_pending.saturating_sub(total_read);
         let mut read_from_network = false;
 
         // 2. Loop: read encrypted bytes from socket → process → drain
@@ -1602,6 +1616,129 @@ mod tests {
         assert!(
             !layer.has_bytes_buffered(),
             "has_bytes_buffered must be false after fully draining the receive queue"
+        );
+    }
+
+    /// Regression test for the early-exit-bypasses-bookkeeping bug
+    /// (Phase 5b-2 Round 2 Issue 7).
+    ///
+    /// The buggy code only updated `last_plaintext_pending` from inside
+    /// the network-read loop's `process_new_packets` call. When step 1
+    /// (the pre-loop drain) fully filled `dst` from already-queued
+    /// plaintext, the loop's top guard `if total_read == dst.len() {
+    /// break; }` fired before any `process_new_packets` invocation, and
+    /// `last_plaintext_pending` retained its initial 0 — yielding
+    /// `has_bytes_buffered = false` even though rustls still had queued
+    /// plaintext. Java's equivalent
+    /// (`updateBytesBuffered(readFromNetwork || read > 0)` followed by
+    /// `appReadBuffer.position() != 0`) would correctly return `true`.
+    ///
+    /// This test sends ≥ 2 KiB through the echo loop, then reads it back
+    /// in two stages: first into a generous buffer to populate rustls's
+    /// plaintext queue, then into a small buffer that step 1 fully fills
+    /// and the loop never enters. Assertions:
+    ///   - mid-drain (queue not empty): `has_bytes_buffered() == true`
+    ///   - after full drain: `has_bytes_buffered() == false`
+    #[tokio::test]
+    async fn has_bytes_buffered_true_when_step1_drain_fills_dst() {
+        let (client_cfg, server_cfg) = build_tls_configs();
+        let addr = spawn_echo_server(server_cfg).await;
+        let server_name = ServerName::try_from("localhost").unwrap();
+        let mut layer = connect_client(addr, client_cfg, server_name).await;
+        complete_handshake(&mut layer).await;
+
+        // 2 KiB payload — fits in a single TLS record (max 16 KiB) but
+        // larger than the small drain buffer below, so rustls's queue
+        // can be left half-empty.
+        let payload: Vec<u8> = (0..2048u32).map(|i| (i & 0xff) as u8).collect();
+        let n = layer.write_vectored(&[IoSlice::new(&payload)]).expect("write");
+        assert_eq!(n, payload.len());
+
+        // Drain encrypted bytes to the wire.
+        for _ in 0..64 {
+            if !layer.has_pending_writes() {
+                break;
+            }
+            let stream = layer.stream.as_mut().expect("stream");
+            stream.writable().await.expect("writable");
+            let conn = layer.conn.as_mut().expect("conn");
+            let mut adapter = TcpStreamWriteAdapter { stream };
+            let _ = conn.write_tls(&mut adapter);
+        }
+
+        // Stage 1: read with a generous buffer that pulls down all the
+        // encrypted bytes from the socket and decrypts them into rustls's
+        // plaintext queue. We bound the read at 1 KiB so half of the
+        // 2 KiB payload remains queued in rustls (this is the case the
+        // bug regresses on).
+        let mut received = Vec::with_capacity(payload.len());
+        let mut stage1 = [0u8; 1024];
+        for _ in 0..64 {
+            if received.len() >= 1024 {
+                break;
+            }
+            let stream = layer.stream.as_mut().expect("stream");
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stream.readable()).await;
+            let read = TransportLayer::read(&mut layer, &mut stage1[..1024 - received.len()]).expect("read");
+            received.extend_from_slice(&stage1[..read]);
+        }
+        assert!(received.len() >= 1024, "stage 1 produced at least 1 KiB");
+
+        // After stage 1, rustls's plaintext queue should still hold
+        // ~1 KiB of decrypted payload that hasn't been drained yet
+        // (the server sent 2 KiB in one record; our read stopped after
+        // 1 KiB). At this point `has_bytes_buffered` should already be
+        // true regardless of which path is taken.
+        assert!(
+            layer.has_bytes_buffered(),
+            "has_bytes_buffered must be true while ~1 KiB of plaintext remains queued in rustls"
+        );
+
+        // Stage 2: drain with a tiny buffer that is *smaller* than the
+        // plaintext rustls has queued. Step 1 of `read` will fully fill
+        // `dst`, the loop's top guard will fire, and `process_new_packets`
+        // will never be called this iteration — the exact path that
+        // bypassed the buggy bookkeeping.
+        let mut tiny = [0u8; 256];
+        let stream = layer.stream.as_mut().expect("stream");
+        // No need to await readable: the data is already inside rustls's
+        // queue; the read should never touch the socket.
+        let _ = stream;
+        let read = TransportLayer::read(&mut layer, &mut tiny).expect("read");
+        assert_eq!(read, 256, "step 1 fully filled the 256-byte dst from queued plaintext");
+        received.extend_from_slice(&tiny[..read]);
+
+        // Critical assertion: rustls still has queued plaintext, so
+        // `has_bytes_buffered` must report true. Before the fix, this
+        // returned false (a missed wakeup that would stall the channel
+        // in Phase 5c's Selector).
+        assert!(
+            layer.has_bytes_buffered(),
+            "has_bytes_buffered must be true when step 1 fills dst but plaintext queue is non-empty"
+        );
+
+        // Continue draining. Each subsequent read should keep returning
+        // queued plaintext as long as anything remains. After the queue
+        // is fully drained, `has_bytes_buffered` should flip to false.
+        let mut buf = [0u8; 256];
+        for _ in 0..32 {
+            if received.len() >= payload.len() {
+                break;
+            }
+            let stream = layer.stream.as_mut().expect("stream");
+            let _ = tokio::time::timeout(std::time::Duration::from_secs(2), stream.readable()).await;
+            let take = (payload.len() - received.len()).min(buf.len());
+            let read = TransportLayer::read(&mut layer, &mut buf[..take]).expect("read");
+            received.extend_from_slice(&buf[..read]);
+        }
+        assert_eq!(received, payload, "full echo round-trip");
+
+        // After the entire payload is drained, the queue is empty and
+        // `has_bytes_buffered` must be false — confirms the snapshot
+        // bookkeeping correctly subtracts step-1 drains.
+        assert!(
+            !layer.has_bytes_buffered(),
+            "has_bytes_buffered must be false once rustls's plaintext queue is fully drained"
         );
     }
 }

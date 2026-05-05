@@ -372,3 +372,66 @@ into `key_valid: bool` + `socket_open: bool`, or by documenting the joint
 semantic on the trait), both transports are addressed in the same change.
 Filed as a tracking note in Phase 5c review so the Selector implementation
 doesn't accidentally call `peer_principal` after `disconnect`.
+
+## Issue 7 (Round 2): `has_bytes_buffered` returns `false` when step-1 drain fills `dst` while plaintext remains queued
+
+- **File**: `src/common/network/ssl_transport_layer.rs:662-757` (post-fix `5fa1bed`)
+- **Severity**: Bug (Behavior Mismatch — same load-bearing case the actor cited)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/common/network/SslTransportLayer.java:566-651,995-1000`
+- **Originating commit**: `faa61cc` (issue persisted in fixup `5fa1bed`)
+
+The Round-1 fix correctly captured `IoState::plaintext_bytes_to_read` from
+`process_new_packets` calls inside the network-read loop, but a path bypassed
+that capture entirely:
+
+1. Step 1 (line 667) drains *already-buffered plaintext* via
+   `conn.reader().read(dst)` — the case where the previous read left rustls's
+   queue with N bytes still pending and the caller's `dst` is M < N bytes.
+2. After step 1, `total_read = M` (dst is full). The loop's first guard
+   `if total_read == dst.len() { break; }` fired immediately.
+3. `process_new_packets` was never called this iteration.
+   `last_plaintext_pending` retained its initial value of 0.
+   `read_from_network` retained `false`.
+4. Final computation: `made_progress = (false || M > 0) = true`, but
+   `has_bytes_buffered = true && (0 > 0) = false`.
+
+Java's behaviour for the same scenario:
+- `appReadBuffer.position() > 0` ⇒ `read = readFromAppBuffer(dst)` (M bytes
+  drained, dst full, appReadBuffer still holds N − M bytes).
+- The `while (dst.remaining() > 0)` loop body skipped because dst has no room.
+- `updateBytesBuffered(readFromNetwork || read > 0)` ⇒ `madeProgress = true`.
+- `hasBytesBuffered = (netReadBuffer.position() != 0 || appReadBuffer.position() != 0) = (N − M) != 0 = true`.
+
+So Java set `hasBytesBuffered = true`, Rust set it to `false` — the exact
+"missed wakeup, channel stalls until external readiness fires" failure mode
+the Phase 5c Selector depends on getting right. The existing test
+`has_bytes_buffered_false_after_full_drain` did not catch this because it
+used an oversized 4 KiB buffer for a 10-byte payload, so step-1 never
+overflowed.
+
+**Resolution:** Fixed. Adopted suggestion (a) from the Critic — initialise
+`last_plaintext_pending` from a `process_new_packets()` call performed
+*before* the step-1 drain, then subtract step-1's `total_read` from it.
+This mirrors Java's `appReadBuffer.position()` snapshot taken at the top
+of `read(ByteBuffer)`. `process_new_packets` is documented as cheap when
+idle (no new TLS records to surface), so the steady-state cost is bounded.
+Errors from the pre-drain `process_new_packets` are surfaced as
+`io::Error::other` (same shape as the loop-internal call).
+
+Added regression test `has_bytes_buffered_true_when_step1_drain_fills_dst`:
+
+1. Sends 2 KiB through the echo loop.
+2. Stage 1: reads back 1 KiB into a 1 KiB buffer (populates rustls's
+   plaintext queue with the remaining 1 KiB after decryption + drain).
+3. Asserts `has_bytes_buffered() == true` (already-queued case).
+4. Stage 2: reads with a 256-byte tiny buffer — step 1 fills `dst`,
+   loop top guard fires, `process_new_packets` is never called this
+   iteration. This is the exact path the bug regressed on.
+5. Asserts `has_bytes_buffered() == true` (the load-bearing assertion;
+   would have FAILED with the buggy code).
+6. Drains the rest of the payload, asserts `has_bytes_buffered() == false`
+   only after the queue is fully empty (confirms the snapshot
+   bookkeeping correctly subtracts step-1 drains over multiple reads).
+
+All 4 gates green. Fixup chain: `5fa1bed` → fixup of `faa61cc`, this fixup
+chains on top.
