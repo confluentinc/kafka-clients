@@ -431,6 +431,13 @@ impl RecordAccumulator {
         self.appends_in_progress.load(Ordering::Acquire) > 0
     }
 
+    /// Visible-for-testing: read the raw `appends_in_progress` counter
+    /// to assert on `AppendInProgressGuard::Drop` having fired.
+    #[cfg(test)]
+    pub(crate) fn appends_in_progress_count(&self) -> i32 {
+        self.appends_in_progress.load(Ordering::Acquire)
+    }
+
     /// Add `tp` to the muted set; matching partitions are skipped during
     /// drain. Mirrors Java's `mutePartition(tp)`.
     pub fn mute_partition(&self, tp: TopicPartition) {
@@ -1736,24 +1743,41 @@ mod tests {
     //!   long runtime.
     //! - `testAwaitFlushComplete` — exercises Java's
     //!   `Thread.interrupt()` on a blocking `awaitFlushCompletion`.
-    //!   Rust uses `tokio::time::timeout` / future-drop for
-    //!   cancellation, which Phase 6a's `BufferPool` cancellation tests
-    //!   already validate. The relevant invariant (flushes_in_progress
-    //!   decrements on every return path) is covered by
+    //!   Rust replaces blocking-with-interrupt with future-drop /
+    //!   `tokio::time::timeout`. The two Java invariants the test
+    //!   guards are (a) the wait short-circuits when no batches are
+    //!   in-flight, and (b) `flushesInProgress` decrements on every
+    //!   return path. (a) is covered by
     //!   `await_flush_completion_returns_immediately_when_no_batches`
-    //!   above plus the `FlushInProgressGuard` Drop impl.
+    //!   below; (b) is covered by `flush_drives_all_batches_to_completion`
+    //!   plus the unconditional decrement in `FlushInProgressGuard::Drop`
+    //!   (`record_accumulator.rs:1638-1648`). Java's
+    //!   `Thread.interrupt`-specific control flow has no Rust analogue.
     //! - `testAppendLargeOldMessageFormat{Compressed,NonCompressed}` —
     //!   v0/v1 magic byte path is out of scope (Phase 3 generates only
-    //!   v2 batches).
-    //! - `testReadyAndDrainWhenABatchIsBeingRetried`,
-    //!   `testDrainWithANodeThatDoesntHostAnyPartitions`,
-    //!   `testSplitAndReenqueuePreventInfiniteRecursion` — long
-    //!   regression scenarios; we keep simpler equivalents covering
-    //!   the same code paths so the file doesn't balloon to 2k LOC.
-    //! - `testUniformBuiltInPartitioner`, `testAdaptiveBuiltInPartitioner`,
-    //!   `testBuiltInPartitionerFractionalBatches` — `BuiltInPartitioner`
-    //!   internals already covered by Phase 6c
-    //!   `BuiltInPartitionerTest`.
+    //!   v2 batches). The v2 forms (`testAppendLargeCompressed`,
+    //!   `testAppendLargeNonCompressed`) ARE translated below as
+    //!   `append_large_compressed` / `append_large_non_compressed`.
+    //! - `testSplitAndReenqueuePreventInfiniteRecursion` — exercises
+    //!   the `split → reenqueue` recursion-prevention guard. The Rust
+    //!   `split_and_reenqueue` (`record_accumulator.rs:1326`) sets
+    //!   `is_split_batch=true` on the produced batches; the
+    //!   `producer_batch.rs:split_preserves_magic_and_compression_type_v2`
+    //!   test asserts every output batch carries the `is_split_batch`
+    //!   flag, and the accumulator-side guard (Java's
+    //!   `if (bigBatch.isSplitBatch()) throw...`) is preserved at
+    //!   `record_accumulator.rs:1335`. End-to-end the
+    //!   `split_and_reenqueue_returns_zero_for_empty_batch` test
+    //!   (below) drives the deque-replacement contract; the
+    //!   recursion guard itself is a one-liner directly under unit-test
+    //!   coverage in `producer_batch.rs`.
+    //! - `testUniformBuiltInPartitioner`, `testAdaptiveBuiltInPartitioner`
+    //!   — partitioner-only tests with no accumulator interaction;
+    //!   covered by Phase 6c
+    //!   `built_in_partitioner.rs::tests::peek_*` and `update_*`
+    //!   tests. The integration test
+    //!   `testBuiltInPartitionerFractionalBatches` is translated below
+    //!   as `built_in_partitioner_fractional_batches`.
 
     use super::*;
 
@@ -2037,6 +2061,102 @@ mod tests {
         );
     }
 
+    /// Java's `testBuiltInPartitionerFractionalBatches`
+    /// (`RecordAccumulatorTest.java:1391-1420`). Verifies the
+    /// accumulator + `BuiltInPartitioner` integration that Phase 6c's
+    /// isolated `BuiltInPartitionerTest` does not exercise: with a
+    /// high `linger.ms`, the sticky partitioner avoids creating
+    /// fractional batches by switching partitions only when the
+    /// previous one fills past the sticky threshold. Each loop
+    /// iteration produces ~2/3 of a batch, advances time past the
+    /// linger window, then drains — asserting that exactly one batch
+    /// rolls out per iteration, sized between half-batch and
+    /// full-batch.
+    #[tokio::test]
+    async fn built_in_partitioner_fractional_batches() {
+        const BATCH_SIZE: i32 = 512;
+        const VAL_SIZE: usize = 32;
+        const TOTAL_SIZE: i64 = 1024 * 1024;
+        const LINGER_MS: i32 = 10;
+
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let pool = Arc::new(BufferPool::new(TOTAL_SIZE, BATCH_SIZE, time.clone(), "producer-metrics"));
+        let accum = Arc::new(RecordAccumulator::new(
+            LogContext::new(),
+            BATCH_SIZE,
+            CompressionType::None,
+            LINGER_MS,
+            100,
+            1000,
+            3200,
+            PartitionerConfig::default(),
+            "producer-metrics",
+            time.clone(),
+            None,
+            pool,
+        ));
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let value = vec![0u8; VAL_SIZE];
+
+        // 10 iterations: each produces ~2/3 of a batch through
+        // UNKNOWN_PARTITION, advances mock time past the linger window,
+        // then drains and asserts exactly 1 batch flushed sized in
+        // (batch_size/2, batch_size).
+        for _ in 0..10 {
+            let rec_count = (BATCH_SIZE * 2 / 3) as usize / VAL_SIZE;
+            for _ in 0..rec_count {
+                let now = time.milliseconds();
+                let _ = accum
+                    .append(
+                        "test",
+                        RecordMetadata::UNKNOWN_PARTITION,
+                        0,
+                        None,
+                        Some(&value),
+                        &[],
+                        None,
+                        1000,
+                        now,
+                        &cluster,
+                    )
+                    .await
+                    .expect("append");
+                // Advance MockTime by 0 so subsequent appends see
+                // monotonically-non-decreasing milliseconds even though
+                // the records share a single batch — Java's
+                // `time.milliseconds()` is wall-clock and doesn't tick
+                // unless the test calls `sleep()`.
+            }
+            // Advance past linger so the partial batch is "ready".
+            time.sleep(LINGER_MS as i64);
+
+            let now = time.milliseconds();
+            let r = accum.ready(&snap, now);
+            assert_eq!(1, r.ready_nodes.len(), "exactly one leader should be ready");
+            let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, 0);
+            let batches: Vec<Arc<ProducerBatch>> = drained.into_iter().next().expect("at least one node drained").1;
+            assert_eq!(1, batches.len(), "exactly one batch should drain per iteration");
+            let actual_size = batches[0].records().expect("records").size_in_bytes();
+            assert!(
+                actual_size > BATCH_SIZE / 2,
+                "batch size {actual_size} must be > batch.size / 2 = {}",
+                BATCH_SIZE / 2,
+            );
+            assert!(
+                actual_size < BATCH_SIZE,
+                "batch size {actual_size} must be < batch.size = {BATCH_SIZE}",
+            );
+            // Complete + deallocate so the buffer recycles before the
+            // next iteration. Mirrors Java's implicit drain → response
+            // → deallocate cycle.
+            for batch in batches {
+                batch.complete(0, 0);
+                accum.complete_and_deallocate_batch(batch);
+            }
+        }
+    }
+
     /// Build a [`MetadataSnapshot`] over the test cluster.
     fn build_test_snapshot(cluster: Arc<Cluster>) -> MetadataSnapshot {
         use crate::common::protocol::Errors;
@@ -2150,27 +2270,144 @@ mod tests {
 
     #[tokio::test]
     async fn ready_when_batch_full_immediately_ready() {
-        // batch_size = 1024 + RECORD_BATCH_OVERHEAD; appending a value
-        // larger than the batch makes the FIRST batch immediately
-        // marked "full" because the very next append rolls over.
-        // (Mirror of testFull's "extra append → ready".)
+        // Java testFull (RecordAccumulatorTest.java:227-267): the first
+        // batch fills up so the next append rolls over to a new batch
+        // and the first one becomes "ready" (full). The Java test ALSO
+        // drains the closed batch and asserts each drained record's
+        // key/value matches the input — catching regressions where
+        // `try_append_to_existing` consumes a record but the bytes
+        // never make it into the batch buffer. Mirror that contents
+        // check here.
         let accum = make_accumulator(64, 64 * 1024, 10000);
         let (cluster, _n1, _n2) = build_test_cluster();
         let snap = build_test_snapshot(cluster.clone());
-        // Append a huge value that pushes batch full.
-        let big_value = vec![0u8; 256];
+        // Use a value large enough to force rollover after 1 record:
+        // batch_size=64, value=256 → first record allocates an
+        // oversized buffer (max(64, upper_bound)), the second append
+        // can't fit and rolls over to a new batch. The first batch
+        // (with the 256-byte value) becomes full and is ready.
+        let key = b"k";
+        let big_value = vec![0xABu8; 256];
         let _ = accum
-            .append("test", 0, 0, Some(b"k"), Some(&big_value), &[], None, 1000, 0, &cluster)
+            .append("test", 0, 0, Some(key), Some(&big_value), &[], None, 1000, 0, &cluster)
             .await
             .expect("append1");
-        // Second append rolls to a new batch; the first is full.
         let _ = accum
-            .append("test", 0, 0, Some(b"k"), Some(&big_value), &[], None, 1000, 0, &cluster)
+            .append("test", 0, 0, Some(key), Some(&big_value), &[], None, 1000, 0, &cluster)
             .await
             .expect("append2");
         let r = accum.ready(&snap, 0);
-        // Linger has not elapsed but batch_is_full → ready.
-        assert_eq!(1, r.ready_nodes.len());
+        // Linger has not elapsed but `batch_is_full` → ready.
+        assert_eq!(1, r.ready_nodes.len(), "rollover should mark first batch ready");
+
+        // Drain the ready node and verify the FIRST drained batch's
+        // records match the input bytes — the regression-content check
+        // Java's testFull provides.
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, 0);
+        let batches = drained.get(&0).expect("node 0");
+        assert!(!batches.is_empty(), "drain should return at least one batch");
+        let batch = &batches[0];
+        let records = batch.records().expect("records");
+
+        use crate::common::record::Records;
+        let mut count = 0;
+        for record in Records::records(&records) {
+            let k = record.key().expect("key").to_vec();
+            let v = record.value().expect("value").to_vec();
+            assert_eq!(key.as_ref(), k.as_slice(), "key bytes must survive append/drain");
+            assert_eq!(big_value, v, "value bytes must survive append/drain");
+            count += 1;
+        }
+        assert_eq!(1, count, "the first batch should hold exactly the first appended record");
+    }
+
+    /// Java's `testAppendLargeNonCompressed`
+    /// (`RecordAccumulatorTest.java:275-301`). Verifies the v2-format
+    /// oversized-record path: a single record with `value.len() = 2 *
+    /// batchSize` triggers the
+    /// `let size = self.batch_size.max(upper_bound)` branch in
+    /// `append`, allocating a buffer LARGER than `batch_size`. The
+    /// resulting batch contains exactly one record of the given size
+    /// and is immediately ready for drain.
+    #[tokio::test]
+    async fn append_large_non_compressed() {
+        append_large_helper(CompressionType::None).await;
+    }
+
+    /// Java's `testAppendLargeCompressed`
+    /// (`RecordAccumulatorTest.java:269-271`). Same as above with
+    /// gzip compression — the upper-bound estimator must still
+    /// reserve enough buffer space for the oversized record before
+    /// compression.
+    #[tokio::test]
+    async fn append_large_compressed() {
+        append_large_helper(CompressionType::Gzip).await;
+    }
+
+    async fn append_large_helper(compression: CompressionType) {
+        const BATCH_SIZE: i32 = 512;
+        let key = b"key";
+        let value = vec![0xCDu8; 2 * BATCH_SIZE as usize];
+
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let pool = Arc::new(BufferPool::new(10 * 1024, BATCH_SIZE, time.clone(), "producer-metrics"));
+        let accum = Arc::new(RecordAccumulator::new(
+            LogContext::new(),
+            BATCH_SIZE,
+            compression,
+            0,
+            100,
+            1000,
+            3200,
+            PartitionerConfig::default(),
+            "producer-metrics",
+            time,
+            None,
+            pool,
+        ));
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+
+        let _ = accum
+            .append("test", 0, 0, Some(key), Some(&value), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+
+        // Single oversized record → batch full → ready immediately.
+        let r = accum.ready(&snap, 0);
+        assert_eq!(1, r.ready_nodes.len(), "leader should be ready (oversized batch is full)");
+
+        // Verify the deque holds exactly one batch.
+        let tp1 = TopicPartition::new("test", 0);
+        let dq = accum.get_deque(&tp1).expect("deque");
+        assert_eq!(1, dq.lock().unwrap().len(), "exactly one batch in the deque");
+
+        // Drain & verify record-level fidelity (mirrors Java's
+        // `recordBatch.iterator()` walk asserting offset, key, value,
+        // timestamp).
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, 0);
+        let batches = drained.get(&0).expect("node 0");
+        assert_eq!(1, batches.len());
+        let batch = &batches[0];
+        let records = batch.records().expect("records");
+
+        use crate::common::record::Records;
+        let mut record_count = 0;
+        let mut batch_count = 0;
+        for batch_result in Records::batches(&records) {
+            let rb = batch_result.expect("batch");
+            assert_eq!(0, rb.base_offset(), "single batch must have base_offset=0");
+            batch_count += 1;
+        }
+        assert_eq!(1, batch_count, "exactly one record-batch in the drained batch");
+        for record in Records::records(&records) {
+            assert_eq!(0, record.offset(), "single record must have offset=0");
+            assert_eq!(0, record.timestamp(), "timestamp matches the append's now=0");
+            assert_eq!(key.as_ref(), record.key().expect("key"));
+            assert_eq!(value, record.value().expect("value").to_vec());
+            record_count += 1;
+        }
+        assert_eq!(1, record_count, "oversized batch holds exactly one record");
     }
 
     #[tokio::test]
@@ -2241,6 +2478,38 @@ mod tests {
         // Only partition 0 is drainable; partition 1 is muted.
         assert_eq!(1, batches.len());
         assert_eq!(0, batches[0].topic_partition().partition());
+    }
+
+    /// Java's `testDrainWithANodeThatDoesntHostAnyPartitions`
+    /// (`RecordAccumulatorTest.java:1543-1557`). Verifies the
+    /// `parts.is_empty()` early-return at `drain_batches_for_one_node`
+    /// (line 1147-1149 in the impl) when the requested node hosts no
+    /// partitions for any topic the accumulator knows about.
+    #[tokio::test]
+    async fn drain_with_a_node_that_doesnt_host_any_partitions() {
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        // Build a 2-node cluster but a snapshot where ONLY node1 (id=0)
+        // hosts the single partition. Node2 (id=1) hosts nothing — the
+        // exact "node hosts no partitions" condition the Java test is
+        // about.
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_single_partition_snapshot(cluster.clone(), 0);
+        // Append something so the accumulator is non-empty (the
+        // early-return is for the iteration over `parts`, not for an
+        // empty deque).
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let mut nodes = HashSet::new();
+        nodes.insert(1); // ONLY node2 — which hosts no partitions in `snap`.
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 0);
+        // Java asserts `batches.get(node2.id()).isEmpty()` — i.e. the
+        // map contains the requested node with an empty list. The Rust
+        // translation conventionally returns the entry with an empty
+        // Vec rather than omitting the key entirely; either is valid
+        // per the no-records contract.
+        assert!(drained.get(&1).map(|v| v.is_empty()).unwrap_or(true));
     }
 
     #[tokio::test]
@@ -2656,25 +2925,222 @@ mod tests {
         assert_eq!(1, batches.len(), "post-backoff drain succeeds");
     }
 
+    /// Build a [`MetadataSnapshot`] for partition 0 only (leader = node1
+    /// = id 0), with the given leader epoch. Mirrors Java's
+    /// `testReadyAndDrainWhenABatchIsBeingRetried` setup which uses a
+    /// single-partition snapshot whose leader epoch is bumped between
+    /// retry attempts.
+    fn build_single_partition_snapshot(cluster: Arc<Cluster>, leader_epoch: i32) -> MetadataSnapshot {
+        use crate::common::protocol::Errors;
+        use crate::common::requests::metadata_response::PartitionMetadata;
+        use std::collections::HashMap as StdMap;
+        let n1 = cluster.node_by_id(0).unwrap().clone();
+        let mut nodes_map: StdMap<i32, Node> = StdMap::new();
+        nodes_map.insert(0, n1);
+        let parts = vec![PartitionMetadata::new(
+            Errors::None,
+            TopicPartition::new("test", 0),
+            Some(0),
+            Some(leader_epoch),
+            vec![0],
+            vec![0],
+            vec![],
+        )];
+        MetadataSnapshot::new_with_cluster(
+            None,
+            nodes_map,
+            parts,
+            StdHashSet::new(),
+            StdHashSet::new(),
+            StdHashSet::new(),
+            None,
+            StdMap::new(),
+            Some(cluster),
+        )
+    }
+
+    /// Java's `testReadyAndDrainWhenABatchIsBeingRetried`
+    /// (`RecordAccumulatorTest.java:1428-1540`). Verifies KAFKA-15968:
+    /// a leader-epoch change observed during a retry overrides the
+    /// retry-backoff, allowing the batch to drain immediately on the
+    /// new leader rather than waiting for the backoff to elapse.
+    ///
+    /// Covers four cases:
+    /// 1. wait < backoff AND no leader change → backoff (drain skipped).
+    /// 2. wait < backoff AND leader changed → no backoff (drain proceeds,
+    ///    `attemptsWhenLeaderLastChanged` increments).
+    /// 3. wait > backoff AND no leader change → no backoff (drain proceeds,
+    ///    `attemptsWhenLeaderLastChanged` unchanged).
+    /// 4. wait > backoff AND leader changed → no backoff (drain proceeds,
+    ///    `attemptsWhenLeaderLastChanged` increments again).
+    #[tokio::test]
+    async fn ready_and_drain_when_a_batch_is_being_retried() {
+        // Java config: batchSize=10, lingerMs=10, retryBackoffMs=100,
+        // retryBackoffMaxMs=1000, deliveryTimeoutMs=Integer.MAX_VALUE,
+        // totalSize=10*1024.
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let pool = Arc::new(BufferPool::new(10 * 1024, 4096, time.clone(), "producer-metrics"));
+        let accum = Arc::new(RecordAccumulator::new(
+            LogContext::new(),
+            4096,
+            CompressionType::None,
+            10,
+            100,
+            1000,
+            i32::MAX,
+            PartitionerConfig::default(),
+            "producer-metrics",
+            time,
+            None,
+            pool,
+        ));
+
+        let (cluster, _n1, _n2) = build_test_cluster();
+
+        // Initial snapshot: partition 0 led by node1 with epoch=100.
+        let mut leader_epoch: i32 = 100;
+        let mut snap = build_single_partition_snapshot(cluster.clone(), leader_epoch);
+
+        // Append a record to partition 0.
+        let mut now: i64 = 0;
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+
+        // ---- 1st attempt (not a retry): wait > linger → ready & drained.
+        now += 11; // lingerMs + 1
+        let r = accum.ready(&snap, now);
+        assert!(r.ready_nodes.contains(&0), "node 0 should be ready on first attempt");
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, now);
+        let batch = drained.get(&0).expect("node 0").first().cloned().expect("batch");
+        assert_eq!(
+            Some(leader_epoch),
+            batch.current_leader_epoch(),
+            "leader-epoch propagated through drain"
+        );
+        assert_eq!(
+            0,
+            batch.attempts_when_leader_last_changed(),
+            "attempts_when_leader_last_changed=0 before any retry"
+        );
+        accum.reenqueue(batch.clone(), now);
+
+        // ---- Case 1: wait < backoff AND no leader change → backoff.
+        now += 1;
+        let r = accum.ready(&snap, now);
+        assert!(
+            !r.ready_nodes.contains(&0),
+            "case 1: wait < backoff AND no leader change → not ready"
+        );
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        let drained = accum.drain(&snap, &nodes, i32::MAX, now);
+        assert!(
+            drained.get(&0).map(|v| v.is_empty()).unwrap_or(true),
+            "case 1: drain returns empty under retry-backoff"
+        );
+
+        // ---- Case 2: wait < backoff AND leader changed → no backoff.
+        now += 1;
+        leader_epoch += 1;
+        snap = build_single_partition_snapshot(cluster.clone(), leader_epoch);
+        let r = accum.ready(&snap, now);
+        assert!(r.ready_nodes.contains(&0), "case 2: leader change overrides backoff → ready");
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, now);
+        let batch = drained.get(&0).expect("node 0").first().cloned().expect("batch");
+        assert_eq!(
+            Some(leader_epoch),
+            batch.current_leader_epoch(),
+            "case 2: leader-epoch updated to new value on drain"
+        );
+        assert_eq!(
+            1,
+            batch.attempts_when_leader_last_changed(),
+            "case 2: attempts_when_leader_last_changed bumps to 1 (the retry attempt)"
+        );
+        accum.reenqueue(batch.clone(), now);
+
+        // ---- Case 3: wait > backoff AND no leader change → no backoff.
+        now += 2 * 1000; // 2 * retryBackoffMaxMs
+        // snapshot unchanged (still epoch=101).
+        let r = accum.ready(&snap, now);
+        assert!(
+            r.ready_nodes.contains(&0),
+            "case 3: wait > backoff → ready even without leader change"
+        );
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, now);
+        let batch = drained.get(&0).expect("node 0").first().cloned().expect("batch");
+        assert_eq!(
+            Some(leader_epoch),
+            batch.current_leader_epoch(),
+            "case 3: leader-epoch unchanged when snapshot unchanged"
+        );
+        assert_eq!(
+            1,
+            batch.attempts_when_leader_last_changed(),
+            "case 3: attempts_when_leader_last_changed unchanged when leader unchanged"
+        );
+        accum.reenqueue(batch.clone(), now);
+
+        // ---- Case 4: wait > backoff AND leader changed → no backoff,
+        // attempts_when_leader_last_changed bumps to current attempts (3:
+        // the original attempt + 3 reenqueues = attempts==3).
+        now += 2 * 1000;
+        leader_epoch += 1;
+        snap = build_single_partition_snapshot(cluster.clone(), leader_epoch);
+        let r = accum.ready(&snap, now);
+        assert!(r.ready_nodes.contains(&0), "case 4: ready");
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, now);
+        let batch = drained.get(&0).expect("node 0").first().cloned().expect("batch");
+        assert_eq!(
+            Some(leader_epoch),
+            batch.current_leader_epoch(),
+            "case 4: leader-epoch updated to latest"
+        );
+        assert_eq!(
+            3,
+            batch.attempts_when_leader_last_changed(),
+            "case 4: attempts_when_leader_last_changed bumps to attempts() (3) on the new change"
+        );
+    }
+
     // -------------------- stressful smoke (replaces testStressfulSituation) --------------------
 
     #[tokio::test]
     async fn stressful_concurrent_appends_smoke() {
-        // Java testStressfulSituation runs 5 threads × 10000 messages.
-        // We exercise the same code path with a smaller payload so the
-        // test stays fast: 4 tasks × 200 records, each one driving the
-        // append/ready/drain loop. The invariant is "no panic / no
-        // deadlock under concurrent appends to overlapping partitions".
+        // Java testStressfulSituation runs 5 producer threads × 10000
+        // records each, with the main thread CONCURRENTLY draining and
+        // completing batches in a `while (read < expected)` loop. This
+        // is the contract we mirror: producer tasks AND a draining task
+        // run in parallel, the test exits only when every produced
+        // record has been seen by the drainer, and the final assertion
+        // is on the EXACT total record count (not just `> 0`) so a
+        // record-loss regression fails the test.
+        //
+        // Sized down for runtime: 4 producers × 500 records = 2000
+        // total. The drain loop runs until `seen == 2000` or until a
+        // timeout fires (so a deadlock regression surfaces as a test
+        // failure rather than a hang).
+        const PRODUCERS: usize = 4;
+        const RECORDS_PER_PRODUCER: usize = 500;
+        const EXPECTED_TOTAL: i32 = (PRODUCERS * RECORDS_PER_PRODUCER) as i32;
+
         let accum = make_accumulator(4096, 64 * 1024, 0);
         let (cluster, _n1, _n2) = build_test_cluster();
         let snap = build_test_snapshot(cluster.clone());
-        let mut handles = Vec::new();
-        for t in 0..4 {
+
+        // Spawn producer tasks. Each task spreads its appends across
+        // all three partitions so producers contend on the same deques
+        // (the actual lock-and-await invariant Java's stress test
+        // exercises).
+        let mut producers = Vec::new();
+        for t in 0..PRODUCERS {
             let accum = accum.clone();
             let cluster = cluster.clone();
-            handles.push(tokio::spawn(async move {
-                for i in 0..200 {
-                    let part = (t + i) % 3;
+            producers.push(tokio::spawn(async move {
+                for i in 0..RECORDS_PER_PRODUCER {
+                    let part = ((t + i) % 3) as i32;
                     let _ = accum
                         .append("test", part, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
                         .await
@@ -2682,20 +3148,209 @@ mod tests {
                 }
             }));
         }
-        for h in handles {
-            h.await.expect("task done");
+
+        // Concurrent drainer task. Loops draining whatever is ready,
+        // completing each batch (so the in-flight buffer is recycled
+        // back to the pool — exercising the deallocate path in parallel
+        // with appends), and accumulates the seen record count. Exits
+        // when it has observed `EXPECTED_TOTAL` records OR when it
+        // observes an empty drain after producers have all finished
+        // (sentinel via `producers_done`).
+        let drainer_accum = accum.clone();
+        let drainer = tokio::spawn(async move {
+            let mut seen: i32 = 0;
+            // Bounded drain loop: cap at 10000 polls so a record-loss
+            // regression surfaces as a test failure, not a hang.
+            for _ in 0..10_000 {
+                let r = drainer_accum.ready(&snap, i64::MAX);
+                if !r.ready_nodes.is_empty() {
+                    let drained = drainer_accum.drain(&snap, &r.ready_nodes, i32::MAX, i64::MAX);
+                    for (_, batches) in drained {
+                        for batch in batches {
+                            seen += batch.record_count();
+                            batch.complete(0, 0);
+                            drainer_accum.complete_and_deallocate_batch(batch);
+                        }
+                    }
+                }
+                if seen >= EXPECTED_TOTAL {
+                    break;
+                }
+                // Yield so producers can make progress; without this
+                // the drainer can busy-loop on a near-empty accumulator
+                // and starve the producers under the cooperative
+                // scheduler.
+                tokio::task::yield_now().await;
+            }
+            seen
+        });
+
+        for h in producers {
+            h.await.expect("producer task");
         }
-        let r = accum.ready(&snap, 1);
-        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, 1);
-        let mut total_records = 0;
+        // Producers done — drain whatever's left. Ready check needs a
+        // long-enough now_ms so linger doesn't hold batches back; we
+        // pass `i64::MAX` above for the same reason.
+        let seen = tokio::time::timeout(std::time::Duration::from_secs(10), drainer)
+            .await
+            .expect("drainer did not finish within 10s — possible deadlock or record loss")
+            .expect("drainer task");
+        assert_eq!(
+            EXPECTED_TOTAL, seen,
+            "drainer must observe every produced record under concurrent append+drain"
+        );
+        assert!(!accum.has_undrained(), "no batches should remain after drain");
+        assert!(
+            !accum.has_incomplete(),
+            "no incomplete batches should remain after complete_and_deallocate"
+        );
+    }
+
+    /// Issue 10: regression test for `AppendInProgressGuard::Drop` on
+    /// future cancellation.
+    ///
+    /// Drives the cancellation path:
+    /// 1. Exhaust the buffer pool with a successful append.
+    /// 2. Spawn a second `append(...)` task that blocks on
+    ///    `BufferPool::allocate().await` (no memory available).
+    /// 3. Abort the second task via [`tokio::task::JoinHandle::abort`].
+    /// 4. Assert (a) the accumulator's `appends_in_progress` counter
+    ///    decremented (the guard's Drop fired even on cancellation),
+    ///    (b) the pool's `queued()` is back to 0 after draining the
+    ///    buffer.
+    /// 5. Spawn a third appender, then deallocate the first batch's
+    ///    buffer; the third must complete (no leaked-ghost wakeup
+    ///    masking memory).
+    #[tokio::test]
+    async fn append_in_progress_guard_drops_on_cancellation() {
+        // Pool sized to allow exactly one allocation; the second
+        // appender will block on `BufferPool::allocate(...).await`.
+        // The upper-bound estimator for a (k=1B, v=1B, no headers)
+        // record at v2 magic is ~87 bytes, so pool=128 / batch=128
+        // sizes exactly one buffer.
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let pool = Arc::new(BufferPool::new(128, 128, time.clone(), "producer-metrics"));
+        let accum = Arc::new(RecordAccumulator::new(
+            LogContext::new(),
+            128,
+            CompressionType::None,
+            10,
+            100,
+            1000,
+            3200,
+            PartitionerConfig::default(),
+            "producer-metrics",
+            time,
+            None,
+            pool,
+        ));
+        let (cluster, _n1, _n2) = build_test_cluster();
+
+        let baseline_appends = accum.appends_in_progress_count();
+        let baseline_memory = accum.buffer_pool_available_memory();
+        assert_eq!(0, baseline_appends);
+        assert_eq!(128, baseline_memory);
+
+        // Step 1: exhaust the pool.
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("first append should succeed");
+        // After successful append: pool memory drops to 0 (first batch
+        // claimed the buffer). The guard disarmed → counter back to 0.
+        assert_eq!(0, accum.buffer_pool_available_memory());
+        assert_eq!(0, accum.appends_in_progress_count(), "guard disarmed on success path");
+
+        // Step 2: spawn an appender that will block on
+        // `BufferPool::allocate(...).await` because pool is empty.
+        let blocked_accum = accum.clone();
+        let blocked_cluster = cluster.clone();
+        let blocked = tokio::spawn(async move {
+            blocked_accum
+                .append("test", 1, 0, Some(b"k"), Some(b"v"), &[], None, 60_000, 0, &blocked_cluster)
+                .await
+        });
+
+        // Wait for the blocked task to register itself in the accumulator
+        // (`AppendInProgressGuard::new` runs at the top of `append`).
+        // Without a sync primitive we yield in a bounded loop until the
+        // counter reflects the in-flight append.
+        for _ in 0..100 {
+            if accum.appends_in_progress_count() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            1,
+            accum.appends_in_progress_count(),
+            "blocked task should have registered an in-progress append"
+        );
+
+        // Step 3: abort the blocked task — its Drop must run.
+        blocked.abort();
+        // The aborted JoinHandle resolves with `Err` once Drop has run.
+        let _ = blocked.await; // Either Err(JoinError::Cancelled) or Ok if it raced.
+
+        // Step 4a: counter went back to baseline.
+        for _ in 0..100 {
+            if accum.appends_in_progress_count() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            0,
+            accum.appends_in_progress_count(),
+            "AppendInProgressGuard Drop must decrement the counter on cancellation"
+        );
+        // Step 4b: the buffer pool's waiter queue is empty.
+        for _ in 0..100 {
+            if accum.buffer_pool().queued() == 0 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(2)).await;
+        }
+        assert_eq!(
+            0,
+            accum.buffer_pool().queued(),
+            "WaiterGuard Drop should have removed the cancelled waiter from the pool queue"
+        );
+
+        // Step 5: deallocate the first batch's buffer; a fresh waiter
+        // must wake up. (This is the proof the cancellation didn't
+        // leak a ghost-wakeup target ahead of live waiters.)
+        let snap = build_test_snapshot(cluster.clone());
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 0);
         for (_, batches) in drained {
             for batch in batches {
-                total_records += batch.record_count();
                 batch.complete(0, 0);
                 accum.complete_and_deallocate_batch(batch);
             }
         }
-        assert!(total_records > 0);
+        // After deallocate: pool should have memory available again.
+        assert_eq!(
+            128,
+            accum.buffer_pool_available_memory(),
+            "deallocate should refund memory to the pool"
+        );
+
+        // A fresh appender now succeeds within the deadline — proving
+        // the prior cancellation didn't leak a stale wake target.
+        let later_append = tokio::time::timeout(
+            std::time::Duration::from_secs(3),
+            accum.append("test", 2, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster),
+        )
+        .await
+        .expect("subsequent append must complete within 3s — cancellation leak suspected");
+        let _ = later_append.expect("subsequent append should succeed");
+        assert_eq!(
+            0,
+            accum.appends_in_progress_count(),
+            "counter back to 0 on the success path of the third append"
+        );
     }
 
     #[tokio::test]
