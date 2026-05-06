@@ -445,3 +445,140 @@ Added test `buffer_returns_owned_vec_when_records_clone_is_alive` at
 Test count 991 → 992 (+1 regression test for the Err-branch
 soundness fix). DoD checks (build, test, format-check, lint) all
 green. Phase 6b closed.
+
+---
+
+# Critic 6 — Phase 6c (Partitioners + interceptors + ProducerRecord) Round 1 review (resolved)
+
+Reviewed commits `65fd6ef` (ProducerRecord), `bd3b78a` (Partitioner +
+RoundRobinPartitioner), `2823a69` (ProducerInterceptor +
+ProducerInterceptors), `2153070` (BuiltInPartitioner). 0 Blocking,
+6 Suggestion.
+
+## Issue 1 — Behavior Mismatch: `ProducerRecord` rejects empty topic
+
+**File**: `src/producer/producer_record.rs:108-125`.
+**Description**: Java's `ProducerRecord(String topic, ...)` rejects only
+`topic == null`; `""` (empty string) is accepted at construction (the
+broker rejects later in metadata lookup). The Rust translation used
+`topic.is_empty()` as the equivalent, rejecting `""` at construction
+with `ProducerRecordError::NullTopic`. The variant name was misleading
+when the user passed a literal `""`.
+
+**Disposition**: Fixed in commit `ec0d2fc` (fixup! `65fd6ef`).
+Dropped the `is_empty()` guard. Removed the now-unreachable
+`NullTopic` variant — Java's `null` rejection is enforced at the
+Rust type level (`impl Into<Arc<str>>` has no `null` representation).
+Updated the test to drop the moot null-topic case and added a
+positive regression `empty_topic_is_accepted` to pin the new
+contract. The remaining two `IllegalArgumentException` cases
+(negative timestamp, negative partition) are preserved.
+
+## Issue 2 — Suggestion: `ProducerInterceptors::on_send` clones every record per interceptor
+
+**File**: `src/producer/internals/producer_interceptors.rs:84-113`.
+**Description**: The Rust `on_send` calls `intercept_record.clone()`
+before each interceptor invocation. The clone is unavoidable given
+the panic-isolation contract (input is moved into `catch_unwind`; the
+previous-good record must survive). For typical hot-path types
+(`K = V = &[u8]`) the cost is fat-pointer copies plus a
+`Vec<RecordHeader>` deep-clone; for `String`/`Vec<u8>` types each
+clone allocates.
+
+**Disposition**: Fixed in commit `2c9f679` (fixup! `2823a69`).
+Documented the `K: Clone, V: Clone` bound on `on_send` with a hot-
+path allocation note. The clone is kept (panic-isolation contract is
+load-bearing); alternatives like `Arc<RecordHeaders>` and trait-shape
+changes are flagged for Phase 6d/7 design review.
+
+## Issue 3 — Suggestion: warn-log topic on `on_send` panic uses running record, not original
+
+**File**: `src/producer/internals/producer_interceptors.rs:94-106`.
+**Description**: Java's catch-block (`ProducerInterceptors.java`
+line 71-72) logs `record.topic()` and `record.partition()` from the
+**original** input parameter, not the running `interceptRecord`
+(which a previous interceptor may have mutated). The Rust translation
+captured the topic/partition from `intercept_record` per-iteration.
+
+**Disposition**: Fixed in commit `2c9f679` (fixup! `2823a69`).
+Capture `original_topic` and `original_partition` once before the
+loop and reuse for every iteration's warn-log. Mirrors Java exactly
+and avoids the per-iteration `to_string()` allocation (one upfront
+vs N).
+
+## Issue 4 — Suggestion: `RoundRobinPartitionerTest` does not exercise the `next_value` slow path under contention
+
+**File**: `src/producer/round_robin_partitioner.rs:65-86, 120-258`.
+**Description**: `next_value()` has two paths (fast: counter exists,
+lock-free atomic increment; slow: mutex-guarded
+`entry().or_insert_with()`). The translated tests run single-threaded
+so the slow path is exercised exactly once per topic, never under
+contention. The bifurcation is Rust-specific (Java's
+`ConcurrentHashMap.computeIfAbsent` collapses both into one call).
+
+**Disposition**: Fixed in commit `1dd333c` (fixup! `bd3b78a`).
+Added regression `next_value_increments_through_fast_path_after_first_call`
+which calls `partition()` three times for the same topic and asserts
+the round-robin distribution holds — the second and third calls
+must hit the fast path (counter exists), so the assertion only
+passes if the fast-path increment is correct.
+
+## Issue 5 — Suggestion: `BuiltInPartitioner::peek_current_partition_info` race-loser path is untested
+
+**File**: `src/producer/internals/built_in_partitioner.rs:192-215`.
+**Description**: The race-resolve branch ("Someone raced us. Reload
+the winner.") was not covered by any of the four translated tests
+deterministically — the early-return branch was tangentially hit by
+the sticky-partitioning loop but never pinned by an assertion.
+Java's tests have the same gap.
+
+**Disposition**: Fixed in commit `d6d08ef` (fixup! `2153070`).
+Added regression `peek_current_partition_info_returns_staged_arc_on_second_call`
+which uses `Arc::ptr_eq` to confirm the second call returns the
+same `Arc` the first call staged — pinning the early-return
+branch. The race-loser CAS-lost path remains untestable
+deterministically without forcing a multi-threaded race; documented
+in code via the `expect(...)` panic message that would surface in
+production.
+
+## Issue 6 — Suggestion: `next_partition` and `RoundRobinPartitioner::partition` return `-1` instead of throwing on zero-partition topics
+
+**File**: `src/producer/internals/built_in_partitioner.rs:142-150`,
+`src/producer/round_robin_partitioner.rs:106-116`.
+**Description**: Java's `Utils.toPositive(nextValue) % numPartitions`
+(RoundRobinPartitioner.java:62) and `random % partitions.size()`
+(BuiltInPartitioner.java:82) both raise `ArithmeticException` on a
+zero-partition topic. The Rust translations returned `-1`, silently
+routing to "partition -1". Java does NOT explicitly throw — it
+propagates from divide-by-zero. The Rust divergence traded a hard
+failure for silent invalid output.
+
+**Disposition**: Fixed in commits `1dd333c` (fixup! `bd3b78a`) and
+`d6d08ef` (fixup! `2153070`). **Option (c) chosen — panic to mirror
+Java exactly.** Both `RoundRobinPartitioner::partition` and
+`BuiltInPartitioner::next_partition` now let the Rust `%` panic on
+the zero-partitions branch, matching Java's `ArithmeticException`.
+CLAUDE.md rule 10.1 explicitly permits panic on
+`ArithmeticException`-like conditions ("OOM or `ArithmeticException`
+like division by zero"). Option (a) (Result<i32, KafkaError>) was
+rejected as over-engineered — it would invasively change every
+caller and Java doesn't do this either. Option (b) (keep `-1`) was
+rejected as a real behavior divergence. Documented the panic in
+the trait's rustdoc and added regression tests
+`partition_on_zero_partition_topic_panics` and
+`next_partition_on_zero_partition_topic_panics`.
+
+## Phase 6c Round 1 Summary
+- **Blocking**: 0
+- **Suggestion**: 6 (1 Behavior Mismatch — Issue 1; 1 documentation —
+  Issue 2; 1 log-message detail — Issue 3; 2 test gaps — Issues 4
+  & 5; 1 documented divergence — Issue 6 — all Fixed)
+
+Test count 1005 → 1010 (+5: 1 ProducerRecord
+`empty_topic_is_accepted`, 2 RoundRobin
+`next_value_increments_through_fast_path_after_first_call` +
+`partition_on_zero_partition_topic_panics`, 2 BuiltInPartitioner
+`peek_current_partition_info_returns_staged_arc_on_second_call` +
+`next_partition_on_zero_partition_topic_panics`). DoD checks
+(build, test, format-check, lint) all green. Fixup chain: `ec0d2fc`,
+`2c9f679`, `1dd333c`, `d6d08ef`.
