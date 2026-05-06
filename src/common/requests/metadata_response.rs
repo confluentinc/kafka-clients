@@ -473,6 +473,10 @@ impl AbstractResponse for MetadataResponse {
     fn should_client_throttle(&self, version: i16) -> bool {
         version >= 6
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 #[cfg(test)]

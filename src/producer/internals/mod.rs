@@ -24,6 +24,7 @@ pub(crate) mod producer_batch;
 pub(crate) mod producer_interceptors;
 pub(crate) mod producer_metadata;
 pub(crate) mod record_accumulator;
+pub(crate) mod sender;
 pub(crate) mod transaction_manager;
 
 #[allow(unused_imports)]
@@ -46,5 +47,7 @@ pub(crate) use producer_interceptors::ProducerInterceptors;
 pub(crate) use producer_metadata::ProducerMetadata;
 #[allow(unused_imports)]
 pub(crate) use record_accumulator::RecordAccumulator;
+#[allow(unused_imports)]
+pub(crate) use sender::Sender;
 #[allow(unused_imports)]
 pub(crate) use transaction_manager::TransactionManager;

@@ -93,6 +93,10 @@ impl AbstractResponse for ProduceResponse {
     fn should_client_throttle(&self, version: i16) -> bool {
         version >= 6
     }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
 }
 
 /// Mirrors the inner `ProduceResponse.PartitionResponse` data class.

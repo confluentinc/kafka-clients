@@ -59,6 +59,15 @@ pub trait AbstractResponse: AbstractRequestResponse + std::marker::Send + std::m
         false
     }
 
+    /// Cast helper for callers that hold a `&dyn AbstractResponse` and
+    /// need to recover the concrete type. Java does this with a direct
+    /// `(ProduceResponse)` cast on a polymorphic `responseBody()`; the
+    /// Rust translation uses [`std::any::Any`] downcast.
+    ///
+    /// Default implementation returns `None`; concrete types override
+    /// to return `self`.
+    fn as_any(&self) -> &dyn std::any::Any;
+
     /// Test-visible: serialize the response body. Mirrors
     /// `AbstractResponse.serialize(short)`.
     fn serialize(&self, version: i16) -> Result<ByteBufferAccessor, KafkaError> {

@@ -28,3 +28,6 @@
 - [Phase-6b review patterns](phase6b_review_patterns.md) — ProducerBatch: unsafe Send/Sync audit, OnceLock CAS-once parity, per-record bifurcation drift, hot-path zero-copy on try_append/split, missing-method scan
 - [Phase-6b Round-2 patterns](phase6b_round2_patterns.md) — bytes-crate zero-copy capacity-preservation verification, try_into_mut Err+reserve soundness hazard, snapshot fields for moved-out storage
 - [Phase-6c review patterns](phase6c_review_patterns.md) — null-vs-empty topic guard, owned-record interceptor clone, Box<dyn Fn> test seam, race-loser branch testability, Java-assert vs Rust-assert! divergence
+- [Phase-6c Round-2 patterns](phase6c_round2_patterns.md) — verified-good fix shapes: Java null elision via Rust types, original-input log capture, Arc::ptr_eq race-loser test, ArithmeticException panic translation
+- [Phase-6d review patterns](phase6d_review_patterns.md) — RecordAccumulator: skip-rationale audit framework, Tokio sync-loop-vs-Java-thread divergence, hot-path Arc::from(&str), dead-field detection
+- [Phase-6d Round-2 patterns](phase6d_round2_patterns.md) — verified-good fix shapes: get_key_value Arc<str> reuse, checked_add overflow translation, cancellation-Drop test scaffolding with counter polling
