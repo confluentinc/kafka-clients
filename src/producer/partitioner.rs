@@ -56,6 +56,16 @@ pub trait Partitioner: Send + Sync {
     /// * `value` — The value to partition on or `None`.
     /// * `value_bytes` — The serialized value to partition on or `None`.
     /// * `cluster` — The current cluster metadata.
+    ///
+    /// # Panics
+    ///
+    /// May panic if `cluster` reports zero partitions for `topic`. This
+    /// mirrors Java's behavior: the Java implementations all reduce to
+    /// `random % numPartitions`, which throws `ArithmeticException` on
+    /// division by zero. Per CLAUDE.md rule 10, panicking on
+    /// `ArithmeticException`-like conditions is acceptable. In practice
+    /// the producer's metadata pipeline guards against this earlier; a
+    /// panic here indicates a programmer error or stale metadata.
     fn partition(
         &self,
         topic: &str,

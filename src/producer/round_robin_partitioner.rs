@@ -87,6 +87,13 @@ impl RoundRobinPartitioner {
 }
 
 impl Partitioner for RoundRobinPartitioner {
+    /// # Panics
+    ///
+    /// Panics if `cluster` reports zero partitions for `topic`. Mirrors
+    /// Java's `Utils.toPositive(nextValue) % numPartitions` raising
+    /// `ArithmeticException` on division by zero. Per CLAUDE.md rule
+    /// 10, panicking on `ArithmeticException`-like conditions is
+    /// acceptable.
     fn partition(
         &self,
         topic: &str,
@@ -103,15 +110,13 @@ impl Partitioner for RoundRobinPartitioner {
             available_partitions[part].partition()
         } else {
             // No partitions are available, give a non-available partition.
+            // Java line 62: `Utils.toPositive(nextValue) % numPartitions`
+            // — raises `ArithmeticException` if `numPartitions == 0`.
+            // We mirror by panicking; CLAUDE.md rule 10.1 explicitly
+            // permits panic on division-by-zero. The previous version
+            // returned `-1`, which silently routed to "partition -1"
+            // and was a behavior divergence from Java.
             let num_partitions = cluster.partitions_for_topic(topic).len();
-            // Java would throw `ArithmeticException` on a 0-size topic; we
-            // mirror by returning -1 (invalid partition) rather than
-            // panicking. In practice the producer side guards against
-            // this elsewhere — the caller's metadata validation would
-            // fail before reaching us.
-            if num_partitions == 0 {
-                return -1;
-            }
             (Self::to_positive(next_value) as usize % num_partitions) as i32
         }
     }
@@ -255,5 +260,72 @@ mod tests {
         assert_eq!(10, *partition_count.get(&0).unwrap());
         assert_eq!(10, *partition_count.get(&1).unwrap());
         assert_eq!(10, *partition_count.get(&2).unwrap());
+    }
+
+    /// Regression for Phase 6c Round 1 Issue 4. The Rust implementation
+    /// has two paths through `next_value`: a fast path when the topic
+    /// counter already exists (Arc<AtomicI32> increment, no mutex), and
+    /// a slow path that takes the mutex to `entry().or_insert_with()`.
+    /// Java's `ConcurrentHashMap.computeIfAbsent` collapses both into
+    /// one call, so this fast/slow bifurcation is Rust-specific. This
+    /// test calls `partition` twice for the same topic: the first call
+    /// goes through the slow path (counter created), the second call
+    /// must hit the fast path (counter exists). We verify the counter
+    /// is monotonically incremented by checking the second call returns
+    /// the next round-robin partition.
+    #[test]
+    fn next_value_increments_through_fast_path_after_first_call() {
+        let n = nodes();
+        let partitions = vec![
+            PartitionInfo::new(
+                "test",
+                0,
+                Some(n[0].clone()),
+                vec![n[0].clone(), n[1].clone(), n[2].clone()],
+                vec![n[0].clone(), n[1].clone(), n[2].clone()],
+            ),
+            PartitionInfo::new(
+                "test",
+                1,
+                Some(n[1].clone()),
+                vec![n[0].clone(), n[1].clone(), n[2].clone()],
+                vec![n[0].clone(), n[1].clone(), n[2].clone()],
+            ),
+        ];
+        let cluster = Cluster::new(
+            Some("clusterId".to_string()),
+            n.to_vec(),
+            partitions,
+            HashSet::new(),
+            HashSet::new(),
+        );
+        let partitioner = RoundRobinPartitioner::new();
+        let p0 = partitioner.partition("test", None, None, None, None, &cluster); // slow path
+        let p1 = partitioner.partition("test", None, None, None, None, &cluster); // fast path
+        let p2 = partitioner.partition("test", None, None, None, None, &cluster); // fast path
+        // Each call must return a different partition (round-robin) —
+        // proves the counter incremented on the fast path.
+        assert_ne!(p0, p1);
+        assert_eq!(p0, p2); // round-robin wraps after 2 partitions
+    }
+
+    /// Regression for Phase 6c Round 1 Issue 6. Java's `partition()`
+    /// raises `ArithmeticException` via `% 0` when `numPartitions == 0`.
+    /// The Rust translation panics to mirror Java exactly (CLAUDE.md
+    /// rule 10.1 allows panic on division-by-zero).
+    #[test]
+    fn partition_on_zero_partition_topic_panics() {
+        let n = nodes();
+        let cluster = Cluster::new(
+            Some("clusterId".to_string()),
+            n.to_vec(),
+            // No partitions for topic "no-parts".
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+        );
+        let partitioner = RoundRobinPartitioner::new();
+        let result = std::panic::catch_unwind(|| partitioner.partition("no-parts", None, None, None, None, &cluster));
+        assert!(result.is_err(), "expected panic on zero-partition topic");
     }
 }
