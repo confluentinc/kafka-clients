@@ -33,8 +33,7 @@ blocks:
           commands:
             - checkout
             - sem-version python 3.10
-            - cd tools/translation_agent
-            - pip install -e '.[dev]'
+            - (cd tools/translation_agent && pip install -e '.[dev]')
             # First-ever seed has no artifact yet; subsequent re-seeds do.
             - artifact pull project translation_agent.db || true
             - |
