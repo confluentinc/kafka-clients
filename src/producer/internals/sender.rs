@@ -90,11 +90,40 @@
 //!
 //! ## Skipped `SenderTest` cases
 //!
-//! All SenderTest cases driven by `TransactionManager` or by the
-//! idempotent-producer state machine (sequence numbers, producer ID,
-//! epoch) are skipped this milestone. The corresponding Rust test
-//! coverage will be added when transactions land in a future milestone.
-//! Specific Java cases skipped:
+//! Every Java `SenderTest` case is in one of three buckets below.
+//!
+//! ### Translated (Java case → Rust test)
+//!
+//! - `testSimple` → `test_simple`
+//! - `testTopicAuthorizationFailedTerminal` → `test_topic_authorization_failed_terminal`
+//! - `testRetries` (first loop / success path) → `test_retries_then_success`
+//! - `testRetries` (second loop / retry exhaustion) → `test_retries_exhausted_yields_network_exception`
+//! - `testSendInOrder` → `test_send_in_order`
+//! - `testAppendInExpiryCallback` → `test_append_in_expiry_callback`
+//! - `testInflightBatchesExpireOnDeliveryTimeout` → `test_inflight_batches_expire_on_delivery_timeout`
+//! - `testCustomErrorMessage` → `test_custom_error_message`
+//! - `testDefaultErrorMessage` → `test_default_error_message`
+//! - `testClusterAuthorizationExceptionInProduceRequest` → `test_cluster_authorization_exception_in_produce_request`
+//! - `testTooLargeBatchesAreSafelyRemoved` → `test_too_large_batches_are_safely_removed`
+//! - `testExpiredBatchDoesNotRetry` → `test_expired_batch_does_not_retry`
+//! - `testExpiredBatchDoesNotSplitOnMessageTooLargeError` → `test_expired_batch_does_not_split_on_message_too_large_error`
+//! - `testExpiredBatchesInMultiplePartitions` → `test_expired_batches_in_multiple_partitions`
+//! - `testRecordErrorPropagatedToApplication` → `test_record_error_propagated_to_application`
+//! - `testGuaranteeOrderMutesPartitionUntilFirstResponse` → `test_guarantee_order_mutes_partition_until_first_response`
+//! - `testNotLeaderOrFollowerRetriesThenSuccess` → `test_not_leader_or_follower_retries_then_success`
+//! - `testProducerBatchRetriesWhenPartitionLeaderChanges` → `test_producer_batch_retries_when_partition_leader_changes`
+//! - `testWhenProduceResponseReturnsWithALeaderShipChangeErrorButNoNewLeaderInformation` →
+//!   `test_produce_response_leader_change_no_new_leader_information`
+//! - `testWhenProduceResponseReturnsWithALeaderShipChangeErrorAndNewLeaderInformation` →
+//!   `test_produce_response_leader_change_with_new_leader_information`
+//! - `testNoBufferReuseWhenBatchExpires` → `test_no_buffer_reuse_when_batch_expires`
+//! - `testNoDoubleDeallocation` → `test_no_double_deallocation`
+//!
+//! ### Skipped — idempotent producer / transactional (out of milestone)
+//!
+//! All cases driven by `TransactionManager` or the idempotent-producer
+//! state machine (sequence numbers, producer ID, epoch) are skipped.
+//! Coverage will be added when transactions land in a future milestone.
 //!
 //! - `testInitProducerIdRequest`
 //! - `testInitProducerIdWithMaxInFlightOne`
@@ -135,12 +164,43 @@
 //! - `testExpiryOfAllSentBatchesShouldCauseUnresolvedSequences`
 //! - `testExpiryOfUnsentBatchesShouldNotCauseUnresolvedSequences`
 //! - `testUnresolvedSequencesAreNotFatal`
-//! - `testSenderMetricsTemplates`,  `testQuotaMetrics`,
-//!   `testNodeLatencyStats` (metrics infra out of milestone scope —
-//!   PLAN.md line 296).
+//! - `senderThreadShouldNotGetStuckWhenThrottledAndAddingPartitionsToTxn` (transactional)
 //!
-//! Java cases that exercise the **non-transactional** path are
-//! translated below.
+//! ### Skipped — metrics / mock infra (out of milestone)
+//!
+//! - `testSenderMetricsTemplates` — metrics registry assertions; metrics
+//!   infra is stubbed this milestone (PLAN.md line 296). No alternate
+//!   Rust test.
+//! - `testQuotaMetrics` — same rationale.
+//!
+//! ### Skipped — deferred non-tx with explicit rationale
+//!
+//! - `testNodeLatencyStats` — exercises
+//!   `accumulator.update_node_latency_stats(node, now, can_drain)`
+//!   dispatch from `Sender` (`can_drain=false` when throttled,
+//!   `can_drain=true` when ready). Production code does dispatch the
+//!   updates (`sender.rs:429` and `sender.rs:436`); the
+//!   *accumulator-level* invariant is exercised by
+//!   `record_accumulator.rs::test_update_node_latency_stats_*`. The
+//!   *Sender-level dispatch* has no Rust test — the Java test relies on
+//!   `client.throttle(node, ms)` which the Rust `MockClientImpl` does
+//!   not currently model (Phase 6e NOTES.md MockClient subset). Defer
+//!   until throttle is wired into the Mock.
+//! - `testMetadataTopicExpiry` — exercises the topic-idle window
+//!   (`metadata.containsTopic(t)` flips false after `TOPIC_IDLE_MS`).
+//!   `Sender::send_producer_data` calls
+//!   `producer_metadata.add(topic, now)` for unknown-leader topics; the
+//!   topic-idle expiry test requires a Java-style InOrder / spy harness
+//!   on the metadata that is not yet built. Defer until the metadata
+//!   harness is added.
+//! - `testResetNextBatchExpiry` — verifies the poll-timeout sequence
+//!   (`0L → DELIVERY_TIMEOUT_MS → ≥1L`) across three runOnce ticks. The
+//!   poll-timeout clamping logic at `sender.rs:465-475`
+//!   (`min(next_ready_check_delay, not_ready_timeout, next_expiry_delay)
+//!    .max(0)`) is correct on inspection. The Java test uses Mockito
+//!   `InOrder.verify(client).poll(eq(0L), …)` to assert the exact
+//!   sequence — Rust does not have an equivalent spy/inorder facility
+//!   without bringing in a mock framework. Defer.
 
 #![allow(dead_code)] // Phase 7 (KafkaProducer) wires the public surface.
 
@@ -1178,10 +1238,37 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Drives the sender loop until shutdown. Mirrors Java's `run()`.
+    ///
+    /// Java's `Sender.run()` wraps each `runOnce()` invocation in
+    /// `try/catch (Exception)` so an uncaught `RuntimeException` does
+    /// not terminate the producer I/O thread. The Rust translation
+    /// mirrors that contract via [`futures_util::FutureExt::catch_unwind`]:
+    /// a panic in `run_once().await` is logged and swallowed; the loop
+    /// continues. The producer survives single-iteration invariant
+    /// violations the same way Java's `Thread` does.
+    ///
+    /// Caveats: state mutated up to the panic point is inconsistent
+    /// after the catch. Java has the same hazard. The panics the actor
+    /// introduced (e.g. `sender.rs::panic!("can't find batch …")`) are
+    /// invariant violations per CLAUDE.md rule 10.1 — surviving them is
+    /// best-effort but matches Java behavior.
     pub(crate) async fn run_loop(&mut self) {
+        use futures_util::FutureExt;
+        use std::panic::AssertUnwindSafe;
+
         debug!("{}Starting Kafka producer I/O thread.", self.log_context.log_prefix());
         while self.running.load(Ordering::Acquire) {
-            self.run_once().await;
+            // `AssertUnwindSafe`: `&mut self` is not `UnwindSafe` by default;
+            // we assert that callers tolerate post-panic state per the
+            // rustdoc above (mirrors Java's `try/catch (Exception)`).
+            let outcome = AssertUnwindSafe(self.run_once()).catch_unwind().await;
+            if let Err(e) = outcome {
+                error!(
+                    "{}Uncaught error in kafka producer I/O thread: {}",
+                    self.log_context.log_prefix(),
+                    panic_payload_message(&e)
+                );
+            }
         }
         debug!(
             "{}Beginning shutdown of Kafka producer I/O thread, sending remaining records.",
@@ -1191,7 +1278,14 @@ impl<C: KafkaClient> Sender<C> {
         while !self.force_close.load(Ordering::Acquire)
             && (self.accumulator.has_undrained() || self.client.has_in_flight_requests())
         {
-            self.run_once().await;
+            let outcome = AssertUnwindSafe(self.run_once()).catch_unwind().await;
+            if let Err(e) = outcome {
+                error!(
+                    "{}Uncaught error during producer shutdown drain: {}",
+                    self.log_context.log_prefix(),
+                    panic_payload_message(&e)
+                );
+            }
         }
         if self.force_close.load(Ordering::Acquire) {
             debug!(
@@ -1205,6 +1299,19 @@ impl<C: KafkaClient> Sender<C> {
             "{}Shutdown of Kafka producer I/O thread has completed.",
             self.log_context.log_prefix()
         );
+    }
+}
+
+/// Best-effort extraction of a panic payload's message. Mirrors Java's
+/// `Throwable.getMessage()` for log purposes; falls back to a generic
+/// marker when the panic carries something other than `&str` / `String`.
+fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(s) = payload.downcast_ref::<&'static str>() {
+        (*s).to_string()
+    } else if let Some(s) = payload.downcast_ref::<String>() {
+        s.clone()
+    } else {
+        "<non-string panic payload>".to_string()
     }
 }
 
@@ -1267,6 +1374,10 @@ mod tests {
         auth_errors: HashMap<i32, KafkaError>,
         /// Wakeup hook (test-only).
         wakeup_hook: Option<Arc<dyn Fn() + Send + Sync>>,
+        /// Test-only: when set, the next call to `poll` panics with the
+        /// stored message. Used to verify `run_loop`'s catch-unwind
+        /// matches Java's `try/catch (Exception)` behavior.
+        panic_on_next_poll: Option<String>,
     }
 
     /// Connection state for a given node id.
@@ -1305,7 +1416,13 @@ mod tests {
                 pending_auth_errors: HashMap::new(),
                 auth_errors: HashMap::new(),
                 wakeup_hook: None,
+                panic_on_next_poll: None,
             }
+        }
+
+        /// Test-only: arm a one-shot panic on the next `poll()` call.
+        pub(super) fn set_panic_on_next_poll(&mut self, msg: &str) {
+            self.panic_on_next_poll = Some(msg.to_string());
         }
 
         fn conn(&mut self, node_id: i32) -> &mut ConnState {
@@ -1491,6 +1608,9 @@ mod tests {
             self.requests.push_back(request);
         }
         async fn poll(&mut self, _timeout_ms: i64, now: i64) -> Vec<ClientResponse> {
+            if let Some(msg) = self.panic_on_next_poll.take() {
+                panic!("{msg}");
+            }
             // Java's MockClient.checkTimeoutOfPendingRequests: any
             // in-flight request whose `request_timeout_ms` has elapsed
             // is disconnected. Mirrors `MockClient.checkTimeoutOfPendingRequests(now)`.
@@ -2734,6 +2854,27 @@ mod tests {
             unknown_tagged_fields: Vec::new(),
         };
         Box::new(ProduceResponse::new(data))
+    }
+
+    /// Mirrors Java's `try/catch (Exception)` swallow in `Sender.run()`:
+    /// a panic inside `run_once()` must NOT abort `run_loop`. The loop
+    /// logs the panic and continues. After `initiate_close`, the loop
+    /// terminates cleanly.
+    #[tokio::test]
+    async fn run_loop_swallows_panics_and_continues() {
+        let TestSetup { mut sender, .. } = make_test_setup(i32::MAX, false);
+        // Arm a panic for the FIRST poll call.
+        sender.client.set_panic_on_next_poll("synthetic test panic");
+
+        // Spawn run_loop, then close immediately. The panic on the first
+        // iteration must be caught; subsequent iterations run normally
+        // (no records appended), drain loop exits, run_loop returns.
+        sender.initiate_close();
+        let result = tokio::time::timeout(Duration::from_secs(2), sender.run_loop()).await;
+        assert!(
+            result.is_ok(),
+            "run_loop must terminate after panic — Java's `try/catch` semantics"
+        );
     }
 
     /// Translation of `SenderTest#testNoBufferReuseWhenBatchExpires`
