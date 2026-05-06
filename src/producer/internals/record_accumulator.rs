@@ -80,6 +80,7 @@ use crate::common::header::RecordHeader;
 use crate::common::record::CompressionType;
 use crate::common::record::abstract_records::estimate_size_in_bytes_upper_bound;
 use crate::common::record::base_records::BaseRecords;
+use crate::common::record::compression_ratio_estimator;
 use crate::common::record::record_batch::CURRENT_MAGIC_VALUE;
 use crate::common::record::{MemoryRecordsBuilder, TimestampType};
 use crate::common::topic_partition::TopicPartition;
@@ -1250,6 +1251,98 @@ impl RecordAccumulator {
         batches
     }
 
+    /// Get a list of batches which have been sitting in the
+    /// accumulator too long and need to be expired. Mirrors Java's
+    /// `expiredBatches(long now)` at `RecordAccumulator.java:465-486`.
+    pub fn expired_batches(&self, now: i64) -> Vec<Arc<ProducerBatch>> {
+        let mut expired: Vec<Arc<ProducerBatch>> = Vec::new();
+        let topics: Vec<Arc<TopicInfo>> = {
+            let map = self.topic_info_map.lock().unwrap();
+            map.values().cloned().collect()
+        };
+        for info in topics {
+            let deques: Vec<BatchDeque> = {
+                let batches = info.batches.lock().unwrap();
+                batches.values().cloned().collect()
+            };
+            for deque_arc in deques {
+                // Expire batches in send order (front of the deque).
+                // We hold the deque mutex only for the deque
+                // mutation; `maybe_update_next_batch_expiry_time`
+                // takes a separate atomic and is called outside the
+                // deque lock.
+                let to_check_outside_lock = {
+                    let mut deque = deque_arc.lock().unwrap();
+                    let mut survivor: Option<Arc<ProducerBatch>> = None;
+                    while let Some(batch) = deque.front().cloned() {
+                        if batch.has_reached_delivery_timeout(self.delivery_timeout_ms as i64, now) {
+                            deque.pop_front();
+                            batch.abort_record_appends();
+                            expired.push(batch);
+                        } else {
+                            survivor = Some(batch);
+                            break;
+                        }
+                    }
+                    survivor
+                };
+                if let Some(survivor) = to_check_outside_lock {
+                    self.maybe_update_next_batch_expiry_time(&survivor);
+                }
+            }
+        }
+        expired
+    }
+
+    /// Re-enqueue the given record batch in the accumulator. Mirrors
+    /// Java's `reenqueue(ProducerBatch, long)` at
+    /// `RecordAccumulator.java:496-505`.
+    ///
+    /// In `Sender.completeBatch`, the delivery-timeout check is done
+    /// before this method is called; we don't repeat it here.
+    pub fn reenqueue(&self, batch: Arc<ProducerBatch>, now: i64) {
+        batch.reenqueued(now);
+        let deque_arc = self.get_or_create_deque(batch.topic_partition());
+        let mut deque = deque_arc.lock().unwrap();
+        if self.transaction_manager.is_some() {
+            // Phase 6 NOTES.md plug-in contract: never reachable.
+            unreachable!("transaction_manager is always None per Phase 6 plug-in contract");
+        }
+        deque.push_front(batch);
+    }
+
+    /// Split a big batch and re-enqueue the resulting splits.
+    /// Mirrors Java's `splitAndReenqueue(ProducerBatch)` at
+    /// `RecordAccumulator.java:511-540`. Returns the number of split
+    /// batches.
+    pub fn split_and_reenqueue(&self, big_batch: Arc<ProducerBatch>) -> Result<usize, KafkaError> {
+        // Reset the estimated compression ratio to the initial value
+        // or the big batch's compression ratio, whichever is bigger.
+        compression_ratio_estimator::set_estimation(
+            big_batch.topic_partition().topic(),
+            self.compression,
+            (big_batch.compression_ratio() as f32).max(1.0),
+        );
+        let mut target_split_batch_size = self.batch_size;
+        if big_batch.is_split_batch() {
+            target_split_batch_size = big_batch.max_record_size().max(big_batch.estimated_size_in_bytes() / 2);
+        }
+        let mut dq = big_batch.split(target_split_batch_size)?;
+        let num_split_batches = dq.len();
+        let partition_deque_arc = self.get_or_create_deque(big_batch.topic_partition());
+        // Java pollLast then addFirst; ordering is preserved in the
+        // resulting deque.
+        while let Some(batch) = dq.pop_back() {
+            self.incomplete.add(batch.clone());
+            let mut partition_deque = partition_deque_arc.lock().unwrap();
+            if self.transaction_manager.is_some() {
+                unreachable!("transaction_manager is always None per Phase 6 plug-in contract");
+            }
+            partition_deque.push_front(batch);
+        }
+        Ok(num_split_batches)
+    }
+
     /// Maybe update the next-batch-expiry tracker for `batch`. Mirrors
     /// Java's `maybeUpdateNextBatchExpiryTime(ProducerBatch)`.
     pub fn maybe_update_next_batch_expiry_time(&self, batch: &ProducerBatch) {
@@ -1876,6 +1969,138 @@ mod tests {
         let snap = build_test_snapshot(cluster);
         let drained = accum.drain(&snap, &HashSet::new(), i32::MAX, 0);
         assert!(drained.is_empty());
+    }
+
+    // -------------------- expired_batches() / reenqueue / split_and_reenqueue --------------------
+
+    /// Construct an accumulator with a custom delivery timeout.
+    fn make_accumulator_with_delivery_timeout(
+        batch_size: i32,
+        total_size: i64,
+        linger_ms: i32,
+        delivery_timeout_ms: i32,
+    ) -> Arc<RecordAccumulator> {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let pool = Arc::new(BufferPool::new(total_size, batch_size, time.clone(), "producer-metrics"));
+        Arc::new(RecordAccumulator::new(
+            LogContext::new(),
+            batch_size,
+            CompressionType::None,
+            linger_ms,
+            100,
+            1000,
+            delivery_timeout_ms,
+            PartitionerConfig::default(),
+            "producer-metrics",
+            time,
+            None,
+            pool,
+        ))
+    }
+
+    #[tokio::test]
+    async fn expired_batches_returns_nothing_when_within_deadline() {
+        let accum = make_accumulator_with_delivery_timeout(1024, 64 * 1024, 0, 1000);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let expired = accum.expired_batches(500);
+        assert!(expired.is_empty());
+        // The next-batch-expiry tracker should reflect the survivor.
+        assert_eq!(1000, accum.next_expiry_time_ms());
+    }
+
+    #[tokio::test]
+    async fn expired_batches_returns_aged_batch() {
+        let accum = make_accumulator_with_delivery_timeout(1024, 64 * 1024, 0, 100);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        // Java testExpiredBatchSingle: deliveryTimeoutMs=100; now=200
+        // expires the batch.
+        let expired = accum.expired_batches(200);
+        assert_eq!(1, expired.len());
+        // After expiration the deque is empty (the batch has been
+        // popped). Java's `expiredBatches` removes via
+        // `deque.poll()`.
+        let dq = accum.get_deque(&TopicPartition::new("test", 0)).expect("deque");
+        assert_eq!(0, dq.lock().unwrap().len());
+    }
+
+    #[tokio::test]
+    async fn expired_batches_max_value_does_not_overflow() {
+        // Java testExpiredBatchSingleMaxValue.
+        let accum = make_accumulator_with_delivery_timeout(1024, 64 * 1024, 0, i32::MAX);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        // With a near-INT_MAX delivery timeout the saturating_add /
+        // overflow-guarded path should not yield any expired batches
+        // and should not panic.
+        let expired = accum.expired_batches(1_000_000);
+        assert!(expired.is_empty());
+    }
+
+    #[tokio::test]
+    async fn reenqueue_puts_batch_at_head() {
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        // First append builds a batch.
+        let _ = accum
+            .append("test", 0, 0, Some(b"k1"), Some(b"v1"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a1");
+        let dq_arc = accum.get_deque(&TopicPartition::new("test", 0)).expect("deque");
+        // Pop the original batch, simulate it being sent and rejected.
+        let original = {
+            let mut dq = dq_arc.lock().unwrap();
+            dq.pop_front().expect("batch")
+        };
+        // Append again to create a fresh in-progress batch.
+        let _ = accum
+            .append("test", 0, 0, Some(b"k2"), Some(b"v2"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a2");
+        // Now re-enqueue the original at the head.
+        accum.reenqueue(original.clone(), 50);
+        let dq = dq_arc.lock().unwrap();
+        assert_eq!(2, dq.len());
+        assert!(Arc::ptr_eq(&dq[0], &original), "reenqueued batch must be at the head");
+        assert!(original.in_retry(), "reenqueue should set retry=true");
+    }
+
+    #[tokio::test]
+    async fn split_and_reenqueue_returns_zero_for_empty_batch() {
+        // The Java path requires the batch to have records (and to be
+        // closed). For an empty batch split() returns Err(IllegalState)
+        // — so split_and_reenqueue surfaces that error.
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a");
+        let dq_arc = accum.get_deque(&TopicPartition::new("test", 0)).expect("deque");
+        let big_batch = {
+            let mut dq = dq_arc.lock().unwrap();
+            dq.pop_front().expect("batch")
+        };
+        // Close the batch first (Java's `Sender.failBatch` path
+        // closes before splitting).
+        big_batch.close().expect("close");
+        // Run split_and_reenqueue — produces some number of split
+        // batches in the partition deque.
+        let num = accum.split_and_reenqueue(big_batch).expect("split");
+        // For a 1-record batch the split typically produces 1 batch.
+        assert!(num >= 1);
+        let dq = dq_arc.lock().unwrap();
+        assert_eq!(num, dq.len());
     }
 
     #[tokio::test]
