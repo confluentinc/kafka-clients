@@ -655,3 +655,26 @@ buffer-reuse, two leader-change variants, send-in-order,
 append-in-expiry-callback, retries-exhausted, true acks=0 short-circuit,
 run_loop panic-swallow). DoD checks (build, test, format-check, lint)
 all green. Fixup chain: `d3f0d10`, `474d95e`, `56e9c31`.
+
+# Critic 6 — Phase 6e Round 2 review (resolved)
+
+Reviewed Round 1 fixups. 3 new Suggestions surfaced (Issues 10, 11, 12).
+
+## Disposition table
+
+| # | Severity | Issue | Resolution |
+|---|----------|-------|------------|
+| 10 | Bug — Test Fidelity | `run_loop_swallows_panics_and_continues` called `initiate_close()` BEFORE `run_loop()`. With no records appended, the main loop short-circuits on `running=false` and the drain loop short-circuits on `!has_undrained && !has_in_flight`, so `run_once()` is never called and the armed panic never trips. The test would still pass if `catch_unwind` were removed — zero coverage of the actual contract. | **Fixed** in fixup of `56e9c31`. (1) Added `MockClientImpl::panic_trip_count` (`Arc<AtomicUsize>`) bumped immediately before the `panic!` in `poll`, so observers can prove the panic actually fired. (2) Added `MockClientImpl::poll`'s top-of-function `tokio::task::yield_now().await` so the spawned `run_loop` task does not starve the main test task on the current_thread runtime. (3) Added `Sender::running_arc()` and `Sender::force_close_arc()` test-only handles so the test can flip the flags from outside the `tokio::spawn`-ed task. (4) Rewrote the test: append a record (so iteration 1 has work), arm panic, `tokio::spawn(run_loop)`, wait for `panic_trip_count >= 1`, assert `!join.is_finished()` (panic was caught and loop kept running), then `force_close=true; running=false` and assert `JoinHandle.await` returns `Ok(())` (panic did not propagate). **Fidelity check passed**: temporarily reverting the `catch_unwind` wrapper makes the test fail with `"run_loop must keep running after the swallowed panic"` (re-confirmed empirically before final commit). |
+| 11 | Suggestion — Test Fidelity | `testMetadataTopicExpiry` deferred in the Round 1 skip list with rationale "requires a Java-style InOrder / spy harness on the metadata that is not yet built." Java actually uses only the public `metadata.containsTopic(...)` API — no Mockito spy needed. | **Fixed** in fixup of `474d95e`. Translated as `test_metadata_topic_expiry`. Pattern: append → run_once → assert `metadata.contains_topic(TOPIC)` is `true`, drive a successful round-trip with `update_with_current_request_version` between ticks, advance `time.sleep(TOPIC_IDLE_MS)` (60_000), call `update_with_current_request_version` again — predicate fires, topic dropped. Then re-append, assert topic is back in the tracked set, drive a second round-trip. The deferral entry was removed from the skip list rustdoc. Reason for original error: actor over-attributed Java's pre-amble (`client.updateMetadata(...)`) to a hidden Mockito harness; in fact `client.updateMetadata` only refreshes the broker-side metadata cache, which we mirror with `producer_metadata.update_with_current_request_version`. |
+| 12 | Suggestion — Test Fidelity | `test_append_in_expiry_callback` dropped Java's `recordCount=10` invariant — that 10 callback-driven re-appends batch into a single new batch — and substituted a manual single-record post-expiry append. Critic suggested per-record `Future`-await re-appends could close the gap. | **Fixed** in fixup of `474d95e`. Implemented `ReAppendCallback` (`AppendCallbacks` + `Callback`) that, on `Some(KafkaError::Timeout)`, `tokio::spawn`s an async re-append into a shared `Mutex<Vec<JoinHandle<...>>>`. After the expiry-fire `run_once` returns, the test awaits all 10 spawn handles, then asserts `accum.get_deque(tp0).len() == 1` AND `head.record_count() == 10` — Java's exact invariant. CLAUDE.md rule 9.6 honored: callback fires synchronously (Java's lifecycle point); `tokio::spawn` is the only bridge to async append from a sync trait. CLAUDE.md rule 11.4 (per-message spawn forbidden on production send path) does not apply — this is test code. |
+
+## Phase 6e Round 2 Summary
+
+- **Blocking**: 0 (none surfaced in Round 2)
+- **Suggestion**: 3 (Issues #10, #11, #12 — all Fixed)
+
+Test count 1094 → 1095 (+1: `test_metadata_topic_expiry` is the new
+test; `test_append_in_expiry_callback` was rewritten with the
+Java-faithful invariant — same name, no count delta;
+`run_loop_swallows_panics_and_continues` was rewritten — same name, no
+count delta). DoD checks (build, test, format-check, lint) all green.
