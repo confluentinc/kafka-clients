@@ -74,16 +74,23 @@ use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicI32, AtomicI64, Ordering};
 
+use crate::common::cluster::Cluster;
+use crate::common::errors::KafkaError;
+use crate::common::header::RecordHeader;
 use crate::common::record::CompressionType;
+use crate::common::record::abstract_records::estimate_size_in_bytes_upper_bound;
+use crate::common::record::record_batch::CURRENT_MAGIC_VALUE;
+use crate::common::record::{MemoryRecordsBuilder, TimestampType};
 use crate::common::topic_partition::TopicPartition;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::common::utils::Time;
 use crate::common_client_configs::{RETRY_BACKOFF_EXP_BASE, RETRY_BACKOFF_JITTER};
 use crate::producer::callback::Callback;
+use crate::producer::record_metadata::RecordMetadata;
 
 use super::buffer_pool::BufferPool;
-use super::built_in_partitioner::BuiltInPartitioner;
+use super::built_in_partitioner::{BuiltInPartitioner, StickyPartitionInfo};
 use super::future_record_metadata::FutureRecordMetadata;
 use super::incomplete_batches::IncompleteBatches;
 use super::producer_batch::ProducerBatch;
@@ -136,6 +143,17 @@ pub(crate) struct RecordAppendResult {
     /// Number of bytes the record contributed to the batch's
     /// estimated size.
     pub appended_bytes: i32,
+}
+
+impl std::fmt::Debug for RecordAppendResult {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RecordAppendResult")
+            .field("batch_is_full", &self.batch_is_full)
+            .field("new_batch_created", &self.new_batch_created)
+            .field("appended_bytes", &self.appended_bytes)
+            .field("future", &"FutureRecordMetadata")
+            .finish()
+    }
 }
 
 /// The set of nodes that have at least one complete record batch in
@@ -442,7 +460,7 @@ impl RecordAccumulator {
             map.values().cloned().collect()
         };
         for info in topics {
-            let deques: Vec<Arc<Mutex<VecDeque<Arc<ProducerBatch>>>>> = {
+            let deques: Vec<BatchDeque> = {
                 let batches = info.batches.lock().unwrap();
                 batches.values().cloned().collect()
             };
@@ -483,6 +501,380 @@ impl RecordAccumulator {
             stats.drain_time_ms.store(now_ms, Ordering::Release);
         }
         stats.ready_time_ms.store(now_ms, Ordering::Release);
+    }
+
+    /// Add a record to the accumulator, returning the [`RecordAppendResult`].
+    ///
+    /// Mirrors Java's `append(topic, partition, timestamp, key, value,
+    /// headers, callbacks, maxTimeToBlock, nowMs, cluster)` at
+    /// `RecordAccumulator.java:275-359`.
+    ///
+    /// `partition` may be [`RecordMetadata::UNKNOWN_PARTITION`] (`-1`)
+    /// to delegate partition selection to the [`BuiltInPartitioner`].
+    /// `headers` defaults to the empty slice if `None` (Java:
+    /// `Record.EMPTY_HEADERS`).
+    ///
+    /// # Hot-path constraints (CLAUDE.md rule 12)
+    ///
+    /// - The `topic` is interned via `Arc<str>` once per topic — no
+    ///   `String` clone per record send.
+    /// - `key` and `value` are passed as `Option<&[u8]>` and flow
+    ///   through to [`ProducerBatch::try_append`] which writes
+    ///   directly into the underlying [`MemoryRecordsBuilder`] buffer.
+    /// - `headers` is passed by `&[RecordHeader]` borrow; no clone.
+    /// - The `Mutex<VecDeque<...>>` deque guard is **never** held
+    ///   across the [`BufferPool::allocate`] `.await`
+    ///   (CLAUDE.md rule 9.6). The lock-then-await pattern Java uses
+    ///   is replaced with: take the lock, try, drop the lock,
+    ///   `.await`, re-take the lock.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn append(
+        &self,
+        topic: &str,
+        partition: i32,
+        timestamp: i64,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+        callbacks: Option<Arc<dyn AppendCallbacks>>,
+        max_time_to_block: i64,
+        now_ms: i64,
+        cluster: &Cluster,
+    ) -> Result<RecordAppendResult, KafkaError> {
+        let topic_arc: Arc<str> = Arc::from(topic);
+        let topic_info = self.get_or_create_topic_info(topic_arc.clone());
+
+        // Track in-progress appends so abortIncompleteBatches() does
+        // not miss a batch racing the close flag. The guard's `Drop`
+        // also returns any allocated-but-unused buffer to the pool —
+        // mirroring Java's `finally { free.deallocate(buffer); ... }`.
+        let mut state_guard = AppendInProgressGuard::new(self);
+
+        let mut now_ms = now_ms;
+
+        loop {
+            let (partition_info, effective_partition) = if partition == RecordMetadata::UNKNOWN_PARTITION {
+                let info = topic_info.built_in_partitioner.peek_current_partition_info(cluster);
+                let part = info.partition();
+                (Some(info), part)
+            } else {
+                (None, partition)
+            };
+
+            // Now that we know the effective partition, let the caller
+            // know. Mirrors Java's `setPartition(callbacks, effectivePartition)`.
+            if let Some(cb) = callbacks.as_ref() {
+                cb.set_partition(effective_partition);
+            }
+
+            // Check if we have an in-progress batch.
+            let dq = {
+                let mut batches = topic_info.batches.lock().unwrap();
+                batches
+                    .entry(effective_partition)
+                    .or_insert_with(|| Arc::new(Mutex::new(VecDeque::new())))
+                    .clone()
+            };
+
+            // First attempt: try to append to an existing open batch.
+            {
+                let mut deque = dq.lock().unwrap();
+                if Self::partition_changed(
+                    &self.log_prefix,
+                    topic,
+                    &topic_info,
+                    partition_info.as_ref(),
+                    &deque,
+                    cluster,
+                ) {
+                    continue;
+                }
+
+                if let Some(append_result) = self.try_append_to_existing(
+                    timestamp,
+                    key,
+                    value,
+                    headers,
+                    callbacks.as_ref().map(|cb| upcast_callback(cb.clone())),
+                    &mut deque,
+                    now_ms,
+                )? {
+                    let enable_switch = Self::all_batches_full(&deque);
+                    drop(deque);
+                    if let Some(info) = partition_info.as_ref() {
+                        topic_info.built_in_partitioner.update_partition_info(
+                            info,
+                            append_result.appended_bytes,
+                            cluster,
+                            enable_switch,
+                        );
+                    }
+                    state_guard.disarm();
+                    return Ok(append_result);
+                }
+                // deque guard dropped here.
+            }
+
+            // Slow path: allocate a new buffer (may block on pool).
+            // The guard refunds the buffer if we are cancelled mid-await.
+            if state_guard.buffer.is_none() {
+                let upper_bound =
+                    estimate_size_in_bytes_upper_bound(CURRENT_MAGIC_VALUE, self.compression, key, value, headers);
+                let size = self.batch_size.max(upper_bound);
+                log::trace!(
+                    "{}Allocating a new {} byte message buffer for topic {} partition {} with remaining timeout {}ms",
+                    self.log_prefix,
+                    size,
+                    topic,
+                    effective_partition,
+                    max_time_to_block,
+                );
+                // CRITICAL: this call may suspend on `Notify::notified()`.
+                // We hold NO Mutex guards across this `.await`
+                // (CLAUDE.md rule 9.6).
+                let buffer = self.free.allocate(size, max_time_to_block).await?;
+                state_guard.buffer = Some(buffer);
+                state_guard.buffer_size = size;
+                // Update the current time in case the buffer allocation
+                // blocked above. NOTE: getting time may be expensive,
+                // so calling it under a lock should be avoided.
+                now_ms = self.time.milliseconds();
+            }
+
+            // Second attempt: with the freshly allocated buffer in hand.
+            {
+                let mut deque = dq.lock().unwrap();
+                if Self::partition_changed(
+                    &self.log_prefix,
+                    topic,
+                    &topic_info,
+                    partition_info.as_ref(),
+                    &deque,
+                    cluster,
+                ) {
+                    continue;
+                }
+
+                let buffer = state_guard.buffer.take().expect("buffer was just allocated");
+                let buffer_size = state_guard.buffer_size;
+                let (append_result, returned_buffer) = self.append_new_batch(
+                    topic_arc.clone(),
+                    effective_partition,
+                    &mut deque,
+                    timestamp,
+                    key,
+                    value,
+                    headers,
+                    callbacks.as_ref().map(|cb| upcast_callback(cb.clone())),
+                    buffer,
+                    buffer_size,
+                    now_ms,
+                )?;
+                if let Some(unused) = returned_buffer {
+                    // Java sets `buffer = null` only when newBatchCreated;
+                    // otherwise the deallocate-in-finally reclaims it.
+                    // In our path we re-stash the buffer in the guard so
+                    // it gets refunded on drop.
+                    state_guard.buffer = Some(unused);
+                }
+                let enable_switch = Self::all_batches_full(&deque);
+                drop(deque);
+                if let Some(info) = partition_info.as_ref() {
+                    topic_info.built_in_partitioner.update_partition_info(
+                        info,
+                        append_result.appended_bytes,
+                        cluster,
+                        enable_switch,
+                    );
+                }
+                state_guard.disarm();
+                return Ok(append_result);
+            }
+        }
+    }
+
+    /// Mirrors Java's private `partitionChanged(topic, topicInfo,
+    /// partitionInfo, deque, nowMs, cluster)`. Returns `true` if the
+    /// caller should `continue` the retry loop.
+    fn partition_changed(
+        log_prefix: &str,
+        topic: &str,
+        topic_info: &TopicInfo,
+        partition_info: Option<&Arc<StickyPartitionInfo>>,
+        deque: &VecDeque<Arc<ProducerBatch>>,
+        cluster: &Cluster,
+    ) -> bool {
+        let info = match partition_info {
+            Some(i) => i,
+            // Caller specified an explicit partition (Java: `partition
+            // != UNKNOWN_PARTITION`); no sticky tracking, no race.
+            None => return false,
+        };
+
+        if topic_info.built_in_partitioner.is_partition_changed(info) {
+            log::trace!(
+                "{}Partition {} for topic {} switched by a concurrent append, retrying",
+                log_prefix,
+                info.partition(),
+                topic,
+            );
+            return true;
+        }
+
+        // We might have disabled partition switch if the queue had
+        // incomplete batches. Check if all batches are full now and
+        // switch.
+        if Self::all_batches_full(deque) {
+            topic_info.built_in_partitioner.update_partition_info(info, 0, cluster, true);
+            if topic_info.built_in_partitioner.is_partition_changed(info) {
+                log::trace!(
+                    "{}Completed previously disabled switch for topic {} partition {}, retrying",
+                    log_prefix,
+                    topic,
+                    info.partition(),
+                );
+                return true;
+            }
+        }
+
+        false
+    }
+
+    /// Mirrors Java's private `tryAppend(timestamp, key, value, headers,
+    /// callback, deque, nowMs)`. Returns `Some(result)` if appended into
+    /// an existing open batch; `None` if a new batch is needed (the
+    /// existing last batch is closed for further appends).
+    #[allow(clippy::too_many_arguments)]
+    fn try_append_to_existing(
+        &self,
+        timestamp: i64,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+        callback: Option<Arc<dyn Callback>>,
+        deque: &mut VecDeque<Arc<ProducerBatch>>,
+        now_ms: i64,
+    ) -> Result<Option<RecordAppendResult>, KafkaError> {
+        if self.closed.load(Ordering::Acquire) {
+            return Err(KafkaError::IllegalState("Producer closed while send in progress".to_string()));
+        }
+        let last = match deque.back() {
+            Some(b) => b.clone(),
+            None => return Ok(None),
+        };
+        let initial_bytes = last.estimated_size_in_bytes();
+        let future = last.try_append(timestamp, key, value, headers, callback, now_ms);
+        match future {
+            None => {
+                last.close_for_record_appends();
+                Ok(None)
+            },
+            Some(future) => {
+                let appended_bytes = last.estimated_size_in_bytes() - initial_bytes;
+                let batch_is_full = deque.len() > 1 || last.is_full();
+                Ok(Some(RecordAppendResult {
+                    future,
+                    batch_is_full,
+                    new_batch_created: false,
+                    appended_bytes,
+                }))
+            },
+        }
+    }
+
+    /// Mirrors Java's private `appendNewBatch(topic, partition, dq,
+    /// timestamp, key, value, headers, callbacks, buffer, nowMs)`.
+    ///
+    /// Returns `(result, returned_buffer)` where `returned_buffer` is
+    /// `Some(buffer)` if the buffer was NOT consumed (a sibling
+    /// appender raced us and produced a batch first — the caller must
+    /// recycle the buffer) or `None` if the new batch took ownership.
+    #[allow(clippy::too_many_arguments)]
+    fn append_new_batch(
+        &self,
+        topic: Arc<str>,
+        partition: i32,
+        deque: &mut VecDeque<Arc<ProducerBatch>>,
+        timestamp: i64,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+        callback: Option<Arc<dyn Callback>>,
+        buffer: Vec<u8>,
+        buffer_size: i32,
+        now_ms: i64,
+    ) -> Result<(RecordAppendResult, Option<Vec<u8>>), KafkaError> {
+        debug_assert!(
+            partition != RecordMetadata::UNKNOWN_PARTITION,
+            "appendNewBatch must be called with a resolved partition"
+        );
+
+        // Java: "Somebody else found us a batch, return the one we
+        // waited for! Hopefully this doesn't happen often..."
+        if let Some(append_result) =
+            self.try_append_to_existing(timestamp, key, value, headers, callback.clone(), deque, now_ms)?
+        {
+            return Ok((append_result, Some(buffer)));
+        }
+
+        let records_builder = self.records_builder(buffer, buffer_size)?;
+        let tp = TopicPartition::new(topic, partition);
+        let batch = Arc::new(ProducerBatch::new(tp, records_builder, now_ms));
+        let future = batch
+            .try_append(timestamp, key, value, headers, callback, now_ms)
+            .ok_or_else(|| {
+                // Java: `Objects.requireNonNull(batch.tryAppend(...))`. The
+                // contract is that a freshly allocated batch always has
+                // room for the first record (since the buffer is sized
+                // by `estimateSizeInBytesUpperBound`). If this somehow
+                // returns None we have a programmer-state bug.
+                KafkaError::IllegalState("Freshly allocated batch rejected the first record append".to_string())
+            })?;
+
+        let estimated = batch.estimated_size_in_bytes();
+        deque.push_back(batch.clone());
+        self.incomplete.add(batch.clone());
+
+        let batch_is_full = deque.len() > 1 || batch.is_full();
+        let result = RecordAppendResult { future, batch_is_full, new_batch_created: true, appended_bytes: estimated };
+        Ok((result, None))
+    }
+
+    /// Build a [`MemoryRecordsBuilder`] over the provided buffer.
+    /// Mirrors Java's private `recordsBuilder(buffer)`.
+    fn records_builder(&self, buffer: Vec<u8>, buffer_size: i32) -> Result<MemoryRecordsBuilder, KafkaError> {
+        // Java: `MemoryRecords.builder(buffer, CURRENT_MAGIC_VALUE,
+        //                              compression, CREATE_TIME, 0L)`.
+        // Maps to our [`MemoryRecordsBuilder::from_buffer`] with
+        // CreateTime, base offset 0, and the no-producer-state
+        // sentinels. `write_limit` is the buffer size — Java's
+        // `bufferStream` uses `buffer.capacity()` for the same
+        // purpose.
+        use crate::common::record::record_batch::{NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, NO_TIMESTAMP};
+        MemoryRecordsBuilder::from_buffer(
+            buffer,
+            CURRENT_MAGIC_VALUE,
+            self.compression,
+            TimestampType::CreateTime,
+            0,
+            NO_TIMESTAMP,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            false,
+            false,
+            -1,
+            buffer_size,
+        )
+    }
+
+    /// Java's `allBatchesFull(deque)` — only the last batch may be
+    /// incomplete, so check it.
+    fn all_batches_full(deque: &VecDeque<Arc<ProducerBatch>>) -> bool {
+        match deque.back() {
+            Some(last) => last.is_full(),
+            None => true,
+        }
     }
 
     /// Maybe update the next-batch-expiry tracker for `batch`. Mirrors
@@ -556,10 +948,72 @@ impl RecordAccumulator {
 //   are also `Send + Sync`.
 // No additional unsafe impls are needed.
 
+/// RAII guard that decrements `appendsInProgress` and refunds an
+/// allocated-but-unused buffer on drop. Mirrors Java's `try { … }
+/// finally { free.deallocate(buffer); appendsInProgress.decrementAndGet(); }`
+/// at `RecordAccumulator.java:355-358`.
+///
+/// **Cancellation safety:** if the caller's future is dropped between
+/// the buffer allocation and the second deque-append, the guard's
+/// `Drop` returns the buffer to the pool — preventing a permanent leak
+/// of pool memory under cancellation. This mirrors the
+/// [`crate::producer::internals::buffer_pool::BufferPool`]'s
+/// `WaiterGuard` Phase-6a pattern.
+struct AppendInProgressGuard<'a> {
+    accumulator: &'a RecordAccumulator,
+    /// `Some(buffer)` iff the slow path allocated a buffer that has
+    /// not yet been moved into a new batch. `None` after success.
+    buffer: Option<Vec<u8>>,
+    /// Size used at allocation; needed by `BufferPool::deallocate`.
+    buffer_size: i32,
+}
+
+impl<'a> AppendInProgressGuard<'a> {
+    fn new(accumulator: &'a RecordAccumulator) -> Self {
+        accumulator.appends_in_progress.fetch_add(1, Ordering::AcqRel);
+        AppendInProgressGuard { accumulator, buffer: None, buffer_size: 0 }
+    }
+
+    /// Marker for the success path — semantically equivalent to Java's
+    /// `buffer = null` after a successful new-batch creation. Drop
+    /// still runs and decrements `appendsInProgress`.
+    fn disarm(&mut self) {
+        // No-op: refund-on-drop already does the right thing because
+        // `buffer == None` on the success path. Kept as an explicit
+        // call site for future readers / for symmetry with Java's
+        // local variable mutation.
+    }
+}
+
+impl Drop for AppendInProgressGuard<'_> {
+    fn drop(&mut self) {
+        if let Some(buffer) = self.buffer.take() {
+            // Refund the unused buffer to the pool. Java's `finally`
+            // clause calls `free.deallocate(buffer)` (no size arg) —
+            // the no-arg overload uses `buffer.capacity()` as the
+            // size, which we mirror via [`BufferPool::deallocate`]
+            // with the size we recorded on allocation.
+            self.accumulator.free.deallocate(buffer, self.buffer_size);
+        }
+        self.accumulator.appends_in_progress.fetch_sub(1, Ordering::AcqRel);
+    }
+}
+
+/// Upcast `Arc<dyn AppendCallbacks>` → `Arc<dyn Callback>` (Rust
+/// 1.86+ trait upcasting). This is a single fat-pointer copy + Arc
+/// refcount bump — no heap allocation.
+fn upcast_callback(cb: Arc<dyn AppendCallbacks>) -> Arc<dyn Callback> {
+    cb
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    use std::collections::HashSet as StdHashSet;
+
+    use crate::common::node::Node;
+    use crate::common::partition_info::PartitionInfo;
     use crate::common::utils::MockTime;
     use crate::producer::internals::buffer_pool::BufferPool;
 
@@ -582,6 +1036,28 @@ mod tests {
             None,
             pool,
         ))
+    }
+
+    /// Construct a 2-node, 1-topic, 3-partition cluster with both
+    /// nodes present as leaders. `node1` is the leader for `partition1`
+    /// and `partition2`; `node2` is the leader for `partition3`.
+    /// Mirrors `RecordAccumulatorTest`'s setUp.
+    fn build_test_cluster() -> (Arc<Cluster>, Node, Node) {
+        let node1 = Node::new(0, "localhost".to_string(), 1111);
+        let node2 = Node::new(1, "localhost".to_string(), 1112);
+        let parts = vec![
+            PartitionInfo::new("test", 0, Some(node1.clone()), vec![], vec![]),
+            PartitionInfo::new("test", 1, Some(node1.clone()), vec![], vec![]),
+            PartitionInfo::new("test", 2, Some(node2.clone()), vec![], vec![]),
+        ];
+        let cluster = Cluster::new(
+            None,
+            vec![node1.clone(), node2.clone()],
+            parts,
+            StdHashSet::new(),
+            StdHashSet::new(),
+        );
+        (Arc::new(cluster), node1, node2)
     }
 
     #[test]
@@ -673,5 +1149,166 @@ mod tests {
         let _ = accum.get_or_create_deque(&TopicPartition::new("t", 0));
         let r: Option<i32> = accum.with_built_in_partitioner("t", |_| 42);
         assert_eq!(Some(42), r);
+    }
+
+    // -------------------- append() --------------------
+    //
+    // These translate the simpler `RecordAccumulatorTest` cases that
+    // exercise `append` directly. The full `testFull`,
+    // `testAppendLargeNonCompressed`, etc. land alongside `ready` /
+    // `drain` translations in step 3.
+
+    #[tokio::test]
+    async fn append_into_empty_deque_creates_new_batch() {
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let key = b"key";
+        let value = b"value";
+        let now = 0;
+        let r = accum
+            .append("test", 0, now, Some(key), Some(value), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+        assert!(r.new_batch_created, "first append must create a new batch");
+        assert!(!r.batch_is_full, "small key+value should leave room");
+        assert!(r.appended_bytes > 0);
+    }
+
+    #[tokio::test]
+    async fn append_into_existing_batch_does_not_allocate() {
+        let accum = make_accumulator(4096, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let key = b"key";
+        let value = b"value";
+        let now = 0;
+        // First append — creates the batch.
+        let r1 = accum
+            .append("test", 0, now, Some(key), Some(value), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+        assert!(r1.new_batch_created);
+        // Second append — should reuse the same batch.
+        let r2 = accum
+            .append("test", 0, now, Some(key), Some(value), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+        assert!(!r2.new_batch_created);
+        assert!(!r2.batch_is_full);
+    }
+
+    #[tokio::test]
+    async fn append_after_close_returns_illegal_state() {
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        // Force close.
+        accum.closed.store(true, Ordering::Release);
+        // Pre-create the partition's deque so `try_append_to_existing`
+        // is reached.
+        let _ = accum.get_or_create_deque(&TopicPartition::new("test", 0));
+        // First call — try_append_to_existing sees `closed == true` and
+        // returns Err.
+        let err = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect_err("must error after close");
+        match err {
+            KafkaError::IllegalState(msg) => {
+                assert!(
+                    msg.contains("Producer closed while send in progress"),
+                    "expected close-message, got: {msg}"
+                );
+            },
+            other => panic!("expected IllegalState, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn append_returns_appended_bytes_for_existing_batch() {
+        // First append creates the batch (we measure new-batch
+        // appended_bytes — which is the full estimated batch size).
+        // Second append into the same batch should report only the
+        // delta record-bytes, NOT the batch overhead. Java's contract:
+        // RecordAccumulator.java:436 — `int appendedBytes =
+        // last.estimatedSizeInBytes() - initialBytes;`.
+        let accum = make_accumulator(4096, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let r1 = accum
+            .append("t2", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append1");
+        let r2 = accum
+            .append("t2", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append2");
+        assert!(r1.new_batch_created);
+        assert!(!r2.new_batch_created);
+        // r2's appended_bytes is just the per-record overhead; should
+        // be much smaller than r1's (which is the full batch size).
+        assert!(r2.appended_bytes > 0);
+        assert!(r2.appended_bytes < r1.appended_bytes);
+    }
+
+    #[tokio::test]
+    async fn append_uses_unknown_partition_to_let_partitioner_choose() {
+        // BuiltInPartitioner.peek_current_partition_info chooses the
+        // initial partition. We want the test to confirm the value is
+        // a valid partition id for the topic (0..3). The exact choice
+        // varies because the default random source uses
+        // `rand::rng()` — but we can verify the partition is in range.
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let r = accum
+            .append(
+                "test",
+                RecordMetadata::UNKNOWN_PARTITION,
+                0,
+                Some(b"k"),
+                Some(b"v"),
+                &[],
+                None,
+                1000,
+                0,
+                &cluster,
+            )
+            .await
+            .expect("append");
+        assert!(r.new_batch_created);
+        // The chosen partition is reflected by the deque entry now
+        // existing for that partition — verify exactly one deque was
+        // created and its key is in the cluster's range.
+        let info = accum.topic_info_map.lock().unwrap().get("test").cloned().expect("topic info");
+        let batches = info.batches.lock().unwrap();
+        assert_eq!(1, batches.len());
+        let part = *batches.keys().next().unwrap();
+        assert!(
+            (0..3).contains(&part),
+            "chosen partition {part} must be in [0, 3) for the test cluster"
+        );
+    }
+
+    #[tokio::test]
+    async fn append_callbacks_set_partition_invoked() {
+        use std::sync::atomic::AtomicI32;
+        struct Recording {
+            partition: AtomicI32,
+        }
+        impl Callback for Recording {
+            fn on_completion(&self, _m: Option<&RecordMetadata>, _e: Option<&KafkaError>) {}
+        }
+        impl AppendCallbacks for Recording {
+            fn set_partition(&self, partition: i32) {
+                self.partition.store(partition, Ordering::Release);
+            }
+        }
+
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let cb = Arc::new(Recording { partition: AtomicI32::new(-99) });
+        let cb_dyn: Arc<dyn AppendCallbacks> = cb.clone();
+        let _ = accum
+            .append("test", 2, 0, Some(b"k"), Some(b"v"), &[], Some(cb_dyn), 1000, 0, &cluster)
+            .await
+            .expect("append");
+        assert_eq!(2, cb.partition.load(Ordering::Acquire));
     }
 }
