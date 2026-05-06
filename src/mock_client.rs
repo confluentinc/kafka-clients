@@ -25,6 +25,8 @@ use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
 
+use tokio::sync::Notify;
+
 use crate::common::Node;
 use crate::common::requests::ConcreteResponse;
 use crate::common::requests::RequestBuilder;
@@ -543,6 +545,10 @@ impl KafkaClient for MockClient {
 
     fn wakeup(&self) {
         // No-op for mock
+    }
+
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        Arc::new(Notify::new())
     }
 
     fn new_client_request(
