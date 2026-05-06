@@ -81,6 +81,43 @@ use crate::common::utils::byte_buffer_output_stream::ByteBufferOutputStream;
 /// `MemoryRecordsBuilder.COMPRESSION_RATE_ESTIMATION_FACTOR = 1.05f`.
 const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 
+/// Convert the result of `Bytes::try_into_mut` into a `Vec<u8>` suitable
+/// for [`crate::producer::internals::BufferPool::deallocate`].
+///
+/// * On `Ok(BytesMut)` the underlying allocation is uniquely owned —
+///   convert to `Vec<u8>` (zero-copy: `bytes` reuses the original
+///   allocation when its `From<Vec<u8>>` source is preserved through
+///   `try_into_mut`).
+/// * On `Err(Bytes)` the buffer is still cloned elsewhere (e.g. an
+///   in-flight wire-send `Bytes` clone hasn't been dropped). Falls back
+///   to copying — the caller hands the result to
+///   `BufferPool::deallocate` which still routes it to the non-pooled
+///   branch via the `size as usize == buffer.capacity()` check.
+///
+/// In both branches the returned `Vec<u8>` has `len == capacity`
+/// (= `initial_capacity` if no growth occurred), matching the pool's
+/// recycle invariant. The bytes 0..len were initialized either at
+/// allocation or by previous writes, so the `unsafe set_len` is sound.
+fn finalize_recycled_buffer(res: Result<bytes::BytesMut, bytes::Bytes>, initial_capacity: usize) -> Vec<u8> {
+    let mut owned: Vec<u8> = match res {
+        Ok(bm) => bm.into(),
+        Err(b) => b.to_vec(), // fallback: copy out (still-cloned Bytes)
+    };
+    if owned.capacity() < initial_capacity {
+        owned.reserve(initial_capacity - owned.capacity());
+    }
+    let cap = owned.capacity();
+    // SAFETY: every byte in 0..cap is initialized — the pool fills its
+    // initial allocation with `vec![0u8; size]` and subsequent writes
+    // (records + batch header) overwrite a prefix in place; bytes past
+    // the written region retain the original zeros (or prior pool
+    // cycle's writes). No reads of uninitialized memory possible.
+    unsafe {
+        owned.set_len(cap);
+    }
+    owned
+}
+
 /// Records info returned by [`MemoryRecordsBuilder::info`]. Mirrors Java's
 /// nested `RecordsInfo` POD.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -113,6 +150,16 @@ pub struct MemoryRecordsBuilder {
     buffer_stream: Box<ByteBufferOutputStream>,
     magic: i8,
     initial_position: usize,
+    /// Snapshot of the underlying buffer's capacity at construction time.
+    /// Mirrors Java's `bufferStream.initialCapacity()` accessor — but
+    /// because `close()` / `build()` MOVE the underlying `Vec<u8>` out of
+    /// `buffer_stream` (replacing it with an empty stub) for zero-copy
+    /// finalization, calling `bufferStream.initialCapacity()` after build
+    /// would return 0. Snapshotting here keeps `initial_capacity()`
+    /// well-defined across the full lifecycle, including the post-build
+    /// state required by `RecordAccumulator::deallocate(batch.buffer(),
+    /// batch.initialCapacity())`.
+    initial_buffer_capacity: usize,
     base_offset: i64,
     log_append_time: i64,
     is_control_batch: bool,
@@ -221,6 +268,7 @@ impl MemoryRecordsBuilder {
         }
 
         let initial_position = buffer_stream.position();
+        let initial_buffer_capacity = buffer_stream.initial_capacity();
         let batch_header_size_in_bytes = record_batch_header_size_in_bytes(magic, compression_type);
 
         // Reserve the header region so records start writing right after.
@@ -237,6 +285,7 @@ impl MemoryRecordsBuilder {
             buffer_stream,
             magic,
             initial_position,
+            initial_buffer_capacity,
             base_offset,
             log_append_time,
             is_control_batch,
@@ -391,8 +440,81 @@ impl MemoryRecordsBuilder {
     }
 
     /// Initial capacity at construction. Mirrors Java's `initialCapacity()`.
+    ///
+    /// Returns the capacity snapshotted at constructor time — stable
+    /// across the full lifecycle including post-`build()`. Java's
+    /// `bufferStream.initialCapacity()` is similarly stable because the
+    /// underlying `ByteBuffer` reference is retained; in Rust we MOVE
+    /// the `Vec<u8>` out of `buffer_stream` on `close()`/`build()` for
+    /// zero-copy finalization, so we read from the dedicated snapshot
+    /// field instead of the (now-empty-stub) buffer stream.
     pub fn initial_capacity(&self) -> usize {
-        self.buffer_stream.initial_capacity()
+        self.initial_buffer_capacity
+    }
+
+    /// Take ownership of the underlying `Vec<u8>` so it can be returned
+    /// to a `BufferPool`. Mirrors Java's `bufferStream.buffer()` →
+    /// `BufferPool.deallocate(buffer, initialCapacity)` flow at
+    /// `RecordAccumulator.java:1053`. In Java the same `ByteBuffer`
+    /// reference is shared between the stream and the materialized
+    /// `MemoryRecords`; in Rust we move the `Vec<u8>` from the stream
+    /// into a `Bytes` at `build()` time for zero-copy finalization, so
+    /// we recover it via the appropriate channel depending on lifecycle:
+    ///
+    /// * **Pre-build**: extract the buffer from `buffer_stream`,
+    ///   replacing it with an empty stub.
+    /// * **Post-build**: extract from `built_records` via
+    ///   `Bytes::try_into_mut().into()`. This is zero-copy iff the
+    ///   `Bytes` clones from the wire-send path have all been dropped
+    ///   (the typical case at `RecordAccumulator::deallocate` time —
+    ///   the request has been ack'd and the wire-send `Bytes` clones
+    ///   released). If clones still exist this falls back to copying.
+    ///
+    /// The returned `Vec<u8>` has `len == capacity == initial_capacity()`
+    /// (when the buffer didn't grow during writes), matching Java's
+    /// `ByteBuffer.clear()`-equivalent state required by
+    /// [`BufferPool::deallocate`](crate::producer::internals::BufferPool::deallocate).
+    /// Buffers that grew beyond `initial_capacity` retain their actual
+    /// capacity; the pool's `size as usize == buffer.capacity()` check
+    /// correctly routes them to the non-pooled branch in that case.
+    ///
+    /// This is a one-shot extraction. After this call:
+    /// * `buffer_stream` is replaced with an empty stub.
+    /// * `built_records.buffer` (if it was set) has been consumed.
+    /// * Subsequent calls return an empty `Vec<u8>`.
+    pub fn buffer_owned(&mut self) -> Vec<u8> {
+        let initial_capacity = self.initial_buffer_capacity;
+        // Post-build: the Vec lives inside the `Bytes` of `built_records`.
+        if let Some(records) = self.built_records.take() {
+            let buffer = records.into_buffer();
+            return finalize_recycled_buffer(buffer.try_into_mut(), initial_capacity);
+        }
+        // Pre-build: extract from `buffer_stream` (replacing with the
+        // empty stub the build path also uses). Drop the codec writer
+        // first to release the raw-pointer borrow on `buffer_stream`.
+        self.append_stream = None;
+        let boxed_stream =
+            std::mem::replace(&mut self.buffer_stream, Box::new(ByteBufferOutputStream::with_capacity(0)));
+        let raw_vec = (*boxed_stream).into_buffer();
+        // Idempotency edge case: a second call after `built_records`
+        // was already taken sees the empty stub from above (capacity 0).
+        // Return an empty `Vec<u8>` — there's no allocation to recycle.
+        // (Also `Bytes::from(empty_vec)` returns the special static
+        // `b""` `Bytes` that fails `try_into_mut`, so we cannot route
+        // through the usual finalize helper for the empty case.)
+        if raw_vec.capacity() == 0 {
+            return Vec::new();
+        }
+        // `into_buffer` returns a `Vec<u8>` truncated to the stream's
+        // current position. Capacity is preserved across `truncate`, so
+        // routing through `Bytes` -> `BytesMut` -> `Vec<u8>` recovers
+        // the original allocation. The shared finalize helper restores
+        // `len == capacity` and applies the same code path post-build
+        // takes — keeping the buffer-recycle invariants uniform.
+        let bm = bytes::Bytes::from(raw_vec)
+            .try_into_mut()
+            .expect("Bytes::from(non-empty Vec) is uniquely owned at construction");
+        finalize_recycled_buffer(Ok(bm), initial_capacity)
     }
 
     /// The actual compression ratio after `build()` (1.0 if no records or

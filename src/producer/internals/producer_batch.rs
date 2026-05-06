@@ -642,6 +642,55 @@ impl ProducerBatch {
         self.mut_state.lock().unwrap().records_builder.initial_capacity()
     }
 
+    /// Take ownership of the batch's underlying `Vec<u8>` so it can be
+    /// returned to a [`crate::producer::internals::BufferPool`]. Mirrors
+    /// Java's `ByteBuffer buffer()` accessor at `ProducerBatch.java:543`,
+    /// which is consumed by `RecordAccumulator.deallocate(batch)` at
+    /// `RecordAccumulator.java:1053`:
+    ///
+    /// ```java
+    /// free.deallocate(batch.buffer(), batch.initialCapacity());
+    /// ```
+    ///
+    /// **Why this returns `Vec<u8>` (Option A) instead of `&[u8]` (Option
+    /// B) or `recycle_into(pool)` (Option C):**
+    ///
+    /// Phase 6a's `BufferPool::deallocate` already takes ownership of a
+    /// `Vec<u8>` (steady-state `unsafe set_len`-no-fill recycle), so
+    /// transferring ownership here matches the pool's contract exactly
+    /// and lets `RecordAccumulator` translate to a one-line
+    /// `pool.deallocate(batch.buffer(), batch.initial_capacity())` call
+    /// — same shape as Java. Returning `&[u8]` (Option B) would couple
+    /// the lock guard's lifetime to the borrow, forcing the caller to
+    /// hold the mutex while invoking the pool — fragile and a deadlock
+    /// hazard. A bespoke `recycle_into(pool)` (Option C) hides the buffer
+    /// but diverges most from Java and complicates testing the recycle
+    /// path independently.
+    ///
+    /// **Lifecycle expectation:** the `MemoryRecordsBuilder` has been
+    /// `close()`d before this is called (Java contract — Sender closes
+    /// the batch before sending and `deallocate` only runs after the
+    /// produce response is received and processed). All wire-send
+    /// `Bytes` clones derived from `MemoryRecords` must have been
+    /// dropped by the time the broker ack returns, so the underlying
+    /// allocation is uniquely owned and recovery is zero-copy. If a
+    /// clone is still alive (defensive: e.g. an instrumentation hook),
+    /// the helper falls back to copying the bytes — `BufferPool::
+    /// deallocate` then routes the copy to the non-pooled branch via
+    /// the `size as usize == buffer.capacity()` check.
+    ///
+    /// **One-shot semantics:** subsequent calls return an empty `Vec<u8>`
+    /// because the underlying storage has been moved out. The
+    /// `mark_buffer_deallocated` accessor is the canonical idempotency
+    /// flag in `RecordAccumulator`'s flow.
+    ///
+    /// **Returned `Vec<u8>` shape:** `len == capacity == initial_capacity()`
+    /// (when the buffer didn't grow during writes), matching the pool's
+    /// recycle invariant.
+    pub fn buffer(&self) -> Vec<u8> {
+        self.mut_state.lock().unwrap().records_builder.buffer_owned()
+    }
+
     /// Mirrors Java's `long producerId()`.
     pub fn producer_id(&self) -> i64 {
         self.mut_state.lock().unwrap().records_builder.producer_id()
@@ -1529,5 +1578,68 @@ mod tests {
         );
         assert_eq!(Some(batch_leader_epoch), batch.current_leader_epoch());
         assert_eq!(1, batch.attempts_when_leader_last_changed());
+    }
+
+    /// Round-trip: build a batch, close it, then call `buffer()` and
+    /// assert the returned `Vec<u8>` is sized to `initial_capacity()`.
+    /// Mirrors Phase 6d's planned `RecordAccumulator::deallocate(batch)`
+    /// flow — the buffer must be in a `len == capacity == initial_capacity`
+    /// state so it slots into [`crate::producer::internals::BufferPool::deallocate`]
+    /// which checks `size as usize == buffer.capacity()` and uses
+    /// `unsafe set_len(poolable_size)` to recycle without zero-fill.
+    #[test]
+    fn buffer_returns_owned_vec_sized_to_initial_capacity() {
+        let capacity = 512usize;
+        let batch = Arc::new(ProducerBatch::new(
+            topic_partition(1),
+            make_builder_with_compression(MAGIC_VALUE_V2, CompressionType::None, capacity),
+            NOW,
+        ));
+        // Append a record so the batch is non-empty (exercises the
+        // post-build path).
+        let _f = batch
+            .try_append(NOW, Some(b"k"), Some(b"v"), &[], None, NOW)
+            .expect("append must succeed");
+        // `complete` ("done") finalizes the batch's logical state. We
+        // also need to physically close the records-builder (Java's
+        // Sender does this via `batch.close()` before the wire send).
+        batch.close().expect("close must succeed");
+        assert!(batch.complete(0, NO_TIMESTAMP), "complete must transition state");
+        assert_eq!(capacity, batch.initial_capacity());
+        let buf = batch.buffer();
+        assert_eq!(
+            capacity,
+            buf.len(),
+            "BufferPool::deallocate requires len == capacity == initial_capacity"
+        );
+        assert_eq!(
+            capacity,
+            buf.capacity(),
+            "BufferPool::deallocate requires capacity == initial_capacity to pool-recycle"
+        );
+        // One-shot extraction: subsequent calls return an empty Vec
+        // because the underlying allocation has already been moved out.
+        let buf2 = batch.buffer();
+        assert_eq!(0, buf2.len(), "subsequent buffer() must return empty Vec");
+    }
+
+    /// Pre-build path: construct a batch but do NOT close before calling
+    /// `buffer()`. Verifies the same `len == capacity` invariant when
+    /// the buffer is extracted from the still-open `buffer_stream`.
+    #[test]
+    fn buffer_pre_close_returns_full_capacity_vec() {
+        let capacity = 1024usize;
+        let batch = Arc::new(ProducerBatch::new(
+            topic_partition(1),
+            make_builder_with_compression(MAGIC_VALUE_V2, CompressionType::None, capacity),
+            NOW,
+        ));
+        let _f = batch
+            .try_append(NOW, Some(b"k"), Some(b"v"), &[], None, NOW)
+            .expect("append must succeed");
+        // Skip close() — exercise the pre-build extraction path.
+        let buf = batch.buffer();
+        assert_eq!(capacity, buf.len());
+        assert_eq!(capacity, buf.capacity());
     }
 }

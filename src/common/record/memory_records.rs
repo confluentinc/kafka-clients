@@ -98,6 +98,20 @@ impl MemoryRecords {
         &self.buffer
     }
 
+    /// Consume `self` and return the underlying `Bytes`. Used by the
+    /// `BufferPool` recycle path (see
+    /// [`MemoryRecordsBuilder::buffer_owned`]) to recover the originating
+    /// `Vec<u8>` allocation. There is no Java analogue — Java's
+    /// `ByteBuffer` is reference-shared between the builder's `bufferStream`
+    /// and the materialized `MemoryRecords`, so the pool's
+    /// `deallocate(buffer)` call uses that same reference. In Rust we
+    /// MOVED the `Vec<u8>` into the `Bytes` at `build()` for zero-copy
+    /// finalization, so recovery is "consume the `MemoryRecords`, take
+    /// its `Bytes`, and `try_into_mut`".
+    pub(crate) fn into_buffer(self) -> Bytes {
+        self.buffer
+    }
+
     /// The total number of bytes in this message set not including any
     /// partial, trailing messages. Mirrors Java's `validBytes()`. Walks
     /// every batch; corrupt records terminate early.
