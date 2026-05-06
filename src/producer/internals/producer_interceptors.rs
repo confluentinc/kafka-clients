@@ -81,18 +81,35 @@ impl<K: Clone, V: Clone> ProducerInterceptors<K, V> {
     /// successful interceptor". In Rust, panics from an interceptor's
     /// `on_send` are caught via [`catch_unwind`] and logged; the
     /// previous good record is forwarded unchanged.
+    ///
+    /// # Hot-path allocation note
+    ///
+    /// Java passes the record through the chain by reference and does
+    /// not copy it. The Rust translation requires `K: Clone, V: Clone`
+    /// because the panic-isolation contract demands a fallback record
+    /// when an interceptor panics mid-call: the input is moved into
+    /// `catch_unwind`, so we must save a clone before each iteration to
+    /// preserve the previous-good-record. For the typical hot-path types
+    /// (`K = V = &[u8]`), the per-interceptor clone is two fat-pointer
+    /// copies plus a deep-clone of `RecordHeaders` (a `Vec<RecordHeader>`).
+    /// For `String` or `Vec<u8>` types, each clone allocates. Callers
+    /// with deep-clone headers should consider this overhead when sizing
+    /// the interceptor chain. See `phase6c_partitioners_interceptors.md`
+    /// for design history.
     pub fn on_send(&self, record: ProducerRecord<K, V>) -> ProducerRecord<K, V> {
+        // Capture the original record's topic/partition before the loop
+        // to mirror Java's `record.topic()` / `record.partition()` in
+        // the catch-block warn-log (Java line 71-72 logs the original
+        // input, not the running `interceptRecord`). Avoids a per-
+        // iteration `to_string()` as well.
+        let original_topic = record.topic().to_string();
+        let original_partition = record.partition();
         let mut intercept_record = record;
         for interceptor in &self.interceptors {
             // Pass a clone into the interceptor so that, if it panics,
             // we still hold the previous good record. (Java mutates a
             // reference, so a panic leaves the reference unchanged.)
             let candidate = intercept_record.clone();
-            // Capture topic/partition for the warn-log fallback in
-            // case the interceptor panics — `intercept_record` gets
-            // moved if we replace it on success.
-            let topic = intercept_record.topic().to_string();
-            let partition = intercept_record.partition();
             let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_send(candidate)));
             match result {
                 Ok(new_record) => intercept_record = new_record,
@@ -100,8 +117,8 @@ impl<K: Clone, V: Clone> ProducerInterceptors<K, V> {
                     let descr = describe_panic(panic_payload.as_ref());
                     log::warn!(
                         "Error executing interceptor onSend callback for topic: {}, partition: {:?}: {}",
-                        topic,
-                        partition,
+                        original_topic,
+                        original_partition,
                         descr,
                     );
                     // intercept_record retained from the previous
