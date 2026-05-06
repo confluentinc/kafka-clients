@@ -44,8 +44,7 @@ global_job_config:
       - git submodule update --init --depth=1 kafka
       - sem-version python 3.10
       - sudo apt install -y cmake rustup && rustup default stable
-      - cd tools/translation_agent
-      - pip install -e '.[dev]'
+      - (cd tools/translation_agent && pip install -e '.[dev]')
       # First sweep on a fresh project will have no artifact yet -- allow
       # the pull to fail so the orchestrator can create the DB from scratch.
       - artifact pull project translation_agent.db || true
@@ -63,7 +62,7 @@ blocks:
         # the prologue (which is `tools/translation_agent`). Defaults to the
         # `kafka` git submodule at the repo root.
         - name: AK_REPO_PATH
-          value: ../../kafka
+          value: ./kafka
       jobs:
         - name: sweep-or-per-pr
           commands:
@@ -72,12 +71,6 @@ blocks:
                 echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
                 SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
               fi
-              # Tested first because it's the most-specific case: a PR
-              # build whose head branch is the main branch matches both
-              # the sweep clause (branch == MAIN_BRANCH) and the per-PR
-              # clause (PR_NUMBER set). Without this guard the sweep
-              # clause would win and publish new translation PRs while
-              # a human is still reviewing the PR against main.
               echo "SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH}"
               echo "SEMAPHORE_GIT_PR_BRANCH=${SEMAPHORE_GIT_PR_BRANCH}"
               echo "SEMAPHORE_GIT_PR_NUMBER=${SEMAPHORE_GIT_PR_NUMBER}"
@@ -92,6 +85,10 @@ blocks:
               elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} (status check only)"
                 translation-agent --pr "${SEMAPHORE_GIT_PR_NUMBER}"
+                echo "PR build -- running 'make verify' directly in Semaphore env"
+                make verify
+                echo "PR build -- experiment: running 'make verify' inside r2 sandbox to probe Docker availability"
+                r2 sandbox claude -p "Run 'make verify' from the repository root. Then report (a) whether the 'docker' CLI is on PATH inside the sandbox, (b) whether 'docker info' succeeds, and (c) the make verify exit code. Be concise." || true
               else
                 echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
               fi
