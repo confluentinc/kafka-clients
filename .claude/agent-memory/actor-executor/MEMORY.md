@@ -45,4 +45,5 @@
 - [Phase 6c partitioners + interceptors](phase6c_partitioners_interceptors.md) — owned-record interceptor chain with K/V Clone, randomPartition virtual hook via Box<dyn Fn>, ArcSwapOption for volatile state
 - [Phase 6c Round 1 patterns](phase6c_round1_patterns.md) — type-level null elimination, ArithmeticException → panic per CLAUDE.md 10.1, original-input log parity, fast/slow-path coverage, Arc::ptr_eq for staged-state
 - [Phase 6d RecordAccumulator](phase6d_record_accumulator.md) — lock-then-await pattern, AppendCallbacks upcasting, KAFKA-19012 surrogate buffer, Outcome enum for drain
+- [Phase 6d Round 1 patterns](phase6d_round1_patterns.md) — interleaved-drain stress shape, leader-epoch test pattern, cancellation-guard test scaffolding, get_key_value Arc<str> reuse, checked_add overflow idiom, skip-rationale tightening rule
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it

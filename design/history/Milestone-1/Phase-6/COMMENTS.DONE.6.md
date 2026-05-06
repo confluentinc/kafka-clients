@@ -582,3 +582,43 @@ Test count 1005 → 1010 (+5: 1 ProducerRecord
 `next_partition_on_zero_partition_topic_panics`). DoD checks
 (build, test, format-check, lint) all green. Fixup chain: `ec0d2fc`,
 `2c9f679`, `1dd333c`, `d6d08ef`.
+
+---
+
+# Round 1 — Phase 6d (RecordAccumulator) — resolved
+
+10 Suggestion items filed against `b1ff454`, `b66cd88`, `a508a86`,
+`2b81a83`, `21d094a`, `f2a5c79`, `4345a43`. **0 Blocking.**
+
+Two fixup commits:
+- `c0ba6e2` (`fixup! Phase 6d-1`) — Issues 1, 8, 9 (impl-level changes).
+- `67ad8fe` (`fixup! Phase 6d-6`) — Issues 2-7, 10 (test sweep).
+
+## Disposition table
+
+| # | Severity | Issue | Disposition |
+|---|---------|-------|-------------|
+| 1 | Suggestion (dead code) | `flush_notify` field is unused | **Fixed** in `c0ba6e2`. Removed the field, the constructor initialization, and the `tokio::sync::Notify` allocation. Updated module rustdoc to point at the actual wake mechanism (`ProduceRequestResult::await_all_dependents` per-result `Notify`). |
+| 2 | Suggestion (test fidelity) | `stressful_concurrent_appends_smoke` does not exercise concurrent drain | **Fixed** in `67ad8fe`. Rewrote the test: 4 producer tasks × 500 records run **in parallel with** a drainer task that loops `ready/drain/complete_and_deallocate` until the seen count reaches the expected total. Asserts EXACT total (record-loss regressions fail), `!has_undrained` and `!has_incomplete`. Outer 10s timeout converts deadlock regressions to failures rather than hangs. |
+| 3 | Suggestion (coverage gap) | `testReadyAndDrainWhenABatchIsBeingRetried` (KAFKA-15968 leader-epoch override) is the only test of the leader-change-overrides-backoff invariant | **Fixed** in `67ad8fe`. Translated the Java test in full as `ready_and_drain_when_a_batch_is_being_retried`. Covers all 4 cases (wait < backoff × {leader changed/no change}, wait > backoff × {leader changed/no change}) with the exact `current_leader_epoch` and `attempts_when_leader_last_changed` post-conditions. Added helper `build_single_partition_snapshot(cluster, leader_epoch)` to vary epochs between cases. |
+| 4 | Suggestion (coverage gap) | `testDrainWithANodeThatDoesntHostAnyPartitions` early-return path untested | **Fixed** in `67ad8fe`. Translated as `drain_with_a_node_that_doesnt_host_any_partitions`. Builds a snapshot where node 1 hosts no partitions, drains for node 1 only, asserts empty result — exercising the `parts.is_empty()` early-return at `record_accumulator.rs:1148-1149`. |
+| 5 | Suggestion (coverage gap) | `testBuiltInPartitionerFractionalBatches` accumulator+partitioner integration uncovered | **Fixed** in `67ad8fe`. Translated as `built_in_partitioner_fractional_batches`. 10 iterations × ~10 records each through `UNKNOWN_PARTITION`, advancing MockTime between iterations to bypass linger, asserting exactly 1 batch flushes per iteration with size in `(batch_size/2, batch_size)`. Exercises `partition_changed` × `update_partition_info` × `all_batches_full` integration that Phase 6c isolated tests do not reach. |
+| 6 | Suggestion (test fidelity) | `testFull` Rust translation drops record-content verification | **Fixed** in `67ad8fe`. `ready_when_batch_full_immediately_ready` now drains the closed batch and iterates `Records::records(&records)` asserting each record's key/value bytes equal the input. Catches regressions where `try_append_to_existing` consumes a record but bytes never make it into the buffer. |
+| 7 | Suggestion (undocumented skip) | v2 `testAppendLargeCompressed`/`testAppendLargeNonCompressed` not translated, not in skip list | **Fixed** in `67ad8fe`. Translated both as `append_large_compressed` / `append_large_non_compressed` with shared `append_large_helper(CompressionType)`. Tests the oversized-record path (`batch_size.max(upper_bound)` branch) — single record with `value.len = 2 * batchSize`. Asserts single batch with `base_offset=0`, single record at `offset=0`/`timestamp=0` with exact key/value byte fidelity. Skip-list updated to disambiguate v0/v1 (still skipped per Phase 3) from v2 (translated). |
+| 8 | Performance Suggestion | Per-`append` `Arc::from(topic)` allocation on hot path | **Fixed** in `c0ba6e2`. Refactored `get_or_create_topic_info` to take `&str` and return `(Arc<str>, Arc<TopicInfo>)`. Fast path uses `HashMap::get_key_value(topic)` to fetch the existing `Arc<str>` key by reference and returns a refcount bump (`Arc::clone`) — no allocation. Slow path (first send for a topic) allocates the `Arc<str>` once and inserts. Matches Java's `topicInfoMap.computeIfAbsent` reuse pattern. CLAUDE.md rule 11 (`Arc<str>` for hot-path identifiers) satisfied: 1 alloc per topic per producer, **not per record**. |
+| 9 | Suggestion (theoretical correctness / debug-build panic) | `maybe_update_next_batch_expiry_time` overflow check uses raw `+` | **Fixed** in `c0ba6e2`. Replaced `batch.created_ms() + self.delivery_timeout_ms as i64` with `batch.created_ms().checked_add(self.delivery_timeout_ms as i64)`. The `match` arm `Some(candidate) if candidate > 0` produces consistent wrap-to-`None` semantics matching Java's wrap-to-negative idiom on both debug (where overflow used to panic) and release builds. Comment in code explains the Java idiom and why `checked_add` is required. |
+| 10 | Suggestion (coverage gap) | No regression test for `AppendInProgressGuard` Drop on cancellation | **Fixed** in `67ad8fe`. Added `append_in_progress_guard_drops_on_cancellation`. Drives the path: pool sized so first append exhausts memory; second appender blocks on `BufferPool::allocate(...).await`; `JoinHandle::abort()` triggers Drop. Asserts (a) `appends_in_progress` counter back to 0 (guard Drop fired even on cancellation), (b) buffer pool waiter queue drained (BufferPool::WaiterGuard fired), (c) a fresh appender after deallocate completes within 3s — proving no leaked-ghost wakeup. New `#[cfg(test)] pub(crate) fn appends_in_progress_count()` inspector added; production API unchanged. |
+
+## Phase 6d Round 1 Summary
+
+- **Blocking**: 0
+- **Suggestion**: 10 (1 dead field, 4 test-coverage gaps from skipped
+  Java cases, 1 test-fidelity gap, 1 unlisted-skip v2-format test, 1
+  hot-path allocation, 1 theoretical-overflow, 1 cancellation-test
+  gap — all Fixed)
+
+Test count 1050 → 1056 (+6: leader-change retry, drain-no-host,
+fractional-batches, append-large × 2, cancellation guard. Issues 2 and
+6 modify existing tests rather than adding new ones). DoD checks
+(build, test, format-check, lint) all green. Fixup chain: `c0ba6e2`,
+`67ad8fe`.
