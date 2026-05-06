@@ -54,6 +54,8 @@
 //! 12 forbids any intermediate copy or zero-fill on the producer send
 //! path.
 
+#![allow(dead_code)] // Phase 6d (RecordAccumulator) wires the public surface.
+
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

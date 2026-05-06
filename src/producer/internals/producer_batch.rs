@@ -26,6 +26,8 @@
 //! (`produceFuture`) so the 6b refill is a strict superset, not a
 //! rewrite.
 
+#![allow(dead_code)] // Phase 6b refills with the full `ProducerBatch` implementation.
+
 use std::sync::Arc;
 
 use super::produce_request_result::ProduceRequestResult;

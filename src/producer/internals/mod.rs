@@ -14,8 +14,6 @@
 
 //! Translation of `org.apache.kafka.clients.producer.internals`.
 
-#![allow(dead_code)]
-
 pub(crate) mod buffer_pool;
 pub(crate) mod error_logging_callback;
 pub(crate) mod future_record_metadata;

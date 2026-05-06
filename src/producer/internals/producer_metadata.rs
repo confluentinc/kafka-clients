@@ -14,6 +14,8 @@
 
 //! Translation of `org.apache.kafka.clients.producer.internals.ProducerMetadata`.
 
+#![allow(dead_code)] // Phase 6e (KafkaProducer) wires the public surface.
+
 use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

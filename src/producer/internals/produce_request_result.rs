@@ -27,6 +27,8 @@
 //!
 //! Per CLAUDE.md rule 9.6 the mutex is **never** held across an `.await`.
 
+#![allow(dead_code)] // Phase 6b (ProducerBatch) wires `set`/`done`/await_*.
+
 use std::collections::VecDeque;
 use std::sync::Arc;
 use std::sync::Mutex;

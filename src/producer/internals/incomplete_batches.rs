@@ -24,6 +24,8 @@
 //! pointer address, not by structural equality. Using a `Mutex` over
 //! the map mirrors Java's `synchronized` block exactly.
 
+#![allow(dead_code)] // Phase 6d (RecordAccumulator) wires this set.
+
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::Mutex;
