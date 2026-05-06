@@ -471,11 +471,7 @@ impl ProducerConfig {
         use std::collections::HashSet;
         let original: Vec<String> = value.split(',').map(|s| s.trim().to_string()).collect();
         let mut seen = HashSet::new();
-        let deduped: Vec<String> = original
-            .iter()
-            .filter(|s| seen.insert((*s).clone()))
-            .cloned()
-            .collect();
+        let deduped: Vec<String> = original.iter().filter(|s| seen.insert((*s).clone())).cloned().collect();
         if deduped.len() != original.len() {
             warn!(
                 "Configuration key \"{}\" contains duplicate values. Duplicates will be removed. \
@@ -696,10 +692,7 @@ mod tests {
     #[test]
     fn test_bootstrap_servers_dedup() {
         let mut props = HashMap::new();
-        props.insert(
-            "bootstrap.servers".to_string(),
-            "host1:9092,host2:9093,host1:9092".to_string(),
-        );
+        props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093,host1:9092".to_string());
         let config = ProducerConfig::from_properties(&props).unwrap();
         assert_eq!(config.bootstrap_servers, vec!["host1:9092", "host2:9093"]);
     }
@@ -708,10 +701,7 @@ mod tests {
     #[test]
     fn test_ssl_enabled_protocols_dedup() {
         let mut props = HashMap::new();
-        props.insert(
-            "ssl.enabled.protocols".to_string(),
-            "TLSv1.3,TLSv1.2,TLSv1.3".to_string(),
-        );
+        props.insert("ssl.enabled.protocols".to_string(), "TLSv1.3,TLSv1.2,TLSv1.3".to_string());
         let config = ProducerConfig::from_properties(&props).unwrap();
         assert_eq!(config.ssl_config.enabled_protocols, vec!["TLSv1.3", "TLSv1.2"]);
     }
