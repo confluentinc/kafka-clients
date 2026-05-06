@@ -15,8 +15,12 @@
 //! Common utility classes (org.apache.kafka.common.utils)
 
 pub mod exponential_backoff;
+pub mod log_context;
+#[macro_use]
+pub mod log_macros;
 
 pub use exponential_backoff::ExponentialBackoff;
+pub use log_context::LogContext;
 
 /// Converts a signed i32 to a non-negative value by clearing the sign bit.
 ///

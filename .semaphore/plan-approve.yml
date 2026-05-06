@@ -1,0 +1,31 @@
+version: v1.0
+name: Approve plan and implement
+
+# Manual promotion target from semaphore.yml. Triggers on the per-PR
+# build; flips the PR's status 2 -> 3 in the sqlite DB and immediately
+# runs the implementation step (cascading 3 -> 4) for that single PR.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-2
+
+blocks:
+  - name: Approve and implement
+    task:
+      jobs:
+        - name: plan-approve
+          commands:
+            - checkout
+            - git submodule update --init --depth=1 kafka
+            - sem-version python 3.10
+            - sudo apt install -y cmake rustup && rustup default stable
+            - (cd tools/translation_agent && pip install -e '.[dev]')
+            - artifact pull project translation_agent.db
+            - |
+              if [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                echo "ERROR: this promotion must be triggered from a PR build."
+                echo "       SEMAPHORE_GIT_PR_NUMBER is unset."
+                exit 1
+              fi
+            - translation-agent --pr "${SEMAPHORE_GIT_PR_NUMBER}" --plan-approve
+            - make verify

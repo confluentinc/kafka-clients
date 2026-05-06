@@ -16,6 +16,10 @@
 //!
 //! Translated from `org.apache.kafka.clients.KafkaClient`.
 
+use std::sync::Arc;
+
+use tokio::sync::Notify;
+
 use crate::common::Node;
 use crate::common::requests::RequestBuilder;
 
@@ -173,6 +177,13 @@ pub trait KafkaClient {
 
     /// Wake up the client if it is currently blocked waiting for I/O.
     fn wakeup(&self);
+
+    /// Returns the [`Notify`] handle used by the underlying selector's poll loop.
+    ///
+    /// This allows the producer to share the selector's wakeup mechanism,
+    /// so that `notify_one()` on the returned handle causes both `selector.poll()`
+    /// and `client.poll()` to return promptly without cancelling in-progress I/O.
+    fn wakeup_notify(&self) -> Arc<Notify>;
 
     /// Create a new `ClientRequest`.
     ///

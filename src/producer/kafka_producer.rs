@@ -26,7 +26,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use log::{debug, info, trace, warn};
 use tokio::sync::Notify;
 use tokio::task::JoinHandle;
 
@@ -38,13 +37,15 @@ use crate::common::PartitionInfo;
 use crate::common::TopicPartition;
 use crate::common::compress::Compression;
 use crate::common::header::Headers;
+use crate::common::header::internals::RecordHeader;
 use crate::common::internals::ClusterResourceListeners;
-use crate::common::network::PlaintextChannelBuilder;
 use crate::common::network::Selector;
+use crate::common::network::channel_builders;
 use crate::common::record::CompressionType;
 use crate::common::record::RecordBatch;
 use crate::common::record::abstract_records;
 use crate::common::serialization::Serializer;
+use crate::common::utils::LogContext;
 use crate::kafka_client::KafkaClient;
 use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
 use crate::network_client::NetworkClient;
@@ -60,6 +61,7 @@ use crate::producer::internals::Sender;
 use crate::producer::internals::{PartitionerConfig, RecordAccumulator};
 use crate::producer::{RecordMetadata, record_metadata};
 use crate::{ApiVersions, DefaultHostResolver};
+use crate::{kafka_debug, kafka_info, kafka_trace, kafka_warn};
 
 /// Network thread name prefix.
 pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
@@ -71,7 +73,7 @@ pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
 #[derive(Debug)]
 struct ClusterAndWaitTime {
     /// The cluster metadata.
-    cluster: Cluster,
+    cluster: Arc<Cluster>,
     /// Time in ms spent waiting for metadata.
     waited_on_metadata_ms: i64,
 }
@@ -125,6 +127,10 @@ pub struct KafkaProducer<K, V> {
     sender_handle: Mutex<Option<JoinHandle<()>>>,
     /// Provider of current wall-clock time in milliseconds.
     time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `KafkaProducer`.
+    log_context: LogContext,
 }
 
 impl<K, V> KafkaProducer<K, V> {
@@ -159,6 +165,7 @@ impl<K, V> KafkaProducer<K, V> {
         sender_handle: Option<JoinHandle<()>>,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         Self {
             client_id: config.client_id.clone(),
             key_serializer,
@@ -175,6 +182,7 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(sender_handle),
             time_provider,
+            log_context,
         }
     }
 
@@ -228,7 +236,9 @@ impl<K, V> KafkaProducer<K, V> {
         key_serializer: Box<dyn Serializer<K> + Send + Sync>,
         value_serializer: Box<dyn Serializer<V> + Send + Sync>,
     ) -> Result<Self, KafkaError> {
-        info!("Starting the Kafka producer");
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
+
+        kafka_trace!(log_context, "Starting the Kafka producer");
 
         // 1. Parse and validate bootstrap server addresses
         let addresses = client_utils::parse_and_validate_addresses(&config.bootstrap_servers)?;
@@ -250,12 +260,13 @@ impl<K, V> KafkaProducer<K, V> {
         });
 
         // 5. Create ProducerMetadata and bootstrap it with the resolved addresses
-        let metadata = Arc::new(ProducerMetadata::new(
+        let metadata = Arc::new(ProducerMetadata::with_log_context(
             config.reconnect_backoff_ms,
             config.reconnect_backoff_max_ms,
             config.metadata_max_age_ms,
             config.metadata_max_idle_ms,
             ClusterResourceListeners::new(),
+            log_context.clone(),
         ));
         metadata.bootstrap(addresses);
 
@@ -265,8 +276,20 @@ impl<K, V> KafkaProducer<K, V> {
         let shared_metadata = metadata.metadata_arc();
 
         // 7. Create Selector + NetworkClient
-        let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let selector = Selector::with_defaults(config.connections_max_idle_ms, channel_builder);
+        let channel_builder = channel_builders::client_channel_builder(
+            config.security_protocol,
+            Some(&config.ssl_config),
+            Some(&config.sasl_config),
+            None,
+            &config.client_id,
+            log_context.clone(),
+        )
+        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        let selector = Selector::with_defaults_and_log_context(
+            config.connections_max_idle_ms,
+            channel_builder,
+            log_context.clone(),
+        );
         let api_versions = Arc::new(ApiVersions::new());
 
         let client = NetworkClient::with_metadata(
@@ -286,6 +309,7 @@ impl<K, V> KafkaProducer<K, V> {
             DefaultHostResolver::new(),
             config.metadata_max_age_ms, // rebootstrap_trigger_ms
             MetadataRecoveryStrategy::None,
+            log_context.clone(),
         );
 
         // 8. Create BufferPool and RecordAccumulator
@@ -293,7 +317,7 @@ impl<K, V> KafkaProducer<K, V> {
         //    to explicitly disable batching, which in practice uses a batch size of 1.
         let batch_size = config.batch_size.max(1);
         let buffer_pool = Arc::new(BufferPool::new(config.buffer_memory, batch_size as usize));
-        let accumulator = Arc::new(RecordAccumulator::new(
+        let accumulator = Arc::new(RecordAccumulator::with_log_context(
             batch_size,
             compression,
             config.linger_ms as i32,
@@ -305,6 +329,7 @@ impl<K, V> KafkaProducer<K, V> {
                 partition_availability_timeout_ms: config.partitioner_availability_timeout_ms,
             },
             buffer_pool,
+            log_context.clone(),
         ));
 
         // 9. Wire up the Sender and spawn the I/O background task
@@ -337,9 +362,10 @@ impl<K, V> KafkaProducer<K, V> {
         client: C,
         time_provider: Arc<dyn Fn() -> i64 + Send + Sync>,
     ) -> Self {
+        let log_context = LogContext::new(format!("[Producer clientId={}] ", config.client_id));
         let running = Arc::new(AtomicBool::new(true));
         let force_close = Arc::new(AtomicBool::new(false));
-        let wakeup = Arc::new(Notify::new());
+        let wakeup = client.wakeup_notify();
 
         let guarantee_message_order = config.max_in_flight_requests_per_connection == 1;
         let acks = config.acks;
@@ -357,17 +383,18 @@ impl<K, V> KafkaProducer<K, V> {
             config.retry_backoff_ms,
             Arc::clone(&running),
             Arc::clone(&force_close),
-            Arc::clone(&wakeup),
             Arc::clone(&time_provider),
+            log_context.clone(),
         );
 
         let io_thread_name = format!("{} | {}", NETWORK_THREAD_PREFIX, config.client_id);
+        let task_log_context = log_context.clone();
         let sender_handle = tokio::task::spawn(async move {
-            debug!("Starting {} I/O task", io_thread_name);
+            kafka_debug!(task_log_context, "Starting {} I/O task", io_thread_name);
             sender.run().await;
         });
 
-        debug!("Kafka producer started");
+        kafka_debug!(log_context, "Kafka producer started");
 
         Self {
             client_id: config.client_id.clone(),
@@ -385,6 +412,7 @@ impl<K, V> KafkaProducer<K, V> {
             wakeup,
             sender_handle: Mutex::new(Some(sender_handle)),
             time_provider,
+            log_context,
         }
     }
 
@@ -462,10 +490,6 @@ impl<K, V> KafkaProducer<K, V> {
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.ensure_not_closed()?;
 
-        let topic = record.topic().to_string();
-
-        // --- Phase 1: Validation (API errors invoke callback + return failed future) ---
-
         // First make sure the metadata for the topic is available
         let now_ms = self.now_ms();
         let cluster_and_wait_time = match self
@@ -474,7 +498,7 @@ impl<K, V> KafkaProducer<K, V> {
         {
             Ok(cwt) => cwt,
             Err(e) if e.is_api_exception() => {
-                return self.handle_api_exception(e, &topic, record_metadata::UNKNOWN_PARTITION, callback);
+                return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
             },
             Err(e) => return Err(e),
         };
@@ -482,66 +506,114 @@ impl<K, V> KafkaProducer<K, V> {
         let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
         let cluster = cluster_and_wait_time.cluster;
 
+        // Destructure the record to take ownership of key/value for zero-copy serialization
+        let (record_topic, partition_opt, timestamp_opt, record_headers, key, value) = record.into_parts();
+
         let serialized_key = self
             .key_serializer
-            .serialize_with_headers(record.topic(), record.headers(), record.key())
+            .serialize_owned_with_headers(&record_topic, &record_headers, key)
             .map_err(|e| KafkaError::serialization(format!("Failed to serialize key: {}", e)))?;
 
         let serialized_value = self
             .value_serializer
-            .serialize_with_headers(record.topic(), record.headers(), record.value())
+            .serialize_owned_with_headers(&record_topic, &record_headers, value)
             .map_err(|e| KafkaError::serialization(format!("Failed to serialize value: {}", e)))?;
 
-        // Calculate partition
-        let partition = self.partition(&record, serialized_key.as_deref(), serialized_value.as_deref(), &cluster);
+        let headers = record_headers.to_array();
 
-        let headers = record.headers().to_array();
-
-        let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            self.compression_type,
-            serialized_key.as_deref(),
-            serialized_value.as_deref(),
-            headers,
-        );
-        if let Err(err) = self.ensure_valid_record_size(serialized_size) {
-            return self.handle_api_exception(err, &topic, partition, callback);
-        }
-
-        let timestamp = record.timestamp().unwrap_or(now_ms);
-
-        // --- Phase 2: Append (callback is moved into the accumulator) ---
-        //
-        // If append fails, the callback has been consumed. We still return a
-        // failed future so the caller can observe the error, matching the
-        // Java contract as closely as possible.
-        match self.accumulator.append(
-            record.topic(),
-            partition,
-            timestamp,
+        self.do_send_bytes(
+            &record_topic,
+            partition_opt,
+            timestamp_opt,
             serialized_key.as_deref(),
             serialized_value.as_deref(),
             headers,
             callback,
-            remaining_wait_ms,
             now_ms,
+            remaining_wait_ms,
             &cluster,
-        ) {
+        )
+        .await
+    }
+
+    /// Common send path for already-serialized key/value bytes.
+    ///
+    /// Both [`do_send`](Self::do_send) (after serialization) and
+    /// [`send`](KafkaProducer::<Vec<u8>, Vec<u8>>::send) (zero-copy borrowed path)
+    /// delegate here for partition calculation, size validation, and accumulator
+    /// append.
+    #[allow(clippy::too_many_arguments)]
+    async fn do_send_bytes(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        timestamp: Option<i64>,
+        key: Option<&[u8]>,
+        value: Option<&[u8]>,
+        headers: &[RecordHeader],
+        callback: Option<Callback>,
+        now_ms: i64,
+        remaining_wait_ms: i64,
+        cluster: &Cluster,
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        let partition = if let Some(p) = partition {
+            p
+        } else if let Some(k) = key
+            && !self.partitioner_ignore_keys
+        {
+            let num_partitions = cluster.partitions_for_topic(topic).len() as i32;
+            if num_partitions > 0 {
+                BuiltInPartitioner::partition_for_key(k, num_partitions)
+            } else {
+                record_metadata::UNKNOWN_PARTITION
+            }
+        } else {
+            record_metadata::UNKNOWN_PARTITION
+        };
+
+        let serialized_size = abstract_records::estimate_size_in_bytes_upper_bound(
+            RecordBatch::CURRENT_MAGIC_VALUE,
+            self.compression_type,
+            key,
+            value,
+            headers,
+        );
+        if let Err(err) = self.ensure_valid_record_size(serialized_size) {
+            return self.handle_api_exception(err, topic, partition, callback);
+        }
+
+        let timestamp = timestamp.unwrap_or(now_ms);
+
+        match self
+            .accumulator
+            .append(
+                topic,
+                partition,
+                timestamp,
+                key,
+                value,
+                headers,
+                callback,
+                remaining_wait_ms,
+                now_ms,
+                cluster,
+            )
+            .await
+        {
             Ok(result) => {
                 if result.batch_is_full || result.new_batch_created {
-                    trace!(
+                    kafka_trace!(
+                        self.log_context,
                         "Waking up the sender since topic {} is either full or getting a new batch",
-                        record.topic()
+                        topic
                     );
                     self.wakeup.notify_one();
                 }
                 Ok(KafkaFuture::new(result.future))
             },
             Err(e) if e.is_api_exception() => {
-                // Callback was consumed by append, so we cannot invoke it here.
-                // Return a completed-with-error future.
-                debug!("Exception occurred during accumulator append: {}", e);
-                let tp = TopicPartition::new(topic, partition);
+                kafka_debug!(self.log_context, "Exception occurred during message send: {}", e);
+                let tp = TopicPartition::new(topic.to_string(), partition);
                 Ok(KafkaFuture::new(Arc::new(FutureRecordMetadata::failed(tp, e))))
             },
             Err(e) => Err(e),
@@ -559,7 +631,7 @@ impl<K, V> KafkaProducer<K, V> {
         partition: i32,
         callback: Option<Callback>,
     ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
-        debug!("Exception occurred during message send: {}", error);
+        kafka_debug!(self.log_context, "Exception occurred during message send: {}", error);
         if let Some(cb) = callback {
             let tp = TopicPartition::new(topic.to_string(), partition);
             let null_metadata = RecordMetadata::new(tp, -1, -1, RecordBatch::NO_TIMESTAMP, -1, -1);
@@ -620,9 +692,14 @@ impl<K, V> KafkaProducer<K, V> {
         // requested partition, or until max_wait_ms is exceeded.
         loop {
             if let Some(p) = partition {
-                trace!("Requesting metadata update for partition {} of topic {}.", p, topic);
+                kafka_trace!(
+                    self.log_context,
+                    "Requesting metadata update for partition {} of topic {}.",
+                    p,
+                    topic
+                );
             } else {
-                trace!("Requesting metadata update for topic {}.", topic);
+                kafka_trace!(self.log_context, "Requesting metadata update for topic {}.", topic);
             }
             self.metadata.add(topic, now_ms + elapsed);
             let version = self.metadata.request_update_for_topic(topic);
@@ -726,7 +803,6 @@ impl<K, V> KafkaProducer<K, V> {
         if let Some(key) = serialized_key
             && !self.partitioner_ignore_keys
         {
-            // Hash the key bytes to choose a partition
             let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
             if num_partitions > 0 {
                 return BuiltInPartitioner::partition_for_key(key, num_partitions);
@@ -787,6 +863,52 @@ impl<K, V> KafkaProducer<K, V> {
     }
 }
 
+impl KafkaProducer<Vec<u8>, Vec<u8>> {
+    /// Send a record with borrowed byte-slice key/value, bypassing serialization.
+    ///
+    /// This is the zero-copy path for callers that already have `&[u8]` data
+    /// (e.g. the C FFI layer). The slices are passed directly through to the
+    /// accumulator's batch buffer without any intermediate allocation.
+    pub async fn send(
+        &self,
+        record: ProducerRecord<&[u8], &[u8]>,
+        callback: Option<Callback>,
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
+        self.ensure_not_closed()?;
+
+        let now_ms = self.now_ms();
+        let cluster_and_wait_time = match self
+            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_ms)
+            .await
+        {
+            Ok(cwt) => cwt,
+            Err(e) if e.is_api_exception() => {
+                return self.handle_api_exception(e, record.topic(), record_metadata::UNKNOWN_PARTITION, callback);
+            },
+            Err(e) => return Err(e),
+        };
+        let now_ms = now_ms + cluster_and_wait_time.waited_on_metadata_ms;
+        let remaining_wait_ms = 0i64.max(self.max_block_ms - cluster_and_wait_time.waited_on_metadata_ms);
+        let cluster = cluster_and_wait_time.cluster;
+
+        let (record_topic, partition, timestamp, _headers, key, value) = record.into_parts();
+
+        self.do_send_bytes(
+            &record_topic,
+            partition,
+            timestamp,
+            key,
+            value,
+            RecordBatch::EMPTY_HEADERS,
+            callback,
+            now_ms,
+            remaining_wait_ms,
+            &cluster,
+        )
+        .await
+    }
+}
+
 impl<K, V> Producer<K, V> for KafkaProducer<K, V>
 where
     K: Send + Sync,
@@ -815,7 +937,7 @@ where
     ///
     /// Translated from `KafkaProducer.flush()`.
     async fn flush(&self) -> Result<(), KafkaError> {
-        trace!("Flushing accumulated records in producer.");
+        kafka_trace!(self.log_context, "Flushing accumulated records in producer.");
         self.accumulator.begin_flush();
         self.wakeup.notify_one();
         self.accumulator.await_flush_completion().await;
@@ -850,7 +972,11 @@ where
     /// Java is omitted (impossible to construct a negative `Duration`).
     async fn close_timeout(&self, timeout: Duration) -> Result<(), KafkaError> {
         let timeout_ms = timeout.as_millis() as i64;
-        info!("Closing the Kafka producer with timeoutMillis = {} ms.", timeout_ms);
+        kafka_info!(
+            self.log_context,
+            "Closing the Kafka producer with timeoutMillis = {} ms.",
+            timeout_ms
+        );
 
         // Track whether the sender is still alive after the graceful close attempt.
         let mut sender_still_alive = false;
@@ -865,7 +991,8 @@ where
 
         if timeout_ms == 0 || sender_still_alive {
             // Force close if timeout is 0 or sender is still alive after timeout
-            info!(
+            kafka_info!(
+                self.log_context,
                 "Proceeding to force close the producer since pending requests could not be \
                  completed within timeout {} ms.",
                 timeout_ms
@@ -876,7 +1003,7 @@ where
             self.await_sender_handle_indefinitely().await;
         }
 
-        debug!("Kafka producer has been closed");
+        kafka_debug!(self.log_context, "Kafka producer has been closed");
         Ok(())
     }
 }
@@ -884,7 +1011,10 @@ where
 impl<K, V> Drop for KafkaProducer<K, V> {
     fn drop(&mut self) {
         if self.running.load(Ordering::Acquire) {
-            warn!("KafkaProducer was not closed before being dropped. Call close() to avoid resource leaks.");
+            kafka_warn!(
+                self.log_context,
+                "KafkaProducer was not closed before being dropped. Call close() to avoid resource leaks."
+            );
             self.force_close();
         }
     }
