@@ -1,9 +1,12 @@
 RUST_PROJECT_ROOT ?= $(realpath ../..)
+PROFILE ?= release
+CFLAGS_EXTRA ?=
 
 .PHONY: build test clean
 
 build:
-	cd $(RUST_PROJECT_ROOT) && cargo build --features ffi --release
+	CONFLUENT_KAFKA_LIB_DIR=$(RUST_PROJECT_ROOT)/target/$(PROFILE) \
+	CFLAGS="$(CFLAGS_EXTRA)" \
 	pip install -e .
 
 test: build
