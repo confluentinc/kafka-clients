@@ -186,13 +186,6 @@
 //!   `client.throttle(node, ms)` which the Rust `MockClientImpl` does
 //!   not currently model (Phase 6e NOTES.md MockClient subset). Defer
 //!   until throttle is wired into the Mock.
-//! - `testMetadataTopicExpiry` — exercises the topic-idle window
-//!   (`metadata.containsTopic(t)` flips false after `TOPIC_IDLE_MS`).
-//!   `Sender::send_producer_data` calls
-//!   `producer_metadata.add(topic, now)` for unknown-leader topics; the
-//!   topic-idle expiry test requires a Java-style InOrder / spy harness
-//!   on the metadata that is not yet built. Defer until the metadata
-//!   harness is added.
 //! - `testResetNextBatchExpiry` — verifies the poll-timeout sequence
 //!   (`0L → DELIVERY_TIMEOUT_MS → ≥1L`) across three runOnce ticks. The
 //!   poll-timeout clamping logic at `sender.rs:465-475`
@@ -3332,56 +3325,281 @@ mod tests {
         assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
     }
 
-    /// Translation of `SenderTest#testAppendInExpiryCallback`. The user's
-    /// `onCompletion` callback is fired on expiry-failure with a
-    /// `KafkaError::Timeout`; from inside that callback the user can
-    /// re-append to the accumulator. The re-appended record lands in
-    /// the partition's deque.
+    /// Translation of `SenderTest#testAppendInExpiryCallback`
+    /// (`SenderTest.java:413-465`). The user's `onCompletion` callback
+    /// is fired on expiry-failure with a `KafkaError::Timeout`; from
+    /// inside that callback the user re-appends a record. Java asserts
+    /// the resulting deque has exactly 1 batch with `recordCount=10`
+    /// (10 callback-driven re-appends batched into a single new batch).
+    ///
+    /// **Java→Rust translation**: `Callback::on_completion` is sync,
+    /// but `RecordAccumulator::append` is `async fn`. We bridge by
+    /// `tokio::spawn`-ing the re-append from inside the callback and
+    /// collecting the `JoinHandle`s in a shared `Mutex<Vec<_>>`. After
+    /// the expiry-fire `run_once` returns, the test awaits all spawned
+    /// handles before asserting on `record_count`. The runtime
+    /// (current_thread) interleaves the spawns naturally because each
+    /// `accumulator.append` await yields at the buffer-pool lookup
+    /// point and again after the deque insert.
+    ///
+    /// CLAUDE.md rule 9 compliance: the callback obligation is honored
+    /// at the same lifecycle point as Java
+    /// (`complete_future_and_fire_callbacks`); the `tokio::spawn` is
+    /// the only way to invoke an async API from a sync callback without
+    /// blocking. Per-message spawn is acceptable here because this is
+    /// test code (CLAUDE.md rule 11.4 forbids per-message spawn on the
+    /// production send path, not in tests).
     #[tokio::test]
     async fn test_append_in_expiry_callback() {
         use std::sync::atomic::AtomicUsize;
+        use tokio::task::JoinHandle;
+
+        type ReAppendHandles = Arc<Mutex<Vec<JoinHandle<Result<(), KafkaError>>>>>;
 
         let messages_per_batch = 10_usize;
         let TestSetup { mut sender, accum, metadata, time, topic_id: _ } = make_test_setup(i32::MAX, false);
-        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let cluster_arc = metadata.metadata().fetch_metadata_snapshot().cluster();
         let tp0 = TopicPartition::new(TOPIC_NAME, 0);
 
-        // Track expiry-callback invocations.
+        // Shared state for the callback. The callback fires from the
+        // sender's `run_once()` task, but the re-append is spawned onto
+        // the runtime so we can `.await` it. Java's
+        // `accumulator.append(...)` is blocking-with-timeout and runs
+        // synchronously inside the callback; Rust's is async.
         let expiry_callback_count = Arc::new(AtomicUsize::new(0));
-        // We can't drive a re-append from inside the callback in a thread-safe
-        // way without bringing in the full producer plumbing; the equivalent
-        // assertion in Rust is: after the expiry tick, the futures returned
-        // by the original appends report `KafkaError::Timeout`, and a
-        // subsequent append to the same partition succeeds (lands in the
-        // deque). This matches Java's invariant: "the partition's
-        // accumulator is healthy after expiry — re-append works."
-        let mut futures = Vec::with_capacity(messages_per_batch);
+        let unexpected_error = Arc::new(Mutex::new(Option::<KafkaError>::None));
+        let spawn_handles: ReAppendHandles = Arc::new(Mutex::new(Vec::new()));
+
+        struct ReAppendCallback {
+            accum: Arc<RecordAccumulator>,
+            cluster: Arc<Cluster>,
+            time: Arc<dyn Time>,
+            expiry_count: Arc<AtomicUsize>,
+            unexpected: Arc<Mutex<Option<KafkaError>>>,
+            handles: ReAppendHandles,
+        }
+
+        impl crate::producer::Callback for ReAppendCallback {
+            fn on_completion(&self, _metadata: Option<&crate::producer::RecordMetadata>, error: Option<&KafkaError>) {
+                match error {
+                    Some(KafkaError::Timeout(_)) => {
+                        self.expiry_count.fetch_add(1, Ordering::Relaxed);
+                        // Spawn the re-append. `.await` cannot be called
+                        // from this sync trait method. Java's blocking
+                        // `accumulator.append(...)` returns synchronously
+                        // because it holds the deque lock for the
+                        // append; Rust's async path lets the buffer pool
+                        // back-pressure cleanly, which is also why we
+                        // drive it through a Tokio task.
+                        let accum = Arc::clone(&self.accum);
+                        let cluster = Arc::clone(&self.cluster);
+                        let time = Arc::clone(&self.time);
+                        let now_ms = time.milliseconds();
+                        let h = tokio::spawn(async move {
+                            accum
+                                .append(
+                                    TOPIC_NAME,
+                                    0,
+                                    0,
+                                    Some(b"key" as &[u8]),
+                                    Some(b"value" as &[u8]),
+                                    &[] as &[crate::common::header::RecordHeader],
+                                    None,
+                                    1000,
+                                    now_ms,
+                                    &cluster,
+                                )
+                                .await
+                                .map(|_| ())
+                        });
+                        self.handles.lock().unwrap().push(h);
+                    },
+                    Some(other) => {
+                        let mut slot = self.unexpected.lock().unwrap();
+                        if slot.is_none() {
+                            *slot = Some(other.clone());
+                        }
+                    },
+                    None => {
+                        // Success — Java only fails the assertion via
+                        // `unexpectedException`; we mirror by recording.
+                    },
+                }
+            }
+        }
+
+        impl crate::producer::internals::record_accumulator::AppendCallbacks for ReAppendCallback {
+            fn set_partition(&self, _partition: i32) {}
+        }
+
+        let now_ms = time.milliseconds();
         for _ in 0..messages_per_batch {
-            futures.push(append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await);
+            let cb: Arc<dyn crate::producer::internals::record_accumulator::AppendCallbacks> =
+                Arc::new(ReAppendCallback {
+                    accum: Arc::clone(&accum),
+                    cluster: Arc::clone(&cluster_arc),
+                    time: Arc::clone(&time),
+                    expiry_count: Arc::clone(&expiry_callback_count),
+                    unexpected: Arc::clone(&unexpected_error),
+                    handles: Arc::clone(&spawn_handles),
+                });
+            accum
+                .append(
+                    TOPIC_NAME,
+                    0,
+                    0,
+                    Some(b"key" as &[u8]),
+                    Some(b"value" as &[u8]),
+                    &[] as &[crate::common::header::RecordHeader],
+                    Some(cb),
+                    1000,
+                    now_ms,
+                    &cluster_arc,
+                )
+                .await
+                .expect("append");
         }
 
         // Drive an in-flight expiry: send → advance time past
-        // delivery_timeout → run_once.
+        // delivery_timeout → run_once. The expiry-tick `run_once` fires
+        // the 10 callbacks synchronously inside
+        // `complete_future_and_fire_callbacks`; each callback spawns a
+        // re-append task.
         sender.run_once().await; // send produce request
         assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
         time.sleep((DELIVERY_TIMEOUT_MS + 100) as i64);
-        sender.run_once().await; // expire in-flight batch
-        for f in &futures {
-            let err = tokio::time::timeout(Duration::from_secs(2), f.get())
-                .await
-                .expect("future timed out")
-                .expect_err("future should error on expiry");
-            assert!(matches!(err, KafkaError::Timeout(_)));
-            expiry_callback_count.fetch_add(1, Ordering::Relaxed);
-        }
-        assert_eq!(expiry_callback_count.load(Ordering::Relaxed), messages_per_batch);
+        sender.run_once().await; // expire in-flight batch → fires callbacks
 
-        // Re-append to the same partition (Java does this from inside
-        // the callback). Assert the append succeeds and lands in the
-        // partition's deque (i.e. the partition is still drainable).
-        let _re_appended = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
-        // The accumulator's `has_undrained` reflects the new record.
-        assert!(accum.has_undrained(), "re-appended record must be undrained");
+        // Java asserts callbacks fired exactly `messagesPerBatch` times.
+        assert_eq!(
+            expiry_callback_count.load(Ordering::Relaxed),
+            messages_per_batch,
+            "callbacks not invoked for expiry"
+        );
+        // Java's `assertNull(unexpectedException.get())`.
+        assert!(
+            unexpected_error.lock().unwrap().is_none(),
+            "unexpected exception in callback: {:?}",
+            unexpected_error.lock().unwrap()
+        );
+
+        // Drain the spawned re-append handles so the deque assertions
+        // see all 10 records. Each handle returns `Ok(())` on a
+        // successful append.
+        let handles = std::mem::take(&mut *spawn_handles.lock().unwrap());
+        assert_eq!(handles.len(), messages_per_batch, "10 re-append spawns expected");
+        for h in handles {
+            tokio::time::timeout(Duration::from_secs(2), h)
+                .await
+                .expect("re-append spawn timed out")
+                .expect("re-append join error")
+                .expect("re-append failed");
+        }
+
+        // Java: `assertNotNull(accumulator.getDeque(tp1));` and
+        //       `assertEquals(1, accumulator.getDeque(tp1).size());`
+        //       `assertEquals(messagesPerBatch, ...peekFirst().recordCount);`
+        // Rust: get_deque returns Option<BatchDeque>; we check Some +
+        //       length 1 + the head batch's record_count is 10.
+        let deque = accum.get_deque(&tp0).expect("deque present after re-append");
+        let deque_guard = deque.lock().unwrap();
+        assert_eq!(deque_guard.len(), 1, "re-appended records must batch into a single new batch");
+        let head = deque_guard.front().expect("deque non-empty");
+        assert_eq!(
+            head.record_count(),
+            messages_per_batch as i32,
+            "all 10 re-appends must batch together (Java's recordCount=10 invariant)"
+        );
+    }
+
+    /// Translation of `SenderTest#testMetadataTopicExpiry`
+    /// (`SenderTest.java:472-505`). Verifies the topic-idle window:
+    /// `metadata.contains_topic(t)` returns `true` while the topic is
+    /// in active use, and flips to `false` after `TOPIC_IDLE_MS`
+    /// elapses without re-touching the topic, on the next metadata
+    /// update.
+    ///
+    /// Java uses `client.updateMetadata(...)` to refresh the producer
+    /// metadata; our Rust translation calls
+    /// `ProducerMetadata::update_with_current_request_version(...)`
+    /// directly (no Mockito harness needed — Round 1 deferral
+    /// rationale was incorrect; see Round 2 / Issue 11).
+    #[tokio::test]
+    async fn test_metadata_topic_expiry() {
+        const TOPIC_IDLE_MS: i64 = 60 * 1000;
+
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let offset = 0i64;
+
+        // (A) First produce cycle: append → send → respond → handle.
+        // The topic is in `metadata` from `make_test_setup` (which
+        // calls `metadata.add(TOPIC_NAME, 0)`), so `contains_topic`
+        // starts true.
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await; // send
+        assert!(metadata.contains_topic(TOPIC_NAME), "Topic not added to metadata");
+        // Java: `client.updateMetadata(...)` → in Rust, refresh the
+        // producer-side metadata from the same response.
+        let resp = build_metadata_response(&cluster, topic_id);
+        metadata
+            .update_with_current_request_version(&resp, false, time.milliseconds())
+            .expect("metadata update");
+        sender.run_once().await; // send produce request (already sent in step above; this is the no-op tick)
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, offset, Errors::None, 0));
+        sender.run_once().await; // handle response
+        assert_eq!(sender.client.in_flight_request_count(), 0, "Request completed.");
+        assert!(!sender.client.has_in_flight_requests());
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 0);
+        sender.run_once().await;
+        // Java: `assertTrue(future.isDone())` — drive the future
+        // resolution to confirm.
+        let resolved = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future.get() timed out")
+            .expect("future returned error");
+        assert_eq!(resolved.offset(), offset);
+        assert!(metadata.contains_topic(TOPIC_NAME), "Topic not retained in metadata list");
+
+        // (B) Advance the clock past TOPIC_IDLE_MS without re-touching
+        // the topic. The next metadata update fires the
+        // `retain_topic` predicate; since
+        // `topics.get(TOPIC_NAME).expire_ms (== 60_000) <= now_ms (==
+        // 60_000)`, the predicate returns false and the topic is
+        // dropped from the producer's tracked set.
+        time.sleep(TOPIC_IDLE_MS);
+        let resp = build_metadata_response(&cluster, topic_id);
+        metadata
+            .update_with_current_request_version(&resp, false, time.milliseconds())
+            .expect("metadata update");
+        assert!(!metadata.contains_topic(TOPIC_NAME), "Unused topic has not been expired");
+
+        // (C) Append again — the producer re-touches the topic and
+        // it re-appears in the metadata-tracked set.
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await;
+        assert!(metadata.contains_topic(TOPIC_NAME), "Topic not added to metadata");
+        let resp = build_metadata_response(&cluster, topic_id);
+        metadata
+            .update_with_current_request_version(&resp, false, time.milliseconds())
+            .expect("metadata update");
+        sender.run_once().await; // send produce request
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, offset + 1, Errors::None, 0));
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 0, "Request completed.");
+        assert!(!sender.client.has_in_flight_requests());
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 0);
+        sender.run_once().await;
+        let resolved = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future.get() timed out")
+            .expect("future returned error");
+        assert_eq!(resolved.offset(), offset + 1);
     }
 
     /// Build a metadata response with a custom `(partition, leader_id)`
