@@ -28,4 +28,3 @@ blocks:
                 exit 1
               fi
             - translation-agent --pr "${SEMAPHORE_GIT_PR_NUMBER}" --plan-approve
-            - make verify

@@ -2,9 +2,9 @@ RUST_PROJECT_ROOT = $(CURDIR)
 RUSTFLAGS_NATIVE = -C target-cpu=native
 CFLAGS_NATIVE = -march=native -mtune=native
 
-.PHONY: all build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python verify format-check lint clean
+.PHONY: all build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init init-hooks test test-rust test-integration test-c test-python verify format-check lint clean
 
-build: build-rust build-c build-python
+build: init-hooks build-rust build-c build-python
 
 build-rust:
 	RUSTFLAGS="$(RUSTFLAGS_NATIVE)" cargo build --features ffi --release
@@ -38,10 +38,10 @@ devel-build-python: submodules init-venv devel-build-rust
 
 test: test-integration test-c test-python
 
-test-rust:
+test-rust: build-rust
 	cargo test
 
-test-integration:
+test-integration: build-rust
 	cargo test --features integration-tests
 
 test-c: build-c
@@ -51,7 +51,11 @@ test-python: build-python
 	@(. venv/bin/activate && \
 	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
 
-verify: format-check lint test
+verify: build format-check lint test
+
+init-hooks:
+	@git config core.hooksPath .githooks
+	@chmod +x .githooks/pre-commit
 
 format-check:
 	cargo xtask format-check
