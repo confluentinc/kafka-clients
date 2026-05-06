@@ -67,6 +67,7 @@ blocks:
         - name: sweep-or-per-pr
           commands:
             - |
+              set -e
               if [ -n "${SEMAPHORE_GIT_BRANCH_CHECKOUT}" ]; then
                 echo "Override: SEMAPHORE_GIT_BRANCH=${SEMAPHORE_GIT_BRANCH} -> ${SEMAPHORE_GIT_BRANCH_CHECKOUT}"
                 SEMAPHORE_GIT_BRANCH="${SEMAPHORE_GIT_BRANCH_CHECKOUT}"

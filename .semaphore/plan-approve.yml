@@ -22,6 +22,7 @@ blocks:
             - (cd tools/translation_agent && pip install -e '.[dev]')
             - artifact pull project translation_agent.db
             - |
+              set -e
               if [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
                 echo "ERROR: this promotion must be triggered from a PR build."
                 echo "       SEMAPHORE_GIT_PR_NUMBER is unset."

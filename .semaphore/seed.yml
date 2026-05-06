@@ -39,6 +39,7 @@ blocks:
             - |
               : "${AK_COMMIT:?AK_COMMIT must be set as a Task parameter}"
             - |
+              set -e
               FORCE_FLAG=""
               if [ "${FORCE:-False}" = "True" ]; then
                 FORCE_FLAG="--force"
