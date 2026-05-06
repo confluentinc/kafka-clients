@@ -1365,6 +1365,23 @@ mod tests {
             self.requests.front().map(|r| r.destination())
         }
 
+        /// Mirrors `MockClient.checkTimeoutOfPendingRequests(long)`.
+        /// Disconnects any in-flight request whose `request_timeout_ms`
+        /// has elapsed (with the head of the FIFO).
+        fn check_timeout_of_pending_requests(&mut self, now_ms: i64) {
+            while let Some(req) = self.requests.front()
+                && (now_ms.saturating_sub(req.created_time_ms())) >= req.request_timeout_ms() as i64
+            {
+                let dest = req.destination().to_string();
+                if let Ok(node_id) = dest.parse::<i32>() {
+                    self.disconnect_node(node_id);
+                } else {
+                    // Non-numeric destinations: just drop the request.
+                    self.requests.pop_front();
+                }
+            }
+        }
+
         /// Convenience used by SenderTest disconnect cases. Mirrors
         /// `MockClient.disconnect(String)`.
         pub(super) fn disconnect_node(&mut self, node_id: i32) {
@@ -1465,7 +1482,11 @@ mod tests {
             }
             self.requests.push_back(request);
         }
-        async fn poll(&mut self, _timeout_ms: i64, _now: i64) -> Vec<ClientResponse> {
+        async fn poll(&mut self, _timeout_ms: i64, now: i64) -> Vec<ClientResponse> {
+            // Java's MockClient.checkTimeoutOfPendingRequests: any
+            // in-flight request whose `request_timeout_ms` has elapsed
+            // is disconnected. Mirrors `MockClient.checkTimeoutOfPendingRequests(now)`.
+            self.check_timeout_of_pending_requests(now);
             let mut out: Vec<ClientResponse> = Vec::with_capacity(self.responses.len());
             while let Some(r) = self.responses.pop_front() {
                 r.on_complete();
@@ -2387,6 +2408,137 @@ mod tests {
         sender.client.disconnect_node(pending_node);
         sender.run_once().await;
         assert!(!future.is_done(), "Should be waiting for retry");
+    }
+
+    /// Translation of `SenderTest#testProducerBatchRetriesWhenPartitionLeaderChanges`.
+    /// First half: NotLeaderOrFollower → batch reenqueued. Update
+    /// metadata to bump leader epoch; on next runOnce the retry skips
+    /// the backoff window.
+    #[tokio::test]
+    async fn test_producer_batch_retries_when_partition_leader_changes() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(10, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await; // send
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+        sender.client.respond(build_produce_response(
+            TOPIC_NAME,
+            topic_id,
+            0,
+            -1,
+            Errors::NotLeaderOrFollower,
+            0,
+        ));
+        sender.run_once().await; // receive retriable error → reenqueue
+        assert!(!future.is_done(), "Produce request should not be done.");
+
+        // Bump leader epoch by re-applying metadata response that
+        // has an incremented partition_metadata leader_epoch via
+        // `update_partition_leadership` on the inner Metadata.
+        let mut updated_leaders: HashMap<TopicPartition, MetadataLeaderIdAndEpoch> = HashMap::new();
+        updated_leaders.insert(tp0.clone(), MetadataLeaderIdAndEpoch::new(Some(0), Some(101)));
+        let leader_nodes = vec![Node::new(0, "localhost".to_string(), 1111)];
+        let _ = metadata.metadata().update_partition_leadership(updated_leaders, leader_nodes);
+
+        // The retry skips backoff because the leader epoch changed.
+        sender.run_once().await; // resend immediately
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+        assert!(sender.client.has_in_flight_requests());
+        let offset = 999;
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, offset, Errors::None, 0));
+        sender.run_once().await; // receive success
+        let resolved = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect("future errored");
+        assert_eq!(resolved.offset(), offset);
+    }
+
+    /// Translation of `SenderTest#testNoDoubleDeallocation`. The
+    /// MockClient's `check_timeout_of_pending_requests` triggers a
+    /// disconnect after `REQUEST_TIMEOUT_MS` elapses; the disconnect is
+    /// then handled by `Sender::handle_produce_response` which
+    /// deallocates the batch buffer exactly once.
+    #[tokio::test]
+    async fn test_no_double_deallocation() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id: _ } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let _future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+        let inflight = sender.in_flight_batches_for(&tp0)[0].clone();
+        assert!(!inflight.is_buffer_deallocated(), "Buffer not deallocated yet");
+
+        // Advance time past `request_timeout_ms` so the MockClient's
+        // checkTimeoutOfPendingRequests disconnects the request.
+        time.sleep((REQUEST_TIMEOUT_MS + 1) as i64);
+        sender.run_once().await; // poll → disconnect → handle response
+        assert!(inflight.is_buffer_deallocated(), "Buffer should be deallocated after timeout");
+
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 0);
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 0);
+    }
+
+    /// `wakeup` forwards to `KafkaClient::wakeup` without panicking.
+    #[test]
+    fn wakeup_forwards_to_client() {
+        let TestSetup { sender, .. } = make_test_setup(i32::MAX, false);
+        sender.wakeup();
+    }
+
+    /// `initiate_close` closes the accumulator and clears the running
+    /// flag.
+    #[test]
+    fn initiate_close_closes_accumulator() {
+        let TestSetup { sender, accum, .. } = make_test_setup(i32::MAX, false);
+        assert!(!accum.is_closed());
+        sender.initiate_close();
+        assert!(accum.is_closed());
+        assert!(!sender.is_running());
+    }
+
+    /// `force_close` sets the force-close flag and clears running.
+    #[test]
+    fn force_close_clears_running_and_force_flag() {
+        let TestSetup { sender, .. } = make_test_setup(i32::MAX, false);
+        assert!(sender.is_running());
+        sender.force_close();
+        assert!(!sender.is_running());
+        assert!(sender.force_close.load(Ordering::Acquire));
+    }
+
+    /// run_loop terminates after `initiate_close` once the accumulator
+    /// is drained.
+    #[tokio::test]
+    async fn run_loop_terminates_on_initiate_close() {
+        let TestSetup { mut sender, .. } = make_test_setup(i32::MAX, false);
+        sender.initiate_close();
+        // Accumulator is empty + no in-flight requests → main loop exits
+        // and shutdown drain loop exits immediately.
+        tokio::time::timeout(Duration::from_secs(2), sender.run_loop())
+            .await
+            .expect("run_loop did not terminate within timeout");
+    }
+
+    /// run_loop force-close path: sets force_close, then run_loop
+    /// terminates without draining undrained batches.
+    #[tokio::test]
+    async fn run_loop_force_close_terminates_immediately() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id: _ } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        // Append one record that will never be sent (because force_close
+        // skips the drain loop).
+        let _f = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.force_close();
+        tokio::time::timeout(Duration::from_secs(2), sender.run_loop())
+            .await
+            .expect("run_loop did not terminate within timeout");
     }
 
     /// Build a produce response with a custom error_message attached to
