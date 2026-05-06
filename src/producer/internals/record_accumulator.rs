@@ -37,8 +37,9 @@
 //!   functions of the snapshot — translated as `fn`, not `async fn`.
 //!
 //! - [`RecordAccumulator::await_flush_completion`] is `async fn`
-//!   driven by [`tokio::sync::Notify`] (one shared notifier, woken by
-//!   `done()` on each batch).
+//!   driven by [`crate::producer::internals::ProduceRequestResult::
+//!   await_all_dependents`] over each in-flight batch's result; the
+//!   per-result `Notify` is the wake mechanism.
 //!
 //! - The `nodesWithData` `Set<Node>` returned by `ready()` is a
 //!   `HashSet<i32>` over node ids (CLAUDE.md hot-path interning rule,
@@ -270,11 +271,6 @@ pub(crate) struct RecordAccumulator {
     /// The Java field is touched only from the sender thread; we use
     /// an atomic to avoid having a separate sender-only mutex.
     next_batch_expiry_time_ms: AtomicI64,
-    /// Notifier for `await_flush_completion` — woken on every
-    /// per-batch `done()` so flush can wake. We use a single shared
-    /// `Notify` (Phase 6a pattern, mirrors `ProduceRequestResult`'s
-    /// `Notify::notify_waiters` to fan-out).
-    flush_notify: Arc<tokio::sync::Notify>,
 }
 
 impl RecordAccumulator {
@@ -329,7 +325,6 @@ impl RecordAccumulator {
             nodes_drain_index: Mutex::new(HashMap::new()),
             transaction_manager,
             next_batch_expiry_time_ms: AtomicI64::new(i64::MAX),
-            flush_notify: Arc::new(tokio::sync::Notify::new()),
         }
     }
 
@@ -544,8 +539,14 @@ impl RecordAccumulator {
         now_ms: i64,
         cluster: &Cluster,
     ) -> Result<RecordAppendResult, KafkaError> {
-        let topic_arc: Arc<str> = Arc::from(topic);
-        let topic_info = self.get_or_create_topic_info(topic_arc.clone());
+        // Fast path: if the topic is already in the map, the existing
+        // `Arc<str>` key is reused via `Arc::clone` (refcount bump only,
+        // no allocation). Only the first send for a previously-unseen
+        // topic allocates an `Arc<str>`. Mirrors Java's
+        // `topicInfoMap.computeIfAbsent(topic, k -> new TopicInfo(...))`,
+        // which uses the `String topic` parameter directly without an
+        // intermediate allocation.
+        let (topic_arc, topic_info) = self.get_or_create_topic_info(topic);
 
         // Track in-progress appends so abortIncompleteBatches() does
         // not miss a batch racing the close flag. The guard's `Drop`
@@ -1346,28 +1347,37 @@ impl RecordAccumulator {
     /// Maybe update the next-batch-expiry tracker for `batch`. Mirrors
     /// Java's `maybeUpdateNextBatchExpiryTime(ProducerBatch)`.
     pub fn maybe_update_next_batch_expiry_time(&self, batch: &ProducerBatch) {
-        let candidate = batch.created_ms().saturating_add(self.delivery_timeout_ms as i64);
-        if batch.created_ms() + self.delivery_timeout_ms as i64 > 0 {
-            // non-negative check guards against overflow
-            let mut current = self.next_batch_expiry_time_ms.load(Ordering::Acquire);
-            while candidate < current {
-                match self.next_batch_expiry_time_ms.compare_exchange(
-                    current,
-                    candidate,
-                    Ordering::AcqRel,
-                    Ordering::Acquire,
-                ) {
-                    Ok(_) => break,
-                    Err(actual) => current = actual,
+        // Java (`RecordAccumulator.java:451-460`) computes
+        // `batch.createdMs() + deliveryTimeoutMs` then checks the result
+        // against `> 0` — relying on Java's silent integer wrap-around
+        // for the overflow detection. In Rust, debug builds **panic on
+        // integer overflow** (release builds wrap), so we must use
+        // `checked_add` to detect the boundary safely on both build
+        // profiles and produce a `None` we can branch on identically to
+        // Java's wrap-to-negative.
+        match batch.created_ms().checked_add(self.delivery_timeout_ms as i64) {
+            Some(candidate) if candidate > 0 => {
+                let mut current = self.next_batch_expiry_time_ms.load(Ordering::Acquire);
+                while candidate < current {
+                    match self.next_batch_expiry_time_ms.compare_exchange(
+                        current,
+                        candidate,
+                        Ordering::AcqRel,
+                        Ordering::Acquire,
+                    ) {
+                        Ok(_) => break,
+                        Err(actual) => current = actual,
+                    }
                 }
-            }
-        } else {
-            log::warn!(
-                "{}Skipping next batch expiry time update due to addition overflow: batch.createMs={}, deliveryTimeoutMs={}",
-                self.log_prefix,
-                batch.created_ms(),
-                self.delivery_timeout_ms,
-            );
+            },
+            _ => {
+                log::warn!(
+                    "{}Skipping next batch expiry time update due to addition overflow: batch.createMs={}, deliveryTimeoutMs={}",
+                    self.log_prefix,
+                    batch.created_ms(),
+                    self.delivery_timeout_ms,
+                );
+            },
         }
     }
 
@@ -1385,7 +1395,7 @@ impl RecordAccumulator {
     /// Get or create the deque for the given (topic, partition).
     /// Mirrors Java's private `getOrCreateDeque(TopicPartition)`.
     fn get_or_create_deque(&self, tp: &TopicPartition) -> BatchDeque {
-        let info = self.get_or_create_topic_info(tp.topic_arc().clone());
+        let (_topic_arc, info) = self.get_or_create_topic_info(tp.topic());
         let mut batches = info.batches.lock().unwrap();
         batches
             .entry(tp.partition())
@@ -1393,15 +1403,27 @@ impl RecordAccumulator {
             .clone()
     }
 
-    fn get_or_create_topic_info(&self, topic: Arc<str>) -> Arc<TopicInfo> {
+    /// Resolve `topic` to its `(Arc<str>, Arc<TopicInfo>)` pair, creating
+    /// the entry on first use. The fast path uses
+    /// [`HashMap::get_key_value`] to retrieve the existing `Arc<str>` key
+    /// (refcount bump via `Arc::clone`) instead of allocating a fresh
+    /// `Arc<str>` per call — matching the Java behavior at
+    /// `RecordAccumulator.java:285` where the existing `String topic`
+    /// reference flows through `computeIfAbsent` without intermediate
+    /// allocation.
+    fn get_or_create_topic_info(&self, topic: &str) -> (Arc<str>, Arc<TopicInfo>) {
         let mut map = self.topic_info_map.lock().unwrap();
-        if let Some(info) = map.get(&topic) {
-            return info.clone();
+        if let Some((key, info)) = map.get_key_value(topic) {
+            return (Arc::clone(key), Arc::clone(info));
         }
-        let partitioner = self.create_built_in_partitioner(topic.clone());
+        // Slow path: first send for this topic — allocate the interned
+        // `Arc<str>` once and reuse via `Arc::clone` for subsequent
+        // sends.
+        let topic_arc: Arc<str> = Arc::from(topic);
+        let partitioner = self.create_built_in_partitioner(topic_arc.clone());
         let info = Arc::new(TopicInfo::new(partitioner));
-        map.insert(topic, info.clone());
-        info
+        map.insert(topic_arc.clone(), info.clone());
+        (topic_arc, info)
     }
 
     // -------------------- Flush / abort / close --------------------
