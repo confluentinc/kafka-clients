@@ -375,6 +375,7 @@ def _check_pr_closures_and_advance_cursor(
 
 def _run_sweep(args: argparse.Namespace, conn) -> int:
     required = ("ak_repo_path", "rust_branch")
+    num_commits=2
     missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
     if missing:
         log.error("sweep mode requires: %s", ", ".join(missing))
@@ -399,7 +400,7 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
     # Step 3: get the next 10 AK commits.
     try:
         ak_commits = git_ops.next_commits(
-            args.ak_repo_path, since=cursor["ak_commit"], branch=ak_branch, n=10,
+            args.ak_repo_path, since=cursor["ak_commit"], branch=ak_branch, n=num_commits,
         )
     except git_ops.GitError as e:
         log.error("Failed to read AK commits: %s", e)
@@ -421,7 +422,7 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
         try:
             ak_commits = git_ops.next_commits(
                 args.ak_repo_path, since=cursor["ak_commit"],
-                branch=ak_branch, n=10,
+                branch=ak_branch, n=num_commits,
             )
         except git_ops.GitError as e:
             log.error(
