@@ -21,6 +21,9 @@
 /// Config key: `bootstrap.servers`
 pub const BOOTSTRAP_SERVERS_CONFIG: &str = "bootstrap.servers";
 
+/// Config key: `security.protocol`
+pub const SECURITY_PROTOCOL_CONFIG: &str = "security.protocol";
+
 /// The base for exponential retry backoff.
 pub const RETRY_BACKOFF_EXP_BASE: i32 = 2;
 
