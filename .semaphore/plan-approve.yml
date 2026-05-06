@@ -28,4 +28,6 @@ blocks:
                 echo "       SEMAPHORE_GIT_PR_NUMBER is unset."
                 exit 1
               fi
+            # Ensure all Python dependencies are installed
+            - make
             - translation-agent --pr "${SEMAPHORE_GIT_PR_NUMBER}" --plan-approve
