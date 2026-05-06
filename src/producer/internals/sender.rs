@@ -1887,6 +1887,251 @@ mod tests {
         assert_eq!(resolved.offset(), 42);
     }
 
+    /// Translation of `SenderTest#testCanRetryWithoutIdempotence` —
+    /// non-tx terminal failure with `TopicAuthorizationFailed`.
+    #[tokio::test]
+    async fn test_topic_authorization_failed_terminal() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"key", b"value").await;
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+        sender.client.respond(build_produce_response(
+            TOPIC_NAME,
+            topic_id,
+            0,
+            -1,
+            Errors::TopicAuthorizationFailed,
+            0,
+        ));
+        sender.run_once().await;
+        let err = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect_err("future should error");
+        match err {
+            KafkaError::TopicAuthorization(_) => {},
+            other => panic!("expected TopicAuthorization, got {other:?}"),
+        }
+    }
+
+    /// Translation of `SenderTest#testRetries` — first response is a
+    /// disconnect (retriable), second succeeds. Verifies the retry path
+    /// re-enqueues the batch and the future eventually completes.
+    #[tokio::test]
+    async fn test_retries_then_success() {
+        let max_retries = 1;
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(max_retries, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"key", b"value").await;
+        sender.run_once().await; // send produce request
+        let dest = sender
+            .client
+            .next_request_destination()
+            .expect("a request was queued")
+            .to_string();
+        let node_id: i32 = dest.parse().expect("destination is an integer node id");
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+
+        // Disconnect → MockClient emits a disconnected ClientResponse for
+        // the pending request and clears it.
+        sender.client.disconnect_node(node_id);
+        // After disconnect, the in-flight client request count should be 0
+        // and the batch is still in sender's in_flight_batches until it
+        // is reenqueued.
+        assert_eq!(sender.client.in_flight_request_count(), 0);
+
+        // Bump time past retry backoff so the next ready/drain picks up
+        // the reenqueued batch.
+        sender.run_once().await; // receive disconnect → retry / reenqueue
+        time.sleep(RETRY_BACKOFF_MS + 1);
+        sender.run_once().await; // resend
+        sender.run_once().await; // resend
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+
+        // Successful retry response.
+        let offset = 0i64;
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, offset, Errors::None, 0));
+        sender.run_once().await;
+        let resolved = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect("future errored");
+        assert_eq!(resolved.offset(), offset);
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 0);
+    }
+
+    /// Translation of `SenderTest#testInflightBatchesExpireOnDeliveryTimeout`.
+    /// Time elapses beyond `delivery_timeout_ms` between the produce
+    /// request being queued and the response handler running; the batch
+    /// should fail with a `KafkaError::Timeout`.
+    #[tokio::test]
+    async fn test_inflight_batches_expire_on_delivery_timeout() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, true);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"key", b"value").await;
+        sender.run_once().await; // send request
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+
+        // Stage a successful response, but advance time past the delivery
+        // timeout BEFORE handling it. The expiry path runs in
+        // send_producer_data BEFORE the response is handled, so the
+        // batch fails before the response can complete it.
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, 0, Errors::None, 0));
+        time.sleep((DELIVERY_TIMEOUT_MS + 100) as i64);
+        sender.run_once().await;
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 0);
+        let err = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect_err("future should error");
+        assert!(matches!(err, KafkaError::Timeout(_)));
+    }
+
+    /// Translation of `SenderTest#testCustomErrorMessage` — the error
+    /// message attached to the broker's `PartitionResponse` is
+    /// propagated to the user's exception.
+    #[tokio::test]
+    async fn test_custom_error_message() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await;
+        let response = build_produce_response_with_message(
+            TOPIC_NAME,
+            topic_id,
+            0,
+            -1,
+            Errors::InvalidRequest,
+            "testCustomErrorMessage",
+        );
+        sender.client.respond(response);
+        sender.run_once().await;
+        sender.run_once().await;
+        let err = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect_err("future should error");
+        match err {
+            KafkaError::InvalidRequest(msg) => assert_eq!(msg, "testCustomErrorMessage"),
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// Translation of `SenderTest#testDefaultErrorMessage` — when the
+    /// PartitionResponse has no error_message, the exception falls back
+    /// to the canonical `Errors::message()`.
+    #[tokio::test]
+    async fn test_default_error_message() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await;
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, -1, Errors::InvalidRequest, 0));
+        sender.run_once().await;
+        sender.run_once().await;
+        let err = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect_err("future should error");
+        match err {
+            KafkaError::InvalidRequest(msg) => {
+                assert_eq!(msg, Errors::InvalidRequest.message().expect("default message"));
+            },
+            other => panic!("expected InvalidRequest, got {other:?}"),
+        }
+    }
+
+    /// Translation of `SenderTest#testClusterAuthorizationExceptionInProduceRequest`.
+    #[tokio::test]
+    async fn test_cluster_authorization_exception_in_produce_request() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await;
+        sender.client.respond(build_produce_response(
+            TOPIC_NAME,
+            topic_id,
+            0,
+            -1,
+            Errors::ClusterAuthorizationFailed,
+            0,
+        ));
+        sender.run_once().await;
+        let err = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect_err("future should error");
+        assert!(matches!(err, KafkaError::ClusterAuthorization(_)));
+    }
+
+    /// Translation of `SenderTest#testTooLargeBatchesAreSafelyRemoved`.
+    /// `MessageTooLarge` with more than 1 record triggers a split-and-
+    /// retry on the accumulator. Verify the in-flight bookkeeping is
+    /// cleaned up.
+    #[tokio::test]
+    async fn test_too_large_batches_are_safely_removed() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let _f1 = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k1", b"v1").await;
+        let _f2 = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k2", b"v2").await;
+        sender.run_once().await; // send
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, -1, Errors::MessageTooLarge, 0));
+        sender.run_once().await; // handle MessageTooLarge → split path
+        // After split, the original batch is removed from in-flight.
+        assert!(sender.in_flight_batches_for(&tp0).is_empty());
+    }
+
+    /// Build a produce response with a custom error_message attached to
+    /// the partition response.
+    fn build_produce_response_with_message(
+        topic: &str,
+        topic_id: Uuid,
+        partition: i32,
+        offset: i64,
+        error: Errors,
+        message: &str,
+    ) -> Box<dyn AbstractResponse> {
+        let partition_resp = PartitionProduceResponse {
+            index: partition,
+            error_code: error.code(),
+            base_offset: offset,
+            log_append_time_ms: -1,
+            log_start_offset: 0,
+            record_errors: Vec::new(),
+            error_message: Some(message.to_string()),
+            current_leader: ProtoLeaderIdAndEpoch::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let topic_resp = TopicProduceResponse {
+            name: topic.to_string(),
+            topic_id,
+            partition_responses: vec![partition_resp],
+            unknown_tagged_fields: Vec::new(),
+        };
+        let data = ProduceResponseData {
+            throttle_time_ms: 0,
+            responses: vec![topic_resp],
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        Box::new(ProduceResponse::new(data))
+    }
+
     /// Build a multi-partition produce response (single topic).
     fn build_produce_response_multi(
         topic: &str,
