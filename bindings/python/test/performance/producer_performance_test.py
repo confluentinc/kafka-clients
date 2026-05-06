@@ -6,13 +6,16 @@ import random
 import signal
 import queue
 import gc
+import uuid
 from threading import Thread
 
 
 from performance_common import Metrics
 from concurrent.futures import CancelledError, Future
 from producer import (KafkaProducer, ProducerRecord, RecordMetadata)
-from confluent_kafka import Producer as CKProducer, Message as CKMessage
+from confluent_kafka import (Producer as CKProducer, Message as CKMessage,
+                             Consumer, TopicPartition)
+from partitioner import partition_for_key
 
 
 def message_generator(topic, key_size=100, value_size=1024,
@@ -44,9 +47,13 @@ terminating = False
 key_size = 0
 value_size = 2048
 verified = 0
+warmup_sent = 0
+measured_sent = 0
+baseline_end_offsets = None  # {partition: offset}; set by main() pre-produce, None = not captured
 message_size = key_size + value_size
 topic_name = os.getenv("TOPIC_NAME", "test-topic")
 limit_rps = os.getenv("LIMIT_RPS", None)
+verify_consumed = os.getenv("VERIFY_CONSUMED", "False") == "True"
 if 'KEY_SIZE' in os.environ:
     key_size = int(os.environ['KEY_SIZE'])
 if 'VALUE_SIZE' in os.environ:
@@ -243,6 +250,160 @@ def print_configuration(conf):
         else:
             print(f"  {key}: {value}")
 
+def _verifier_consumer_config(bootstrap_servers, group_id):
+    conf = {
+        'bootstrap.servers': bootstrap_servers,
+        'group.id': group_id,
+        'enable.auto.commit': 'false',
+        'auto.offset.reset': 'earliest',
+        'session.timeout.ms': '10000',
+        'check.crcs': 'true'
+    }
+    conf.update(sasl_config_from_env(v2=True))
+    return conf
+
+
+def get_topic_end_offsets(bootstrap_servers, topic):
+    """Returns {partition_id: high_watermark} for `topic`.
+
+    Captures pre-existing topic state before the test starts so the end-of-run
+    consumer can resume from these offsets and only see messages produced in
+    this run. Returns {} if the topic does not yet exist (treated as "all
+    partitions start at 0"); raises only on transport/auth failures.
+    """
+    consumer = Consumer(_verifier_consumer_config(
+        bootstrap_servers, f"perf-baseline-{uuid.uuid4()}"))
+    try:
+        md = consumer.list_topics(topic, timeout=10)
+        topic_md = md.topics.get(topic)
+        if topic_md is None or topic_md.error is not None or not topic_md.partitions:
+            return {}
+        partitions = sorted(topic_md.partitions.keys())
+        end_offsets = {}
+        for p in partitions:
+            _, high = consumer.get_watermark_offsets(
+                TopicPartition(topic, p), timeout=10)
+            end_offsets[p] = high
+        return end_offsets
+    finally:
+        consumer.close()
+
+
+def verify_consumed_messages(bootstrap_servers, topic, baseline, expected_count, has_keys):
+    """Consume `topic` starting at `baseline` per-partition offsets, count
+    messages, and (if has_keys) check every message landed in the partition
+    murmur2 would have chosen.
+
+    `baseline` is {partition_id: starting_offset} captured before this test ran;
+    starting from those offsets means the consumer only sees messages produced
+    in this test, so `expected_count` is just the produced total (no need to
+    add pre-existing). Missing partitions are assumed to start at 0.
+
+    Returns 0 on success, 1 on any verification failure.
+    """
+    consumer = Consumer(_verifier_consumer_config(
+        bootstrap_servers, f"perf-verify-{uuid.uuid4()}"))
+    consumed_count = 0
+    mismatch_count = 0
+    sample_mismatches = []
+    try:
+        md = consumer.list_topics(topic, timeout=10)
+        if topic not in md.topics or md.topics[topic].error is not None:
+            print(f"Verification: cannot read metadata for {topic}")
+            return 1
+        partitions = sorted(md.topics[topic].partitions.keys())
+        num_partitions = len(partitions)
+        if num_partitions == 0:
+            print(f"Verification: topic {topic} has no partitions")
+            return 1
+
+        targets = {}
+        assignment = []
+        for p in partitions:
+            low, high = consumer.get_watermark_offsets(
+                TopicPartition(topic, p), timeout=10)
+            # Start from the baseline; if log retention has trimmed past it
+            # since baseline capture, fall back to current low watermark.
+            start = max(low, baseline.get(p, 0))
+            targets[p] = high
+            assignment.append(TopicPartition(topic, p, start))
+        consumer.assign(assignment)
+
+        current = {tp.partition: tp.offset for tp in assignment}
+
+        # Each partition can stop independently when its end watermark is hit.
+        # Allow up to ~60s of empty polls in a row before giving up — the
+        # measured run can take minutes, but post-flush the topic is fully
+        # readable so empty polls really do mean "we're caught up or stuck".
+        empty_budget_s = 60.0
+        last_progress_ns = time.time_ns()
+        progress_print_at = 0
+        progress_print_step = max(10000, expected_count // 20 if expected_count else 10000)
+
+        def caught_up():
+            return all(current[p] >= targets[p] for p in partitions)
+
+        while not caught_up():
+            msgs = consumer.consume(num_messages=1000, timeout=2.0)
+            if not msgs:
+                if (time.time_ns() - last_progress_ns) / 1e9 > empty_budget_s:
+                    break
+                continue
+            saw_data = False
+            for msg in msgs:
+                err = msg.error()
+                if err is not None:
+                    print(f"Verification consume error: {err}")
+                    continue
+                saw_data = True
+                consumed_count += 1
+                p = msg.partition()
+                current[p] = max(current[p], msg.offset() + 1)
+                if has_keys:
+                    key = msg.key()
+                    if key is None:
+                        mismatch_count += 1
+                        if len(sample_mismatches) < 5:
+                            sample_mismatches.append(
+                                f"partition={p} offset={msg.offset()} "
+                                "key=None (expected non-null)")
+                        continue
+                    expected_p = partition_for_key(bytes(key), num_partitions)
+                    if expected_p != p:
+                        mismatch_count += 1
+                        if len(sample_mismatches) < 5:
+                            sample_mismatches.append(
+                                f"partition={p} expected={expected_p} "
+                                f"offset={msg.offset()}")
+                if consumed_count >= progress_print_at:
+                    print(f"Verification: consumed {consumed_count} messages so far",
+                          end='\r')
+                    progress_print_at = consumed_count + progress_print_step
+            if saw_data:
+                last_progress_ns = time.time_ns()
+    finally:
+        consumer.close()
+
+    print()
+    count_ok = (consumed_count == expected_count)
+    partitions_ok = (not has_keys) or (mismatch_count == 0)
+
+    print(f"Consumer verification: consumed={consumed_count} "
+          f"expected={expected_count} "
+          f"(count_ok={count_ok})")
+    if has_keys:
+        print(f"Partition verification: mismatches={mismatch_count}/{consumed_count} "
+              f"(partitions_ok={partitions_ok})")
+        if sample_mismatches:
+            print("First mismatches:")
+            for s in sample_mismatches:
+                print(f"  {s}")
+    else:
+        print("Partition verification: skipped (no keys)")
+
+    return 0 if (count_ok and partitions_ok) else 1
+
+
 def v3_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=False)
     print_configuration(conf)
@@ -251,11 +412,15 @@ def v3_producer(common_default_configuration):
 
 def v2_producer(common_default_configuration):
     conf = configuration_from_env(common_default_configuration, v2=True)
+    # Match Apache Kafka's default partitioner so end-of-run partition
+    # verification is apples-to-apples vs the v3 (Java/Rust) client.
+    # librdkafka defaults to consistent_random (CRC32-based), not murmur2.
+    conf['partitioner'] = 'murmur2_random'
     print_configuration(conf)
     return CompatibleProducer(conf)
 
 def main(v2=False):
-    global producer, verified
+    global producer, verified, warmup_sent, measured_sent, baseline_end_offsets
     total_latency_ms = 0
     max_latency_ms = 0
     completed_messages = 0
@@ -266,6 +431,20 @@ def main(v2=False):
     common_default_configuration = {
         "bootstrap.servers": "localhost:9092",
     }
+    bootstrap_servers = os.environ.get(
+        "BOOTSTRAP_SERVERS",
+        common_default_configuration["bootstrap.servers"])
+
+    if verify_consumed:
+        try:
+            baseline_end_offsets = get_topic_end_offsets(bootstrap_servers, topic_name)
+            total_pre_existing = sum(baseline_end_offsets.values())
+            print(f"Baseline: topic {topic_name} has {total_pre_existing} "
+                  f"pre-existing messages across {len(baseline_end_offsets)} "
+                  "partitions; verifier will start from these offsets")
+        except Exception as e:
+            print(f"Baseline capture failed: {e}. Verification will be skipped.")
+            baseline_end_offsets = None
 
     if not v2:
         producer = v3_producer(common_default_configuration)
@@ -331,6 +510,7 @@ def main(v2=False):
                         ))
                         r = produce_call.result()
                         verification_function(r)
+                        warmup_sent += 1
                     except Exception as e:
                         print("Warmup failed due to message verification error")
                         producer = None
@@ -345,6 +525,7 @@ def main(v2=False):
             start_recording_completed_calls(produce_calls)
             before_ms = int(time.time() * 1000)
             first_message_time = time.time_ns()
+            next_check_time = first_message_time + 1_000_000_000
             metrics.measurement_start_ms = before_ms
             print(f"Starting measured interval at {before_ms} ms: {datetime.datetime.now(tz=datetime.timezone.utc)}")  # noqa: E501
             messages_sent = 0
@@ -364,6 +545,13 @@ def main(v2=False):
                     produce_call = producer.send(next_message)
                     produce_calls.put((produce_call, start_time))
                     messages_sent += 1
+                    limit_rps_reached = limit_rps and messages_sent % limit_rps == 0
+                    if limit_rps_reached:
+                        now = time.time_ns()
+                        if now < next_check_time:
+                            time_to_wait_s = (next_check_time - now) / 1e9
+                            time.sleep(time_to_wait_s)
+                        next_check_time = next_check_time + 1_000_000_000
                     if messages_sent % 10000 == 0:
                         duration = time.time_ns() - first_message_time
                         exceeded_seconds = num_messages > 0 and 10 or 1
@@ -379,6 +567,7 @@ def main(v2=False):
 
             t, record_completed_calls_loop = record_completed_calls_loop, None
             t.join()
+            measured_sent = messages_sent
             after_ms = int(time.time() * 1000)
             after_ns = time.time_ns()
 
@@ -480,3 +669,27 @@ if __name__ == "__main__":
     print(f"Final RSS: {last_metrics['last_rss'] / 1024 :.2f} KiB")
     metrics.stop_collecting()
     print("Done")
+
+    exit_code = 0
+    if verify_consumed and not terminating and baseline_end_offsets is not None:
+        bootstrap_servers = os.environ.get("BOOTSTRAP_SERVERS", "localhost:9092")
+        expected = warmup_sent + measured_sent
+        print(f"Verifying consumed messages from topic '{topic_name}' "
+              f"starting at baseline offsets "
+              f"(expected = {warmup_sent} warmup + {measured_sent} measured "
+              f"= {expected})")
+        try:
+            exit_code = verify_consumed_messages(
+                bootstrap_servers, topic_name,
+                baseline_end_offsets, expected, key_size > 0)
+        except Exception as e:
+            print(f"Verification failed with exception: {e}")
+            exit_code = 1
+    elif not verify_consumed:
+        print("Consumer verification skipped (VERIFY_CONSUMED=False)")
+    elif terminating:
+        print("Consumer verification skipped (terminated)")
+    elif baseline_end_offsets is None:
+        print("Consumer verification skipped (baseline capture failed)")
+
+    sys.exit(exit_code)

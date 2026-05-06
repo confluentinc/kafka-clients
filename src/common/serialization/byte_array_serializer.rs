@@ -19,6 +19,7 @@
 //! Corresponds to Java's `org.apache.kafka.common.serialization.ByteArraySerializer`.
 
 use crate::common::KafkaError;
+use crate::common::header::internals::RecordHeaders;
 use crate::common::serialization::Serializer;
 
 /// Serializes byte arrays by passing them through unchanged.
@@ -43,6 +44,15 @@ impl Serializer<[u8]> for ByteArraySerializer {
 impl Serializer<Vec<u8>> for ByteArraySerializer {
     fn serialize(&self, _topic: &str, data: Option<&Vec<u8>>) -> Result<Option<Vec<u8>>, KafkaError> {
         Ok(data.cloned())
+    }
+
+    fn serialize_owned_with_headers(
+        &self,
+        _topic: &str,
+        _headers: &RecordHeaders,
+        data: Option<Vec<u8>>,
+    ) -> Result<Option<Vec<u8>>, KafkaError> {
+        Ok(data)
     }
 }
 
