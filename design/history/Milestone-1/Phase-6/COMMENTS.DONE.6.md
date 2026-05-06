@@ -622,3 +622,36 @@ fractional-batches, append-large × 2, cancellation guard. Issues 2 and
 6 modify existing tests rather than adding new ones). DoD checks
 (build, test, format-check, lint) all green. Fixup chain: `c0ba6e2`,
 `67ad8fe`.
+
+---
+
+# Critic 6 — Phase 6e (Sender + MockClient subset) review (resolved)
+
+Reviewed commits `a429eeb`, `3ac1741`, `121b4d2`, `3631263`, `1b633c5`,
+`9583ddd`. 1 new file (`sender.rs`, 2615 LOC) plus 4 small additions
+on `AbstractResponse`.
+
+## Disposition table
+
+| # | Severity | Issue | Resolution |
+|---|----------|-------|------------|
+| 1 | Blocking — Behavior Mismatch | `is_invalid_metadata` missing 7 of 13 wire-coded `InvalidMetadataException` subclasses (KafkaStorageError, InconsistentTopicId, ReplicaNotAvailable, ListenerNotFound, PreferredLeaderNotAvailable, EligibleLeadersNotAvailable, ElectionNotNeeded). | **Fixed** in `d3f0d10`. Added all 7 missing variants to the `matches!` arm. Added `is_invalid_metadata_matches_all_java_invalid_metadata_subclasses` regression test asserting every wire-coded subclass triggers the metadata-refresh path, plus a non-subclass sanity slice. The 2 client-internal subclasses (StaleMetadata, NoAvailableBrokers) without wire codes are out of scope per the helper's `Errors` parameter type. |
+| 2 | Suggestion — Test Fidelity | KAFKA-19012 invariant (`testNoBufferReuseWhenBatchExpires`) untested. The Rust test `test_no_double_deallocation` verifies the post-disconnect dealloc but not the buffer-NOT-pooled-during-in-flight-expiry guard. | **Fixed** in `474d95e`. Added `test_no_buffer_reuse_when_batch_expires` with a 32KiB pool / 16KiB batch_size so the math is inspectable. Pre-allocates one buffer + deallocates so the Sender's first append picks it up. Sends, verifies pool reflects in-flight buffer, advances time past `delivery_timeout_ms`, runs `run_once`, asserts `pool.available_memory()` is unchanged after the in-flight expiry tick — exact KAFKA-19012 guard. |
+| 3 | Suggestion — Test Fidelity | KIP-951 leader-info-in-produce-response paths untested (`testWhenProduceResponseReturnsWithALeaderShipChangeError*`). Existing `test_producer_batch_retries_when_partition_leader_changes` bumps epoch externally via `update_partition_leadership`, bypassing the Sender's internal extraction path. | **Fixed** in `474d95e`. Added two tests: `test_produce_response_leader_change_no_new_leader_information` drives `NotLeaderOrFollower` with default `current_leader` (-1/-1) and asserts `update_requested()`; `test_produce_response_leader_change_with_new_leader_information` drives the same error with `current_leader=(9990, 101)` and asserts `metadata.current_leader(tp)` reflects the applied id + epoch. New helper `build_produce_response_with_leader_info` mirrors Java's 3-arg `produceResponse(responses, partitionLeaderInfo, nodes)`. |
+| 4 | Suggestion — Test Fidelity | 5 non-tx Java cases silently absent: `testSendInOrder`, `testAppendInExpiryCallback`, `testMetadataTopicExpiry`, `testResetNextBatchExpiry`, `testRetries` second loop. | **Partially Fixed** in `474d95e` and `56e9c31` (skip-list rationale). Translated: `testSendInOrder` → `test_send_in_order` (two-broker, partition moves, message-order guarantee mutes partition); `testAppendInExpiryCallback` → `test_append_in_expiry_callback` (per-record futures fail with `KafkaError::Timeout` on expiry, re-append lands in deque); `testRetries` second loop → `test_retries_exhausted_yields_network_exception` (two consecutive disconnects with `retries=1` surfaces `KafkaError::Network*`). Deferred with rationale (`56e9c31`): `testMetadataTopicExpiry` — requires Java-style metadata spy harness Rust does not have; `testResetNextBatchExpiry` — requires Mockito InOrder/spy facility Rust does not have. |
+| 5 | Suggestion — Documentation | Skip list incomplete; non-tx cases absent without rationale, `testNodeLatencyStats` misclassified as "metrics infra" when it tests behavioral dispatch. | **Fixed** in `56e9c31`. Module rustdoc skip list now has four explicit buckets: Translated (Java case → Rust test by name), Skipped — idempotent / transactional, Skipped — metrics / mock infra, Skipped — deferred non-tx with explicit rationale. Each deferred case names the path it exercises, the harness gap blocking translation, and the alternate Rust test that covers the closest invariant. `testNodeLatencyStats` re-classified to deferred non-tx with a pointer to the accumulator-level test that covers the underlying invariant. |
+| 6 | Suggestion — Performance | Per-batch `String` allocation in `topic_ids_for_batches` on the send path: `tp.topic().to_string()` per batch + intermediate `HashMap<String, Uuid>`. | **Fixed** in `d3f0d10`. Inlined `topic_ids_for_batches` into `send_produce_request`. `metadata.topic_ids()` is snapshotted once; per-batch lookup uses `topic_ids.get(tp.topic())` via `Borrow<str>` directly — no intermediate map, no per-batch String allocation. The helper function is removed. |
+| 7 | Suggestion — Test Fidelity | `test_no_response_body_treats_all_records_as_success` had a misleading name: body actually exercised the disconnect path, not the acks=0 / no-body short-circuit. | **Fixed** in `474d95e`. Renamed the existing test to `test_disconnect_response_triggers_retry` (which is what it actually tested). Added a real `test_no_response_body_treats_all_records_as_success` that pre-stages a `(body=None, disconnected=false)` response via `respond_with_disconnect(None, false)` and asserts the future resolves to `Errors::None` with `base_offset = -1` (matching Java's `else` branch in `handleProduceResponse`). |
+| 8 | Suggestion — Behavior Mismatch | `run_loop` did not catch panics; Java's `run()` swallows `RuntimeException` and continues. | **Fixed** in `56e9c31`. Wrapped each `run_once().await` in `AssertUnwindSafe(...).catch_unwind()` (via `futures_util::FutureExt`). On panic: log via `error!` with the panic payload's message, continue the loop. Documented the divergence-with-corrupt-state caveat in the rustdoc (Java has the same hazard). Added `MockClientImpl::set_panic_on_next_poll` (test-only) + `run_loop_swallows_panics_and_continues` regression test that arms a panic, calls `initiate_close`, then asserts `run_loop` terminates without aborting the task. |
+
+## Phase 6e Round 1 Summary
+
+- **Blocking**: 1 (Issue #1 — Fixed)
+- **Suggestion**: 7 (Issues #2-#8: 5 Fixed, 2 deferred with rationale
+  in skip list — see #4 / #5)
+
+Test count 1085 → 1094 (+9: regression test for `is_invalid_metadata`,
+buffer-reuse, two leader-change variants, send-in-order,
+append-in-expiry-callback, retries-exhausted, true acks=0 short-circuit,
+run_loop panic-swallow). DoD checks (build, test, format-check, lint)
+all green. Fixup chain: `d3f0d10`, `474d95e`, `56e9c31`.
