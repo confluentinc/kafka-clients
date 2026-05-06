@@ -170,6 +170,39 @@ def test_remove_pr_label_raises_on_nonzero_exit():
             github.remove_pr_label("/repo", 42, "dependencies-evaluated")
 
 
+# --- delete_remote_branch ---------------------------------------------------
+
+def test_delete_remote_branch_invokes_gh_api_delete():
+    """delete_remote_branch wraps `gh api -X DELETE
+    repos/{owner}/{repo}/git/refs/heads/<branch>` and runs it from
+    `repo_path`. The {owner}/{repo} placeholders are emitted literally
+    so `gh api` resolves them from the cwd's git remote."""
+    branch = "kafka-translate/abc"
+    with patch.object(github.subprocess, "run",
+                      return_value=_completed(0)) as mrun:
+        github.delete_remote_branch("/repo", branch)
+    mrun.assert_called_once_with(
+        [
+            "gh", "api", "-X", "DELETE",
+            "repos/{owner}/{repo}/git/refs/heads/" + branch,
+        ],
+        capture_output=True, text=True,
+        cwd="/repo",
+    )
+
+
+def test_delete_remote_branch_raises_on_nonzero_exit():
+    """Non-zero exit -- including 404 ("branch already gone") -- bubbles
+    up as GhError. Per --delete-prs design, callers fail-fast rather
+    than swallowing 404."""
+    with patch.object(
+        github.subprocess, "run",
+        return_value=_completed(1, stderr='{"message":"Reference does not exist"}'),
+    ):
+        with pytest.raises(github.GhError, match="Reference does not exist"):
+            github.delete_remote_branch("/repo", "kafka-translate/abc")
+
+
 # --- format_dep_section / replace_dep_section -------------------------------
 
 def test_format_dep_section_both_deps_renders_both_lines():

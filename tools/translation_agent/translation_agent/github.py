@@ -171,6 +171,37 @@ def _parse_pr_number(gh_output: str) -> Optional[int]:
     return int(m.group(1)) if m else None
 
 
+def delete_remote_branch(repo_path: str, branch_name: str) -> None:
+    """Delete `branch_name` from the GitHub remote via
+    `gh api -X DELETE /repos/{owner}/{repo}/git/refs/heads/<branch>`.
+
+    `gh api` resolves `{owner}/{repo}` from the git remote of the cwd,
+    matching how every other helper in this module locates the repo.
+
+    Side effect on GitHub: any open PR whose head was this branch
+    auto-closes (PRs cannot be deleted on GitHub, only closed).
+
+    Raises GhError on non-zero exit -- including 404 ("branch already
+    gone"). Per the `--delete-prs` design choice, callers fail-fast on
+    any error rather than swallowing 404; the operator can re-run with
+    the offending PR removed from the list.
+    """
+    proc = subprocess.run(
+        [
+            "gh", "api", "-X", "DELETE",
+            f"repos/{{owner}}/{{repo}}/git/refs/heads/{branch_name}",
+        ],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh api delete branch {branch_name} failed "
+            f"(rc={proc.returncode}): {proc.stderr.strip()}"
+        )
+
+
 def update_pr_body(repo_path: str, pr_number: int, body: str) -> None:
     """Replace PR `pr_number`'s body via `gh pr edit <N> --body-file -`.
 

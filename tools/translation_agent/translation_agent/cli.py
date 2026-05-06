@@ -25,6 +25,11 @@ Three invocation modes per the design:
   `branch_commit` table on first use. `--force` overwrites an existing
   cursor; `--cleanup-prs` deletes every `pr_commit` row for
   `--rust-branch` before seeding.
+- Delete-PRs mode: `translation-agent --delete-prs --rust-branch ...
+  --pr-numbers N1,N2,...` -- targeted destructive cleanup of an
+  explicit list of stale/failed PRs. Deletes the GitHub head branch
+  (auto-closing the PR) and the `pr_commit` row for each. `--rust-branch`
+  is a safety scope: any PR whose stored branch differs aborts the run.
 """
 
 import argparse
@@ -99,10 +104,17 @@ def _build_parser() -> argparse.ArgumentParser:
     #   default       sweep mode
     #   --pr N        per-PR mode (status check or --plan-approve)
     #   --seed        seed mode
+    #   --delete-prs  targeted destructive cleanup
     mode = parser.add_mutually_exclusive_group()
     mode.add_argument("--pr", type=int, metavar="N", help="Operate on a single PR.")
     mode.add_argument("--seed", action="store_true",
                       help="Insert a row into branch_commit (idempotent).")
+    mode.add_argument(
+        "--delete-prs", action="store_true",
+        help="Delete pr_commit rows AND GitHub head branches for an "
+             "explicit list of PR numbers on --rust-branch. Requires "
+             "--rust-branch and --pr-numbers.",
+    )
 
     parser.add_argument(
         "--plan-approve", action="store_true",
@@ -153,7 +165,105 @@ def _build_parser() -> argparse.ArgumentParser:
              "--force; the two compose.",
     )
 
+    # --delete-prs args.
+    parser.add_argument(
+        "--pr-numbers", metavar="N1,N2,...",
+        help="Comma-separated list of PR numbers (no spaces) for "
+             "--delete-prs.",
+    )
+
     return parser
+
+
+def _parse_pr_numbers(raw: str) -> list[int] | None:
+    """Parse a comma-separated PR-number string into a list of ints.
+
+    Returns None on any malformed input (empty, whitespace-only,
+    non-integer token, duplicate). The caller logs the user-facing
+    error and returns rc=2; this helper just signals "bad input."
+    """
+    parts = [p for p in raw.split(",") if p != ""]
+    if not parts:
+        return None
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(set(nums)) != len(nums):
+        return None
+    return nums
+
+
+def _run_delete_prs(args: argparse.Namespace, conn) -> int:
+    if not args.rust_branch or not args.pr_numbers:
+        missing = []
+        if not args.rust_branch:
+            missing.append("--rust-branch")
+        if not args.pr_numbers:
+            missing.append("--pr-numbers")
+        log.error("--delete-prs requires: %s", ", ".join(missing))
+        return 2
+
+    pr_numbers = _parse_pr_numbers(args.pr_numbers)
+    if pr_numbers is None:
+        log.error(
+            "--delete-prs: --pr-numbers must be a non-empty comma-"
+            "separated list of unique integers (e.g. '123,456'); got %r",
+            args.pr_numbers,
+        )
+        return 2
+
+    # Pre-flight pass: validate everything BEFORE any mutation. A
+    # failure here means rc=1 with the DB and GitHub completely
+    # untouched -- the operator's --rust-branch acts as a safety scope
+    # against typos that would otherwise delete the wrong PRs.
+    targets: list[tuple[int, str]] = []
+    for n in pr_numbers:
+        row = db.get_pr(conn, n)
+        if row is None:
+            log.error(
+                "--delete-prs: PR %d not found in pr_commit -- aborting",
+                n,
+            )
+            return 1
+        if row["rust_branch"] != args.rust_branch:
+            log.error(
+                "--delete-prs: PR %d belongs to rust_branch=%s, not %s "
+                "-- aborting (no changes made)",
+                n, row["rust_branch"], args.rust_branch,
+            )
+            return 1
+        targets.append((n, github.branch_name_for_ak(row["ak_commit"])))
+
+    if args.dry_run:
+        log.info(
+            "--delete-prs --dry-run: %d PR(s) would be deleted on rust_branch=%s",
+            len(targets), args.rust_branch,
+        )
+        for pr_number, branch in targets:
+            log.info("  would delete: PR %d branch=%s", pr_number, branch)
+        return 0
+
+    # Execute. Per design: GitHub branch FIRST (closes the PR
+    # implicitly), then DB row. Fail-fast on the first error -- rows
+    # already processed stay processed; the operator removes processed
+    # PRs from the list and re-runs.
+    for pr_number, branch in targets:
+        try:
+            github.delete_remote_branch(args.rust_repo_path, branch)
+        except github.GhError as e:
+            log.error(
+                "--delete-prs: failed to delete branch %s for PR %d: %s "
+                "-- aborting (DB row not touched for this PR)",
+                branch, pr_number, e,
+            )
+            return 1
+        db.delete_pr_commit(conn, pr_number)
+        log.info(
+            "Deleted PR %d (branch=%s removed, pr_commit row removed)",
+            pr_number, branch,
+        )
+    return 0
 
 
 def _run_seed(args: argparse.Namespace, conn) -> int:
@@ -1230,17 +1340,22 @@ def main(argv: Sequence[str] | None = None) -> int:
     conn = db.connect(args.db_path)
     db.migrate(conn)
     # State-mutating modes push the DB back to Semaphore at the end (in a
-    # try/finally so partial work is still persisted). --seed mutates state
-    # too; --pr (status check, no --plan-approve) does not.
+    # try/finally so partial work is still persisted). --seed and
+    # --delete-prs both mutate state; --pr (status check, no
+    # --plan-approve) does not. --delete-prs in --dry-run mode mutates
+    # nothing, hence the existing `not args.dry_run` guard already
+    # excludes it.
     push_artifact = (
         not args.no_artifact_push and not args.dry_run
-        and (args.seed or args.plan_approve or
-             (args.pr is None))  # sweep mode
+        and (args.seed or args.delete_prs or args.plan_approve or
+             (args.pr is None and not args.delete_prs))  # sweep mode
     )
     rc = 1
     try:
         if args.seed:
             rc = _run_seed(args, conn)
+        elif args.delete_prs:
+            rc = _run_delete_prs(args, conn)
         elif args.pr is not None:
             rc = _run_pr_mode(args, conn)
         else:

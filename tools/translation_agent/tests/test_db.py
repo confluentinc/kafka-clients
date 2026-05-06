@@ -426,6 +426,31 @@ def test_cleanup_pr_commits_for_rust_branch_idempotent_returns_zero(conn):
     assert db.cleanup_pr_commits_for_rust_branch(conn, "nonexistent") == 0
 
 
+def test_delete_pr_commit_removes_only_target_row(conn):
+    """delete_pr_commit drops the row matching pr_number and leaves
+    siblings untouched. Idempotent: re-deleting the same number is a
+    no-op (no rowcount-checking inside the helper)."""
+    db.insert_pr_commit(conn, 1, "master", "trunk", "ak1")
+    db.insert_pr_commit(conn, 2, "master", "trunk", "ak2")
+    db.delete_pr_commit(conn, 1)
+    assert db.get_pr(conn, 1) is None
+    assert db.get_pr(conn, 2) is not None
+    # Idempotent re-delete of an already-gone row is a no-op.
+    db.delete_pr_commit(conn, 1)
+    assert db.get_pr(conn, 2) is not None
+
+
+def test_delete_pr_commit_does_not_write_history(conn):
+    """Unlike archive_pr_commit (which writes pr_commit_history for
+    merged PRs), delete_pr_commit must NOT touch the history table.
+    Rationale: PRs deleted by --delete-prs were explicitly NOT merged,
+    so writing them to history would corrupt that table's semantics."""
+    db.insert_pr_commit(conn, 1, "master", "trunk", "ak1")
+    db.delete_pr_commit(conn, 1)
+    rows = conn.execute("SELECT * FROM pr_commit_history").fetchall()
+    assert rows == []
+
+
 def test_mark_plan_created_transitions_1_to_2(conn):
     db.insert_pr_commit(conn, 42, "master", "trunk", "ak")
     db.update_dependencies(conn, 42, None, None)

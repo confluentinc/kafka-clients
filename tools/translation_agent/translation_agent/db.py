@@ -397,6 +397,28 @@ def archive_pr_commit(
         return True
 
 
+def delete_pr_commit(conn: sqlite3.Connection, pr_number: int) -> None:
+    """Delete the `pr_commit` row for `pr_number`.
+
+    Caller is responsible for verifying the row exists (via `get_pr`)
+    *before* calling this helper -- this is so error messages can
+    distinguish "PR not found" from "PR found but on the wrong
+    rust_branch". The DELETE itself is unconditional and idempotent
+    (no-op on missing row).
+
+    Used by `--delete-prs` mode to drop a specific PR after its GitHub
+    head branch has been deleted. Unlike `archive_pr_commit`, does NOT
+    write to `pr_commit_history` (PRs deleted by `--delete-prs` were
+    explicitly not merged, so history would corrupt that table's
+    semantics).
+    """
+    with conn:
+        conn.execute(
+            "DELETE FROM pr_commit WHERE pr_number = ?",
+            (pr_number,),
+        )
+
+
 def cleanup_pr_commits_for_rust_branch(
     conn: sqlite3.Connection, rust_branch: str,
 ) -> int:

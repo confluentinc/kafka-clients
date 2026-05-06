@@ -1950,3 +1950,183 @@ def test_sweep_continues_after_gh_error_on_one_commit(tmp_path):
     assert len(rows) == 1
     assert dict(rows[0]) == {"pr_number": 200, "ak_commit": "ak_b"}
 
+
+# --- --delete-prs ----------------------------------------------------------
+
+def test_delete_prs_missing_args_returns_2(tmp_path):
+    """rc=2 (argparse-style usage error) when --rust-branch or
+    --pr-numbers is missing. No partial-execution side effects."""
+    db_path = str(tmp_path / "t.db")
+    assert _run("--delete-prs", "--rust-branch", "master", db_path=db_path) == 2
+    assert _run("--delete-prs", "--pr-numbers", "1,2", db_path=db_path) == 2
+
+
+def test_delete_prs_invalid_pr_numbers_format_returns_2(tmp_path):
+    """Empty list, non-integer tokens, and duplicates all rc=2."""
+    db_path = str(tmp_path / "t.db")
+    base = ["--delete-prs", "--rust-branch", "master"]
+    assert _run(*base, "--pr-numbers", "", db_path=db_path) == 2
+    assert _run(*base, "--pr-numbers", ",,", db_path=db_path) == 2
+    assert _run(*base, "--pr-numbers", "1,abc,3", db_path=db_path) == 2
+    assert _run(*base, "--pr-numbers", "1,2,1", db_path=db_path) == 2
+
+
+def test_delete_prs_pr_not_in_db_aborts_no_mutations(tmp_path):
+    """Pre-flight catches a missing PR and returns rc=1 with no
+    subprocess calls and no DB changes."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 1, "master", "trunk", "ak1")
+    conn.commit()
+    conn.close()
+    from translation_agent import github as gh
+    with patch.object(gh.subprocess, "run") as mrun:
+        rc = _run(
+            "--delete-prs", "--rust-branch", "master",
+            "--pr-numbers", "1,99",
+            db_path=db_path,
+        )
+    assert rc == 1
+    mrun.assert_not_called()
+    conn = db.connect(db_path)
+    assert db.get_pr(conn, 1) is not None  # untouched
+
+
+def test_delete_prs_branch_mismatch_aborts_no_mutations(tmp_path):
+    """If any PR's stored rust_branch != --rust-branch, the run aborts
+    BEFORE touching anything (the safety scope works as a guard)."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 1, "master",       "trunk", "ak1")
+    db.insert_pr_commit(conn, 2, "dev/feature",  "trunk", "ak2")
+    conn.commit()
+    conn.close()
+    from translation_agent import github as gh
+    with patch.object(gh.subprocess, "run") as mrun:
+        rc = _run(
+            "--delete-prs", "--rust-branch", "master",
+            "--pr-numbers", "1,2",
+            db_path=db_path,
+        )
+    assert rc == 1
+    mrun.assert_not_called()
+    conn = db.connect(db_path)
+    # Both rows still present.
+    assert db.get_pr(conn, 1) is not None
+    assert db.get_pr(conn, 2) is not None
+
+
+def test_delete_prs_dry_run_makes_no_mutations(tmp_path):
+    """--dry-run prints intended deletions but never invokes gh and
+    never deletes DB rows."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 1, "master", "trunk", "ak1")
+    db.insert_pr_commit(conn, 2, "master", "trunk", "ak2")
+    conn.commit()
+    conn.close()
+    from translation_agent import github as gh
+    with patch.object(gh.subprocess, "run") as mrun:
+        rc = _run(
+            "--delete-prs", "--dry-run",
+            "--rust-branch", "master",
+            "--pr-numbers", "1,2",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mrun.assert_not_called()
+    conn = db.connect(db_path)
+    assert db.get_pr(conn, 1) is not None
+    assert db.get_pr(conn, 2) is not None
+
+
+def test_delete_prs_success_deletes_branch_then_db_row(tmp_path):
+    """Real run: gh is called per PR with the derived branch name AND
+    the DB row is deleted. Order matters: branch BEFORE row, so a
+    failed gh call leaves the DB recoverable for the next sweep."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 11, "master", "trunk", "ak_alpha")
+    db.insert_pr_commit(conn, 22, "master", "trunk", "ak_beta")
+    conn.commit()
+    conn.close()
+
+    from translation_agent import github as gh
+
+    # Track ordering: each call to subprocess.run records the row state
+    # at the moment of the call. Order invariant: when we delete branch
+    # for PR N, that PR's row must still exist in the DB.
+    observed: list[tuple[str, list[int]]] = []
+
+    def fake_run(argv, **kwargs):
+        c = db.connect(db_path)
+        live = [r["pr_number"] for r in
+                c.execute("SELECT pr_number FROM pr_commit ORDER BY pr_number")]
+        c.close()
+        observed.append((argv[-1], live))  # argv[-1] = the refs/heads/<branch> path
+        return type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})()
+
+    with patch.object(gh.subprocess, "run", side_effect=fake_run):
+        rc = _run(
+            "--delete-prs", "--rust-branch", "master",
+            "--pr-numbers", "11,22",
+            db_path=db_path,
+        )
+    assert rc == 0
+
+    # Two gh calls, in order, with the derived branch names.
+    assert len(observed) == 2
+    assert observed[0][0] == "repos/{owner}/{repo}/git/refs/heads/kafka-translate/ak_alpha"
+    assert observed[1][0] == "repos/{owner}/{repo}/git/refs/heads/kafka-translate/ak_beta"
+    # When PR 11's branch was deleted, both rows still present (DB
+    # mutation hasn't happened yet for this PR).
+    assert 11 in observed[0][1]
+    # When PR 22's branch was deleted, PR 11's row was already gone.
+    assert observed[1][1] == [22]
+
+    # Both rows removed at end of run.
+    conn = db.connect(db_path)
+    assert db.get_pr(conn, 11) is None
+    assert db.get_pr(conn, 22) is None
+
+
+def test_delete_prs_gh_failure_aborts_remaining(tmp_path):
+    """First PR succeeds, second's gh call fails: the first PR's row is
+    gone, the second PR's row remains, the run returns 1. Operator
+    re-runs with the offending PR removed from the list."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 11, "master", "trunk", "ak_alpha")
+    db.insert_pr_commit(conn, 22, "master", "trunk", "ak_beta")
+    conn.commit()
+    conn.close()
+    from translation_agent import github as gh
+    side_effects = [
+        type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+        type("CP", (), {"returncode": 1, "stdout": "", "stderr": "boom"})(),
+    ]
+    with patch.object(gh.subprocess, "run", side_effect=side_effects):
+        rc = _run(
+            "--delete-prs", "--rust-branch", "master",
+            "--pr-numbers", "11,22",
+            db_path=db_path,
+        )
+    assert rc == 1
+    conn = db.connect(db_path)
+    assert db.get_pr(conn, 11) is None  # processed before the failure
+    assert db.get_pr(conn, 22) is not None  # gh failed before db.delete_pr_commit
+
+
+def test_delete_prs_mutex_with_other_modes():
+    """argparse mutex: --delete-prs cannot combine with --pr or --seed."""
+    parser = cli._build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--delete-prs", "--seed"])
+    with pytest.raises(SystemExit):
+        parser.parse_args(["--delete-prs", "--pr", "1"])
+
