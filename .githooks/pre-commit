@@ -3,4 +3,4 @@
 # allowing the commit. Installed by `make init-hooks`, which sets
 # core.hooksPath to .githooks. Bypass with `git commit --no-verify`.
 set -e
-exec make verify
+exec make verify-sandbox
