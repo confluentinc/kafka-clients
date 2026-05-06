@@ -63,6 +63,10 @@ impl KafkaSend for NetworkSend {
         Box::pin(async { self.send.write_to(channel).await })
     }
 
+    fn try_write_to(&mut self, channel: &mut dyn TransportLayer) -> io::Result<usize> {
+        self.send.try_write_to(channel)
+    }
+
     fn size(&self) -> usize {
         self.send.size()
     }

@@ -16,6 +16,21 @@ semaphore:
   branches:
   - master
   tasks:
+  - name: run-sweep
+    branch: master
+    scheduled: false
+    pipeline_file: .semaphore/semaphore.yml
+    description: "Run the translation agent's sweep phase, which evaluates
+      dependencies, generates plans, and implements them by pushing commits
+      and updating PR bodies. This is the main pipeline that runs on every
+      build for the configured main branch (pushes, not PRs). It conditionally
+      no-ops if triggered on a PR build or a non-main branch."
+    parameters:
+      - name: SEMAPHORE_GIT_BRANCH_CHECKOUT
+        required: false
+        description: "Override the SEMAPHORE_GIT_BRANCH value that the pipeline sees. Useful for
+          testing the sweep phase on a PR build by forcing the branch condition
+          to match. Ignored if not set."
   - name: seed-branch-commit
     branch: master
     scheduled: false
@@ -23,8 +38,8 @@ semaphore:
     description: "Bootstrap the branch_commit cursor that the translation
       agent walks. Run once when starting a new (rust_branch, ak_branch)
       tracking pair, or when manually re-aligning after upstream changes.
-      Idempotent -- a row already present for the (ak_branch, ak_commit,
-      rust_branch) primary key is left unchanged."
+      Idempotent -- a row already present for rust_branch with the same
+      (ak_branch, ak_commit) pair is left unchanged."
     parameters:
       - name: AK_BRANCH
         required: true
@@ -39,18 +54,23 @@ semaphore:
         required: true
         default_value: "master"
         description: "Rust client branch this seed maps to."
-      - name: RUST_COMMIT
-        required: true
-        description: "Rust commit SHA (full 40 chars) currently tracking
-          AK_COMMIT on RUST_BRANCH."
       - name: FORCE
         required: true
         default_value: "False"
         description: "Allow overwriting the existing branch_commit cursor
           for the given RUST_BRANCH. Without this, the task errors out
-          if a row already exists with different ak_branch/ak_commit/
-          rust_commit values. Use to re-align after upstream changes or
-          after an interrupted run."
+          if a row already exists with a different ak_branch/ak_commit
+          pair. Use to re-align after upstream changes or after an
+          interrupted run."
+        options:
+          - "False"
+          - "True"
+      - name: CLEANUP_PRS
+        required: true
+        default_value: "False"
+        description: "Delete every pr_commit row for RUST_BRANCH before
+          seeding. Use to reset a branch's PR queue when stale/failed rows
+          would otherwise be picked up by the next sweep."
         options:
           - "False"
           - "True"
