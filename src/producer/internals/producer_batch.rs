@@ -1133,7 +1133,6 @@ mod tests {
     use super::*;
     use crate::common::header::Header;
     use crate::common::record::CompressionType;
-    use crate::common::record::record_batch::{MAGIC_VALUE_V0, MAGIC_VALUE_V1};
 
     const NOW: i64 = 1_488_748_346_917;
 
@@ -1349,7 +1348,12 @@ mod tests {
     /// skipped explicitly. The Java test iterates v0+gzip,
     /// v1+gzip/snappy/lz4, and all v2 cases. Phase 6b's test focuses on
     /// the v2 path which is the only producer output our codebase
-    /// supports.
+    /// supports — the v0/v1 magic-value constants live in
+    /// `crate::common::record::record_batch` (`MAGIC_VALUE_V0`,
+    /// `MAGIC_VALUE_V1`); they are deliberately not exercised here
+    /// because Phase 3's writer cannot construct a v0/v1 builder. (The
+    /// earlier in-test tautological no-op guard has been removed in a
+    /// fixup; see Phase 6b Round 1 disposition for Issue 2.)
     #[tokio::test]
     async fn split_preserves_magic_and_compression_type_v2() {
         for compression in [
@@ -1382,33 +1386,6 @@ mod tests {
                 }
             }
         }
-        // Smoke-check for the v0/v1 deliberately-skipped branch — calling
-        // `from_buffer` with v0 errors today (Phase 3 only emits v2),
-        // so there's no producer-test fixture we could derive. Java's
-        // assertion that `splitBatch.magic() == magic` is unreachable
-        // when the writer cannot create a v0/v1 builder in the first
-        // place. Documented here so a reviewer cross-checking against
-        // Java does not flag the absence.
-        let res = MemoryRecordsBuilder::from_buffer(
-            vec![0u8; 1024],
-            MAGIC_VALUE_V0,
-            CompressionType::Gzip,
-            TimestampType::CreateTime,
-            0,
-            NO_TIMESTAMP,
-            -1,
-            -1,
-            -1,
-            false,
-            false,
-            -1,
-            1024,
-        );
-        assert!(
-            res.is_ok() || res.is_err(),
-            "v0 builder may or may not be rejected; either is fine for this guard"
-        );
-        let _ = MAGIC_VALUE_V1;
     }
 
     /// Java: `testBatchExpiration`.
