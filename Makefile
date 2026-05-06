@@ -18,12 +18,8 @@ build-c: submodules build-rust
 	cmake -S bindings/c -B bindings/c/build -DRUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) -DCMAKE_C_FLAGS="$(CFLAGS_NATIVE)"
 	cmake --build bindings/c/build
 
-init-venv:
-	python3 -m venv venv
-
-build-python: submodules init-venv build-rust
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
+build-python: submodules build-rust
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
 devel-build: devel-build-rust devel-build-c devel-build-python
 
@@ -35,8 +31,7 @@ devel-build-c: submodules devel-build-rust
 	cmake --build bindings/c/build
 
 devel-build-python: submodules init-venv devel-build-rust
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build)
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=debug CFLAGS_EXTRA="$(CFLAGS_NATIVE)" build
 
 test: test-integration test-c test-python
 
@@ -50,12 +45,11 @@ test-c: build-c
 	cd bindings/c/build && ctest --output-on-failure
 
 test-python: build-python
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test)
+	$(MAKE) -C bindings/python RUST_PROJECT_ROOT=$(RUST_PROJECT_ROOT) PROFILE=release test
 
 verify: build format-check lint test
 
-verify-sandbox: build-all format-check lint test
+verify-sandbox: build-rust build-c format-check lint test-integration test-c
 
 init-hooks:
 	@git config core.hooksPath .githooks
@@ -70,5 +64,4 @@ lint:
 clean:
 	cargo clean
 	rm -rf bindings/c/build
-	@(. venv/bin/activate && \
-	$(MAKE) -C bindings/python clean)
+	$(MAKE) -C bindings/python clean
