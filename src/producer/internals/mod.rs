@@ -20,6 +20,7 @@ pub(crate) mod future_record_metadata;
 pub(crate) mod incomplete_batches;
 pub(crate) mod produce_request_result;
 pub(crate) mod producer_batch;
+pub(crate) mod producer_interceptors;
 pub(crate) mod producer_metadata;
 pub(crate) mod transaction_manager;
 
@@ -35,6 +36,8 @@ pub(crate) use incomplete_batches::IncompleteBatches;
 pub(crate) use produce_request_result::ProduceRequestResult;
 #[allow(unused_imports)]
 pub(crate) use producer_batch::ProducerBatch;
+#[allow(unused_imports)]
+pub(crate) use producer_interceptors::ProducerInterceptors;
 #[allow(unused_imports)]
 pub(crate) use producer_metadata::ProducerMetadata;
 #[allow(unused_imports)]
