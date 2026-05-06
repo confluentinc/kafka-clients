@@ -49,6 +49,11 @@ impl MetadataRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut MetadataRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -315,7 +320,7 @@ impl RequestBuilder for MetadataRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         if version < 1 {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -436,7 +441,7 @@ mod tests {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
-                let builder = MetadataRequestBuilder::from_data(data);
+                let mut builder = MetadataRequestBuilder::from_data(data);
                 let result = builder.build_version(*version);
                 assert!(result.is_err(), "Expected error for version {version} with topic {:?}", topic);
             }
@@ -471,7 +476,7 @@ mod tests {
             for topic in &topics {
                 let mut data = MetadataRequestData::new();
                 data.set_topics(Some(vec![topic.clone()]));
-                let builder = MetadataRequestBuilder::from_data(data);
+                let mut builder = MetadataRequestBuilder::from_data(data);
                 // Should succeed since topic_id is zero UUID
                 let result = builder.build_version(*version);
                 assert!(result.is_ok(), "Should not fail for version {version} with topic {:?}", topic);
