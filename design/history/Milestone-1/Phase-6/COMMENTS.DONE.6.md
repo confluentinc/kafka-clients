@@ -246,3 +246,115 @@ All 7 items addressed. Test count 976 → 978 (+2 regression tests:
 `cancelled_allocate_does_not_stall_subsequent_waiter`,
 `outer_timeout_cancels_chained_inner_await`). DoD checks (build,
 test, format-check, lint) all green.
+
+---
+
+# Critic 6 — Phase 6b Round 1 (ProducerBatch) review (resolved)
+
+Reviewed commits `d3bab5a` (core), `6a21ea3` (try_append/done/abort/split),
+`ba7f10b` (test translation, 11 cases) on branch `fresh-impl`. Three
+items filed; all three resolved in fixup chain `a41263b` / `08bff9f` /
+`c7c34a4`.
+
+## Issue 1 — Bug, Missing Requirement: `ProducerBatch::buffer()` accessor is missing
+
+**File**: `src/producer/internals/producer_batch.rs`
+**Severity**: Bug — Missing Requirement.
+**Description**: Java's `ProducerBatch.buffer()` (`ProducerBatch.java:543`)
+is consumed by `RecordAccumulator.deallocate` (`RecordAccumulator.java:1053`)
+to feed the buffer back into `BufferPool.deallocate(buffer, initialCapacity)`.
+The Rust translation omitted this; Phase 6d would hit a hard build-time
+block.
+
+**Disposition**: Fixed in commit `a41263b` (fixup! `6a21ea3`).
+Picked **Option A** (own-the-Vec) of the three options in the Critic
+issue. Rationale:
+
+- Phase 6a's `BufferPool::deallocate` already takes ownership of `Vec<u8>`
+  (steady-state `unsafe set_len` no-fill recycle), so transferring
+  ownership matches the pool's contract exactly. Phase 6d translates to
+  a one-line `pool.deallocate(batch.buffer(), batch.initial_capacity())`
+  call — same shape as Java's `free.deallocate(batch.buffer(),
+  batch.initialCapacity())`.
+- Option B (`&[u8]`) couples the lock-guard's lifetime to the borrow,
+  forcing the caller to hold the mutex while invoking the pool —
+  fragile and a deadlock hazard.
+- Option C (`recycle_into(pool)`) hides the buffer entirely but
+  diverges most from Java and complicates testing the recycle path
+  independently.
+
+Implementation:
+- `MemoryRecordsBuilder::buffer_owned(&mut self) -> Vec<u8>` extracts
+  the buffer from either pre-build (`buffer_stream` -> `into_buffer`)
+  or post-build (`built_records.buffer` `Bytes` -> `try_into_mut` ->
+  `Vec<u8>`) lifecycle states. Returns `Vec<u8>` with `len == capacity ==
+  initial_capacity` (matches `BufferPool::deallocate`'s recycle
+  invariant). Subsequent calls return an empty `Vec<u8>` — one-shot.
+- `MemoryRecords::into_buffer(self) -> Bytes` consuming accessor.
+- `MemoryRecordsBuilder::initial_capacity()` now reads from a
+  snapshot field (`initial_buffer_capacity`) instead of the
+  `buffer_stream` whose underlying Vec is moved out at `close()`. This
+  fixes a latent post-build returns-0 bug.
+- `ProducerBatch::buffer(&self) -> Vec<u8>` locks `mut_state`,
+  delegates to `buffer_owned()`.
+
+Tests: +2 regression tests in `producer_batch.rs`:
+- `buffer_returns_owned_vec_sized_to_initial_capacity` — closes the
+  batch, calls `complete()` (the "done" the Critic issue named), then
+  `buffer()` and asserts `len == capacity == initial_capacity`. Also
+  asserts second call returns empty Vec.
+- `buffer_pre_close_returns_full_capacity_vec` — exercises the
+  pre-build extraction path.
+
+---
+
+## Issue 2 — Suggestion (Test Quality): tautological assertion
+
+**File**: `src/producer/internals/producer_batch.rs:1336-1362`
+(`split_preserves_magic_and_compression_type_v2`).
+**Severity**: Suggestion (Test Quality).
+**Description**: Test ended with `assert!(res.is_ok() || res.is_err(),
+…)` — a tautology. The `let _ = MAGIC_VALUE_V1;` afterward was also
+dead code.
+
+**Disposition**: Fixed in commit `08bff9f` (fixup! `ba7f10b`).
+Took **option (a)** ("delete the smoke-check block"). The per-test
+docstring now records the v0/v1 deliberate skip with a pointer to the
+constants in `crate::common::record::record_batch`, so a reviewer
+cross-checking against Java's `testSplitPreservesMagicAndCompressionType`
+sees the omission documented without an in-test guard. Removed the
+now-unused `MAGIC_VALUE_V0` / `MAGIC_VALUE_V1` imports from the
+test-mod imports.
+
+---
+
+## Issue 3 — Suggestion (Behavior Drift): per-record-error semantics
+
+**File**: `src/producer/internals/producer_batch.rs:464-503`
+(`complete_future_and_fire_callbacks`).
+**Severity**: Suggestion (Behavior Drift, low-impact).
+**Description**: Rust collapsed Java's binary `recordExceptions ==
+null` bifurcation via `record_exceptions.as_ref().and_then(|f|
+f(i))`, so a closure that returned `None` for some index silently
+fell back to the success branch (Java would call
+`onCompletion(null, null)` instead).
+
+**Disposition**: Fixed in commit `c7c34a4` (fixup! `6a21ea3`).
+Took **option (b)** ("match Java exactly by bifurcating on
+`record_exceptions.is_none()`"). The error mode now passes the closure
+result through `on_completion(None, per_record_err.as_ref())` directly
+— mirroring Java's `onCompletion(null, recordExceptions.apply(i))`. The
+existing test
+`complete_exceptionally_with_null_record_errors_smokes_top_level`
+continues to pass because its assertions are about
+`future.get()` resolution (not callback invocation) — that path is
+unchanged.
+
+---
+
+## Phase 6b Round 1 Summary
+- **Bug — Missing Requirement**: 1 (Issue 1 — Fixed)
+- **Suggestion**: 2 (Issues 2, 3 — both Fixed)
+
+All 3 items addressed. Test count 989 → 991 (+2 regression tests for
+`buffer()`). DoD checks (build, test, format-check, lint) all green.
