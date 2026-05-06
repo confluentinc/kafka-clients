@@ -101,6 +101,15 @@ impl BuiltInPartitioner {
 
     /// Calculate the next partition for the topic based on the partition
     /// load stats. Mirrors Java's private `nextPartition`.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cluster` reports zero partitions for `self.topic` and
+    /// no partition load stats are configured. Mirrors Java's
+    /// `random % partitions.size()` raising `ArithmeticException` on
+    /// division by zero (BuiltInPartitioner.java line 82). Per
+    /// CLAUDE.md rule 10.1, panicking on `ArithmeticException`-like
+    /// conditions is acceptable.
     fn next_partition(&self, cluster: &Cluster) -> i32 {
         let random = self.random_partition();
 
@@ -140,12 +149,15 @@ impl BuiltInPartitioner {
                 let idx = (random as usize) % available_partitions.len();
                 partition = available_partitions[idx].partition();
             } else {
+                // Java line 82: `partition = random % partitions.size()`
+                // raises `ArithmeticException` if `partitions` is empty.
+                // We let the Rust `%` panic on the same condition for
+                // exact Java parity. CLAUDE.md rule 10.1 explicitly
+                // permits panic on division-by-zero. The previous
+                // version returned `-1`, which silently routed to
+                // "partition -1" and was a behavior divergence from
+                // Java.
                 let partitions = cluster.partitions_for_topic(&self.topic);
-                if partitions.is_empty() {
-                    // Java would throw ArithmeticException via the modulo;
-                    // mirror by returning -1 (invalid partition).
-                    return -1;
-                }
                 partition = (random as usize % partitions.len()) as i32;
             }
         }
@@ -630,5 +642,63 @@ mod tests {
     fn sticky_batch_size_one_does_not_panic() {
         // Construction should succeed (no panic).
         let _ = BuiltInPartitioner::new(&LogContext::new(), TOPIC_A, 1);
+    }
+
+    /// Regression for Phase 6c Round 1 Issue 5. Exercises the
+    /// "exists, return early" branch of `peek_current_partition_info`:
+    /// after one call has staged a sticky partition info, a second
+    /// call must return the same `Arc` (verified via `Arc::ptr_eq`)
+    /// without going through the `compare_and_swap` race-resolve
+    /// branch. This is the most-common hot-path branch in Java's
+    /// `peekCurrentPartitionInfo` (line 144-146: the early `return
+    /// partitionInfo` when `partitionInfo != null`).
+    #[test]
+    fn peek_current_partition_info_returns_staged_arc_on_second_call() {
+        let n = nodes();
+        let all_partitions = vec![
+            PartitionInfo::new(TOPIC_A, 0, Some(n[0].clone()), n.to_vec(), n.to_vec()),
+            PartitionInfo::new(TOPIC_A, 1, Some(n[1].clone()), n.to_vec(), n.to_vec()),
+            PartitionInfo::new(TOPIC_A, 2, Some(n[2].clone()), n.to_vec(), n.to_vec()),
+        ];
+        let cluster = Cluster::new(
+            Some("clusterId".to_string()),
+            n.to_vec(),
+            all_partitions,
+            HashSet::new(),
+            HashSet::new(),
+        );
+        let partitioner = sequential_partitioner(TOPIC_A, 100); // batch size large so no switch
+        let first = partitioner.peek_current_partition_info(&cluster);
+        let second = partitioner.peek_current_partition_info(&cluster);
+        // Same Arc — confirms the early-return path was taken on the
+        // second call.
+        assert!(Arc::ptr_eq(&first, &second), "second peek must return the staged Arc");
+        assert_eq!(first.partition(), second.partition());
+    }
+
+    /// Regression for Phase 6c Round 1 Issue 6. The `next_partition`
+    /// fall-through (no load stats, no available partitions, zero
+    /// total partitions) must panic on the modulo, mirroring Java's
+    /// `ArithmeticException`. Tested via `peek_current_partition_info`
+    /// since `next_partition` is private.
+    #[test]
+    fn next_partition_on_zero_partition_topic_panics() {
+        let n = nodes();
+        // Empty partitions vec for TOPIC_A.
+        let cluster = Cluster::new(
+            Some("clusterId".to_string()),
+            n.to_vec(),
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+        );
+        let partitioner = BuiltInPartitioner::new(&LogContext::new(), TOPIC_A, 1);
+        // peek_current_partition_info invokes next_partition on the
+        // race-winner branch; no other thread is running, so the path
+        // is deterministic.
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            partitioner.peek_current_partition_info(&cluster)
+        }));
+        assert!(result.is_err(), "expected panic on zero-partition topic");
     }
 }
