@@ -26,6 +26,33 @@
 //! [`tokio::time::sleep`] for `max.block.ms`. Per CLAUDE.md rule 9.6 the
 //! state mutex is **never** held across an `.await` — every await is
 //! preceded by an explicit `drop(state)` of the [`MutexGuard`].
+//!
+//! ## Cancellation safety
+//!
+//! Java relies on `try { … } finally { waiters.remove(moreMemory) }` which
+//! runs on `InterruptedException` from `await(...)` exactly like the
+//! normal-exit path. In Rust, when the future returned by `allocate_slow`
+//! is dropped while suspended at any of its `.await` points (the task is
+//! `abort()`-ed, the caller wraps the call in `tokio::time::timeout(...)`
+//! and the timeout fires, or any parent `select!` arm cancels the call),
+//! plain post-await cleanup does not run. We therefore wrap the
+//! enqueue/cleanup pair in a `WaiterGuard` whose `Drop` impl re-acquires
+//! the state mutex, removes the waiter, refunds any leftover `accumulated`
+//! bytes back into `non_pooled_available_memory`, returns any pooled
+//! buffer that was grabbed mid-loop, and signals the next waiter — the
+//! same set of side-effects Java's `finally` guarantees.
+//!
+//! ## Pool reuse and zero-fill
+//!
+//! Java's `BufferPool.deallocate(buf, size)` calls `buffer.clear()` which
+//! only resets `position=0, limit=capacity` — no bytes are touched. The
+//! Rust equivalent must not zero-fill on the recycle path. We therefore
+//! keep pooled `Vec<u8>` blocks at `len == capacity == poolable_size` at
+//! all times: `deallocate` pushes the buffer back unchanged, and
+//! pool-hit returns hand the buffer back unchanged. Callers (the future
+//! `MemoryRecordsBuilder`) overwrite the bytes on append; CLAUDE.md rule
+//! 12 forbids any intermediate copy or zero-fill on the producer send
+//! path.
 
 use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
@@ -73,7 +100,6 @@ pub(crate) struct BufferPool {
     total_memory: i64,
     poolable_size: i32,
     state: Mutex<State>,
-    #[allow(dead_code)]
     time: Arc<dyn Time>,
     allocator: ByteBufferAllocator,
     wait_recorder: WaitTimeRecorder,
@@ -136,12 +162,15 @@ impl BufferPool {
     /// - `IllegalArgumentException` if `size > totalMemory`
     /// - `KafkaException` if the producer is closed
     /// - `BufferExhaustedException` on timeout
-    /// - `InterruptedException` on `Thread.interrupt()` (no Rust analogue —
-    ///   omitted)
+    /// - `InterruptedException` on `Thread.interrupt()` — Rust translates
+    ///   this to "future-drop": cancelling the returned future cleans up
+    ///   the waiter queue via [`WaiterGuard`].
     ///
-    /// Returns a fresh `Vec<u8>` of length `size`. When the request can be
-    /// satisfied from the pooled `free` list, the recycled buffer is
-    /// resized to `size` (clearing it).
+    /// Returns a `Vec<u8>` of length `size`. When the request hits the
+    /// poolable free list the buffer is returned as-is (length already
+    /// equals `poolable_size == size`); the caller's first writes
+    /// overwrite the previous content. No zero-fill happens on either
+    /// the recycle or hand-out path — see module docs.
     pub async fn allocate(&self, size: i32, max_time_to_block_ms: i64) -> Result<Vec<u8>, KafkaError> {
         if size as i64 > self.total_memory {
             return Err(KafkaError::IllegalArgument(format!(
@@ -150,6 +179,25 @@ impl BufferPool {
             )));
         }
 
+        // Java wraps the entire allocate body in `try { ... } finally {
+        // signal_next_waiter_if_room }`. Returning Result + early returns
+        // doesn't compose with `finally` — so we factor the body into a
+        // helper that returns `(result, signal_after)` and always run the
+        // signal-next-waiter step before returning.
+        let outcome = self.allocate_inner(size, max_time_to_block_ms).await;
+        // Outer finally: signal the next waiter if there is room. Runs
+        // on every return path — fast-path pool hit, immediately
+        // satisfiable, slow-path success, slow-path error.
+        {
+            let mut state = self.state.lock().unwrap();
+            self.signal_next_waiter_if_room(&mut state);
+        }
+        outcome
+    }
+
+    /// Inner body of `allocate`. The outer `allocate` runs the
+    /// signal-next-waiter step on every return path.
+    async fn allocate_inner(&self, size: i32, max_time_to_block_ms: i64) -> Result<Vec<u8>, KafkaError> {
         // Fast path under the lock: pooled hit, or immediately satisfiable.
         let early = {
             let mut state = self.state.lock().unwrap();
@@ -159,13 +207,17 @@ impl BufferPool {
             if size == self.poolable_size
                 && let Some(buf) = state.free.pop_front()
             {
-                return Ok(prepare_recycled(buf, size));
+                // Pooled buffer: returned as-is. `len == capacity ==
+                // poolable_size == size` is an invariant of the free
+                // list. No zero-fill, matching Java's `buffer.clear()`
+                // which only resets position/limit.
+                debug_assert_eq!(buf.len(), size as usize);
+                return Ok(buf);
             }
             let free_list_size = self.free_size_locked(&state) as i64 * self.poolable_size as i64;
             if state.non_pooled_available_memory + free_list_size >= size as i64 {
                 self.free_up(&mut state, size);
                 state.non_pooled_available_memory -= size as i64;
-                self.signal_next_waiter_if_room(&mut state);
                 None
             } else {
                 Some(())
@@ -184,20 +236,22 @@ impl BufferPool {
 
     async fn allocate_slow(&self, size: i32, max_time_to_block_ms: i64) -> Result<Vec<u8>, KafkaError> {
         let waiter = Arc::new(Notify::new());
-        // Insert at tail of FIFO queue.
+        // Insert at tail of FIFO queue. Wrapped in a `WaiterGuard` so
+        // that any cancellation between this point and the success path
+        // (`guard.disarm()`) runs the same cleanup Java guarantees via
+        // `finally`: remove the waiter, refund `accumulated`, return any
+        // pooled buffer to the free list, and signal the next waiter.
         {
             let mut state = self.state.lock().unwrap();
             state.waiters.push_back(Arc::clone(&waiter));
         }
+        let mut guard = WaiterGuard::new(&self.state, &waiter, self.poolable_size);
 
-        let mut accumulated: i32 = 0;
-        let mut buffer: Option<Vec<u8>> = None;
         let mut remaining_ns: i64 = max_time_to_block_ms.saturating_mul(1_000_000);
         // Each wait iteration may yield a poolable buffer or accumulate
         // non-pooled bytes. Loop until accumulated >= size or we error.
         let mut error: Option<KafkaError> = None;
-        // The outer scope holds the closing finally semantics.
-        while accumulated < size {
+        while guard.accumulated < size {
             let start_ns = self.time.nanoseconds();
             let timed_out = Self::wait_for_notify(&waiter, remaining_ns).await;
             let end_ns = self.time.nanoseconds();
@@ -238,40 +292,38 @@ impl BufferPool {
 
             // Try to satisfy the request from pool / non-pooled.
             let mut state = self.state.lock().unwrap();
-            if accumulated == 0 && size == self.poolable_size && !state.free.is_empty() {
-                // Take the head of the free list as-is.
-                buffer = state.free.pop_front();
-                accumulated = size;
+            if guard.accumulated == 0 && size == self.poolable_size && !state.free.is_empty() {
+                // Take the head of the free list as-is. The buffer is
+                // already at len == poolable_size == size.
+                guard.buffer = state.free.pop_front();
+                guard.accumulated = size;
             } else {
-                self.free_up(&mut state, size - accumulated);
-                let got = std::cmp::min((size - accumulated) as i64, state.non_pooled_available_memory) as i32;
+                self.free_up(&mut state, size - guard.accumulated);
+                let got = std::cmp::min((size - guard.accumulated) as i64, state.non_pooled_available_memory) as i32;
                 state.non_pooled_available_memory -= got as i64;
-                accumulated += got;
+                guard.accumulated += got;
             }
         }
-
-        // Outer finally: reclaim leftover `accumulated` and remove waiter
-        // from the queue. Then signal next waiter if memory remains.
-        let return_buffer: Option<Vec<u8>> = {
-            let mut state = self.state.lock().unwrap();
-            if error.is_some() {
-                state.non_pooled_available_memory += accumulated as i64;
-            }
-            // Java: `this.waiters.remove(moreMemory)` removes the first
-            // matching entry by reference equality. `VecDeque::remove`
-            // takes an index, so iterate to find it.
-            if let Some(idx) = state.waiters.iter().position(|w| Arc::ptr_eq(w, &waiter)) {
-                state.waiters.remove(idx);
-            }
-            self.signal_next_waiter_if_room(&mut state);
-            buffer
-        };
 
         if let Some(e) = error {
+            // Drop runs and refunds `accumulated` + returns any pooled
+            // buffer + removes the waiter.
             return Err(e);
         }
-        if let Some(buf) = return_buffer {
-            Ok(prepare_recycled(buf, size))
+
+        // Success path: take the buffer (if any) out of the guard and
+        // disarm it so cleanup-on-drop becomes a no-op for waiter
+        // removal but still runs (releasing only the lock-bound state).
+        // Java: `accumulated = 0;` immediately before the finally so
+        // that `nonPooledAvailableMemory += accumulated;` is a no-op.
+        let buffer = guard.buffer.take();
+        guard.accumulated = 0;
+        guard.disarm();
+
+        if let Some(buf) = buffer {
+            // Pooled buffer recycled: return as-is. No zero-fill.
+            debug_assert_eq!(buf.len(), size as usize);
+            Ok(buf)
         } else {
             // No pooled buffer was used; allocate a fresh one. On
             // allocator failure return the bytes to non_pooled and
@@ -321,11 +373,37 @@ impl BufferPool {
         // that has been re-allocated in place during compression. We use
         // `Vec::capacity()` for the same purpose.
         if size == self.poolable_size && size as usize == buffer.capacity() {
-            // Java's `buffer.clear()` resets position=0, limit=capacity.
-            // For Vec<u8> we restore len = capacity (filled with zeros)
-            // so the recycled buffer behaves as a fresh allocation.
-            buffer.clear();
-            buffer.resize(self.poolable_size as usize, 0);
+            // Java's `buffer.clear()` is a position/limit reset — no
+            // bytes are touched. The Rust equivalent: restore `len =
+            // capacity` without zero-fill so the buffer can be returned
+            // to the free list at its full poolable size. We use
+            // `set_len` because `Vec::resize(N, 0)` would zero the whole
+            // buffer on every recycle (DoD line 10 / CLAUDE.md rule 12).
+            //
+            // SAFETY: The pool's invariant is that every buffer it hands
+            // out has `len == capacity == poolable_size` and that
+            // callers do not shrink the `Vec` (no `truncate`, `pop`,
+            // `clear`, `drain`) before returning it via `deallocate`.
+            // Under that invariant `len == capacity` already, and
+            // `set_len(capacity)` is a no-op. If a caller did shrink
+            // the buffer, the `(len..capacity)` bytes were previously
+            // written by an earlier producer of this same buffer (or
+            // by the initial `vec![0u8; size]` allocation), so they
+            // remain initialized `u8` values. Reading uninitialized
+            // memory would be UB, but we never can — every byte from
+            // 0..capacity has been written at some prior point. The
+            // recycled buffer's contents are conceptually "garbage"
+            // from the caller's viewpoint and must be overwritten
+            // before being read, exactly as with Java's
+            // `ByteBuffer.clear()` which leaves prior bytes in place.
+            debug_assert_eq!(
+                buffer.len(),
+                buffer.capacity(),
+                "BufferPool invariant: pooled buffers must not be shrunk before deallocate"
+            );
+            unsafe {
+                buffer.set_len(self.poolable_size as usize);
+            }
             state.free.push_back(buffer);
         } else {
             state.non_pooled_available_memory += size as i64;
@@ -415,11 +493,84 @@ impl BufferPool {
     }
 }
 
-/// Restore a recycled buffer to a fresh state of the requested size.
-fn prepare_recycled(mut buf: Vec<u8>, size: i32) -> Vec<u8> {
-    buf.clear();
-    buf.resize(size as usize, 0);
-    buf
+/// RAII guard for a single `allocate_slow` invocation. Mirrors Java's
+/// inner `try { ... } finally { nonPooledAvailableMemory += accumulated;
+/// waiters.remove(moreMemory); }` so cleanup runs whether the future
+/// completes normally, errors out, or is cancelled mid-await.
+///
+/// On the success path the caller calls [`WaiterGuard::disarm`] to
+/// suppress the cleanup; otherwise the `Drop` impl re-acquires the
+/// state mutex, removes the waiter from the queue, refunds any leftover
+/// `accumulated` bytes back into `non_pooled_available_memory`, returns
+/// any pooled buffer that was grabbed mid-loop to the free list, and
+/// signals the next waiter — the same set of side-effects Java's
+/// `finally` guarantees.
+struct WaiterGuard<'a> {
+    state: &'a Mutex<State>,
+    waiter: &'a Arc<Notify>,
+    poolable_size: i32,
+    /// Bytes reserved from `non_pooled_available_memory`; refunded on
+    /// drop unless the success path zeroes this out via `accumulated = 0`.
+    accumulated: i32,
+    /// Pooled buffer grabbed from `state.free` during the wait loop.
+    /// Returned to the free list on drop unless the success path takes
+    /// it via `buffer.take()`.
+    buffer: Option<Vec<u8>>,
+    /// `true` while the guard is "armed" — i.e. on drop, run cleanup.
+    /// Disarmed on the success path via [`WaiterGuard::disarm`].
+    armed: bool,
+}
+
+impl<'a> WaiterGuard<'a> {
+    fn new(state: &'a Mutex<State>, waiter: &'a Arc<Notify>, poolable_size: i32) -> Self {
+        WaiterGuard { state, waiter, poolable_size, accumulated: 0, buffer: None, armed: true }
+    }
+
+    /// Mark the guard as successful so `Drop` runs only the
+    /// waiter-removal + signal step (which is needed even on success
+    /// for a cancellation that races with disarm — we drop the guard
+    /// before the await of the final pool-hit return).
+    fn disarm(&mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for WaiterGuard<'_> {
+    fn drop(&mut self) {
+        // We hold a `std::sync::Mutex`; `lock()` may block but never
+        // crosses an `.await` because Drop runs synchronously.
+        let mut state = self.state.lock().unwrap();
+        // 1. Remove the waiter (Java: `this.waiters.remove(moreMemory)`).
+        if let Some(idx) = state.waiters.iter().position(|w| Arc::ptr_eq(w, self.waiter)) {
+            state.waiters.remove(idx);
+        }
+        if self.armed {
+            // 2. Refund leftover accumulated bytes (Java:
+            //    `nonPooledAvailableMemory += accumulated`).
+            state.non_pooled_available_memory += self.accumulated as i64;
+            // 3. Return any pooled buffer back to the free list. Java
+            //    has no analogue (a pooled buffer grabbed mid-await is
+            //    bound to the local variable and lost on
+            //    InterruptedException too — Java leaks the buffer in
+            //    that case). Returning it is strictly more correct.
+            if let Some(buf) = self.buffer.take() {
+                if self.poolable_size as usize == buf.capacity() && buf.len() == buf.capacity() {
+                    state.free.push_back(buf);
+                } else {
+                    // Buffer with non-poolable capacity — refund as
+                    // raw memory.
+                    state.non_pooled_available_memory += buf.capacity() as i64;
+                }
+            }
+        }
+        // 4. Signal next waiter if there is room. Mirrors Java's outer
+        //    `finally` block in `allocate`, which we cannot rely on
+        //    when the outer future itself is dropped.
+        let any_memory = !(state.non_pooled_available_memory == 0 && state.free.is_empty());
+        if any_memory && let Some(head) = state.waiters.front() {
+            head.notify_one();
+        }
+    }
 }
 
 fn default_allocator() -> ByteBufferAllocator {
@@ -623,16 +774,14 @@ mod tests {
     }
 
     /// Java: `BufferPoolTest#testCleanupMemoryAvailabilityWaiterOnInterruption`.
-    /// Rust translation: tokio's task `abort` plays the role of
-    /// `Thread.interrupt()`. Drops cancel the futures, which means our
-    /// waiter cleanup must happen via `Drop` — but the original Java code
-    /// relies on `try/finally` running unconditionally. In Rust, when a
-    /// future is cancelled mid-await, the `finally` block (the post-await
-    /// cleanup) is not executed. We therefore simulate the same outcome
-    /// by closing the pool, which Java would not do — but the
-    /// observational test (`pool.queued() == 0`) is preserved by
-    /// closing the pool, which signals all waiters; each then sees the
-    /// closed flag and returns Err, releasing the waiter slot.
+    /// Rust translation: [`JoinHandle::abort`] plays the role of
+    /// `Thread.interrupt()`. The future returned by `allocate(...)` is
+    /// dropped while still suspended at its `Notify::notified()` await
+    /// point; the `WaiterGuard`'s [`Drop`] impl then removes the waiter
+    /// from the queue, refunds any reserved memory, and signals the
+    /// next waiter. `pool.queued() == 0` asserts the cleanup actually
+    /// ran — without the guard this test would observe a leaked
+    /// waiter and fail.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn test_cleanup_memory_availability_waiter_on_cancellation() {
         let pool = Arc::new(BufferPool::new(2, 1, system_time(), METRIC_GROUP));
@@ -660,13 +809,91 @@ mod tests {
         let c2 = Arc::clone(&waiters_before[1]);
         assert!(!Arc::ptr_eq(&c1, &c2));
 
-        // Closing the pool releases both waiters with a closed-pool
-        // error (the closest analogue of Thread.interrupt() that Rust
-        // can offer without breaking cancellation safety).
-        pool.close();
+        // Aborting the tasks drops the in-flight `allocate` futures
+        // mid-await. The `WaiterGuard`'s `Drop` impl must remove each
+        // waiter from the queue and signal the next.
+        t1.abort();
+        t2.abort();
         let _ = t1.await;
         let _ = t2.await;
 
+        // Drain time: the abort signal needs a runtime tick to reach
+        // the cancelled tasks and run their Drop chain. Spin briefly
+        // until the queue drains (or fail with a clear message).
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pool.queued() != 0 {
+            assert!(
+                Instant::now() < deadline,
+                "waiter queue did not drain after abort: {} waiter(s) remained",
+                pool.queued()
+            );
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(0, pool.queued());
+    }
+
+    /// Regression for Issue 1: a cancelled `allocate(...)` future (here:
+    /// via `tokio::time::timeout`) must not leave a leaked waiter that
+    /// then swallows the next `deallocate` signal — live waiters
+    /// behind the leak should still be woken in O(1) instead of
+    /// stalling until their own `max.block.ms`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn cancelled_allocate_does_not_stall_subsequent_waiter() {
+        let pool = Arc::new(BufferPool::new(2, 1, system_time(), METRIC_GROUP));
+        // Fully consume the pool.
+        let buf = pool.allocate(2, MAX_BLOCK_TIME_MS).await.unwrap();
+        assert_eq!(0, pool.available_memory());
+
+        // Cancellable allocator: wraps `allocate(2, large)` in
+        // `tokio::time::timeout(50ms)` so the inner future is dropped
+        // while suspended at `notified().await`. This is exactly the
+        // Java `try { await(...) } finally { remove }` corner case
+        // (`InterruptedException` from `await`).
+        let pool_cancel = Arc::clone(&pool);
+        let cancel_handle = tokio::spawn(async move {
+            let _ = tokio::time::timeout(Duration::from_millis(50), pool_cancel.allocate(2, 60_000)).await;
+        });
+        // Wait until the cancelled task has enqueued.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pool.queued() != 1 {
+            assert!(Instant::now() < deadline, "first waiter never enqueued");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Wait for the timeout to fire (and the WaiterGuard drop to
+        // remove the leaked waiter).
+        cancel_handle.await.unwrap();
+        // Spin briefly until the queue drains.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pool.queued() != 0 {
+            assert!(Instant::now() < deadline, "leaked waiter not removed after cancel");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        assert_eq!(0, pool.queued());
+
+        // Now spawn a "live" waiter and verify it is woken promptly by
+        // a subsequent `deallocate`. Without the Drop guard, the
+        // `notify_one()` in deallocate would target the leaked waiter
+        // (a no-listener `Notify`), and the live waiter would only
+        // wake when its own block-time elapsed.
+        let pool_live = Arc::clone(&pool);
+        let live_handle = tokio::spawn(async move {
+            // Long block time — should never be reached if the wakeup
+            // chain is correct.
+            pool_live.allocate(2, 60_000).await
+        });
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while pool.queued() != 1 {
+            assert!(Instant::now() < deadline, "live waiter never enqueued");
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Deallocate — head of queue is now the live waiter, so
+        // `notify_one()` reaches a real listener.
+        pool.deallocate_full(buf);
+        let result = tokio::time::timeout(Duration::from_secs(1), live_handle).await;
+        let outcome = result
+            .expect("live waiter not woken within 1s — leaked-ghost wakeup bug")
+            .unwrap();
+        assert!(outcome.is_ok(), "live waiter expected Ok after deallocate, got {outcome:?}");
         assert_eq!(0, pool.queued());
     }
 
