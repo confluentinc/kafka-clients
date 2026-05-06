@@ -25,6 +25,8 @@
 //! Per CLAUDE.md rule 11, we avoid `Pin<Box<dyn Future>>` per record by
 //! exposing `get` as a concrete `async fn`.
 
+#![allow(dead_code)] // Phase 6b (ProducerBatch) wires `chain` and `is_done`.
+
 use std::sync::{Arc, OnceLock};
 
 use crate::common::errors::KafkaError;
@@ -41,7 +43,10 @@ pub(crate) struct FutureRecordMetadata {
     create_timestamp: i64,
     serialized_key_size: i32,
     serialized_value_size: i32,
-    #[allow(dead_code)]
+    /// Unused in the Rust port: Java's `time` field powers the
+    /// `get(timeout, unit)` overload (see module docs for skipped
+    /// tests). Retained as a constructor parameter for Java parity so
+    /// that 6b/6c builders can pass through their own `Time` source.
     time: Arc<dyn Time>,
     /// Set once when the parent batch is split and a new
     /// `FutureRecordMetadata` is created for the child. After it is set,
@@ -160,10 +165,18 @@ mod tests {
     //! awaits the parent first, then awaits the chain — and `tokio::time::timeout`
     //! covers both transparently.
     //!
-    //! We replace those two tests with a deadline-propagation
-    //! verification that sets up a real chain, completes both sides
-    //! out-of-order, and asserts the final metadata corresponds to the
-    //! chain tail.
+    //! We replace those two tests with two Rust-shape equivalents:
+    //!
+    //! - [`tests::chain_resolves_to_tail_metadata`] sets up a real
+    //!   chain, completes parent then child out-of-order, and asserts
+    //!   the final metadata corresponds to the chain tail.
+    //! - [`tests::outer_timeout_cancels_chained_inner_await`] is the
+    //!   deadline-propagation guard: completes the parent, leaves the
+    //!   child pending, and asserts that `tokio::time::timeout(d,
+    //!   parent_future.get())` fires (because `get` continues to await
+    //!   the child after the parent resolves). This is the equivalent
+    //!   of "the remaining timeout is propagated to the chained
+    //!   future" in idiomatic Rust.
 
     use super::*;
     use crate::common::record::record_batch::NO_TIMESTAMP;
@@ -201,6 +214,36 @@ mod tests {
         // After chaining, the final metadata corresponds to the chain
         // tail (offset = 200 + batch_index 0).
         assert_eq!(200, metadata.offset());
+    }
+
+    /// Deadline-propagation guard equivalent to Java's
+    /// `testFutureGetWithSeconds` / `testFutureGetWithMilliSeconds`.
+    /// In Java the bug under test was: after the parent batch's `get`
+    /// returns, the chained `get(timeout, unit)` must use the
+    /// **remaining** budget, not the original. In Rust the natural
+    /// idiom is `tokio::time::timeout(d, f.get())`, which transparently
+    /// covers both awaits — this test asserts that wrapping the chain
+    /// head's `get()` in `tokio::time::timeout(...)` does in fact
+    /// cancel the chained inner await once the parent has completed
+    /// and the child is still pending. Without proper chain
+    /// propagation, the outer timeout would resolve immediately to the
+    /// parent's metadata instead of waiting for the child.
+    #[tokio::test]
+    async fn outer_timeout_cancels_chained_inner_await() {
+        let parent = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
+        let child = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
+        let parent_future = future_for(Arc::clone(&parent));
+        parent_future.chain(Arc::new(future_for(Arc::clone(&child))));
+
+        // Complete the parent only — child stays pending forever.
+        parent.set(0, NO_TIMESTAMP, None);
+        parent.done();
+
+        let elapsed = tokio::time::timeout(Duration::from_millis(50), parent_future.get()).await;
+        assert!(
+            elapsed.is_err(),
+            "outer tokio::time::timeout should fire because the chained child future never completes; got {elapsed:?}"
+        );
     }
 
     #[tokio::test]
