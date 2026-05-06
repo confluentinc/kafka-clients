@@ -15,6 +15,7 @@
 //! Translation of `org.apache.kafka.clients.producer.internals`.
 
 pub(crate) mod buffer_pool;
+pub(crate) mod built_in_partitioner;
 pub(crate) mod error_logging_callback;
 pub(crate) mod future_record_metadata;
 pub(crate) mod incomplete_batches;
@@ -26,6 +27,8 @@ pub(crate) mod transaction_manager;
 
 #[allow(unused_imports)]
 pub(crate) use buffer_pool::BufferPool;
+#[allow(unused_imports)]
+pub(crate) use built_in_partitioner::BuiltInPartitioner;
 #[allow(unused_imports)]
 pub(crate) use error_logging_callback::ErrorLoggingCallback;
 #[allow(unused_imports)]
