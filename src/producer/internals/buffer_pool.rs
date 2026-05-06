@@ -891,9 +891,13 @@ mod tests {
         // Deallocate — head of queue is now the live waiter, so
         // `notify_one()` reaches a real listener.
         pool.deallocate_full(buf);
-        let result = tokio::time::timeout(Duration::from_secs(1), live_handle).await;
+        // 3s envelope (vs the 60s `block_time`) leaves ample margin
+        // under a slow CI runner: if the guard works, the wake-up is
+        // sub-millisecond; if it doesn't, the live waiter sleeps the
+        // full block_time.
+        let result = tokio::time::timeout(Duration::from_secs(3), live_handle).await;
         let outcome = result
-            .expect("live waiter not woken within 1s — leaked-ghost wakeup bug")
+            .expect("live waiter not woken within 3s — leaked-ghost wakeup bug")
             .unwrap();
         assert!(outcome.is_ok(), "live waiter expected Ok after deallocate, got {outcome:?}");
         assert_eq!(0, pool.queued());
