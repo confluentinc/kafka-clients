@@ -37,8 +37,12 @@ const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 
 /// State of the append stream.
 enum AppendState<W: Write> {
-    /// Stream is open for appending records.
-    Open(CompressingWriter<W>),
+    /// No compression — records are written directly into the main buffer,
+    /// eliminating one full copy of the record bytes.
+    Direct,
+    /// Compression — records go through a `CompressingWriter` into a separate
+    /// buffer, then the compressed output is appended to the main buffer on close.
+    Compressed(CompressingWriter<W>),
     /// Stream has been closed (records cannot be appended).
     Closed,
 }
@@ -83,7 +87,10 @@ pub struct MemoryRecordsBuilder {
     last_offset: Option<i64>,
     base_timestamp: Option<i64>,
 
+    initial_buffer_capacity: usize,
     built_records: Option<MemoryRecords>,
+    built_size: Option<usize>,
+    closed: bool,
     aborted: bool,
 }
 
@@ -133,6 +140,7 @@ impl MemoryRecordsBuilder {
         }
 
         let batch_header_size = record_batch_header_size_in_bytes(magic, compression.compression_type());
+        let initial_buffer_capacity = buffer.capacity();
 
         // Ensure the buffer is large enough for the header
         let header_end = initial_position + batch_header_size;
@@ -140,11 +148,18 @@ impl MemoryRecordsBuilder {
             buffer.resize(header_end, 0);
         }
 
-        // Create the append stream (compression wraps a separate Vec<u8>)
-        let append_buf = Vec::new();
-        let append_writer = compression
-            .wrap_for_output(append_buf, magic)
-            .expect("Failed to create compression writer");
+        let append_stream = if compression.compression_type() == CompressionType::None {
+            // Truncate to header_end so Write::write_all appends records
+            // right after the header placeholder.
+            buffer.truncate(header_end);
+            AppendState::Direct
+        } else {
+            let append_buf = Vec::new();
+            let writer = compression
+                .wrap_for_output(append_buf, magic)
+                .expect("Failed to create compression writer");
+            AppendState::Compressed(writer)
+        };
 
         let has_delete_horizon = magic >= RecordBatch::MAGIC_VALUE_V2 && delete_horizon_ms >= 0;
         let base_timestamp = if has_delete_horizon {
@@ -167,7 +182,7 @@ impl MemoryRecordsBuilder {
             batch_header_size_in_bytes: batch_header_size,
             delete_horizon_ms,
             estimated_compression_ratio: 1.0,
-            append_stream: AppendState::Open(append_writer),
+            append_stream,
             is_transactional,
             producer_id,
             producer_epoch,
@@ -179,7 +194,10 @@ impl MemoryRecordsBuilder {
             offset_of_max_timestamp: -1,
             last_offset: None,
             base_timestamp,
+            initial_buffer_capacity,
             built_records: None,
+            built_size: None,
+            closed: false,
             aborted: false,
         }
     }
@@ -233,7 +251,7 @@ impl MemoryRecordsBuilder {
 
     /// Returns the initial capacity of the buffer.
     pub fn initial_capacity(&self) -> usize {
-        self.buffer.capacity()
+        self.initial_buffer_capacity
     }
 
     /// Takes ownership of the underlying buffer, leaving an empty Vec in its place.
@@ -278,6 +296,23 @@ impl MemoryRecordsBuilder {
         }
         self.close();
         self.built_records.clone().expect("build() called but no records built")
+    }
+
+    /// Take the built records, consuming them from the builder.
+    ///
+    /// Unlike [`build`](Self::build), this can only be called once — subsequent
+    /// calls return `None`. Avoids cloning the batch buffer.
+    pub fn take_built_records(&mut self) -> Option<MemoryRecords> {
+        if self.closed && self.built_records.is_none() && self.num_records > 0 {
+            let batch_data = self.take_batch_data();
+            self.built_records = Some(MemoryRecords::new(batch_data));
+        }
+        self.close();
+        let records = self.built_records.take();
+        if let Some(ref r) = records {
+            self.built_size = Some(r.size_in_bytes());
+        }
+        records
     }
 
     /// Returns info about the records (max timestamp and shallow offset).
@@ -336,7 +371,7 @@ impl MemoryRecordsBuilder {
     ///
     /// Panics if the records have already been built.
     pub fn override_last_offset(&mut self, last_offset: i64) {
-        if self.built_records.is_some() {
+        if self.closed {
             panic!("Cannot override the last offset after the records have been built");
         }
         self.last_offset = Some(last_offset);
@@ -346,10 +381,12 @@ impl MemoryRecordsBuilder {
     ///
     /// After this method is called, it's only possible to update the RecordBatch header.
     pub fn close_for_record_appends(&mut self) {
-        if let AppendState::Open(writer) = std::mem::replace(&mut self.append_stream, AppendState::Closed) {
-            match writer.finish() {
+        match std::mem::replace(&mut self.append_stream, AppendState::Closed) {
+            AppendState::Direct => {
+                // Records already written directly into self.buffer — nothing to copy.
+            },
+            AppendState::Compressed(writer) => match writer.finish() {
                 Ok(compressed_data) => {
-                    // Append the compressed data to the buffer
                     let header_end = self.initial_position + self.batch_header_size_in_bytes;
                     self.buffer.truncate(header_end);
                     self.buffer.extend_from_slice(&compressed_data);
@@ -357,7 +394,8 @@ impl MemoryRecordsBuilder {
                 Err(e) => {
                     panic!("Failed to finish compression: {}", e);
                 },
-            }
+            },
+            AppendState::Closed => {},
         }
     }
 
@@ -380,6 +418,8 @@ impl MemoryRecordsBuilder {
             panic!("Should not reopen a batch which is already aborted.");
         }
         self.built_records = None;
+        self.built_size = None;
+        self.closed = false;
         self.producer_id = producer_id;
         self.producer_epoch = producer_epoch;
         self.base_sequence = base_sequence;
@@ -394,7 +434,7 @@ impl MemoryRecordsBuilder {
             panic!("Cannot close MemoryRecordsBuilder as it has already been aborted");
         }
 
-        if self.built_records.is_some() {
+        if self.closed {
             return;
         }
 
@@ -409,13 +449,18 @@ impl MemoryRecordsBuilder {
             let written_compressed = self.write_default_batch_header();
             self.actual_compression_ratio = written_compressed as f32 / self.uncompressed_records_size_in_bytes as f32;
 
-            let batch_data = self.buffer[self.initial_position..].to_vec();
+            let batch_data = self.take_batch_data();
             self.built_records = Some(MemoryRecords::new(batch_data));
         } else {
             // Legacy format not supported
-            let batch_data = self.buffer[self.initial_position..].to_vec();
+            let batch_data = self.take_batch_data();
             self.built_records = Some(MemoryRecords::new(batch_data));
         }
+        self.closed = true;
+    }
+
+    fn take_batch_data(&mut self) -> Vec<u8> {
+        self.buffer[self.initial_position..].to_vec()
     }
 
     fn validate_producer_state(&self) {
@@ -643,7 +688,12 @@ impl MemoryRecordsBuilder {
         headers: &[RecordHeader],
     ) -> io::Result<usize> {
         match &mut self.append_stream {
-            AppendState::Open(writer) => {
+            AppendState::Direct => {
+                let size =
+                    DefaultRecord::write_to(&mut self.buffer, offset_delta, timestamp_delta, key, value, headers)?;
+                Ok(size as usize)
+            },
+            AppendState::Compressed(writer) => {
                 let size = DefaultRecord::write_to(writer, offset_delta, timestamp_delta, key, value, headers)?;
                 Ok(size as usize)
             },
@@ -760,7 +810,7 @@ impl MemoryRecordsBuilder {
 
     /// Returns whether the builder has been closed (records have been built).
     pub fn is_closed(&self) -> bool {
-        self.built_records.is_some()
+        self.closed
     }
 
     /// Returns whether the batch is full.
@@ -774,9 +824,12 @@ impl MemoryRecordsBuilder {
     /// The returned value is exactly correct if the record set is not compressed
     /// or if the builder has been closed.
     pub fn estimated_size_in_bytes(&self) -> usize {
-        match &self.built_records {
-            Some(records) => records.size_in_bytes(),
-            None => self.estimated_bytes_written(),
+        if let Some(records) = &self.built_records {
+            records.size_in_bytes()
+        } else if let Some(size) = self.built_size {
+            size
+        } else {
+            self.estimated_bytes_written()
         }
     }
 
@@ -811,7 +864,7 @@ impl MemoryRecordsBuilder {
 impl Drop for MemoryRecordsBuilder {
     fn drop(&mut self) {
         // Ensure resources are released
-        if !self.aborted && self.built_records.is_none() {
+        if !self.aborted && !self.closed {
             // Try to close gracefully, but don't panic in Drop
             let _ = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                 self.close_for_record_appends();
