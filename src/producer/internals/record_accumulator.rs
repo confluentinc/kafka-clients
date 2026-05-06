@@ -1403,6 +1403,213 @@ impl RecordAccumulator {
         map.insert(topic, info.clone());
         info
     }
+
+    // -------------------- Flush / abort / close --------------------
+
+    /// Initiate the flushing of data from the accumulator — marks all
+    /// requests immediately ready. Mirrors Java's `beginFlush()`.
+    pub fn begin_flush(&self) {
+        self.flushes_in_progress.fetch_add(1, Ordering::AcqRel);
+    }
+
+    /// Mark all partitions as ready to send and block until the send
+    /// is complete. Mirrors Java's
+    /// `awaitFlushCompletion()` at `RecordAccumulator.java:1098-1114`.
+    ///
+    /// Java uses `awaitAllDependents()` to ensure split batches are
+    /// also waited for. We mirror with
+    /// [`ProduceRequestResult::await_all_dependents`].
+    pub async fn await_flush_completion(&self) {
+        // Snapshot of all ProduceRequestResults at the time of flush.
+        // We must not hold a reference to the ProducerBatch(s) so they
+        // can be dropped/recycled by the sender independently.
+        let results = self.incomplete.request_results();
+        // Use a guard to mirror Java's `try { ... } finally
+        // { decrementAndGet(); }` even on cancellation.
+        let _flush_guard = FlushInProgressGuard::new(self);
+        for result in results {
+            // `await_all_dependents` walks the chain so split batches
+            // are awaited. CLAUDE.md rule 9.6: never holds a Mutex
+            // guard across the await — the dependents are visited via
+            // a queue inside the helper, locking the dependents-mutex
+            // briefly to extract a snapshot before recursing.
+            result.await_all_dependents().await;
+        }
+        // Drop guard runs `flushes_in_progress.fetch_sub(1)`.
+    }
+
+    /// Complete and deallocate the record batch. Mirrors Java's
+    /// `completeAndDeallocateBatch(ProducerBatch)`.
+    pub fn complete_and_deallocate_batch(&self, batch: Arc<ProducerBatch>) {
+        self.complete_batch(&batch);
+        self.deallocate(&batch);
+    }
+
+    /// Remove from the incomplete list but do not free memory yet.
+    /// Mirrors Java's `completeBatch(ProducerBatch)`.
+    pub fn complete_batch(&self, batch: &Arc<ProducerBatch>) {
+        self.incomplete.remove(batch);
+    }
+
+    /// Only perform deallocation (and not removal from the incomplete
+    /// set). Mirrors Java's `deallocate(ProducerBatch)` at
+    /// `RecordAccumulator.java:1040-1056`.
+    pub fn deallocate(&self, batch: &ProducerBatch) {
+        // Only deallocate the batch if it is not a split batch — split
+        // batches are allocated outside the buffer pool.
+        if batch.is_split_batch() {
+            return;
+        }
+        if batch.is_buffer_deallocated() {
+            log::warn!(
+                "{}Skipping deallocating a batch that has already been deallocated. Batch is {}, created time is {}",
+                self.log_prefix,
+                batch,
+                batch.created_ms()
+            );
+            return;
+        }
+        batch.mark_buffer_deallocated();
+        if batch.is_inflight() {
+            // KAFKA-19012: if the batch has been sent it might still
+            // be in use by the network client so we cannot allow it
+            // to be reused yet. Java creates a fresh `ByteBuffer` of
+            // `initialCapacity()` and routes that to the pool to keep
+            // accounting consistent, then panics. We mirror by
+            // allocating a fresh `Vec<u8>` and routing it through the
+            // pool's `deallocate_full` so the available-memory
+            // accounting is preserved, then panic.
+            let cap = batch.initial_capacity();
+            let surrogate = vec![0u8; cap];
+            self.free.deallocate(surrogate, cap as i32);
+            panic!("Attempting to deallocate a batch that is inflight. Batch is {}", batch);
+        }
+        let buffer = batch.buffer();
+        self.free.deallocate(buffer, batch.initial_capacity() as i32);
+    }
+
+    /// `true` iff [`Self::abort_incomplete_batches`] / `close` have
+    /// been called or the underlying buffer pool is closed.
+    pub fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
+    /// This function is only called when the sender is closed
+    /// forcefully. It will fail all the incomplete batches and
+    /// return. Mirrors Java's `abortIncompleteBatches()` at
+    /// `RecordAccumulator.java:1127-1140`.
+    pub fn abort_incomplete_batches(&self) {
+        // We need to keep aborting the incomplete batch until no
+        // thread is trying to append. Java has a tight loop here.
+        loop {
+            self.abort_batches_with_default_reason();
+            if !self.appends_in_progress() {
+                break;
+            }
+        }
+        // After this point, no thread will append any messages because
+        // they will see the `closed` flag set. We need to do the last
+        // abort after no thread was appending in case there was a new
+        // batch appended by the last appending thread.
+        self.abort_batches_with_default_reason();
+        self.topic_info_map.lock().unwrap().clear();
+    }
+
+    fn abort_batches_with_default_reason(&self) {
+        self.abort_batches(KafkaError::IllegalState("Producer is closed forcefully.".to_string()));
+    }
+
+    /// Abort all incomplete batches (whether they have been sent or
+    /// not). Mirrors Java's `abortBatches(RuntimeException reason)` at
+    /// `RecordAccumulator.java:1152-1169`.
+    pub fn abort_batches(&self, reason: KafkaError) {
+        for batch in self.incomplete.copy_all() {
+            if let Some(dq_arc) = self.get_deque(batch.topic_partition()) {
+                let mut dq = dq_arc.lock().unwrap();
+                batch.abort_record_appends();
+                // Java: `dq.remove(batch)` — identity-equality remove.
+                // We mirror by `Arc::ptr_eq` filtering.
+                let pos = dq.iter().position(|b| Arc::ptr_eq(b, &batch));
+                if let Some(pos) = pos {
+                    dq.remove(pos);
+                }
+            }
+            batch.abort(reason.clone());
+            if batch.is_inflight() {
+                // KAFKA-19012: skip deallocate; the network client
+                // will release the buffer when the in-flight request
+                // completes via `Sender.completeBatch` /
+                // `Sender.failBatch`.
+                self.complete_batch(&batch);
+            } else {
+                self.complete_and_deallocate_batch(batch);
+            }
+        }
+    }
+
+    /// Abort any batches which have not been drained. Mirrors Java's
+    /// `abortUndrainedBatches(RuntimeException reason)` at
+    /// `RecordAccumulator.java:1174-1190`.
+    pub fn abort_undrained_batches(&self, reason: KafkaError) {
+        for batch in self.incomplete.copy_all() {
+            let aborted = if let Some(dq_arc) = self.get_deque(batch.topic_partition()) {
+                let mut dq = dq_arc.lock().unwrap();
+                // transactionManager == None this milestone — so the
+                // condition simplifies to `!batch.is_closed()`.
+                let cond = if self.transaction_manager.is_some() {
+                    unreachable!("transaction_manager is always None per Phase 6 plug-in contract");
+                } else {
+                    !batch.is_closed()
+                };
+                if cond {
+                    batch.abort_record_appends();
+                    let pos = dq.iter().position(|b| Arc::ptr_eq(b, &batch));
+                    if let Some(pos) = pos {
+                        dq.remove(pos);
+                    }
+                    true
+                } else {
+                    false
+                }
+            } else {
+                false
+            };
+            if aborted {
+                batch.abort(reason.clone());
+                self.complete_and_deallocate_batch(batch);
+            }
+        }
+    }
+
+    /// Close this accumulator and force all the record buffers to be
+    /// drained. Mirrors Java's `close()` at
+    /// `RecordAccumulator.java:1203-1206`.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Release);
+        self.free.close();
+    }
+}
+
+/// Symmetric to [`AppendInProgressGuard`]: decrements
+/// `flushesInProgress` on drop. Mirrors Java's `try { … } finally
+/// { flushesInProgress.decrementAndGet(); }` at
+/// `RecordAccumulator.java:1099-1113`. Java doesn't increment in this
+/// method (the increment happens in `beginFlush`), but the decrement
+/// must happen on every return path of `awaitFlushCompletion`.
+struct FlushInProgressGuard<'a> {
+    accumulator: &'a RecordAccumulator,
+}
+
+impl<'a> FlushInProgressGuard<'a> {
+    fn new(accumulator: &'a RecordAccumulator) -> Self {
+        Self { accumulator }
+    }
+}
+
+impl Drop for FlushInProgressGuard<'_> {
+    fn drop(&mut self) {
+        self.accumulator.flushes_in_progress.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 // SAFETY of `Send + Sync`:
@@ -2073,6 +2280,104 @@ mod tests {
         assert_eq!(2, dq.len());
         assert!(Arc::ptr_eq(&dq[0], &original), "reenqueued batch must be at the head");
         assert!(original.in_retry(), "reenqueue should set retry=true");
+    }
+
+    // -------------------- Flush / abort / close --------------------
+
+    #[tokio::test]
+    async fn await_flush_completion_returns_immediately_when_no_batches() {
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        accum.begin_flush();
+        // No incomplete batches → flush completes immediately.
+        accum.await_flush_completion().await;
+        assert!(!accum.flush_in_progress(), "flushes_in_progress decremented");
+    }
+
+    #[tokio::test]
+    async fn await_flush_completion_waits_for_batch_done() {
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let r = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        accum.begin_flush();
+        // Spawn the flush wait, then complete the batch from the main task.
+        let accum2 = accum.clone();
+        let flush_task = tokio::spawn(async move {
+            accum2.await_flush_completion().await;
+        });
+        // Find the batch via the partition's deque and complete it.
+        let dq = accum.get_deque(&TopicPartition::new("test", 0)).expect("deque");
+        let batch = {
+            let dq = dq.lock().unwrap();
+            dq.front().cloned().expect("batch")
+        };
+        // Mark the produce future as set + done so awaiters wake.
+        batch.complete(0, 0);
+        // The future returned by `append` should also resolve.
+        let _ = r.future.get().await;
+        // The flush task should finish promptly.
+        tokio::time::timeout(std::time::Duration::from_millis(500), flush_task)
+            .await
+            .expect("flush completed within 500ms")
+            .expect("no panic");
+        assert!(!accum.flush_in_progress());
+    }
+
+    #[tokio::test]
+    async fn abort_incomplete_batches_clears_topic_info_map() {
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        assert!(accum.has_incomplete());
+        accum.close();
+        accum.abort_incomplete_batches();
+        assert!(!accum.has_incomplete(), "incomplete batches drained");
+        // The topic_info_map is cleared by abort_incomplete_batches.
+        assert!(accum.topic_info_map.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn abort_undrained_batches_aborts_open_batches() {
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        assert!(accum.has_incomplete());
+        accum.abort_undrained_batches(KafkaError::IllegalState("test reason".to_string()));
+        // Undrained batch is aborted and removed from incomplete.
+        assert!(!accum.has_incomplete());
+    }
+
+    #[tokio::test]
+    async fn close_marks_accumulator_and_buffer_pool_closed() {
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        assert!(!accum.is_closed());
+        accum.close();
+        assert!(accum.is_closed());
+        // Buffer pool is also closed — allocate must error now.
+        let r = accum.buffer_pool().allocate(1024, 1000).await;
+        assert!(r.is_err());
+    }
+
+    #[tokio::test]
+    async fn complete_batch_removes_from_incomplete_set() {
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let dq = accum.get_deque(&TopicPartition::new("test", 0)).expect("deque");
+        let batch = dq.lock().unwrap().front().cloned().expect("batch");
+        accum.complete_batch(&batch);
+        assert!(!accum.has_incomplete(), "batch removed from incomplete");
     }
 
     #[tokio::test]
