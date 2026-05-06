@@ -45,9 +45,11 @@ use super::{ChannelState, channel_state};
 
 use futures_util::future::select_all;
 use indexmap::IndexMap;
-use log::{debug, error, trace};
 use tokio::net::TcpSocket;
 use tokio::sync::Notify;
+
+use crate::common::utils::LogContext;
+use crate::{kafka_debug, kafka_error, kafka_trace};
 
 use std::collections::{HashMap, HashSet, LinkedList};
 use std::future::Future;
@@ -120,6 +122,10 @@ pub struct Selector {
     notify: Arc<Notify>,
     /// Whether progress was made reading in the last poll.
     made_read_progress_last_poll: bool,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `Selector`.
+    log_context: LogContext,
 }
 
 impl Selector {
@@ -133,6 +139,25 @@ impl Selector {
     ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
     /// * `channel_builder` - Channel builder for every new connection
     pub fn new(max_receive_size: i32, connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
+        Self::with_log_context(max_receive_size, connection_max_idle_ms, channel_builder, LogContext::empty())
+    }
+
+    /// Create a new selector with a `LogContext`.
+    ///
+    /// # Arguments
+    ///
+    /// * `max_receive_size` - Max size in bytes of a single network receive
+    ///   (use `UNLIMITED` for no limit)
+    /// * `connection_max_idle_ms` - Max idle connection time
+    ///   (use [`NO_IDLE_TIMEOUT_MS`] to disable idle timeout)
+    /// * `channel_builder` - Channel builder for every new connection
+    /// * `log_context` - Contextual log message prefix
+    pub fn with_log_context(
+        max_receive_size: i32,
+        connection_max_idle_ms: i64,
+        channel_builder: Box<dyn ChannelBuilder>,
+        log_context: LogContext,
+    ) -> Self {
         Self {
             channels: HashMap::new(),
             explicitly_muted_channels: HashSet::new(),
@@ -153,12 +178,27 @@ impl Selector {
             },
             notify: Arc::new(Notify::new()),
             made_read_progress_last_poll: true,
+            log_context,
         }
     }
 
     /// Convenience constructor matching the common Java pattern.
     pub fn with_defaults(connection_max_idle_ms: i64, channel_builder: Box<dyn ChannelBuilder>) -> Self {
         Self::new(super::network_receive::UNLIMITED, connection_max_idle_ms, channel_builder)
+    }
+
+    /// Create a new selector with default max receive size and a `LogContext`.
+    pub fn with_defaults_and_log_context(
+        connection_max_idle_ms: i64,
+        channel_builder: Box<dyn ChannelBuilder>,
+        log_context: LogContext,
+    ) -> Self {
+        Self::with_log_context(
+            super::network_receive::UNLIMITED,
+            connection_max_idle_ms,
+            channel_builder,
+            log_context,
+        )
     }
 
     fn ensure_not_registered(&self, id: &str) -> Result<(), String> {
@@ -285,84 +325,56 @@ impl Selector {
     /// was selected (i.e., has ready I/O) in `pollSelectionKeys`. This
     /// includes partial reads/writes where bytes were transferred but a
     /// full `NetworkReceive`/`NetworkSend` was not yet completed.
-    async fn poll_channel(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: u64) {
-        let mut send_failed = false;
+    /// Read-phase of channel polling: connect, prepare, read.
+    ///
+    /// Handles everything except writes, which are done concurrently
+    /// in `poll_channels_write_concurrent`.
+    async fn poll_channel_reads(&mut self, channel_id: &str, is_immediately_connected: bool, current_time_nanos: u64) {
         let mut had_bytes_transferred = false;
-
-        // Track pre-poll state to detect if any I/O activity occurred
         let pre_connected = self.connected.len();
 
         let result: io::Result<()> = async {
-            // Complete any connections that have finished their handshake
             let channel = self.channels.get_mut(channel_id).unwrap();
             if is_immediately_connected || !channel.is_connected() {
                 if channel.finish_connect().await? {
                     self.connected.push(channel_id.to_string());
-                    debug!("Connected to node {}", channel_id);
+                    kafka_debug!(self.log_context, "Connected to node {}", channel_id);
                 } else {
                     return Ok(());
                 }
             }
 
-            // If channel is not ready, finish prepare
             let channel = self.channels.get_mut(channel_id).unwrap();
+            let was_ready = channel.ready();
             if channel.is_connected() && !channel.ready() {
                 channel.prepare().await?;
             }
 
             let channel = self.channels.get_mut(channel_id).unwrap();
-            if channel.ready() && channel.state() == &channel_state::NOT_CONNECTED {
-                channel.set_state(channel_state::READY.clone());
+            // Signal the post-handshake (TLS/SASL) ready transition so poll() exits and
+            // handle_initiate_api_version_requests fires without waiting for an external event.
+            if !was_ready && channel.ready() {
+                self.connected.push(channel_id.to_string());
             }
 
-            // Handle re-authentication responses
             let channel = self.channels.get_mut(channel_id).unwrap();
             if let Some(receive) = channel.poll_response_received_during_reauthentication() {
                 self.add_to_completed_receives(receive);
             }
 
-            // Read if ready and not muted and no completed receive yet
             if self.attempt_read(channel_id).await? {
                 had_bytes_transferred = true;
             }
 
-            // Track buffered read state
             let channel = self.channels.get(channel_id).unwrap();
             if channel.has_bytes_buffered() && !self.explicitly_muted_channels.contains(channel_id) {
                 self.channels_with_buffered_read.insert(channel_id.to_string());
-            }
-
-            // Write if ready and has send
-            let channel = self.channels.get_mut(channel_id).unwrap();
-            if channel.has_send() && channel.ready() {
-                let now_nanos = current_time_nanos;
-                let should_write = !channel.maybe_begin_client_reauthentication(|| now_nanos)?;
-                if should_write {
-                    match self.write_channel(channel_id).await {
-                        Ok(bytes_written) => {
-                            if bytes_written {
-                                had_bytes_transferred = true;
-                            }
-                        },
-                        Err(e) => {
-                            send_failed = true;
-                            return Err(e);
-                        },
-                    }
-                }
             }
 
             Ok(())
         }
         .await;
 
-        // Update idle expiry if actual I/O activity occurred on this channel.
-        // This matches Java's behavior where `idleExpiryManager.update` is
-        // called unconditionally for every channel with a ready NIO selection
-        // key in `pollSelectionKeys` (line 525-526). In Java, NIO naturally
-        // filters to only channels with ready I/O. In Rust, we poll all
-        // channels, so we track whether bytes were actually transferred
-        // (including partial reads/writes) or a connection was established.
         let had_activity = had_bytes_transferred || self.connected.len() > pre_connected;
         if had_activity && let Some(ref mut mgr) = self.idle_expiry_manager {
             mgr.update(channel_id, current_time_nanos);
@@ -376,18 +388,76 @@ impl Selector {
             };
 
             if e.kind() == io::ErrorKind::Other || e.kind() == io::ErrorKind::InvalidInput {
-                // Authentication error
-                error!("Failed authentication with {} ({})", desc, e);
+                kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, e);
             } else {
-                debug!("Connection with {} disconnected: {}", desc, e);
+                kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, e);
             }
 
-            let close_mode = if send_failed {
-                CloseMode::NotifyOnly
-            } else {
-                CloseMode::Graceful
-            };
-            self.close_channel_internal(channel_id, close_mode).await;
+            self.close_channel_internal(channel_id, CloseMode::Graceful).await;
+        }
+    }
+
+    /// Write-phase: extract channels with pending sends and write concurrently.
+    ///
+    /// Channels are temporarily removed from the HashMap so each can be
+    /// borrowed independently by `join_all`. While one channel's TLS write
+    /// awaits TCP readiness, other channels' writes can proceed.
+    async fn poll_channels_write_concurrent(&mut self, channel_ids: &[String], current_time_nanos: u64) {
+        let mut extracted: Vec<(String, KafkaChannel)> = Vec::new();
+        for id in channel_ids {
+            if let Some(channel) = self.channels.get(id)
+                && channel.has_send()
+                && channel.ready()
+                && let Some(channel) = self.channels.remove(id)
+            {
+                extracted.push((id.clone(), channel));
+            }
+        }
+
+        if extracted.is_empty() {
+            return;
+        }
+
+        let results: Vec<ChannelWriteResult> = futures_util::future::join_all(
+            extracted
+                .iter_mut()
+                .map(|(_, channel)| do_channel_write(channel, current_time_nanos)),
+        )
+        .await;
+
+        for ((id, channel), result) in extracted.into_iter().zip(results) {
+            self.channels.insert(id.clone(), channel);
+
+            if (result.bytes_written > 0 || result.completed_send.is_some())
+                && let Some(ref mut mgr) = self.idle_expiry_manager
+            {
+                mgr.update(&id, current_time_nanos);
+            }
+
+            if let Some(send) = result.completed_send {
+                self.completed_sends.push(send);
+            }
+
+            if let Some((error, send_failed)) = result.error {
+                let desc = if let Some(ch) = self.channels.get(&id) {
+                    format!("{} (channelId={})", ch.socket_description(), ch.id())
+                } else {
+                    format!("unknown (channelId={id})")
+                };
+
+                if error.kind() == io::ErrorKind::Other || error.kind() == io::ErrorKind::InvalidInput {
+                    kafka_error!(self.log_context, "Failed authentication with {} ({})", desc, error);
+                } else {
+                    kafka_debug!(self.log_context, "Connection with {} disconnected: {}", desc, error);
+                }
+
+                let close_mode = if send_failed {
+                    CloseMode::NotifyOnly
+                } else {
+                    CloseMode::Graceful
+                };
+                self.close_channel_internal(&id, close_mode).await;
+            }
         }
     }
 
@@ -400,7 +470,6 @@ impl Selector {
     /// Uses a zero-duration timeout to make the read non-blocking from the
     /// selector's perspective, matching Java NIO's non-blocking channel reads.
     async fn attempt_read(&mut self, channel_id: &str) -> io::Result<bool> {
-        // Check conditions with immutable borrows first
         let should_read = {
             let channel = self.channels.get(channel_id).unwrap();
             channel.ready()
@@ -411,14 +480,25 @@ impl Selector {
 
         if should_read {
             let channel = self.channels.get_mut(channel_id).unwrap();
-            // Use timeout to avoid blocking on this channel's readability.
-            // If not ready, we skip and retry on the next poll() iteration.
-            let read_result = tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await;
+            // Fix A (read-path bottleneck): use the synchronous `try_read` path
+            // when the transport supports it. The previous
+            // `tokio::time::timeout(Duration::ZERO, channel.read()).await`
+            // wrapper paid ~546us per call to register/deregister a Sleep on
+            // the timer driver, capping single-Sender throughput at ~12K msg/s.
+            // SSL transports keep the async fallback because rustls's I/O state
+            // machine is driven through the async TLS stream.
+            let read_result = if channel.supports_try_read() {
+                channel.try_read()
+            } else {
+                match tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await {
+                    Ok(r) => r,
+                    Err(_elapsed) => Err(io::Error::from(io::ErrorKind::WouldBlock)),
+                }
+            };
             let bytes = match read_result {
-                Ok(Ok(b)) => b,
-                Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
-                Ok(Err(e)) => return Err(e),
-                Err(_elapsed) => 0, // timeout = not ready
+                Ok(b) => b,
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+                Err(e) => return Err(e),
             };
             if bytes != 0 {
                 self.made_read_progress_last_poll = true;
@@ -435,29 +515,6 @@ impl Selector {
             return Ok(bytes != 0);
         }
         Ok(false)
-    }
-
-    /// Write to a channel.
-    ///
-    /// Returns `true` if bytes were actually written to the channel (including
-    /// partial writes where a full `NetworkSend` has not yet completed).
-    async fn write_channel(&mut self, channel_id: &str) -> io::Result<bool> {
-        let channel = self.channels.get_mut(channel_id).unwrap();
-        // Use timeout to avoid blocking on this channel's writability.
-        let write_result = tokio::time::timeout(std::time::Duration::ZERO, channel.write()).await;
-        let bytes_sent = match write_result {
-            Ok(Ok(b)) => b,
-            Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
-            Ok(Err(e)) => return Err(e),
-            Err(_elapsed) => 0, // timeout = not ready
-        };
-        let send = channel.maybe_complete_send();
-        if (bytes_sent > 0 || send.is_some())
-            && let Some(send) = send
-        {
-            self.completed_sends.push(send);
-        }
-        Ok(bytes_sent > 0)
     }
 
     /// Begin closing a channel.
@@ -525,7 +582,11 @@ impl Selector {
         if let Some((connection_id, _last_active)) = mgr.poll_expired_connection(current_time_nanos)
             && self.channels.contains_key(&connection_id)
         {
-            trace!("About to close the idle connection from {} due to being idle", connection_id);
+            kafka_trace!(
+                self.log_context,
+                "About to close the idle connection from {} due to being idle",
+                connection_id
+            );
             if let Some(channel) = self.channels.get_mut(&connection_id) {
                 channel.set_state(channel_state::EXPIRED.clone());
             }
@@ -558,17 +619,38 @@ impl Selector {
         self.channels.values().next()
     }
     /// Collect readiness futures for channels interested in I/O.
+    ///
+    /// Channels mid-handshake (TLS or SASL) also register interest so that the
+    /// outer `select_all` wakes the poll loop when handshake bytes arrive or the
+    /// socket becomes writable for outgoing handshake data. Without this, at
+    /// low throughput the handshake response can sit unread in the TCP buffer
+    /// until the connection-setup timeout expires (matching Java NIO, which
+    /// registers OP_READ | OP_WRITE based on SSLEngine / SASL state).
     fn collect_readiness_futures(&self) -> Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> {
         let mut futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> = Vec::new();
         for (id, channel) in &self.channels {
+            let in_handshake = channel.is_connected() && !channel.ready();
             let want_read = channel.ready()
                 && (channel.has_bytes_buffered() || !channel.is_muted())
                 && !self.has_completed_receive(id)
                 && !self.explicitly_muted_channels.contains(id);
-            if want_read {
+            if want_read || in_handshake {
                 futs.push(channel.transport_readable());
             }
-            if channel.has_send() && channel.ready() {
+            // Register write-interest only when there is actual outgoing data
+            // to push to the socket. For ready channels that means a queued
+            // send; for handshaking channels (TLS or SASL) it means the
+            // transport has buffered ciphertext that has not been fully
+            // flushed (e.g. rustls's `wants_write()`).
+            //
+            // Blanket-registering write-interest for all handshaking channels
+            // makes the writable future fire immediately whenever the TCP
+            // socket buffer is non-full, which is almost always — the
+            // outer `select_all` would then return without ever giving the
+            // kernel a chance to deliver readable bytes, busy-spinning the
+            // poll loop while a SASL response sits in the kernel buffer.
+            let want_write = (channel.has_send() && channel.ready()) || (in_handshake && channel.has_pending_writes());
+            if want_write {
                 futs.push(channel.transport_writable());
             }
         }
@@ -643,6 +725,10 @@ impl Selectable for Selector {
         self.notify.notify_one();
     }
 
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        self.notify.clone()
+    }
+
     async fn close(&mut self) {
         let ids: Vec<String> = self.channels.keys().cloned().collect();
         for id in ids {
@@ -689,9 +775,11 @@ impl Selectable for Selector {
                         }
                     }
 
-                    error!(
+                    kafka_error!(
+                        self.log_context,
                         "Unexpected error during send, closing connection {} and returning error: {}",
-                        connection_id, e
+                        connection_id,
+                        e
                     );
                     return Err(e);
                 },
@@ -729,25 +817,29 @@ impl Selectable for Selector {
         // progress or the timeout expires. This matches Java NIO's
         // nioSelector.select(timeout) which blocks until I/O or timeout.
         loop {
-            // Process channels with buffered data
+            // Process channels with buffered data (reads only)
             if data_in_buffers {
                 let buffered_ids: Vec<String> = self.channels_with_buffered_read.drain().collect();
-                for id in buffered_ids {
-                    if self.channels.contains_key(&id) {
-                        self.poll_channel(&id, false, start_select).await;
+                for id in &buffered_ids {
+                    if self.channels.contains_key(id) {
+                        self.poll_channel_reads(id, false, start_select).await;
                     }
                 }
+                self.poll_channels_write_concurrent(&buffered_ids, start_select).await;
             }
 
-            // Process all active channels with non-blocking I/O (try_read/try_write).
+            // Pass 1: Connect + Read all channels (sequential, fast)
             let channel_ids: Vec<String> = self.channels.keys().cloned().collect();
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(id);
-                    self.poll_channel(id, is_immediately, start_select).await;
+                    self.poll_channel_reads(id, is_immediately, start_select).await;
                 }
             }
             self.immediately_connected_keys.clear();
+
+            // Pass 2: Write all channels concurrently
+            self.poll_channels_write_concurrent(&channel_ids, start_select).await;
 
             let made_progress = !self.completed_sends.is_empty()
                 || !self.completed_receives.is_empty()
@@ -771,19 +863,29 @@ impl Selectable for Selector {
                     if readiness_futs.is_empty() {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => {},
-                            _ = tokio::time::sleep_until(dl) => {},
+                            _ = notify.notified() => { break; },
+                            _ = tokio::time::sleep_until(dl) => { break; },
                         }
                     } else {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => {},
+                            _ = notify.notified() => { break; },
                             _ = select_all(readiness_futs) => {},
-                            _ = tokio::time::sleep_until(dl) => {},
+                            _ = tokio::time::sleep_until(dl) => { break; },
                         }
                     }
                 },
-                _ => break,
+                _ => {
+                    // Fix A companion: with the read path now fully sync
+                    // (no `timeout(ZERO, …).await`), a `poll(0)` sweep can
+                    // contain no `.await` points at all. Callers that
+                    // busy-loop `poll(0)` would then starve the Tokio I/O
+                    // reactor — OS readiness never reaches the channel and
+                    // idle expiry trips with a spurious disconnect. Yield
+                    // once before breaking so the reactor gets a tick.
+                    tokio::task::yield_now().await;
+                    break;
+                },
             }
         }
 
@@ -866,6 +968,38 @@ impl Selectable for Selector {
 
     fn is_channel_ready(&self, id: &str) -> bool {
         self.channels.get(id).is_some_and(|c| c.ready())
+    }
+}
+
+/// Result of a single channel write operation.
+struct ChannelWriteResult {
+    bytes_written: usize,
+    completed_send: Option<NetworkSend>,
+    error: Option<(io::Error, bool)>,
+}
+
+/// Standalone write I/O on a single extracted channel — no Selector state access.
+async fn do_channel_write(channel: &mut KafkaChannel, current_time_nanos: u64) -> ChannelWriteResult {
+    if !channel.has_send() || !channel.ready() {
+        return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
+    }
+
+    let should_write = match channel.maybe_begin_client_reauthentication(|| current_time_nanos) {
+        Ok(reauth) => !reauth,
+        Err(e) => {
+            return ChannelWriteResult { bytes_written: 0, completed_send: None, error: Some((e, false)) };
+        },
+    };
+    if !should_write {
+        return ChannelWriteResult { bytes_written: 0, completed_send: None, error: None };
+    }
+
+    match channel.write_concurrent().await {
+        Ok(bytes) => {
+            let send = channel.maybe_complete_send();
+            ChannelWriteResult { bytes_written: bytes, completed_send: send, error: None }
+        },
+        Err(e) => ChannelWriteResult { bytes_written: 0, completed_send: None, error: Some((e, true)) },
     }
 }
 
