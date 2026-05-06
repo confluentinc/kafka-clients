@@ -79,6 +79,7 @@ use crate::common::errors::KafkaError;
 use crate::common::header::RecordHeader;
 use crate::common::record::CompressionType;
 use crate::common::record::abstract_records::estimate_size_in_bytes_upper_bound;
+use crate::common::record::base_records::BaseRecords;
 use crate::common::record::record_batch::CURRENT_MAGIC_VALUE;
 use crate::common::record::{MemoryRecordsBuilder, TimestampType};
 use crate::common::topic_partition::TopicPartition;
@@ -86,6 +87,7 @@ use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::common::utils::Time;
 use crate::common_client_configs::{RETRY_BACKOFF_EXP_BASE, RETRY_BACKOFF_JITTER};
+use crate::metadata_snapshot::MetadataSnapshot;
 use crate::producer::callback::Callback;
 use crate::producer::record_metadata::RecordMetadata;
 
@@ -877,6 +879,377 @@ impl RecordAccumulator {
         }
     }
 
+    /// Java's private `shouldBackoff(hasLeaderChanged, batch, waitedTimeMs)`.
+    fn should_backoff(&self, has_leader_changed: bool, batch: &ProducerBatch, waited_time_ms: i64) -> bool {
+        let attempts = batch.attempts() as i64;
+        let should_wait_more = attempts > 0 && waited_time_ms < self.retry_backoff.backoff(attempts - 1);
+        let should_backoff = !has_leader_changed && should_wait_more;
+        if should_backoff {
+            log::trace!("{}For {}, will backoff", self.log_prefix, batch);
+        } else {
+            log::trace!(
+                "{}For {}, will not backoff, shouldWaitMore {}, hasLeaderChanged {}",
+                self.log_prefix,
+                batch,
+                should_wait_more,
+                has_leader_changed,
+            );
+        }
+        should_backoff
+    }
+
+    /// Java's private `batchReady(...)`. Adds `leader_id` to
+    /// `ready_nodes` iff the batch is ready, otherwise narrows
+    /// `next_ready_check_delay_ms` to the time until ready.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_ready(
+        &self,
+        exhausted: bool,
+        part: &TopicPartition,
+        leader_id: i32,
+        waited_time_ms: i64,
+        backing_off: bool,
+        backoff_attempts: i32,
+        full: bool,
+        next_ready_check_delay_ms: i64,
+        ready_nodes: &mut HashSet<i32>,
+    ) -> i64 {
+        if !ready_nodes.contains(&leader_id) && !self.is_muted(part) {
+            let time_to_wait_ms = if backing_off {
+                self.retry_backoff.backoff(if backoff_attempts > 0 {
+                    (backoff_attempts - 1) as i64
+                } else {
+                    0
+                })
+            } else {
+                self.linger_ms as i64
+            };
+            let expired = waited_time_ms >= time_to_wait_ms;
+            // transactionManager == null this milestone — see Phase 6 NOTES.md.
+            let transaction_completing = false;
+            let sendable = full
+                || expired
+                || exhausted
+                || self.closed.load(Ordering::Acquire)
+                || self.flush_in_progress()
+                || transaction_completing;
+            if sendable && !backing_off {
+                ready_nodes.insert(leader_id);
+            } else {
+                let time_left_ms = (time_to_wait_ms - waited_time_ms).max(0);
+                // Note that this results in a conservative estimate
+                // since an un-sendable partition may have a leader that
+                // will later be found to have sendable data. However,
+                // this is good enough since we'll just wake up and
+                // then sleep again for the remaining time.
+                return time_left_ms.min(next_ready_check_delay_ms);
+            }
+        }
+        next_ready_check_delay_ms
+    }
+
+    /// Per-topic ready check. Mirrors Java's private `partitionReady(...)`.
+    #[allow(clippy::too_many_arguments)]
+    fn partition_ready(
+        &self,
+        metadata_snapshot: &MetadataSnapshot,
+        now_ms: i64,
+        topic: &Arc<str>,
+        topic_info: &TopicInfo,
+        next_ready_check_delay_ms: i64,
+        ready_nodes: &mut HashSet<i32>,
+        unknown_leader_topics: &mut HashSet<Arc<str>>,
+    ) -> i64 {
+        // Snapshot the partition->deque map (cheap clone of the
+        // `Arc<Mutex<...>>` values, which lets us drop the
+        // `topic_info.batches` mutex before per-deque work).
+        let snapshot: Vec<(i32, BatchDeque)> = {
+            let batches = topic_info.batches.lock().unwrap();
+            batches.iter().map(|(k, v)| (*k, v.clone())).collect()
+        };
+
+        // Collect the queue sizes for available partitions to be used
+        // in adaptive partitioning.
+        let cluster = metadata_snapshot.cluster_ref();
+        let total_topic_partitions = cluster.partitions_for_topic(topic.as_ref()).len();
+        let mut queue_sizes: Option<Vec<i32>> = None;
+        let mut partition_ids: Option<Vec<i32>> = None;
+        if self.enable_adaptive_partitioning && snapshot.len() >= total_topic_partitions {
+            queue_sizes = Some(vec![0; snapshot.len()]);
+            partition_ids = Some(vec![0; snapshot.len()]);
+        }
+
+        let mut queue_sizes_index: i32 = -1;
+        let exhausted = self.free.queued() > 0;
+        let mut next_ready_check_delay_ms = next_ready_check_delay_ms;
+
+        for (part_id, deque_arc) in snapshot {
+            let part = TopicPartition::new(topic.clone(), part_id);
+            let leader = cluster.leader_for(&part).cloned();
+
+            if leader.is_some()
+                && let Some(qs) = queue_sizes.as_ref()
+            {
+                queue_sizes_index += 1;
+                debug_assert!((queue_sizes_index as usize) < qs.len());
+                if let Some(pids) = partition_ids.as_mut() {
+                    pids[queue_sizes_index as usize] = part_id;
+                }
+            }
+
+            let leader_epoch = metadata_snapshot.leader_epoch_for(&part);
+
+            // Minimum-required-inside-lock per Java's KAFKA-16226 note.
+            let waited_time_ms;
+            let backing_off;
+            let backoff_attempts;
+            let deque_size;
+            let full;
+            {
+                let deque = deque_arc.lock().unwrap();
+                let batch = match deque.front() {
+                    Some(b) => b.clone(),
+                    None => continue,
+                };
+                drop(deque);
+                waited_time_ms = batch.waited_time_ms(now_ms);
+                batch.maybe_update_leader_epoch(leader_epoch);
+                backing_off =
+                    self.should_backoff(batch.has_leader_changed_for_the_ongoing_retry(), &batch, waited_time_ms);
+                backoff_attempts = batch.attempts();
+                let deque = deque_arc.lock().unwrap();
+                deque_size = deque.len() as i32;
+                full = deque_size > 1 || batch.is_full();
+            }
+
+            match leader {
+                None => {
+                    // Partition with no known leader, but data to send.
+                    unknown_leader_topics.insert(topic.clone());
+                },
+                Some(leader_node) => {
+                    if let Some(qs) = queue_sizes.as_mut() {
+                        qs[queue_sizes_index as usize] = deque_size;
+                    }
+                    if self.partition_availability_timeout_ms > 0
+                        && let Some(stats) = self.node_stats.lock().unwrap().get(&leader_node.id()).cloned()
+                    {
+                        // NOTE: read ready time first to avoid
+                        // accidentally marking partition unavailable.
+                        let ready_time_ms = stats.ready_time_ms.load(Ordering::Acquire);
+                        let drain_time_ms = stats.drain_time_ms.load(Ordering::Acquire);
+                        if ready_time_ms - drain_time_ms > self.partition_availability_timeout_ms {
+                            queue_sizes_index -= 1;
+                        }
+                    }
+
+                    next_ready_check_delay_ms = self.batch_ready(
+                        exhausted,
+                        &part,
+                        leader_node.id(),
+                        waited_time_ms,
+                        backing_off,
+                        backoff_attempts,
+                        full,
+                        next_ready_check_delay_ms,
+                        ready_nodes,
+                    );
+                },
+            }
+        }
+
+        // Update the partitioner load stats. Length is one past the
+        // last filled index.
+        let length = (queue_sizes_index + 1).max(0) as usize;
+        topic_info.built_in_partitioner.update_partition_load_stats(
+            queue_sizes.as_deref_mut(),
+            partition_ids.as_deref().unwrap_or(&[]),
+            length,
+        );
+        next_ready_check_delay_ms
+    }
+
+    /// Iterate over partitions to see which one have batches ready and
+    /// collect leaders of those partitions into the set of ready nodes.
+    /// Mirrors Java's `ready(metadataSnapshot, nowMs)`.
+    pub fn ready(&self, metadata_snapshot: &MetadataSnapshot, now_ms: i64) -> ReadyCheckResult {
+        let mut ready_nodes: HashSet<i32> = HashSet::new();
+        let mut next_ready_check_delay_ms = i64::MAX;
+        let mut unknown_leader_topics: HashSet<Arc<str>> = HashSet::new();
+
+        // Snapshot the topic info map keys to avoid holding the outer
+        // mutex while we iterate per-topic deques.
+        let topics: Vec<(Arc<str>, Arc<TopicInfo>)> = {
+            let map = self.topic_info_map.lock().unwrap();
+            map.iter().map(|(k, v)| (k.clone(), v.clone())).collect()
+        };
+
+        for (topic, info) in topics {
+            next_ready_check_delay_ms = self.partition_ready(
+                metadata_snapshot,
+                now_ms,
+                &topic,
+                &info,
+                next_ready_check_delay_ms,
+                &mut ready_nodes,
+                &mut unknown_leader_topics,
+            );
+        }
+
+        ReadyCheckResult { ready_nodes, next_ready_check_delay_ms, unknown_leader_topics }
+    }
+
+    /// Java's private `shouldStopDrainBatchesForPartition(first, tp)`.
+    /// In the non-transactional case (always this milestone) returns
+    /// `false`. Kept as a method for parity / future wiring.
+    fn should_stop_drain_batches_for_partition(&self, _first: &ProducerBatch, _tp: &TopicPartition) -> bool {
+        if self.transaction_manager.is_some() {
+            // Phase 6 NOTES.md plug-in contract: transaction_manager
+            // is always None this milestone. Reaching this branch is
+            // structurally impossible.
+            unreachable!("transaction_manager is always None per Phase 6 plug-in contract");
+        }
+        false
+    }
+
+    /// Per-node drain. Mirrors Java's private
+    /// `drainBatchesForOneNode(metadataSnapshot, node, maxSize, now)`.
+    fn drain_batches_for_one_node(
+        &self,
+        metadata_snapshot: &MetadataSnapshot,
+        node_id: i32,
+        max_size: i32,
+        now: i64,
+    ) -> Vec<Arc<ProducerBatch>> {
+        // Outcomes from inspecting the partition's deque. Defined
+        // here so the per-partition block can produce a value while
+        // dropping the deque lock (Java RecordAccumulator.java:929
+        // calls out that `close()` outside the lock is "particularly
+        // expensive").
+        enum Outcome {
+            /// Continue with the next partition in the round-robin.
+            Skip,
+            /// Stop the drain loop for this node (Java's `break`).
+            StopDrain,
+            /// Drain this batch.
+            Drain(Arc<ProducerBatch>),
+        }
+
+        let mut size: i32 = 0;
+        let cluster = metadata_snapshot.cluster_ref();
+        let parts: Vec<(Arc<str>, i32)> = cluster
+            .partitions_for_node(node_id)
+            .iter()
+            .map(|p| (p.topic_arc().clone(), p.partition()))
+            .collect();
+        let mut ready: Vec<Arc<ProducerBatch>> = Vec::new();
+        if parts.is_empty() {
+            return ready;
+        }
+        // To make starvation less likely each node has its own
+        // drain-index. Mirrors Java's nodesDrainIndex map.
+        let mut drain_index = {
+            let mut idx_map = self.nodes_drain_index.lock().unwrap();
+            *idx_map.entry(node_id).or_insert(0) % parts.len()
+        };
+        let start = drain_index;
+        loop {
+            let (topic_arc, part_id): (Arc<str>, i32) = parts[drain_index].clone();
+            // Persist the current drain index AFTER we've committed
+            // to looking at this partition (Java RecordAccumulator.java:865).
+            self.nodes_drain_index.lock().unwrap().insert(node_id, drain_index);
+            drain_index = (drain_index + 1) % parts.len();
+
+            let tp = TopicPartition::new(topic_arc, part_id);
+            let outcome: Outcome = (|| {
+                // Only proceed if the partition has no in-flight batches.
+                if self.is_muted(&tp) {
+                    return Outcome::Skip;
+                }
+                let deque_arc = match self.get_deque(&tp) {
+                    Some(d) => d,
+                    None => return Outcome::Skip,
+                };
+                let leader_epoch = metadata_snapshot.leader_epoch_for(&tp);
+                let mut deque = deque_arc.lock().unwrap();
+                let first = match deque.front() {
+                    Some(b) => b.clone(),
+                    None => return Outcome::Skip,
+                };
+                first.maybe_update_leader_epoch(leader_epoch);
+                if self.should_backoff(
+                    first.has_leader_changed_for_the_ongoing_retry(),
+                    &first,
+                    first.waited_time_ms(now),
+                ) {
+                    return Outcome::Skip;
+                }
+                if size + first.estimated_size_in_bytes() > max_size && !ready.is_empty() {
+                    // Single-batch-bigger-than-maxSize edge case: we
+                    // will eventually send it in its own request.
+                    return Outcome::StopDrain;
+                }
+                if self.should_stop_drain_batches_for_partition(&first, &tp) {
+                    return Outcome::StopDrain;
+                }
+                Outcome::Drain(deque.pop_front().expect("deque was non-empty"))
+            })();
+
+            match outcome {
+                Outcome::Skip => {
+                    if start == drain_index {
+                        break;
+                    }
+                    continue;
+                },
+                Outcome::StopDrain => break,
+                Outcome::Drain(batch) => {
+                    // Transactional / idempotent producer state
+                    // assignment is gated by `transaction_manager ==
+                    // None` this milestone — empty-body branch per
+                    // Phase 6 NOTES.md.
+                    if let Some(_tm) = &self.transaction_manager {
+                        unreachable!("transaction_manager is always None per Phase 6 plug-in contract");
+                    }
+                    // The rest of the work happens outside the lock —
+                    // `close()` is particularly expensive.
+                    batch.close().expect("batch close");
+                    let records = batch.records().expect("batch records");
+                    size += records.size_in_bytes();
+                    batch.drained(now);
+                    ready.push(batch);
+                },
+            }
+
+            if start == drain_index {
+                break;
+            }
+        }
+        ready
+    }
+
+    /// Drain all the data for the given nodes and collate them into a
+    /// list of batches that will fit within the specified size on a
+    /// per-node basis. Mirrors Java's `drain(metadataSnapshot, nodes,
+    /// maxSize, now)`.
+    pub fn drain(
+        &self,
+        metadata_snapshot: &MetadataSnapshot,
+        nodes: &HashSet<i32>,
+        max_size: i32,
+        now: i64,
+    ) -> HashMap<i32, Vec<Arc<ProducerBatch>>> {
+        let mut batches: HashMap<i32, Vec<Arc<ProducerBatch>>> = HashMap::with_capacity(nodes.len());
+        if nodes.is_empty() {
+            return batches;
+        }
+        for &node_id in nodes {
+            let ready = self.drain_batches_for_one_node(metadata_snapshot, node_id, max_size, now);
+            batches.insert(node_id, ready);
+        }
+        batches
+    }
+
     /// Maybe update the next-batch-expiry tracker for `batch`. Mirrors
     /// Java's `maybeUpdateNextBatchExpiryTime(ProducerBatch)`.
     pub fn maybe_update_next_batch_expiry_time(&self, batch: &ProducerBatch) {
@@ -1017,10 +1390,14 @@ mod tests {
     use crate::common::utils::MockTime;
     use crate::producer::internals::buffer_pool::BufferPool;
 
-    /// Construct a minimal accumulator suitable for type-level smoke
-    /// tests (no append calls yet — those land in Phase 6d step 2).
+    /// Construct a minimal accumulator suitable for tests. The
+    /// [`MockTime`] starts at `0` (Java tests use `MockTime` whose
+    /// constructor defaults to 0 — our default is wall clock, so we
+    /// explicitly pin to 0 here so `waited_time_ms` and the
+    /// linger/expiry math line up with the integer timestamps the
+    /// tests pass).
     fn make_accumulator(batch_size: i32, total_size: i64, linger_ms: i32) -> Arc<RecordAccumulator> {
-        let time: Arc<dyn Time> = Arc::new(MockTime::default());
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
         let pool = Arc::new(BufferPool::new(total_size, batch_size, time.clone(), "producer-metrics"));
         Arc::new(RecordAccumulator::new(
             LogContext::new(),
@@ -1284,6 +1661,258 @@ mod tests {
             (0..3).contains(&part),
             "chosen partition {part} must be in [0, 3) for the test cluster"
         );
+    }
+
+    /// Build a [`MetadataSnapshot`] over the test cluster.
+    fn build_test_snapshot(cluster: Arc<Cluster>) -> MetadataSnapshot {
+        use crate::common::protocol::Errors;
+        use crate::common::requests::metadata_response::PartitionMetadata;
+        use std::collections::HashMap as StdMap;
+        let n1 = cluster.node_by_id(0).unwrap().clone();
+        let n2 = cluster.node_by_id(1).unwrap().clone();
+        let mut nodes_map: StdMap<i32, Node> = StdMap::new();
+        nodes_map.insert(0, n1.clone());
+        nodes_map.insert(1, n2.clone());
+        let parts = vec![
+            PartitionMetadata::new(
+                Errors::None,
+                TopicPartition::new("test", 0),
+                Some(0),
+                Some(0),
+                vec![0],
+                vec![0],
+                vec![],
+            ),
+            PartitionMetadata::new(
+                Errors::None,
+                TopicPartition::new("test", 1),
+                Some(0),
+                Some(0),
+                vec![0],
+                vec![0],
+                vec![],
+            ),
+            PartitionMetadata::new(
+                Errors::None,
+                TopicPartition::new("test", 2),
+                Some(1),
+                Some(0),
+                vec![1],
+                vec![1],
+                vec![],
+            ),
+        ];
+        MetadataSnapshot::new_with_cluster(
+            None,
+            nodes_map,
+            parts,
+            StdHashSet::new(),
+            StdHashSet::new(),
+            StdHashSet::new(),
+            None,
+            StdMap::new(),
+            Some(cluster),
+        )
+    }
+
+    // -------------------- ready() / drain() --------------------
+
+    #[tokio::test]
+    async fn ready_with_no_data_returns_empty() {
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster);
+        let r = accum.ready(&snap, 0);
+        assert!(r.ready_nodes.is_empty());
+        assert!(r.unknown_leader_topics.is_empty());
+        assert_eq!(i64::MAX, r.next_ready_check_delay_ms);
+    }
+
+    #[tokio::test]
+    async fn ready_with_linger_zero_makes_partition_immediately_ready() {
+        // linger_ms=0 → expired check is true after any wait.
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let r = accum.ready(&snap, 1);
+        assert_eq!(1, r.ready_nodes.len());
+        assert!(r.ready_nodes.contains(&0)); // node1 leads partition 0
+    }
+
+    #[tokio::test]
+    async fn ready_with_linger_returns_delay_until_ready() {
+        // linger_ms=10, no time has passed → should NOT be ready, delay = 10.
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let r = accum.ready(&snap, 0);
+        assert!(r.ready_nodes.is_empty(), "no leader ready before linger elapses");
+        assert_eq!(10, r.next_ready_check_delay_ms);
+    }
+
+    #[tokio::test]
+    async fn ready_with_linger_after_sleep_marks_partition_ready() {
+        let accum = make_accumulator(1024, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        // After linger has elapsed (waited >= lingerMs), the partition
+        // is "expired" and therefore ready to send. Mirrors Java's
+        // testLinger sequence: append, sleep linger, ready -> {leader}.
+        let r = accum.ready(&snap, 11);
+        assert_eq!(1, r.ready_nodes.len());
+    }
+
+    #[tokio::test]
+    async fn ready_when_batch_full_immediately_ready() {
+        // batch_size = 1024 + RECORD_BATCH_OVERHEAD; appending a value
+        // larger than the batch makes the FIRST batch immediately
+        // marked "full" because the very next append rolls over.
+        // (Mirror of testFull's "extra append → ready".)
+        let accum = make_accumulator(64, 64 * 1024, 10000);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        // Append a huge value that pushes batch full.
+        let big_value = vec![0u8; 256];
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(&big_value), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append1");
+        // Second append rolls to a new batch; the first is full.
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(&big_value), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append2");
+        let r = accum.ready(&snap, 0);
+        // Linger has not elapsed but batch_is_full → ready.
+        assert_eq!(1, r.ready_nodes.len());
+    }
+
+    #[tokio::test]
+    async fn drain_returns_per_node_batches() {
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a1");
+        let _ = accum
+            .append("test", 2, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a2");
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        nodes.insert(1);
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 0);
+        assert_eq!(2, drained.len());
+        assert_eq!(1, drained.get(&0).expect("node 0 batches").len());
+        assert_eq!(1, drained.get(&1).expect("node 1 batches").len());
+    }
+
+    #[tokio::test]
+    async fn drain_respects_max_size() {
+        // Two partitions on node1. Drain with max_size = 1 batch's
+        // worth → only one batch returned per call (Java's
+        // testDrainBatches verifies this same flow).
+        let accum = make_accumulator(64, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a1");
+        let _ = accum
+            .append("test", 1, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a2");
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        // max_size below a typical batch: drain should still return
+        // one batch (the single-batch-bigger-than-maxSize edge case).
+        let drained = accum.drain(&snap, &nodes, 1, 0);
+        let batches = drained.get(&0).expect("node 0 batches");
+        assert_eq!(1, batches.len());
+    }
+
+    #[tokio::test]
+    async fn drain_skips_muted_partition() {
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a1");
+        let _ = accum
+            .append("test", 1, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("a2");
+        accum.mute_partition(TopicPartition::new("test", 1));
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 0);
+        let batches = drained.get(&0).expect("node 0 batches");
+        // Only partition 0 is drainable; partition 1 is muted.
+        assert_eq!(1, batches.len());
+        assert_eq!(0, batches[0].topic_partition().partition());
+    }
+
+    #[tokio::test]
+    async fn drain_empty_when_no_nodes_passed() {
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster);
+        let drained = accum.drain(&snap, &HashSet::new(), i32::MAX, 0);
+        assert!(drained.is_empty());
+    }
+
+    #[tokio::test]
+    async fn ready_unknown_leader_topics_recorded() {
+        // Cluster with a partition whose leader is None.
+        let n1 = Node::new(0, "localhost".to_string(), 1111);
+        let parts = vec![
+            // No leader for partition 0.
+            PartitionInfo::new("orphan", 0, None, vec![], vec![]),
+        ];
+        let cluster = Arc::new(Cluster::new(
+            None,
+            vec![n1.clone()],
+            parts,
+            StdHashSet::new(),
+            StdHashSet::new(),
+        ));
+        let snap = MetadataSnapshot::new_with_cluster(
+            None,
+            std::iter::once((0, n1)).collect(),
+            vec![],
+            StdHashSet::new(),
+            StdHashSet::new(),
+            StdHashSet::new(),
+            None,
+            std::collections::HashMap::new(),
+            Some(cluster.clone()),
+        );
+        let accum = make_accumulator(1024, 64 * 1024, 0);
+        let _ = accum
+            .append("orphan", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let r = accum.ready(&snap, 1);
+        assert!(r.ready_nodes.is_empty());
+        assert_eq!(1, r.unknown_leader_topics.len());
+        assert!(r.unknown_leader_topics.contains(&Arc::<str>::from("orphan")));
     }
 
     #[tokio::test]
