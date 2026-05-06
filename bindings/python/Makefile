@@ -10,6 +10,7 @@ build:
 	pip install -e .
 
 test: build
+	pip install .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
 
 clean:
