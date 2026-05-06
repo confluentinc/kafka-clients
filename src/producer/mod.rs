@@ -20,8 +20,10 @@
 
 pub mod buffer_exhausted_error;
 pub mod callback;
+pub mod partitioner;
 pub mod producer_record;
 pub mod record_metadata;
+pub mod round_robin_partitioner;
 
 #[cfg(test)]
 mod record_send_test;
@@ -31,5 +33,7 @@ pub(crate) mod internals;
 
 pub use buffer_exhausted_error::BufferExhaustedError;
 pub use callback::Callback;
+pub use partitioner::Partitioner;
 pub use producer_record::{ProducerRecord, ProducerRecordError};
 pub use record_metadata::RecordMetadata;
+pub use round_robin_partitioner::RoundRobinPartitioner;
