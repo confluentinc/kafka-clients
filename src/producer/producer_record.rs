@@ -22,10 +22,18 @@ use crate::common::header::{RecordHeader, RecordHeaders};
 
 /// Errors returned by [`ProducerRecord`] constructors. Mirrors Java's
 /// `IllegalArgumentException` cases.
+///
+/// # Translation note
+///
+/// Java's `if (topic == null) throw new IllegalArgumentException("Topic
+/// cannot be null.")` is enforced at the type level in Rust: the `topic`
+/// parameter is `impl Into<Arc<str>>`, which has no `null` representation.
+/// There is therefore no `NullTopic` variant — the only way for a caller
+/// to express "no topic" in Java is to pass `null`, and that is a
+/// compile-time error in Rust. Empty strings (`""`) are accepted at
+/// construction (matching Java) and rejected later by metadata lookup.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ProducerRecordError {
-    /// Mirrors `"Topic cannot be null."`.
-    NullTopic,
     /// Mirrors `"Invalid timestamp: %d. Timestamp should always be non-negative or null."`.
     NegativeTimestamp(i64),
     /// Mirrors `"Invalid partition: %d. Partition number should always be non-negative or null."`.
@@ -35,7 +43,6 @@ pub enum ProducerRecordError {
 impl fmt::Display for ProducerRecordError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            ProducerRecordError::NullTopic => f.write_str("Topic cannot be null."),
             ProducerRecordError::NegativeTimestamp(ts) => {
                 write!(f, "Invalid timestamp: {}. Timestamp should always be non-negative or null.", ts)
             },
@@ -73,8 +80,13 @@ impl std::error::Error for ProducerRecordError {}
 /// refcount bump rather than a heap copy on the producer hot path.
 ///
 /// Constructors return `Result<Self, ProducerRecordError>` because Java
-/// throws `IllegalArgumentException` for null topic, negative timestamp, or
-/// negative partition. Per CLAUDE.md rule 10, we surface these as a
+/// throws `IllegalArgumentException` for negative timestamp or negative
+/// partition. Java's "null topic" guard is enforced at the Rust type
+/// level (the `impl Into<Arc<str>>` parameter has no `null`
+/// representation), so there is no runtime check or error variant for
+/// it. Empty-string topics are accepted at construction (matching
+/// Java) and later rejected by the broker during metadata lookup. Per
+/// CLAUDE.md rule 10, the remaining checks are surfaced as a
 /// recoverable error rather than panicking.
 pub struct ProducerRecord<K, V> {
     topic: Arc<str>,
@@ -105,24 +117,12 @@ impl<K, V> ProducerRecord<K, V> {
         value: Option<V>,
         headers: Option<Vec<RecordHeader>>,
     ) -> Result<Self, ProducerRecordError> {
+        // Java's `if (topic == null) throw new IllegalArgumentException(...)`
+        // is enforced at the type level here: `impl Into<Arc<str>>` has no
+        // `null` representation. Empty strings (`""`) are accepted at
+        // construction (matching Java's behavior) and rejected later by
+        // metadata lookup on the broker side.
         let topic: Arc<str> = topic.into();
-        if topic.is_empty() {
-            // Java rejects null topic (`if (topic == null)`). Rust's signature
-            // makes a null impossible at the type level, but we keep the
-            // semantic guard for the empty-string case too — the Java client
-            // would later fail on an empty-name partition lookup, and the
-            // Phase 4 `Cluster` API already treats empty topics as invalid.
-            //
-            // The original Java guard is "topic == null"; the closest
-            // type-safe Rust analogue is "no topic provided", which our
-            // `into()` boundary models with the empty `Arc<str>`. Callers
-            // that legitimately want an empty topic must construct via the
-            // internal builder (which they cannot from outside).
-            //
-            // Keeping the runtime check matches the Java behavior 1:1 for
-            // the test that passes `null` for topic.
-            return Err(ProducerRecordError::NullTopic);
-        }
         if let Some(ts) = timestamp
             && ts < 0
         {
@@ -382,13 +382,15 @@ mod tests {
     }
 
     /// Java: `testInvalidRecords`.
+    ///
+    /// The Java test has three cases: null topic, negative timestamp,
+    /// negative partition. The "null topic" case (Java passes `null`) is
+    /// elided in Rust because the `impl Into<Arc<str>>` parameter has
+    /// no `null` representation — the constraint is enforced at the
+    /// type level, so the runtime guard is unnecessary. The other two
+    /// cases are translated directly.
     #[test]
     fn invalid_records() {
-        // Java: null topic
-        let err = ProducerRecord::<String, i32>::with_partition("", Some(0), Some("key".to_string()), Some(1))
-            .expect_err("Expected error to be raised because topic is null");
-        assert_eq!(err, ProducerRecordError::NullTopic);
-
         // Java: negative timestamp
         let err =
             ProducerRecord::<String, i32>::with_timestamp("test", Some(0), Some(-1), Some("key".to_string()), Some(1))
@@ -399,6 +401,17 @@ mod tests {
         let err = ProducerRecord::<String, i32>::with_partition("test", Some(-1), Some("key".to_string()), Some(1))
             .expect_err("Expected error to be raised because of negative partition");
         assert_eq!(err, ProducerRecordError::NegativePartition(-1));
+    }
+
+    /// Java accepts `""` as a valid topic at construction (the broker
+    /// rejects later in metadata lookup). Verify the Rust constructor
+    /// preserves that contract — see Issue 1 from Phase 6c Round 1.
+    #[test]
+    fn empty_topic_is_accepted() {
+        let record =
+            ProducerRecord::<String, i32>::with_partition("", Some(0), Some("key".to_string()), Some(1)).unwrap();
+        assert_eq!(record.topic(), "");
+        assert_eq!(record.partition(), Some(0));
     }
 
     fn record_hash<K: Hash, V: Hash>(r: &ProducerRecord<K, V>) -> u64 {
