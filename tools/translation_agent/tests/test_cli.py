@@ -2130,3 +2130,38 @@ def test_delete_prs_mutex_with_other_modes():
     with pytest.raises(SystemExit):
         parser.parse_args(["--delete-prs", "--pr", "1"])
 
+
+def test_delete_prs_branch_already_gone_continues_to_next_pr(tmp_path):
+    """When gh reports 'Reference does not exist' for a branch (HTTP
+    422 -- already deleted on GitHub), the CLI logs it as a soft
+    success, removes the DB row anyway, and continues with the
+    remaining PRs. rc=0 if everything else succeeds."""
+    db_path = str(tmp_path / "t.db")
+    conn = db.connect(db_path)
+    db.migrate(conn)
+    db.insert_pr_commit(conn, 11, "master", "trunk", "ak_alpha")
+    db.insert_pr_commit(conn, 22, "master", "trunk", "ak_beta")
+    conn.commit()
+    conn.close()
+    from translation_agent import github as gh
+    side_effects = [
+        # First PR: branch already gone (the case the user actually hit).
+        type("CP", (), {
+            "returncode": 1, "stdout": "",
+            "stderr": "gh: Reference does not exist (HTTP 422)",
+        })(),
+        # Second PR: clean delete.
+        type("CP", (), {"returncode": 0, "stdout": "", "stderr": ""})(),
+    ]
+    with patch.object(gh.subprocess, "run", side_effect=side_effects):
+        rc = _run(
+            "--delete-prs", "--rust-branch", "master",
+            "--pr-numbers", "11,22",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    # Both rows gone -- the missing branch did NOT block the row delete.
+    assert db.get_pr(conn, 11) is None
+    assert db.get_pr(conn, 22) is None
+

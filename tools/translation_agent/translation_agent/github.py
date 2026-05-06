@@ -35,6 +35,13 @@ class GhPrAlreadyExists(GhError):
     """Raised when `gh pr create` fails because a PR already exists for the head branch."""
 
 
+class GhBranchAlreadyGone(GhError):
+    """Raised when `gh api -X DELETE` of a ref returns a 'Reference does
+    not exist' error (HTTP 422 -- GitHub's quirky status for missing
+    refs, not 404). Distinct from GhError so callers that only care
+    about *removing* the branch can treat it as a soft success."""
+
+
 BRANCH_PREFIX = "kafka-translate/"
 
 
@@ -181,10 +188,12 @@ def delete_remote_branch(repo_path: str, branch_name: str) -> None:
     Side effect on GitHub: any open PR whose head was this branch
     auto-closes (PRs cannot be deleted on GitHub, only closed).
 
-    Raises GhError on non-zero exit -- including 404 ("branch already
-    gone"). Per the `--delete-prs` design choice, callers fail-fast on
-    any error rather than swallowing 404; the operator can re-run with
-    the offending PR removed from the list.
+    Raises GhBranchAlreadyGone if gh stderr indicates the ref does not
+    exist (HTTP 422 "Reference does not exist" -- GitHub's idiosyncratic
+    status for missing refs). Callers can catch this specifically to
+    treat it as a soft success.
+
+    Raises GhError for any other non-zero exit (auth, network, real 5xx).
     """
     proc = subprocess.run(
         [
@@ -196,9 +205,14 @@ def delete_remote_branch(repo_path: str, branch_name: str) -> None:
         cwd=repo_path,
     )
     if proc.returncode != 0:
+        stderr = proc.stderr.strip()
+        if "Reference does not exist" in stderr:
+            raise GhBranchAlreadyGone(
+                f"branch {branch_name} already gone on remote: {stderr}"
+            )
         raise GhError(
             f"gh api delete branch {branch_name} failed "
-            f"(rc={proc.returncode}): {proc.stderr.strip()}"
+            f"(rc={proc.returncode}): {stderr}"
         )
 
 

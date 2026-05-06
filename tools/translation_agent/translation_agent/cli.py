@@ -245,12 +245,21 @@ def _run_delete_prs(args: argparse.Namespace, conn) -> int:
         return 0
 
     # Execute. Per design: GitHub branch FIRST (closes the PR
-    # implicitly), then DB row. Fail-fast on the first error -- rows
-    # already processed stay processed; the operator removes processed
-    # PRs from the list and re-runs.
+    # implicitly), then DB row. Fail-fast on real gh errors (auth,
+    # network, 5xx). A "branch already gone" response is a soft
+    # success: log it, then proceed to delete the DB row so the run
+    # continues with remaining PRs.
     for pr_number, branch in targets:
         try:
             github.delete_remote_branch(args.rust_repo_path, branch)
+            branch_outcome = "removed"
+        except github.GhBranchAlreadyGone as e:
+            log.info(
+                "--delete-prs: branch %s for PR %d already gone on remote, "
+                "proceeding to remove DB row (%s)",
+                branch, pr_number, e,
+            )
+            branch_outcome = "already gone"
         except github.GhError as e:
             log.error(
                 "--delete-prs: failed to delete branch %s for PR %d: %s "
@@ -260,8 +269,8 @@ def _run_delete_prs(args: argparse.Namespace, conn) -> int:
             return 1
         db.delete_pr_commit(conn, pr_number)
         log.info(
-            "Deleted PR %d (branch=%s removed, pr_commit row removed)",
-            pr_number, branch,
+            "Deleted PR %d (branch=%s %s, pr_commit row removed)",
+            pr_number, branch, branch_outcome,
         )
     return 0
 

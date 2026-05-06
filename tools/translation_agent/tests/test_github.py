@@ -191,16 +191,30 @@ def test_delete_remote_branch_invokes_gh_api_delete():
     )
 
 
-def test_delete_remote_branch_raises_on_nonzero_exit():
-    """Non-zero exit -- including 404 ("branch already gone") -- bubbles
-    up as GhError. Per --delete-prs design, callers fail-fast rather
-    than swallowing 404."""
+def test_delete_remote_branch_raises_branch_already_gone_on_422():
+    """GitHub returns HTTP 422 'Reference does not exist' (NOT 404) when
+    the ref to delete is missing. The helper detects that string and
+    raises the distinct GhBranchAlreadyGone subclass so callers can
+    treat it as a soft success."""
     with patch.object(
         github.subprocess, "run",
-        return_value=_completed(1, stderr='{"message":"Reference does not exist"}'),
+        return_value=_completed(1, stderr="gh: Reference does not exist (HTTP 422)"),
     ):
-        with pytest.raises(github.GhError, match="Reference does not exist"):
+        with pytest.raises(github.GhBranchAlreadyGone, match="already gone"):
             github.delete_remote_branch("/repo", "kafka-translate/abc")
+
+
+def test_delete_remote_branch_raises_plain_gh_error_for_other_failures():
+    """Non-422 errors (auth, network, 5xx) surface as GhError, NOT
+    GhBranchAlreadyGone -- callers must fail-fast on these."""
+    with patch.object(
+        github.subprocess, "run",
+        return_value=_completed(1, stderr="HTTP 401: Bad credentials"),
+    ):
+        with pytest.raises(github.GhError, match="Bad credentials") as ei:
+            github.delete_remote_branch("/repo", "kafka-translate/abc")
+        # Specifically NOT the soft-success subclass.
+        assert not isinstance(ei.value, github.GhBranchAlreadyGone)
 
 
 # --- format_dep_section / replace_dep_section -------------------------------
