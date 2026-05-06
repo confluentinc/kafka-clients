@@ -90,8 +90,8 @@ blocks:
               fi
               echo "PR build -- running 'make verify' directly in Semaphore env"
               make verify
-              echo "PR build -- experiment: running 'make verify' inside r2 sandbox to probe Docker availability"
-              r2 sandbox claude -p "Run 'make verify' from the repository root. Then report (a) whether the 'docker' CLI is on PATH inside the sandbox, (b) whether 'docker info' succeeds, and (c) the make verify exit code. Be concise." || true
+              echo "PR build -- experiment: running 'make verify-sandbox' inside r2 sandbox to probe Docker availability"
+              r2 sandbox claude -p "Run 'make verify-sandbox' from the repository root. Then report (a) whether the 'docker' CLI is on PATH inside the sandbox, (b) whether 'docker info' succeeds, and (c) the make verify exit code. Be concise." || true
 
 promotions:
   - name: Approve plan and implement
