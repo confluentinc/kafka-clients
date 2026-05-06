@@ -94,28 +94,68 @@ const COMPRESSION_RATE_ESTIMATION_FACTOR: f32 = 1.05;
 ///   `BufferPool::deallocate` which still routes it to the non-pooled
 ///   branch via the `size as usize == buffer.capacity()` check.
 ///
-/// In both branches the returned `Vec<u8>` has `len == capacity`
-/// (= `initial_capacity` if no growth occurred), matching the pool's
-/// recycle invariant. The bytes 0..len were initialized either at
-/// allocation or by previous writes, so the `unsafe set_len` is sound.
+/// In both branches the returned `Vec<u8>` has `len == capacity`, matching
+/// the pool's recycle invariant.
+///
+/// The two branches differ in how the tail (between the written prefix and
+/// `capacity`) is made readable:
+/// * **Ok branch** uses `unsafe set_len(capacity)` because the underlying
+///   allocation was once `vec![0u8; size]` (the pool's
+///   `default_allocator`), so every byte 0..capacity has been initialized
+///   by either the original zero-fill or a subsequent write. No
+///   uninitialized memory is exposed.
+/// * **Err branch** (rare slow path — fires when a `Bytes` clone is still
+///   outstanding, e.g. the wire-send pipeline hasn't dropped its handle)
+///   `to_vec()` produces a fresh allocation with `cap == len`. A
+///   subsequent `reserve` would grow the allocation, but the bytes
+///   `len..cap` of that fresh allocation are uninitialized — `set_len`
+///   would expose UB. Instead we `resize(initial_capacity, 0)` which
+///   zero-fills the tail in safe code. The zero-fill cost is acceptable
+///   because this path is rare on the steady-state producer hot path
+///   (uniquely-owned dominates after the broker ack drops the wire-send
+///   `Bytes` clone).
 fn finalize_recycled_buffer(res: Result<bytes::BytesMut, bytes::Bytes>, initial_capacity: usize) -> Vec<u8> {
-    let mut owned: Vec<u8> = match res {
-        Ok(bm) => bm.into(),
-        Err(b) => b.to_vec(), // fallback: copy out (still-cloned Bytes)
-    };
-    if owned.capacity() < initial_capacity {
-        owned.reserve(initial_capacity - owned.capacity());
+    match res {
+        Ok(bm) => {
+            // Uniquely-owned: the underlying `Vec<u8>` is the pool's
+            // original `vec![0u8; size]` allocation. `cap` already equals
+            // `initial_capacity` (or larger if a prior grow occurred);
+            // `set_len(cap)` is sound because every byte 0..cap was once
+            // zero-initialized.
+            let mut owned: Vec<u8> = bm.into();
+            if owned.capacity() < initial_capacity {
+                owned.reserve(initial_capacity - owned.capacity());
+            }
+            let cap = owned.capacity();
+            // SAFETY: `Vec<u8>` originates from `vec![0u8; size]` (the
+            // pool's `default_allocator`); every byte 0..cap was
+            // zero-initialized at allocation and subsequent writes only
+            // overwrite a prefix.
+            unsafe {
+                owned.set_len(cap);
+            }
+            owned
+        },
+        Err(b) => {
+            // Fallback: a `Bytes` clone is alive, so we must copy. The
+            // fresh `Vec` from `to_vec()` has `cap == len` and a
+            // potentially-uninitialized tail after any subsequent `reserve`.
+            // Use safe `resize` instead of `unsafe set_len` to avoid
+            // exposing uninitialized memory through the pool recycle path
+            // (`BufferPool::deallocate` routes by capacity == poolable_size,
+            // which an allocator-rounded `reserve` could match).
+            let mut owned: Vec<u8> = b.to_vec();
+            if owned.capacity() < initial_capacity {
+                owned.reserve(initial_capacity - owned.capacity());
+            }
+            // Zero-fill the tail to `capacity` so `len == capacity`
+            // (matches `BufferPool::deallocate`'s `len == capacity`
+            // invariant) and so no uninitialized memory is observable.
+            let cap = owned.capacity();
+            owned.resize(cap, 0);
+            owned
+        },
     }
-    let cap = owned.capacity();
-    // SAFETY: every byte in 0..cap is initialized — the pool fills its
-    // initial allocation with `vec![0u8; size]` and subsequent writes
-    // (records + batch header) overwrite a prefix in place; bytes past
-    // the written region retain the original zeros (or prior pool
-    // cycle's writes). No reads of uninitialized memory possible.
-    unsafe {
-        owned.set_len(cap);
-    }
-    owned
 }
 
 /// Records info returned by [`MemoryRecordsBuilder::info`]. Mirrors Java's

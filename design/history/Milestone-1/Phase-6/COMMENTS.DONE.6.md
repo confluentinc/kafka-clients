@@ -358,3 +358,90 @@ unchanged.
 
 All 3 items addressed. Test count 989 → 991 (+2 regression tests for
 `buffer()`). DoD checks (build, test, format-check, lint) all green.
+
+---
+
+# Critic 6 — Phase 6b Round 2 review (resolved)
+
+Reviewed Round 2 of Phase 6b. Issues 1/2/3 verified resolved (see Round
+1 dispositions above). Round 2 surfaced two new Suggestion items
+pointing at a real soundness concern in `finalize_recycled_buffer`'s
+`Err` fallback.
+
+## Issue 4 — Suggestion: `finalize_recycled_buffer` Err path may expose uninitialized memory
+
+**File**: `src/common/record/memory_records_builder.rs` (lines 101-119
+pre-fix, 117-159 post-fix).
+**Severity**: Suggestion (narrow soundness hazard, only reachable on
+the production-typical wire-send-clone-alive path which Phase 6e wires).
+**Description**: When `try_into_mut()` returns `Err(b)` (Bytes clone
+outstanding from the wire-send path), the fallback was:
+```rust
+let mut owned: Vec<u8> = b.to_vec();          // fresh alloc, cap == len
+if owned.capacity() < initial_capacity {
+    owned.reserve(initial_capacity - owned.capacity());  // may grow
+}
+let cap = owned.capacity();
+unsafe { owned.set_len(cap); }                // exposes 0..cap
+```
+`to_vec()` produces `Vec` with `cap == len`. `reserve(N)` then
+allocates fresh memory whose `len..cap` bytes are uninitialized.
+`set_len(cap)` exposes them. If the allocator rounds the new
+capacity to exactly `initial_capacity` (possible at power-of-two
+sizes that match allocator size classes), `BufferPool::deallocate`'s
+`size as usize == buffer.capacity()` check passes and the buffer
+reaches the free list — the next consumer can read uninitialized
+bytes (UB).
+
+**Disposition**: Fixed in commit `e3a1d61` (fixup! `a41263b`).
+Took **option F1** ("zero-fill the tail before exposing in safe
+code"). Bifurcated `finalize_recycled_buffer` so the `Err` branch
+uses `Vec::resize(cap, 0)` (safe, zero-fill) while the `Ok` branch
+retains its `unsafe set_len` zero-fill-avoidance optimization. The
+`Ok` branch is the steady-state hot path (uniquely-owned dominates
+once broker ack drops the wire-send `Bytes` clone); the `Err` branch
+is rare and the zero-fill cost is acceptable for the soundness
+guarantee. Doc comment updated to document the asymmetry. API
+surface unchanged.
+
+## Issue 5 — Suggestion: Buffer regression tests don't model the production deallocate lifecycle
+
+**File**: `src/producer/internals/producer_batch.rs` (lines 1574-1629
+pre-fix, +1 test post-fix).
+**Severity**: Suggestion.
+**Description**: The two existing regression tests
+(`buffer_returns_owned_vec_sized_to_initial_capacity`,
+`buffer_pre_close_returns_full_capacity_vec`) call `batch.close()`
+then `batch.buffer()` directly — they never call `batch.records()`
+in between, so `try_into_mut` is always uniquely-owned and the
+`Err` fallback path is never exercised. In production
+(Phase 6e Sender), the lifecycle is: `Sender.close()` →
+`Sender.records()` (clones the `Bytes`) → wire send → broker ack →
+`RecordAccumulator::deallocate` → `batch.buffer()`. At the point of
+extraction, the `Bytes` refcount is ≥ 2 — the `Err` branch fires.
+The Issue 4 soundness fix needed a regression test that drives
+that specific path.
+
+**Disposition**: Fixed in commit `e3a1d61` (fixup! `a41263b`).
+Added test `buffer_returns_owned_vec_when_records_clone_is_alive` at
+`producer_batch.rs:1631-1690`. The test:
+1. Builds a non-empty batch and calls `close()` + `complete()`.
+2. Calls `batch.records()` to clone the `Bytes` (refcount → 2).
+3. Holds the clone alive while calling `batch.buffer()` — this
+   forces the `Err` branch (`built_records.take()` consumes one ref;
+   the externally-held `records_clone` keeps refcount ≥ 1, so
+   `try_into_mut()` returns `Err`).
+4. Asserts `len == capacity == initial_capacity` (BufferPool
+   invariants), and that the tail bytes (past the record payload)
+   read as zero — the soundness signal that confirms `resize(_, 0)`
+   is in effect rather than `unsafe set_len` over uninitialized
+   memory.
+5. Asserts the `records_clone` still observes its data (proves the
+   fallback is a copy, not a move).
+
+## Phase 6b Round 2 Summary
+- **Suggestion**: 2 (Issues 4, 5 — both Fixed)
+
+Test count 991 → 992 (+1 regression test for the Err-branch
+soundness fix). DoD checks (build, test, format-check, lint) all
+green. Phase 6b closed.

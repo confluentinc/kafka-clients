@@ -1627,4 +1627,72 @@ mod tests {
         assert_eq!(capacity, buf.len());
         assert_eq!(capacity, buf.capacity());
     }
+
+    /// Production-typical lifecycle: `Sender` calls `records()` to obtain a
+    /// `MemoryRecords` for the wire (cloning the underlying `Bytes`), then
+    /// after the broker ack `RecordAccumulator::deallocate` calls
+    /// `buffer()`. Because the `Bytes` is shared at the moment of
+    /// extraction, `try_into_mut()` returns `Err`, and
+    /// `finalize_recycled_buffer` falls back to `to_vec()` + zero-fill.
+    ///
+    /// This is the path the original two regression tests above cannot
+    /// exercise (they call `buffer()` directly without an intervening
+    /// `records()` clone). The assertion that the tail bytes are zero is
+    /// the soundness signal: prior to the Round 2 fix, the fallback used
+    /// `unsafe set_len` over a freshly-allocated `Vec` whose tail was
+    /// uninitialized — UB in Rust. Reading-back-as-zero confirms the
+    /// fix's `resize(_, 0)` is in effect.
+    #[test]
+    fn buffer_returns_owned_vec_when_records_clone_is_alive() {
+        let capacity = 512usize;
+        let batch = Arc::new(ProducerBatch::new(
+            topic_partition(1),
+            make_builder_with_compression(MAGIC_VALUE_V2, CompressionType::None, capacity),
+            NOW,
+        ));
+        let _f = batch
+            .try_append(NOW, Some(b"k"), Some(b"v"), &[], None, NOW)
+            .expect("append must succeed");
+        batch.close().expect("close must succeed");
+        assert!(batch.complete(0, NO_TIMESTAMP), "complete must transition state");
+
+        // Step 1: clone the `Bytes` via `records()` (mirrors what `Sender`
+        // does to obtain the `MemoryRecords` for the wire-send path).
+        let records_clone = batch.records().expect("records() must succeed");
+        let records_buf_len = records_clone.buffer().len();
+        assert!(records_buf_len > 0, "records buffer must be non-empty");
+
+        // Step 2: holding the clone alive, extract the buffer for
+        // recycling. With the clone alive, `try_into_mut()` returns
+        // `Err(_)` and `finalize_recycled_buffer` takes the `to_vec()`
+        // fallback.
+        let buf = batch.buffer();
+
+        // Soundness post-conditions: len == capacity == initial_capacity
+        // (the deallocate path's invariants), and the tail past the
+        // record payload reads as zero (so the safe `resize(_, 0)` is in
+        // effect — `unsafe set_len` over a fresh allocation would expose
+        // arbitrary bytes here).
+        assert_eq!(
+            capacity,
+            buf.len(),
+            "Err-branch fallback must satisfy BufferPool len == capacity invariant"
+        );
+        assert_eq!(
+            capacity,
+            buf.capacity(),
+            "Err-branch fallback must satisfy BufferPool capacity == initial_capacity"
+        );
+        for (i, b) in buf.iter().enumerate().skip(records_buf_len) {
+            assert_eq!(0u8, *b, "tail byte at index {i} must be zero (no uninit-memory exposure)");
+        }
+
+        // Sanity: the records-clone Bytes still observes its data
+        // independently of the Vec we just extracted (the fallback is a
+        // copy, not a move).
+        assert_eq!(records_buf_len, records_clone.buffer().len());
+
+        // Drop the clone explicitly so its lifetime is unambiguous.
+        drop(records_clone);
+    }
 }
