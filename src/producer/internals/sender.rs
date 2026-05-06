@@ -608,7 +608,14 @@ impl<C: KafkaClient> Sender<C> {
 
         let mut records_by_partition: HashMap<TopicPartition, Arc<ProducerBatch>> =
             HashMap::with_capacity(batches.len());
-        let topic_ids = self.topic_ids_for_batches(&batches);
+        // Snapshot the metadata's topic-id map once. The map is keyed by
+        // `String` in `ProducerMetadata::topic_ids` so `Borrow<str>` lookup
+        // via `topic_ids.get(<&str>)` works without per-batch allocation.
+        // Mirrors Java's `topicIdsForBatches`, but inlined to avoid the
+        // intermediate `HashMap<String, Uuid>` Java's helper builds (Java's
+        // GC hides the cost; in Rust the per-batch `String` allocation is a
+        // measurable per-`runOnce` overhead on the send path).
+        let topic_ids = self.metadata.metadata().topic_ids();
 
         // Group by topic into TopicProduceData entries. We preserve Java
         // insertion order via a Vec<TopicProduceData>; the deduplication
@@ -717,18 +724,6 @@ impl<C: KafkaClient> Sender<C> {
             destination,
             correlation_id
         );
-    }
-
-    /// Mirrors Java's `topicIdsForBatches`.
-    fn topic_ids_for_batches(&self, batches: &[Arc<ProducerBatch>]) -> HashMap<String, Uuid> {
-        let topic_ids = self.metadata.metadata().topic_ids();
-        let mut out: HashMap<String, Uuid> = HashMap::new();
-        for batch in batches {
-            let topic = batch.topic_partition().topic().to_string();
-            let id = topic_ids.get(&topic).copied().unwrap_or(Uuid::zero());
-            out.insert(topic, id);
-        }
-        out
     }
 
     /// Mirrors `MockClient::respond` flow plus
@@ -1008,15 +1003,28 @@ impl<C: KafkaClient> Sender<C> {
     /// Returns `true` if the broker error is treated as a metadata
     /// staleness signal. Mirrors Java's
     /// `error.exception() instanceof InvalidMetadataException`.
+    ///
+    /// Java's `InvalidMetadataException` has 15 subclasses; the 13
+    /// listed here are exactly the wire-coded subset (the remaining
+    /// two — `StaleMetadataException` and `NoAvailableBrokersException`
+    /// — are client-internal with no broker error code, so they cannot
+    /// arrive on a produce response).
     fn is_invalid_metadata(error: Errors) -> bool {
         matches!(
             error,
             Errors::UnknownTopicOrPartition
-                | Errors::NotLeaderOrFollower
                 | Errors::LeaderNotAvailable
+                | Errors::NotLeaderOrFollower
+                | Errors::ReplicaNotAvailable
                 | Errors::NetworkException
+                | Errors::KafkaStorageError
+                | Errors::ListenerNotFound
                 | Errors::FencedLeaderEpoch
+                | Errors::PreferredLeaderNotAvailable
+                | Errors::EligibleLeadersNotAvailable
+                | Errors::ElectionNotNeeded
                 | Errors::UnknownTopicId
+                | Errors::InconsistentTopicId
         )
     }
 
@@ -2575,6 +2583,58 @@ mod tests {
             unknown_tagged_fields: Vec::new(),
         };
         Box::new(ProduceResponse::new(data))
+    }
+
+    /// Regression test for `is_invalid_metadata`: every Java
+    /// `InvalidMetadataException` subclass with a wire error code must
+    /// trigger a metadata refresh. Java treats the test as
+    /// `error.exception() instanceof InvalidMetadataException`, which
+    /// matches all 13 wire-coded subclasses. The Rust hardcoded list was
+    /// previously missing 7 of those (KafkaStorageError, InconsistentTopicId,
+    /// ReplicaNotAvailable, ListenerNotFound, PreferredLeaderNotAvailable,
+    /// EligibleLeadersNotAvailable, ElectionNotNeeded) — which would silently
+    /// skip the metadata refresh on a produce response with one of those
+    /// errors.
+    #[test]
+    fn is_invalid_metadata_matches_all_java_invalid_metadata_subclasses() {
+        // 13 wire-coded subclasses of InvalidMetadataException.
+        let must_be_true = [
+            Errors::UnknownTopicOrPartition,
+            Errors::LeaderNotAvailable,
+            Errors::NotLeaderOrFollower,
+            Errors::ReplicaNotAvailable,
+            Errors::NetworkException,
+            Errors::KafkaStorageError,
+            Errors::ListenerNotFound,
+            Errors::FencedLeaderEpoch,
+            Errors::PreferredLeaderNotAvailable,
+            Errors::EligibleLeadersNotAvailable,
+            Errors::ElectionNotNeeded,
+            Errors::UnknownTopicId,
+            Errors::InconsistentTopicId,
+        ];
+        for err in must_be_true {
+            assert!(
+                Sender::<MockClientImpl>::is_invalid_metadata(err),
+                "{err:?} should be treated as InvalidMetadataException"
+            );
+        }
+        // A handful of non-InvalidMetadataException errors must NOT trigger
+        // the metadata-refresh path (sanity).
+        let must_be_false = [
+            Errors::None,
+            Errors::CorruptMessage,
+            Errors::TopicAuthorizationFailed,
+            Errors::MessageTooLarge,
+            Errors::OutOfOrderSequenceNumber,
+            Errors::UnsupportedVersion,
+        ];
+        for err in must_be_false {
+            assert!(
+                !Sender::<MockClientImpl>::is_invalid_metadata(err),
+                "{err:?} should NOT be treated as InvalidMetadataException"
+            );
+        }
     }
 
     /// Build a multi-partition produce response (single topic).
