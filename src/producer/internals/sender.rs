@@ -1681,14 +1681,14 @@ mod tests {
             .update_with_current_request_version(&metadata_response, false, time.milliseconds())
             .expect("metadata update");
 
-        let pool = Arc::new(BufferPool::new(64 * 1024, 1024, time.clone(), "producer-metrics"));
+        let pool = Arc::new(BufferPool::new(1024 * 1024, 16 * 1024, time.clone(), "producer-metrics"));
         let accum = Arc::new(RecordAccumulator::new_with_default_partitioner(
             LogContext::new(),
-            1024,
+            16 * 1024,
             CompressionType::None,
-            10, // linger_ms
+            0, // linger_ms — Java's default in setupWithTransactionState
             RETRY_BACKOFF_MS,
-            1000,
+            RETRY_BACKOFF_MS,
             DELIVERY_TIMEOUT_MS,
             "producer-metrics",
             time.clone(),
@@ -1770,5 +1770,156 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), sender.run_once())
             .await
             .expect("run_once timed out");
+    }
+
+    /// Translation of `SenderTest#testSimple` (round-trip canonical
+    /// regression).
+    ///
+    /// Append a record → run_once (sends produce request) → respond
+    /// with `Errors::NONE` → run_once (handles response) → assert the
+    /// future resolves to the expected RecordMetadata.
+    #[tokio::test]
+    async fn test_simple() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let offset = 0i64;
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"key", b"value").await;
+        sender.run_once().await; // send produce request
+        assert_eq!(
+            sender.client.in_flight_request_count(),
+            1,
+            "We should have a single produce request in flight."
+        );
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+        assert!(sender.client.has_in_flight_requests());
+        sender
+            .client
+            .respond(build_produce_response(TOPIC_NAME, topic_id, 0, offset, Errors::None, 0));
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 0, "All requests completed.");
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 0);
+        assert!(!sender.client.has_in_flight_requests());
+        let resolved = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future.get() timed out")
+            .expect("future returned error");
+        assert_eq!(resolved.offset(), offset);
+    }
+
+    /// Append + send + read inflight request count without responding.
+    /// Confirms the in-flight bookkeeping is wired correctly.
+    #[tokio::test]
+    async fn append_drives_send() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id: _ } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let tp0 = TopicPartition::new(TOPIC_NAME, 0);
+        let _future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 1);
+        assert_eq!(sender.in_flight_batches_for(&tp0).len(), 1);
+    }
+
+    /// Round-trip with 3 records. All futures must resolve.
+    #[tokio::test]
+    async fn round_trip_three_records() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        let f0 = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k0", b"v0").await;
+        let f1 = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 1, 0, b"k1", b"v1").await;
+        let f2 = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 2, 0, b"k2", b"v2").await;
+        sender.run_once().await;
+        // All three partitions go to the same broker (node 0), so they
+        // all batch into one ProduceRequest.
+        assert!(sender.client.has_in_flight_requests());
+        // Stage a multi-partition response.
+        let response =
+            build_produce_response_multi(TOPIC_NAME, topic_id, &[(0, 100), (1, 200), (2, 300)], Errors::None);
+        sender.client.respond(response);
+        sender.run_once().await;
+        let m0 = tokio::time::timeout(Duration::from_secs(2), f0.get())
+            .await
+            .expect("f0 timed out")
+            .expect("f0 errored");
+        let m1 = tokio::time::timeout(Duration::from_secs(2), f1.get())
+            .await
+            .expect("f1 timed out")
+            .expect("f1 errored");
+        let m2 = tokio::time::timeout(Duration::from_secs(2), f2.get())
+            .await
+            .expect("f2 timed out")
+            .expect("f2 errored");
+        assert_eq!(m0.offset(), 100);
+        assert_eq!(m1.offset(), 200);
+        assert_eq!(m2.offset(), 300);
+    }
+
+    /// Acks=0 path: the sender does not register a pending response (no
+    /// expect_response). We can't fully test without a different fixture
+    /// (acks=0 uses a different sender ctor), so this exercises the
+    /// "no responses come back" branch only.
+    #[tokio::test]
+    async fn no_response_when_no_records_pending() {
+        let TestSetup { mut sender, .. } = make_test_setup(i32::MAX, false);
+        sender.run_once().await;
+        assert_eq!(sender.client.in_flight_request_count(), 0);
+    }
+
+    /// `MockClientImpl::prepare_response` answers immediately on send.
+    /// Verify a single full cycle works in a single `run_once`.
+    #[tokio::test]
+    async fn prepare_response_immediate_round_trip() {
+        let TestSetup { mut sender, accum, metadata, time, topic_id } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
+        sender
+            .client
+            .prepare_response(build_produce_response(TOPIC_NAME, topic_id, 0, 42, Errors::None, 0));
+        let future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+        // Send the request — MockClient answers immediately because of
+        // the staged future-response.
+        sender.run_once().await;
+        // Future may resolve in this same run_once (response delivered
+        // during the same poll).
+        let resolved = tokio::time::timeout(Duration::from_secs(2), future.get())
+            .await
+            .expect("future timed out")
+            .expect("future errored");
+        assert_eq!(resolved.offset(), 42);
+    }
+
+    /// Build a multi-partition produce response (single topic).
+    fn build_produce_response_multi(
+        topic: &str,
+        topic_id: Uuid,
+        offsets: &[(i32, i64)],
+        error: Errors,
+    ) -> Box<dyn AbstractResponse> {
+        let partition_responses: Vec<PartitionProduceResponse> = offsets
+            .iter()
+            .map(|(p, o)| PartitionProduceResponse {
+                index: *p,
+                error_code: error.code(),
+                base_offset: *o,
+                log_append_time_ms: -1,
+                log_start_offset: 0,
+                record_errors: Vec::new(),
+                error_message: None,
+                current_leader: ProtoLeaderIdAndEpoch::new(),
+                unknown_tagged_fields: Vec::new(),
+            })
+            .collect();
+        let topic_resp = TopicProduceResponse {
+            name: topic.to_string(),
+            topic_id,
+            partition_responses,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let data = ProduceResponseData {
+            throttle_time_ms: 0,
+            responses: vec![topic_resp],
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        Box::new(ProduceResponse::new(data))
     }
 }
