@@ -14,6 +14,8 @@
 
 //! Translation of `org.apache.kafka.clients.producer.internals.ErrorLoggingCallback`.
 
+#![allow(dead_code)] // Phase 6e (KafkaProducer) wires this as the default callback.
+
 use log::error;
 
 use crate::common::errors::KafkaError;
@@ -74,8 +76,15 @@ impl Callback for ErrorLoggingCallback {
             } else {
                 format!("{} bytes", self.value_length)
             };
+            // Java's `log.error(format, topic, keyString, valueString, e)`
+            // passes the exception as a separate trailing argument so
+            // SLF4J appends the full stack trace. Rust's `log::error!`
+            // has no equivalent — we surface the same diagnostic via
+            // `{:#?}` (pretty Debug) which prints the structured form
+            // including any `KafkaError` source chain rather than just
+            // the leaf `Display` message.
             error!(
-                "Error when sending message to topic {} with key: {}, value: {} with error: {}",
+                "Error when sending message to topic {} with key: {}, value: {} with error: {:#?}",
                 self.topic, key_string, value_string, e
             );
         }
