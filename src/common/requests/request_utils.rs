@@ -49,7 +49,7 @@ pub fn get_leader_epoch(leader_epoch: i32) -> Option<i32> {
 pub fn serialize(
     header: &impl Message,
     header_version: i16,
-    api_message: &impl Message,
+    api_message: &mut impl Message,
     api_version: i16,
 ) -> io::Result<ByteBufferAccessor> {
     let mut cache = ObjectSerializationCache::new();
@@ -58,7 +58,8 @@ pub fn serialize(
     let message_size = api_message.size(&mut cache, api_version)?;
     let mut writable = ByteBufferAccessor::new((header_size + message_size) as usize);
 
-    header.write(&mut writable, &cache, header_version)?;
+    let mut header_clone = header.clone();
+    header_clone.write(&mut writable, &cache, header_version)?;
     api_message.write(&mut writable, &cache, api_version)?;
 
     writable.flip();
