@@ -464,21 +464,29 @@ impl ProducerBatch {
         for (i, thunk) in thunks.iter().enumerate() {
             if let Some(cb) = &thunk.callback {
                 // Java: `RecordMetadata metadata = thunk.future.value()` /
-                // exception lookup. Here we read the per-record error
-                // from `record_exceptions` directly to mirror Java's
-                // bifurcation; the metadata path uses the same fields a
+                // exception lookup. We bifurcate on
+                // `record_exceptions.is_none()` (success vs error mode)
+                // — NOT on the per-index closure result — so that even
+                // if a caller's `record_exceptions` closure returns
+                // `None` for some index, we stay on the error branch
+                // (matching Java's `else` arm at
+                // `ProducerBatch.java:317-319`, which fires
+                // `onCompletion(null, recordExceptions.apply(i))` —
+                // potentially `onCompletion(null, null)` — rather than
+                // silently flipping to the success path).
+                //
+                // The metadata path uses the same fields a
                 // `FutureRecordMetadata::value` would compute (the future
                 // is already `set` above).
-                let per_record_err = record_exceptions.as_ref().and_then(|f| f(i as i32));
                 let cb_clone = Arc::clone(cb);
-                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| match per_record_err {
-                    None => {
+                let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    if let Some(err_fn) = record_exceptions.as_ref() {
+                        let per_record_err = err_fn(i as i32);
+                        cb_clone.on_completion(None, per_record_err.as_ref());
+                    } else {
                         let metadata = self.metadata_for(i as i32, &thunk.future);
                         cb_clone.on_completion(Some(&metadata), None);
-                    },
-                    Some(err) => {
-                        cb_clone.on_completion(None, Some(&err));
-                    },
+                    }
                 }));
                 if let Err(panic_payload) = result {
                     // Java: `log.error("Error executing user-provided callback...")`.
