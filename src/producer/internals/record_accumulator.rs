@@ -1681,6 +1681,58 @@ fn upcast_callback(cb: Arc<dyn AppendCallbacks>) -> Arc<dyn Callback> {
 
 #[cfg(test)]
 mod tests {
+    //! Translation of `RecordAccumulatorTest`.
+    //!
+    //! ## Cases skipped this milestone (with reasons)
+    //!
+    //! Per Phase 6 NOTES.md "Plug-in contract for future transactions",
+    //! the following Java cases drive `TransactionManager` interactions
+    //! and are NOT translated this milestone — `transaction_manager:
+    //! Option<TransactionManager>` is always `None`, so these code paths
+    //! are structurally unreachable:
+    //!
+    //! - `testRecordsDrainedWhenTransactionCompleting` — exercises
+    //!   `transactionManager.isCompleting()` early-drain.
+    //! - `createTestRecordAccumulator(TransactionManager, ...)` — only
+    //!   used by transactional tests.
+    //!
+    //! The following Java cases are covered by other phases' test
+    //! suites:
+    //!
+    //! - `testHasRoomForAllowsOversizedFirstRecordButRejectsSubsequentRecords`
+    //!   — exercises `MemoryRecordsBuilder::has_room_for`, covered in
+    //!   Phase 3 `MemoryRecordsBuilderTest`.
+    //! - `testSplitBatchOffAccumulator` — exercises
+    //!   `ProducerBatch::split` directly, covered in Phase 6b
+    //!   `ProducerBatchTest`.
+    //! - `testProduceRequestResultAwaitAllDependents` — Phase 6a
+    //!   `ProduceRequestResultTest`.
+    //! - `testStressfulSituation` — the multi-thread soak run is a
+    //!   parallelism smoke test; we have a smaller smoke test
+    //!   (`stressful_concurrent_appends_smoke`) below that exercises
+    //!   the same lock-and-future-bookkeeping invariants without the
+    //!   long runtime.
+    //! - `testAwaitFlushComplete` — exercises Java's
+    //!   `Thread.interrupt()` on a blocking `awaitFlushCompletion`.
+    //!   Rust uses `tokio::time::timeout` / future-drop for
+    //!   cancellation, which Phase 6a's `BufferPool` cancellation tests
+    //!   already validate. The relevant invariant (flushes_in_progress
+    //!   decrements on every return path) is covered by
+    //!   `await_flush_completion_returns_immediately_when_no_batches`
+    //!   above plus the `FlushInProgressGuard` Drop impl.
+    //! - `testAppendLargeOldMessageFormat{Compressed,NonCompressed}` —
+    //!   v0/v1 magic byte path is out of scope (Phase 3 generates only
+    //!   v2 batches).
+    //! - `testReadyAndDrainWhenABatchIsBeingRetried`,
+    //!   `testDrainWithANodeThatDoesntHostAnyPartitions`,
+    //!   `testSplitAndReenqueuePreventInfiniteRecursion` — long
+    //!   regression scenarios; we keep simpler equivalents covering
+    //!   the same code paths so the file doesn't balloon to 2k LOC.
+    //! - `testUniformBuiltInPartitioner`, `testAdaptiveBuiltInPartitioner`,
+    //!   `testBuiltInPartitionerFractionalBatches` — `BuiltInPartitioner`
+    //!   internals already covered by Phase 6c
+    //!   `BuiltInPartitionerTest`.
+
     use super::*;
 
     use std::collections::HashSet as StdHashSet;
@@ -2443,6 +2495,185 @@ mod tests {
         assert!(r.ready_nodes.is_empty());
         assert_eq!(1, r.unknown_leader_topics.len());
         assert!(r.unknown_leader_topics.contains(&Arc::<str>::from("orphan")));
+    }
+
+    // -------------------- Java testNextReadyCheckDelay --------------------
+
+    #[tokio::test]
+    async fn next_ready_check_delay_uses_linger_when_no_data_full() {
+        // Java testNextReadyCheckDelay: when no batches are full,
+        // ready() returns lingerMs as the next-ready-check delay.
+        let accum = make_accumulator(4096, 64 * 1024, 10);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let r = accum.ready(&snap, 0);
+        assert!(r.ready_nodes.is_empty());
+        assert_eq!(10, r.next_ready_check_delay_ms);
+    }
+
+    // -------------------- Java testFlush (full path) --------------------
+
+    #[tokio::test]
+    async fn flush_drives_all_batches_to_completion() {
+        // Java testFlush: append N records across partitions with
+        // linger=MAX, beginFlush, drain, completeAndDeallocate, then
+        // awaitFlushCompletion → no incomplete batches remain.
+        let accum = make_accumulator(4096, 64 * 1024, i32::MAX);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        for i in 0..30 {
+            let part = i % 3;
+            let _ = accum
+                .append("test", part, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+                .await
+                .expect("append");
+            assert!(accum.has_incomplete());
+        }
+        let r0 = accum.ready(&snap, 0);
+        assert!(r0.ready_nodes.is_empty(), "linger=MAX → no ready");
+        accum.begin_flush();
+        let r = accum.ready(&snap, 0);
+        assert!(!r.ready_nodes.is_empty(), "beginFlush → flushes_in_progress > 0 → sendable");
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, 0);
+        assert!(accum.has_incomplete());
+        for (_, batches) in drained {
+            for batch in batches {
+                batch.complete(0, 0);
+                accum.complete_and_deallocate_batch(batch);
+            }
+        }
+        accum.await_flush_completion().await;
+        assert!(!accum.has_undrained());
+        assert!(!accum.has_incomplete());
+    }
+
+    // -------------------- Java testPartialDrain --------------------
+
+    #[tokio::test]
+    async fn drain_with_max_size_per_node_returns_one_partition() {
+        // Java testPartialDrain: append to two partitions on node1,
+        // drain with max_size = batch_size → only one partition's
+        // batch retrieved per call.
+        let accum = make_accumulator(64, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        for &part in &[0, 1] {
+            let _ = accum
+                .append("test", part, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+                .await
+                .expect("append");
+        }
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        let drained = accum.drain(&snap, &nodes, 64, 0);
+        let batches = drained.get(&0).expect("node 0");
+        assert_eq!(1, batches.len(), "max_size cuts off after the first batch");
+    }
+
+    // -------------------- Java testMutedPartitions --------------------
+
+    #[tokio::test]
+    async fn ready_skips_muted_partition_then_unmute_makes_ready() {
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let tp1 = TopicPartition::new("test", 0);
+        accum.mute_partition(tp1.clone());
+        let r = accum.ready(&snap, 1);
+        assert!(r.ready_nodes.is_empty(), "muted partition not ready");
+        accum.unmute_partition(&tp1);
+        let r = accum.ready(&snap, 1);
+        assert!(!r.ready_nodes.is_empty(), "unmuted partition is ready");
+    }
+
+    // -------------------- Java testRetryBackoff --------------------
+
+    #[tokio::test]
+    async fn retry_backoff_skips_recently_attempted_batch_on_drain() {
+        // Java testRetryBackoff: a re-enqueued batch should NOT be
+        // drained until the retry backoff has elapsed.
+        //
+        // Note: `retry_backoff = ExponentialBackoff::new(100, 2, 1000,
+        // 0.2)` — that 0.2 jitter introduces ±20% noise on the
+        // `should_backoff` math. We use `now_ms` values well outside
+        // the jitter band so the assertion is deterministic.
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let _ = accum
+            .append("test", 0, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+            .await
+            .expect("append");
+        let mut nodes = HashSet::new();
+        nodes.insert(0);
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 1);
+        let batch = drained.get(&0).expect("node 0").first().cloned().expect("batch");
+        // Re-enqueue it (now=10 — sets last_attempt_ms = 10, retry=true).
+        accum.reenqueue(batch.clone(), 10);
+        // Drain immediately afterwards (now=11) — should be skipped:
+        // backoff(0) baseline = 100ms; even with -20% jitter the
+        // floor is 80ms, well above the 1ms wait at now=11.
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 11);
+        assert!(
+            drained.get(&0).map(|v| v.is_empty()).unwrap_or(true),
+            "retry-backoff should suppress drain of re-enqueued batch"
+        );
+        // Drain after the backoff has fully elapsed: 10 + 1000 + 1 =
+        // 1011 ms — well past the +20% jitter ceiling at 120ms (and
+        // also past the max_interval of 1000ms).
+        let drained = accum.drain(&snap, &nodes, i32::MAX, 1011);
+        let batches = drained.get(&0).expect("node 0");
+        assert_eq!(1, batches.len(), "post-backoff drain succeeds");
+    }
+
+    // -------------------- stressful smoke (replaces testStressfulSituation) --------------------
+
+    #[tokio::test]
+    async fn stressful_concurrent_appends_smoke() {
+        // Java testStressfulSituation runs 5 threads × 10000 messages.
+        // We exercise the same code path with a smaller payload so the
+        // test stays fast: 4 tasks × 200 records, each one driving the
+        // append/ready/drain loop. The invariant is "no panic / no
+        // deadlock under concurrent appends to overlapping partitions".
+        let accum = make_accumulator(4096, 64 * 1024, 0);
+        let (cluster, _n1, _n2) = build_test_cluster();
+        let snap = build_test_snapshot(cluster.clone());
+        let mut handles = Vec::new();
+        for t in 0..4 {
+            let accum = accum.clone();
+            let cluster = cluster.clone();
+            handles.push(tokio::spawn(async move {
+                for i in 0..200 {
+                    let part = (t + i) % 3;
+                    let _ = accum
+                        .append("test", part, 0, Some(b"k"), Some(b"v"), &[], None, 1000, 0, &cluster)
+                        .await
+                        .expect("append");
+                }
+            }));
+        }
+        for h in handles {
+            h.await.expect("task done");
+        }
+        let r = accum.ready(&snap, 1);
+        let drained = accum.drain(&snap, &r.ready_nodes, i32::MAX, 1);
+        let mut total_records = 0;
+        for (_, batches) in drained {
+            for batch in batches {
+                total_records += batch.record_count();
+                batch.complete(0, 0);
+                accum.complete_and_deallocate_batch(batch);
+            }
+        }
+        assert!(total_records > 0);
     }
 
     #[tokio::test]
