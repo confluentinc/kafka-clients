@@ -20,6 +20,7 @@
 
 pub mod buffer_exhausted_error;
 pub mod callback;
+pub mod producer_record;
 pub mod record_metadata;
 
 #[cfg(test)]
@@ -30,4 +31,5 @@ pub(crate) mod internals;
 
 pub use buffer_exhausted_error::BufferExhaustedError;
 pub use callback::Callback;
+pub use producer_record::{ProducerRecord, ProducerRecordError};
 pub use record_metadata::RecordMetadata;
