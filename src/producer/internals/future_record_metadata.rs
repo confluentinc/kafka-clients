@@ -134,6 +134,23 @@ impl FutureRecordMetadata {
         }
     }
 
+    /// Accessor for the create timestamp passed at construction. Used by
+    /// [`ProducerBatch`](super::producer_batch::ProducerBatch) when
+    /// building a per-record [`RecordMetadata`] for the `Callback`.
+    pub fn create_timestamp(&self) -> i64 {
+        self.create_timestamp
+    }
+
+    /// Accessor for the serialized key size passed at construction.
+    pub fn serialized_key_size(&self) -> i32 {
+        self.serialized_key_size
+    }
+
+    /// Accessor for the serialized value size passed at construction.
+    pub fn serialized_value_size(&self) -> i32 {
+        self.serialized_value_size
+    }
+
     /// `true` iff the underlying request has completed.
     pub fn is_done(&self) -> bool {
         if let Some(next) = self.next.get() {

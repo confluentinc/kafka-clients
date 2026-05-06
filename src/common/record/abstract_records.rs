@@ -36,7 +36,9 @@
 //!    therefore deferred to Phase 3c, when `DefaultRecordBatch` lands.
 
 use crate::common::errors::KafkaError;
-use crate::common::record::{RecordBatch, Records};
+use crate::common::header::RecordHeader;
+use crate::common::record::default_record_batch::estimate_batch_size_upper_bound;
+use crate::common::record::{CompressionType, RecordBatch, Records};
 
 /// Return the first batch in `records`, or `None` if empty. Mirrors Java's
 /// `AbstractRecords#firstBatch()`.
@@ -46,4 +48,22 @@ use crate::common::record::{RecordBatch, Records};
 /// `Iterator.next()`.
 pub fn first_batch<'a>(records: &'a dyn Records) -> Result<Option<Box<dyn RecordBatch + 'a>>, KafkaError> {
     records.batches().next().transpose()
+}
+
+/// Get an upper bound estimate on the byte size of a batch with only a
+/// single record using a given key, value and headers. Mirrors Java's
+/// `AbstractRecords#estimateSizeInBytesUpperBound(byte, CompressionType,
+/// byte[], byte[], Header[])`.
+///
+/// Phase 3 only supports magic v2. For v0/v1 callers we conservatively
+/// fall through to the v2 upper bound (Java dispatches to
+/// `LegacyRecord.recordSize`, which is out of scope per PLAN.md).
+pub fn estimate_size_in_bytes_upper_bound(
+    _magic: i8,
+    _compression: CompressionType,
+    key: Option<&[u8]>,
+    value: Option<&[u8]>,
+    headers: &[RecordHeader],
+) -> i32 {
+    estimate_batch_size_upper_bound(key, value, headers)
 }
