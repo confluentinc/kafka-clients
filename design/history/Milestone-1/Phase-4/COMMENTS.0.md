@@ -79,3 +79,32 @@ The Phase-4b skip-list pattern — "covered by another test file" without a 1:1 
 # Phase 4c Review — Round 1
 
 All Phase 4c issues resolved; see `COMMENTS.DONE.0.md`.
+
+---
+
+## Phase 4c Review — Round 2
+
+## Round 2 verdict: APPROVED
+
+Round 2 covered single fixup commit `c0e1487` resolving Issue 17 (the
+only Round 1 finding) against base `e932fd9`. Re-ran DoD checks:
+
+- `cargo build --lib` — clean, no warnings.
+- `cargo test --lib` — `test result: ok. 720 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.30s` (unchanged from end of Round 1; the fixup is comment-only).
+- `cargo xtask format-check` — clean.
+- `cargo xtask lint` — clean.
+- `cargo xtask check-generated` — clean (199 generated files).
+
+Per-issue verification:
+
+- **Issue 17 — verified**: rustdoc on `ClientDnsLookup::ResolveCanonicalBootstrapServersOnly` at `src/client_dns_lookup.rs:32-62` now carries a `# Note — deviation from Java behavior` heading directly on the variant. The 28-line block covers all four points the Round 1 review asked for: (1) Java's `InetAddress.getCanonicalHostName()` reverse-DNS behavior is named, (2) Rust's IP-literal fallback in Phase 4c is named with the reason (`std::net` exposes no reverse-DNS API) and a cross-reference to `client_utils::parse_and_validate_addresses_with_resolver` for the implementation, (3) the SASL/Kerberos SPN implication is spelled out concretely (`kafka/<ip>@REALM` vs `kafka/<canonical-hostname>@REALM`) with the note that no caller is currently affected because the SASL stack is not yet implemented, (4) the deviation is flagged as Phase 5+ SASL work with two candidate crates (`dns-lookup`, `hickory-resolver`) and the fix shape (route the resolver through reverse-DNS for this variant only, preserving the cheap synchronous `to_socket_addrs` path for `UseAllDnsIps`). The phrasing satisfies the Round 1 ask for visual emphasis: a `# Note` heading, **bold** call-outs on `**not**`, `**Implication for SASL/Kerberos**`, and `**Where to revisit**` make the deviation impossible to miss for a future caller reading only the variant doc.
+
+Source-code scope check: `git diff c0e1487^..c0e1487 -- src/` is limited to `src/client_dns_lookup.rs` (28 lines added, 0 removed, all rustdoc on the existing variant). No logic, public API surface, or test was touched. `client_dns_lookup` test count unchanged (5 tests, all passing).
+
+Bookkeeping: `COMMENTS.0.md` Round 1 line reads `All Phase 4c issues resolved; see COMMENTS.DONE.0.md.` (verified line 81). `COMMENTS.DONE.0.md` Issue 17 has a `**Resolution:**` paragraph explaining the rustdoc-block addition. Phase 4a Round 2 verdict (lines 1-27) and Phase 4b Round 1 pointer (line 33) in `COMMENTS.0.md`, plus all Phase 4a/4b content in `COMMENTS.DONE.0.md`, are untouched.
+
+**SHA-reference nit (acknowledged, not blocking)**: the `**Resolution:**` paragraph in `COMMENTS.DONE.0.md` Issue 17 names `7e201af` rather than the actual final commit `c0e1487`. `7e201af` exists as a dangling commit (the pre-amend version of the fixup) — `git cat-file -t` confirms it's still reachable today, but it's not on the branch and will eventually be GC'd, leaving a broken SHA in the resolution. The actor's explanation (an amend can't self-reference its post-amend hash) is technically correct, but the standard fix is a follow-up bookkeeping commit that updates the SHA reference after the final amend lands. Not a blocker for Phase 5 — the resolution text itself is accurate and `c0e1487` is trivially discoverable from `git log --grep='Issue 17'`. Recommend the actor update the reference at the next bookkeeping pass.
+
+**Procedural observation (not a finding)**: the fixup commit `c0e1487` also adds the Phase 4b Round 2 verdict block to `COMMENTS.0.md` (lines 37-71 of the new file). That section was missing from `df09aee` (the Phase 4b bookkeeping commit) and was bundled into this Phase 4c fixup. The bundling is harmless because the additions are purely additive — no Phase 4a/4b text was modified — but the commit message ("Comment-only change addressing Issue 17") undersells the scope. Phase 4b Round 2 was already approved by me in conversation, so the verdict text is accurate; this is a bookkeeping artifact only.
+
+No new regressions. No new findings. Phase 4c is ready for Phase 5.

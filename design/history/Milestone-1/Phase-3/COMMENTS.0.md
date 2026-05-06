@@ -1213,3 +1213,114 @@ Apache 2.0 headers present on all new files. Re-exports updated in `mod.rs`. No 
 
 _(Issues 20, 21, 22, 23 from Phase 3d-4 Round 1 review have been
 resolved and moved to `COMMENTS.DONE.0.md`.)_
+
+## Phase 3d-4 Round 2 verdict: APPROVED
+
+Round 2 covered fixup commits `ca38cc3`, `6756c50`, `ecb5d4f` resolving
+Issues 20–23, plus rotation `1d6d9c8` and the actor memory note
+`9fe6d41`. With this approval, **Phase 3d is fully complete**:
+3d-1, 3d-2, 3d-3, and 3d-4 are all closed.
+
+DoD re-ran clean:
+
+- `cargo build` — clean
+- `cargo test --lib` — `test result: ok. 577 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.24s` (was 574, +3 streaming-codec tests)
+- `cargo xtask format-check` — clean
+- `cargo xtask check-generated` — 199 generated files clean
+- `cargo xtask lint` — no clippy issues
+
+### Per-issue verification
+
+- **Issue 20 (streaming compression)**: `compress_into_buffer_stream` is gone; appends now route through a persistent `Box<dyn Write + 'static>` codec wrapper. Test `compressed_append_streams_into_buffer_stream_in_flight` proves bytes flow into `buffer_stream` mid-append (lz4 forced to emit a block before close). `compressed_streaming_round_trip_per_codec` covers gzip/snappy/lz4/zstd. **Resolved.**
+- **Issue 21 (LogAppendTime)**: `with_records` (`memory_records.rs:178-185`) now captures `SystemTime::now()` when `timestamp_type == LogAppendTime`. Test `with_records_log_append_time_populates_max_timestamp` asserts the produced batch's `max_timestamp` lies in the wall-clock window captured before/after the call (±1 ms slop), and asserts non-`NO_TIMESTAMP`. **Resolved.**
+- **Issue 22 (error message)**: dead function gone (auto-resolved by Issue 20). Remaining flush-error wording in `close()` line 607 reads `"I/O exception when writing to the append stream, closing: {e}"` — matches Java's `MemoryRecordsBuilder.java:339` exactly. **Resolved.**
+- **Issue 23 (`with_records` overloads)**: `memory_records.rs` now exports 14 `with_*` factories (1 base + 13 overloads), each documented with the Java line range it translates (`MemoryRecords.java:587-667`). Defaults match Java (`CURRENT_MAGIC_VALUE`, `0`, `CreateTime`, `NO_PRODUCER_ID/EPOCH/SEQUENCE`, `NO_PARTITION_LEADER_EPOCH`, `is_transactional=false`). **Resolved.**
+
+### Self-referential pointer safety assessment (the headline question)
+
+The actor's design is **sound**, with the following verified invariants:
+
+1. **Heap pinning**: `buffer_stream: Box<ByteBufferOutputStream>` (line 113) is allocated in `from_stream` (line 231) **before** `install_append_stream` runs (line 275). The boxed allocation has a stable address across builder moves.
+2. **Captured pointer scope**: the codec writer borrows the `ByteBufferOutputStream` *struct itself* via `&'static mut ByteBufferOutputStream` (line 306), not a slice into its internal `Vec<u8>`. Hence Vec realloc on growth (via `set_position`/`ensure_remaining`) does **not** invalidate the codec's pointer — every `Write` call re-derefs `&mut self.buffer_stream`'s inner Vec freshly. This is the critical correctness property.
+3. **Drop order**: explicit `impl Drop` (line 1048) sets `append_stream = None` first, ensuring the writer is dropped before `buffer_stream`. Field declaration order alone would be wrong (`buffer_stream` is declared first), and the actor correctly identifies and overrides this in the safety comment.
+4. **Mutation paths drop first**: both `abort()` (line 530) and `close()` (lines 587, 614) drop `append_stream` before touching `buffer_stream`. `build()` runs `close()` first, so its `mem::replace` on `buffer_stream` (line 644) is safe.
+5. **No escape**: grep for `pub fn ... append_stream` and `pub fn ... -> &mut.*Write` in this file finds nothing — the writer never leaves the builder. All `Write` use is `&mut self`-gated. This guarantees exclusive access while writes happen.
+6. **`unsafe` block**: exactly one (line 306), with a function-level safety comment plus a line-level `// SAFETY:` reference. Justification is accurate.
+7. **`'static` lie acknowledged**: explicitly documented at module-level docs (line 44) and field-level (line 158). Acceptable Rust idiom for self-referential structs given the encapsulation.
+
+**Verdict on memory safety**: I cannot identify a code path that would invalidate the captured `&'static mut ByteBufferOutputStream` while the writer is alive. Miri would be valuable hardening but is not configured in the project — flagged as a **future recommendation** (low priority; the design is defensible without it).
+
+No new issues found.
+
+---
+
+# Phase 3e Review — Critic N=0
+
+## Round 1
+
+**Scope**: 3 commits since `1d6d9c8`:
+- `31bfceb` submodule bump (adds `kafka/clients/src/test/java/org/apache/kafka/common/record/RustFixtureCapture.java`, submodule SHA `011b88b`)
+- `fcc2c35` parent-repo wire fixtures + 2 codec close-path fixes
+- `f1440c6` actor memory note (no source impact)
+
+**DoD**: build, lib tests, format-check, lint, check-generated all clean.
+- `cargo test --lib` tail line: `test result: ok. 586 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.25s` — matches the actor's claim.
+- 577 → 586 (+9 = 1 hex round-trip + 7 byte-equality + 1 snappy tripwire). Verified.
+- `cargo xtask format-check`: clean.
+- `cargo xtask lint`: clean.
+- `cargo xtask check-generated`: clean (199 generated files unchanged).
+
+### Codec close-path bug-fixes — verified
+
+Both fixes are real and well-justified.
+
+1. **Gzip flush removal** in `memory_records_builder::close()` (lines 594-615). The 19-line comment block at lines 597-612 explicitly documents why a `Write::flush()` on `GzEncoder` would emit a `Z_SYNC_FLUSH` block (`00 00 00 00 ff ff`) followed by a separate empty-final block on `try_finish`, while Java's `GZIPOutputStream.close()` emits a single final block. Dropping the boxed writer (which calls each codec's `try_finish` via `Drop`) is the correct analogue of Java's `out.close()`. The byte-equality assertion in `matches_java_gzip_two_records` IS the verification — and it passes. Audited all `flush()` callsites; the only call previously on this hot path was the now-removed one. Standalone codec tests in `gzip_compression.rs` / `lz4_compression.rs` / `zstd_compression.rs` still call `out.flush().unwrap()` in their own test scopes (not the builder path), and all pass. **No regression to other tests.**
+
+2. **Zstd Drop fix** (`zstd_compression.rs:72-89`): `ZstdWriter::Drop` now calls `flush()` then `finish()`. This mirrors Java's `BufferedOutputStream(zstd, 16K).close()` which forwards `flush()` to `flushStream()` then `out.close()` calls `endStream()`. Documented in lines 75-83 with explicit reference to Phase 3e wire fixtures. Verified: `matches_java_zstd_two_records` passes byte-for-byte.
+
+### Fixture coverage vs DoD
+
+PLAN.md line 220 asks for "build a batch with two known records, assert the bytes equal a hex fixture captured from the Java client". The actor delivered **7 byte-equal assertions** plus 1 snappy tripwire (assertion deferred for documented reason) — exceeds the DoD baseline.
+
+Each `include_str!` is wired to a test that calls `MemoryRecords::with_records_default` or `MemoryRecords::with_idempotent_records_default` and asserts via `assert_bytes_eq` against the decoded fixture. Idempotent fixtures pass `producerId=12345, epoch=7, baseSeq=42`, matching the Java capture program (`RustFixtureCapture.java:140,145`).
+
+### Java capture program review
+
+`RustFixtureCapture.java`:
+- `main(String[])` (not `@Test`) — runnable via `java -cp ... org.apache.kafka.common.record.RustFixtureCapture`. README documents the exact javac/java invocation with resolved jar paths.
+- Hex emission via per-byte `String.format("%02x", b & 0xff)` (line 47). Equivalent to `Bytes.toHexString`.
+- Determinism: timestamps are explicit (`0L`, `1234L`, `1235L`); no `System.currentTimeMillis()`. Both Java factories `withRecords` and `withIdempotentRecords` default to `CreateTime`, so wall-clock is not consulted.
+- Covers all 8 fixtures the actor claims: 1 uncompressed-1, 1 uncompressed-2, gzip-2, snappy-2, lz4-2, zstd-2, idempotent-uncompressed-2, idempotent-gzip-2.
+- License: Apache 2.0 ASF header present (lines 1-16).
+
+### Submodule pointer bump
+
+- Submodule diff = exactly 1 file added (`RustFixtureCapture.java`, 148 LOC). No unrelated upstream pulls. Submodule SHA `011b88b` is built directly on top of the previously-pinned `a18251b` ("Bump version to 4.2.0"). Clean.
+
+### Hex parser
+
+Inline in `wire_fixtures.rs:45-67`. No new crate added (CLAUDE.md rule 1 satisfied — no dependency justification needed). Parser handles whitespace via `chars().filter(!is_whitespace)`, panics on odd length and bad nibbles. The `.hex` files are single-line (no embedded comments), so the whitespace handling is sufficient. `hex_decoder_round_trip` covers both compact and whitespace-padded inputs.
+
+### Module wiring
+
+`mod wire_fixtures;` is `#[cfg(test)]`-gated in `mod.rs:55-58` — fixtures don't affect release binary size. All fixture loads use `include_str!` (compile-time, no runtime IO). The module itself also has `#![cfg(test)]` at the top, double-gating against accidental non-test inclusion.
+
+### Snappy tripwire
+
+`snappy_fixture_present_but_assertion_deferred` (lines 228-243) decodes the fixture, asserts the xerial magic header (`82 53 4E 41 50 50 59 00`) at offset 61 (= `RECORD_BATCH_OVERHEAD`). Comments link to "Phase 3c snappy gap" and `phase3c_snappy_framing_gap.md`. The tripwire is intentionally minimal (8 bytes of the 16-byte xerial header) but sufficient to detect rot in the captured asset. Acceptable scope.
+
+### Apache 2.0 license
+
+Verified on every new file:
+- `src/common/record/wire_fixtures.rs:1-14` (Confluent Inc, Apache 2.0)
+- `src/common/record/test_fixtures/README.md` — no header, but it's a documentation README, no precedent in the repo for headers on README files.
+- `RustFixtureCapture.java:1-16` (ASF / Apache 2.0)
+- The 8 `.hex` files are pure data — no header convention exists for them in the project.
+
+### Minor observations (NOT issues)
+
+- The Java capture program comment at line 117 says "GZIPOutputStream uses default deflate level 1 in Kafka 4.2 (level=1 is the Kafka default)". This is **wrong as commentary** — Java actually uses `Deflater.DEFAULT_COMPRESSION` (= -1, mapping to zlib level 6) per `CompressionType.GZIP.DEFAULT_LEVEL`. The Rust README (`test_fixtures/README.md:60-62`) correctly states "level 6". No behavior impact: the program calls `Compression.gzip().build()` (no level override), so Java's actual default level is used, whatever it is — and the byte fixture reflects ground truth. Worth fixing the comment in a future cleanup but not blocking.
+
+## Phase 3e Round 1 verdict: APPROVED
+
+Phase 3 complete. Both codec close-path fixes (gzip flush removal, zstd Drop chain) are correct, byte-verified against Java fixtures, and well-documented. 8/8 fixtures captured; 7/8 asserted byte-equal; 1/8 (snappy) deferred for documented xerial-vs-RFC framing gap with a tripwire on the asset. No regressions in earlier 577 tests. Build/test/format/lint/check-generated all green.

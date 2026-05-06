@@ -37,4 +37,11 @@
 - [Phase 5c-2 Selector](phase5c2_selector.md) — single-task design + connect-task pattern + IdleExpiryManager LRU + EchoServer test harness
 - [Phase 5d NetworkClient](phase5d_network_client.md) — KafkaClient `&mut self` divergence, internal metadata response re-parse, AbstractRequest+Send/Sync trait change
 - [Phase 5d review fixes](phase5d_review_fixes.md) — MockTime jitter math, MetadataUpdater test mocks, KIP-511 same-poll re-dispatch
+- [Phase 6a patterns](phase6a_patterns.md) — Tokio-fair waiter pool, async-fn FutureRecordMetadata, identity-HashSet→pointer-keyed HashMap
+- [Phase 6a Round 1 patterns](phase6a_round1_patterns.md) — Cancellation-safe RAII Drop guard, `ByteBuffer.clear()` zero-fill audit, `#![allow(dead_code)]` per-file scope
+- [Phase 6b ProducerBatch](phase6b_producer_batch.md) — unsafe Send/Sync over Mutex<MutState>, OnceLock<FinalState>, panic::catch_unwind on user callbacks, zero-copy split path
+- [Phase 6b Round 1 patterns](phase6b_round1_patterns.md) — Vec<u8> ownership through Bytes::try_into_mut, initial_capacity snapshot, Java-binary bifurcation
+- [Phase 6b Round 2 patterns](phase6b_round2_patterns.md) — bifurcate `unsafe set_len` by origin (zero-init Vec vs fresh `to_vec()`), tail-zero assertion as soundness signal
+- [Phase 6c partitioners + interceptors](phase6c_partitioners_interceptors.md) — owned-record interceptor chain with K/V Clone, randomPartition virtual hook via Box<dyn Fn>, ArcSwapOption for volatile state
+- [Phase 6c Round 1 patterns](phase6c_round1_patterns.md) — type-level null elimination, ArithmeticException → panic per CLAUDE.md 10.1, original-input log parity, fast/slow-path coverage, Arc::ptr_eq for staged-state
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
