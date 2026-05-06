@@ -25,6 +25,8 @@ use super::ConnectionState;
 use super::HostResolver;
 use super::client_utils;
 use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::LogContext;
+use crate::kafka_info;
 
 /// Exponential base for reconnect backoff.
 pub const CLUSTER_CONNECTION_STATES_RECONNECT_BACKOFF_EXP_BASE: i32 = 2;
@@ -47,6 +49,7 @@ pub struct ClusterConnectionStates<H: HostResolver> {
     reconnect_backoff: ExponentialBackoff,
     connection_setup_timeout: ExponentialBackoff,
     host_resolver: H,
+    log_context: LogContext,
 }
 
 impl<H: HostResolver> ClusterConnectionStates<H> {
@@ -63,6 +66,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
         reconnect_backoff_max_ms: i64,
         connection_setup_timeout_ms: i64,
         connection_setup_timeout_max_ms: i64,
+        log_context: LogContext,
         host_resolver: H,
     ) -> Self {
         Self {
@@ -83,6 +87,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
             node_state: HashMap::new(),
             connecting_nodes: HashSet::new(),
             host_resolver,
+            log_context,
         }
     }
 
@@ -158,7 +163,13 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
                 self.connecting_nodes.insert(id.to_string());
                 return;
             }
-            log::info!("Hostname for node {} changed from {} to {}.", id, connection_state.host(), host);
+            kafka_info!(
+                self.log_context,
+                "Hostname for node {} changed from {} to {}.",
+                id,
+                connection_state.host(),
+                host
+            );
         }
 
         // Create a new NodeConnectionState if node_state does not already contain one
@@ -635,6 +646,7 @@ mod tests {
             RECONNECT_BACKOFF_MAX,
             CONNECTION_SETUP_TIMEOUT_MS,
             CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            LogContext::empty(),
             SingleIpHostResolver,
         )
     }
@@ -645,6 +657,7 @@ mod tests {
             RECONNECT_BACKOFF_MAX,
             CONNECTION_SETUP_TIMEOUT_MS,
             CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            LogContext::empty(),
             AddressChangeHostResolver::new(initial_addresses(), new_addresses()),
         )
     }
@@ -891,6 +904,7 @@ mod tests {
             RECONNECT_BACKOFF_MAX,
             CONNECTION_SETUP_TIMEOUT_MS,
             CONNECTION_SETUP_TIMEOUT_MAX_MS,
+            LogContext::empty(),
             host_resolver,
         );
         let time = MockTime::new();

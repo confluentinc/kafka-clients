@@ -36,6 +36,7 @@ pub use compression_type::CompressionType;
 pub use default_record::DefaultRecord;
 pub use default_record_batch::DefaultRecordBatch;
 pub use invalid_record_error::InvalidRecordError;
+pub use memory_records::BatchIterator;
 pub use memory_records::MemoryRecords;
 pub use memory_records_builder::MemoryRecordsBuilder;
 pub use record_batch::RecordBatch;

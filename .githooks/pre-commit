@@ -1,0 +1,6 @@
+#!/usr/bin/env bash
+# Pre-commit hook: run `make verify` (format-check + lint + tests) before
+# allowing the commit. Installed by `make init-hooks`, which sets
+# core.hooksPath to .githooks. Bypass with `git commit --no-verify`.
+set -e
+exec make verify
