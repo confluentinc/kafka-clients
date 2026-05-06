@@ -411,6 +411,22 @@ impl<C: KafkaClient> Sender<C> {
         self.running.load(Ordering::Acquire)
     }
 
+    /// Test-only handle on the running flag. Lets tests that move the
+    /// sender into a `tokio::spawn` task still flip the flag from
+    /// outside the task to drive the loop's exit path.
+    #[cfg(test)]
+    pub(crate) fn running_arc(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.running)
+    }
+
+    /// Test-only handle on the force-close flag. Used together with
+    /// [`Self::running_arc`] to bypass the drain stage when a test has
+    /// moved the sender into a `tokio::spawn` task.
+    #[cfg(test)]
+    pub(crate) fn force_close_arc(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.force_close)
+    }
+
     /// Mirrors Java's `wakeup()`. Idempotent — multiple wakeups during a
     /// single tick coalesce.
     pub(crate) fn wakeup(&self) {
@@ -1378,6 +1394,13 @@ mod tests {
         /// stored message. Used to verify `run_loop`'s catch-unwind
         /// matches Java's `try/catch (Exception)` behavior.
         panic_on_next_poll: Option<String>,
+        /// Test-only: counter of how many times the armed panic-on-poll
+        /// has actually tripped. Bumped immediately before
+        /// [`MockClientImpl::poll`] panics, so the test can observe the
+        /// panic-was-triggered AND panic-was-caught path independently of
+        /// the loop's exit condition. Exposed via
+        /// [`MockClientImpl::panic_trip_counter`].
+        panic_trip_count: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     /// Connection state for a given node id.
@@ -1417,12 +1440,21 @@ mod tests {
                 auth_errors: HashMap::new(),
                 wakeup_hook: None,
                 panic_on_next_poll: None,
+                panic_trip_count: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
             }
         }
 
         /// Test-only: arm a one-shot panic on the next `poll()` call.
         pub(super) fn set_panic_on_next_poll(&mut self, msg: &str) {
             self.panic_on_next_poll = Some(msg.to_string());
+        }
+
+        /// Test-only: clone of the panic-trip counter shared with `poll`.
+        /// Caller observes a non-zero value once the armed
+        /// [`Self::set_panic_on_next_poll`] has actually tripped (i.e.
+        /// `poll` was reached AND the panic was triggered).
+        pub(super) fn panic_trip_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+            Arc::clone(&self.panic_trip_count)
         }
 
         fn conn(&mut self, node_id: i32) -> &mut ConnState {
@@ -1608,7 +1640,22 @@ mod tests {
             self.requests.push_back(request);
         }
         async fn poll(&mut self, _timeout_ms: i64, now: i64) -> Vec<ClientResponse> {
+            // Real `KafkaClient::poll` involves I/O readiness which
+            // implicitly yields. The mock has no genuine await point, so
+            // we yield explicitly at the top — without this, a spawned
+            // `run_loop` task is a tight CPU loop that starves the main
+            // test task (the
+            // `run_loop_swallows_panics_and_continues` test depends on
+            // observing the trip counter from the main task).
+            tokio::task::yield_now().await;
             if let Some(msg) = self.panic_on_next_poll.take() {
+                // Bump the trip counter BEFORE panicking so observers can
+                // distinguish "poll was reached and panicked" from "poll
+                // was never called". Atomic write is reordering-safe vs
+                // the panic — `panic_unwind` reads the counter only after
+                // the panic propagates back, by which time the store is
+                // visible.
+                self.panic_trip_count.fetch_add(1, Ordering::Relaxed);
                 panic!("{msg}");
             }
             // Java's MockClient.checkTimeoutOfPendingRequests: any
@@ -2858,22 +2905,101 @@ mod tests {
 
     /// Mirrors Java's `try/catch (Exception)` swallow in `Sender.run()`:
     /// a panic inside `run_once()` must NOT abort `run_loop`. The loop
-    /// logs the panic and continues. After `initiate_close`, the loop
-    /// terminates cleanly.
+    /// logs the panic and continues. After the panic is observed, the
+    /// test bypasses the drain stage (`force_close`) so the loop
+    /// terminates without depending on a separately-staged response —
+    /// the property under test is "panic was caught", not "drain
+    /// completed".
+    ///
+    /// To genuinely exercise `catch_unwind` (Round 2 / Issue 10), the
+    /// test must:
+    ///   1. Append a record so iteration 1 has work to do (`run_once`
+    ///      drains, sends, then polls — and only then can the armed
+    ///      panic actually trip).
+    ///   2. Arm `panic_on_next_poll` BEFORE entering the loop.
+    ///   3. Spawn `run_loop` on a Tokio task and wait for the
+    ///      trip-counter to increment, proving the panic actually fired
+    ///      AND was caught (otherwise `JoinHandle.await` would resolve
+    ///      with `Err(JoinError::panic)`).
+    ///   4. Flip `running=false` + `force_close=true` so the loop exits
+    ///      cleanly, then `await` the JoinHandle and assert it returned
+    ///      `Ok` (the panic did not propagate to the caller — Java's
+    ///      `try/catch (Exception)` swallow contract).
+    ///
+    /// Mentally reverting the `catch_unwind` wrapper: the
+    /// `JoinHandle.await` would resolve to `Err(JoinError::panic)`, the
+    /// final `.is_ok()` assert would fail. Test fidelity confirmed.
     #[tokio::test]
     async fn run_loop_swallows_panics_and_continues() {
-        let TestSetup { mut sender, .. } = make_test_setup(i32::MAX, false);
-        // Arm a panic for the FIRST poll call.
-        sender.client.set_panic_on_next_poll("synthetic test panic");
+        let TestSetup { mut sender, accum, metadata, time, topic_id: _ } = make_test_setup(i32::MAX, false);
+        let cluster = metadata.metadata().fetch_metadata_snapshot().cluster();
 
-        // Spawn run_loop, then close immediately. The panic on the first
-        // iteration must be caught; subsequent iterations run normally
-        // (no records appended), drain loop exits, run_loop returns.
-        sender.initiate_close();
-        let result = tokio::time::timeout(Duration::from_secs(2), sender.run_loop()).await;
+        // (1) Append so iteration 1 of `run_loop` has work — drain, send,
+        //     poll. Without this, the `while running` and drain loops
+        //     both short-circuit and `run_once` is never called, leaving
+        //     the armed panic untripped (Round 1 regression — see Issue
+        //     10).
+        let _future = append_to_accumulator(&accum, &time, &cluster, TOPIC_NAME, 0, 0, b"k", b"v").await;
+
+        // (2) Arm the panic and capture the trip counter handle.
+        sender.client.set_panic_on_next_poll("synthetic test panic");
+        let trip_counter = sender.client.panic_trip_counter();
+
+        // (3) Capture handles to drive shutdown from outside the
+        //     spawned task — `run_loop` takes `&mut self`, so once the
+        //     sender moves into the task we can't call
+        //     `initiate_close()` directly.
+        let running = sender.running_arc();
+        let force_close = sender.force_close_arc();
+
+        let join = tokio::spawn(async move {
+            sender.run_loop().await;
+        });
+
+        // (3) Wait for the panic to actually trip. The counter is
+        //     incremented atomically inside `MockClientImpl::poll`
+        //     immediately before the `panic!`, so a non-zero value
+        //     proves: (a) `run_once` was called, (b) `poll` was
+        //     reached, (c) the panic fired. If `catch_unwind` failed
+        //     to swallow it, the join handle would already be in
+        //     `Err(JoinError::panic)` state and the next assertion
+        //     would catch it.
+        let observed = tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if trip_counter.load(Ordering::Relaxed) >= 1 {
+                    return;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await;
+        assert!(observed.is_ok(), "panic-on-next-poll never tripped (run_once not reached?)");
         assert!(
-            result.is_ok(),
-            "run_loop must terminate after panic — Java's `try/catch` semantics"
+            !join.is_finished(),
+            "run_loop must keep running after the swallowed panic; \
+             a finished JoinHandle here means the panic propagated"
+        );
+
+        // (4) Drive shutdown: `force_close=true` bypasses the drain
+        //     loop (the in-flight request from iteration 1 has no
+        //     staged response — without `force_close` the drain loop
+        //     would spin forever). Setting `running=false` exits the
+        //     main loop.
+        force_close.store(true, Ordering::Release);
+        running.store(false, Ordering::Release);
+
+        // (4) `JoinHandle::await` returning `Ok(())` is the assertion:
+        //     the loop terminated cleanly, the panic was swallowed by
+        //     `catch_unwind` (otherwise `JoinError::panic`).
+        let join_result = tokio::time::timeout(Duration::from_secs(2), join).await;
+        assert!(
+            matches!(&join_result, Ok(Ok(()))),
+            "run_loop must terminate after panic — Java's `try/catch` semantics. Got: {join_result:?}"
+        );
+        assert_eq!(
+            trip_counter.load(Ordering::Relaxed),
+            1,
+            "panic should have tripped exactly once (one-shot arm)"
         );
     }
 
