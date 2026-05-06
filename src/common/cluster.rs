@@ -12,45 +12,116 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! An immutable representation of a subset of the nodes, topics, and partitions in the Kafka cluster.
+//! Translation of `org.apache.kafka.common.Cluster`.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
-use std::hash::{Hash, Hasher};
 use std::net::SocketAddr;
+use std::sync::{Arc, OnceLock};
 
 use rand::seq::SliceRandom;
 
-use super::ClusterResource;
-use super::Node;
-use super::PartitionInfo;
-use super::TopicPartition;
-use super::Uuid;
+use crate::common::{ClusterResource, Node, PartitionInfo, TopicPartition, Uuid};
 
-/// An immutable representation of a subset of the nodes, topics, and partitions
-/// in the Kafka cluster.
+/// Convert a `HashSet<String>` to a `HashSet<Arc<str>>` at a public-API
+/// boundary. Used once per `pub fn new_*` constructor; the inner
+/// [`Cluster::build`] then carries `Arc<str>` end-to-end.
+fn into_arc_set(set: HashSet<String>) -> HashSet<Arc<str>> {
+    set.into_iter().map(Arc::<str>::from).collect()
+}
+
+/// An immutable representation of a subset of the nodes, topics, and
+/// partitions in the Kafka cluster.
 #[derive(Clone, Debug)]
 pub struct Cluster {
     is_bootstrap_configured: bool,
     nodes: Vec<Node>,
-    unauthorized_topics: HashSet<String>,
-    invalid_topics: HashSet<String>,
-    internal_topics: HashSet<String>,
+    unauthorized_topics: HashSet<Arc<str>>,
+    invalid_topics: HashSet<Arc<str>>,
+    internal_topics: HashSet<Arc<str>>,
     controller: Option<Node>,
     partitions_by_topic_partition: HashMap<TopicPartition, PartitionInfo>,
-    partitions_by_topic: HashMap<String, Vec<PartitionInfo>>,
-    available_partitions_by_topic: HashMap<String, Vec<PartitionInfo>>,
+    partitions_by_topic: HashMap<Arc<str>, Vec<PartitionInfo>>,
+    available_partitions_by_topic: HashMap<Arc<str>, Vec<PartitionInfo>>,
     partitions_by_node: HashMap<i32, Vec<PartitionInfo>>,
     nodes_by_id: HashMap<i32, Node>,
     cluster_resource: ClusterResource,
-    topic_ids: HashMap<String, Uuid>,
-    topic_names: HashMap<Uuid, String>,
+    topic_ids: HashMap<Arc<str>, Uuid>,
+    topic_names: HashMap<Uuid, Arc<str>>,
 }
 
 impl Cluster {
-    /// Create a new cluster with the given id, nodes and partitions.
-    #[allow(clippy::too_many_arguments)]
+    /// Create a new cluster with the given id, nodes, and partitions.
+    /// Equivalent to Java's 5-arg `Cluster(clusterId, nodes, partitions,
+    /// unauthorizedTopics, internalTopics)`.
     pub fn new(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<String>,
+        internal_topics: HashSet<String>,
+    ) -> Self {
+        Self::build(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            into_arc_set(unauthorized_topics),
+            HashSet::new(),
+            into_arc_set(internal_topics),
+            None,
+            HashMap::new(),
+        )
+    }
+
+    /// Equivalent to Java's 6-arg constructor with controller.
+    pub fn new_with_controller(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<String>,
+        internal_topics: HashSet<String>,
+        controller: Option<Node>,
+    ) -> Self {
+        Self::build(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            into_arc_set(unauthorized_topics),
+            HashSet::new(),
+            into_arc_set(internal_topics),
+            controller,
+            HashMap::new(),
+        )
+    }
+
+    /// Equivalent to Java's 7-arg constructor (adds invalid topics).
+    pub fn new_with_invalid(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<String>,
+        invalid_topics: HashSet<String>,
+        internal_topics: HashSet<String>,
+        controller: Option<Node>,
+    ) -> Self {
+        Self::build(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            into_arc_set(unauthorized_topics),
+            into_arc_set(invalid_topics),
+            into_arc_set(internal_topics),
+            controller,
+            HashMap::new(),
+        )
+    }
+
+    /// Equivalent to Java's 8-arg constructor (adds topic ids).
+    #[allow(clippy::too_many_arguments)] // Mirrors Java's 8-arg constructor.
+    pub fn new_with_topic_ids(
         cluster_id: Option<String>,
         nodes: Vec<Node>,
         partitions: Vec<PartitionInfo>,
@@ -60,7 +131,39 @@ impl Cluster {
         controller: Option<Node>,
         topic_ids: HashMap<String, Uuid>,
     ) -> Self {
-        Self::new_internal(
+        let topic_ids_arc: HashMap<Arc<str>, Uuid> =
+            topic_ids.into_iter().map(|(k, v)| (Arc::<str>::from(k), v)).collect();
+        Self::build(
+            cluster_id,
+            false,
+            nodes,
+            partitions,
+            into_arc_set(unauthorized_topics),
+            into_arc_set(invalid_topics),
+            into_arc_set(internal_topics),
+            controller,
+            topic_ids_arc,
+        )
+    }
+
+    /// `Arc<str>`-aware constructor used internally by [`Cluster::with_partitions`]
+    /// (and any future caller on the metadata-refresh path) so that the
+    /// existing `Arc<str>` topic names can be reused without reallocation.
+    /// All inputs flow straight into the inner indices via `Arc::clone`
+    /// (refcount bumps), bypassing the `String → Arc<str>` round-trip the
+    /// public `pub fn new_*` constructors perform at their boundary.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn from_arc_inputs(
+        cluster_id: Option<String>,
+        nodes: Vec<Node>,
+        partitions: Vec<PartitionInfo>,
+        unauthorized_topics: HashSet<Arc<str>>,
+        invalid_topics: HashSet<Arc<str>>,
+        internal_topics: HashSet<Arc<str>>,
+        controller: Option<Node>,
+        topic_ids: HashMap<Arc<str>, Uuid>,
+    ) -> Self {
+        Self::build(
             cluster_id,
             false,
             nodes,
@@ -74,69 +177,79 @@ impl Cluster {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn new_internal(
+    fn build(
         cluster_id: Option<String>,
         is_bootstrap_configured: bool,
         nodes: Vec<Node>,
         partitions: Vec<PartitionInfo>,
-        unauthorized_topics: HashSet<String>,
-        invalid_topics: HashSet<String>,
-        internal_topics: HashSet<String>,
+        unauthorized_topics: HashSet<Arc<str>>,
+        invalid_topics: HashSet<Arc<str>>,
+        internal_topics: HashSet<Arc<str>>,
         controller: Option<Node>,
-        topic_ids: HashMap<String, Uuid>,
+        topic_ids: HashMap<Arc<str>, Uuid>,
     ) -> Self {
-        let cluster_resource = ClusterResource::new(cluster_id);
+        // Make a randomized copy of the nodes — matches Java's
+        // `Collections.shuffle(copy)` so iteration order is randomized.
+        let mut shuffled_nodes = nodes.clone();
+        let mut rng = rand::rng();
+        shuffled_nodes.shuffle(&mut rng);
 
-        // Make a randomized copy of the nodes for load balancing across brokers
-        let mut nodes = nodes;
-        nodes.shuffle(&mut rand::rng());
-
-        // Index the nodes for quick lookup
-        let mut nodes_by_id = HashMap::with_capacity(nodes.len());
-        let mut partitions_by_node: HashMap<i32, Vec<PartitionInfo>> = HashMap::with_capacity(nodes.len());
-        for node in &nodes {
+        // Index nodes by id; pre-create the partitions-by-node map with an
+        // empty vec for every node so we can append efficiently below.
+        let mut nodes_by_id: HashMap<i32, Node> = HashMap::with_capacity(shuffled_nodes.len());
+        let mut partitions_by_node: HashMap<i32, Vec<PartitionInfo>> = HashMap::with_capacity(shuffled_nodes.len());
+        for node in &shuffled_nodes {
             nodes_by_id.insert(node.id(), node.clone());
             partitions_by_node.insert(node.id(), Vec::new());
         }
 
-        // Index the partition infos by topic, topic+partition, and node
-        let mut partitions_by_topic_partition = HashMap::with_capacity(partitions.len());
-        let mut partitions_by_topic: HashMap<String, Vec<PartitionInfo>> = HashMap::new();
-        for p in &partitions {
-            let tp = TopicPartition::new(p.topic().to_string(), p.partition());
-            partitions_by_topic_partition.insert(tp, p.clone());
-            partitions_by_topic.entry(p.topic().to_string()).or_default().push(p.clone());
+        // Index partitions by topic, topic+partition, and node. The
+        // partitions_by_topic_partition map shares the same `Arc<str>` topic
+        // allocation as the source `PartitionInfo`, so growing the maps is
+        // refcount bumps, not allocations.
+        let mut partitions_by_topic_partition: HashMap<TopicPartition, PartitionInfo> =
+            HashMap::with_capacity(partitions.len());
+        let mut partitions_by_topic: HashMap<Arc<str>, Vec<PartitionInfo>> = HashMap::new();
 
-            // The leader may not be known
+        for p in &partitions {
+            let tp = TopicPartition::new(p.topic_arc().clone(), p.partition());
+            partitions_by_topic_partition.insert(tp, p.clone());
+            partitions_by_topic.entry(p.topic_arc().clone()).or_default().push(p.clone());
+
+            // The leader may not be known.
             if let Some(leader) = p.leader() {
                 if leader.is_empty() {
                     continue;
                 }
-                if let Some(parts) = partitions_by_node.get_mut(&leader.id()) {
-                    parts.push(p.clone());
-                }
+                // If known, its node info should be available.
+                let entry = partitions_by_node
+                    .get_mut(&leader.id())
+                    .unwrap_or_else(|| panic!("partition leader id {} not found in nodes-by-id map", leader.id()));
+                entry.push(p.clone());
             }
         }
 
-        // Populate available partitions by topic
-        let mut available_partitions_by_topic = HashMap::with_capacity(partitions_by_topic.len());
-        for (topic, topic_partitions) in &partitions_by_topic {
-            let has_unavailable = topic_partitions.iter().any(|p| p.leader().is_none());
-            if has_unavailable {
-                let available: Vec<PartitionInfo> =
-                    topic_partitions.iter().filter(|p| p.leader().is_some()).cloned().collect();
-                available_partitions_by_topic.insert(topic.clone(), available);
+        // Build available_partitions_by_topic: copy each per-topic list,
+        // skipping entries with no leader.
+        let mut available_partitions_by_topic: HashMap<Arc<str>, Vec<PartitionInfo>> =
+            HashMap::with_capacity(partitions_by_topic.len());
+        for (topic, parts) in &partitions_by_topic {
+            let any_unavailable = parts.iter().any(|p| p.leader().is_none());
+            let avail = if any_unavailable {
+                parts.iter().filter(|p| p.leader().is_some()).cloned().collect()
             } else {
-                available_partitions_by_topic.insert(topic.clone(), topic_partitions.clone());
-            }
+                parts.clone()
+            };
+            available_partitions_by_topic.insert(topic.clone(), avail);
         }
 
-        // Build reverse topic_names map
-        let topic_names: HashMap<Uuid, String> = topic_ids.iter().map(|(name, id)| (*id, name.clone())).collect();
+        // Topic-id reverse map (Uuid → Arc<str>) shares the same `Arc<str>`
+        // keys as `topic_ids` (refcount bumps, not allocations).
+        let topic_names: HashMap<Uuid, Arc<str>> = topic_ids.iter().map(|(k, v)| (*v, k.clone())).collect();
 
-        Self {
+        Cluster {
             is_bootstrap_configured,
-            nodes,
+            nodes: shuffled_nodes,
             unauthorized_topics,
             invalid_topics,
             internal_topics,
@@ -146,35 +259,36 @@ impl Cluster {
             available_partitions_by_topic,
             partitions_by_node,
             nodes_by_id,
-            cluster_resource,
+            cluster_resource: ClusterResource::new(cluster_id),
             topic_ids,
             topic_names,
         }
     }
 
-    /// Create an empty cluster instance with no nodes and no topic-partitions.
-    pub fn empty() -> Self {
-        Self::new(
-            None,
-            Vec::new(),
-            Vec::new(),
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            None,
-            HashMap::new(),
-        )
+    /// Create an empty cluster instance with no nodes and no
+    /// topic-partitions. Returns a cached singleton.
+    pub fn empty() -> &'static Cluster {
+        static EMPTY: OnceLock<Cluster> = OnceLock::new();
+        EMPTY.get_or_init(|| {
+            Cluster::new_with_controller(None, Vec::new(), Vec::new(), HashSet::new(), HashSet::new(), None)
+        })
     }
 
-    /// Create a "bootstrap" cluster using the given list of socket addresses.
-    pub fn bootstrap(addresses: &[SocketAddr]) -> Self {
-        let mut nodes = Vec::with_capacity(addresses.len());
+    /// Create a "bootstrap" cluster from a list of `(host, port)` pairs.
+    /// This is the direct analogue of Java's
+    /// `Cluster.bootstrap(List<InetSocketAddress>)`: Java calls
+    /// `InetSocketAddress.getHostString()` which returns the textual host
+    /// the caller supplied (DNS name or numeric IP), *not* a resolved IP.
+    /// Preserving textual hostnames is required so a later
+    /// `MetadataResponse` can match its broker entries by name.
+    pub fn bootstrap(hosts: &[(String, u16)]) -> Cluster {
+        let mut nodes = Vec::with_capacity(hosts.len());
         let mut node_id: i32 = -1;
-        for address in addresses {
-            nodes.push(Node::new(node_id, address.ip().to_string(), address.port() as i32));
+        for (host, port) in hosts {
+            nodes.push(Node::new(node_id, host.clone(), *port as i32));
             node_id -= 1;
         }
-        Self::new_internal(
+        Cluster::build(
             None,
             true,
             nodes,
@@ -187,15 +301,57 @@ impl Cluster {
         )
     }
 
-    /// Return a copy of this cluster combined with additional partitions.
-    pub fn with_partitions(&self, partitions: HashMap<TopicPartition, PartitionInfo>) -> Self {
-        let mut combined = self.partitions_by_topic_partition.clone();
-        combined.extend(partitions);
-        let all_partitions: Vec<PartitionInfo> = combined.into_values().collect();
-        Self::new(
-            self.cluster_resource.cluster_id().map(|s| s.to_string()),
+    /// Create a "bootstrap" cluster from already-resolved `SocketAddr`
+    /// values.
+    ///
+    /// **Warning — this loses hostnames.** A `SocketAddr` only stores the
+    /// numeric IP (Rust's stdlib has no `InetSocketAddress.getHostString()`
+    /// equivalent), so this constructor records each broker's host as the
+    /// IP-literal form. If your input was a textual DNS name (e.g.
+    /// `www.example.com:9092`), use [`Cluster::bootstrap`] instead — it is
+    /// the actual analogue of Java's
+    /// `Cluster.bootstrap(List<InetSocketAddress>)` and preserves DNS
+    /// names for the later `MetadataResponse` match.
+    ///
+    /// Use this only when you genuinely want IP-keyed bootstrap nodes
+    /// (e.g. tests, or a caller that has already resolved addresses and
+    /// does not need the original hostname).
+    pub fn bootstrap_with_addresses(addresses: &[SocketAddr]) -> Cluster {
+        let mut nodes = Vec::with_capacity(addresses.len());
+        let mut node_id: i32 = -1;
+        for addr in addresses {
+            let host = addr.ip().to_string();
+            nodes.push(Node::new(node_id, host, addr.port() as i32));
+            node_id -= 1;
+        }
+        Cluster::build(
+            None,
+            true,
+            nodes,
+            Vec::new(),
+            HashSet::new(),
+            HashSet::new(),
+            HashSet::new(),
+            None,
+            HashMap::new(),
+        )
+    }
+
+    /// Return a copy of this cluster combined with `partitions`.
+    ///
+    /// Reuses the existing `Arc<str>` topic-name allocations end-to-end:
+    /// the unauthorized/invalid/internal-topic sets and the topic-id map
+    /// are cloned by refcount bump, never by reallocation. Hot path
+    /// (metadata-refresh) — see Phase 4a Critic Issue 4.
+    pub fn with_partitions(&self, partitions: HashMap<TopicPartition, PartitionInfo>) -> Cluster {
+        let mut combined: HashMap<TopicPartition, PartitionInfo> = self.partitions_by_topic_partition.clone();
+        for (k, v) in partitions {
+            combined.insert(k, v);
+        }
+        Cluster::from_arc_inputs(
+            self.cluster_resource.cluster_id().map(str::to_owned),
             self.nodes.clone(),
-            all_partitions,
+            combined.into_values().collect(),
             self.unauthorized_topics.clone(),
             self.invalid_topics.clone(),
             self.internal_topics.clone(),
@@ -209,45 +365,48 @@ impl Cluster {
         &self.nodes
     }
 
-    /// Get the node by the node id (or `None` if the node is not online or does not exist).
+    /// Look up a node by id.
     pub fn node_by_id(&self, id: i32) -> Option<&Node> {
         self.nodes_by_id.get(&id)
     }
 
-    /// Get the node by node id if the replica for the given partition is online.
+    /// Get the node by node id if the replica for the given partition is
+    /// online — i.e. the node exists, the partition exists, the node is in
+    /// the partition's replica list, and the node is not in the offline
+    /// replica list.
     pub fn node_if_online(&self, partition: &TopicPartition, id: i32) -> Option<&Node> {
-        let node = self.nodes_by_id.get(&id)?;
-        let info = self.partitions_by_topic_partition.get(partition)?;
-
-        let is_offline = info.offline_replicas().iter().any(|n| n.id() == node.id());
-        let is_replica = info.replicas().iter().any(|n| n.id() == node.id());
-
-        if !is_offline && is_replica { Some(node) } else { None }
+        let node = self.node_by_id(id)?;
+        let info = self.partition(partition)?;
+        let in_replicas = info.replicas().iter().any(|n| n == node);
+        let in_offline = info.offline_replicas().iter().any(|n| n == node);
+        if in_replicas && !in_offline { Some(node) } else { None }
     }
 
-    /// Get the current leader for the given topic-partition.
+    /// The current leader for the given topic-partition, or `None` if
+    /// there is no current leader.
     pub fn leader_for(&self, topic_partition: &TopicPartition) -> Option<&Node> {
-        self.partitions_by_topic_partition
-            .get(topic_partition)
-            .and_then(|info| info.leader())
+        self.partitions_by_topic_partition.get(topic_partition)?.leader()
     }
 
-    /// Get the metadata for the specified partition.
+    /// Metadata for the specified partition, or `None` if not known.
     pub fn partition(&self, topic_partition: &TopicPartition) -> Option<&PartitionInfo> {
         self.partitions_by_topic_partition.get(topic_partition)
     }
 
-    /// Get the list of partitions for this topic.
+    /// List of partitions for the topic. Returns an empty slice if no
+    /// metadata is known.
     pub fn partitions_for_topic(&self, topic: &str) -> &[PartitionInfo] {
         self.partitions_by_topic.get(topic).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Get the number of partitions for the given topic.
+    /// Number of partitions for the given topic, or `None` if no metadata
+    /// is known.
     pub fn partition_count_for_topic(&self, topic: &str) -> Option<usize> {
-        self.partitions_by_topic.get(topic).map(|v| v.len())
+        self.partitions_by_topic.get(topic).map(Vec::len)
     }
 
-    /// Get the list of available partitions for this topic.
+    /// List of available partitions for the topic (those with a known
+    /// leader).
     pub fn available_partitions_for_topic(&self, topic: &str) -> &[PartitionInfo] {
         self.available_partitions_by_topic
             .get(topic)
@@ -255,64 +414,74 @@ impl Cluster {
             .unwrap_or(&[])
     }
 
-    /// Get the list of partitions whose leader is this node.
+    /// List of partitions whose leader is the given node.
     pub fn partitions_for_node(&self, node_id: i32) -> &[PartitionInfo] {
         self.partitions_by_node.get(&node_id).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
-    /// Get all topics.
+    /// All known topics.
     pub fn topics(&self) -> impl Iterator<Item = &str> {
-        self.partitions_by_topic.keys().map(|s| s.as_str())
+        self.partitions_by_topic.keys().map(|k| k.as_ref())
     }
 
-    /// Unauthorized topics.
-    pub fn unauthorized_topics(&self) -> &HashSet<String> {
-        &self.unauthorized_topics
+    /// Unauthorized topics (read-only borrow).
+    pub fn unauthorized_topics(&self) -> impl Iterator<Item = &str> {
+        self.unauthorized_topics.iter().map(|s| s.as_ref())
     }
 
-    /// Invalid topics.
-    pub fn invalid_topics(&self) -> &HashSet<String> {
-        &self.invalid_topics
+    /// Invalid topics (read-only borrow).
+    pub fn invalid_topics(&self) -> impl Iterator<Item = &str> {
+        self.invalid_topics.iter().map(|s| s.as_ref())
     }
 
-    /// Internal topics.
-    pub fn internal_topics(&self) -> &HashSet<String> {
-        &self.internal_topics
+    /// Internal topics (read-only borrow).
+    pub fn internal_topics(&self) -> impl Iterator<Item = &str> {
+        self.internal_topics.iter().map(|s| s.as_ref())
     }
 
-    /// Whether bootstrap is configured.
+    /// Whether this cluster was constructed by [`Cluster::bootstrap`] or
+    /// [`Cluster::bootstrap_with_addresses`].
     pub fn is_bootstrap_configured(&self) -> bool {
         self.is_bootstrap_configured
     }
 
-    /// The cluster resource metadata.
+    /// The cluster resource (cluster id).
     pub fn cluster_resource(&self) -> &ClusterResource {
         &self.cluster_resource
     }
 
-    /// The controller node, if known.
+    /// The controller node, if one is known.
     pub fn controller(&self) -> Option<&Node> {
         self.controller.as_ref()
     }
 
-    /// All topic IDs.
-    pub fn topic_ids(&self) -> impl Iterator<Item = &Uuid> {
-        self.topic_ids.values()
+    /// All known topic ids.
+    pub fn topic_ids(&self) -> impl Iterator<Item = Uuid> + '_ {
+        self.topic_ids.values().copied()
     }
 
-    /// Get the topic ID for a given topic name.
+    /// Topic id for the given topic name. Returns [`Uuid::ZERO_UUID`] if
+    /// not known (matching Java's `getOrDefault(topic, ZERO_UUID)`).
     pub fn topic_id(&self, topic: &str) -> Uuid {
-        self.topic_ids.get(topic).copied().unwrap_or(Uuid::zero())
+        self.topic_ids.get(topic).copied().unwrap_or(crate::common::uuid::ZERO_UUID)
     }
 
-    /// Get the topic name for a given topic ID.
-    pub fn topic_name(&self, topic_id: &Uuid) -> Option<&str> {
-        self.topic_names.get(topic_id).map(|s| s.as_str())
+    /// Topic name for the given topic id, or `None` if not known.
+    pub fn topic_name(&self, topic_id: Uuid) -> Option<&str> {
+        self.topic_names.get(&topic_id).map(|s| s.as_ref())
     }
 }
 
 impl PartialEq for Cluster {
     fn eq(&self, other: &Self) -> bool {
+        // Java equals compares: isBootstrapConfigured, nodes, unauthorizedTopics,
+        // invalidTopics, internalTopics, controller, partitionsByTopicPartition,
+        // clusterResource, topicIds. Note: `nodes` is a List in Java and the
+        // shuffle randomizes order — Java's `List.equals` is order-dependent
+        // so equality of two freshly-constructed Clusters is in principle
+        // sensitive to the shuffle outcome. ClusterTest.testEquals uses a
+        // single node, dodging the issue. We mirror Java's order-dependent
+        // equality.
         self.is_bootstrap_configured == other.is_bootstrap_configured
             && self.nodes == other.nodes
             && self.unauthorized_topics == other.unauthorized_topics
@@ -327,50 +496,26 @@ impl PartialEq for Cluster {
 
 impl Eq for Cluster {}
 
-impl Hash for Cluster {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.is_bootstrap_configured.hash(state);
-        // Hash nodes in a order-dependent way (matching Java's List.hashCode)
-        self.nodes.hash(state);
-        // HashSet doesn't implement Hash, so we hash the sorted elements
-        let mut unauthorized: Vec<&String> = self.unauthorized_topics.iter().collect();
-        unauthorized.sort();
-        unauthorized.hash(state);
-        let mut invalid: Vec<&String> = self.invalid_topics.iter().collect();
-        invalid.sort();
-        invalid.hash(state);
-        let mut internal: Vec<&String> = self.internal_topics.iter().collect();
-        internal.sort();
-        internal.hash(state);
-        self.controller.hash(state);
-        // Hash partitions_by_topic_partition sorted by key
-        let mut partitions: Vec<(&TopicPartition, &PartitionInfo)> =
-            self.partitions_by_topic_partition.iter().collect();
-        partitions.sort_by_key(|(k, _)| (k.topic(), k.partition()));
-        for (k, v) in &partitions {
-            k.hash(state);
-            v.hash(state);
-        }
-        self.cluster_resource.hash(state);
-        // Hash topic_ids sorted by key
-        let mut ids: Vec<(&String, &Uuid)> = self.topic_ids.iter().collect();
-        ids.sort_by_key(|(k, _)| k.as_str());
-        for (k, v) in &ids {
-            k.hash(state);
-            v.hash(state);
-        }
-    }
-}
-
 impl fmt::Display for Cluster {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let cluster_id = match self.cluster_resource.cluster_id() {
+            Some(id) => id.to_string(),
+            None => "null".to_string(),
+        };
+        let controller = match &self.controller {
+            Some(c) => c.to_string(),
+            None => "null".to_string(),
+        };
+        let nodes_str = self.nodes.iter().map(Node::to_string).collect::<Vec<_>>().join(", ");
+        let parts_str = self
+            .partitions_by_topic_partition
+            .values()
+            .map(PartitionInfo::to_string)
+            .collect::<Vec<_>>()
+            .join(", ");
         write!(
             f,
-            "Cluster(id = {:?}, nodes = {:?}, partitions = {:?}, controller = {:?})",
-            self.cluster_resource.cluster_id(),
-            self.nodes,
-            self.partitions_by_topic_partition.values().collect::<Vec<_>>(),
-            self.controller,
+            "Cluster(id = {cluster_id}, nodes = [{nodes_str}], partitions = [{parts_str}], controller = {controller})"
         )
     }
 }
@@ -379,290 +524,231 @@ impl fmt::Display for Cluster {
 mod tests {
     use super::*;
 
-    fn make_node(id: i32) -> Node {
-        Node::new(id, format!("host{id}"), 9092)
+    fn nodes_array() -> [Node; 4] {
+        [
+            Node::new(0, "localhost".to_string(), 99),
+            Node::new(1, "localhost".to_string(), 100),
+            Node::new(2, "localhost".to_string(), 101),
+            Node::new(11, "localhost".to_string(), 102),
+        ]
     }
 
-    fn make_partition(topic: &str, partition: i32, leader_id: i32) -> PartitionInfo {
-        let leader = make_node(leader_id);
-        let replicas = vec![make_node(leader_id)];
-        let isr = vec![make_node(leader_id)];
-        PartitionInfo::new(topic.to_string(), partition, Some(leader), replicas, isr)
-    }
-
-    #[test]
-    fn test_empty_cluster() {
-        let cluster = Cluster::empty();
-        assert!(cluster.nodes().is_empty());
-        assert_eq!(cluster.topics().count(), 0);
-    }
+    const TOPIC_A: &str = "topicA";
+    const TOPIC_B: &str = "topicB";
+    const TOPIC_C: &str = "topicC";
+    const TOPIC_D: &str = "topicD";
+    const TOPIC_E: &str = "topicE";
 
     #[test]
-    fn test_bootstrap_cluster() {
-        let addrs: Vec<SocketAddr> = vec!["127.0.0.1:9092".parse().unwrap(), "127.0.0.1:9093".parse().unwrap()];
-        let cluster = Cluster::bootstrap(&addrs);
+    fn test_bootstrap() {
+        // Translation of ClusterTest.testBootstrap. `Cluster::bootstrap`
+        // is the direct analogue of Java's hostname-preserving
+        // `Cluster.bootstrap(List<InetSocketAddress>)`.
+        let ip = "140.211.11.105";
+        let host = "www.example.com";
+        let cluster = Cluster::bootstrap(&[(ip.to_string(), 9002), (host.to_string(), 9002)]);
+        let mut actual: HashSet<String> = HashSet::new();
+        for n in cluster.nodes() {
+            actual.insert(n.host().to_string());
+        }
+        let expected: HashSet<String> = [ip.to_string(), host.to_string()].into_iter().collect();
+        assert_eq!(actual, expected);
         assert!(cluster.is_bootstrap_configured());
-        assert_eq!(cluster.nodes().len(), 2);
-        // Nodes are shuffled so we check by id lookup instead of order
-        assert!(cluster.node_by_id(-1).is_some());
-        assert!(cluster.node_by_id(-2).is_some());
     }
 
     #[test]
-    fn test_cluster_with_partitions() {
-        let nodes = vec![make_node(0), make_node(1)];
-        let partitions = vec![make_partition("test", 0, 0), make_partition("test", 1, 1)];
-        let cluster = Cluster::new(
-            Some("cluster1".to_string()),
-            nodes,
-            partitions,
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            None,
-            HashMap::new(),
-        );
-
-        assert_eq!(cluster.partitions_for_topic("test").len(), 2);
-        assert_eq!(cluster.partition_count_for_topic("test"), Some(2));
-        assert_eq!(cluster.partition_count_for_topic("nonexistent"), None);
-        assert_eq!(cluster.available_partitions_for_topic("test").len(), 2);
-    }
-
-    #[test]
-    fn test_node_by_id() {
-        let nodes = vec![make_node(0), make_node(1)];
-        let cluster = Cluster::new(
-            None,
-            nodes,
-            Vec::new(),
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            None,
-            HashMap::new(),
-        );
-
-        assert!(cluster.node_by_id(0).is_some());
-        assert!(cluster.node_by_id(1).is_some());
-        assert!(cluster.node_by_id(99).is_none());
-    }
-
-    #[test]
-    fn test_leader_for() {
-        let nodes = vec![make_node(0)];
-        let partitions = vec![make_partition("test", 0, 0)];
-        let cluster = Cluster::new(
-            None,
-            nodes,
-            partitions,
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            None,
-            HashMap::new(),
-        );
-
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let leader = cluster.leader_for(&tp).unwrap();
-        assert_eq!(leader.id(), 0);
-
-        let tp2 = TopicPartition::new("test".to_string(), 99);
-        assert!(cluster.leader_for(&tp2).is_none());
-    }
-
-    #[test]
-    fn test_topic_ids() {
-        let mut topic_ids = HashMap::new();
-        topic_ids.insert("test".to_string(), Uuid::random_uuid());
-
-        let cluster = Cluster::new(
-            None,
-            Vec::new(),
-            Vec::new(),
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            None,
-            topic_ids.clone(),
-        );
-
-        let id = topic_ids["test"];
-        assert_eq!(cluster.topic_id("test"), id);
-        assert_eq!(cluster.topic_name(&id), Some("test"));
-        assert_eq!(cluster.topic_id("nonexistent"), Uuid::zero());
-    }
-
-    #[test]
-    fn test_controller() {
-        let controller = make_node(0);
-        let cluster = Cluster::new(
-            None,
-            vec![make_node(0)],
-            Vec::new(),
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            Some(controller),
-            HashMap::new(),
-        );
-
-        assert_eq!(cluster.controller().unwrap().id(), 0);
-    }
-
-    #[test]
-    fn test_partitions_for_node() {
-        let nodes = vec![make_node(0), make_node(1)];
-        let partitions = vec![
-            make_partition("test", 0, 0),
-            make_partition("test", 1, 0),
-            make_partition("test", 2, 1),
+    fn test_returns_immutable_views() {
+        // Translation of ClusterTest.testReturnUnmodifiableCollections.
+        // In Rust, the immutability is statically enforced by `&` borrows
+        // (the public API exposes `&[..]` and `impl Iterator<Item = &str>`
+        // which cannot be mutated by callers). The Java test asserts
+        // `UnsupportedOperationException` on `.add(...)` calls which has
+        // no analogue. Instead we verify the data is reachable and
+        // identical under repeated reads.
+        let nodes = nodes_array();
+        let all_partitions = vec![
+            PartitionInfo::new(TOPIC_A, 0, Some(nodes[0].clone()), nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_A, 1, None, nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_A, 2, Some(nodes[2].clone()), nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_B, 0, None, nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_B, 1, Some(nodes[0].clone()), nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_C, 0, None, nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_D, 0, Some(nodes[1].clone()), nodes.to_vec(), nodes.to_vec()),
+            PartitionInfo::new(TOPIC_E, 0, Some(nodes[0].clone()), nodes.to_vec(), nodes.to_vec()),
         ];
-        let cluster = Cluster::new(
-            None,
-            nodes,
-            partitions,
-            HashSet::new(),
-            HashSet::new(),
-            HashSet::new(),
-            None,
-            HashMap::new(),
+        let mut unauthorized = HashSet::new();
+        unauthorized.insert(TOPIC_C.to_string());
+        let mut invalid = HashSet::new();
+        invalid.insert(TOPIC_D.to_string());
+        let mut internal = HashSet::new();
+        internal.insert(TOPIC_E.to_string());
+
+        let cluster = Cluster::new_with_invalid(
+            Some("clusterId".to_string()),
+            nodes.to_vec(),
+            all_partitions,
+            unauthorized,
+            invalid,
+            internal,
+            Some(nodes[1].clone()),
         );
 
-        assert_eq!(cluster.partitions_for_node(0).len(), 2);
-        assert_eq!(cluster.partitions_for_node(1).len(), 1);
-        assert_eq!(cluster.partitions_for_node(99).len(), 0);
+        let invalids: HashSet<&str> = cluster.invalid_topics().collect();
+        assert_eq!(invalids, [TOPIC_D].into_iter().collect());
+        let internals: HashSet<&str> = cluster.internal_topics().collect();
+        assert_eq!(internals, [TOPIC_E].into_iter().collect());
+        let unauthorizeds: HashSet<&str> = cluster.unauthorized_topics().collect();
+        assert_eq!(unauthorizeds, [TOPIC_C].into_iter().collect());
+
+        let topics_iter: HashSet<&str> = cluster.topics().collect();
+        assert!(topics_iter.contains(TOPIC_A));
+        assert!(topics_iter.contains(TOPIC_B));
+
+        // partitionsForTopic(TOPIC_A) returns 3 partitions, in some order.
+        assert_eq!(cluster.partitions_for_topic(TOPIC_A).len(), 3);
+        // availablePartitionsForTopic(TOPIC_B) returns the one with a
+        // known leader.
+        assert_eq!(cluster.available_partitions_for_topic(TOPIC_B).len(), 1);
+        // partitionsForNode(NODES[1].id() == 1) — only TOPIC_D-0 has node 1
+        // as leader.
+        assert_eq!(cluster.partitions_for_node(nodes[1].id()).len(), 1);
     }
 
     #[test]
     fn test_not_equals() {
-        let cluster_id1 = "clusterId1";
-        let cluster_id2 = "clusterId2";
+        // Translation of ClusterTest.testNotEquals.
+        let cluster_id_1 = Some("clusterId1".to_string());
+        let cluster_id_2 = Some("clusterId2".to_string());
         let node0 = Node::new(0, "host0".to_string(), 100);
         let node1 = Node::new(1, "host1".to_string(), 100);
-        let partitions1 = vec![PartitionInfo::new(
-            "topic1".to_string(),
+        let partitions_1 = vec![PartitionInfo::new(
+            "topic1",
             0,
             Some(node0.clone()),
             vec![node0.clone(), node1.clone()],
             vec![node0.clone()],
         )];
-        let partitions2 = vec![PartitionInfo::new(
-            "topic2".to_string(),
+        let partitions_2 = vec![PartitionInfo::new(
+            "topic2",
             0,
             Some(node0.clone()),
             vec![node1.clone(), node0.clone()],
             vec![node1.clone()],
         )];
-        let unauthorized1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
-        let unauthorized2: HashSet<String> = ["topic2".to_string()].into_iter().collect();
-        let invalid1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
-        let invalid2: HashSet<String> = ["topic2".to_string()].into_iter().collect();
-        let internal1: HashSet<String> = ["topic3".to_string()].into_iter().collect();
-        let internal2: HashSet<String> = ["topic4".to_string()].into_iter().collect();
-        let controller1 = Node::new(2, "host2".to_string(), 100);
-        let controller2 = Node::new(3, "host3".to_string(), 100);
-        let topic_id1 = Uuid::random_uuid();
-        let topic_id2 = Uuid::random_uuid();
-        let topic_ids1: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
-        let topic_ids2: HashMap<String, Uuid> = [("topic2".to_string(), topic_id2)].into_iter().collect();
+        let unauthorized_1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let unauthorized_2: HashSet<String> = ["topic2".to_string()].into_iter().collect();
+        let invalid_1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let invalid_2: HashSet<String> = ["topic2".to_string()].into_iter().collect();
+        let internal_1: HashSet<String> = ["topic3".to_string()].into_iter().collect();
+        let internal_2: HashSet<String> = ["topic4".to_string()].into_iter().collect();
+        let controller_1 = Node::new(2, "host2".to_string(), 100);
+        let controller_2 = Node::new(3, "host3".to_string(), 100);
+        let topic_ids_1: HashMap<String, Uuid> = [("topic1".to_string(), Uuid::random())].into_iter().collect();
+        let topic_ids_2: HashMap<String, Uuid> = [("topic2".to_string(), Uuid::random())].into_iter().collect();
 
-        let cluster1 = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let cluster1 = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions1.clone(),
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller1.clone()),
-            topic_ids1.clone(),
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
-        let different_topic_ids = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let different_topic_ids = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions1.clone(),
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller1.clone()),
-            topic_ids2,
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_2,
         );
-        let different_controller = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let different_controller = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions1.clone(),
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller2),
-            topic_ids1.clone(),
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_2),
+            topic_ids_1.clone(),
         );
-        let different_internal_topics = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let different_internal = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions1.clone(),
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal2,
-            Some(controller1.clone()),
-            topic_ids1.clone(),
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_2,
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
-        let different_invalid_topics = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let different_invalid = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions1.clone(),
-            unauthorized1.clone(),
-            invalid2,
-            internal1.clone(),
-            Some(controller1.clone()),
-            topic_ids1.clone(),
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_2,
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
-        let different_unauthorized_topics = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let different_unauthorized = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions1.clone(),
-            unauthorized2,
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller1.clone()),
-            topic_ids1.clone(),
+            partitions_1.clone(),
+            unauthorized_2,
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
-        let different_partitions = Cluster::new(
-            Some(cluster_id1.to_string()),
+        let different_partitions = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
             vec![node0.clone()],
-            partitions2,
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller1.clone()),
-            topic_ids1.clone(),
+            partitions_2,
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
-        let different_nodes = Cluster::new(
-            Some(cluster_id1.to_string()),
-            vec![node0.clone(), node1],
-            partitions1.clone(),
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller1.clone()),
-            topic_ids1.clone(),
+        // For "different nodes" we use 2 nodes — the shuffle is a no-op
+        // for 1-element lists in `cluster1`, but for 2 elements it can
+        // produce either order. We add a partition leader so that the
+        // partitions-by-node index has both entries; List equality is
+        // order-dependent so this test is order-flaky in Java for >=2
+        // nodes, but the comparison here is against `cluster1` which has
+        // a different *length* anyway — so we're safe.
+        let different_nodes = Cluster::new_with_topic_ids(
+            cluster_id_1.clone(),
+            vec![node0.clone(), node1.clone()],
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
-        let different_cluster_id = Cluster::new(
-            Some(cluster_id2.to_string()),
-            vec![node0],
-            partitions1,
-            unauthorized1,
-            invalid1,
-            internal1,
-            Some(controller1),
-            topic_ids1,
+        let different_cluster_id = Cluster::new_with_topic_ids(
+            cluster_id_2,
+            vec![node0.clone()],
+            partitions_1.clone(),
+            unauthorized_1.clone(),
+            invalid_1.clone(),
+            internal_1.clone(),
+            Some(controller_1.clone()),
+            topic_ids_1.clone(),
         );
 
         assert_ne!(cluster1, different_topic_ids);
         assert_ne!(cluster1, different_controller);
-        assert_ne!(cluster1, different_internal_topics);
-        assert_ne!(cluster1, different_invalid_topics);
-        assert_ne!(cluster1, different_unauthorized_topics);
+        assert_ne!(cluster1, different_internal);
+        assert_ne!(cluster1, different_invalid);
+        assert_ne!(cluster1, different_unauthorized);
         assert_ne!(cluster1, different_partitions);
         assert_ne!(cluster1, different_nodes);
         assert_ne!(cluster1, different_cluster_id);
@@ -670,52 +756,187 @@ mod tests {
 
     #[test]
     fn test_equals() {
-        let cluster_id1 = "clusterId1";
+        // Translation of ClusterTest.testEquals.
+        let cluster_id = Some("clusterId1".to_string());
         let node1 = Node::new(1, "host0".to_string(), 100);
-        let node1_duplicate = Node::new(1, "host0".to_string(), 100);
-        let partitions1 = vec![PartitionInfo::new(
-            "topic1".to_string(),
+        let node1_dup = Node::new(1, "host0".to_string(), 100);
+        let topic_id_1 = Uuid::random();
+        let partitions = vec![PartitionInfo::new(
+            "topic1",
             0,
             Some(node1.clone()),
             vec![node1.clone()],
             vec![node1.clone()],
         )];
-        let partitions1_duplicate = vec![PartitionInfo::new(
-            "topic1".to_string(),
+        let partitions_dup = vec![PartitionInfo::new(
+            "topic1",
             0,
-            Some(node1_duplicate.clone()),
-            vec![node1_duplicate.clone()],
-            vec![node1_duplicate.clone()],
+            Some(node1_dup.clone()),
+            vec![node1_dup.clone()],
+            vec![node1_dup.clone()],
         )];
-        let unauthorized1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
-        let invalid1: HashSet<String> = ["topic1".to_string()].into_iter().collect();
-        let internal1: HashSet<String> = ["topic3".to_string()].into_iter().collect();
-        let controller1 = Node::new(2, "host0".to_string(), 100);
-        let controller1_duplicate = Node::new(2, "host0".to_string(), 100);
-        let topic_id1 = Uuid::random_uuid();
-        let topic_ids1: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
-        let topic_ids1_duplicate: HashMap<String, Uuid> = [("topic1".to_string(), topic_id1)].into_iter().collect();
+        let unauthorized: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let invalid: HashSet<String> = ["topic1".to_string()].into_iter().collect();
+        let internal: HashSet<String> = ["topic3".to_string()].into_iter().collect();
+        let controller = Node::new(2, "host0".to_string(), 100);
+        let controller_dup = Node::new(2, "host0".to_string(), 100);
+        let topic_ids: HashMap<String, Uuid> = [("topic1".to_string(), topic_id_1)].into_iter().collect();
+        let topic_ids_dup: HashMap<String, Uuid> = [("topic1".to_string(), topic_id_1)].into_iter().collect();
 
-        let cluster1 = Cluster::new(
-            Some(cluster_id1.to_string()),
-            vec![node1],
-            partitions1,
-            unauthorized1.clone(),
-            invalid1.clone(),
-            internal1.clone(),
-            Some(controller1),
-            topic_ids1,
+        let c1 = Cluster::new_with_topic_ids(
+            cluster_id.clone(),
+            vec![node1.clone()],
+            partitions,
+            unauthorized.clone(),
+            invalid.clone(),
+            internal.clone(),
+            Some(controller),
+            topic_ids,
         );
-        let cluster1_duplicate = Cluster::new(
-            Some(cluster_id1.to_string()),
-            vec![node1_duplicate],
-            partitions1_duplicate,
-            unauthorized1,
-            invalid1,
-            internal1,
-            Some(controller1_duplicate),
-            topic_ids1_duplicate,
+        let c1_dup = Cluster::new_with_topic_ids(
+            cluster_id,
+            vec![node1_dup],
+            partitions_dup,
+            unauthorized,
+            invalid,
+            internal,
+            Some(controller_dup),
+            topic_ids_dup,
         );
-        assert_eq!(cluster1, cluster1_duplicate);
+        assert_eq!(c1, c1_dup);
+    }
+
+    #[test]
+    fn empty_is_cached() {
+        let a: *const Cluster = Cluster::empty();
+        let b: *const Cluster = Cluster::empty();
+        assert_eq!(a, b);
+        assert!(!Cluster::empty().is_bootstrap_configured());
+    }
+
+    #[test]
+    fn topic_id_returns_zero_when_unknown() {
+        let c = Cluster::empty();
+        assert_eq!(c.topic_id("missing"), crate::common::uuid::ZERO_UUID);
+        assert_eq!(c.topic_name(Uuid::random()), None);
+    }
+
+    #[test]
+    fn partition_lookup_works() {
+        let n0 = Node::new(0, "host".to_string(), 100);
+        let parts = vec![PartitionInfo::new(
+            "t",
+            0,
+            Some(n0.clone()),
+            vec![n0.clone()],
+            vec![n0.clone()],
+        )];
+        let cluster = Cluster::new_with_controller(None, vec![n0.clone()], parts, HashSet::new(), HashSet::new(), None);
+        let tp = TopicPartition::new("t", 0);
+        let info = cluster.partition(&tp).expect("partition exists");
+        assert_eq!(info.partition(), 0);
+        assert_eq!(info.topic(), "t");
+        assert_eq!(cluster.leader_for(&tp), Some(&n0));
+        assert_eq!(cluster.partition_count_for_topic("t"), Some(1));
+        assert_eq!(cluster.partition_count_for_topic("missing"), None);
+    }
+
+    #[test]
+    fn node_if_online_logic() {
+        let n0 = Node::new(0, "h".to_string(), 100);
+        let n1 = Node::new(1, "h".to_string(), 101);
+        let parts = vec![PartitionInfo::new_with_offline(
+            "t",
+            0,
+            Some(n0.clone()),
+            vec![n0.clone(), n1.clone()],
+            vec![n0.clone()],
+            vec![n1.clone()],
+        )];
+        let cluster = Cluster::new_with_controller(
+            None,
+            vec![n0.clone(), n1.clone()],
+            parts,
+            HashSet::new(),
+            HashSet::new(),
+            None,
+        );
+        let tp = TopicPartition::new("t", 0);
+        // n0 is in replicas and not in offline → online.
+        assert_eq!(cluster.node_if_online(&tp, 0), Some(&n0));
+        // n1 is in replicas but also offline → not online.
+        assert_eq!(cluster.node_if_online(&tp, 1), None);
+        // unknown id → None.
+        assert_eq!(cluster.node_if_online(&tp, 999), None);
+    }
+
+    #[test]
+    fn with_partitions_combines() {
+        let n0 = Node::new(0, "h".to_string(), 100);
+        let parts = vec![PartitionInfo::new(
+            "t",
+            0,
+            Some(n0.clone()),
+            vec![n0.clone()],
+            vec![n0.clone()],
+        )];
+        let cluster = Cluster::new_with_controller(None, vec![n0.clone()], parts, HashSet::new(), HashSet::new(), None);
+        let tp = TopicPartition::new("t", 1);
+        let new_pi = PartitionInfo::new("t", 1, Some(n0.clone()), vec![n0.clone()], vec![n0.clone()]);
+        let mut extra: HashMap<TopicPartition, PartitionInfo> = HashMap::new();
+        extra.insert(tp.clone(), new_pi);
+        let combined = cluster.with_partitions(extra);
+        assert!(combined.partition(&tp).is_some());
+        assert!(combined.partition(&TopicPartition::new("t", 0)).is_some());
+    }
+
+    #[test]
+    fn with_partitions_shares_topic_arc() {
+        // Phase 4a Critic Issue 4: with_partitions must reuse the existing
+        // `Arc<str>` topic-name allocations rather than round-tripping
+        // through `String`. Build a cluster that has every Arc<str>-keyed
+        // input populated (unauthorized, invalid, internal, topic_ids) and
+        // verify each Arc address survives a `with_partitions` call.
+        let n0 = Node::new(0, "h".to_string(), 100);
+        let topic_id = Uuid::random();
+        let mut topic_ids: HashMap<String, Uuid> = HashMap::new();
+        topic_ids.insert("t".to_string(), topic_id);
+        let mut unauthorized: HashSet<String> = HashSet::new();
+        unauthorized.insert("u".to_string());
+        let mut invalid: HashSet<String> = HashSet::new();
+        invalid.insert("i".to_string());
+        let mut internal: HashSet<String> = HashSet::new();
+        internal.insert("n".to_string());
+        let parts = vec![PartitionInfo::new(
+            "t",
+            0,
+            Some(n0.clone()),
+            vec![n0.clone()],
+            vec![n0.clone()],
+        )];
+        let cluster = Cluster::new_with_topic_ids(
+            None,
+            vec![n0.clone()],
+            parts,
+            unauthorized,
+            invalid,
+            internal,
+            None,
+            topic_ids,
+        );
+
+        // Snapshot Arc addresses on the source side.
+        let topic_id_key_ptr = cluster.topic_ids.keys().next().unwrap().as_ptr();
+        let unauth_ptr = cluster.unauthorized_topics.iter().next().unwrap().as_ptr();
+        let invalid_ptr = cluster.invalid_topics.iter().next().unwrap().as_ptr();
+        let internal_ptr = cluster.internal_topics.iter().next().unwrap().as_ptr();
+
+        let combined = cluster.with_partitions(HashMap::new());
+
+        // Every Arc<str> address must survive intact across with_partitions.
+        assert_eq!(combined.topic_ids.keys().next().unwrap().as_ptr(), topic_id_key_ptr);
+        assert_eq!(combined.unauthorized_topics.iter().next().unwrap().as_ptr(), unauth_ptr);
+        assert_eq!(combined.invalid_topics.iter().next().unwrap().as_ptr(), invalid_ptr);
+        assert_eq!(combined.internal_topics.iter().next().unwrap().as_ptr(), internal_ptr);
     }
 }

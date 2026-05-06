@@ -12,23 +12,21 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cluster resource listener callback.
-//!
-//! Corresponds to `org.apache.kafka.common.ClusterResourceListener`.
+//! Translation of `org.apache.kafka.common.ClusterResourceListener`.
 
-use super::ClusterResource;
+use crate::common::ClusterResource;
 
-/// A callback trait that users can implement to get notified about changes in the
+/// Callback trait for users that wish to be notified about changes in the
 /// cluster metadata.
 ///
-/// Users who need access to cluster metadata in interceptors, metric reporters,
-/// serializers and deserializers can implement this trait.
+/// Mirrors Java's `ClusterResourceListener`. There will be one invocation of
+/// [`ClusterResourceListener::on_update`] after each metadata response.
 ///
-/// There will be one invocation of [`ClusterResourceListener::on_update`] after
-/// each metadata response.
-///
-/// Corresponds to `org.apache.kafka.common.ClusterResourceListener`.
-pub trait ClusterResourceListener: Send {
-    /// Called when the cluster metadata is updated.
+/// Implementations are stored as `Arc<dyn ClusterResourceListener + Send +
+/// Sync>` and may be called from any thread, so all interior mutability must
+/// be synchronized by the implementor.
+pub trait ClusterResourceListener: Send + Sync {
+    /// A callback method that a user can implement to get updates for
+    /// [`ClusterResource`].
     fn on_update(&self, cluster_resource: &ClusterResource);
 }

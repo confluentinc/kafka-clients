@@ -1,0 +1,1 @@
+- [Milestone-1 agent numbering](milestone1_agent_numbering.md) — Phase 1 uses N=0; subsequent phases increment from there per user decision.

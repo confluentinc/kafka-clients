@@ -12,29 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Invalid receive error for Kafka network protocol.
-//!
-//! Translated from `org.apache.kafka.common.network.InvalidReceiveException`.
+//! Translation of
+//! `org.apache.kafka.common.network.InvalidReceiveException`.
 
 use std::fmt;
-use std::io;
 
-/// Error returned when an invalid receive is detected.
+/// Raised when a [`crate::common::network::NetworkReceive`] reads a length
+/// prefix that is negative or larger than the configured maximum.
 ///
-/// This occurs when the size header in a network receive is negative
-/// or exceeds the maximum allowed size.
-#[derive(Debug)]
+/// In Java this extends `KafkaException`. In Rust we follow the
+/// CLAUDE.md `Exception → Error` rule. This error is constructible
+/// independently of [`crate::common::errors::KafkaError`] but converts
+/// into [`crate::common::errors::KafkaError::Generic`] for callers that
+/// want a unified `Result<T, KafkaError>` shape.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct InvalidReceiveError {
     message: String,
 }
 
 impl InvalidReceiveError {
-    /// Creates a new `InvalidReceiveError` with the given message.
+    /// Mirrors the single-argument Java constructor.
     pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
+        InvalidReceiveError { message: message.into() }
     }
 
-    /// Returns the error message.
+    /// Mirrors `Throwable.getMessage()`.
     pub fn message(&self) -> &str {
         &self.message
     }
@@ -42,14 +44,32 @@ impl InvalidReceiveError {
 
 impl fmt::Display for InvalidReceiveError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.message)
+        f.write_str(&self.message)
     }
 }
 
 impl std::error::Error for InvalidReceiveError {}
 
-impl From<InvalidReceiveError> for io::Error {
-    fn from(e: InvalidReceiveError) -> Self {
-        io::Error::new(io::ErrorKind::InvalidData, e)
+impl From<InvalidReceiveError> for crate::common::errors::KafkaError {
+    fn from(err: InvalidReceiveError) -> Self {
+        crate::common::errors::KafkaError::Generic(err.message)
+    }
+}
+
+impl From<InvalidReceiveError> for std::io::Error {
+    fn from(err: InvalidReceiveError) -> Self {
+        std::io::Error::new(std::io::ErrorKind::InvalidData, err)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn message_round_trip() {
+        let err = InvalidReceiveError::new("Invalid receive (size = -1)");
+        assert_eq!(err.message(), "Invalid receive (size = -1)");
+        assert_eq!(err.to_string(), "Invalid receive (size = -1)");
     }
 }

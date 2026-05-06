@@ -12,28 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Message size accumulator for two-pass serialization.
-//!
-//! Helper class which facilitates zero-copy network transmission.
-//!
-//! Corresponds to org.apache.kafka.common.protocol.MessageSizeAccumulator
+//! Translation of
+//! `org.apache.kafka.common.protocol.MessageSizeAccumulator`.
 
-/// Accumulates message size with zero-copy optimization.
-///
-/// Tracks both the total size and the zero-copy size separately,
-/// enabling efficient network transmission by distinguishing between
-/// bytes that need to be copied into a buffer and bytes that can be
-/// sent directly (zero-copy).
-#[derive(Debug, Default)]
+/// Helper class which facilitates zero-copy network transmission. See
+/// [`crate::common::protocol::SendBuilder`].
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct MessageSizeAccumulator {
     total_size: i32,
     zero_copy_size: i32,
 }
 
 impl MessageSizeAccumulator {
-    /// Creates a new empty accumulator.
+    /// Construct an empty accumulator. Mirrors the implicit `new
+    /// MessageSizeAccumulator()`.
     pub fn new() -> Self {
-        Self::default()
+        MessageSizeAccumulator::default()
     }
 
     /// Get the total size of the message.
@@ -41,19 +35,26 @@ impl MessageSizeAccumulator {
         self.total_size
     }
 
-    /// Size excluding zero copy fields as specified by [`zero_copy_size`].
-    /// This is typically the size of the byte buffer used to serialize messages.
+    /// Size excluding zero-copy fields. Typically the size of the byte buffer
+    /// used to serialise messages.
     pub fn size_excluding_zero_copy(&self) -> i32 {
         self.total_size - self.zero_copy_size
     }
 
-    /// Add zero-copy bytes to the accumulator.
+    /// Get the zero-copy portion. Mirrors no Java getter directly but is
+    /// useful for tests.
+    pub fn zero_copy_size(&self) -> i32 {
+        self.zero_copy_size
+    }
+
+    /// Add `size` zero-copy bytes. Both the zero-copy and total counters
+    /// advance.
     pub fn add_zero_copy_bytes(&mut self, size: i32) {
         self.zero_copy_size += size;
         self.total_size += size;
     }
 
-    /// Add regular (non-zero-copy) bytes to the accumulator.
+    /// Add `size` regular (non zero-copy) bytes.
     pub fn add_bytes(&mut self, size: i32) {
         self.total_size += size;
     }
@@ -70,49 +71,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_new_accumulator_is_zero() {
+    fn empty_sizes() {
         let acc = MessageSizeAccumulator::new();
         assert_eq!(acc.total_size(), 0);
         assert_eq!(acc.size_excluding_zero_copy(), 0);
+        assert_eq!(acc.zero_copy_size(), 0);
     }
 
     #[test]
-    fn test_add_bytes() {
+    fn add_bytes_only_grows_total() {
         let mut acc = MessageSizeAccumulator::new();
-        acc.add_bytes(100);
-        assert_eq!(acc.total_size(), 100);
-        assert_eq!(acc.size_excluding_zero_copy(), 100);
+        acc.add_bytes(7);
+        assert_eq!(acc.total_size(), 7);
+        assert_eq!(acc.size_excluding_zero_copy(), 7);
     }
 
     #[test]
-    fn test_add_zero_copy_bytes() {
+    fn zero_copy_grows_both() {
         let mut acc = MessageSizeAccumulator::new();
-        acc.add_zero_copy_bytes(50);
-        assert_eq!(acc.total_size(), 50);
+        acc.add_zero_copy_bytes(10);
+        assert_eq!(acc.total_size(), 10);
         assert_eq!(acc.size_excluding_zero_copy(), 0);
     }
 
     #[test]
-    fn test_mixed_bytes() {
-        let mut acc = MessageSizeAccumulator::new();
-        acc.add_bytes(100);
-        acc.add_zero_copy_bytes(50);
-        assert_eq!(acc.total_size(), 150);
-        assert_eq!(acc.size_excluding_zero_copy(), 100);
-    }
-
-    #[test]
-    fn test_add_accumulator() {
-        let mut acc1 = MessageSizeAccumulator::new();
-        acc1.add_bytes(100);
-        acc1.add_zero_copy_bytes(50);
-
-        let mut acc2 = MessageSizeAccumulator::new();
-        acc2.add_bytes(200);
-        acc2.add_zero_copy_bytes(75);
-
-        acc1.add(&acc2);
-        assert_eq!(acc1.total_size(), 425);
-        assert_eq!(acc1.size_excluding_zero_copy(), 300);
+    fn add_merges() {
+        let mut a = MessageSizeAccumulator::new();
+        a.add_bytes(3);
+        a.add_zero_copy_bytes(5);
+        let mut b = MessageSizeAccumulator::new();
+        b.add_bytes(7);
+        b.add_zero_copy_bytes(11);
+        a.add(&b);
+        assert_eq!(a.total_size(), 3 + 5 + 7 + 11);
+        assert_eq!(a.zero_copy_size(), 5 + 11);
     }
 }

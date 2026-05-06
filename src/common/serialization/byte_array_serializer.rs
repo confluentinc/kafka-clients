@@ -12,72 +12,33 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Byte array serializer.
-//!
-//! Passes through byte arrays unchanged.
-//!
-//! Corresponds to Java's `org.apache.kafka.common.serialization.ByteArraySerializer`.
+//! Translation of `org.apache.kafka.common.serialization.ByteArraySerializer`.
 
 use crate::common::KafkaError;
 use crate::common::serialization::Serializer;
 
-/// Serializes byte arrays by passing them through unchanged.
+/// Identity serializer for `[u8]`. Mirrors Java's
+/// `ByteArraySerializer implements Serializer<byte[]>`.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.serialization.ByteArraySerializer`.
-#[derive(Clone, Debug, Default)]
+/// Hot-path zero-copy: [`Serializer::serialize_to`] does **not** allocate;
+/// it writes directly into the caller's buffer. The owned-`Vec<u8>` API
+/// (`serialize`) does allocate (`to_vec`) — that path is for callers who
+/// genuinely need an owned copy.
+#[derive(Default, Debug, Clone, Copy)]
 pub struct ByteArraySerializer;
-
-impl ByteArraySerializer {
-    /// Create a new `ByteArraySerializer`.
-    pub fn new() -> Self {
-        Self
-    }
-}
 
 impl Serializer<[u8]> for ByteArraySerializer {
     fn serialize(&self, _topic: &str, data: Option<&[u8]>) -> Result<Option<Vec<u8>>, KafkaError> {
-        Ok(data.map(|d| d.to_vec()))
-    }
-}
-
-impl Serializer<Vec<u8>> for ByteArraySerializer {
-    fn serialize(&self, _topic: &str, data: Option<&Vec<u8>>) -> Result<Option<Vec<u8>>, KafkaError> {
-        Ok(data.cloned())
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_serialize_null() {
-        let serializer = ByteArraySerializer::new();
-        let result: Result<Option<Vec<u8>>, KafkaError> = Serializer::<[u8]>::serialize(&serializer, "topic", None);
-        assert_eq!(result.unwrap(), None);
+        Ok(data.map(<[u8]>::to_vec))
     }
 
-    #[test]
-    fn test_serialize_bytes() {
-        let serializer = ByteArraySerializer::new();
-        let data = b"my bytes";
-        let result = Serializer::<[u8]>::serialize(&serializer, "topic", Some(data.as_slice())).unwrap();
-        assert_eq!(result, Some(b"my bytes".to_vec()));
-    }
-
-    #[test]
-    fn test_serialize_vec() {
-        let serializer = ByteArraySerializer::new();
-        let data = vec![1u8, 2, 3, 4, 5];
-        let result = Serializer::<Vec<u8>>::serialize(&serializer, "topic", Some(&data)).unwrap();
-        assert_eq!(result, Some(vec![1, 2, 3, 4, 5]));
-    }
-
-    #[test]
-    fn test_serialize_empty() {
-        let serializer = ByteArraySerializer::new();
-        let data: &[u8] = &[];
-        let result = Serializer::<[u8]>::serialize(&serializer, "topic", Some(data)).unwrap();
-        assert_eq!(result, Some(Vec::new()));
+    fn serialize_to(&self, _topic: &str, data: Option<&[u8]>, out: &mut Vec<u8>) -> Result<bool, KafkaError> {
+        match data {
+            Some(d) => {
+                out.extend_from_slice(d);
+                Ok(true)
+            },
+            None => Ok(false),
+        }
     }
 }

@@ -22,8 +22,7 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod api_versions_test;
-mod connection_test;
-mod metadata_test;
-mod producer_test;
-mod ssl_sasl_test;
+// Performance tests — added when performance infrastructure landed.
+// Uncomment as integration tests are translated:
+// mod performance_test;
+// mod producer_perf_test;

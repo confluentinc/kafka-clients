@@ -12,102 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Kafka record headers (org.apache.kafka.common.header).
-//!
-//! A header is a key-value pair attached to a Kafka record. The [`Header`] trait
-//! defines the contract, while [`Headers`] is a mutable ordered collection of
-//! headers.
+//! Translation of `org.apache.kafka.common.header`.
 
-pub(crate) mod internals;
+// CLAUDE.md rule 2 mandates each Java class lives in its own file (so
+// `Header` lives in `header/header.rs`). Clippy's `module_inception` lint
+// would otherwise flag the same-name child module.
+#[allow(clippy::module_inception)]
+pub mod header;
+pub mod headers;
+pub mod internals;
 
-use internals::RecordHeader;
-
-/// A header is a key-value pair.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.Header`.
-pub trait Header {
-    /// Returns the key of the header.
-    ///
-    /// The key must not be null (always returns a valid string reference).
-    fn key(&self) -> &str;
-
-    /// Returns the value of the header.
-    ///
-    /// The value may be `None` (corresponding to Java's null).
-    fn value(&self) -> Option<&[u8]>;
-}
-
-/// A mutable ordered collection of [`Header`] objects.
-///
-/// Note that multiple headers may have the same key. The order of headers
-/// is preserved in the order they were added.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.Headers`.
-pub trait Headers {
-    /// Adds a header (key inside), to the end, returning if the operation succeeded.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if headers are in a read-only state.
-    fn add(&mut self, header: RecordHeader) -> Result<(), IllegalStateError>;
-
-    /// Creates and adds a header, to the end, returning if the operation succeeded.
-    ///
-    /// The key and value are borrowed; the allocation is performed internally.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if headers are in a read-only state.
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError>;
-
-    /// Removes all headers for the given key returning if the operation succeeded,
-    /// while preserving the insertion order of the remaining headers.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if headers are in a read-only state.
-    fn remove(&mut self, key: &str) -> Result<(), IllegalStateError>;
-
-    /// Returns just one (the very last) header for the given key, if present.
-    fn last_header(&self, key: &str) -> Option<&RecordHeader>;
-
-    /// Returns all headers for the given key, in the order they were added in.
-    fn headers_for_key(&self, key: &str) -> Vec<&RecordHeader>;
-
-    /// Returns all headers as a slice.
-    ///
-    /// If no headers are present an empty slice is returned.
-    fn to_array(&self) -> &[RecordHeader];
-
-    /// Returns an iterator over the headers.
-    fn iter(&self) -> std::slice::Iter<'_, RecordHeader>;
-}
-
-/// Error returned when a mutating operation is attempted on read-only headers.
-///
-/// Corresponds to Java's `IllegalStateException` thrown by `RecordHeaders`
-/// when the collection has been set to read-only.
-#[derive(Clone, Debug)]
-pub struct IllegalStateError {
-    message: String,
-}
-
-impl IllegalStateError {
-    /// Create a new `IllegalStateError` with the given message.
-    pub fn new(message: impl Into<String>) -> Self {
-        Self { message: message.into() }
-    }
-
-    /// The error message.
-    pub fn message(&self) -> &str {
-        &self.message
-    }
-}
-
-impl std::fmt::Display for IllegalStateError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.message)
-    }
-}
-
-impl std::error::Error for IllegalStateError {}
+pub use header::Header;
+pub use headers::Headers;
+pub use internals::{RecordHeader, RecordHeaders, RecordHeadersError};

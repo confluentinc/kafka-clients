@@ -1,5 +1,47 @@
-- [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
-- [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
-- [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
-- [SSL/TLS Transport](ssl_tls_transport.md) — rustls patterns, ChannelBuilder refactor, NoHostnameVerifier, Box<TlsStream> for enum size
-- [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN goes INTERMEDIATE->COMPLETE directly, CLIENT_COMPLETE is for SCRAM only
+- [Phase 1 lint gotchas](phase1_lint_gotchas.md) — clippy patterns I hit repeatedly during foundation translation
+- [Module name collisions](module_inception_pattern.md) — `header/header.rs`, `utils/utils.rs` need `#[allow(clippy::module_inception)]`
+- [Generator crate layout](generator_layout.md) — codegen lives in lib.rs (~5000 lines), not the message/ submodules
+- [Phase 2b types design](phase2b_types_design.md) — Type/Value enums, Schema id, ReadBuffer cursor, Records bytes-level only
+- [Phase 2c protocol layout](phase2c_protocol_layout.md) — Readable/Writable/ByteBufferAccessor moved out of types/io.rs
+- [Phase 2d generator/runtime gap](phase2d_generator_runtime_gap.md) — generator emits an API surface that doesn't match Phase 2c traits
+- [Phase 2d-4 byte fixtures](phase2d4_byte_fixtures.md) — Java-authoritative byte capture process + 2 produce-path generator emit fixes
+- [Phase 2e requests layout](phase2e_requests_layout.md) — wrapper trait shape choices: `&dyn Message`, `HashMap<Errors,_>`, no associated const
+- [Phase 2 review fixes](phase2_review_fixes.md) — patterns kept from Phase 2 review round (write_byte_buffer split, OnceLock api_key, ListenerType dedup)
+- [Phase 3a record base](phase3a_record_base.md) — record/ trait base layer summary, what's deferred to 3c/3d/5
+- [Phase 3a compression gap](phase3a_compression_dispatch_gap.md) — RESOLVED in Phase 3c (kept for history)
+- [Phase 3c compression](phase3c_compression.md) — compress/ module + dispatch wiring + ratio estimator: what landed, what's deferred
+- [Phase 3c snappy framing gap](phase3c_snappy_framing_gap.md) — `snap` crate emits RFC framing, not xerial — wire-incompat with Java brokers
+- [Phase 3b serializers](phase3b_serializers.md) — what landed/skipped/deferred for serialization module
+- [Phase 3b serializer design](phase3b_serializer_design.md) — dual `serialize`/`serialize_to` trait shape; Headers-overload omission rationale
+- [Phase 3b list serde gap](phase3b_list_serde_gap.md) — `ListSerializer` cross-process Java-FQN limitation, what we support vs defer
+- [Phase 3d-1 default_record](phase3d1_default_record.md) — DefaultRecord/PartialDefaultRecord landed; `increment_sequence` temporarily inlined, move to 3d-2 batch file
+- [Phase 3d-2 default_record_batch](phase3d2_default_record_batch.md) — DefaultRecordBatch + LogInputStream + RecordBatchIterator + RecordValidationStats; Vec<u8> storage with per-iter Bytes view
+- [Phase 3d-3 memory_records](phase3d3_memory_records.md) — MemoryRecords + UnalignedMemoryRecords (Bytes-backed, zero-copy slice) + RecordsSend state-core; `Records::records()` per-record alloc; `to_send()` on concrete impls only
+- [Phase 3d-4 builder](phase3d4_memory_records_builder.md) — MemoryRecordsBuilder + with_records factories; uncompressed path direct-write into bufferStream; close() moves Vec to satisfy strict zero-copy DoD
+- [Phase 3d-4 streaming codec](phase3d4_streaming_codec.md) — self-borrow pattern: Box the borrowee + 'static-erased writer + explicit Drop impl for "appendStream wraps bufferStream" Java idiom
+- [Phase 3e wire fixtures](phase3e_wire_fixtures.md) — Java-derived byte vectors + codec close-path fixes (gzip flush removal, zstd flush+finish chain)
+- [Phase 4a cluster data types](phase4a_cluster_data_types.md) — Arc<str> interning, null-topic empty-string substitution, Cluster shuffle/equality scope, bootstrap_with_hosts
+- [Phase 4b metadata stack](phase4b_metadata_stack.md) — single-mutex sync, retain-topic predicate via composition, await_update wall-clock deadline, KafkaError::StaleMetadata
+- [Phase 4b Round 2 patterns](phase4b_round2_patterns.md) — ArcSwap as `volatile Arc<T>`, listener-under-lock, "covered elsewhere" deferral trap, slice .len() vs iterator .count()
+- [Phase 4c client utils](phase4c_client_utils.md) — InetSocketAddress shim, sync HostResolver+spawn_blocking, file-level deferral rustdoc, ClientDnsLookup 2-variant truth
+- [Phase 5a network primitives](phase5a_network_primitives.md) — Send/Receive/TransferableChannel traits, ByteBufferSend zero-copy, Ok(0)≠EOF, AbstractRequestBuilder erasure
+- [Phase 5a review fixes](phase5a_review_fixes.md) — NetworkReceive `with_buffer` semantics + payload_pos field for zero-alloc fill; `try_with_timed_out` removal
+- [Phase 5b-1 transport layer](phase5b1_transport_layer.md) — TransportLayer trait + PlaintextTransportLayer + KafkaPrincipal; how SSL (5b-2) slots in
+- [Phase 5b-2 SSL transport](phase5b2_ssl_transport.md) — rustls low-level state machine, Tokio↔rustls adapter, handshake test harness gotchas
+- [Phase 5b-2 rustls bookkeeping](phase5b2_rustls_bookkeeping.md) — set_buffer_limit + IoState capture + IANA cipher-name mapping bridges where rustls defaults diverge from Java SSLEngine
+- [Phase 5b-3 kafka channel](phase5b3_kafka_channel.md) — KafkaChannel + ChannelBuilders trait shape; Authenticator stub design; pub-not-pub(crate) for sibling-Selector callers
+- [Phase 5b-3 review fixes](phase5b3_review_fixes.md) — lazy-lookup via trait method arg; mock partial-write cap; Java package-private → pub(crate)+#[allow(dead_code)]
+- [Phase 5c-1 connection state](phase5c1_connection_state.md) — i32 connection ids end-to-end, async-poll Selectable, Arc<NodeApiVersions> for the cache, SupportedVersionRange new module
+- [Tokio↔Java NIO read bridge](tokio_nio_read_bridge.md) — three-way `try_read` outcome translation; never collapse `WouldBlock` and `Ok(0)`/EOF
+- [Phase 5c-1 review fixes](phase5c1_review_fixes.md) — Java test-fixture parity, end-to-end i32 sibling consistency, pub(crate) + dead_code allow lint annotation pattern
+- [Phase 5c-2 Selector](phase5c2_selector.md) — single-task design + connect-task pattern + IdleExpiryManager LRU + EchoServer test harness
+- [Phase 5d NetworkClient](phase5d_network_client.md) — KafkaClient `&mut self` divergence, internal metadata response re-parse, AbstractRequest+Send/Sync trait change
+- [Phase 5d review fixes](phase5d_review_fixes.md) — MockTime jitter math, MetadataUpdater test mocks, KIP-511 same-poll re-dispatch
+- [Phase 6a patterns](phase6a_patterns.md) — Tokio-fair waiter pool, async-fn FutureRecordMetadata, identity-HashSet→pointer-keyed HashMap
+- [Phase 6a Round 1 patterns](phase6a_round1_patterns.md) — Cancellation-safe RAII Drop guard, `ByteBuffer.clear()` zero-fill audit, `#![allow(dead_code)]` per-file scope
+- [Phase 6b ProducerBatch](phase6b_producer_batch.md) — unsafe Send/Sync over Mutex<MutState>, OnceLock<FinalState>, panic::catch_unwind on user callbacks, zero-copy split path
+- [Phase 6b Round 1 patterns](phase6b_round1_patterns.md) — Vec<u8> ownership through Bytes::try_into_mut, initial_capacity snapshot, Java-binary bifurcation
+- [Phase 6b Round 2 patterns](phase6b_round2_patterns.md) — bifurcate `unsafe set_len` by origin (zero-init Vec vs fresh `to_vec()`), tail-zero assertion as soundness signal
+- [Phase 6c partitioners + interceptors](phase6c_partitioners_interceptors.md) — owned-record interceptor chain with K/V Clone, randomPartition virtual hook via Box<dyn Fn>, ArcSwapOption for volatile state
+- [Phase 6c Round 1 patterns](phase6c_round1_patterns.md) — type-level null elimination, ArithmeticException → panic per CLAUDE.md 10.1, original-input log parity, fast/slow-path coverage, Arc::ptr_eq for staged-state
+- [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it

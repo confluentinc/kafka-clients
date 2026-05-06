@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Connection mode for SSL and SASL connections.
-//!
-//! Translated from `org.apache.kafka.common.network.ConnectionMode`.
+//! Translation of `org.apache.kafka.common.network.ConnectionMode`.
 
-/// Connection mode for SSL and SASL connections.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Connection mode for SSL and SASL connections. Mirrors the Java
+/// `ConnectionMode` enum.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ConnectionMode {
-    /// Client-side connection.
     Client,
-    /// Server-side connection.
     Server,
 }

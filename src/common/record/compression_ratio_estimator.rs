@@ -12,170 +12,142 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-topic compression ratio estimation.
+//! Translation of `org.apache.kafka.common.record.CompressionRatioEstimator`.
 //!
-//! This class helps estimate the compression ratio for each topic and
-//! compression type combination.
-//!
-//! Corresponds to Java's `org.apache.kafka.common.record.CompressionRatioEstimator`.
+//! Tracks running compression-ratio estimates per `(topic, codec)`. Used by
+//! the producer to budget how many records fit into a given batch size
+//! given the codec's expected compression rate.
 
-use std::collections::HashMap;
-use std::sync::{LazyLock, Mutex};
+use std::sync::Mutex;
+use std::sync::OnceLock;
+
+use dashmap::DashMap;
 
 use crate::common::record::CompressionType;
 
-/// The constant speed to increase compression ratio when a batch compresses
-/// better than expected.
+/// Constant speed at which the estimate increases when a batch compresses
+/// better than expected. Mirrors Java's `COMPRESSION_RATIO_IMPROVING_STEP`.
 pub const COMPRESSION_RATIO_IMPROVING_STEP: f32 = 0.005;
 
-/// The minimum speed to decrease compression ratio when a batch compresses
-/// worse than expected.
+/// Constant speed at which the estimate decreases when a batch compresses
+/// worse than expected. Mirrors Java's `COMPRESSION_RATIO_DETERIORATE_STEP`.
 pub const COMPRESSION_RATIO_DETERIORATE_STEP: f32 = 0.05;
 
-/// Process-wide global compression ratio estimator instance.
-///
-/// Matches the Java behavior where `CompressionRatioEstimator` has static
-/// methods backed by a static `ConcurrentHashMap`, making it a process-wide
-/// singleton that shares compression ratio estimates across all producers
-/// and consumers in the same process.
-static INSTANCE: LazyLock<CompressionRatioEstimator> = LazyLock::new(CompressionRatioEstimator::new_instance);
+/// Number of compression-type slots (matches the Java `CompressionType.values().length`).
+const NUM_TYPES: usize = 5;
 
-/// Per-topic compression ratio estimation.
-///
-/// Thread-safe singleton that tracks compression ratio estimates per topic
-/// and compression type. Use the static methods ([`update_estimation`](Self::update_estimation),
-/// [`estimation`](Self::estimation), etc.) which operate on the process-wide
-/// global instance, matching Java's static `CompressionRatioEstimator` methods.
-///
-/// Corresponds to Java's `org.apache.kafka.common.record.CompressionRatioEstimator`.
-pub struct CompressionRatioEstimator {
-    compression_ratio: Mutex<HashMap<String, [f32; CompressionType::COUNT]>>,
+/// Map from topic name to `[ratio; NUM_TYPES]`. Wrapped in a `Mutex` per
+/// entry to mirror Java's `synchronized (compressionRatioForTopic)` block.
+struct PerTopicRatios(Mutex<[f32; NUM_TYPES]>);
+
+fn map() -> &'static DashMap<String, PerTopicRatios> {
+    static M: OnceLock<DashMap<String, PerTopicRatios>> = OnceLock::new();
+    M.get_or_init(DashMap::new)
 }
 
-impl CompressionRatioEstimator {
-    /// Create a new empty estimator instance (private).
-    fn new_instance() -> Self {
-        Self { compression_ratio: Mutex::new(HashMap::new()) }
+fn initial_ratios() -> [f32; NUM_TYPES] {
+    let mut a = [0.0f32; NUM_TYPES];
+    for t in [
+        CompressionType::None,
+        CompressionType::Gzip,
+        CompressionType::Snappy,
+        CompressionType::Lz4,
+        CompressionType::Zstd,
+    ] {
+        a[t.id() as usize] = t.rate();
     }
+    a
+}
 
-    /// Update the compression ratio estimation for a topic and compression type.
-    ///
-    /// Returns the compression ratio estimation after the update.
-    /// Operates on the process-wide global instance.
-    pub fn update_estimation(topic: &str, compression_type: CompressionType, observed_ratio: f32) -> f32 {
-        let mut map = INSTANCE.compression_ratio.lock().unwrap();
-        let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
-        let idx = compression_type.id() as usize;
-        let current_estimation = ratios[idx];
-
-        if observed_ratio > current_estimation {
-            ratios[idx] = f32::max(current_estimation + COMPRESSION_RATIO_DETERIORATE_STEP, observed_ratio);
-        } else if observed_ratio < current_estimation {
-            ratios[idx] = f32::max(current_estimation - COMPRESSION_RATIO_IMPROVING_STEP, observed_ratio);
-        }
-
-        ratios[idx]
+fn get_or_create(topic: &str) -> dashmap::mapref::one::RefMut<'_, String, PerTopicRatios> {
+    let m = map();
+    if let Some(r) = m.get_mut(topic) {
+        return r;
     }
+    m.entry(topic.to_owned())
+        .or_insert_with(|| PerTopicRatios(Mutex::new(initial_ratios())))
+}
 
-    /// Get the compression ratio estimation for a topic and compression type.
-    ///
-    /// Operates on the process-wide global instance.
-    pub fn estimation(topic: &str, compression_type: CompressionType) -> f32 {
-        let mut map = INSTANCE.compression_ratio.lock().unwrap();
-        let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
-        ratios[compression_type.id() as usize]
+/// Update the compression-ratio estimate for a topic and compression type
+/// based on `observed_ratio`. Returns the new estimate.
+///
+/// Mirrors Java's `CompressionRatioEstimator#updateEstimation`.
+pub fn update_estimation(topic: &str, codec: CompressionType, observed_ratio: f32) -> f32 {
+    let entry = get_or_create(topic);
+    let mut ratios = entry.0.lock().expect("compression-ratio lock poisoned");
+    let idx = codec.id() as usize;
+    let current = ratios[idx];
+    if observed_ratio > current {
+        ratios[idx] = (current + COMPRESSION_RATIO_DETERIORATE_STEP).max(observed_ratio);
+    } else if observed_ratio < current {
+        ratios[idx] = (current - COMPRESSION_RATIO_IMPROVING_STEP).max(observed_ratio);
     }
+    ratios[idx]
+}
 
-    /// Reset the compression ratio estimation to the initial values for a topic.
-    ///
-    /// Operates on the process-wide global instance.
-    pub fn reset_estimation(topic: &str) {
-        let mut map = INSTANCE.compression_ratio.lock().unwrap();
-        let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
-        for ct in CompressionType::values() {
-            ratios[ct.id() as usize] = ct.rate();
-        }
-    }
+/// Get the current compression-ratio estimate for the given `(topic, codec)`.
+/// Mirrors Java's `CompressionRatioEstimator#estimation`.
+pub fn estimation(topic: &str, codec: CompressionType) -> f32 {
+    let entry = get_or_create(topic);
+    let ratios = entry.0.lock().expect("compression-ratio lock poisoned");
+    ratios[codec.id() as usize]
+}
 
-    /// Set the compression estimation for a topic compression type combination.
-    ///
-    /// This method is for unit test purpose.
-    /// Operates on the process-wide global instance.
-    pub fn set_estimation(topic: &str, compression_type: CompressionType, ratio: f32) {
-        let mut map = INSTANCE.compression_ratio.lock().unwrap();
-        let ratios = map.entry(topic.to_string()).or_insert_with(Self::initial_compression_ratio);
-        ratios[compression_type.id() as usize] = ratio;
-    }
+/// Reset the per-codec estimates for a topic to the initial values.
+/// Mirrors Java's `CompressionRatioEstimator#resetEstimation`.
+pub fn reset_estimation(topic: &str) {
+    let entry = get_or_create(topic);
+    let mut ratios = entry.0.lock().expect("compression-ratio lock poisoned");
+    *ratios = initial_ratios();
+}
 
-    fn initial_compression_ratio() -> [f32; CompressionType::COUNT] {
-        let mut ratios = [0.0f32; CompressionType::COUNT];
-        for ct in CompressionType::values() {
-            ratios[ct.id() as usize] = ct.rate();
-        }
-        ratios
-    }
+/// Set the estimate for a `(topic, codec)`. Visible for testing —
+/// mirrors Java's `setEstimation`.
+pub fn set_estimation(topic: &str, codec: CompressionType, ratio: f32) {
+    let entry = get_or_create(topic);
+    let mut ratios = entry.0.lock().expect("compression-ratio lock poisoned");
+    ratios[codec.id() as usize] = ratio;
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Corresponds to Java's testUpdateEstimation.
-    ///
-    /// Each test case uses a unique topic name to avoid interference from
-    /// the shared global state and parallel test execution.
+    /// Translation of `CompressionRatioEstimatorTest.testUpdateEstimation`.
     #[test]
-    fn test_update_estimation() {
-        struct EstimationsObservedRatios {
-            current_estimation: f32,
-            observed_ratio: f32,
-        }
+    fn update_estimation_test() {
+        // The Java test uses topic "tp" — but the static map persists
+        // across tests, so we use a unique topic per test invocation to
+        // avoid cross-test interference.
+        let topic = "compression_ratio_test_update_estimation";
 
-        // If currentEstimation is smaller than observedRatio, the updatedCompressionRatio
-        // is currentEstimation plus COMPRESSION_RATIO_DETERIORATE_STEP 0.05, otherwise
-        // currentEstimation minus COMPRESSION_RATIO_IMPROVING_STEP 0.005.
-        // There are four cases, and updatedCompressionRatio should not be smaller than
-        // observedRatio in all of cases.
-        let test_cases = [
-            EstimationsObservedRatios { current_estimation: 0.8, observed_ratio: 0.84 },
-            EstimationsObservedRatios { current_estimation: 0.6, observed_ratio: 0.7 },
-            EstimationsObservedRatios { current_estimation: 0.6, observed_ratio: 0.4 },
-            EstimationsObservedRatios { current_estimation: 0.004, observed_ratio: 0.001 },
+        let cases = [
+            (0.8f32, 0.84f32),
+            (0.6f32, 0.7f32),
+            (0.6f32, 0.4f32),
+            (0.004f32, 0.001f32),
         ];
-
-        for (i, case) in test_cases.iter().enumerate() {
-            let topic = &format!("test_update_estimation_{}", i);
-            CompressionRatioEstimator::set_estimation(topic, CompressionType::Zstd, case.current_estimation);
-            let updated =
-                CompressionRatioEstimator::update_estimation(topic, CompressionType::Zstd, case.observed_ratio);
-            assert!(
-                updated >= case.observed_ratio,
-                "Updated ratio {} should be >= observed ratio {} (current estimation: {})",
-                updated,
-                case.observed_ratio,
-                case.current_estimation
-            );
+        for (current, observed) in cases {
+            set_estimation(topic, CompressionType::Zstd, current);
+            let updated = update_estimation(topic, CompressionType::Zstd, observed);
+            assert!(updated >= observed, "updated {updated} should be >= observed {observed}");
         }
     }
 
     #[test]
-    fn test_estimation_returns_initial_rate() {
-        let topic = "test_estimation_returns_initial_rate";
-        for ct in CompressionType::values() {
-            assert_eq!(CompressionRatioEstimator::estimation(topic, *ct), ct.rate());
-        }
+    fn estimation_returns_initial_rate_for_new_topic() {
+        let topic = "compression_ratio_test_initial_rate";
+        // Initial = CompressionType::Zstd.rate() = 1.0
+        assert_eq!(estimation(topic, CompressionType::Zstd), 1.0);
+        assert_eq!(estimation(topic, CompressionType::None), 1.0);
     }
 
     #[test]
-    fn test_reset_estimation() {
-        let topic = "test_reset_estimation";
-        CompressionRatioEstimator::set_estimation(topic, CompressionType::Gzip, 0.5);
-        assert_eq!(CompressionRatioEstimator::estimation(topic, CompressionType::Gzip), 0.5);
-
-        CompressionRatioEstimator::reset_estimation(topic);
-        assert_eq!(
-            CompressionRatioEstimator::estimation(topic, CompressionType::Gzip),
-            CompressionType::Gzip.rate()
-        );
+    fn reset_estimation_restores_initial_values() {
+        let topic = "compression_ratio_test_reset";
+        set_estimation(topic, CompressionType::Gzip, 0.123);
+        assert_eq!(estimation(topic, CompressionType::Gzip), 0.123);
+        reset_estimation(topic);
+        assert_eq!(estimation(topic, CompressionType::Gzip), 1.0);
     }
 }

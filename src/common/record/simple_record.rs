@@ -12,100 +12,115 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A high-level representation of a Kafka record.
-//!
-//! This is useful when building record sets to avoid depending on a specific
-//! magic version.
-//!
-//! Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
+//! Translation of `org.apache.kafka.common.record.SimpleRecord`.
 
-use crate::common::header::internals::RecordHeader;
-use crate::common::record::RecordBatch;
+use std::fmt;
+use std::sync::Arc;
+
+use bytes::Bytes;
+
+use crate::common::header::RecordHeader;
+use crate::common::record::record_batch::NO_TIMESTAMP;
 
 /// High-level representation of a Kafka record.
 ///
-/// This is useful when building record sets to avoid depending on a specific
-/// magic version. It owns its key, value, and headers data.
+/// Useful when building record sets to avoid depending on a specific magic
+/// version — `SimpleRecord` carries the record's logical fields without any
+/// wire-format coupling.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.SimpleRecord`.
-#[derive(Clone, Debug)]
+/// Storage:
+///
+/// * `key` and `value` are `Option<Bytes>`. Java accepts `byte[]` or
+///   `ByteBuffer` and stores a `ByteBuffer` reference; `Utils.wrapNullable`
+///   produces a `ByteBuffer.wrap(byte[])` view that does NOT copy. The
+///   `bytes::Bytes` type is the closest Rust equivalent: it carries
+///   shared-ownership semantics over a refcounted backing buffer, so cloning
+///   a `SimpleRecord` (e.g. when it gets pushed onto the producer
+///   accumulator) costs only a refcount bump — no payload copy. The canonical
+///   constructor [`SimpleRecord::new`] takes `Option<Bytes>` so callers that
+///   already own a `Bytes` (e.g. `MemoryRecordsBuilder` once it lands in
+///   Phase 3c) pass through with zero copies, satisfying CLAUDE.md rule 12.
+/// * `headers` is `Arc<[RecordHeader]>` for cheap clones. The Java constructor
+///   `requireNonNull(headers)` semantic is preserved by making `headers`
+///   non-`Option` (always at least an empty slice).
+#[derive(Clone)]
 pub struct SimpleRecord {
-    key: Option<Vec<u8>>,
-    value: Option<Vec<u8>>,
+    key: Option<Bytes>,
+    value: Option<Bytes>,
     timestamp: i64,
-    headers: Vec<RecordHeader>,
+    headers: Arc<[RecordHeader]>,
 }
 
 impl SimpleRecord {
-    /// Create a new `SimpleRecord` with all fields specified.
+    /// Construct a record from already-shared `Bytes` payloads — the
+    /// canonical, **zero-copy** constructor. Mirrors Java's
+    /// `SimpleRecord(long, ByteBuffer, ByteBuffer, Header[])` where
+    /// `ByteBuffer.wrap(byte[])` produces a non-copying view.
     ///
-    /// Corresponds to Java's `SimpleRecord(long, ByteBuffer, ByteBuffer, Header[])`.
-    pub fn new(timestamp: i64, key: Option<Vec<u8>>, value: Option<Vec<u8>>, headers: Vec<RecordHeader>) -> Self {
-        Self { key, value, timestamp, headers }
+    /// The producer write path (Phase 3c `MemoryRecordsBuilder` and
+    /// callers) is expected to invoke this constructor with `Bytes`
+    /// payloads it already owns.
+    pub fn new(timestamp: i64, key: Option<Bytes>, value: Option<Bytes>, headers: &[RecordHeader]) -> Self {
+        SimpleRecord { key, value, timestamp, headers: Arc::from(headers.to_vec().into_boxed_slice()) }
     }
 
-    /// Create a new `SimpleRecord` with timestamp, key, and value (no headers).
-    ///
-    /// Corresponds to Java's `SimpleRecord(long, byte[], byte[])`.
-    pub fn new_with_key_value(timestamp: i64, key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
-        Self::new(timestamp, key, value, Vec::new())
-    }
-
-    /// Create a new `SimpleRecord` with timestamp and value only (no key, no headers).
-    ///
-    /// Corresponds to Java's `SimpleRecord(long, byte[])`.
-    pub fn new_with_timestamp_value(timestamp: i64, value: Option<Vec<u8>>) -> Self {
-        Self::new(timestamp, None, value, Vec::new())
-    }
-
-    /// Create a new `SimpleRecord` with value only (no timestamp, no key, no headers).
-    ///
-    /// Uses `RecordBatch::NO_TIMESTAMP` as the timestamp.
-    ///
-    /// Corresponds to Java's `SimpleRecord(byte[])`.
-    pub fn new_with_value(value: Option<Vec<u8>>) -> Self {
-        Self::new(RecordBatch::NO_TIMESTAMP, None, value, Vec::new())
-    }
-
-    /// Create a new `SimpleRecord` with key and value only (no timestamp, no headers).
-    ///
-    /// Uses `RecordBatch::NO_TIMESTAMP` as the timestamp.
-    ///
-    /// Corresponds to Java's `SimpleRecord(byte[], byte[])`.
-    pub fn new_with_key_value_no_timestamp(key: Option<Vec<u8>>, value: Option<Vec<u8>>) -> Self {
-        Self::new(RecordBatch::NO_TIMESTAMP, key, value, Vec::new())
-    }
-
-    /// Create a `SimpleRecord` from a `Record` trait implementor.
-    ///
-    /// Copies the key, value, and headers from the record.
-    ///
-    /// Corresponds to Java's `SimpleRecord(Record)`.
-    pub fn from_record(record: &dyn super::record_trait::Record) -> Self {
-        Self::new(
-            record.timestamp(),
-            record.key().map(|k| k.to_vec()),
-            record.value().map(|v| v.to_vec()),
-            record.headers().to_vec(),
+    /// Construct a record by **copying** borrowed byte slices into freshly
+    /// allocated `Bytes` payloads. Convenience for tests and callers that
+    /// only have a `&[u8]`. This path is **not zero-copy** — each `Some(_)`
+    /// argument allocates and memcpys via `Bytes::copy_from_slice`.
+    /// Prefer [`SimpleRecord::new`] on the hot path.
+    pub fn new_from_slice(timestamp: i64, key: Option<&[u8]>, value: Option<&[u8]>, headers: &[RecordHeader]) -> Self {
+        SimpleRecord::new(
+            timestamp,
+            key.map(Bytes::copy_from_slice),
+            value.map(Bytes::copy_from_slice),
+            headers,
         )
     }
 
-    /// Returns the key, or `None` if there is no key.
+    /// Construct a record without headers (zero-copy). Mirrors Java's
+    /// `SimpleRecord(long, ByteBuffer, ByteBuffer)`.
+    pub fn with_no_headers(timestamp: i64, key: Option<Bytes>, value: Option<Bytes>) -> Self {
+        SimpleRecord::new(timestamp, key, value, &[])
+    }
+
+    /// Construct a record carrying only a value (zero-copy).
+    /// Mirrors Java's `SimpleRecord(long, ByteBuffer)`.
+    pub fn with_value(timestamp: i64, value: Option<Bytes>) -> Self {
+        SimpleRecord::with_no_headers(timestamp, None, value)
+    }
+
+    /// Construct a record carrying only a value, without an explicit
+    /// timestamp (zero-copy). Mirrors Java's `SimpleRecord(ByteBuffer)`.
+    pub fn from_value(value: Option<Bytes>) -> Self {
+        SimpleRecord::with_value(NO_TIMESTAMP, value)
+    }
+
+    /// Construct a record carrying both a key and a value, without an
+    /// explicit timestamp (zero-copy). Mirrors Java's
+    /// `SimpleRecord(ByteBuffer, ByteBuffer)` (and the `byte[], byte[]`
+    /// overload, since Java's `wrapNullable` views the array without
+    /// copying).
+    pub fn from_key_value(key: Option<Bytes>, value: Option<Bytes>) -> Self {
+        SimpleRecord::with_no_headers(NO_TIMESTAMP, key, value)
+    }
+
+    /// Get the record's key as a borrowed slice, or `None` if absent.
     pub fn key(&self) -> Option<&[u8]> {
         self.key.as_deref()
     }
 
-    /// Returns the value, or `None` if there is no value.
+    /// Get the record's value as a borrowed slice, or `None` if absent.
     pub fn value(&self) -> Option<&[u8]> {
         self.value.as_deref()
     }
 
-    /// Returns the timestamp.
+    /// Get the record's timestamp.
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// Returns the headers.
+    /// Get the record's headers as a borrowed slice.
     pub fn headers(&self) -> &[RecordHeader] {
         &self.headers
     }
@@ -114,9 +129,9 @@ impl SimpleRecord {
 impl PartialEq for SimpleRecord {
     fn eq(&self, other: &Self) -> bool {
         self.timestamp == other.timestamp
-            && self.key == other.key
-            && self.value == other.value
-            && self.headers == other.headers
+            && self.key() == other.key()
+            && self.value() == other.value()
+            && self.headers() == other.headers()
     }
 }
 
@@ -124,93 +139,146 @@ impl Eq for SimpleRecord {}
 
 impl std::hash::Hash for SimpleRecord {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.key.hash(state);
-        self.value.hash(state);
+        // Mirror Java's `Objects.hash` semantics: key bytes, value bytes,
+        // timestamp, and the header array all contribute.
+        self.key().hash(state);
+        self.value().hash(state);
         self.timestamp.hash(state);
-        self.headers.hash(state);
+        self.headers().hash(state);
     }
 }
 
-impl std::fmt::Display for SimpleRecord {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+impl fmt::Debug for SimpleRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Java's `toString` prints byte sizes rather than the bytes themselves;
+        // mirror that to keep test logs readable.
         write!(
             f,
             "SimpleRecord(timestamp={}, key={} bytes, value={} bytes)",
             self.timestamp,
-            self.key.as_ref().map_or(0, |k| k.len()),
-            self.value.as_ref().map_or(0, |v| v.len()),
+            self.key().map(<[u8]>::len).unwrap_or(0),
+            self.value().map(<[u8]>::len).unwrap_or(0),
         )
+    }
+}
+
+impl fmt::Display for SimpleRecord {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        fmt::Debug::fmt(self, f)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::header::internals::RecordHeader;
 
     #[test]
-    fn test_new_with_all_fields() {
-        let headers = vec![RecordHeader::new("h1".to_string(), Some(b"v1".to_vec()))];
-        let record = SimpleRecord::new(100, Some(b"key".to_vec()), Some(b"value".to_vec()), headers);
-        assert_eq!(record.timestamp(), 100);
-        assert_eq!(record.key(), Some(b"key".as_slice()));
-        assert_eq!(record.value(), Some(b"value".as_slice()));
-        assert_eq!(record.headers().len(), 1);
+    fn from_value_carries_no_timestamp() {
+        let r = SimpleRecord::from_value(Some(Bytes::from_static(b"v")));
+        assert_eq!(r.timestamp(), NO_TIMESTAMP);
+        assert_eq!(r.key(), None);
+        assert_eq!(r.value(), Some(b"v".as_slice()));
+        assert_eq!(r.headers(), &[]);
     }
 
     #[test]
-    fn test_new_with_key_value() {
-        let record = SimpleRecord::new_with_key_value(100, Some(b"key".to_vec()), Some(b"value".to_vec()));
-        assert_eq!(record.timestamp(), 100);
-        assert_eq!(record.key(), Some(b"key".as_slice()));
-        assert_eq!(record.value(), Some(b"value".as_slice()));
-        assert!(record.headers().is_empty());
+    fn from_value_handles_null_value() {
+        let r = SimpleRecord::from_value(None);
+        assert_eq!(r.value(), None);
     }
 
     #[test]
-    fn test_new_with_value() {
-        let record = SimpleRecord::new_with_value(Some(b"value".to_vec()));
-        assert_eq!(record.timestamp(), RecordBatch::NO_TIMESTAMP);
-        assert_eq!(record.key(), None);
-        assert_eq!(record.value(), Some(b"value".as_slice()));
+    fn from_key_value_no_timestamp() {
+        let r = SimpleRecord::from_key_value(Some(Bytes::from_static(b"k")), Some(Bytes::from_static(b"v")));
+        assert_eq!(r.timestamp(), NO_TIMESTAMP);
+        assert_eq!(r.key(), Some(b"k".as_slice()));
+        assert_eq!(r.value(), Some(b"v".as_slice()));
     }
 
     #[test]
-    fn test_null_key_and_value() {
-        let record = SimpleRecord::new_with_key_value(100, None, None);
-        assert_eq!(record.key(), None);
-        assert_eq!(record.value(), None);
+    fn full_constructor_round_trip() {
+        let h = RecordHeader::new("h-key", Some(b"h-value"));
+        let r = SimpleRecord::new(
+            42,
+            Some(Bytes::from_static(b"k")),
+            Some(Bytes::from_static(b"v")),
+            std::slice::from_ref(&h),
+        );
+        assert_eq!(r.timestamp(), 42);
+        assert_eq!(r.key(), Some(b"k".as_slice()));
+        assert_eq!(r.value(), Some(b"v".as_slice()));
+        assert_eq!(r.headers().len(), 1);
+        assert_eq!(r.headers()[0], h);
     }
 
     #[test]
-    fn test_equality() {
-        let r1 = SimpleRecord::new_with_key_value(100, Some(b"k".to_vec()), Some(b"v".to_vec()));
-        let r2 = SimpleRecord::new_with_key_value(100, Some(b"k".to_vec()), Some(b"v".to_vec()));
-        assert_eq!(r1, r2);
+    fn equality_compares_all_fields() {
+        let h = RecordHeader::new("h", Some(b"v"));
+        let a = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        let b = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        assert_eq!(a, b);
+
+        let c = SimpleRecord::new_from_slice(2, Some(b"k"), Some(b"v"), std::slice::from_ref(&h));
+        assert_ne!(a, c);
+
+        let d = SimpleRecord::new_from_slice(1, Some(b"K"), Some(b"v"), std::slice::from_ref(&h));
+        assert_ne!(a, d);
+
+        let e = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"V"), std::slice::from_ref(&h));
+        assert_ne!(a, e);
+
+        let f = SimpleRecord::new_from_slice(1, Some(b"k"), Some(b"v"), &[]);
+        assert_ne!(a, f);
     }
 
     #[test]
-    fn test_inequality_different_timestamp() {
-        let r1 = SimpleRecord::new_with_key_value(100, Some(b"k".to_vec()), Some(b"v".to_vec()));
-        let r2 = SimpleRecord::new_with_key_value(200, Some(b"k".to_vec()), Some(b"v".to_vec()));
-        assert_ne!(r1, r2);
+    fn clone_is_cheap_bytes_share() {
+        // Crude check that cloning shares storage rather than re-copying:
+        // both clones must read the same bytes through the same address.
+        let value = Bytes::from(vec![1u8, 2, 3, 4]);
+        let r = SimpleRecord::with_value(0, Some(value));
+        let r2 = r.clone();
+        let p1 = r.value().unwrap().as_ptr();
+        let p2 = r2.value().unwrap().as_ptr();
+        assert_eq!(p1, p2);
     }
 
     #[test]
-    fn test_display() {
-        let record = SimpleRecord::new_with_key_value(100, Some(b"hi".to_vec()), Some(b"there".to_vec()));
-        let display = format!("{}", record);
-        assert!(display.contains("SimpleRecord"));
-        assert!(display.contains("timestamp=100"));
-        assert!(display.contains("key=2 bytes"));
-        assert!(display.contains("value=5 bytes"));
+    fn new_with_bytes_is_zero_copy() {
+        // The canonical zero-copy contract: passing a `Bytes` into `new`
+        // must NOT copy. The constructed record's slice must alias the
+        // input's backing storage (same pointer).
+        let payload: Bytes = Bytes::from(vec![10u8, 20, 30, 40, 50]);
+        let p_in = payload.as_ptr();
+        let r = SimpleRecord::new(0, None, Some(payload), &[]);
+        let p_out = r.value().unwrap().as_ptr();
+        assert_eq!(p_in, p_out, "SimpleRecord::new with Some(Bytes) must alias the input — no copy",);
     }
 
     #[test]
-    fn test_display_null_key_value() {
-        let record = SimpleRecord::new_with_key_value(100, None, None);
-        let display = format!("{}", record);
-        assert!(display.contains("key=0 bytes"));
-        assert!(display.contains("value=0 bytes"));
+    fn new_from_slice_copies() {
+        // The convenience copying path: `new_from_slice` must NOT alias
+        // the caller's stack slice (it produces a fresh allocation).
+        let stack = [99u8, 100, 101];
+        let p_in = stack.as_ptr();
+        let r = SimpleRecord::new_from_slice(0, None, Some(&stack), &[]);
+        let p_out = r.value().unwrap().as_ptr();
+        assert_ne!(p_in, p_out);
+        // Contents must still match.
+        assert_eq!(r.value(), Some(stack.as_slice()));
+    }
+
+    #[test]
+    fn debug_formats_byte_sizes() {
+        let r = SimpleRecord::new_from_slice(7, Some(b"abc"), Some(b"de"), &[]);
+        let s = format!("{r:?}");
+        assert_eq!(s, "SimpleRecord(timestamp=7, key=3 bytes, value=2 bytes)");
+    }
+
+    #[test]
+    fn debug_with_null_key_value() {
+        let r = SimpleRecord::with_value(7, None);
+        let s = format!("{r:?}");
+        assert_eq!(s, "SimpleRecord(timestamp=7, key=0 bytes, value=0 bytes)");
     }
 }

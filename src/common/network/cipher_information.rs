@@ -12,15 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SSL cipher and protocol information.
-//!
-//! Translated from `org.apache.kafka.common.network.CipherInformation`.
+//! Translation of `org.apache.kafka.common.network.CipherInformation`.
 
-use std::fmt;
+const UNKNOWN: &str = "unknown";
 
-/// SSL cipher and protocol information for a connection.
-///
-/// Empty or missing values are replaced with "unknown".
+/// Information about the SSL cipher and protocol negotiated for a
+/// channel. Mirrors the Java `CipherInformation` value type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct CipherInformation {
     cipher: String,
@@ -28,37 +25,72 @@ pub struct CipherInformation {
 }
 
 impl CipherInformation {
-    /// Creates a new `CipherInformation` with the given cipher and protocol.
-    ///
-    /// Empty strings are replaced with "unknown".
-    pub fn new(cipher: &str, protocol: &str) -> Self {
-        Self {
-            cipher: if cipher.is_empty() {
-                "unknown".to_string()
-            } else {
-                cipher.to_string()
-            },
+    /// Construct a new `CipherInformation`. Empty / null inputs are
+    /// normalised to the literal `"unknown"`, matching Java.
+    pub fn new(cipher: impl Into<String>, protocol: impl Into<String>) -> Self {
+        let cipher = cipher.into();
+        let protocol = protocol.into();
+        CipherInformation {
+            cipher: if cipher.is_empty() { UNKNOWN.to_owned() } else { cipher },
             protocol: if protocol.is_empty() {
-                "unknown".to_string()
+                UNKNOWN.to_owned()
             } else {
-                protocol.to_string()
+                protocol
             },
         }
     }
 
-    /// Returns the cipher name.
+    /// Mirrors `CipherInformation.cipher()`.
     pub fn cipher(&self) -> &str {
         &self.cipher
     }
 
-    /// Returns the protocol name.
+    /// Mirrors `CipherInformation.protocol()`.
     pub fn protocol(&self) -> &str {
         &self.protocol
     }
 }
 
-impl fmt::Display for CipherInformation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for CipherInformation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "CipherInformation(cipher={}, protocol={})", self.cipher, self.protocol)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn populated_inputs_are_preserved() {
+        let info = CipherInformation::new("TLS_AES_256_GCM_SHA384", "TLSv1.3");
+        assert_eq!(info.cipher(), "TLS_AES_256_GCM_SHA384");
+        assert_eq!(info.protocol(), "TLSv1.3");
+    }
+
+    #[test]
+    fn empty_inputs_become_unknown() {
+        let info = CipherInformation::new("", "");
+        assert_eq!(info.cipher(), "unknown");
+        assert_eq!(info.protocol(), "unknown");
+    }
+
+    #[test]
+    fn equality_and_hash() {
+        use std::collections::HashSet;
+        let a = CipherInformation::new("c", "p");
+        let b = CipherInformation::new("c", "p");
+        let c = CipherInformation::new("d", "p");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
+
+    #[test]
+    fn display_format() {
+        let info = CipherInformation::new("c", "p");
+        assert_eq!(info.to_string(), "CipherInformation(cipher=c, protocol=p)");
     }
 }

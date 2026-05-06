@@ -12,327 +12,273 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Produce response handling.
-//!
-//! Corresponds to `org.apache.kafka.common.requests.ProduceResponse`.
+//! Translation of `org.apache.kafka.common.requests.ProduceResponse`.
 
 use std::collections::HashMap;
-use std::io;
+use std::sync::OnceLock;
 
-use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::produce_response_data::{LeaderIdAndEpoch, ProduceResponseData};
+use crate::common::errors::KafkaError;
+use crate::common::message::produce_response_data::ProduceResponseData;
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::{ApiKey, ApiKeys, Errors, Message};
+use crate::common::requests::AbstractRequestResponse;
+use crate::common::requests::AbstractResponse;
+use crate::common::requests::abstract_response;
 
-/// Sentinel value for an invalid offset.
-pub const INVALID_OFFSET: i64 = -1;
-
-/// A Produce response.
+/// Translation of `org.apache.kafka.common.requests.ProduceResponse`.
 ///
-/// Possible error codes:
-/// - [`Errors::CorruptMessage`]
-/// - [`Errors::UnknownTopicOrPartition`]
-/// - [`Errors::NotLeaderOrFollower`]
-/// - [`Errors::MessageTooLarge`]
-/// - [`Errors::InvalidTopicError`]
-/// - [`Errors::RecordListTooLarge`]
-/// - [`Errors::NotEnoughReplicas`]
-/// - [`Errors::NotEnoughReplicasAfterAppend`]
-/// - [`Errors::InvalidRequiredAcks`]
-/// - [`Errors::TopicAuthorizationFailed`]
-/// - [`Errors::UnsupportedForMessageFormat`]
-/// - [`Errors::InvalidProducerEpoch`]
-/// - [`Errors::ClusterAuthorizationFailed`]
-/// - [`Errors::TransactionalIdAuthorizationFailed`]
-/// - [`Errors::InvalidRecord`]
-/// - [`Errors::InvalidTxnState`]
-///
-/// Corresponds to `org.apache.kafka.common.requests.ProduceResponse`.
-#[derive(Debug, Clone)]
+/// Note: the deprecated `ProduceResponse(Map<TopicIdPartition, PartitionResponse>)`
+/// constructors and the inner `PartitionResponse` / `RecordError` helper
+/// classes are kept verbatim since they are referenced by `ProduceRequest.
+/// getErrorResponse`. We translate them as plain Rust structs because they
+/// have no `Builder` / `Schema` / `Message` involvement — they are pure
+/// data containers.
 pub struct ProduceResponse {
     data: ProduceResponseData,
 }
 
 impl ProduceResponse {
-    /// Creates a new `ProduceResponse` from data.
+    /// Mirrors `ProduceResponse.INVALID_OFFSET = -1L`.
+    pub const INVALID_OFFSET: i64 = -1;
+
+    /// Mirrors `new ProduceResponse(ProduceResponseData)`.
     pub fn new(data: ProduceResponseData) -> Self {
-        Self { data }
+        ProduceResponse { data }
     }
 
-    /// Returns a reference to the underlying data.
-    pub fn data(&self) -> &ProduceResponseData {
+    /// Mirrors `ProduceResponse.data()`.
+    pub fn response_data(&self) -> &ProduceResponseData {
         &self.data
     }
 
-    /// Returns a mutable reference to the underlying data.
-    pub fn data_mut(&mut self) -> &mut ProduceResponseData {
-        &mut self.data
+    /// Mirrors `ProduceResponse.parse(Readable, short)`.
+    pub fn parse(accessor: &mut ByteBufferAccessor, version: i16) -> Result<Self, KafkaError> {
+        let data = ProduceResponseData::read(accessor, version)?;
+        Ok(ProduceResponse::new(data))
+    }
+}
+
+impl AbstractRequestResponse for ProduceResponse {
+    fn data(&self) -> &dyn Message {
+        &self.data
+    }
+}
+
+impl AbstractResponse for ProduceResponse {
+    fn api_key(&self) -> &'static ApiKey {
+        // See `MetadataResponse::api_key` — `OnceLock` cache avoids the
+        // public-API panic from CLAUDE.md rule 10.1.
+        static PRODUCE: OnceLock<&'static ApiKey> = OnceLock::new();
+        PRODUCE.get_or_init(|| ApiKeys::for_id(0).expect("PRODUCE api_key always present in ALL_API_KEYS"))
     }
 
-    /// Returns the API key for this response.
-    pub fn api_key(&self) -> &'static ApiKeys {
-        &ApiKeys::PRODUCE
-    }
-
-    /// Returns the error counts for this response.
-    ///
-    /// Iterates over all partition responses and counts each error code.
-    pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        let mut counts = HashMap::new();
+    fn error_counts(&self) -> HashMap<Errors, i32> {
+        let mut out: HashMap<Errors, i32> = HashMap::new();
         for topic in &self.data.responses {
             for partition in &topic.partition_responses {
-                let error = Errors::for_code(partition.error_code);
-                super::abstract_response::update_error_counts(&mut counts, error);
+                abstract_response::update_error_counts(&mut out, Errors::for_code(partition.error_code));
             }
         }
-        counts
+        out
     }
 
-    /// Returns the throttle time in milliseconds.
-    pub fn throttle_time_ms(&self) -> i32 {
+    fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms
     }
 
-    /// Sets the throttle time in the response.
-    pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
-        self.data.set_throttle_time_ms(throttle_time_ms);
+    fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
+        self.data.throttle_time_ms = throttle_time_ms;
     }
 
-    /// Returns whether the client should throttle upon receiving this response.
-    ///
-    /// Client-side throttling is enabled starting from version 6.
-    pub fn should_client_throttle(&self, version: i16) -> bool {
+    fn should_client_throttle(&self, version: i16) -> bool {
         version >= 6
     }
-
-    /// Parses a `ProduceResponse` from a readable buffer at the given version.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing fails.
-    pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
-        let data = ProduceResponseData::read(readable, version)?;
-        Ok(Self::new(data))
-    }
 }
 
-impl std::fmt::Display for ProduceResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ProduceResponse(data={:?})", self.data)
-    }
-}
-
-/// A partition-level response within a produce response.
-///
-/// Corresponds to `ProduceResponse.PartitionResponse` in Java.
-#[derive(Clone, Debug, PartialEq, Eq)]
+/// Mirrors the inner `ProduceResponse.PartitionResponse` data class.
+/// Used by callers that build error responses out of the wire-level types.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PartitionResponse {
-    /// The error for this partition.
     pub error: Errors,
-    /// The base offset assigned to the records.
     pub base_offset: i64,
-    /// The log append time (-1 if CreateTime is used).
     pub log_append_time: i64,
-    /// The log start offset.
     pub log_start_offset: i64,
-    /// Per-record errors (batch index and optional error message).
     pub record_errors: Vec<RecordError>,
-    /// Optional error message.
     pub error_message: Option<String>,
-    /// The current leader for this partition, used by the producer to discover
-    /// the leader when a `NOT_LEADER_OR_FOLLOWER` error is returned.
-    pub current_leader: LeaderIdAndEpoch,
+    pub current_leader: crate::common::message::produce_response_data::LeaderIdAndEpoch,
 }
 
 impl PartitionResponse {
-    /// Creates a `PartitionResponse` with just an error code (all offsets invalid).
+    /// Mirrors `new PartitionResponse(Errors error)`.
     pub fn from_error(error: Errors) -> Self {
-        Self {
+        PartitionResponse {
             error,
-            base_offset: INVALID_OFFSET,
-            log_append_time: crate::common::record::RecordBatch::NO_TIMESTAMP,
-            log_start_offset: INVALID_OFFSET,
+            base_offset: ProduceResponse::INVALID_OFFSET,
+            // Mirrors RecordBatch.NO_TIMESTAMP = -1.
+            log_append_time: -1,
+            log_start_offset: ProduceResponse::INVALID_OFFSET,
             record_errors: Vec::new(),
             error_message: None,
-            current_leader: LeaderIdAndEpoch::new(),
+            current_leader: crate::common::message::produce_response_data::LeaderIdAndEpoch::new(),
         }
     }
 
-    /// Creates a `PartitionResponse` with error and message (all offsets invalid).
-    pub fn from_error_with_message(error: Errors, error_message: Option<String>) -> Self {
-        Self {
-            error,
-            base_offset: INVALID_OFFSET,
-            log_append_time: crate::common::record::RecordBatch::NO_TIMESTAMP,
-            log_start_offset: INVALID_OFFSET,
-            record_errors: Vec::new(),
-            error_message,
-            current_leader: LeaderIdAndEpoch::new(),
-        }
-    }
-
-    /// Creates a `PartitionResponse` with all fields except `current_leader` (defaults to empty).
-    pub fn new(
-        error: Errors,
-        base_offset: i64,
-        log_append_time: i64,
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
-    ) -> Self {
-        Self::with_leader(
-            error,
-            base_offset,
-            log_append_time,
-            log_start_offset,
-            record_errors,
-            error_message,
-            LeaderIdAndEpoch::new(),
-        )
-    }
-
-    /// Creates a `PartitionResponse` with all fields including `current_leader`.
-    pub fn with_leader(
-        error: Errors,
-        base_offset: i64,
-        log_append_time: i64,
-        log_start_offset: i64,
-        record_errors: Vec<RecordError>,
-        error_message: Option<String>,
-        current_leader: LeaderIdAndEpoch,
-    ) -> Self {
-        Self {
-            error,
-            base_offset,
-            log_append_time,
-            log_start_offset,
-            record_errors,
-            error_message,
-            current_leader,
-        }
+    /// Mirrors `new PartitionResponse(Errors, String)`.
+    pub fn from_error_and_message(error: Errors, error_message: impl Into<String>) -> Self {
+        let mut r = Self::from_error(error);
+        r.error_message = Some(error_message.into());
+        r
     }
 }
 
-impl std::fmt::Display for PartitionResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "{{error: {:?}, offset: {}, logAppendTime: {}, logStartOffset: {}, recordErrors: {:?}, currentLeader: {:?}, errorMessage: {}}}",
-            self.error,
-            self.base_offset,
-            self.log_append_time,
-            self.log_start_offset,
-            self.record_errors,
-            self.current_leader,
-            self.error_message.as_deref().unwrap_or("null"),
-        )
-    }
-}
-
-/// A per-record error within a produce response.
-///
-/// Corresponds to `ProduceResponse.RecordError` in Java.
-#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+/// Mirrors the inner `ProduceResponse.RecordError` data class.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordError {
-    /// The batch index of the record that caused the error.
     pub batch_index: i32,
-    /// Optional error message.
     pub message: Option<String>,
 }
 
 impl RecordError {
-    /// Creates a `RecordError` with batch index and optional message.
     pub fn new(batch_index: i32, message: Option<String>) -> Self {
-        Self { batch_index, message }
-    }
-
-    /// Creates a `RecordError` with just a batch index (no message).
-    pub fn from_index(batch_index: i32) -> Self {
-        Self { batch_index, message: None }
-    }
-}
-
-impl std::fmt::Display for RecordError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "RecordError(batchIndex={}, message={})",
-            self.batch_index,
-            match &self.message {
-                Some(m) => format!("'{}'", m),
-                None => "null".to_string(),
-            }
-        )
+        RecordError { batch_index, message }
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::produce_response_data::{PartitionProduceResponse, ProduceResponseData, TopicProduceResponse};
+    use crate::common::message::produce_response_data::{
+        LeaderIdAndEpoch, PartitionProduceResponse, TopicProduceResponse,
+    };
 
+    /// Translation of `ProduceResponseTest#produceResponseVersionTest`.
+    /// We rebuild the response directly via `ProduceResponseData` rather
+    /// than via the deprecated `Map<TopicIdPartition, PartitionResponse>`
+    /// constructor, which depends on `TopicIdPartition` (Phase 4+).
     #[test]
-    fn test_produce_response_basic() {
-        let data = ProduceResponseData::new();
-        let response = ProduceResponse::new(data);
-        assert_eq!(*response.api_key(), ApiKeys::PRODUCE);
-        assert_eq!(response.throttle_time_ms(), 0);
+    fn throttle_time_round_trip_across_versions() {
+        let data_v0 = ProduceResponseData { throttle_time_ms: 0, ..ProduceResponseData::new() };
+        let data_v1 = ProduceResponseData { throttle_time_ms: 10, ..ProduceResponseData::new() };
+        let v0 = ProduceResponse::new(data_v0);
+        let v1 = ProduceResponse::new(data_v1);
+
+        assert_eq!(v0.throttle_time_ms(), 0, "v0 throttle must be 0");
+        assert_eq!(v1.throttle_time_ms(), 10, "v1 throttle must be 10");
+    }
+
+    /// Translation of `ProduceResponseTest#produceResponseRecordErrorsTest`.
+    /// Java loops over `PRODUCE.allVersions()`; we iterate over [0..=latest].
+    #[test]
+    fn produce_response_record_errors_test() {
+        use crate::common::message::produce_response_data::BatchIndexAndErrorMessage;
+
+        // Java uses Uuid.fromString("4w0AQXe9TvBG5JkYABorYD"); we use a
+        // deterministic concrete (most_sig_bits, least_sig_bits) pair —
+        // the actual UUID value is not asserted, only round-tripping.
+        let topic_id = crate::common::uuid::Uuid::new(0x12345678, 0x9abcdef0);
+
+        let partition_resp = PartitionProduceResponse {
+            index: 0,
+            error_code: Errors::None.code(),
+            base_offset: 10000,
+            log_append_time_ms: -1,
+            log_start_offset: 100,
+            record_errors: vec![BatchIndexAndErrorMessage {
+                batch_index: 3,
+                batch_index_error_message: Some("Record error".to_owned()),
+                unknown_tagged_fields: Vec::new(),
+            }],
+            error_message: Some("Produce failed".to_owned()),
+            current_leader: LeaderIdAndEpoch::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+
+        let topic_resp = TopicProduceResponse {
+            name: "test".to_owned(),
+            topic_id,
+            partition_responses: vec![partition_resp],
+            unknown_tagged_fields: Vec::new(),
+        };
+
+        let response_data = ProduceResponseData {
+            throttle_time_ms: 0,
+            responses: vec![topic_resp],
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let resp = ProduceResponse::new(response_data);
+
+        let produce = ApiKeys::for_id(0).expect("PRODUCE");
+        for version in produce.oldest_version()..=produce.latest_version() {
+            let mut serialized = AbstractResponse::serialize(&resp, version).expect("serialize");
+            let parsed = ProduceResponse::parse(&mut serialized, version).expect("parse");
+            let topic_responses = &parsed.response_data().responses;
+            assert_eq!(topic_responses.len(), 1);
+            let partitions = &topic_responses[0].partition_responses;
+            assert_eq!(partitions.len(), 1);
+            let deserialized = &partitions[0];
+            if version >= 8 {
+                assert_eq!(deserialized.record_errors.len(), 1);
+                assert_eq!(deserialized.record_errors[0].batch_index, 3);
+                assert_eq!(
+                    deserialized.record_errors[0].batch_index_error_message.as_deref(),
+                    Some("Record error")
+                );
+                assert_eq!(deserialized.error_message.as_deref(), Some("Produce failed"));
+            } else {
+                assert_eq!(deserialized.record_errors.len(), 0);
+                assert!(deserialized.error_message.is_none());
+            }
+        }
     }
 
     #[test]
-    fn test_produce_response_error_counts() {
-        let mut ppr1 = PartitionProduceResponse::new();
-        ppr1.set_error_code(Errors::None.code());
-
-        let mut ppr2 = PartitionProduceResponse::new();
-        ppr2.set_error_code(Errors::UnknownTopicOrPartition.code());
-
-        let mut ppr3 = PartitionProduceResponse::new();
-        ppr3.set_error_code(Errors::UnknownTopicOrPartition.code());
-
-        let mut tpr = TopicProduceResponse::new();
-        tpr.set_name("test".to_string());
-        tpr.set_partition_responses(vec![ppr1, ppr2, ppr3]);
-
-        let mut data = ProduceResponseData::new();
-        data.set_responses(vec![tpr]);
-
-        let response = ProduceResponse::new(data);
-        let counts = response.error_counts();
-        assert_eq!(counts.get(&Errors::None), Some(&1));
-        assert_eq!(counts.get(&Errors::UnknownTopicOrPartition), Some(&2));
+    fn error_counts_aggregates_across_partitions() {
+        use crate::common::message::produce_response_data::PartitionProduceResponse;
+        let partition_a = PartitionProduceResponse {
+            index: 0,
+            error_code: Errors::NetworkException.code(),
+            base_offset: -1,
+            log_append_time_ms: -1,
+            log_start_offset: -1,
+            record_errors: Vec::new(),
+            error_message: None,
+            current_leader: LeaderIdAndEpoch::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let partition_b = PartitionProduceResponse {
+            index: 1,
+            error_code: Errors::NetworkException.code(),
+            base_offset: -1,
+            log_append_time_ms: -1,
+            log_start_offset: -1,
+            record_errors: Vec::new(),
+            error_message: None,
+            current_leader: LeaderIdAndEpoch::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let topic_resp = TopicProduceResponse {
+            name: "test".to_owned(),
+            topic_id: crate::common::uuid::Uuid::zero(),
+            partition_responses: vec![partition_a, partition_b],
+            unknown_tagged_fields: Vec::new(),
+        };
+        let resp_data = ProduceResponseData {
+            throttle_time_ms: 0,
+            responses: vec![topic_resp],
+            node_endpoints: Vec::new(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let resp = ProduceResponse::new(resp_data);
+        let counts = resp.error_counts();
+        assert_eq!(counts.get(&Errors::NetworkException), Some(&2));
     }
 
     #[test]
-    fn test_produce_response_throttle() {
-        let mut data = ProduceResponseData::new();
-        data.set_throttle_time_ms(500);
-        let response = ProduceResponse::new(data);
-        assert_eq!(response.throttle_time_ms(), 500);
-    }
-
-    #[test]
-    fn test_should_client_throttle() {
-        let data = ProduceResponseData::new();
-        let response = ProduceResponse::new(data);
-        assert!(!response.should_client_throttle(5));
-        assert!(response.should_client_throttle(6));
-        assert!(response.should_client_throttle(9));
-    }
-
-    #[test]
-    fn test_partition_response_from_error() {
-        let pr = PartitionResponse::from_error(Errors::UnknownTopicOrPartition);
-        assert_eq!(pr.error, Errors::UnknownTopicOrPartition);
-        assert_eq!(pr.base_offset, INVALID_OFFSET);
-        assert!(pr.error_message.is_none());
-        assert!(pr.record_errors.is_empty());
-    }
-
-    #[test]
-    fn test_record_error_display() {
-        let re = RecordError::new(5, Some("bad record".to_string()));
-        assert_eq!(re.to_string(), "RecordError(batchIndex=5, message='bad record')");
-
-        let re_none = RecordError::from_index(3);
-        assert_eq!(re_none.to_string(), "RecordError(batchIndex=3, message=null)");
+    fn should_client_throttle_only_v6_plus() {
+        let resp = ProduceResponse::new(ProduceResponseData::new());
+        assert!(!resp.should_client_throttle(5));
+        assert!(resp.should_client_throttle(6));
+        assert!(resp.should_client_throttle(13));
     }
 }

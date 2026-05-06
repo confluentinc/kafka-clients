@@ -12,19 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Producer types (org.apache.kafka.clients.producer)
+//! Translation of `org.apache.kafka.clients.producer`.
+//!
+//! Phase 4b lays only the producer-side metadata cache
+//! ([`internals::ProducerMetadata`]). Phase 5 wires the rest of the
+//! producer (Sender, RecordAccumulator, KafkaProducer).
 
-pub(crate) mod internals;
-pub mod kafka_producer;
-pub mod mock_producer;
-pub mod producer_config;
+pub mod buffer_exhausted_error;
+pub mod callback;
+pub mod partitioner;
+pub mod producer_interceptor;
 pub mod producer_record;
-pub mod producer_trait;
 pub mod record_metadata;
+pub mod round_robin_partitioner;
 
-pub use kafka_producer::KafkaProducer;
-pub use mock_producer::MockProducer;
-pub use producer_config::ProducerConfig;
-pub use producer_record::ProducerRecord;
-pub use producer_trait::Producer;
+#[cfg(test)]
+mod record_send_test;
+
+// `internals` packages are `pub(crate)` per CLAUDE.md naming rules.
+pub(crate) mod internals;
+
+pub use buffer_exhausted_error::BufferExhaustedError;
+pub use callback::Callback;
+pub use partitioner::Partitioner;
+pub use producer_interceptor::ProducerInterceptor;
+pub use producer_record::{ProducerRecord, ProducerRecordError};
 pub use record_metadata::RecordMetadata;
+pub use round_robin_partitioner::RoundRobinPartitioner;

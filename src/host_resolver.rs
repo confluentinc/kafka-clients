@@ -12,72 +12,28 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Host resolution traits and implementations.
-//!
-//! Translated from `org.apache.kafka.clients.HostResolver` and
-//! `org.apache.kafka.clients.DefaultHostResolver`.
+//! Translation of `org.apache.kafka.clients.HostResolver`.
 
-use std::io;
 use std::net::IpAddr;
 
-/// A trait for resolving hostnames to IP addresses.
+use crate::common::errors::KafkaError;
+
+/// Single-method interface used by `ClientUtils::resolve` and
+/// `NetworkClient` to resolve a hostname to a list of IP addresses.
+/// Mirrors Java's `HostResolver`.
 ///
-/// This is the async equivalent of Java's `HostResolver` interface.
+/// Java throws `UnknownHostException`; the Rust translation surfaces
+/// failures as `KafkaError::Network(_)` (retriable, librdkafka
+/// `_TRANSPORT`).
+///
+/// `resolve` is **synchronous** because Java's
+/// `InetAddress.getAllByName(...)` is also blocking and the producer
+/// only invokes it during bootstrap and metadata refresh — never on the
+/// per-message hot path. Phase 5/6 may wrap the call in
+/// `tokio::task::spawn_blocking` when invoked from an async context.
 pub trait HostResolver: Send + Sync {
-    /// Resolves the given hostname to a list of IP addresses.
-    ///
-    /// # Errors
-    /// Returns an `io::Error` if the hostname cannot be resolved.
-    fn resolve(&self, host: &str) -> impl std::future::Future<Output = io::Result<Vec<IpAddr>>> + Send;
-}
-
-/// The default host resolver using Tokio's async DNS resolution.
-///
-/// Translates `org.apache.kafka.clients.DefaultHostResolver`.
-#[derive(Debug, Default, Clone)]
-pub struct DefaultHostResolver;
-
-impl DefaultHostResolver {
-    /// Creates a new `DefaultHostResolver`.
-    pub fn new() -> Self {
-        Self
-    }
-}
-
-impl HostResolver for DefaultHostResolver {
-    async fn resolve(&self, host: &str) -> io::Result<Vec<IpAddr>> {
-        // Use tokio's async DNS lookup. We pass port 0 since we only need IP addresses.
-        let addrs: Vec<IpAddr> = tokio::net::lookup_host(format!("{}:0", host))
-            .await?
-            .map(|socket_addr| socket_addr.ip())
-            .collect();
-        if addrs.is_empty() {
-            return Err(io::Error::new(
-                io::ErrorKind::NotFound,
-                format!("No addresses found for host: {}", host),
-            ));
-        }
-        Ok(addrs)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn test_resolve_localhost() {
-        let resolver = DefaultHostResolver::new();
-        let addrs = resolver.resolve("localhost").await.unwrap();
-        assert!(!addrs.is_empty());
-        // localhost should resolve to a loopback address
-        assert!(addrs.iter().any(|a| a.is_loopback()));
-    }
-
-    #[tokio::test]
-    async fn test_resolve_unknown_host() {
-        let resolver = DefaultHostResolver::new();
-        let result = resolver.resolve("this.host.does.not.exist.example.invalid").await;
-        assert!(result.is_err());
-    }
+    /// Resolve `host` to a list of IP addresses. Returns
+    /// `KafkaError::Network` on lookup failure (Java
+    /// `UnknownHostException`).
+    fn resolve(&self, host: &str) -> Result<Vec<IpAddr>, KafkaError>;
 }

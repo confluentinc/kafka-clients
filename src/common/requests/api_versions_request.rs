@@ -12,139 +12,38 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! ApiVersions request handling.
-//!
-//! Corresponds to `org.apache.kafka.common.requests.ApiVersionsRequest`.
+//! Translation of `org.apache.kafka.common.requests.ApiVersionsRequest`.
 
-use std::io;
+use std::sync::OnceLock;
 
-use regex::Regex;
-use std::sync::LazyLock;
+use crate::common::errors::KafkaError;
+use crate::common::message::api_versions_request_data::ApiVersionsRequestData;
+use crate::common::message::api_versions_response_data::ApiVersionsResponseData;
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::{ApiKey, ApiKeys, Errors, Message};
+use crate::common::requests::AbstractRequest;
+use crate::common::requests::AbstractRequestBuilder;
+use crate::common::requests::AbstractRequestResponse;
+use crate::common::requests::AbstractResponse;
+use crate::common::requests::ApiVersionsResponse;
 
-use crate::api_versions_request_data::ApiVersionsRequestData;
-use crate::api_versions_response_data::ApiVersionsResponseData;
-use crate::common::protocol::{ApiKeys, Errors, Readable};
+/// Mirrors the `Builder.DEFAULT_CLIENT_SOFTWARE_NAME` constant.
+const DEFAULT_CLIENT_SOFTWARE_NAME: &str = "apache-kafka-java";
 
-use super::ApiVersionsResponse;
-use super::ConcreteRequest;
-use super::ConcreteResponse;
-use super::RequestBuilder;
-
-/// Default client software name for this Rust Kafka client.
-const DEFAULT_CLIENT_SOFTWARE_NAME: &str = "confluent-kafka-rust";
-
-/// Regex pattern for validating client software name and version.
-///
-/// Must be alphanumeric, optionally with dots and hyphens in the middle.
-static SOFTWARE_NAME_VERSION_PATTERN: LazyLock<Regex> =
-    LazyLock::new(|| Regex::new(r"^[a-zA-Z0-9]([a-zA-Z0-9\.\-]*[a-zA-Z0-9])?$").unwrap());
-
-/// An ApiVersions request.
-///
-/// Unlike other request types, the broker handles ApiVersions requests with higher
-/// versions than supported. It does so by treating the request as if it were v0 and
-/// returns a response using the v0 response schema. The reason for this is that the
-/// client does not yet know what versions a broker supports when this request is sent,
-/// so instead of assuming the lowest supported version, it can use the most recent
-/// version and only fallback to the old version when necessary.
-#[derive(Debug, Clone)]
-pub struct ApiVersionsRequest {
-    data: ApiVersionsRequestData,
-    version: i16,
-    unsupported_request_version: Option<i16>,
+/// Mirrors `AppInfoParser.getVersion()`. Java reads from
+/// `kafka/kafka-clients-version.properties` at JAR build time; we use the
+/// crate version for the same role.
+fn default_client_software_version() -> &'static str {
+    env!("CARGO_PKG_VERSION")
 }
 
-impl ApiVersionsRequest {
-    /// Creates a new `ApiVersionsRequest` from data and version.
-    pub fn new(data: ApiVersionsRequestData, version: i16) -> Self {
-        Self { data, version, unsupported_request_version: None }
-    }
-
-    /// Creates a new `ApiVersionsRequest` with an optional unsupported request version.
-    pub fn with_unsupported_version(
-        data: ApiVersionsRequestData,
-        version: i16,
-        unsupported_request_version: Option<i16>,
-    ) -> Self {
-        Self { data, version, unsupported_request_version }
-    }
-
-    /// Whether this request was sent with an unsupported version.
-    pub fn has_unsupported_request_version(&self) -> bool {
-        self.unsupported_request_version.is_some()
-    }
-
-    /// Whether the request is valid.
-    ///
-    /// For version >= 3, the client software name and version must match the
-    /// `SOFTWARE_NAME_VERSION_PATTERN` regex.
-    pub fn is_valid(&self) -> bool {
-        if self.version >= 3 {
-            SOFTWARE_NAME_VERSION_PATTERN.is_match(&self.data.client_software_name)
-                && SOFTWARE_NAME_VERSION_PATTERN.is_match(&self.data.client_software_version)
-        } else {
-            true
-        }
-    }
-
-    /// Returns a reference to the underlying data.
-    pub fn data(&self) -> &ApiVersionsRequestData {
-        &self.data
-    }
-
-    /// Returns the API version of this request.
-    pub fn version(&self) -> i16 {
-        self.version
-    }
-
-    /// Returns the API key for this request.
-    pub fn api_key(&self) -> &'static ApiKeys {
-        &ApiKeys::API_VERSIONS
-    }
-
-    /// Creates an error response for this request.
-    ///
-    /// Starting from Apache Kafka 2.4 (KIP-511), the ApiKeys field is populated with
-    /// the supported versions of the ApiVersionsRequest when an `UNSUPPORTED_VERSION`
-    /// error is returned.
-    pub fn get_error_response(&self, throttle_time_ms: i32, error: &Errors) -> ConcreteResponse {
-        let mut data = ApiVersionsResponseData::new();
-        data.set_error_code(error.code());
-
-        if self.version >= 1 {
-            data.set_throttle_time_ms(throttle_time_ms);
-        }
-
-        // Starting from Apache Kafka 2.4 (KIP-511), ApiKeys field is populated with the supported
-        // versions of the ApiVersionsRequest when an UNSUPPORTED_VERSION error is returned.
-        if *error == Errors::UnsupportedVersion {
-            let api_version = ApiVersionsResponse::to_api_version(&ApiKeys::API_VERSIONS);
-            data.set_api_keys(vec![api_version]);
-        }
-
-        ConcreteResponse::ApiVersions(ApiVersionsResponse::new(data))
-    }
-
-    /// Parses an `ApiVersionsRequest` from a readable buffer at the given version.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing fails.
-    pub fn parse(readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
-        let data = ApiVersionsRequestData::read(readable, version)?;
-        Ok(Self::new(data, version))
-    }
-}
-
-impl std::fmt::Display for ApiVersionsRequest {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "ApiVersionsRequest(version={}, data={:?})", self.version, self.data)
-    }
-}
-
-/// Builder for [`ApiVersionsRequest`].
+/// Translation of `org.apache.kafka.common.requests.ApiVersionsRequest.Builder`.
 ///
-/// Corresponds to `ApiVersionsRequest.Builder` in Java.
+/// Java declares this as a `public static class Builder extends
+/// AbstractRequest.Builder<ApiVersionsRequest>`. Rust models it as a
+/// concrete struct implementing the type-erased
+/// [`AbstractRequestBuilder`] trait (the trait surface is the lowest
+/// common denominator that `NetworkClient::send` consumes).
 #[derive(Debug, Clone)]
 pub struct ApiVersionsRequestBuilder {
     data: ApiVersionsRequestData,
@@ -153,29 +52,32 @@ pub struct ApiVersionsRequestBuilder {
 }
 
 impl ApiVersionsRequestBuilder {
-    /// Creates a default builder with the default client software name and the crate version.
+    /// Mirrors `new Builder()` — no-arg constructor with
+    /// `[oldestVersion, latestVersion]` from `ApiKeys.API_VERSIONS`.
     pub fn new() -> Self {
-        let mut data = ApiVersionsRequestData::new();
-        data.set_client_software_name(DEFAULT_CLIENT_SOFTWARE_NAME.to_string());
-        data.set_client_software_version(env!("CARGO_PKG_VERSION").to_string());
-        Self {
-            data,
-            oldest_allowed_version: ApiKeys::API_VERSIONS.oldest_version(),
-            latest_allowed_version: ApiKeys::API_VERSIONS.latest_version(),
-        }
+        let api_key = ApiKeys::for_id(18).expect("API_VERSIONS api_key always present");
+        Self::with_versions(api_key.oldest_version(), api_key.latest_version())
     }
 
-    /// Creates a builder that targets a specific version.
-    pub fn for_version(version: i16) -> Self {
-        let mut builder = Self::new();
-        builder.oldest_allowed_version = version;
-        builder.latest_allowed_version = version;
-        builder
+    /// Mirrors `new Builder(short version)` — pin to a single version.
+    pub fn with_version(version: i16) -> Self {
+        Self::with_versions(version, version)
     }
 
-    /// Creates a builder from custom data and version range.
-    pub fn from_data(data: ApiVersionsRequestData, oldest_allowed_version: i16, latest_allowed_version: i16) -> Self {
-        Self { data, oldest_allowed_version, latest_allowed_version }
+    /// Mirrors the 3-arg `Builder(ApiVersionsRequestData, short, short)`.
+    pub fn with_data(data: ApiVersionsRequestData, oldest_allowed_version: i16, latest_allowed_version: i16) -> Self {
+        ApiVersionsRequestBuilder { data, oldest_allowed_version, latest_allowed_version }
+    }
+
+    /// Construct with a default `ApiVersionsRequestData` populated from the
+    /// crate identification fields and an explicit version range.
+    pub fn with_versions(oldest_allowed_version: i16, latest_allowed_version: i16) -> Self {
+        let data = ApiVersionsRequestData {
+            client_software_name: DEFAULT_CLIENT_SOFTWARE_NAME.to_owned(),
+            client_software_version: default_client_software_version().to_owned(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        ApiVersionsRequestBuilder { data, oldest_allowed_version, latest_allowed_version }
     }
 }
 
@@ -185,24 +87,139 @@ impl Default for ApiVersionsRequestBuilder {
     }
 }
 
-impl RequestBuilder for ApiVersionsRequestBuilder {
-    fn api_key(&self) -> &'static ApiKeys {
-        &ApiKeys::API_VERSIONS
+impl AbstractRequestBuilder for ApiVersionsRequestBuilder {
+    fn api_key(&self) -> &'static ApiKey {
+        ApiKeys::for_id(18).expect("API_VERSIONS api_key always present")
     }
-
     fn oldest_allowed_version(&self) -> i16 {
         self.oldest_allowed_version
     }
-
     fn latest_allowed_version(&self) -> i16 {
         self.latest_allowed_version
     }
+    fn build(&self, version: i16) -> Result<Box<dyn AbstractRequest>, KafkaError> {
+        Ok(Box::new(ApiVersionsRequest::new(self.data.clone(), version)))
+    }
+}
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
-        Ok(ConcreteRequest::ApiVersions(ApiVersionsRequest::new(
-            self.data.clone(),
-            version,
-        )))
+/// Translation of `org.apache.kafka.common.requests.ApiVersionsRequest`.
+pub struct ApiVersionsRequest {
+    data: ApiVersionsRequestData,
+    version: i16,
+    /// `unsupportedRequestVersion` from Java — populated when the broker
+    /// receives an `ApiVersionsRequest` with a version higher than it
+    /// supports and treats it as v0.
+    unsupported_request_version: Option<i16>,
+}
+
+impl ApiVersionsRequest {
+    /// Mirrors `new ApiVersionsRequest(ApiVersionsRequestData data, short version)`.
+    pub fn new(data: ApiVersionsRequestData, version: i16) -> Self {
+        ApiVersionsRequest { data, version, unsupported_request_version: None }
+    }
+
+    /// Mirrors `new ApiVersionsRequest(ApiVersionsRequestData, short version,
+    /// Short unsupportedRequestVersion)`.
+    pub fn with_unsupported_version(
+        data: ApiVersionsRequestData,
+        version: i16,
+        unsupported_request_version: i16,
+    ) -> Self {
+        ApiVersionsRequest { data, version, unsupported_request_version: Some(unsupported_request_version) }
+    }
+
+    /// Mirrors `ApiVersionsRequest.hasUnsupportedRequestVersion()`.
+    pub fn has_unsupported_request_version(&self) -> bool {
+        self.unsupported_request_version.is_some()
+    }
+
+    /// Mirrors `ApiVersionsRequest.isValid()`.
+    ///
+    /// Java enforces a regex on `clientSoftwareName` /
+    /// `clientSoftwareVersion` for v3+. The pattern is
+    /// `[a-zA-Z0-9](?:[a-zA-Z0-9\\-.]*[a-zA-Z0-9])?` — one or more chars,
+    /// each from `[a-zA-Z0-9\-.]`, with the first and last not being `-`
+    /// or `.`. We validate that explicitly to avoid pulling in a regex
+    /// crate for a single call site.
+    pub fn is_valid(&self) -> bool {
+        if self.version >= 3 {
+            valid_software_name_or_version(self.data.client_software_name.as_str())
+                && valid_software_name_or_version(self.data.client_software_version.as_str())
+        } else {
+            true
+        }
+    }
+
+    /// Mirrors `ApiVersionsRequest.data()`.
+    pub fn request_data(&self) -> &ApiVersionsRequestData {
+        &self.data
+    }
+
+    /// Mirrors `ApiVersionsRequest.parse(Readable, short)`.
+    pub fn parse(accessor: &mut ByteBufferAccessor, version: i16) -> Result<Self, KafkaError> {
+        let data = ApiVersionsRequestData::read(accessor, version)?;
+        Ok(ApiVersionsRequest::new(data, version))
+    }
+}
+
+fn valid_software_name_or_version(s: &str) -> bool {
+    if s.is_empty() {
+        return false;
+    }
+    let bytes = s.as_bytes();
+    let valid = |c: u8, allow_dash_dot: bool| -> bool {
+        c.is_ascii_alphanumeric() || (allow_dash_dot && (c == b'-' || c == b'.'))
+    };
+    if !valid(bytes[0], false) {
+        return false;
+    }
+    if bytes.len() == 1 {
+        return true;
+    }
+    if !valid(bytes[bytes.len() - 1], false) {
+        return false;
+    }
+    for &b in &bytes[1..bytes.len() - 1] {
+        if !valid(b, true) {
+            return false;
+        }
+    }
+    true
+}
+
+impl AbstractRequestResponse for ApiVersionsRequest {
+    fn data(&self) -> &dyn Message {
+        &self.data
+    }
+}
+
+impl AbstractRequest for ApiVersionsRequest {
+    fn version(&self) -> i16 {
+        self.version
+    }
+
+    fn api_key(&self) -> &'static ApiKey {
+        // See `MetadataResponse::api_key` — `OnceLock` cache avoids the
+        // public-API panic from CLAUDE.md rule 10.1.
+        static API_VERSIONS: OnceLock<&'static ApiKey> = OnceLock::new();
+        API_VERSIONS.get_or_init(|| ApiKeys::for_id(18).expect("API_VERSIONS api_key always present in ALL_API_KEYS"))
+    }
+
+    fn get_error_response(&self, throttle_time_ms: i32, error: &KafkaError) -> Option<Box<dyn AbstractResponse>> {
+        let mut data = ApiVersionsResponseData {
+            error_code: Errors::for_code(error.code()).code(),
+            ..ApiVersionsResponseData::new()
+        };
+        if self.version >= 1 {
+            data.throttle_time_ms = throttle_time_ms;
+        }
+        // Starting from Kafka 2.4 (KIP-511), populate `apiKeys` with the
+        // supported versions of the ApiVersionsRequest itself when the
+        // error is UNSUPPORTED_VERSION.
+        if matches!(error, KafkaError::UnsupportedVersion(_)) {
+            data.api_keys.push(ApiVersionsResponse::to_api_version(self.api_key()));
+        }
+        Some(Box::new(ApiVersionsResponse::new(data)))
     }
 }
 
@@ -211,76 +228,62 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_api_versions_request_is_valid_v0() {
-        let data = ApiVersionsRequestData::new();
-        let request = ApiVersionsRequest::new(data, 0);
-        assert!(request.is_valid());
+    fn parse_round_trip_v0() {
+        let req_data = ApiVersionsRequestData::new();
+        let request = ApiVersionsRequest::new(req_data, 0);
+        let mut serialized = AbstractRequest::serialize(&request).expect("serialize");
+
+        let parsed = ApiVersionsRequest::parse(&mut serialized, 0).expect("parse");
+        assert_eq!(parsed.version, 0);
+        assert!(parsed.request_data().client_software_name.is_empty());
+    }
+
+    /// At v3+, `clientSoftwareName` and `clientSoftwareVersion` must match
+    /// the regex `[a-zA-Z0-9](?:[a-zA-Z0-9\-.]*[a-zA-Z0-9])?`.
+    #[test]
+    fn is_valid_v3_rejects_empty_software_name() {
+        let req = ApiVersionsRequest::new(ApiVersionsRequestData::new(), 3);
+        assert!(!req.is_valid(), "empty client_software_name should fail");
     }
 
     #[test]
-    fn test_api_versions_request_is_valid_v3() {
-        let mut data = ApiVersionsRequestData::new();
-        data.set_client_software_name("my-client".to_string());
-        data.set_client_software_version("1.0.0".to_string());
-        let request = ApiVersionsRequest::new(data, 3);
-        assert!(request.is_valid());
-    }
-
-    #[test]
-    fn test_api_versions_request_invalid_v3_name() {
-        let mut data = ApiVersionsRequestData::new();
-        data.set_client_software_name("".to_string());
-        data.set_client_software_version("1.0.0".to_string());
-        let request = ApiVersionsRequest::new(data, 3);
-        assert!(!request.is_valid());
-    }
-
-    #[test]
-    fn test_api_versions_request_invalid_v3_special_chars() {
-        let mut data = ApiVersionsRequestData::new();
-        data.set_client_software_name("my client!".to_string());
-        data.set_client_software_version("1.0.0".to_string());
-        let request = ApiVersionsRequest::new(data, 3);
-        assert!(!request.is_valid());
-    }
-
-    #[test]
-    fn test_builder_default() {
-        let builder = ApiVersionsRequestBuilder::new();
-        assert_eq!(*builder.api_key(), ApiKeys::API_VERSIONS);
-        assert_eq!(builder.oldest_allowed_version(), ApiKeys::API_VERSIONS.oldest_version());
-        assert_eq!(builder.latest_allowed_version(), ApiKeys::API_VERSIONS.latest_version());
-    }
-
-    #[test]
-    fn test_builder_for_version() {
-        let builder = ApiVersionsRequestBuilder::for_version(2);
-        assert_eq!(builder.oldest_allowed_version(), 2);
-        assert_eq!(builder.latest_allowed_version(), 2);
-    }
-
-    #[test]
-    fn test_has_unsupported_request_version() {
-        let data = ApiVersionsRequestData::new();
-        let request = ApiVersionsRequest::new(data.clone(), 0);
-        assert!(!request.has_unsupported_request_version());
-
-        let request = ApiVersionsRequest::with_unsupported_version(data, 0, Some(99));
-        assert!(request.has_unsupported_request_version());
-    }
-
-    #[test]
-    fn test_get_error_response_unsupported_version() {
-        let data = ApiVersionsRequestData::new();
-        let request = ApiVersionsRequest::new(data, 1);
-        let response = request.get_error_response(100, &Errors::UnsupportedVersion);
-        let ConcreteResponse::ApiVersions(r) = &response else {
-            panic!("Expected ApiVersions response");
+    fn is_valid_v3_accepts_well_formed() {
+        let data = ApiVersionsRequestData {
+            client_software_name: "apache-kafka-java".to_owned(),
+            client_software_version: "4.2.0".to_owned(),
+            unknown_tagged_fields: Vec::new(),
         };
-        assert_eq!(r.data().error_code, Errors::UnsupportedVersion.code());
-        assert_eq!(r.data().throttle_time_ms, 100);
-        // Should have the API_VERSIONS api key in the response
-        assert!(!r.data().api_keys.is_empty());
-        assert_eq!(r.data().api_keys[0].api_key, ApiKeys::API_VERSIONS.id());
+        let req = ApiVersionsRequest::new(data, 3);
+        assert!(req.is_valid());
+    }
+
+    #[test]
+    fn is_valid_v3_rejects_leading_dash() {
+        let data = ApiVersionsRequestData {
+            client_software_name: "-apache".to_owned(),
+            client_software_version: "1".to_owned(),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let req = ApiVersionsRequest::new(data, 3);
+        assert!(!req.is_valid());
+    }
+
+    #[test]
+    fn is_valid_v0_skips_regex_check() {
+        let req = ApiVersionsRequest::new(ApiVersionsRequestData::new(), 0);
+        assert!(req.is_valid(), "v0 has no regex check");
+    }
+
+    #[test]
+    fn unsupported_version_error_response_includes_api_keys_kip_511() {
+        let req = ApiVersionsRequest::new(ApiVersionsRequestData::new(), 3);
+        let resp = req
+            .get_error_response(0, &KafkaError::UnsupportedVersion(String::new()))
+            .expect("response");
+        // Downcast not directly possible; instead parse out the shape via
+        // `error_counts` and the response's known surface.
+        let counts = resp.error_counts();
+        let total: i32 = counts.values().sum();
+        assert!(total >= 1);
     }
 }

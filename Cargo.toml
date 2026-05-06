@@ -32,22 +32,31 @@ flate2 = "1"
 snap = "1"
 lz4_flex = "0.11"
 zstd = "0.13"
+# `twox-hash` is already pulled in transitively by `lz4_flex`. We promote it
+# to a direct dep because Phase 3c's `Lz4BlockOutputStream` reproduces Kafka's
+# LZ4 frame XXH32 header/block checksum bytewise — the framing differs from
+# `lz4_flex`'s default (which omits the header) and must match Java's
+# `net.jpountz.xxhash.XXHash32` byte-for-byte.
+twox-hash = { version = "2", features = ["xxhash32"] }
 crc32c = "0.6"
 dashmap = "6"
 futures-util = "0.3"
+base64 = "0.22"
+bytes = "1"
+# `arc-swap` provides lock-free atomic Arc reads/swaps, which is the closest
+# Rust analogue of Java's `volatile Arc<T>` semantics. Used in
+# `crate::metadata::Metadata` to replace mutex-guarded reads of
+# `metadata_snapshot` on the producer hot path (every `KafkaProducer.send`
+# looks up partitioning metadata via `Metadata::fetch`); see
+# `Metadata.java:79,129-138` where `metadataSnapshot` is `volatile` and the
+# accessors are not `synchronized`.
+arc-swap = "1"
 
 [dev-dependencies]
 testcontainers = "0.27"
 testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
 
-[[test]]
-name = "common"
-path = "tests/main.rs"
-
-[[test]]
-name = "producer"
-path = "tests/producer/main.rs"
 
 [build-dependencies]
 serde = { version = "1.0", features = ["derive"] }

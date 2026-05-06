@@ -12,7 +12,12 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Feature version range types (org.apache.kafka.common.feature)
+//! Translation of `org.apache.kafka.common.feature`.
+//!
+//! Phase 5c-1 only translates `SupportedVersionRange` (which `NodeApiVersions`
+//! depends on). The `BaseVersionRange` parent is collapsed onto the
+//! `SupportedVersionRange` struct since the only other subclass
+//! (`FinalizedVersionRange`) is not used on the producer path.
 
 pub mod supported_version_range;
 

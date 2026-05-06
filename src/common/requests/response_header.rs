@@ -12,111 +12,122 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A response header in the Kafka protocol.
-//!
-//! Corresponds to `org.apache.kafka.common.requests.ResponseHeader`.
+//! Translation of `org.apache.kafka.common.requests.ResponseHeader`.
 
-use std::fmt;
-use std::io;
+use std::cell::Cell;
 
-use crate::common::protocol::ByteBufferAccessor;
+use crate::common::errors::KafkaError;
+use crate::common::message::response_header_data::ResponseHeaderData;
 use crate::common::protocol::Message;
-use crate::common::protocol::ObjectSerializationCache;
-use crate::response_header_data::ResponseHeaderData;
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+use crate::common::requests::AbstractRequestResponse;
 
-/// Sentinel value indicating that the cached size has not been computed yet.
-const SIZE_NOT_INITIALIZED: i32 = -1;
-
-/// A response header in the Kafka protocol.
-///
-/// Wraps the generated [`ResponseHeaderData`] and provides convenience methods
-/// for serialization, size computation, and parsing.
-#[derive(Debug, Clone)]
+/// A response header in the Kafka protocol. Wraps the generated
+/// [`ResponseHeaderData`].
 pub struct ResponseHeader {
     data: ResponseHeaderData,
     header_version: i16,
-    size: i32,
+    size_cache: Cell<Option<i32>>,
 }
 
 impl ResponseHeader {
-    /// Creates a new `ResponseHeader` with the given correlation id and header version.
+    /// Mirrors `new ResponseHeader(int correlationId, short headerVersion)`.
     pub fn new(correlation_id: i32, header_version: i16) -> Self {
-        let mut data = ResponseHeaderData::new();
-        data.set_correlation_id(correlation_id);
-        Self { data, header_version, size: SIZE_NOT_INITIALIZED }
+        let data = ResponseHeaderData { correlation_id, unknown_tagged_fields: Vec::new() };
+        Self::from_data(data, header_version)
     }
 
-    /// Creates a new `ResponseHeader` from existing data and a header version.
+    /// Mirrors `new ResponseHeader(ResponseHeaderData data, short headerVersion)`.
     pub fn from_data(data: ResponseHeaderData, header_version: i16) -> Self {
-        Self { data, header_version, size: SIZE_NOT_INITIALIZED }
+        ResponseHeader { data, header_version, size_cache: Cell::new(None) }
     }
 
-    /// Returns the correlation id of this response.
+    /// Calculate the size of the header. Mirrors the test-visible
+    /// `ResponseHeader.size(ObjectSerializationCache)`.
+    pub fn size_with_cache(&self, serialization_cache: &mut ObjectSerializationCache) -> i32 {
+        let mut sizer = crate::common::protocol::MessageSizeAccumulator::new();
+        Message::add_size(&self.data, &mut sizer, serialization_cache, self.header_version);
+        sizer.total_size()
+    }
+
+    /// Returns the size of the header in bytes. Mirrors `ResponseHeader.size()`.
+    pub fn size(&self) -> i32 {
+        if let Some(s) = self.size_cache.get() {
+            return s;
+        }
+        let mut cache = ObjectSerializationCache::new();
+        let s = self.size_with_cache(&mut cache);
+        self.size_cache.set(Some(s));
+        s
+    }
+
+    /// Mirrors `ResponseHeader.correlationId()`.
     pub fn correlation_id(&self) -> i32 {
         self.data.correlation_id
     }
 
-    /// Returns the header version.
+    /// Mirrors `ResponseHeader.headerVersion()`.
     pub fn header_version(&self) -> i16 {
         self.header_version
     }
 
-    /// Returns a reference to the underlying data.
-    pub fn data(&self) -> &ResponseHeaderData {
+    /// Mirrors `ResponseHeader.data()`.
+    pub fn header_data(&self) -> &ResponseHeaderData {
         &self.data
     }
 
-    /// Calculates the size of this header in bytes using the given serialization cache.
-    ///
-    /// This method recalculates the size on each invocation. Prefer [`size`](Self::size)
-    /// unless you need to pair this call with a subsequent [`write`](Self::write) using
-    /// the same cache.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if size calculation fails.
-    pub fn size_with_cache(&mut self, cache: &mut ObjectSerializationCache) -> io::Result<i32> {
-        let s = Message::size(&self.data, cache, self.header_version)?;
-        self.size = s;
-        Ok(s)
+    /// Test-only: write into a pre-allocated `ByteBufferAccessor`. Mirrors
+    /// `ResponseHeader.write(ByteBuffer, ObjectSerializationCache)`.
+    pub fn write(&self, accessor: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> Result<(), KafkaError> {
+        Message::write(&self.data, accessor, cache, self.header_version)
     }
 
-    /// Returns the size of this header in bytes.
-    ///
-    /// The result is cached after the first invocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if size calculation fails.
-    pub fn size(&mut self) -> io::Result<i32> {
-        if self.size == SIZE_NOT_INITIALIZED {
-            let mut cache = ObjectSerializationCache::new();
-            self.size_with_cache(&mut cache)?;
+    /// Parse a response header. Mirrors
+    /// `ResponseHeader.parse(ByteBuffer, short headerVersion)`.
+    pub fn parse(accessor: &mut ByteBufferAccessor, header_version: i16) -> Result<Self, KafkaError> {
+        let start_position = accessor.position();
+        let data = ResponseHeaderData::read(accessor, header_version)?;
+        let header = ResponseHeader::from_data(data, header_version);
+        let parsed_size = (accessor.position() as i32 - start_position as i32).max(0);
+        header.size_cache.set(Some(parsed_size));
+        Ok(header)
+    }
+}
+
+impl AbstractRequestResponse for ResponseHeader {
+    fn data(&self) -> &dyn Message {
+        &self.data
+    }
+}
+
+impl std::fmt::Debug for ResponseHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ResponseHeader")
+            .field("data", &self.data)
+            .field("header_version", &self.header_version)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ResponseHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "ResponseHeader(correlationId={}, headerVersion={})",
+            self.correlation_id(),
+            self.header_version
+        )
+    }
+}
+
+impl Clone for ResponseHeader {
+    fn clone(&self) -> Self {
+        ResponseHeader {
+            data: self.data.clone(),
+            header_version: self.header_version,
+            size_cache: Cell::new(self.size_cache.get()),
         }
-        Ok(self.size)
-    }
-
-    /// Writes this header to the given buffer using the provided serialization cache.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if writing fails.
-    pub fn write(&self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
-        Message::write(&self.data, buffer, cache, self.header_version)
-    }
-
-    /// Parses a `ResponseHeader` from the given buffer.
-    ///
-    /// The header size is computed from the number of bytes consumed during parsing.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing fails.
-    pub fn parse(buffer: &mut ByteBufferAccessor, header_version: i16) -> io::Result<Self> {
-        let start_position = buffer.position();
-        let data = ResponseHeaderData::read(buffer, header_version)?;
-        let consumed = buffer.position() - start_position;
-        Ok(Self { data, header_version, size: consumed as i32 })
     }
 }
 
@@ -135,70 +146,58 @@ impl std::hash::Hash for ResponseHeader {
     }
 }
 
-impl fmt::Display for ResponseHeader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ResponseHeader(correlationId={}, headerVersion={})",
-            self.data.correlation_id, self.header_version
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    /// Basic roundtrip test for ResponseHeader: create, serialize, parse, compare.
+    /// Round-trip a v0 (non-flexible) `ResponseHeader`.
     #[test]
-    fn test_response_header_roundtrip_v0() {
-        let mut header = ResponseHeader::new(42, 0);
+    fn response_header_v0_round_trip() {
+        let header = ResponseHeader::new(42, 0);
         let mut cache = ObjectSerializationCache::new();
-        let size = header.size_with_cache(&mut cache).unwrap();
-        assert_eq!(size, 4); // correlation_id is 4 bytes, v0 has no tagged fields
+        let size = header.size_with_cache(&mut cache) as usize;
+        // v0: just a 4-byte correlation id
+        assert_eq!(size, 4);
 
-        let mut buf = ByteBufferAccessor::new(size as usize);
-        header.write(&mut buf, &cache).unwrap();
-        buf.flip();
+        let mut accessor = ByteBufferAccessor::allocate(size);
+        header.write(&mut accessor, &cache).expect("write");
+        accessor.flip();
 
-        let parsed = ResponseHeader::parse(&mut buf, 0).unwrap();
-        assert_eq!(header, parsed);
+        let parsed = ResponseHeader::parse(&mut accessor, 0).expect("parse");
         assert_eq!(parsed.correlation_id(), 42);
+        assert_eq!(parsed.header_version(), 0);
+        assert_eq!(parsed.size(), 4);
     }
 
-    /// Roundtrip test for flexible header version (v1, which includes tagged fields).
+    /// Round-trip a v1 (flexible) `ResponseHeader`.
     #[test]
-    fn test_response_header_roundtrip_v1() {
-        let mut header = ResponseHeader::new(123, 1);
+    fn response_header_v1_round_trip() {
+        let header = ResponseHeader::new(123, 1);
         let mut cache = ObjectSerializationCache::new();
-        let size = header.size_with_cache(&mut cache).unwrap();
-        // correlation_id (4 bytes) + tagged fields count varint (1 byte for 0)
+        let size = header.size_with_cache(&mut cache) as usize;
+        // v1 flexible: 4-byte correlation id + 1-byte tagged-field count (0)
         assert_eq!(size, 5);
 
-        let mut buf = ByteBufferAccessor::new(size as usize);
-        header.write(&mut buf, &cache).unwrap();
-        buf.flip();
+        let mut accessor = ByteBufferAccessor::allocate(size);
+        header.write(&mut accessor, &cache).expect("write");
+        accessor.flip();
 
-        let parsed = ResponseHeader::parse(&mut buf, 1).unwrap();
-        assert_eq!(header, parsed);
+        let parsed = ResponseHeader::parse(&mut accessor, 1).expect("parse");
         assert_eq!(parsed.correlation_id(), 123);
         assert_eq!(parsed.header_version(), 1);
     }
 
+    /// `to_response_header()` round-trips correlation id and uses the right
+    /// header version derived from the api key.
     #[test]
-    fn test_response_header_display() {
-        let header = ResponseHeader::new(99, 1);
-        let display = format!("{}", header);
-        assert!(display.contains("correlationId=99"));
-        assert!(display.contains("headerVersion=1"));
-    }
-
-    /// Tests that the cached size method returns the same value as the computed size.
-    #[test]
-    fn test_response_header_size_caching() {
-        let mut header = ResponseHeader::new(42, 1);
-        let size1 = header.size().unwrap();
-        let size2 = header.size().unwrap();
-        assert_eq!(size1, size2);
+    fn to_response_header_uses_correct_header_version_for_api() {
+        use crate::common::protocol::ApiKeys;
+        let api_versions = ApiKeys::for_id(18).expect("API_VERSIONS");
+        let req_header = crate::common::requests::RequestHeader::new(api_versions, 3, "id", 99);
+        let resp_header = req_header.to_response_header().expect("to_response_header");
+        assert_eq!(resp_header.correlation_id(), 99);
+        // ApiVersions response v3 uses header v0 (the broker keeps the response header non-flexible
+        // even when the request header is flexible — see KIP-511 in apache/kafka).
+        assert_eq!(resp_header.header_version(), 0);
     }
 }

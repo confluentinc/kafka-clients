@@ -12,12 +12,6 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security types and utilities (org.apache.kafka.common.security).
+//! Translation of `org.apache.kafka.common.security`.
 
 pub mod auth;
-pub mod authenticator;
-pub mod ssl;
-
-pub use auth::SecurityProtocol;
-pub use authenticator::SaslClientAuthenticator;
-pub use ssl::SslFactory;

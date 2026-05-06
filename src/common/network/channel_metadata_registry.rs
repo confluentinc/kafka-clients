@@ -12,62 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Channel metadata registry for collecting cipher and client information.
-//!
-//! Translated from `org.apache.kafka.common.network.ChannelMetadataRegistry`.
-//!
-//! Metadata about a channel is provided in various places in the network stack.
-//! This registry is used as a common place to collect them.
+//! Translation of `org.apache.kafka.common.network.ChannelMetadataRegistry`
+//! and the test-fixture `DefaultChannelMetadataRegistry`.
 
-use super::CipherInformation;
-use super::ClientInformation;
+use super::{CipherInformation, ClientInformation};
 
-/// A registry for collecting channel metadata such as cipher and client information.
-///
-/// Translated from the Java `ChannelMetadataRegistry` interface.
-pub trait ChannelMetadataRegistry: Send {
+/// Trait counterpart of the Java `ChannelMetadataRegistry` interface.
+/// Mirrors the four register/get methods plus `close`. Java's
+/// `Closeable.close()` is modelled as an explicit method on the trait;
+/// implementors that hold no resources can use the default no-op.
+pub trait ChannelMetadataRegistry {
     /// Register information about the SSL cipher we are using.
-    /// Re-registering the information will overwrite the previous one.
+    /// Re-registering overwrites the previous value. Mirrors
+    /// `registerCipherInformation`.
     fn register_cipher_information(&mut self, cipher_information: CipherInformation);
 
-    /// Get the currently registered cipher information.
+    /// Return the currently registered cipher information.
     fn cipher_information(&self) -> Option<&CipherInformation>;
 
-    /// Register information about the client we are using.
-    /// Depending on the clients, the ApiVersionsRequest could be received
-    /// multiple times or not at all. Re-registering the information will
-    /// overwrite the previous one.
+    /// Register information about the client we are talking to.
+    /// Mirrors `registerClientInformation`. Re-registering overwrites
+    /// the previous value (Java accepts repeated `ApiVersionsRequest`s).
     fn register_client_information(&mut self, client_information: ClientInformation);
 
-    /// Get the currently registered client information.
+    /// Return the currently registered client information.
     fn client_information(&self) -> Option<&ClientInformation>;
 
-    /// Unregister everything that has been registered and close the registry.
+    /// Unregister everything that has been registered and close the
+    /// registry. Mirrors `close()`.
     fn close(&mut self);
 }
 
-/// Default implementation of [`ChannelMetadataRegistry`] that simply stores values.
-///
-/// Translated from `org.apache.kafka.common.network.DefaultChannelMetadataRegistry`
-/// (test support class in Java).
-///
-/// Metrics integration is deferred; this implementation stores values without
-/// recording metric events.
+/// Concrete in-memory `ChannelMetadataRegistry`. Mirrors the
+/// `DefaultChannelMetadataRegistry` test fixture used by the Java client.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
 pub struct DefaultChannelMetadataRegistry {
     cipher_information: Option<CipherInformation>,
     client_information: Option<ClientInformation>,
 }
 
 impl DefaultChannelMetadataRegistry {
-    /// Creates a new empty `DefaultChannelMetadataRegistry`.
+    /// Construct an empty registry.
     pub fn new() -> Self {
-        Self { cipher_information: None, client_information: None }
-    }
-}
-
-impl Default for DefaultChannelMetadataRegistry {
-    fn default() -> Self {
-        Self::new()
+        Self::default()
     }
 }
 
@@ -91,5 +78,47 @@ impl ChannelMetadataRegistry for DefaultChannelMetadataRegistry {
     fn close(&mut self) {
         self.cipher_information = None;
         self.client_information = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn empty_registry_returns_none() {
+        let reg = DefaultChannelMetadataRegistry::new();
+        assert!(reg.cipher_information().is_none());
+        assert!(reg.client_information().is_none());
+    }
+
+    #[test]
+    fn register_and_overwrite_cipher() {
+        let mut reg = DefaultChannelMetadataRegistry::new();
+        reg.register_cipher_information(CipherInformation::new("c1", "TLSv1.3"));
+        assert_eq!(reg.cipher_information().unwrap().cipher(), "c1");
+        // Re-register overwrites.
+        reg.register_cipher_information(CipherInformation::new("c2", "TLSv1.3"));
+        assert_eq!(reg.cipher_information().unwrap().cipher(), "c2");
+    }
+
+    #[test]
+    fn register_and_overwrite_client() {
+        let mut reg = DefaultChannelMetadataRegistry::new();
+        reg.register_client_information(ClientInformation::new("kafka", "4.0"));
+        assert_eq!(reg.client_information().unwrap().software_name(), "kafka");
+        // Repeated `ApiVersionsRequest` overwrites.
+        reg.register_client_information(ClientInformation::new("kafka", "4.1"));
+        assert_eq!(reg.client_information().unwrap().software_version(), "4.1");
+    }
+
+    #[test]
+    fn close_clears_state() {
+        let mut reg = DefaultChannelMetadataRegistry::new();
+        reg.register_cipher_information(CipherInformation::new("c", "p"));
+        reg.register_client_information(ClientInformation::new("n", "v"));
+        reg.close();
+        assert!(reg.cipher_information().is_none());
+        assert!(reg.client_information().is_none());
     }
 }

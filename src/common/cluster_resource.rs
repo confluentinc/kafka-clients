@@ -12,25 +12,29 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `ClusterResource` class encapsulates metadata for a Kafka cluster.
+//! Translation of `org.apache.kafka.common.ClusterResource`.
 
 use std::fmt;
 
-/// The `ClusterResource` class encapsulates metadata for a Kafka cluster.
+/// Encapsulates metadata for a Kafka cluster.
+///
+/// Mirrors Java's `ClusterResource`. The cluster id may be `None` if the
+/// metadata request was sent to a broker without support for cluster ids.
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct ClusterResource {
     cluster_id: Option<String>,
 }
 
 impl ClusterResource {
-    /// Create a `ClusterResource` with a cluster id. Note that cluster id may be `None` if the
-    /// metadata request was sent to a broker without support for cluster ids.
+    /// Create a [`ClusterResource`] with a cluster id. The cluster id may be
+    /// `None` if the metadata request was sent to a broker without support
+    /// for cluster ids.
     pub fn new(cluster_id: Option<String>) -> Self {
         Self { cluster_id }
     }
 
-    /// Return the cluster id. Note that it may be `None` if the metadata request was sent to a
-    /// broker without support for cluster ids.
+    /// Return the cluster id. Note that it may be `None` if the metadata
+    /// request was sent to a broker without support for cluster ids.
     pub fn cluster_id(&self) -> Option<&str> {
         self.cluster_id.as_deref()
     }
@@ -38,7 +42,11 @@ impl ClusterResource {
 
 impl fmt::Display for ClusterResource {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ClusterResource(clusterId={:?})", self.cluster_id)
+        // Java's `+` against null prints "null"; mirror that.
+        match &self.cluster_id {
+            Some(id) => write!(f, "ClusterResource(clusterId={id})"),
+            None => write!(f, "ClusterResource(clusterId=null)"),
+        }
     }
 }
 
@@ -47,23 +55,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cluster_resource() {
-        let cr = ClusterResource::new(Some("test-cluster".to_string()));
-        assert_eq!(cr.cluster_id(), Some("test-cluster"));
+    fn equals_and_clone() {
+        let a = ClusterResource::new(Some("abc".to_string()));
+        let b = a.clone();
+        assert_eq!(a, b);
+
+        let c = ClusterResource::new(None);
+        let d = ClusterResource::new(None);
+        assert_eq!(c, d);
+
+        assert_ne!(a, c);
     }
 
     #[test]
-    fn test_cluster_resource_none() {
-        let cr = ClusterResource::new(None);
-        assert!(cr.cluster_id().is_none());
+    fn display_matches_java() {
+        let a = ClusterResource::new(Some("xyz".to_string()));
+        assert_eq!(a.to_string(), "ClusterResource(clusterId=xyz)");
+        let b = ClusterResource::new(None);
+        assert_eq!(b.to_string(), "ClusterResource(clusterId=null)");
     }
 
     #[test]
-    fn test_cluster_resource_equality() {
-        let cr1 = ClusterResource::new(Some("id".to_string()));
-        let cr2 = ClusterResource::new(Some("id".to_string()));
-        let cr3 = ClusterResource::new(None);
-        assert_eq!(cr1, cr2);
-        assert_ne!(cr1, cr3);
+    fn cluster_id_accessor() {
+        let r = ClusterResource::new(Some("hello".to_string()));
+        assert_eq!(r.cluster_id(), Some("hello"));
+        let r2 = ClusterResource::new(None);
+        assert_eq!(r2.cluster_id(), None);
     }
 }

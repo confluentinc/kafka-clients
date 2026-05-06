@@ -12,122 +12,102 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Readable trait for deserializing Kafka protocol messages.
+//! Translation of `org.apache.kafka.common.protocol.Readable`.
 //!
-//! Corresponds to org.apache.kafka.common.protocol.Readable
+//! `Readable` is a generic source of typed wire-protocol primitives, mirroring
+//! the Java interface of the same name. The canonical implementation is
+//! [`crate::common::protocol::ByteBufferAccessor`], but other clients (e.g.
+//! the network layer) implement it on their own buffers.
+//!
+//! In Java, the read methods throw `RuntimeException` when the source has
+//! insufficient bytes. Following CLAUDE.md rule 10, we surface these as
+//! `Result<T, KafkaError>` here. The default-method helpers
+//! (`read_string`, `read_uuid`, `read_unsigned_short`, …) are translated as
+//! provided trait methods so any implementor inherits them automatically.
 
 use crate::common::Uuid;
-use std::io;
+use crate::common::errors::KafkaError;
+use crate::common::protocol::types::RawTaggedField;
 
-/// Trait for reading Kafka protocol data types from a byte stream.
-///
-/// This trait provides methods for reading primitive types and Kafka-specific
-/// types like varints, UUIDs, and strings.
+/// Translation of `org.apache.kafka.common.protocol.Readable`.
 pub trait Readable {
-    /// Read a single byte.
-    fn read_byte(&mut self) -> io::Result<i8>;
+    /// Mirrors `readByte`.
+    fn read_byte(&mut self) -> Result<i8, KafkaError>;
 
-    /// Read a 16-bit signed integer (big-endian).
-    fn read_short(&mut self) -> io::Result<i16>;
+    /// Mirrors `readShort`.
+    fn read_short(&mut self) -> Result<i16, KafkaError>;
 
-    /// Read a 32-bit signed integer (big-endian).
-    fn read_int(&mut self) -> io::Result<i32>;
+    /// Mirrors `readInt`.
+    fn read_int(&mut self) -> Result<i32, KafkaError>;
 
-    /// Read a 64-bit signed integer (big-endian).
-    fn read_long(&mut self) -> io::Result<i64>;
+    /// Mirrors `readLong`.
+    fn read_long(&mut self) -> Result<i64, KafkaError>;
 
-    /// Read a 64-bit floating point number (big-endian).
-    fn read_double(&mut self) -> io::Result<f64>;
+    /// Mirrors `readDouble`.
+    fn read_double(&mut self) -> Result<f64, KafkaError>;
 
-    /// Read an array of bytes with the given length.
-    fn read_array(&mut self, length: usize) -> io::Result<Vec<u8>>;
+    /// Mirrors `readArray(int length)`. Reads `length` bytes into a freshly
+    /// allocated `Vec`. Returns an error if fewer than `length` bytes remain.
+    fn read_array(&mut self, length: usize) -> Result<Vec<u8>, KafkaError>;
 
-    /// Read an unsigned varint (for sizes, lengths, counts).
-    fn read_unsigned_varint(&mut self) -> io::Result<u32>;
+    /// Mirrors `readUnsignedVarint`.
+    fn read_unsigned_varint(&mut self) -> Result<u32, KafkaError>;
 
-    /// Read a signed varint (zig-zag encoded).
-    fn read_varint(&mut self) -> io::Result<i32>;
+    /// Mirrors `readByteBuffer(int length)`. Reads `length` bytes and returns
+    /// them as an owned `Vec` whose contents may be wrapped in a buffer by
+    /// the caller. Java returns a `ByteBuffer` slice that shares storage with
+    /// the source; for the producer client we translate this as a `Vec<u8>`
+    /// since none of the Phase 2c+ call sites mutate the source after read.
+    fn read_byte_buffer(&mut self, length: usize) -> Result<Vec<u8>, KafkaError>;
 
-    /// Read a signed varlong (zig-zag encoded).
-    fn read_varlong(&mut self) -> io::Result<i64>;
+    /// Mirrors `readVarint`.
+    fn read_varint(&mut self) -> Result<i32, KafkaError>;
 
-    /// Returns the number of bytes remaining to be read.
+    /// Mirrors `readVarlong`.
+    fn read_varlong(&mut self) -> Result<i64, KafkaError>;
+
+    /// Mirrors `remaining()`.
     fn remaining(&self) -> usize;
 
-    /// Read a UTF-8 string of the given length.
-    fn read_string(&mut self, length: usize) -> io::Result<String> {
-        let bytes = self.read_array(length)?;
-        String::from_utf8(bytes).map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e))
+    /// Mirrors `slice()`. Returns a new `Box<dyn Readable>` whose content
+    /// shares the same bytes as `self`, starting at `self`'s current position.
+    /// The two readables advance independently after `slice()` is called.
+    fn slice(&mut self) -> Result<Box<dyn Readable + '_>, KafkaError>;
+
+    /// Mirrors the Java default `readString(int length)`.
+    fn read_string(&mut self, length: usize) -> Result<String, KafkaError> {
+        let arr = self.read_array(length)?;
+        String::from_utf8(arr).map_err(|e| KafkaError::Generic(format!("Invalid UTF-8: {e}")))
     }
 
-    /// Read bytes into the provided buffer.
-    fn read_bytes(&mut self, buf: &mut [u8]) -> io::Result<()> {
-        let data = self.read_array(buf.len())?;
-        buf.copy_from_slice(&data);
-        Ok(())
-    }
-
-    /// Read a UUID (128-bit value, most significant bits first).
-    fn read_uuid(&mut self) -> io::Result<Uuid> {
-        let most_sig_bits = self.read_long()? as u64;
-        let least_sig_bits = self.read_long()? as u64;
-        Ok(Uuid::new(most_sig_bits, least_sig_bits))
-    }
-
-    /// Read an unsigned 16-bit integer.
-    fn read_unsigned_short(&mut self) -> io::Result<u16> {
-        let value = self.read_short()?;
-        Ok(value as u16)
-    }
-
-    /// Read an unsigned 32-bit integer.
-    fn read_unsigned_int(&mut self) -> io::Result<u32> {
-        let value = self.read_int()?;
-        Ok(value as u32)
-    }
-
-    /// Read an unknown tagged field and add it to the list.
-    /// Returns the updated list of unknown tagged fields.
+    /// Mirrors the Java default
+    /// `readUnknownTaggedField(List<RawTaggedField>, int tag, int size)`.
     fn read_unknown_tagged_field(
         &mut self,
-        mut unknowns: Vec<RawTaggedField>,
-        tag: u32,
-        size: u32,
-    ) -> io::Result<Vec<RawTaggedField>> {
-        let data = self.read_array(size as usize)?;
-        unknowns.push(RawTaggedField::new(tag, data));
-        Ok(unknowns)
-    }
-}
-
-/// Raw tagged field for forward compatibility.
-/// Stores unknown tagged fields that can be passed through.
-///
-/// Corresponds to org.apache.kafka.common.protocol.types.RawTaggedField
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub struct RawTaggedField {
-    tag: u32,
-    data: Vec<u8>,
-}
-
-impl RawTaggedField {
-    /// Create a new raw tagged field.
-    pub fn new(tag: u32, data: Vec<u8>) -> Self {
-        RawTaggedField { tag, data }
+        unknowns: Option<Vec<RawTaggedField>>,
+        tag: i32,
+        size: usize,
+    ) -> Result<Vec<RawTaggedField>, KafkaError> {
+        let mut list = unknowns.unwrap_or_default();
+        let data = self.read_array(size)?;
+        list.push(RawTaggedField::new(tag, data));
+        Ok(list)
     }
 
-    /// Get the tag number.
-    pub fn tag(&self) -> u32 {
-        self.tag
+    /// Mirrors the Java default `readUuid()`. Reads two big-endian longs.
+    fn read_uuid(&mut self) -> Result<Uuid, KafkaError> {
+        let msb = self.read_long()?;
+        let lsb = self.read_long()?;
+        Ok(Uuid::new(msb, lsb))
     }
 
-    /// Get the data bytes.
-    pub fn data(&self) -> &[u8] {
-        &self.data
+    /// Mirrors `readUnsignedShort`.
+    fn read_unsigned_short(&mut self) -> Result<u16, KafkaError> {
+        Ok(self.read_short()? as u16)
     }
 
-    /// Get the size of the data.
-    pub fn size(&self) -> usize {
-        self.data.len()
+    /// Mirrors `readUnsignedInt`.
+    fn read_unsigned_int(&mut self) -> Result<u32, KafkaError> {
+        Ok(self.read_int()? as u32)
     }
 }

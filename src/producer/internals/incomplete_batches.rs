@@ -12,178 +12,153 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A thread-safe helper class to hold batches that haven't been acknowledged yet
-//! (including those which have and have not been sent).
+//! Translation of `org.apache.kafka.clients.producer.internals.IncompleteBatches`.
 //!
-//! Translated from `org.apache.kafka.clients.producer.internals.IncompleteBatches`.
+//! A thread-safe helper class to hold batches that haven't been
+//! acknowledged yet (including those which have and have not been
+//! sent). Java backs this with a `synchronized (incomplete) { ... }`
+//! block guarding a `HashSet<ProducerBatch>` that uses default
+//! identity-based `equals`/`hashCode`. Rust mirrors the identity
+//! semantics with [`std::sync::Arc::as_ptr`] used as the hash key —
+//! the underlying [`HashMap`] therefore distinguishes batches by
+//! pointer address, not by structural equality. Using a `Mutex` over
+//! the map mirrors Java's `synchronized` block exactly.
 
-use std::collections::HashSet;
-use std::sync::{Arc, Mutex};
+#![allow(dead_code)] // Phase 6d (RecordAccumulator) wires this set.
 
-use crate::producer::internals::ProduceRequestResult;
+use std::collections::HashMap;
+use std::sync::Arc;
+use std::sync::Mutex;
 
-/// A thread-safe helper class to hold batches that haven't been acknowledged yet
-/// (including those which have and have not been sent).
-///
-/// In Java, identity equality (`==`) on `ProducerBatch` is used via `HashSet`.
-/// In Rust, since batches in deques are not `Arc`-wrapped, we track
-/// `Arc<ProduceRequestResult>` using pointer-based equality. This is sufficient
-/// because each `ProducerBatch` has a unique `produce_future` and the primary
-/// uses of `IncompleteBatches` are:
-/// - `request_results()` for `awaitFlushCompletion`
-/// - `is_empty()` for `hasIncomplete`
-pub struct IncompleteBatches {
-    /// The set of incomplete produce futures, keyed by Arc pointer identity.
-    incomplete: Mutex<HashSet<ArcResultKey>>,
-}
+use super::produce_request_result::ProduceRequestResult;
+use super::producer_batch::ProducerBatch;
 
-/// Wrapper around `Arc<ProduceRequestResult>` that uses pointer-based equality and hashing,
-/// matching Java's identity-based `HashSet<ProducerBatch>`.
-#[derive(Clone)]
-struct ArcResultKey(Arc<ProduceRequestResult>);
-
-impl PartialEq for ArcResultKey {
-    fn eq(&self, other: &Self) -> bool {
-        Arc::ptr_eq(&self.0, &other.0)
-    }
-}
-
-impl Eq for ArcResultKey {}
-
-impl std::hash::Hash for ArcResultKey {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        Arc::as_ptr(&self.0).hash(state);
-    }
+/// See module-level docs.
+pub(crate) struct IncompleteBatches {
+    /// Map keyed by the raw pointer value of each batch's Arc, so we
+    /// can replicate Java's `HashSet<ProducerBatch>` identity-equality
+    /// semantics. The map's value is the same Arc, retaining the batch
+    /// alive while it is incomplete.
+    incomplete: Mutex<HashMap<usize, Arc<ProducerBatch>>>,
 }
 
 impl IncompleteBatches {
-    /// Create a new empty `IncompleteBatches`.
     pub fn new() -> Self {
-        Self { incomplete: Mutex::new(HashSet::new()) }
+        IncompleteBatches { incomplete: Mutex::new(HashMap::new()) }
     }
 
-    /// Add a batch's produce future to the incomplete set.
-    pub fn add(&self, produce_future: Arc<ProduceRequestResult>) {
-        let mut incomplete = self.incomplete.lock().unwrap();
-        incomplete.insert(ArcResultKey(produce_future));
+    /// Add a batch to the incomplete set. Mirrors Java's `add`.
+    pub fn add(&self, batch: Arc<ProducerBatch>) {
+        let key = Arc::as_ptr(&batch) as usize;
+        self.incomplete.lock().unwrap().insert(key, batch);
     }
 
-    /// Remove a batch's produce future from the incomplete set.
-    pub fn remove(&self, produce_future: &Arc<ProduceRequestResult>) {
-        let mut incomplete = self.incomplete.lock().unwrap();
-        let removed = incomplete.remove(&ArcResultKey(Arc::clone(produce_future)));
-        assert!(removed, "Remove from the incomplete set failed. This should be impossible.");
+    /// Remove a batch from the incomplete set. Panics with
+    /// `IllegalStateException`-equivalent message if the batch is not
+    /// present, matching Java's `if (!removed) throw IllegalStateException`.
+    pub fn remove(&self, batch: &Arc<ProducerBatch>) {
+        let key = Arc::as_ptr(batch) as usize;
+        let removed = self.incomplete.lock().unwrap().remove(&key);
+        assert!(
+            removed.is_some(),
+            "Remove from the incomplete set failed. This should be impossible."
+        );
     }
 
-    /// Return a snapshot copy of all incomplete produce futures.
-    pub fn copy_all(&self) -> Vec<Arc<ProduceRequestResult>> {
-        let incomplete = self.incomplete.lock().unwrap();
-        incomplete.iter().map(|k| Arc::clone(&k.0)).collect()
+    /// Return a snapshot copy of all incomplete batches. Mirrors
+    /// `copyAll` returning `Iterable<ProducerBatch>`.
+    pub fn copy_all(&self) -> Vec<Arc<ProducerBatch>> {
+        self.incomplete.lock().unwrap().values().cloned().collect()
     }
 
-    /// Return the [`ProduceRequestResult`] for each incomplete batch.
+    /// Return the [`ProduceRequestResult`] of every incomplete batch.
+    /// Mirrors `requestResults`.
     pub fn request_results(&self) -> Vec<Arc<ProduceRequestResult>> {
-        self.copy_all()
+        self.incomplete
+            .lock()
+            .unwrap()
+            .values()
+            .map(|batch| Arc::clone(batch.produce_future()))
+            .collect()
     }
 
-    /// Check if there are no incomplete batches.
+    /// `true` iff there are no incomplete batches.
     pub fn is_empty(&self) -> bool {
-        let incomplete = self.incomplete.lock().unwrap();
-        incomplete.is_empty()
-    }
-}
-
-impl Default for IncompleteBatches {
-    fn default() -> Self {
-        Self::new()
+        self.incomplete.lock().unwrap().is_empty()
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! There is no dedicated `IncompleteBatchesTest.java`; the class is
+    //! exercised through `RecordAccumulatorTest` (translated in Phase
+    //! 6d). The smoke tests below verify add/remove/snapshot semantics
+    //! against the real `ProducerBatch` type.
+
     use super::*;
-    use crate::common::TopicPartition;
+    use crate::common::record::record_batch::{MAGIC_VALUE_V2, NO_TIMESTAMP};
+    use crate::common::record::{CompressionType, MemoryRecordsBuilder, TimestampType};
+    use crate::common::topic_partition::TopicPartition;
 
-    fn make_future(topic: &str, partition: i32) -> Arc<ProduceRequestResult> {
-        let tp = TopicPartition::new(topic.to_string(), partition);
-        Arc::new(ProduceRequestResult::new(tp))
+    fn make_builder() -> MemoryRecordsBuilder {
+        MemoryRecordsBuilder::from_buffer(
+            vec![0u8; 256],
+            MAGIC_VALUE_V2,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            NO_TIMESTAMP,
+            -1,
+            -1,
+            -1,
+            false,
+            false,
+            -1,
+            256,
+        )
+        .expect("builder")
+    }
+
+    fn make_batch() -> Arc<ProducerBatch> {
+        Arc::new(ProducerBatch::new(TopicPartition::new("t", 0), make_builder(), 0))
     }
 
     #[test]
-    fn test_add_and_remove() {
-        let batches = IncompleteBatches::new();
-        assert!(batches.is_empty());
+    fn add_remove_round_trip() {
+        let inc = IncompleteBatches::new();
+        assert!(inc.is_empty());
+        let b1 = make_batch();
+        let b2 = make_batch();
+        inc.add(Arc::clone(&b1));
+        inc.add(Arc::clone(&b2));
+        assert!(!inc.is_empty());
+        assert_eq!(2, inc.copy_all().len());
+        assert_eq!(2, inc.request_results().len());
 
-        let future1 = make_future("topic", 0);
-        let future2 = make_future("topic", 1);
-
-        batches.add(Arc::clone(&future1));
-        batches.add(Arc::clone(&future2));
-        assert!(!batches.is_empty());
-
-        batches.remove(&future1);
-        batches.remove(&future2);
-        assert!(batches.is_empty());
+        inc.remove(&b1);
+        assert_eq!(1, inc.copy_all().len());
+        inc.remove(&b2);
+        assert!(inc.is_empty());
     }
 
     #[test]
-    #[should_panic(expected = "Remove from the incomplete set failed")]
-    fn test_remove_not_present_panics() {
-        let batches = IncompleteBatches::new();
-        let future = make_future("topic", 0);
-        batches.remove(&future);
+    #[should_panic(expected = "Remove from the incomplete set failed.")]
+    fn remove_missing_panics() {
+        let inc = IncompleteBatches::new();
+        let b = make_batch();
+        inc.remove(&b);
     }
 
     #[test]
-    fn test_copy_all() {
-        let batches = IncompleteBatches::new();
-        let future1 = make_future("topic", 0);
-        let future2 = make_future("topic", 1);
-
-        batches.add(Arc::clone(&future1));
-        batches.add(Arc::clone(&future2));
-
-        let all = batches.copy_all();
-        assert_eq!(2, all.len());
-    }
-
-    #[test]
-    fn test_request_results() {
-        let batches = IncompleteBatches::new();
-        let future1 = make_future("topic", 0);
-        let future2 = make_future("topic", 1);
-
-        batches.add(Arc::clone(&future1));
-        batches.add(Arc::clone(&future2));
-
-        let results = batches.request_results();
-        assert_eq!(2, results.len());
-    }
-
-    #[test]
-    fn test_identity_based_equality() {
-        let batches = IncompleteBatches::new();
-        let future = make_future("topic", 0);
-
-        // Add the same Arc twice — should only appear once
-        batches.add(Arc::clone(&future));
-        batches.add(Arc::clone(&future));
-
-        let all = batches.copy_all();
-        assert_eq!(1, all.len(), "Same Arc added twice should only appear once");
-    }
-
-    #[test]
-    fn test_different_futures_same_partition() {
-        let batches = IncompleteBatches::new();
-        // Two different ProduceRequestResult instances for the same partition
-        let future1 = make_future("topic", 0);
-        let future2 = make_future("topic", 0);
-
-        batches.add(Arc::clone(&future1));
-        batches.add(Arc::clone(&future2));
-
-        let all = batches.copy_all();
-        assert_eq!(2, all.len(), "Different Arcs for same partition should be separate entries");
+    fn identity_equality_distinguishes_distinct_arcs() {
+        // Two distinct ProducerBatches over the same topic-partition
+        // must be treated as distinct (matching Java's identity-based
+        // HashSet<ProducerBatch>).
+        let b1 = make_batch();
+        let b2 = make_batch();
+        let inc = IncompleteBatches::new();
+        inc.add(Arc::clone(&b1));
+        inc.add(Arc::clone(&b2));
+        assert_eq!(2, inc.copy_all().len());
     }
 }

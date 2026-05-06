@@ -12,102 +12,120 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Maintains node api versions for access outside of NetworkClient
-//! (which is where the information is derived).
-//! The pattern is akin to the use of Metadata for topic metadata.
+//! Translation of `org.apache.kafka.clients.ApiVersions`.
 //!
-//! NOTE: This class is intended for INTERNAL usage only within Kafka.
+//! Note: the Java type lives in `org.apache.kafka.clients` (not `common`),
+//! so it sits at the crate root rather than under `common::`.
 //!
-//! Translated from `org.apache.kafka.clients.ApiVersions`.
+//! The Java class is annotated `synchronized` on every method. The Rust
+//! translation guards the inner state with a single `Mutex` and never
+//! holds the guard across an `.await` (CLAUDE.md rule 9.6 — `ApiVersions`
+//! is currently called from synchronous code, but the rule still applies
+//! once Phase 5d wires it into the network loop).
 
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, Mutex};
 
-use super::NodeApiVersions;
+use crate::NodeApiVersions;
 
-/// Information about finalized features and their epoch.
+/// Snapshot returned by [`ApiVersions::finalized_features_info`].
 #[derive(Debug, Clone)]
 pub struct FinalizedFeaturesInfo {
-    /// The epoch of the finalized features.
+    /// The maximum finalized feature epoch observed across all known
+    /// nodes. Mirrors `FinalizedFeaturesInfo.finalizedFeaturesEpoch`.
     pub finalized_features_epoch: i64,
-    /// Map of finalized feature name to its version.
-    pub finalized_features: Option<HashMap<String, i16>>,
+    /// The finalized feature versions captured at the same epoch. May
+    /// be empty if no node has reported any. Mirrors
+    /// `FinalizedFeaturesInfo.finalizedFeatures`.
+    pub finalized_features: HashMap<String, i16>,
 }
 
-impl FinalizedFeaturesInfo {
-    /// Creates a new `FinalizedFeaturesInfo`.
-    fn new(finalized_features_epoch: i64, finalized_features: Option<HashMap<String, i16>>) -> Self {
-        Self { finalized_features_epoch, finalized_features }
-    }
-}
-
-/// Maintains node API versions for access outside of NetworkClient.
-///
-/// Thread-safe: all access is synchronized via `RwLock`.
-///
-/// Translated from `org.apache.kafka.clients.ApiVersions`.
-#[derive(Debug)]
-pub struct ApiVersions {
-    inner: RwLock<ApiVersionsInner>,
-}
-
-#[derive(Debug)]
+#[derive(Default)]
 struct ApiVersionsInner {
-    node_api_versions: HashMap<String, NodeApiVersions>,
-    /// The maximum finalized feature epoch of all the node api versions.
+    /// Java keys this map by the connection id `String`
+    /// (`Integer.toString(node.id())`); the Rust translation keys by
+    /// `i32` directly. See `design/history/Milestone-1/Phase-5/NOTES.md`
+    /// "Hot-path identifier interning" — the producer hot path looks up
+    /// usable versions per request via [`ApiVersions::get`] and a
+    /// `String` key would force a per-call allocation.
+    node_api_versions: HashMap<i32, Arc<NodeApiVersions>>,
+    /// The maximum finalized feature epoch of all the node api
+    /// versions. Mirrors Java's `private long maxFinalizedFeaturesEpoch = -1;`.
     max_finalized_features_epoch: i64,
-    finalized_features: Option<HashMap<String, i16>>,
+    /// The finalized features captured alongside
+    /// [`Self::max_finalized_features_epoch`]. Java's `null` collapses
+    /// onto an empty `HashMap` here (the Java class never reads the
+    /// field as null without first checking the epoch).
+    finalized_features: HashMap<String, i16>,
+}
+
+/// Maintains node api versions for access outside of `NetworkClient`
+/// (which is where the information is derived). The pattern is akin to
+/// the use of `Metadata` for topic metadata.
+///
+/// **Note**: This class is intended for internal usage only within
+/// Kafka. Mirrors the Java `ApiVersions`.
+///
+/// Thread-safe: every public method takes `&self` and uses an internal
+/// `Mutex` for synchronisation, mirroring Java's `synchronized` methods.
+pub struct ApiVersions {
+    inner: Mutex<ApiVersionsInner>,
 }
 
 impl ApiVersions {
-    /// Creates a new `ApiVersions` instance.
+    /// Mirrors `new ApiVersions()`.
     pub fn new() -> Self {
-        Self {
-            inner: RwLock::new(ApiVersionsInner {
-                node_api_versions: HashMap::new(),
-                max_finalized_features_epoch: -1,
-                finalized_features: None,
-            }),
+        ApiVersions {
+            inner: Mutex::new(ApiVersionsInner { max_finalized_features_epoch: -1, ..Default::default() }),
         }
     }
 
-    /// Updates the API versions for a given node.
+    /// Mirrors `ApiVersions.update(String, NodeApiVersions)`.
     ///
-    /// If the node's finalized features epoch is higher than the current maximum,
-    /// the finalized features are updated.
-    pub fn update(&self, node_id: &str, node_api_versions: NodeApiVersions) {
-        let mut inner = self.inner.write().unwrap();
+    /// Java keys by `Integer.toString(node.id())`; the Rust signature
+    /// takes `i32` directly to avoid the per-call `String` allocation
+    /// the producer hot path would otherwise pay (CLAUDE.md rule 11,
+    /// NOTES.md "Hot-path identifier interning").
+    ///
+    /// Java passes the `NodeApiVersions` by value; we accept an
+    /// `Arc<NodeApiVersions>` so the cache can hand out cheap clones via
+    /// [`Self::get`]. Pre-existing callers can wrap a fresh
+    /// `NodeApiVersions` with `Arc::new` at the call site.
+    pub fn update(&self, node_id: i32, node_api_versions: Arc<NodeApiVersions>) {
+        let mut inner = self.inner.lock().expect("ApiVersions inner not poisoned");
         if inner.max_finalized_features_epoch < node_api_versions.finalized_features_epoch() {
             inner.max_finalized_features_epoch = node_api_versions.finalized_features_epoch();
-            inner.finalized_features = Some(node_api_versions.finalized_features().clone());
+            inner.finalized_features = node_api_versions.finalized_features().clone();
         }
-        inner.node_api_versions.insert(node_id.to_string(), node_api_versions);
+        inner.node_api_versions.insert(node_id, node_api_versions);
     }
 
-    /// Removes the API versions for a given node.
-    pub fn remove(&self, node_id: &str) {
-        let mut inner = self.inner.write().unwrap();
-        inner.node_api_versions.remove(node_id);
+    /// Mirrors `ApiVersions.remove(String)`.
+    pub fn remove(&self, node_id: i32) {
+        let mut inner = self.inner.lock().expect("ApiVersions inner not poisoned");
+        inner.node_api_versions.remove(&node_id);
     }
 
-    /// Gets the API versions for a given node.
-    ///
-    /// Returns `None` if the node is not known.
-    pub fn get(&self, node_id: &str) -> Option<NodeApiVersions> {
-        let inner = self.inner.read().unwrap();
-        inner.node_api_versions.get(node_id).cloned()
+    /// Mirrors `ApiVersions.get(String)`. Returns `None` if no entry is
+    /// known for the given node id.
+    pub fn get(&self, node_id: i32) -> Option<Arc<NodeApiVersions>> {
+        let inner = self.inner.lock().expect("ApiVersions inner not poisoned");
+        inner.node_api_versions.get(&node_id).cloned()
     }
 
-    /// Returns the maximum finalized features epoch.
+    /// Mirrors `ApiVersions.getMaxFinalizedFeaturesEpoch()`.
     pub fn max_finalized_features_epoch(&self) -> i64 {
-        let inner = self.inner.read().unwrap();
+        let inner = self.inner.lock().expect("ApiVersions inner not poisoned");
         inner.max_finalized_features_epoch
     }
 
-    /// Returns the finalized features info containing the epoch and features map.
+    /// Mirrors `ApiVersions.getFinalizedFeaturesInfo()`.
     pub fn finalized_features_info(&self) -> FinalizedFeaturesInfo {
-        let inner = self.inner.read().unwrap();
-        FinalizedFeaturesInfo::new(inner.max_finalized_features_epoch, inner.finalized_features.clone())
+        let inner = self.inner.lock().expect("ApiVersions inner not poisoned");
+        FinalizedFeaturesInfo {
+            finalized_features_epoch: inner.max_finalized_features_epoch,
+            finalized_features: inner.finalized_features.clone(),
+        }
     }
 }
 
@@ -119,60 +137,71 @@ impl Default for ApiVersions {
 
 #[cfg(test)]
 mod tests {
+    //! Translation of `ApiVersionsTest`.
+
     use super::*;
-    use crate::NodeApiVersions;
-    use crate::api_versions_response_data::{FinalizedFeatureKey, SupportedFeatureKey};
+    use crate::common::message::api_versions_response_data::{FinalizedFeatureKey, SupportedFeatureKey};
 
-    /// Translated from `ApiVersionsTest.testFinalizedFeaturesUpdate`
+    /// Java: `testFinalizedFeaturesUpdate`.
     #[test]
-    fn test_finalized_features_update() {
+    fn finalized_features_update() {
         let api_versions = ApiVersions::new();
-        assert_eq!(-1, api_versions.max_finalized_features_epoch());
+        assert_eq!(api_versions.max_finalized_features_epoch(), -1);
 
-        let default_versions: Vec<_> = NodeApiVersions::create()
+        // First update at epoch 1
+        let default_versions: Vec<_> = NodeApiVersions::create_default()
             .all_supported_api_versions()
             .values()
             .cloned()
             .collect();
-
-        let mut supported_feature = SupportedFeatureKey::new();
-        supported_feature.set_name("transaction.version".to_string());
-        supported_feature.set_max_version(2);
-        supported_feature.set_min_version(0);
-
-        let mut finalized_feature = FinalizedFeatureKey::new();
-        finalized_feature.set_name("transaction.version".to_string());
-        finalized_feature.set_max_version_level(2);
-        finalized_feature.set_min_version_level(2);
-
-        api_versions.update(
-            "2",
-            NodeApiVersions::new(&default_versions, &[supported_feature.clone()], &[finalized_feature], 1),
+        let node_2 = Arc::new(
+            NodeApiVersions::with_features(
+                default_versions.clone(),
+                vec![SupportedFeatureKey {
+                    name: "transaction.version".into(),
+                    min_version: 0,
+                    max_version: 2,
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                vec![FinalizedFeatureKey {
+                    name: "transaction.version".into(),
+                    max_version_level: 2,
+                    min_version_level: 2,
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                1,
+            )
+            .expect("ctor"),
         );
-
+        api_versions.update(2, node_2);
         let info = api_versions.finalized_features_info();
-        assert_eq!(1, info.finalized_features_epoch);
-        assert_eq!(
-            &2_i16,
-            info.finalized_features.as_ref().unwrap().get("transaction.version").unwrap()
+        assert_eq!(info.finalized_features_epoch, 1);
+        assert_eq!(*info.finalized_features.get("transaction.version").expect("present"), 2);
+
+        // Second update at the older epoch 0 must NOT overwrite the
+        // newer state — Java's "stale update should be fenced" check.
+        let node_1 = Arc::new(
+            NodeApiVersions::with_features(
+                default_versions,
+                vec![SupportedFeatureKey {
+                    name: "transaction.version".into(),
+                    min_version: 0,
+                    max_version: 2,
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                vec![FinalizedFeatureKey {
+                    name: "transaction.version".into(),
+                    max_version_level: 1,
+                    min_version_level: 1,
+                    unknown_tagged_fields: Vec::new(),
+                }],
+                0,
+            )
+            .expect("ctor"),
         );
-
-        let mut finalized_feature_stale = FinalizedFeatureKey::new();
-        finalized_feature_stale.set_name("transaction.version".to_string());
-        finalized_feature_stale.set_max_version_level(1);
-        finalized_feature_stale.set_min_version_level(1);
-
-        api_versions.update(
-            "1",
-            NodeApiVersions::new(&default_versions, &[supported_feature], &[finalized_feature_stale], 0),
-        );
-
-        // The stale update should be fenced.
+        api_versions.update(1, node_1);
         let info = api_versions.finalized_features_info();
-        assert_eq!(1, info.finalized_features_epoch);
-        assert_eq!(
-            &2_i16,
-            info.finalized_features.as_ref().unwrap().get("transaction.version").unwrap()
-        );
+        assert_eq!(info.finalized_features_epoch, 1);
+        assert_eq!(*info.finalized_features.get("transaction.version").expect("present"), 2);
     }
 }

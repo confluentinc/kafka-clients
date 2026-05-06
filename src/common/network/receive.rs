@@ -12,56 +12,51 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `Receive` trait models the in-progress reading of data from a channel.
-//!
-//! Translated from `org.apache.kafka.common.network.Receive`.
-//!
-//! In Java, `readFrom` takes a `ScatteringByteChannel`. Since `TransportLayer`
-//! extends `ScatteringByteChannel`, in Rust `read_from` takes `&mut dyn TransportLayer`
-//! to preserve the same composability.
+//! Translation of `org.apache.kafka.common.network.Receive`.
 
-use super::TransportLayer;
-
-use std::future::Future;
 use std::io;
-use std::pin::Pin;
 
-/// Models the in-progress reading of data from a channel identified by a source string.
+/// Models the in-progress reading of data from a channel from a source
+/// identified by a string id.
 ///
-/// Data is read incrementally: [`read_from`](Receive::read_from) may need to be called
-/// multiple times before [`complete`](Receive::complete) returns `true`.
-pub trait Receive: Send {
-    /// The identifier of the source from which we are receiving data.
+/// Mirrors the Java interface `org.apache.kafka.common.network.Receive`.
+/// The Java interface extends `Closeable`; in Rust the corresponding
+/// resource cleanup is achieved by `Drop`. We expose `close` as an
+/// explicit method to mirror the Java surface for callers that want to
+/// release resources eagerly.
+pub trait Receive {
+    /// The id of the source from which we are receiving data.
+    /// Mirrors `Receive.source()`.
     fn source(&self) -> &str;
 
-    /// Returns `true` if we are done receiving data.
+    /// Are we done receiving data? Mirrors `Receive.complete()`.
     fn complete(&self) -> bool;
 
-    /// Reads bytes into this receive from the given channel.
+    /// Read bytes into this receive from the given byte source. Returns
+    /// the number of bytes read. Mirrors
+    /// `Receive.readFrom(ScatteringByteChannel)`.
     ///
-    /// In Java, this takes a `ScatteringByteChannel`. Since `TransportLayer` extends
-    /// `ScatteringByteChannel`, in Rust we take `&mut dyn TransportLayer` directly.
-    ///
-    /// # Arguments
-    ///
-    /// * `channel` - The transport layer to read from
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes read.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the reading fails, including `UnexpectedEof` if the
-    /// remote end closes the connection before the receive is complete.
-    fn read_from<'a>(
-        &'a mut self,
-        channel: &'a mut dyn TransportLayer,
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    /// In Java the channel is a `ScatteringByteChannel` (NIO). In Rust we
+    /// use a `&mut dyn io::Read` so the same code can be exercised with a
+    /// `Cursor<Vec<u8>>` in tests and with the Phase 5b/5c Tokio
+    /// non-blocking reader in production. The non-blocking reader is
+    /// expected to be wrapped in a `tokio::io::ReadBuf` adapter exposing
+    /// `io::Read` semantics.
+    fn read_from(&mut self, src: &mut dyn io::Read) -> io::Result<u64>;
 
-    /// Returns `true` if we know how much memory is required to fully read this receive.
+    /// Do we know yet how much memory we require to fully read this?
+    /// Mirrors `Receive.requiredMemoryAmountKnown()`.
     fn required_memory_amount_known(&self) -> bool;
 
-    /// Returns `true` if the underlying memory required to complete reading has been allocated.
+    /// Has the underlying memory required to complete reading been
+    /// allocated yet? Mirrors `Receive.memoryAllocated()`.
     fn memory_allocated(&self) -> bool;
+
+    /// Release any resources held by this receive. Mirrors
+    /// `Receive.close()` (inherited from `Closeable`). The default
+    /// implementation is a no-op; concrete impls override if they hold
+    /// pooled memory.
+    fn close(&mut self) -> io::Result<()> {
+        Ok(())
+    }
 }

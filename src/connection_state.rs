@@ -12,38 +12,52 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The states of a node connection.
+//! Translation of `org.apache.kafka.clients.ConnectionState`.
 //!
-//! Translated from `org.apache.kafka.clients.ConnectionState`.
+//! Note: the Java type lives in `org.apache.kafka.clients` (not `common`),
+//! so it sits at the crate root rather than under `common::`.
 
 /// The states of a node connection.
 ///
-/// - `Disconnected`: connection has not been successfully established yet
-/// - `Connecting`: connection is under progress
-/// - `CheckingApiVersions`: connection has been established and api versions check is in progress.
-///   Failure of this check will cause connection to close.
-/// - `Ready`: connection is ready to send requests
-/// - `AuthenticationFailed`: connection failed due to an authentication error
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// * `Disconnected` — connection has not been successfully established yet.
+/// * `Connecting` — connection is under progress.
+/// * `CheckingApiVersions` — connection has been established and api
+///   versions check is in progress. Failure of this check will cause the
+///   connection to close.
+/// * `Ready` — connection is ready to send requests.
+/// * `AuthenticationFailed` — connection failed due to an authentication
+///   error.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConnectionState {
+    /// Mirrors `ConnectionState.DISCONNECTED`.
     Disconnected,
+    /// Mirrors `ConnectionState.CONNECTING`.
     Connecting,
+    /// Mirrors `ConnectionState.CHECKING_API_VERSIONS`.
     CheckingApiVersions,
+    /// Mirrors `ConnectionState.READY`.
     Ready,
+    /// Mirrors `ConnectionState.AUTHENTICATION_FAILED`.
     AuthenticationFailed,
 }
 
 impl ConnectionState {
-    /// Returns `true` if the connection is in a disconnected state
-    /// (either explicitly disconnected or authentication failed).
-    pub fn is_disconnected(&self) -> bool {
-        matches!(self, Self::AuthenticationFailed | Self::Disconnected)
+    /// Mirrors `ConnectionState.isDisconnected()`.
+    ///
+    /// Returns true when the connection is in either the
+    /// [`ConnectionState::Disconnected`] or
+    /// [`ConnectionState::AuthenticationFailed`] state.
+    pub fn is_disconnected(self) -> bool {
+        matches!(self, ConnectionState::Disconnected | ConnectionState::AuthenticationFailed)
     }
 
-    /// Returns `true` if the connection is in a connected state
-    /// (either checking API versions or ready).
-    pub fn is_connected(&self) -> bool {
-        matches!(self, Self::CheckingApiVersions | Self::Ready)
+    /// Mirrors `ConnectionState.isConnected()`.
+    ///
+    /// Returns true when the connection is in either the
+    /// [`ConnectionState::CheckingApiVersions`] or [`ConnectionState::Ready`]
+    /// state.
+    pub fn is_connected(self) -> bool {
+        matches!(self, ConnectionState::CheckingApiVersions | ConnectionState::Ready)
     }
 }
 
@@ -51,17 +65,18 @@ impl ConnectionState {
 mod tests {
     use super::*;
 
+    /// `ConnectionState.java` has no dedicated test class; the predicates
+    /// are exercised through `ClusterConnectionStatesTest`. Keeping a tiny
+    /// unit check for the predicate truth table mirrors the Java enum's
+    /// behaviour and pins drift if the variant set ever changes.
     #[test]
-    fn test_disconnected_states() {
+    fn predicate_truth_table() {
         assert!(ConnectionState::Disconnected.is_disconnected());
         assert!(ConnectionState::AuthenticationFailed.is_disconnected());
         assert!(!ConnectionState::Connecting.is_disconnected());
         assert!(!ConnectionState::CheckingApiVersions.is_disconnected());
         assert!(!ConnectionState::Ready.is_disconnected());
-    }
 
-    #[test]
-    fn test_connected_states() {
         assert!(ConnectionState::CheckingApiVersions.is_connected());
         assert!(ConnectionState::Ready.is_connected());
         assert!(!ConnectionState::Disconnected.is_connected());

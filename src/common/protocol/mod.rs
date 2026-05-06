@@ -12,29 +12,37 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Kafka wire protocol serialization/deserialization.
+//! Translation of `org.apache.kafka.common.protocol`.
 //!
-//! This module provides traits and implementations for reading and writing
-//! Kafka protocol messages to/from byte streams.
+//! The runtime side of the protocol (`Readable`, `Writable`,
+//! `ByteBufferAccessor`, `Message`, `ApiMessage`, `ApiKeys`, `Errors`, …)
+//! lives at the top level. The `types` submodule contains the
+//! `org.apache.kafka.common.protocol.types.*` translation (`Type`, `Schema`,
+//! `Struct`, `Field`, `RawTaggedFieldWriter`, …).
 
 pub mod api_keys;
+pub mod api_message;
 pub mod byte_buffer_accessor;
+pub mod data_output_stream_writable;
 pub mod errors;
 pub mod message;
 pub mod message_size_accumulator;
 pub mod message_util;
 pub mod object_serialization_cache;
 pub mod readable;
+pub mod send_builder;
 pub mod types;
-pub mod varint;
 pub mod writable;
 
-pub use api_keys::ApiKeys;
-pub use byte_buffer_accessor::ByteBufferAccessor;
+pub use api_keys::{ApiKey, ApiKeys};
+pub use api_message::ApiMessage;
+pub use byte_buffer_accessor::{ByteBufferAccessor, SliceReadable};
+pub use data_output_stream_writable::DataOutputStreamWritable;
 pub use errors::Errors;
-pub use message::{ApiMessage, Message};
+pub use message::Message;
 pub use message_size_accumulator::MessageSizeAccumulator;
 pub use object_serialization_cache::ObjectSerializationCache;
-pub use readable::{RawTaggedField, Readable};
-pub use types::{BoundField, Field, Schema, SchemaType, TaggedField};
+pub use readable::Readable;
+pub use send_builder::SendBuilder;
+pub use types::RawTaggedField;
 pub use writable::Writable;

@@ -280,10 +280,18 @@ impl SchemaGenerator {
                     continue;
                 }
 
+                // Apply per-field `flexibleVersions` override (Java's
+                // `field.flexibleVersions().orElse(messageFlexibleVersions)`). For
+                // example, `RequestHeader.ClientId` declares
+                // `"flexibleVersions": "none"` and must always use the
+                // length-prefixed (non-compact) schema type even when the message
+                // itself is flexible.
+                let field_flex = Self::field_flexible_versions(field, self.message_flexible_versions);
                 let field_type_str = self.field_type_to_schema_type(
                     field.field_type(),
                     field.nullable_versions().contains(version),
                     version,
+                    field_flex,
                 )?;
 
                 let comma = if i == final_line { "" } else { "," };
@@ -308,6 +316,16 @@ impl SchemaGenerator {
         buffer.printf("}");
 
         Ok(())
+    }
+
+    /// Returns the effective flexible versions for a field, applying the
+    /// per-field `flexibleVersions` override when set. Mirrors
+    /// `MessageDataGenerator.fieldFlexibleVersions` in the Java generator.
+    fn field_flexible_versions(field: &FieldSpec, message_flexible_versions: Versions) -> Versions {
+        match field.flexible_versions() {
+            Some(field_flex) => field_flex,
+            None => message_flexible_versions,
+        }
     }
 
     fn find_last_valid_field_index(&self, struct_spec: &StructSpec, version: i16, tagged_only: bool) -> Option<usize> {
@@ -347,10 +365,12 @@ impl SchemaGenerator {
                     continue;
                 }
 
+                let field_flex = Self::field_flexible_versions(field, self.message_flexible_versions);
                 let field_type_str = self.field_type_to_schema_type(
                     field.field_type(),
                     field.nullable_versions().contains(version),
                     version,
+                    field_flex,
                 )?;
 
                 let comma = if i == last_idx { "" } else { "," };
@@ -373,8 +393,9 @@ impl SchemaGenerator {
         field_type: &FieldType,
         nullable: bool,
         version: i16,
+        field_flexible_versions: Versions,
     ) -> Result<String, String> {
-        let flexible = self.message_flexible_versions.contains(version);
+        let flexible = field_flexible_versions.contains(version);
 
         match field_type {
             FieldType::Bool => {
@@ -473,7 +494,8 @@ impl SchemaGenerator {
                 }
             },
             FieldType::Array(element_type) => {
-                let element_schema = self.field_type_to_schema_type(element_type, false, version)?;
+                let element_schema =
+                    self.field_type_to_schema_type(element_type, false, version, field_flexible_versions)?;
                 if flexible {
                     let prefix = if nullable {
                         "CompactArrayOf::nullable"

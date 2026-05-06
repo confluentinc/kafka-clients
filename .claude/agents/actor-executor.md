@@ -1,7 +1,7 @@
 ---
 name: "actor-executor"
 description: "Use this agent when the user needs to execute a code translation or implementation task following the Actor role defined in the project's agent-roles.md. This includes generating Rust code translated from Java, running builds and tests, fixing reviewer comments, and committing changes. Examples:\\n\\n- user: \"Translate the KafkaConsumer class from Java to Rust\"\\n  assistant: \"I'll use the Actor agent to translate the KafkaConsumer class, verify it builds and passes tests, and commit the changes.\"\\n  <commentary>Since the user wants code translated and verified, use the Agent tool to launch the actor-executor agent to handle the full workflow.</commentary>\\n\\n- user: \"Implement the Message trait with read/write methods\"\\n  assistant: \"I'll use the Actor agent to implement the Message trait, ensure all tests pass, and commit incrementally.\"\\n  <commentary>Since the user wants new code implemented following the project's translation rules, use the Agent tool to launch the actor-executor agent.</commentary>\\n\\n- user: \"Fix the issues from the reviewer and continue with the next task\"\\n  assistant: \"I'll use the Actor agent to check COMMENTS.N.md, fix the issues, move resolved comments to COMMENTS.DONE.N.md, and continue.\"\\n  <commentary>Since the user wants reviewer comments addressed following the Actor workflow, use the Agent tool to launch the actor-executor agent.</commentary>"
-model: opus
+model: claude-opus-4-7
 color: green
 memory: project
 ---
@@ -27,6 +27,7 @@ For every task, follow this exact loop:
 - Ensure every method from the source Java class is implemented.
 - Translate ALL corresponding tests from the Java codebase. Never skip a test unless it's genuinely irrelevant to Rust (explain why if skipping).
 - If there are blockers (missing dependencies/classes), implement those as well.
+- **For large phases with multiple independent classes, consider spawning a sub-agent per class or logical group** using the Agent tool. Each sub-agent translates its assigned class(es), runs verification checks, commits, and returns — keeping each session focused and avoiding context exhaustion mid-phase. Use your judgment: a small phase with two related classes fits in one session; a large phase with five unrelated classes benefits from parallelism.
 
 ### 3. Verify (Definition of Done)
 After each logical step, run ALL of these and fix any failures:
@@ -45,6 +46,8 @@ Before committing, review your own code for:
 - Proper rustdoc translated from javadoc
 - No unnecessary heap allocations (stack when possible)
 - Public API: most general borrowed form for inputs, immutable returns, no unnecessary copying of key/value/header byte arrays
+- **If the translated class is on the send path**: audit for per-message heap allocations (intermediate copy buffers, `String` clones for identifiers, `Box<dyn Future>` per send, per-message `tokio::spawn`). Verify wire sends use `IoSlice`/`write_vectored`, not a single assembled buffer.
+- **Tokio pitfalls**: check any `select!` arms for cancellation safety; ensure no `MutexGuard` is held across an `.await`
 
 ### 5. Commit
 - Commit with a clear, descriptive message explaining what was done.
@@ -55,13 +58,15 @@ Before committing, review your own code for:
 - Continue until the task is fully complete and all checks pass.
 
 ## Key Translation Rules (Summary)
-- Java packages → Rust modules (e.g., `org.apache.kafka.clients.consumer` → `clients::consumer`)
+- Java packages → Rust modules (e.g., `org.apache.kafka.clients.consumer` → `consumer`; `clients` must NOT appear in module or folder names)
 - PascalCase class names preserved, camelCase methods → snake_case
 - Exceptions → `Result<T, KafkaError>` with `is_retriable()`, `is_fatal()`, `txn_requires_abort()`
 - No `panic!` in public API except unrecoverable errors (OOM, division by zero)
-- Callbacks → await after async call; non-blocking callbacks → `tokio::task::spawn`
+- Callbacks → await after async call; non-blocking callbacks → `tokio::task::spawn`; callback obligation survives async translation — fire at the same lifecycle point
+- `tokio::select!` cancels the losing branch mid-execution — never put side-effectful operations in a `select!` arm unless the future is cancellation-safe
 - Non-blocking IO with Tokio, single Selector pattern
 - Big-endian wire protocol, varint encoding per wire-protocol.md
+- Zero-copy through the full write path: serialize directly into the batch buffer, no finalization copies, use `IoSlice`/`write_vectored` for wire sends
 
 ## Update your agent memory
 As you discover codepaths, module locations, architectural decisions, test patterns, common pitfalls, and translation edge cases in this codebase, update your agent memory. Write concise notes about what you found and where.

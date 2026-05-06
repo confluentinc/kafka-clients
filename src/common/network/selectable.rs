@@ -12,104 +12,135 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! An interface for asynchronous, multi-channel network I/O.
+//! Translation of `org.apache.kafka.common.network.Selectable`.
 //!
-//! Translated from `org.apache.kafka.common.network.Selectable`.
+//! Java's `Selectable` is the trait through which `NetworkClient` drives
+//! the `Selector`. It exposes connect/poll/send/disconnect plus the
+//! per-poll output collections (completed sends/receives, disconnected
+//! nodes, newly connected nodes).
+//!
+//! The Rust translation keeps the same shape but with two adjustments:
+//!
+//! 1. **Async `poll`.** Java's `poll(long)` blocks the calling thread on
+//!    NIO selection. Rust uses Tokio; `poll` is `async fn` (CLAUDE.md
+//!    rule 9.1).
+//!
+//! 2. **Numeric connection ids.** Java keys connections by `String`
+//!    (see `Selectable.connect(String id, ...)`). The Rust translation
+//!    uses `i32` everywhere — it is the broker node id (`Node::id()`)
+//!    that the producer code path always converts from, and using the
+//!    integer avoids a per-message `String` clone on the hot path
+//!    (CLAUDE.md rule 11; see `design/history/Milestone-1/Phase-5/NOTES.md`
+//!    "Hot-path identifier interning"). The Selector implementation in
+//!    Phase 5c-2 will accept `i32` ids directly; downstream
+//!    `KafkaChannel`s already accept `Arc<str>` for the human-readable
+//!    label, so no string is materialised on the request path.
 
-use super::ChannelState;
-use super::NetworkReceive;
-use super::NetworkSend;
-
-use std::collections::HashMap;
-use std::io;
 use std::net::SocketAddr;
 
-/// See [`Selectable::connect`] — use the platform default buffer size.
+use crate::common::errors::KafkaError;
+use crate::common::network::{ChannelState, NetworkReceive, NetworkSend};
+
+/// Mirrors `Selectable.USE_DEFAULT_BUFFER_SIZE`.
 pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
 
 /// An interface for asynchronous, multi-channel network I/O.
 ///
-/// Translated from the Java `Selectable` interface.
+/// Mirrors Java's `org.apache.kafka.common.network.Selectable`. See the
+/// module-level rustdoc for the design notes on `i32` ids and the
+/// `async fn poll` signature.
 ///
-/// All I/O methods are `async` per CLAUDE.md rule 8.
+/// All methods are documented in lock-step with the Java original. The
+/// poll-output accessors (`completed_sends`, `completed_receives`,
+/// `disconnected`, `connected`) reset on each call to `poll` — same
+/// semantics as Java.
 pub trait Selectable: Send {
-    /// Begin establishing a socket connection to the given address identified by
-    /// the given id.
+    /// Begin establishing a socket connection to the given address.
     ///
-    /// # Arguments
+    /// * `id` — the connection id (broker node id).
+    /// * `address` — the resolved peer address.
+    /// * `send_buffer_size` — SO_SNDBUF (use [`USE_DEFAULT_BUFFER_SIZE`]).
+    /// * `receive_buffer_size` — SO_RCVBUF (use [`USE_DEFAULT_BUFFER_SIZE`]).
     ///
-    /// * `id` - The id for this connection
-    /// * `address` - The address to connect to
-    /// * `peer_host` - The hostname of the remote peer (used for TLS SNI and hostname verification)
-    /// * `send_buffer_size` - The send buffer for the socket
-    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
-    /// * `receive_buffer_size` - The receive buffer for the socket
-    ///   (use [`USE_DEFAULT_BUFFER_SIZE`] for platform default)
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if we cannot begin connecting.
+    /// Mirrors `Selectable.connect(String, InetSocketAddress, int, int)`.
+    /// Java throws `IOException`; we surface failures as
+    /// [`KafkaError::Network`] (retriable).
     fn connect(
         &mut self,
-        id: &str,
+        id: i32,
         address: SocketAddr,
-        peer_host: &str,
         send_buffer_size: i32,
         receive_buffer_size: i32,
-    ) -> impl std::future::Future<Output = io::Result<()>> + Send;
+    ) -> Result<(), KafkaError>;
 
-    /// Wakeup this selector if it is blocked on I/O.
+    /// Wakeup this selector if it is blocked on I/O. Mirrors
+    /// `Selectable.wakeup()`.
     fn wakeup(&self);
 
-    /// Close this selector.
-    fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
+    /// Close this selector. Mirrors `Selectable.close()`.
+    fn close(&mut self);
 
-    /// Close the connection identified by the given id.
-    fn close_channel(&mut self, id: &str) -> impl std::future::Future<Output = ()> + Send;
+    /// Close the connection identified by the given id. Mirrors
+    /// `Selectable.close(String)`.
+    fn close_connection(&mut self, id: i32);
 
-    /// Queue the given request for sending in the subsequent `poll()` calls.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the channel does not exist.
-    fn send(&mut self, send: NetworkSend) -> Result<(), String>;
+    /// Queue the given request for sending in the subsequent
+    /// [`Self::poll`] calls. Mirrors `Selectable.send(NetworkSend)`.
+    fn send(&mut self, send: NetworkSend);
 
     /// Do I/O. Reads, writes, connection establishment, etc.
     ///
-    /// # Arguments
+    /// `timeout_ms` is the maximum amount of time to block when there is
+    /// nothing to do. Mirrors `Selectable.poll(long)`. Java blocks the
+    /// thread on `Selector.select(timeout)`; the Rust translation is
+    /// async because Tokio uses cooperative scheduling.
     ///
-    /// * `timeout_ms` - The amount of time to block if there is nothing to do
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if I/O fails.
-    fn poll(&mut self, timeout_ms: i64) -> impl std::future::Future<Output = io::Result<()>> + Send;
+    /// Java throws `IOException`; we surface failures as
+    /// [`KafkaError::Network`].
+    #[allow(async_fn_in_trait)]
+    async fn poll(&mut self, timeout_ms: i64) -> Result<(), KafkaError>;
 
-    /// The list of sends that completed on the last `poll()` call.
+    /// The list of sends that completed on the last [`Self::poll`] call.
+    /// Mirrors `Selectable.completedSends()`.
     fn completed_sends(&self) -> &[NetworkSend];
 
-    /// The collection of receives that completed on the last `poll()` call.
-    fn completed_receives(&self) -> Vec<&NetworkReceive>;
+    /// The collection of receives that completed on the last
+    /// [`Self::poll`] call.
+    ///
+    /// Mirrors `Selectable.completedReceives()`. Note: Java's contract
+    /// says callers are responsible for closing the returned receives if
+    /// they were backed by a `MemoryPool`. Our Phase 5a `NetworkReceive`
+    /// allocates eagerly (no `MemoryPool`), so dropping the slice is
+    /// sufficient.
+    fn completed_receives(&self) -> &[NetworkReceive];
 
-    /// The connections that finished disconnecting on the last `poll()` call.
-    /// Channel state indicates the local channel state at the time of disconnection.
-    fn disconnected(&self) -> &HashMap<String, ChannelState>;
+    /// The connections that finished disconnecting on the last
+    /// [`Self::poll`] call. The map value indicates the local channel
+    /// state at the time of disconnection. Mirrors
+    /// `Selectable.disconnected()`.
+    fn disconnected(&self) -> &std::collections::HashMap<i32, ChannelState>;
 
-    /// The list of connections that completed their connection on the last `poll()` call.
-    fn connected(&self) -> &[String];
+    /// The list of connections that completed their connection on the
+    /// last [`Self::poll`] call. Mirrors `Selectable.connected()`.
+    fn connected(&self) -> &[i32];
 
-    /// Disable reads from the given connection.
-    fn mute(&mut self, id: &str);
+    /// Disable reads from the given connection. Mirrors
+    /// `Selectable.mute(String)`.
+    fn mute(&mut self, id: i32);
 
-    /// Re-enable reads from the given connection.
-    fn unmute(&mut self, id: &str);
+    /// Re-enable reads from the given connection. Mirrors
+    /// `Selectable.unmute(String)`.
+    fn unmute(&mut self, id: i32);
 
-    /// Disable reads from all connections.
+    /// Disable reads from all connections. Mirrors
+    /// `Selectable.muteAll()`.
     fn mute_all(&mut self);
 
-    /// Re-enable reads from all connections.
+    /// Re-enable reads from all connections. Mirrors
+    /// `Selectable.unmuteAll()`.
     fn unmute_all(&mut self);
 
-    /// Returns `true` if a channel is ready.
-    fn is_channel_ready(&self, id: &str) -> bool;
+    /// Returns true if a channel is ready. Mirrors
+    /// `Selectable.isChannelReady(String)`.
+    fn is_channel_ready(&self, id: i32) -> bool;
 }

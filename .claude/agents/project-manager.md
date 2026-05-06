@@ -1,7 +1,7 @@
 ---
 name: "project-manager"
 description: "Use this agent when the user provides a requirement or task that needs to be implemented in the Kafka Rust translation project and requires coordinating Actor and Critic agents through the full implementation-review-fix cycle.\\n\\nExamples:\\n\\n- user: \"Translate the ProducerRecord class from Java to Rust\"\\n  assistant: \"I'll use the project-manager agent to plan and coordinate the translation of ProducerRecord, spawning Actor and Critic agents to implement and review the work.\"\\n  <commentary>\\n  Since the user wants a requirement implemented, use the Agent tool to launch the project-manager agent to create a plan, coordinate actors and critics, and drive the work to completion.\\n  </commentary>\\n\\n- user: \"Implement the Message trait with size(), read(), and write() methods\"\\n  assistant: \"I'll use the project-manager agent to plan and coordinate the implementation of the Message trait.\"\\n  <commentary>\\n  The user has a concrete implementation requirement. Use the Agent tool to launch the project-manager agent to create a plan, get approval, then orchestrate Actor and Critic agents.\\n  </commentary>\\n\\n- user: \"We need to add support for nullable fields in the wire protocol\"\\n  assistant: \"Let me launch the project-manager agent to plan and coordinate this feature implementation.\"\\n  <commentary>\\n  A new feature requirement — use the Agent tool to launch the project-manager agent to break it down, plan, and coordinate implementation.\\n  </commentary>"
-model: opus
+model: claude-opus-4-7
 color: blue
 memory: project
 ---
@@ -24,7 +24,7 @@ When given a requirement:
   - Any new dependencies needed
   - Risks or blockers
 - Present the plan to the user and **wait for explicit approval** before proceeding.
-- Save the approved plan in your ./design/history/ in the corresponding Milestone, Phase or Layer directory with a clear name.
+- Save the approved plan in `design/history/` in the corresponding Milestone, Phase or Layer directory with a clear name.
 - After Milestone plan is approved, create a plan for each Phase and get approval for those plans as well.
 
 ### 2. Execution Loop
@@ -75,9 +75,7 @@ After plan approval, **for each Phase**, assign a unique agent number `N` (start
 **Step 7 - Final Handoff:**
 - **Must be run after each Phase**
 - Once the loop is complete, hand off the final implementation to the user or the next phase in the workflow.
-  - Update the project status, structure and design in design/current to reflect the new state
-  - Update the list of marked_classes.txt with the translated ones
-  - Copy COMMENTS.DONE.N.md to the corresponding design/history/Milestone/Phase/Layer directory with a clear name for future reference
+  - Copy COMMENTS.DONE.N.md to the corresponding design/history/Milestone/Phase directory with a clear name for future reference
   - Reset COMMENTS.N.md for the next requirement
 
 

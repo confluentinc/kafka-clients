@@ -12,48 +12,31 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The `KafkaSend` trait models the in-progress sending of data.
-//!
-//! Translated from `org.apache.kafka.common.network.Send`.
-//!
-//! Renamed from `Send` to `KafkaSend` to avoid conflict with `std::marker::Send`.
+//! Translation of `org.apache.kafka.common.network.Send`.
 
-use super::TransportLayer;
-
-use std::future::Future;
 use std::io;
-use std::pin::Pin;
 
-/// Models the in-progress sending of data.
+use super::TransferableChannel;
+
+/// Models the in-progress sending of data to a [`TransferableChannel`].
 ///
-/// This trait represents a send operation that may require multiple calls to
-/// [`write_to`](KafkaSend::write_to) before all data is fully written.
+/// Mirrors the Java interface `org.apache.kafka.common.network.Send`.
 ///
-/// All I/O is async per CLAUDE.md rule 8.
-pub trait KafkaSend: Send {
-    /// Returns `true` if this send is complete.
+/// Note: the Rust trait is named `Send` to match the Java name. It must
+/// always be imported qualified (`use crate::common::network::send::Send as
+/// NetworkSendTrait;` or `use crate::common::network;` then `network::Send`)
+/// so it does not clash with `std::marker::Send`.
+pub trait Send {
+    /// Is this send complete? Mirrors `Send.completed()`.
     fn completed(&self) -> bool;
 
-    /// Writes some as-yet unwritten bytes from this send to the provided channel.
+    /// Write some as-yet unwritten bytes from this send to the provided
+    /// channel. It may take multiple calls for the send to be completely
+    /// written. Returns the number of bytes written.
     ///
-    /// It may take multiple calls for the send to be completely written.
-    ///
-    /// # Arguments
-    ///
-    /// * `channel` - The channel to write to
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes written.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the write fails.
-    fn write_to<'a>(
-        &'a mut self,
-        channel: &'a mut dyn TransportLayer,
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    /// Mirrors `Send.writeTo(TransferableChannel)`.
+    fn write_to(&mut self, channel: &mut dyn TransferableChannel) -> io::Result<u64>;
 
-    /// Returns the total size of this send in bytes.
-    fn size(&self) -> usize;
+    /// Total size of the send, in bytes. Mirrors `Send.size()`.
+    fn size(&self) -> u64;
 }

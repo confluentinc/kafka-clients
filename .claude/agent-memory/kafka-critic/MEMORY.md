@@ -1,23 +1,30 @@
-- [Generator tagged field patterns](review_patterns.md) — Default-value checks missing for primitives/structs/UUIDs in tagged field write/size
-- [Uuid signed/unsigned mismatch](uuid_signed_unsigned.md) — Java Uuid.compareTo uses signed long but Rust uses unsigned u64
-- [Test coverage gap patterns](test_coverage_gaps.md) — Error messages, iteration tests, and utility tests commonly under-translated
-- [Nullable default mismatch](nullable_default_mismatch.md) — Nullable string/bytes defaults to None but Java defaults to empty — 66 fields affected
-- [Layer 4 Network Transport patterns](review_layer4_patterns.md) — EOF semantics, trait composability, sync vs async pitfalls in Java NIO to Rust translation
-- [Layer 5 Channel & Selection patterns](review_layer5_patterns.md) — Format string typos, poll loop design, test coverage gaps in Selector/KafkaChannel
-- [Layer 3 Request/Response patterns](review_layer3_patterns.md) — Validation gaps, panic vs Result in builders, per-field flexibleVersions
-- [Layer 6 NetworkClient patterns](review_layer6_patterns.md) — Async boundary gaps, exception hierarchy, time update, ISE mapping
-- [M2 Phase 1 patterns](review_m2_phase1_patterns.md) — Option vs Result for Java exceptions, compression wire compat, missing Serializer overloads
-- [M2 Phase 2 patterns](review_m2_phase2_patterns.md) — Negative varint-as-usize cast causes panic; Java try/catch vs Rust missing size guard
-- [M2 Phase 3 patterns](review_m2_phase3_patterns.md) — Assert-vs-clamp in slice(), missing delegated validation, i32-to-usize wrap in batch layer
-- [M2 Phase 5 patterns](review_m2_phase5_patterns.md) — TOCTOU in chain snapshot-before-await, OOM omission, reduced large-value test coverage
-- [M2 Phase 4 patterns](review_m2_phase4_patterns.md) — Watch channel notify-on-set vs latch semantics, null-return vs empty-response, error type erasure
-- [M2 Phase 6 patterns](review_m2_phase6_patterns.md) — Callback drop/no-fire, leader epoch tracking dead code, IncompleteBatches unused, buffer pool deallocate fakes
-- [M2 Phase 7 patterns](review_m2_phase7_patterns.md) — Ownership transfer gap in retry path, split_and_reenqueue missing silently drops records, test gaps predict bugs
-- [M2 Phase 8 patterns](review_m2_phase8_patterns.md) — close/flush never awaits async sender, accumulator not closed, ApiException callback contract broken
-- [from_config factory patterns](review_from_config_patterns.md) — Hardcoded defaults instead of config values, missing validation steps in constructor translation
-- [Milestone 3 Phase 1 patterns](review_milestone3_phase1.md) — Config default-vs-constant mismatch: Default impl may ignore its own constants
-- [SSL/TLS translation patterns](review_ssl_tls_patterns.md) — Buffered data tracking, crypto provider deps, Java SSLEngine vs rustls test scope
-- [SASL Authenticator patterns](review_sasl_authenticator_patterns.md) — try-catch scope mismatch, integer wrapping near MAX_VALUE
-- [Milestone 4 Phase 1 patterns](review_milestone4_phase1.md) — Ownership-consuming async methods break Java retry patterns, panic vs Result
-- [MockProducer patterns](review_mockproducer_patterns.md) — Option::take() changes error injection from persistent to one-shot; Mutex reentrance
-- [FFI Producer patterns](review_ffi_producer_patterns.md) — Out-parameter null-init on error paths, batch partial-failure cleanup
+- [Phase-1 review patterns](phase1_review_patterns.md) — high-yield areas + recurring translation-bug patterns I saw in Phase 1
+- [Phase-2 review patterns](phase2_review_patterns.md) — generator emit + runtime wire-protocol translation gotchas
+- [Phase-3 review patterns](phase3_review_patterns.md) — record-format trait surface + zero-copy regressions in SimpleRecord-style value types
+- [Phase-3b review patterns](phase3b_review_patterns.md) — serializer/deserializer translations: UUID text form, NaN bits, constant re-export rule, hot-path zero-copy
+- [Phase-3c review patterns](phase3c_review_patterns.md) — codec translations: LZ4 framing byte-exact verification, snappy xerial-vs-RFC trap, compression-ratio step direction
+- [Phase-3d review patterns](phase3d_review_patterns.md) — read-side records: iterator-error contract drift, marker-trait adaptation for Java default methods, header-size boundary tests
+- [Phase-3d-4 review patterns](phase3d4_review_patterns.md) — MemoryRecordsBuilder: streaming-vs-at-close compression trap, dead-code if/else, pointer-equality DoD tests
+- [Phase 3d-4 streaming-codec self-ref](phase3d4_streaming_codec.md) — verified-safe pattern: Box<ByteBufferOutputStream> + Box<dyn Write + 'static> borrowing it via raw pointer, with explicit Drop impl
+- [Phase-3e review patterns](phase3e_review_patterns.md) — Java-captured wire byte fixtures + codec close-path traps (gzip Z_SYNC_FLUSH, zstd Drop chain, snappy xerial)
+- [Phase-4a review patterns](phase4a_review_patterns.md) — cluster data types: Arc<str> end-to-end audit, sentinel caching, bootstrap hostname trap, hash-vs-equals scope
+- [Phase-4b review patterns](phase4b_review_patterns.md) — metadata stack: volatile-vs-mutex hot reads, "covered by other test" deferral verification, listener lock scope, silent unwrap_or_default of Result
+- [Phase-4b Round-2 patterns](phase4b_round2_patterns.md) — verified-good translation patterns: ArcSwap as volatile-Arc, listener non-reentrancy doc, sync-Mutex concurrent test shape
+- [Phase-4c review patterns](phase4c_review_patterns.md) — constant-file audit, deferred-test mapping verified, reverse-DNS gap on enum-variant rustdoc, InetSocketAddress shim, sync HostResolver acceptable
+- [Phase-5a review patterns](phase5a_review_patterns.md) — network primitives: pre-filled test-fixture state divergence, scratch-vec hot path, NPE-mirroring panic over-strictness, Locale.ROOT vs ASCII case folding
+- [Phase-5b review patterns](phase5b_review_patterns.md) — TransportLayer: Tokio try_read 3-state EOF gap, disconnect-vs-close key-cancel divergence, trait-surface freeze risk, requireNonNull ≠ assert!(!is_empty)
+- [Phase-5b Round-2 patterns](phase5b_round2_patterns.md) — verified-good fix shapes: Tokio EOF 3-arm match, OnceLock+clone singleton, inherent→trait migration safety, deferral integrity check
+- [Phase-5b-2 review patterns](phase5b2_review_patterns.md) — rustls↔SSLEngine bridge: unbounded plaintext queue, has_bytes_buffered IoState gap, dual WouldBlock translation, cipher-string Debug-vs-IANA
+- [Phase-5b-2 Round-2 patterns](phase5b2_round2_patterns.md) — early-return-bypasses-bookkeeping bug, oversized-test-buffer mask, doc-comment under-claims precision, macOS RST-vs-FIN broadening criteria
+- [Phase-5b-3 review patterns](phase5b3_review_patterns.md) — KafkaChannel + ChannelBuilders: eager-vs-lazy principal cache, test fidelity gaps for partial-write and ConfigDef-driven filters, package-private→pub(crate) translation
+- [Phase 5b cross-phase patterns](phase5b_cross_phase_patterns.md) — recurring axes across 5b-1/5b-2/5b-3 to carry into Phase 5c Selector + Authenticator review
+- [Phase-5c-1 review patterns](phase5c1_review_patterns.md) — connection-state plumbing + trait surfaces (Selectable/KafkaClient/MetadataUpdater); hot-path id-interning consistency, package-private→pub(crate), test-fixture default divergence
+- [Phase-5c-2 review patterns](phase5c2_review_patterns.md) — Tokio Selector translation: idle-expiry update scope (real production bug), clear() ordering, ignored connect parameters, single-task-vs-per-channel deviation acceptance criteria, cancel-safety checklist
+- [Phase-5c-2 Round-2 patterns](phase5c2_round2_patterns.md) — verified-good fix shapes: io-progress flag for per-key idle.update, clear() split with closing-channels between, TcpSocket pre-connect ordering, BTreeSet+HashMap LRU; "conditional assertion" anti-pattern in regression tests
+- [Phase-5d review patterns](phase5d_review_patterns.md) — NetworkClient + NetworkClientUtils: doSend UnsupportedVersion 3-arm fan-out trap, KIP-511 fallback test gap, test-name overclaim, untested 60-line code paths, Wrapping<i32> correlation
+- [Phase 5 cross-phase patterns](phase5_cross_phase_patterns.md) — recurring axes across 5a/5b/5c/5d to carry into Phase 6 Producer Internals; multi-arm fan-out, deferral integrity, hot-path Arc<str>, cancellation safety
+- [Phase-6a review patterns](phase6a_review_patterns.md) — BufferPool + futures: Java try/finally→Drop guard gap, ByteBuffer.clear vs Vec zero-fill, false-passing cancellation tests
+- [Phase-6a Round-2 patterns](phase6a_round2_patterns.md) — verified-good fix shapes: RAII WaiterGuard for cancellation cleanup, unsafe set_len vs zero-fill, signal-on-exit refactor; new-defect scan checklist
+- [Phase-6b review patterns](phase6b_review_patterns.md) — ProducerBatch: unsafe Send/Sync audit, OnceLock CAS-once parity, per-record bifurcation drift, hot-path zero-copy on try_append/split, missing-method scan
+- [Phase-6b Round-2 patterns](phase6b_round2_patterns.md) — bytes-crate zero-copy capacity-preservation verification, try_into_mut Err+reserve soundness hazard, snapshot fields for moved-out storage
+- [Phase-6c review patterns](phase6c_review_patterns.md) — null-vs-empty topic guard, owned-record interceptor clone, Box<dyn Fn> test seam, race-loser branch testability, Java-assert vs Rust-assert! divergence

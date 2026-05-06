@@ -12,58 +12,70 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Cluster resource listeners collection.
-//!
-//! Corresponds to `org.apache.kafka.common.internals.ClusterResourceListeners`.
-//!
-//! In Java, `ClusterResourceListeners.maybeAdd()` uses `instanceof` to check if
-//! an arbitrary object implements the `ClusterResourceListener` interface. In Rust,
-//! callers add listeners explicitly via `add_listener()`.
+//! Translation of `org.apache.kafka.common.internals.ClusterResourceListeners`.
 
-use crate::common::{ClusterResource, ClusterResourceListener};
+// Phase 4a translation. The producer/consumer/metadata stack that consumes
+// this aggregator lands in Phase 4b/Phase 6 — until then the public API is
+// dead-code from the perspective of the lib build but lives behind tests.
+#![allow(dead_code)]
 
-/// A collection of [`ClusterResourceListener`]s that are notified when the cluster
-/// resource (cluster ID) changes.
+use std::sync::{Arc, Mutex};
+
+use crate::common::ClusterResource;
+use crate::common::cluster_resource_listener::ClusterResourceListener;
+
+/// Aggregator for [`ClusterResourceListener`] instances. Mirrors Java's
+/// `ClusterResourceListeners`.
 ///
-/// Corresponds to `org.apache.kafka.common.internals.ClusterResourceListeners`.
+/// Java's `maybeAdd(Object)` used `instanceof` to filter generic
+/// `Object`/`List<?>` collections. The Rust translation drops the
+/// `instanceof` check — call sites pass concretely-typed
+/// `Arc<dyn ClusterResourceListener>` directly.
 ///
-/// In Java, `maybeAdd(Object)` uses `instanceof` to check if the candidate
-/// implements `ClusterResourceListener`. In Rust, callers must use [`add_listener`]
-/// directly since there is no runtime type introspection.
-///
-/// [`add_listener`]: ClusterResourceListeners::add_listener
-pub struct ClusterResourceListeners {
-    listeners: Vec<Box<dyn ClusterResourceListener>>,
+/// This type is `pub(crate)` because it lives under the
+/// `org.apache.kafka.common.internals` package (CLAUDE.md naming rules).
+pub(crate) struct ClusterResourceListeners {
+    listeners: Mutex<Vec<Arc<dyn ClusterResourceListener>>>,
 }
 
 impl ClusterResourceListeners {
-    /// Creates an empty `ClusterResourceListeners` collection.
-    pub fn new() -> Self {
-        Self { listeners: Vec::new() }
+    pub(crate) fn new() -> Self {
+        Self { listeners: Mutex::new(Vec::new()) }
     }
 
-    /// Adds a listener to the collection.
+    /// Add a listener.
+    pub(crate) fn add(&self, listener: Arc<dyn ClusterResourceListener>) {
+        self.listeners.lock().expect("listeners mutex poisoned").push(listener);
+    }
+
+    /// Add all listeners from the given iterator.
+    pub(crate) fn add_all<I>(&self, listeners: I)
+    where
+        I: IntoIterator<Item = Arc<dyn ClusterResourceListener>>,
+    {
+        let mut guard = self.listeners.lock().expect("listeners mutex poisoned");
+        for l in listeners {
+            guard.push(l);
+        }
+    }
+
+    /// Send the updated cluster metadata to all listeners.
     ///
-    /// This replaces Java's `maybeAdd(Object)` which uses `instanceof` to check
-    /// if the candidate implements `ClusterResourceListener`. In Rust, callers
-    /// must call this method directly with a concrete listener.
-    pub fn add_listener(&mut self, listener: Box<dyn ClusterResourceListener>) {
-        self.listeners.push(listener);
-    }
-
-    /// Convenience alias for `add_listener`, matching the Java method name pattern.
-    ///
-    /// In Java, `maybeAdd` checks if the candidate is a `ClusterResourceListener`
-    /// using `instanceof`. In Rust, the caller already knows the type, so this is
-    /// equivalent to `add_listener`.
-    pub fn maybe_add(&mut self, listener: Box<dyn ClusterResourceListener>) {
-        self.add_listener(listener);
-    }
-
-    /// Sends the updated cluster metadata to all registered listeners.
-    pub fn on_update(&self, cluster_resource: &ClusterResource) {
-        for listener in &self.listeners {
-            listener.on_update(cluster_resource);
+    /// Takes `&self` (not `&mut self`) because the listener collection is
+    /// read-only at notification time — Java iterates over its `List` and
+    /// calls `onUpdate` on each element without mutating the list.
+    /// The mutex is dropped before any listener is invoked, so a listener
+    /// is free to call back into [`ClusterResourceListeners::add`] or
+    /// otherwise re-lock without deadlock.
+    pub(crate) fn on_update(&self, cluster: &ClusterResource) {
+        // Snapshot the current listeners so we don't hold the lock across
+        // calls into user code.
+        let snapshot: Vec<Arc<dyn ClusterResourceListener>> = {
+            let guard = self.listeners.lock().expect("listeners mutex poisoned");
+            guard.clone()
+        };
+        for listener in snapshot {
+            listener.on_update(cluster);
         }
     }
 }
@@ -74,61 +86,55 @@ impl Default for ClusterResourceListeners {
     }
 }
 
+impl std::fmt::Debug for ClusterResourceListeners {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let len = self.listeners.lock().map(|g| g.len()).unwrap_or_default();
+        f.debug_struct("ClusterResourceListeners").field("len", &len).finish()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
-    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::atomic::{AtomicUsize, Ordering};
 
-    /// A mock listener for testing.
-    struct MockListener {
-        called: Arc<AtomicBool>,
+    struct Counting {
+        count: AtomicUsize,
+        last_id: Mutex<Option<String>>,
     }
 
-    impl ClusterResourceListener for MockListener {
-        fn on_update(&self, _cluster_resource: &ClusterResource) {
-            self.called.store(true, Ordering::SeqCst);
+    impl ClusterResourceListener for Counting {
+        fn on_update(&self, cluster_resource: &ClusterResource) {
+            self.count.fetch_add(1, Ordering::SeqCst);
+            *self.last_id.lock().unwrap() = cluster_resource.cluster_id().map(str::to_owned);
         }
     }
 
     #[test]
-    fn test_on_update_notifies_all_listeners() {
-        let called1 = Arc::new(AtomicBool::new(false));
-        let called2 = Arc::new(AtomicBool::new(false));
-
-        let listener1 = MockListener { called: called1.clone() };
-        let listener2 = MockListener { called: called2.clone() };
-
-        let mut listeners = ClusterResourceListeners::new();
-        listeners.add_listener(Box::new(listener1));
-        listeners.add_listener(Box::new(listener2));
-
-        let cr = ClusterResource::new(Some("test-cluster".to_string()));
-        listeners.on_update(&cr);
-
-        assert!(called1.load(Ordering::SeqCst));
-        assert!(called2.load(Ordering::SeqCst));
-    }
-
-    #[test]
-    fn test_on_update_with_no_listeners() {
+    fn add_and_dispatch() {
         let listeners = ClusterResourceListeners::new();
-        let cr = ClusterResource::new(Some("test-cluster".to_string()));
-        // Should not panic
+        let l1 = Arc::new(Counting { count: AtomicUsize::new(0), last_id: Mutex::new(None) });
+        let l2 = Arc::new(Counting { count: AtomicUsize::new(0), last_id: Mutex::new(None) });
+        listeners.add(l1.clone());
+        listeners.add(l2.clone());
+
+        let cr = ClusterResource::new(Some("cid".to_string()));
         listeners.on_update(&cr);
+        assert_eq!(l1.count.load(Ordering::SeqCst), 1);
+        assert_eq!(l2.count.load(Ordering::SeqCst), 1);
+        assert_eq!(l1.last_id.lock().unwrap().as_deref(), Some("cid"));
     }
 
     #[test]
-    fn test_maybe_add() {
-        let called = Arc::new(AtomicBool::new(false));
-        let listener = MockListener { called: called.clone() };
+    fn add_all_appends() {
+        let listeners = ClusterResourceListeners::new();
+        let l1: Arc<dyn ClusterResourceListener> =
+            Arc::new(Counting { count: AtomicUsize::new(0), last_id: Mutex::new(None) });
+        let l2: Arc<dyn ClusterResourceListener> =
+            Arc::new(Counting { count: AtomicUsize::new(0), last_id: Mutex::new(None) });
+        listeners.add_all(vec![l1, l2]);
 
-        let mut listeners = ClusterResourceListeners::new();
-        listeners.maybe_add(Box::new(listener));
-
-        let cr = ClusterResource::new(Some("test-cluster".to_string()));
+        let cr = ClusterResource::new(None);
         listeners.on_update(&cr);
-
-        assert!(called.load(Ordering::SeqCst));
     }
 }
