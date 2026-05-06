@@ -1,0 +1,27 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "translation-agent"
+version = "0.1.0"
+description = "Orchestrator producing Rust translations of Apache Kafka commits via r2 sandbox claude"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Confluent Inc." }]
+dependencies = []
+
+[project.optional-dependencies]
+dev = ["pytest>=8.0"]
+
+[project.scripts]
+translation-agent = "translation_agent.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["translation_agent*"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+addopts = "-v"
