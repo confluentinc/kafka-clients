@@ -65,6 +65,11 @@ impl ByteBufferAccessor {
         &self.buffer
     }
 
+    /// Consume this accessor and return the underlying buffer.
+    pub fn into_buffer(self) -> Vec<u8> {
+        self.buffer
+    }
+
     /// Get the total length of the buffer.
     pub fn len(&self) -> usize {
         self.buffer.len()

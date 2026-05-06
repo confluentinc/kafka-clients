@@ -34,8 +34,10 @@ use crate::common::config::SaslConfig;
 use crate::common::security::SaslClientAuthenticator;
 use crate::common::security::SecurityProtocol;
 use crate::common::security::SslFactory;
+use crate::common::utils::LogContext;
 
 use std::io;
+use std::sync::Arc;
 
 use tokio::net::TcpStream;
 
@@ -70,6 +72,8 @@ pub struct SaslChannelBuilder {
     listener_name: Option<ListenerName>,
     /// The Kafka client ID for request headers.
     client_id: String,
+    /// Contextual log prefix forwarded to the authenticator.
+    log_context: LogContext,
 }
 
 impl SaslChannelBuilder {
@@ -82,6 +86,7 @@ impl SaslChannelBuilder {
     /// * `ssl_factory` - Required for `SASL_SSL`, `None` for `SASL_PLAINTEXT`
     /// * `listener_name` - The listener name (server-side only, `None` for clients)
     /// * `client_id` - The Kafka client ID
+    /// * `log_context` - Contextual log prefix
     ///
     /// # Errors
     ///
@@ -95,6 +100,7 @@ impl SaslChannelBuilder {
         ssl_factory: Option<SslFactory>,
         listener_name: Option<ListenerName>,
         client_id: &str,
+        log_context: LogContext,
     ) -> io::Result<Self> {
         // Validate security protocol
         if security_protocol != SecurityProtocol::SaslPlaintext && security_protocol != SecurityProtocol::SaslSsl {
@@ -132,6 +138,7 @@ impl SaslChannelBuilder {
             ssl_factory,
             listener_name,
             client_id: client_id.to_string(),
+            log_context,
         })
     }
 }
@@ -148,9 +155,10 @@ impl ChannelBuilder for SaslChannelBuilder {
         let transport_layer: Box<dyn crate::common::network::TransportLayer> =
             if self.security_protocol == SecurityProtocol::SaslSsl {
                 let ssl_factory = self.ssl_factory.as_ref().unwrap();
-                let connector = ssl_factory.create_tls_connector();
                 let domain = SslFactory::create_server_name(peer_host)?;
-                Box::new(SslTransportLayer::new(stream, connector, domain))
+                let conn = rustls::ClientConnection::new(Arc::clone(ssl_factory.client_config()), domain.clone())
+                    .map_err(|e| io::Error::other(format!("Failed to construct TLS client connection: {e}")))?;
+                Box::new(SslTransportLayer::new(stream, conn, domain))
             } else {
                 Box::new(PlaintextTransportLayer::new(stream))
             };
@@ -165,6 +173,7 @@ impl ChannelBuilder for SaslChannelBuilder {
             id,
             peer_host,
             &self.client_id,
+            self.log_context.clone(),
         ));
 
         Ok(KafkaChannel::new(
@@ -201,8 +210,15 @@ mod tests {
             password: Some("secret".to_string()),
             ..SaslConfig::default()
         };
-        let builder =
-            SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "test-client").unwrap();
+        let builder = SaslChannelBuilder::new(
+            SecurityProtocol::SaslPlaintext,
+            sasl_config,
+            None,
+            None,
+            "test-client",
+            LogContext::empty(),
+        )
+        .unwrap();
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 
         let channel = builder
@@ -229,9 +245,15 @@ mod tests {
             ..SaslConfig::default()
         };
         let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
-        let builder =
-            SaslChannelBuilder::new(SecurityProtocol::SaslSsl, sasl_config, Some(ssl_factory), None, "test-client")
-                .unwrap();
+        let builder = SaslChannelBuilder::new(
+            SecurityProtocol::SaslSsl,
+            sasl_config,
+            Some(ssl_factory),
+            None,
+            "test-client",
+            LogContext::empty(),
+        )
+        .unwrap();
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
 
         let channel = builder
@@ -252,7 +274,14 @@ mod tests {
             password: Some("secret".to_string()),
             ..SaslConfig::default()
         };
-        let result = SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "test-client");
+        let result = SaslChannelBuilder::new(
+            SecurityProtocol::SaslPlaintext,
+            sasl_config,
+            None,
+            None,
+            "test-client",
+            LogContext::empty(),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("username"));
 
@@ -262,7 +291,14 @@ mod tests {
             username: Some("alice".to_string()),
             ..SaslConfig::default()
         };
-        let result = SaslChannelBuilder::new(SecurityProtocol::SaslPlaintext, sasl_config, None, None, "test-client");
+        let result = SaslChannelBuilder::new(
+            SecurityProtocol::SaslPlaintext,
+            sasl_config,
+            None,
+            None,
+            "test-client",
+            LogContext::empty(),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("password"));
     }
@@ -276,7 +312,14 @@ mod tests {
             password: Some("secret".to_string()),
             ..SaslConfig::default()
         };
-        let result = SaslChannelBuilder::new(SecurityProtocol::Plaintext, sasl_config, None, None, "test-client");
+        let result = SaslChannelBuilder::new(
+            SecurityProtocol::Plaintext,
+            sasl_config,
+            None,
+            None,
+            "test-client",
+            LogContext::empty(),
+        );
         assert!(result.is_err());
         assert!(result.unwrap_err().to_string().contains("SASL_PLAINTEXT or SASL_SSL"));
     }
