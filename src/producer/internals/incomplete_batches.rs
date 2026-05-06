@@ -93,16 +93,34 @@ mod tests {
     //! There is no dedicated `IncompleteBatchesTest.java`; the class is
     //! exercised through `RecordAccumulatorTest` (translated in Phase
     //! 6d). The smoke tests below verify add/remove/snapshot semantics
-    //! against the placeholder `ProducerBatch` type.
+    //! against the real `ProducerBatch` type.
 
     use super::*;
-    use crate::common::record::record_batch::NO_TIMESTAMP;
+    use crate::common::record::record_batch::{MAGIC_VALUE_V2, NO_TIMESTAMP};
+    use crate::common::record::{CompressionType, MemoryRecordsBuilder, TimestampType};
     use crate::common::topic_partition::TopicPartition;
 
+    fn make_builder() -> MemoryRecordsBuilder {
+        MemoryRecordsBuilder::from_buffer(
+            vec![0u8; 256],
+            MAGIC_VALUE_V2,
+            CompressionType::None,
+            TimestampType::CreateTime,
+            0,
+            NO_TIMESTAMP,
+            -1,
+            -1,
+            -1,
+            false,
+            false,
+            -1,
+            256,
+        )
+        .expect("builder")
+    }
+
     fn make_batch() -> Arc<ProducerBatch> {
-        let result = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
-        result.set(0, NO_TIMESTAMP, None);
-        Arc::new(ProducerBatch::new(result))
+        Arc::new(ProducerBatch::new(TopicPartition::new("t", 0), make_builder(), 0))
     }
 
     #[test]
@@ -133,13 +151,11 @@ mod tests {
 
     #[test]
     fn identity_equality_distinguishes_distinct_arcs() {
-        // Two batches built from clones of the same underlying
-        // ProduceRequestResult must be treated as distinct (matching
-        // Java's identity-based HashSet<ProducerBatch>).
-        let result = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
-        result.set(0, NO_TIMESTAMP, None);
-        let b1 = Arc::new(ProducerBatch::new(Arc::clone(&result)));
-        let b2 = Arc::new(ProducerBatch::new(Arc::clone(&result)));
+        // Two distinct ProducerBatches over the same topic-partition
+        // must be treated as distinct (matching Java's identity-based
+        // HashSet<ProducerBatch>).
+        let b1 = make_batch();
+        let b2 = make_batch();
         let inc = IncompleteBatches::new();
         inc.add(Arc::clone(&b1));
         inc.add(Arc::clone(&b2));

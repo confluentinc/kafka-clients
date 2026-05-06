@@ -21,6 +21,7 @@ pub(crate) mod incomplete_batches;
 pub(crate) mod produce_request_result;
 pub(crate) mod producer_batch;
 pub(crate) mod producer_metadata;
+pub(crate) mod transaction_manager;
 
 #[allow(unused_imports)]
 pub(crate) use buffer_pool::BufferPool;
@@ -36,3 +37,5 @@ pub(crate) use produce_request_result::ProduceRequestResult;
 pub(crate) use producer_batch::ProducerBatch;
 #[allow(unused_imports)]
 pub(crate) use producer_metadata::ProducerMetadata;
+#[allow(unused_imports)]
+pub(crate) use transaction_manager::TransactionManager;
