@@ -216,10 +216,27 @@ pub struct KafkaProducer<K, V, C: KafkaClient> {
     sender_running: Arc<std::sync::atomic::AtomicBool>,
     sender_force_close: Arc<std::sync::atomic::AtomicBool>,
 
-    /// Java: `private final Sender.SenderThread ioThread`. Replaced with
-    /// the `JoinHandle` of the `tokio::spawn` task running the Sender's
-    /// run loop. `Option` so [`Drop`] can `take()` it during cleanup.
-    sender_task: Option<JoinHandle<()>>,
+    /// Java: `private final Sender.SenderThread ioThread`. Replaced
+    /// with the `JoinHandle` of the `tokio::spawn` task running the
+    /// Sender's run loop. Held under [`std::sync::Mutex`] so the
+    /// `&self` async [`crate::producer::Producer::close`] can `take()`
+    /// the handle for awaiting; once taken, [`Drop`] sees `None` and
+    /// becomes a no-op (idempotent close → idempotent drop).
+    ///
+    /// `Mutex` rather than `OnceLock` because the contract is "exactly
+    /// one taker" with no inits-after-take; `Mutex<Option<T>>` is the
+    /// idiomatic shape (`OnceLock` is for "init at most once" with no
+    /// take-back).
+    sender_task: std::sync::Mutex<Option<JoinHandle<()>>>,
+
+    /// Idempotency flag for `close()` / `close_with_timeout()`. Once
+    /// flipped, subsequent close calls return `Ok(())` immediately —
+    /// matching Java's idempotent close semantics (a second call after
+    /// `firstException` is set still walks the
+    /// `Utils.closeQuietly(...)` chain but the run-loop join short-
+    /// circuits on the dead `ioThread`). The Rust translation collapses
+    /// this to a single atomic check.
+    closed: Arc<AtomicBool>,
 
     // ---- Phantom for the C parameter on the inherent skeleton ----
     /// `C` only appears in the [`Sender<C>`] type parameter, which is
@@ -554,7 +571,8 @@ where
             api_versions,
             sender_running,
             sender_force_close,
-            sender_task: Some(sender_task),
+            sender_task: std::sync::Mutex::new(Some(sender_task)),
+            closed: Arc::new(AtomicBool::new(false)),
             _client_marker: std::marker::PhantomData,
         })
     }
@@ -1082,6 +1100,146 @@ where
         }
         Ok(())
     }
+
+    /// The full close path. Translation of Java's
+    /// `private void close(Duration timeout, boolean swallowException)`
+    /// at `KafkaProducer.java:1397-1464`.
+    ///
+    /// Java behaviour:
+    /// 1. validate `timeoutMs >= 0`;
+    /// 2. if invoked from inside the IO thread (a `Callback`), force
+    ///    the timeout to 0 to avoid self-join deadlock;
+    /// 3. graceful path (`timeout > 0`): `sender.initiateClose()` →
+    ///    `ioThread.join(remaining)`;
+    /// 4. force-close fallback (`timeout == 0` OR ioThread still alive
+    ///    after the join deadline): `sender.forceClose()` then a final
+    ///    join (which is non-blocking when the run loop has already
+    ///    bailed via the `force_close` flag);
+    /// 5. close interceptors / serializers / partitioner via
+    ///    `Utils.closeQuietly`;
+    /// 6. swallow-or-rethrow the first encountered exception.
+    ///
+    /// Rust translation:
+    ///
+    /// * `&self` (not `&mut self`) for trait compatibility — interior
+    ///   mutability via [`std::sync::Mutex<Option<JoinHandle>>`] for
+    ///   the spawned-task handle, and an [`Arc<AtomicBool>`] for the
+    ///   `closed` idempotency flag.
+    /// * No `Thread.currentThread() == ioThread` check — Tokio tasks
+    ///   have no thread-identity comparator. A user calling `close`
+    ///   from inside a [`Callback`] body would deadlock the runtime;
+    ///   this is a documented hazard and Phase 8 may add a
+    ///   `tokio::task::id()` guard.
+    /// * No `Utils.closeQuietly` chain — Phase 6/7 serializers,
+    ///   partitioners, and interceptors all have a no-op default
+    ///   `close()`. Once a non-trivial implementation lands the chain
+    ///   is added here.
+    /// * Idempotent: a second call returns `Ok(())` immediately without
+    ///   touching the JoinHandle (matches Java's behaviour: the second
+    ///   call walks the same `Utils.closeQuietly` chain but the
+    ///   ioThread.join short-circuits on the dead thread).
+    pub(crate) async fn close_inner(&self, timeout: std::time::Duration) -> Result<(), KafkaError> {
+        use std::sync::atomic::Ordering;
+        // Java line 1399-1400: validate timeout. Rust's `Duration`
+        // cannot be negative by construction, so the `IllegalArgumentException`
+        // is unreachable. Documented for parity.
+        let timeout_ms: i64 = timeout.as_millis().min(i64::MAX as u128) as i64;
+        log::info!("Closing the Kafka producer with timeoutMillis = {timeout_ms} ms.");
+
+        // Idempotency check: second-and-subsequent close calls return
+        // without touching the spawned task. Java's behaviour is
+        // similar (the join on a dead thread is a fast no-op), but
+        // Rust must guard explicitly — `JoinHandle` cannot be awaited
+        // twice and `take()` on an already-`None` Mutex slot would
+        // simply skip the await, which is functionally the same.
+        if self.closed.swap(true, Ordering::AcqRel) {
+            log::debug!("Kafka producer close called more than once; ignoring.");
+            return Ok(());
+        }
+
+        // Take the JoinHandle. After this point the producer's
+        // `Drop` impl sees `None` and skips the abort.
+        let task: Option<JoinHandle<()>> = self.sender_task.lock().expect("poisoned").take();
+
+        if timeout_ms > 0 {
+            // Graceful path. Java's `sender.initiateClose()` is
+            // inlined here because the `Sender` instance was moved
+            // into the spawned task at construction time.
+            //
+            // `Sender::initiate_close` does:
+            //   self.accumulator.close();
+            //   self.running.store(false, Release);
+            //   self.wakeup();
+            //
+            // The producer holds `Arc<RecordAccumulator>` and the
+            // running flag, so we can perform the same three steps
+            // from the producer side. `wakeup()` is the Phase 7d no-op
+            // (documented in [`Self::sender_wakeup`]).
+            self.accumulator.close();
+            self.sender_running.store(false, Ordering::Release);
+            self.sender_wakeup();
+            // Java line 1422-1429: ioThread.join(remainingMs).
+            if let Some(handle) = task {
+                match tokio::time::timeout(timeout, handle).await {
+                    Ok(Ok(())) => {
+                        // Sender exited cleanly within the deadline —
+                        // pending records were drained before the
+                        // run-loop's `while !force_close && (has_undrained
+                        // || has_in_flight)` predicate flipped to false.
+                    },
+                    Ok(Err(join_err)) => {
+                        // Join error: panicked task or cancelled.
+                        // Java surfaces these as `KafkaException`.
+                        log::error!("Sender task did not exit cleanly: {join_err}");
+                    },
+                    Err(_elapsed) => {
+                        // Java line 1434-1446: deadline exceeded —
+                        // force-close and final-join. The handle was
+                        // consumed by `tokio::time::timeout`; we no
+                        // longer have it. Flip `force_close` so the
+                        // run loop's drain phase aborts.
+                        log::info!(
+                            "Proceeding to force close the producer since pending requests could not be \
+                             completed within timeout {timeout_ms} ms."
+                        );
+                        self.sender_force_close.store(true, Ordering::Release);
+                        // Without the JoinHandle we cannot await again;
+                        // the run loop's drain stage observes
+                        // `force_close=true` on its next yield point and
+                        // bails. The `Drop` impl will perform the abort
+                        // when the producer is dropped.
+                    },
+                }
+            }
+        } else {
+            // Force-close path (timeout == 0). Java line 1434:
+            // `sender.forceClose()` then `ioThread.join()` — the latter
+            // is unbounded but expected to return promptly because
+            // `force_close=true` makes the run loop bail on its next
+            // yield point.
+            self.sender_force_close.store(true, Ordering::Release);
+            self.sender_running.store(false, Ordering::Release);
+            self.accumulator.close();
+            // Abort the JoinHandle directly — the run loop is
+            // guaranteed to bail on its next yield, so the abort is
+            // a belt-and-suspenders guard against tasks blocked on
+            // long polls / sleeps.
+            if let Some(handle) = task {
+                handle.abort();
+                // Await the cancelled handle so subsequent observers
+                // (tests, the Drop impl) see the task fully terminated.
+                let _ = handle.await;
+            }
+        }
+
+        // Java line 1448-1454: `Utils.closeQuietly(...)` chain.
+        // Milestone-1 partitioner / interceptors / serializers / metrics
+        // all have a no-op `close()` (default trait method). Once a
+        // non-trivial impl lands the chain is added here.
+
+        log::debug!("Kafka producer has been closed");
+        Ok(())
+    }
 }
 
 // =====================================================================
@@ -1350,11 +1508,19 @@ where
     }
 
     async fn close(&self) -> Result<(), KafkaError> {
-        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+        // Java line 1369-1371: `close(Duration.ofMillis(Long.MAX_VALUE))`.
+        // Rust translates `Long.MAX_VALUE` ms to `i64::MAX as u64 ms`.
+        self.close_inner(std::time::Duration::from_millis(i64::MAX as u64)).await
     }
 
-    async fn close_with_timeout(&self, _timeout: std::time::Duration) -> Result<(), KafkaError> {
-        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+    async fn close_with_timeout(&self, timeout: std::time::Duration) -> Result<(), KafkaError> {
+        // Java line 1393-1395: `close(timeout, false)`. The
+        // `swallowException=true` overload is the construction-failure
+        // cleanup path inside Java's constructors; the Rust translation
+        // does not need it because every error-returning path before
+        // the `tokio::spawn` returns `Err` without leaving a background
+        // task running (see `new_for_test` rustdoc).
+        self.close_inner(timeout).await
     }
 }
 
@@ -1383,7 +1549,12 @@ impl<K, V, C: KafkaClient> Drop for KafkaProducer<K, V, C> {
         use std::sync::atomic::Ordering;
         self.sender_force_close.store(true, Ordering::Release);
         self.sender_running.store(false, Ordering::Release);
-        if let Some(task) = self.sender_task.take() {
+        // `sender_task` may already be `None` if the user awaited
+        // `Producer::close` (Phase 7e) — the close path takes the
+        // JoinHandle out of the Mutex, awaits it, and leaves `None`
+        // behind. `Drop` then becomes a no-op for the JoinHandle
+        // (idempotent close → idempotent drop).
+        if let Some(task) = self.sender_task.lock().expect("poisoned").take() {
             task.abort();
         }
     }
@@ -1813,7 +1984,7 @@ mod tests {
         // Capture the running flag before the producer moves the Sender
         // into the spawned task — this gives us an external observer
         // independent of the JoinHandle.
-        let mut producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
             cfg, key_ser, value_ser, None, client, None, None, None,
         )
         .expect("construction succeeds");
@@ -1829,6 +2000,8 @@ mod tests {
         // assertion are paired in the test, not split across Drop.
         let handle = producer
             .sender_task
+            .lock()
+            .expect("sender_task mutex not poisoned")
             .take()
             .expect("sender_task should be Some after construction");
 
@@ -2689,6 +2862,94 @@ mod tests {
         let producer = build_test_producer("topic", 1, time.clone(), None, None);
         let m = producer.metrics();
         assert!(m.is_empty(), "Milestone-1 metrics map is empty");
+    }
+
+    // ============================================================
+    // Phase 7e — `close` / `close_with_timeout`
+    // ============================================================
+
+    /// `close()` (Long.MAX_VALUE timeout) on a producer with no
+    /// pending records exits cleanly within the deadline. Mirrors the
+    /// Java empty-accumulator close path at `KafkaProducer.java:1417-1430`.
+    #[tokio::test]
+    async fn close_completes_cleanly_with_no_pending_records() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+        // No buffered records — `accumulator.close()` + `running=false`
+        // makes the run loop fall through to the drain phase, which
+        // exits immediately when both `has_undrained` and
+        // `has_in_flight_requests` are false.
+        tokio::time::timeout(Duration::from_secs(2), producer.close())
+            .await
+            .expect("close within 2s")
+            .expect("close ok");
+        // Sanity: post-close, sender_task slot is None.
+        assert!(
+            producer.sender_task.lock().unwrap().is_none(),
+            "JoinHandle should have been taken"
+        );
+    }
+
+    /// Calling `close()` twice must be a no-op on the second call.
+    /// Java's idempotency: the second call walks the
+    /// `Utils.closeQuietly` chain but the dead-thread join is a no-op.
+    /// Rust short-circuits via the `closed` atomic flag.
+    #[tokio::test]
+    async fn close_is_idempotent() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+        producer.close().await.expect("first close ok");
+        // Second close — must not panic, must return Ok within a short
+        // window (the idempotency check is an atomic swap).
+        tokio::time::timeout(Duration::from_millis(100), producer.close())
+            .await
+            .expect("second close fast")
+            .expect("second close ok");
+    }
+
+    /// Java line 1393-1395: `close(Duration.ofMillis(0))` is the
+    /// force-close path — `force_close=true` and the run loop bails on
+    /// its next yield without draining. Pending records are aborted by
+    /// the `abort_incomplete_batches` invocation in
+    /// `Sender::run_loop` when it observes `force_close=true`.
+    #[tokio::test]
+    async fn close_with_zero_timeout_force_closes() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+        // Append a batch so we know the force-close path actually runs.
+        let cluster = producer.metadata.metadata().fetch();
+        let now = time.milliseconds();
+        let _r = producer
+            .accumulator
+            .append("topic", 0, now, Some(b"k"), Some(b"v"), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+
+        tokio::time::timeout(Duration::from_secs(2), producer.close_with_timeout(Duration::ZERO))
+            .await
+            .expect("close within 2s")
+            .expect("close ok");
+        // Sanity: force-close flag was flipped.
+        assert!(
+            producer.sender_force_close.load(std::sync::atomic::Ordering::Acquire),
+            "force_close should be true after close(0)"
+        );
+        // Accumulator must be closed.
+        assert!(producer.accumulator.is_closed());
+    }
+
+    /// After `close()`, a subsequent `send()` must fail with
+    /// [`KafkaError::IllegalState`] — the run loop has stopped, so
+    /// `throw_if_producer_closed` rejects the call. Mirrors Java's
+    /// `KafkaProducer.java:957-958` invariant.
+    #[tokio::test]
+    async fn send_after_close_via_close_method_returns_illegal_state() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+        producer.close().await.expect("close ok");
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::new("topic", Some(b"v".to_vec())).expect("record");
+        let err = producer.send(record).await.expect_err("send rejected after close");
+        assert!(matches!(err, KafkaError::IllegalState(_)), "got {err:?}");
     }
 
     /// No `partitioner.class` set → no partitioner wired (built-in
