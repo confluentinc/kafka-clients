@@ -73,6 +73,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
 
+use log::warn;
 use tokio::task::JoinHandle;
 
 use crate::KafkaClient;
@@ -94,9 +95,18 @@ use crate::producer::producer_config::{self, ProducerConfig};
 /// Java's `KafkaProducer.JMX_PREFIX`.
 pub const JMX_PREFIX: &str = "kafka.producer";
 
-/// Java's `KafkaProducer.NETWORK_THREAD_PREFIX`. Used to build the
-/// background-task name so log lines correlate with the Java client.
-pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
+// Java's `KafkaProducer.NETWORK_THREAD_PREFIX` (`"kafka-producer-network-thread"`)
+// is intentionally not translated yet. Java uses it to name the IO thread
+// (`new KafkaThread(NETWORK_THREAD_PREFIX + " | " + clientId, sender, true)`)
+// so log lines from the Sender carry the thread name. Tokio tasks have no
+// native thread-name slot; the equivalent observability hook is the
+// `tracing` crate's spans (`tracing::info_span!("kafka-producer-network-thread", ...)`).
+// This crate currently uses `log`, not `tracing`, so the constant has no
+// consumer. It will be reintroduced together with span instrumentation
+// when/if the codebase adopts `tracing` (or in Phase 7e if a different
+// observability shim is chosen). The Sender's [`crate::common::utils::log_context::LogContext`]
+// already prefixes every log line with `[Producer clientId=...]`, so the
+// per-message context is preserved without the prefix.
 
 /// Java's `KafkaProducer.PRODUCER_METRIC_GROUP_NAME`.
 pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
@@ -498,6 +508,12 @@ where
             sender.run_loop().await;
         });
 
+        // Java line 458: `config.logUnused()` — emit a WARN for every
+        // config key the user provided but the producer never consumed
+        // (typo or stale key). Mirrors the order in
+        // `KafkaProducer.java:454-458`: spawn first, log unused last.
+        config.inner().log_unused();
+
         Ok(KafkaProducer {
             client_id,
             time,
@@ -621,7 +637,16 @@ fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, KafkaError
                 producer_config::REQUEST_TIMEOUT_MS_CONFIG,
             )));
         }
-        // Java: silently bumps to the lower bound.
+        // Java emits a `log.warn(...)` on the silent-bump path
+        // (`KafkaProducer.java:582-587`) so operators can see the
+        // auto-bump in their logs. Translate that warn here.
+        warn!(
+            "{} should be equal to or larger than {} + {}. Setting it to {}.",
+            producer_config::DELIVERY_TIMEOUT_MS_CONFIG,
+            producer_config::LINGER_MS_CONFIG,
+            producer_config::REQUEST_TIMEOUT_MS_CONFIG,
+            linger_plus_request,
+        );
         Ok(linger_plus_request)
     } else {
         Ok(delivery_timeout_ms)
