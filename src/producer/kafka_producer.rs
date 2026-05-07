@@ -785,6 +785,246 @@ where
 }
 
 // =====================================================================
+// `do_send` — Java `KafkaProducer.java:981`
+// =====================================================================
+
+impl<K, V, C: KafkaClient + 'static> KafkaProducer<K, V, C>
+where
+    // `K: Clone, V: Clone` is required by
+    // `ProducerInterceptors::on_send_error` (Phase 6c) which clones the
+    // record into each interceptor's `catch_unwind` so a panicking
+    // interceptor cannot consume the record. The producer trait users
+    // already accept this — `K=Vec<u8>` / `K=String` / `K=&[u8]` all
+    // satisfy `Clone`.
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+{
+    /// Implementation of asynchronously sending a record to a topic.
+    ///
+    /// Mirrors Java's private
+    /// `Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback)`
+    /// at `KafkaProducer.java:981`. The Java `Future` collapses into the
+    /// returned [`Arc<FutureRecordMetadata>`] which the public
+    /// [`Producer::send`] / [`Producer::send_with_callback`] then
+    /// awaits.
+    ///
+    /// On any pre-append exception (closed producer, metadata timeout,
+    /// invalid topic, serialization failure, record-too-large), this
+    /// method:
+    ///
+    /// 1. fires `interceptors.on_send_error(record, tp, err)`
+    ///    (Java line 1064);
+    /// 2. fires the user callback with `(synthesised_metadata, err)`
+    ///    if one was provided (Java line 1058-1062);
+    /// 3. returns the error.
+    ///
+    /// A success returns the `Arc<FutureRecordMetadata>` produced by
+    /// the accumulator — the caller awaits it for the broker ack.
+    pub(crate) async fn do_send(
+        &self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Box<dyn Callback>>,
+    ) -> Result<Arc<crate::producer::internals::future_record_metadata::FutureRecordMetadata>, KafkaError> {
+        // Java line 985: build AppendCallbacks BEFORE any throwing path
+        // so its `topic_partition()` accessor is available in catch
+        // blocks.
+        let append_cb = Arc::new(AppendCallbacksImpl::<K, V>::new(
+            callback,
+            Arc::clone(&self.interceptors),
+            &record,
+        ));
+
+        match self.do_send_inner(&record, Arc::clone(&append_cb)).await {
+            Ok(future) => Ok(future),
+            Err(err) => {
+                // Java line 1056-1081 — every `catch` arm fires
+                // `interceptors.onSendError(record, tp, e)` and then
+                // either rethrows or wraps in a failed Future.
+                let tp = append_cb.topic_partition();
+                self.interceptors.on_send_error(Some(&record), Some(tp.clone()), &err);
+                // Java line 1058-1062: the user-supplied callback is
+                // also fired with the synthesized null-metadata. The
+                // user callback was moved into `append_cb`; route via
+                // its `Callback::on_completion` so the same lifecycle
+                // hook fires as Java's
+                // `appendCallbacks.onCompletion(...)` would on a
+                // success path.
+                let null_metadata =
+                    RecordMetadata::new(tp, -1, -1, crate::common::record::record_batch::NO_TIMESTAMP, -1, -1);
+                append_cb.on_completion(Some(&null_metadata), Some(&err));
+                Err(err)
+            },
+        }
+    }
+
+    /// The body of `do_send` factored out so we can use `?` for early-
+    /// exit while routing every error through the catch-block fire-up
+    /// in [`Self::do_send`].
+    async fn do_send_inner(
+        &self,
+        record: &ProducerRecord<K, V>,
+        append_cb: Arc<AppendCallbacksImpl<K, V>>,
+    ) -> Result<Arc<crate::producer::internals::future_record_metadata::FutureRecordMetadata>, KafkaError> {
+        // Java line 988: throwIfProducerClosed.
+        self.throw_if_producer_closed()?;
+
+        // Java line 992: nowMs = time.milliseconds().
+        let mut now_ms = self.time.milliseconds();
+
+        // Java line 995: waitOnMetadata.
+        let cluster_and_wait = match self
+            .wait_on_metadata(record.topic(), record.partition(), now_ms, self.max_block_time_ms)
+            .await
+        {
+            Ok(v) => v,
+            Err(err) => {
+                // Java line 996-999: re-wrap if the producer was closed
+                // during the wait. We also map other-thread close.
+                if self.metadata.metadata().is_closed() {
+                    return Err(KafkaError::Generic(format!("Producer closed while send in progress: {err}")));
+                }
+                return Err(err);
+            },
+        };
+        // Java line 1001-1002: bookkeeping for remaining wait budget.
+        now_ms = now_ms.saturating_add(cluster_and_wait.waited_on_metadata_ms);
+        let remaining_wait_ms = self
+            .max_block_time_ms
+            .saturating_sub(cluster_and_wait.waited_on_metadata_ms)
+            .max(0);
+        let cluster = cluster_and_wait.cluster;
+
+        // Java line 1004-1011: serialize key.
+        let serialized_key: Option<Vec<u8>> =
+            self.key_serializer
+                .serialize(record.topic(), record.key())
+                .map_err(|e| match e {
+                    KafkaError::Serialization(_) => e,
+                    other => KafkaError::Serialization(format!("Failed to serialize key: {other}")),
+                })?;
+
+        // Java line 1012-1019: serialize value.
+        let serialized_value: Option<Vec<u8>> = self
+            .value_serializer
+            .serialize(record.topic(), record.value())
+            .map_err(|e| match e {
+                KafkaError::Serialization(_) => e,
+                other => KafkaError::Serialization(format!("Failed to serialize value: {other}")),
+            })?;
+
+        // Java line 1024: compute partition.
+        let partition =
+            self.partition(record, serialized_key.as_deref(), serialized_value.as_deref(), cluster.as_ref())?;
+
+        // Java line 1026-1027: setReadOnly + headers.toArray. The Rust
+        // translation makes the headers read-only at the source — the
+        // batch's headers are a `Vec<RecordHeader>` clone of the
+        // record's headers, so the original headers can stay mutable on
+        // the user's `ProducerRecord` if they kept it.
+        // We pass the headers slice directly into `accumulator.append`.
+        let headers = record.headers();
+        // Java's `record.headers().toArray()` builds a defensive `Header[]`
+        // copy. The Rust accumulator takes `&[RecordHeader]`. Borrow
+        // through one Vec because the headers iterator yields owned
+        // values via `.cloned()` — same allocation Java pays for the
+        // toArray() copy. The clone is shallow (key &str + value bytes
+        // are already inside RecordHeader's heap allocation).
+        let headers_slice: Vec<crate::common::header::RecordHeader> = headers.iter().cloned().collect();
+
+        // Java line 1029-1031: estimate serialized size + cap check.
+        let serialized_size = crate::common::record::abstract_records::estimate_size_in_bytes_upper_bound(
+            crate::common::record::record_batch::CURRENT_MAGIC_VALUE,
+            self.compression.compression_type(),
+            serialized_key.as_deref(),
+            serialized_value.as_deref(),
+            &headers_slice,
+        );
+        self.ensure_valid_record_size(serialized_size)?;
+
+        // Java line 1032: timestamp default.
+        let timestamp = record.timestamp().unwrap_or(now_ms);
+
+        // Java line 1036: accumulator.append.
+        let cb_dyn: Arc<dyn AppendCallbacks> = append_cb.clone();
+        let result = self
+            .accumulator
+            .append(
+                record.topic(),
+                partition,
+                timestamp,
+                serialized_key.as_deref(),
+                serialized_value.as_deref(),
+                &headers_slice,
+                Some(cb_dyn),
+                remaining_wait_ms,
+                now_ms,
+                cluster.as_ref(),
+            )
+            .await?;
+
+        // Java line 1038: post-append assertion. The accumulator MUST
+        // have called `set_partition` so a non-UNKNOWN partition is
+        // observable on the callback. `debug_assert` so release builds
+        // are unaffected.
+        debug_assert_ne!(append_cb.get_partition(), RecordMetadata::UNKNOWN_PARTITION);
+
+        // Java line 1044-1046: transactionManager.maybeAddPartition. The
+        // Milestone-1 plug-in contract pins `transaction_manager` to
+        // `None`, so the branch is unreachable. Reaching this `if let`
+        // would mean a future translation enabled transactions without
+        // wiring `add_partition`, which is a breach of the plug-in
+        // contract.
+        if let Some(_tm) = &self.transaction_manager {
+            unreachable!("transaction_manager is always None per Phase 6 plug-in contract");
+        }
+
+        // Java line 1048-1051: wake the sender on full or new batches.
+        if result.batch_is_full || result.new_batch_created {
+            log::trace!(
+                "Waking up the sender since topic {} partition {} is either full or getting a new batch",
+                record.topic(),
+                append_cb.get_partition(),
+            );
+            self.sender_wakeup();
+        }
+
+        Ok(result.future)
+    }
+
+    /// Java's `throwIfProducerClosed()` (line 956). Mirrors the Java
+    /// guard: if the spawned Sender is no longer running, calling
+    /// `send` after close is rejected.
+    fn throw_if_producer_closed(&self) -> Result<(), KafkaError> {
+        if !self.sender_running.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(KafkaError::IllegalState(
+                "Cannot perform operation after producer has been closed".to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Java's `ensureValidRecordSize(int size)` (line 1169). Mirrors the
+    /// two distinct error messages: one for the per-record cap and one
+    /// for the total memory cap.
+    fn ensure_valid_record_size(&self, size: i32) -> Result<(), KafkaError> {
+        if size > self.max_request_size {
+            return Err(KafkaError::RecordTooLarge(format!(
+                "The message is {size} bytes when serialized which is larger than {}, which is the value of the {} configuration.",
+                self.max_request_size,
+                producer_config::MAX_REQUEST_SIZE_CONFIG,
+            )));
+        }
+        if (size as i64) > self.total_memory_size {
+            return Err(KafkaError::RecordTooLarge(format!(
+                "The message is {size} bytes when serialized which is larger than the total memory buffer you have configured with the {} configuration.",
+                producer_config::BUFFER_MEMORY_CONFIG,
+            )));
+        }
+        Ok(())
+    }
+}
+
+// =====================================================================
 // `AppendCallbacks` — Java `KafkaProducer.java:1568` inner class
 // =====================================================================
 
