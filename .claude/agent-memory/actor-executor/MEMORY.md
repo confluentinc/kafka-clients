@@ -52,3 +52,4 @@
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
 - [Phase 7a config validators](phase7a_config_validators.md) — CaseInsensitive/NonEmpty/ValidList added; SSL/SASL helpers as ConfigDef methods delegating to free fns
 - [Phase 7a ProducerConfig](phase7a_producer_config.md) — post_processed overlay, i64-Range cast, post-process ordering for error-message parity, Milestone-1 deviations
+- [Phase 7a Round 1 patterns](phase7a_round1_patterns.md) — anchor-import smell, public/private DOC gradient, append-not-replace deviation notes, reachable-subset skip rationales
