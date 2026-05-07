@@ -632,6 +632,22 @@ impl ConfigDef {
         self.config_keys.get(name)
     }
 
+    /// Add the standard SSL client configuration options to this schema.
+    /// Mirrors `ConfigDef.withClientSslSupport()` (which delegates to
+    /// `SslConfigs.addClientSslSupport(ConfigDef)`).
+    pub fn with_client_ssl_support(&mut self) -> Result<&mut Self, KafkaError> {
+        crate::common::config::ssl_configs::add_client_ssl_support(self)?;
+        Ok(self)
+    }
+
+    /// Add the standard SASL client configuration options to this schema.
+    /// Mirrors `ConfigDef.withClientSaslSupport()` (which delegates to
+    /// `SaslConfigs.addClientSaslSupport(ConfigDef)`).
+    pub fn with_client_sasl_support(&mut self) -> Result<&mut Self, KafkaError> {
+        crate::common::config::sasl_configs::add_client_sasl_support(self)?;
+        Ok(self)
+    }
+
     /// Parse `props` (raw `Map<String, String>` from Java) into a typed
     /// value map. Mirrors `ConfigDef.parse(Map<?, ?>)`.
     ///
