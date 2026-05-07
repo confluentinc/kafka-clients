@@ -1153,6 +1153,103 @@ impl<K: Send + Sync + 'static, V: Send + Sync + 'static> AppendCallbacks for App
 }
 
 // =====================================================================
+// `impl Producer for KafkaProducer` — Java-trait `send` overloads
+// =====================================================================
+//
+// Phase 7d implements `send` and `send_with_callback`. Every other
+// trait method (`flush`, `close`, `partitions_for`,
+// `init_transactions`, ...) returns
+// [`KafkaError::UnsupportedOperation`] with a "Phase 7e/7f/9"
+// deferred-error marker. CLAUDE.md rule 5 prohibits silently completing
+// or hanging futures — the explicit `Err` makes the unimplemented path
+// observable to callers.
+
+/// Phase 7d marker error message returned by every Producer trait
+/// method except `send` / `send_with_callback`. The included sub-phase
+/// number tells callers (and reviewers) which milestone removes the
+/// stub.
+const PHASE_7E_DEFERRED: &str = "flush/close/partitions_for/metrics: implemented in Phase 7e";
+const PHASE_9_TXN_DEFERRED: &str = "Transactional producer is not supported in Milestone-1.";
+const TELEMETRY_DEFERRED: &str = "Client telemetry is not implemented in Milestone-1.";
+
+impl<K, V, C> crate::producer::Producer<K, V> for KafkaProducer<K, V, C>
+where
+    K: Clone + Send + Sync + 'static,
+    V: Clone + Send + Sync + 'static,
+    C: KafkaClient + 'static,
+{
+    async fn init_transactions(&self) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_9_TXN_DEFERRED.to_owned()))
+    }
+
+    async fn begin_transaction(&self) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_9_TXN_DEFERRED.to_owned()))
+    }
+
+    async fn commit_transaction(&self) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_9_TXN_DEFERRED.to_owned()))
+    }
+
+    async fn abort_transaction(&self) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_9_TXN_DEFERRED.to_owned()))
+    }
+
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<RecordMetadata, KafkaError> {
+        self.send_with_callback(record, None).await
+    }
+
+    async fn send_with_callback(
+        &self,
+        record: ProducerRecord<K, V>,
+        callback: Option<Box<dyn Callback>>,
+    ) -> Result<RecordMetadata, KafkaError> {
+        // Java line 950: interceptors.onSend(record). Java's `onSend`
+        // does not throw — it catches and logs interceptor exceptions.
+        let intercepted = self.interceptors.on_send(record);
+        // Java line 951: doSend with the (possibly modified) record.
+        let future = self.do_send(intercepted, callback).await?;
+        // Per the Phase 7b decision (`producer.rs` module docs), Rust
+        // collapses Java's `Future<RecordMetadata>` into one async fn:
+        // the broker ack is awaited inline. Callers that want the
+        // Java fire-and-forget shape should `tokio::spawn` the future
+        // returned by `Producer::send` themselves.
+        future.get().await
+    }
+
+    async fn flush(&self) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+    }
+
+    async fn partitions_for(
+        &self,
+        _topic: &str,
+    ) -> Result<Vec<crate::common::partition_info::PartitionInfo>, KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+    }
+
+    fn metrics(&self) -> crate::producer::ProducerMetrics {
+        // Java returns an unmodifiable view of the metrics map. Phase 7e
+        // wires the stub to an empty map (matching Phase 7b's
+        // `ProducerMetrics` placeholder type alias). The map allocation
+        // is one-shot per call; callers only inspect `is_empty()` /
+        // `len()` until full metrics land.
+        crate::producer::ProducerMetrics::new()
+    }
+
+    async fn client_instance_id(&self, _timeout: std::time::Duration) -> Result<crate::common::uuid::Uuid, KafkaError> {
+        Err(KafkaError::UnsupportedOperation(TELEMETRY_DEFERRED.to_owned()))
+    }
+
+    async fn close(&self) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+    }
+
+    async fn close_with_timeout(&self, _timeout: std::time::Duration) -> Result<(), KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+    }
+}
+
+// =====================================================================
 // Drop / shutdown
 // =====================================================================
 
@@ -1611,11 +1708,18 @@ mod tests {
         }
     }
 
-    /// Phase 7c does not yet implement `Producer` for `KafkaProducer`.
-    /// This compile-only function pins that fact: if a future commit
-    /// adds the impl prematurely, this stub will need to be updated.
-    fn _phase_7c_does_not_impl_producer<K, V, C: KafkaClient>(_p: KafkaProducer<K, V, C>) {
-        // Intentionally empty — the absence of a `Producer<K, V>` impl
-        // is the contract documented at module-level.
+    /// Phase 7d implements `Producer` for `KafkaProducer`. This
+    /// compile-only function pins that fact via a generic-bound check:
+    /// if the impl is removed accidentally, the bound `P: Producer<K,V>`
+    /// here will fail to satisfy.
+    fn _phase_7d_impls_producer<
+        K: Clone + Send + Sync + 'static,
+        V: Clone + Send + Sync + 'static,
+        C: KafkaClient + 'static,
+    >(
+        p: KafkaProducer<K, V, C>,
+    ) {
+        fn check<K, V, P: crate::producer::Producer<K, V>>(_p: P) {}
+        check::<K, V, _>(p);
     }
 }
