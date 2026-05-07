@@ -134,6 +134,44 @@ The accumulator's built-in adaptive partitioner handles every code
 path Phase 7d needs; custom partitioners land with the public-ctor
 builder in Phase 7e/8.
 
+**Phase 7d Round 1 add-on:** `new_for_test` now emits a `log::warn!`
+when the user supplies a non-default `partitioner.class` so the silent
+deferral is visible in operator logs. Once Phase 7e wires `new(props)`
+to a real `NetworkClient`, this warn becomes either:
+
+1. a hard `KafkaError::Config(...)` rejection if the builder API does
+   not ship in 7e, OR
+2. a routing fallback ("supply your `Partitioner` via the builder") if
+   the builder API DOES ship in 7e.
+
+**Phase 7e MUST wire `partitioner.class`** — either as a hard rejection
+or as a routed-through-builder error. A user with a custom partitioner
+left silently dropped is a real correctness gap once `new(props)`
+becomes the production constructor.
+
+### `do_send` catch fan-out: per-arm user-callback parity
+
+Phase 7d Round 1 (Critic 7 Suggestion 1) split the single Rust catch
+arm into Java's four-arm fan-out using a new
+[`KafkaError::is_api_exception`] classifier:
+
+* `ApiException` subclasses (Timeout, RecordTooLarge, InvalidTopic,
+  Disconnect, etc.) — fire user callback + `interceptors.on_send_error`.
+* `KafkaException` direct subclasses (`Serialization`, `Config`,
+  `Interrupt`, bare `Generic`), `InterruptException`, and stdlib
+  `RuntimeException` (`IllegalArgument`, `IllegalState`,
+  `UnsupportedOperation`) — fire `interceptors.on_send_error` only.
+
+This mirrors Java's per-arm callback rule at `KafkaProducer.java:1056-1081`
+(only `catch (ApiException)` invokes `callback.onCompletion`; the
+other three arms re-throw without invoking the user callback).
+
+Test-pinned by:
+- `send_returns_record_too_large_and_fires_interceptor_on_send_error`
+  (ApiException path — user callback fires once).
+- `send_does_not_fire_user_callback_for_non_api_exception`
+  (non-ApiException path — user callback does NOT fire).
+
 ### `Producer` trait methods covered: `send` and `send_with_callback`
 
 Every other trait method (`init_transactions`, `flush`,

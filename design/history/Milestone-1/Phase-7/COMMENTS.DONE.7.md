@@ -599,3 +599,218 @@ steals `producer.sender_task` before drop, then `tokio::time::timeout(1s, handle
 proves the task ran to completion or was cancelled. Accepts either a
 cancelled JoinError (the abort path) or `Ok(())` (the cooperative
 running-flag-flip path) — both prove the task actually exited.
+
+---
+
+# Critic 7 — Phase 7c Round 2 acceptance (archived)
+
+Review window: fixup commits `973218a`, `fabe23b`, `62bad53`, archive
+`07d6d6b`, memory `e2f3e1f` on branch `fresh-impl`.
+
+Java references (cross-checked):
+- `KafkaProducer.java:454-458` — `config.logUnused()` ordering after
+  Sender start.
+- `KafkaProducer.java:582-587` — silent `delivery.timeout.ms` bump emits
+  `log.warn`.
+- `KafkaProducer.java:455` — `NETWORK_THREAD_PREFIX` is the IO-thread
+  name; no Tokio analogue without `tracing`.
+
+Build state: `cargo test --lib kafka_producer::` 6/6 pass in 0.01s. Full
+suite still 1149/1149 (unchanged from Round 1).
+
+## Per-fixup verifications (summary)
+
+- Suggestion #1 — `NETWORK_THREAD_PREFIX` removed from public API,
+  replaced by 10-line module comment explaining the Tokio/`log`
+  divergence (`kafka_producer.rs:98-108`). No orphan references.
+- Suggestion #2 — silent delivery-timeout bump emits a `log::warn!` at
+  `kafka_producer.rs:643-650` byte-equivalent to Java `KafkaProducer.java:584-587`.
+- Suggestion #3 — `config.logUnused()` translated as
+  `config.inner().log_unused()` after `tokio::spawn(sender.run_loop())`
+  at `kafka_producer.rs:508-515`. Order matches Java.
+- Suggestion #4 — `Sender::is_running` and `Sender::running_arc` cross-
+  reference each other in rustdoc (`sender.rs:402-413, 419-425`).
+- Nit #1 — strengthened `drop_aborts_sender_task` to verify both halves
+  of the abort contract (running-flag flip + JoinHandle exit within 1s).
+
+All five Round-1 disposition fixups verified against the Round-1
+descriptions; archive integrity confirmed; no new defects scanned.
+
+## Round 2 verdict: accepted — Phase 7c ready to close.
+
+---
+
+# Critic 7 — Phase 7d Round 1 review (resolved)
+
+Critic 7. Commits reviewed: `92f79af`, `4d3a950`, `53d8cf4`, `51116c3`,
+`34341b2`, `41294f2`. Build state on review: `cargo test --lib` 1159
+passing per Actor's report; reviewer did not re-run.
+
+## Verdict: accepted with **0 Blocking, 2 Suggestion, 1 Nit**.
+
+The send path translation is faithful to Java's `doSend`, the
+interceptor double-fire was a real bug correctly diagnosed and fixed,
+and the new tests genuinely pin the on-error contract. Two minor
+divergences below are worth recording — neither breaks the send
+contract and both are aligned with project deferral conventions.
+
+## Per-area summary
+
+- **`do_send` step parity**: present. (a) `throw_if_producer_closed`,
+  (b) `wait_on_metadata`, (c) remaining-wait recompute, (d) key+value
+  serialize with mapped error wrapping, (f) `partition`, (g) headers
+  snapshot, (h) `estimate_size_in_bytes_upper_bound`, (i)
+  `ensure_valid_record_size`, (j) `accumulator.append`, (l) wakeup-on-
+  full, (m) catch-block fan-out — all wired in the same order as Java
+  L987–L1080. Step (e) — explicit-partition validation against
+  `cluster.partitionsForTopic(topic).size()` — is correctly subsumed by
+  `wait_on_metadata` (which Java also relies on; there is no separate
+  validator at the Java callsite either; the loop's exit condition
+  `partition < partitionsCount` enforces it). Step (k)
+  `transactionManager.maybeAddPartition` is correctly gated by an
+  `unreachable!()` since Phase 6 plug-in contract pins
+  `transaction_manager = None`.
+- **Interceptor double-fire fix**: correct and well-targeted. Java's
+  catch block at L1058–L1064 fires the user callback *directly*, not
+  via `AppendCallbacks.onCompletion` — bypassing the
+  `interceptors.onAcknowledgement` re-entry. The Rust catch arm extracts
+  `append_cb.user_callback.as_ref()` and fires it without going through
+  `AppendCallbacksImpl::on_completion`, then runs
+  `interceptors.on_send_error` separately. The new
+  `send_returns_record_too_large_and_fires_interceptor_on_send_error`
+  test counts `on_acknowledgement(error)` invocations and asserts == 1;
+  the doubled-up path would have produced 2.
+- **`partition` parity**: matches Java L1476–L1495 exactly.
+  Explicit-partition first, user-Partitioner second, key-hash third,
+  `UNKNOWN_PARTITION` fallback. Negative-partition rejection as
+  `KafkaError::IllegalArgument`. `partitioner_ignore_keys` honoured.
+- **`AppendCallbacks` parity**: matches Java L1568–L1626.
+  `topic_partition()` priority chain
+  (set_partition > record_partition > UNKNOWN) is correct,
+  `OnceLock` mirrors Java's `volatile` cache semantics, and
+  `on_completion` synthesises a placeholder metadata when the
+  accumulator passes `None` (Java L1597–L1599).
+- **`wait_on_metadata` parity**: faithful; uses
+  `ProducerMetadata::await_update` with a wall-clock-bound deadline
+  (so MockTime-based tests still time out). Topic is `add`-ed,
+  invalid-topic short-circuits, and the timeout error message is
+  Java-verbatim.
+- **Zero-copy + no-spawn**: clean. Serialised key/value `Vec<u8>` are
+  passed via `as_deref()` → `Option<&[u8]>` into
+  `accumulator.append` with no second copy. No `Box::pin` or
+  `tokio::spawn` per send.
+
+## Issues
+
+### Suggestion 1 — Catch-block user-callback fires for every error type, not just `ApiException`
+
+- **File**: `src/producer/kafka_producer.rs:840-867` (`do_send`)
+- **Severity**: Suggestion (behavior divergence)
+- **Java reference**: `KafkaProducer.java:1056-1081`
+- **Description**: Java's `doSend` has four distinct catch arms:
+  - `ApiException` (L1056) — fires user callback **and** onSendError,
+    returns `FutureFailure` (caller sees the error via
+    `Future.get()`).
+  - `InterruptedException` (L1069), `KafkaException` (L1073),
+    `Exception` (L1077) — fires **only** onSendError, then
+    *re-throws*. The user does *not* observe a callback fire on these
+    paths; they get the synchronous throw on `send()`.
+
+  The Rust translation collapsed all four paths into one match arm
+  that fired the user callback for every error. A user who registered
+  both a callback AND awaited the `Result` from `send()` would observe
+  an error event twice on non-API errors.
+
+**Disposition**: Fixed in commit `67ea5df` (fixup! `53d8cf4`).
+Added `KafkaError::is_api_exception()` classifier that returns `true`
+for variants whose Java counterpart is a subclass of `ApiException`,
+`false` for direct `KafkaException` subclasses (`Serialization`,
+`Config`, `Interrupt`, bare `Generic`) and stdlib `RuntimeException`
+variants (`IllegalArgument`, `IllegalState`, `UnsupportedOperation`).
+The `do_send` catch arm now fires the user callback only when
+`err.is_api_exception()`; the interceptor `on_send_error` always fires
+(matching all four Java arms). The rustdoc on `do_send` documents the
+fan-out table verbatim against Java line numbers. Test pinning: see
+`bfba26c` below — `send_does_not_fire_user_callback_for_non_api_exception`
+would have failed against the pre-fix behaviour because it reverts to
+the `IllegalState` arm where the pre-fix code fired the callback.
+
+### Suggestion 2 — `partitioner.class` config silently ignored
+
+- **File**: `src/producer/kafka_producer.rs:368-374`
+  (`new_for_test`, partitioner instantiation)
+- **Severity**: Suggestion (regression risk into Phase 7e)
+- **Java reference**: `KafkaProducer.java:369-375`
+  (`partitionerPlugin = config.getConfiguredInstance(...)`)
+- **Description**: The Rust `new_for_test` always set
+  `partitioner = None`, even when the user provides
+  `partitioner.class = com.example.MyPartitioner` in the config.
+  Once Phase 7e wires `new()` to the production NetworkClient, this
+  becomes a real silent-drop bug.
+
+**Disposition**: Fixed in commit `0e2dd8e` (fixup! `b696f5d`).
+`new_for_test` now emits a `log::warn!` whenever the user supplied a
+non-default `partitioner.class` so the deferral is operator-visible.
+Phase 7e carryover note in `NOTES.md` strengthened to make explicit
+that Phase 7e MUST either reject `partitioner.class` outright or
+route it through the builder API once `new(props)` becomes
+production. The warn becomes a hard rejection (or routing) at that
+point.
+
+### Nit 1 — `set_read_only(record.headers())` not translated
+
+- **File**: `src/producer/kafka_producer.rs:929-942` (`do_send_inner`)
+- **Severity**: Nit
+- **Java reference**: `KafkaProducer.java:1026, 1084-1088`
+- **Description**: Java calls `setReadOnly(record.headers())` (L1026)
+  to flip the user's `RecordHeaders` to read-only after `partition()`,
+  preventing a misbehaving interceptor (or the user) from mutating
+  them between `partition()` and `accumulator.append()`.
+
+**Disposition**: Fixed in commit `67ea5df` (fixup! `53d8cf4`).
+Replaced the existing inline comment with an explicit rustdoc-style
+block explaining that the Rust ownership model provides the same
+guarantee for free: `do_send`'s receiver is `record: ProducerRecord<K, V>`
+(by value — moved out of `Producer::send_with_callback`'s intercepted
+record), so the user no longer holds any reference to the original
+`Headers`. Past this point the only reader of `record.headers()` is
+`do_send_inner` itself, and the headers `Vec` passed to
+`accumulator.append` is a shallow `cloned()` collection. Interceptors
+run before the record reaches `do_send` (in
+`Producer::send_with_callback`), so the read-only flag has no Rust
+counterpart to defend against. No `set_read_only` API was added.
+
+### Test-pinning of Suggestion 1 (commit `bfba26c`, fixup! `34341b2`)
+
+- New test `send_does_not_fire_user_callback_for_non_api_exception`
+  (`kafka_producer.rs`) closes the producer (sets `sender_running =
+  false`) before `send_with_callback`, triggering
+  `KafkaError::IllegalState` from `throw_if_producer_closed`. Asserts:
+  - The error is `IllegalState` and `!err.is_api_exception()`.
+  - The user callback fires **0 times** (Java `catch (Exception)` arm
+    rethrows without invoking the callback).
+  - The interceptor's `on_acknowledgement(error)` fires **exactly 1
+    time** (Java `catch (Exception)` arm still fires `onSendError`).
+- Existing test `send_returns_record_too_large_and_fires_interceptor_on_send_error`
+  strengthened to also register a user callback and assert it fires
+  exactly once for `RecordTooLarge` (an `ApiException` subclass —
+  Java `catch (ApiException)` arm DOES invoke the user callback).
+  Also asserts the error message contains `max.request.size` per
+  DoD #3.
+
+## Definition-of-done check
+
+- All listed Java methods translated (`doSend`, `partition`,
+  `AppendCallbacks`, `waitOnMetadata`, `throwIfProducerClosed`,
+  `ensureValidRecordSize`).
+- 11 send-path tests (10 from Round 1 + 1 added in Round 1 fixup) with
+  citations to the corresponding Java `@Test`. Error-message content
+  asserted where Java specifies it (DoD #3 honoured).
+- `tokio::spawn` only at construction, not per send. No
+  `Box<dyn Future>` per send. No clones on serialised bytes.
+- No `TODO`/`FIXME` introduced.
+
+## Round 1 verdict (resolved)
+
+**Accepted.** All Suggestions and the Nit fixed in Round-1 fixup
+commits. Phase 7d ready to close.
