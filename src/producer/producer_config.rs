@@ -239,12 +239,12 @@ const RETRIES_DOC: &str = concat!(
 /// `key.serializer`
 pub const KEY_SERIALIZER_CLASS_CONFIG: &str = "key.serializer";
 /// Doc string for [`KEY_SERIALIZER_CLASS_CONFIG`].
-pub const KEY_SERIALIZER_CLASS_DOC: &str = "Serializer class for key that implements the `Serializer` interface.";
+pub const KEY_SERIALIZER_CLASS_DOC: &str = "Serializer class for key that implements the <code>org.apache.kafka.common.serialization.Serializer</code> interface.";
 
 /// `value.serializer`
 pub const VALUE_SERIALIZER_CLASS_CONFIG: &str = "value.serializer";
 /// Doc string for [`VALUE_SERIALIZER_CLASS_CONFIG`].
-pub const VALUE_SERIALIZER_CLASS_DOC: &str = "Serializer class for value that implements the `Serializer` interface.";
+pub const VALUE_SERIALIZER_CLASS_DOC: &str = "Serializer class for value that implements the <code>org.apache.kafka.common.serialization.Serializer</code> interface.";
 
 /// `socket.connection.setup.timeout.ms`
 pub const SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG: &str =
@@ -267,7 +267,8 @@ const PARTITIONER_CLASS_DOC: &str = concat!(
 pub const INTERCEPTOR_CLASSES_CONFIG: &str = "interceptor.classes";
 /// Doc string for [`INTERCEPTOR_CLASSES_CONFIG`].
 pub const INTERCEPTOR_CLASSES_DOC: &str = concat!(
-    "A list of classes to use as interceptors. Implementing the `ProducerInterceptor` interface allows you to ",
+    "A list of classes to use as interceptors. ",
+    "Implementing the <code>org.apache.kafka.clients.producer.ProducerInterceptor</code> interface allows you to ",
     "intercept (and possibly mutate) the records received by the producer before they are published to the Kafka ",
     "cluster. By default, there are no interceptors.",
 );
@@ -282,8 +283,16 @@ pub const ENABLE_IDEMPOTENCE_CONFIG: &str = "enable.idempotence";
 /// Doc string for [`ENABLE_IDEMPOTENCE_CONFIG`].
 pub const ENABLE_IDEMPOTENCE_DOC: &str = concat!(
     "When set to 'true', the producer will ensure that exactly one copy of each message is written in the stream. ",
-    "If 'false', producer retries due to broker failures, etc., may write duplicates. ",
-    "Milestone-1 deviation: the default is 'false' and 'true' is rejected at construction (Phase 8 will re-enable). ",
+    "If 'false', producer retries due to broker failures, etc., may write duplicates of the retried message in the stream. ",
+    "Note that enabling idempotence requires <code>max.in.flight.requests.per.connection</code> to be less than or equal to 5 ",
+    "(with message ordering preserved for any allowable value), <code>retries</code> to be greater than 0, and <code>acks</code> ",
+    "must be 'all'. ",
+    "<p>",
+    "Idempotence is enabled by default if no conflicting configurations are set. ",
+    "If conflicting configurations are set and idempotence is not explicitly enabled, idempotence is disabled. ",
+    "If idempotence is explicitly enabled and conflicting configurations are set, a <code>ConfigException</code> is thrown.",
+    "<p>",
+    "Milestone-1 deviation: the default is 'false' and an explicit 'true' is rejected at construction (Phase 8 will re-enable). ",
     "See design/history/Milestone-1/PLAN.md.",
 );
 
@@ -296,15 +305,24 @@ pub const TRANSACTION_TIMEOUT_CONFIG: &str = "transaction.timeout.ms";
 /// Doc string for [`TRANSACTION_TIMEOUT_CONFIG`].
 pub const TRANSACTION_TIMEOUT_DOC: &str = concat!(
     "The maximum amount of time in milliseconds that a transaction will remain open before the coordinator ",
-    "proactively aborts it.",
+    "proactively aborts it. ",
+    "The start of the transaction is set at the time that the first partition is added to it. ",
+    "If this value is larger than the <code>transaction.max.timeout.ms</code> setting in the broker, the request will fail with a ",
+    "<code>InvalidTxnTimeoutException</code> error.",
 );
 
 /// `transactional.id`
 pub const TRANSACTIONAL_ID_CONFIG: &str = "transactional.id";
 /// Doc string for [`TRANSACTIONAL_ID_CONFIG`].
 pub const TRANSACTIONAL_ID_DOC: &str = concat!(
-    "The TransactionalId to use for transactional delivery. By default the TransactionId is not configured. ",
-    "Milestone-1 deviation: any non-null/non-empty value is rejected at construction (Phase 9 will re-enable).",
+    "The TransactionalId to use for transactional delivery. This enables reliability semantics which span multiple producer ",
+    "sessions since it allows the client to guarantee that transactions using the same TransactionalId have been completed ",
+    "prior to starting any new transactions. If no TransactionalId is provided, then the producer is limited to idempotent delivery. ",
+    "If a TransactionalId is configured, <code>enable.idempotence</code> is implied. ",
+    "By default the TransactionId is not configured, which means transactions cannot be used. ",
+    "Note that, by default, transactions require a cluster of at least three brokers which is the recommended setting for production; ",
+    "for development you can change this, by adjusting broker setting ",
+    "<code>transaction.state.log.replication.factor</code>.",
 );
 
 /// `transaction.two.phase.commit.enable`
