@@ -73,7 +73,7 @@ pub trait Message: Clone {
     /// # Errors
     ///
     /// Returns an error if the specified version is not supported.
-    fn write(&self, writable: &mut dyn Writable, cache: &ObjectSerializationCache, version: i16) -> io::Result<()>;
+    fn write(&mut self, writable: &mut dyn Writable, cache: &ObjectSerializationCache, version: i16) -> io::Result<()>;
 
     /// Reads this message from the given Readable. This will overwrite all
     /// relevant fields with information from the byte buffer.
@@ -147,7 +147,7 @@ mod tests {
         }
 
         fn write(
-            &self,
+            &mut self,
             writable: &mut dyn Writable,
             _cache: &ObjectSerializationCache,
             version: i16,
@@ -207,7 +207,12 @@ mod tests {
             self.inner.add_size(size, cache, version)
         }
 
-        fn write(&self, writable: &mut dyn Writable, cache: &ObjectSerializationCache, version: i16) -> io::Result<()> {
+        fn write(
+            &mut self,
+            writable: &mut dyn Writable,
+            cache: &ObjectSerializationCache,
+            version: i16,
+        ) -> io::Result<()> {
             self.inner.write(writable, cache, version)
         }
 
@@ -245,7 +250,7 @@ mod tests {
     fn test_message_write_and_read() {
         use crate::common::protocol::ByteBufferAccessor;
 
-        let msg = TestMessage::new(42);
+        let mut msg = TestMessage::new(42);
         let mut cache = ObjectSerializationCache::new();
         let size = msg.size(&mut cache, 0).unwrap();
 
