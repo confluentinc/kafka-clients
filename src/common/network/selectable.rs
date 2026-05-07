@@ -97,8 +97,13 @@ pub trait Selectable: Send {
     ///
     /// Java throws `IOException`; we surface failures as
     /// [`KafkaError::Network`].
-    #[allow(async_fn_in_trait)]
-    async fn poll(&mut self, timeout_ms: i64) -> Result<(), KafkaError>;
+    ///
+    /// Returns a `Send` future so [`crate::KafkaClient::poll`] (which
+    /// `await`s this) can in turn return a `Send` future — required so
+    /// the producer's [`crate::producer::internals::sender::Sender`]
+    /// run loop can be moved into a `tokio::spawn` task that is itself
+    /// `Send`.
+    fn poll(&mut self, timeout_ms: i64) -> impl std::future::Future<Output = Result<(), KafkaError>> + Send;
 
     /// The list of sends that completed on the last [`Self::poll`] call.
     /// Mirrors `Selectable.completedSends()`.

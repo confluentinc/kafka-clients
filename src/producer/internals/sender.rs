@@ -404,18 +404,18 @@ impl<C: KafkaClient> Sender<C> {
         self.running.load(Ordering::Acquire)
     }
 
-    /// Test-only handle on the running flag. Lets tests that move the
+    /// Handle on the running flag. Lets external code that moved the
     /// sender into a `tokio::spawn` task still flip the flag from
-    /// outside the task to drive the loop's exit path.
-    #[cfg(test)]
+    /// outside the task to drive the loop's exit path. Used by
+    /// `KafkaProducer::Drop` (Phase 7c) and the Phase 7e async `close`.
     pub(crate) fn running_arc(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.running)
     }
 
-    /// Test-only handle on the force-close flag. Used together with
-    /// [`Self::running_arc`] to bypass the drain stage when a test has
-    /// moved the sender into a `tokio::spawn` task.
-    #[cfg(test)]
+    /// Handle on the force-close flag. Used together with
+    /// [`Self::running_arc`] to bypass the drain stage when the sender
+    /// has been moved into a `tokio::spawn` task. Same callers as
+    /// [`Self::running_arc`].
     pub(crate) fn force_close_arc(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.force_close)
     }

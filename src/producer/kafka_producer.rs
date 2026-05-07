@@ -69,21 +69,27 @@
 
 #![allow(dead_code)] // Phase 7d/7e wire send/flush/close on top of this skeleton.
 
+use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 
 use tokio::task::JoinHandle;
 
 use crate::KafkaClient;
-use crate::common::compress::Compression;
+use crate::common::compress::{Compression, NoCompression, SnappyCompression};
+use crate::common::errors::KafkaError;
+use crate::common::record::CompressionType;
 use crate::common::serialization::Serializer;
 use crate::common::utils::log_context::LogContext;
+use crate::common::utils::system_time::SystemTime;
 use crate::common::utils::time::Time;
 use crate::producer::internals::producer_interceptors::ProducerInterceptors;
 use crate::producer::internals::producer_metadata::ProducerMetadata;
 use crate::producer::internals::record_accumulator::RecordAccumulator;
+use crate::producer::internals::sender::Sender;
 use crate::producer::internals::transaction_manager::TransactionManager;
 use crate::producer::partitioner::Partitioner;
-use crate::producer::producer_config::ProducerConfig;
+use crate::producer::producer_config::{self, ProducerConfig};
 
 /// Java's `KafkaProducer.JMX_PREFIX`.
 pub const JMX_PREFIX: &str = "kafka.producer";
@@ -207,6 +213,435 @@ pub struct KafkaProducer<K, V, C: KafkaClient> {
     /// `Send`/`Sync` bounds on `C` beyond what [`KafkaClient`] already
     /// requires.
     _client_marker: std::marker::PhantomData<fn() -> C>,
+}
+
+// =====================================================================
+// Public API
+// =====================================================================
+
+impl<K, V, C: KafkaClient> KafkaProducer<K, V, C> {
+    /// Java's `getClientId()` accessor (visible-for-testing).
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+}
+
+// =====================================================================
+// Public constructors — `KafkaProducer<K, V>` over a Map of config.
+// =====================================================================
+//
+// Java public constructor (`KafkaProducer.java:283-303`) takes a
+// `Map<String, Object>` plus optional `Serializer<K>` / `Serializer<V>`
+// instances and internally constructs a `ProducerConfig`. Internally
+// `KafkaProducer` then constructs a `NetworkClient` via
+// `ClientUtils.createNetworkClient` — that path requires Java's
+// `DefaultMetadataUpdater` (the package-private inner class on
+// `NetworkClient`). The Rust translation does not yet have a
+// `DefaultMetadataUpdater` translation; the public constructors below
+// honour Java's signature shape but currently delegate to a
+// `KafkaError::UnsupportedOperation` until that translation lands.
+//
+// Tests (and Phase 7d/7e wiring) use the [`KafkaProducer::new_for_test`]
+// pkg-private constructor that takes a pre-built [`KafkaClient`].
+
+/// Phase 7c marker error message returned by the public constructors
+/// until [`crate::NetworkClient`]'s `DefaultMetadataUpdater` is
+/// translated. Matches CLAUDE.md rule 5: a Java path that's not yet
+/// implemented surfaces an explicit `KafkaError`, not a silent stub or
+/// a hang.
+const PRODUCTION_NETWORK_CLIENT_DEFERRED: &str = "KafkaProducer::new and ::with_serializers are deferred until \
+     NetworkClient's DefaultMetadataUpdater is translated (Phase 7d/8 \
+     prereq). Use KafkaProducer::new_for_test in unit tests, or wait \
+     for the Phase 8 wiring.";
+
+impl<K, V> KafkaProducer<K, V, crate::NetworkClient<crate::common::network::Selector, crate::ManualMetadataUpdater>>
+where
+    K: 'static,
+    V: 'static,
+{
+    /// A producer is instantiated by providing a set of key-value pairs
+    /// as configuration. Mirrors `KafkaProducer(Map<String, Object>)` at
+    /// `KafkaProducer.java:283`.
+    ///
+    /// Note: after creating a `KafkaProducer` you must always
+    /// [`KafkaProducer::close`] it to avoid resource leaks.
+    ///
+    /// # Phase 7c deferral
+    ///
+    /// This constructor returns
+    /// [`KafkaError::UnsupportedOperation`] in this milestone — the
+    /// production NetworkClient path requires `DefaultMetadataUpdater`,
+    /// which is not yet translated. See module-level docs and
+    /// [`KafkaProducer::new_for_test`] for the working construction
+    /// surface. Phase 7d/8 will lift this restriction.
+    pub fn new(_props: HashMap<String, String>) -> Result<Self, KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PRODUCTION_NETWORK_CLIENT_DEFERRED.to_owned()))
+    }
+
+    /// A producer is instantiated by providing a set of key-value pairs
+    /// as configuration plus explicit key/value serializer instances.
+    /// Mirrors `KafkaProducer(Map<String, Object>, Serializer<K>,
+    /// Serializer<V>)` at `KafkaProducer.java:300`.
+    ///
+    /// # Phase 7c deferral
+    ///
+    /// Same deferral as [`Self::new`].
+    pub fn with_serializers(
+        _props: HashMap<String, String>,
+        _key_serializer: Box<dyn Serializer<K>>,
+        _value_serializer: Box<dyn Serializer<V>>,
+    ) -> Result<Self, KafkaError> {
+        Err(KafkaError::UnsupportedOperation(PRODUCTION_NETWORK_CLIENT_DEFERRED.to_owned()))
+    }
+}
+
+// =====================================================================
+// Visible-for-testing constructor (Java line 332).
+// =====================================================================
+
+impl<K, V, C: KafkaClient + 'static> KafkaProducer<K, V, C>
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
+    /// Visible-for-testing constructor mirroring
+    /// `KafkaProducer(ProducerConfig, Serializer<K>, Serializer<V>,
+    /// ProducerMetadata, KafkaClient, ProducerInterceptors<K, V>,
+    /// ApiVersions, Time)` at `KafkaProducer.java:332`.
+    ///
+    /// Each `Option`-typed parameter mirrors the Java overload's `null`
+    /// argument: when `None`, the constructor builds the corresponding
+    /// component from the config. When `Some`, the caller-supplied
+    /// instance is used (Java passes one or more pre-built collaborators
+    /// in the same constructor).
+    ///
+    /// The constructor spawns the [`Sender::run_loop`] task as the very
+    /// last step — every `Err`-returning path before the spawn ensures no
+    /// background task is left running on construction failure.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K>>,
+        value_serializer: Box<dyn Serializer<V>>,
+        metadata: Option<Arc<ProducerMetadata>>,
+        kafka_client: C,
+        interceptors: Option<Arc<ProducerInterceptors<K, V>>>,
+        api_versions: Option<Arc<crate::ApiVersions>>,
+        time: Option<Arc<dyn Time>>,
+    ) -> Result<Self, KafkaError> {
+        // Java line 343:  this.time = time;
+        let time: Arc<dyn Time> = time.unwrap_or_else(|| SystemTime::instance());
+
+        // Java line 345-353: derive `clientId`, `transactionalId`,
+        // construct LogContext.
+        let client_id_str = config.get_string(producer_config::CLIENT_ID_CONFIG)?;
+        let transactional_id = config.get_string(producer_config::TRANSACTIONAL_ID_CONFIG).ok();
+        let client_id: Arc<str> = Arc::from(client_id_str);
+        let log_context = LogContext::with_prefix(Some(&match transactional_id {
+            Some(tx) if !tx.is_empty() => format!("[Producer clientId={client_id}, transactionalId={tx}] "),
+            _ => format!("[Producer clientId={client_id}] "),
+        }));
+
+        // Java line 376: partitioner.ignore.keys
+        let partitioner_ignore_keys = config.get_boolean(producer_config::PARTITIONER_IGNORE_KEYS_CONFIG)?;
+
+        // Java lines 377-378: retry backoff
+        let retry_backoff_ms = config.get_long(producer_config::RETRY_BACKOFF_MS_CONFIG)?;
+        let retry_backoff_max_ms = config.get_long(producer_config::RETRY_BACKOFF_MAX_MS_CONFIG)?;
+
+        // Java line 369-375: partitionerPlugin = config.getConfiguredInstance(...)
+        // Rust does not perform reflective class-loading from the
+        // `partitioner.class` config; advanced custom partitioners must
+        // be provided via the (future) Phase 7d builder API. Until then
+        // we always select `None` (= built-in adaptive partitioner —
+        // accumulator handles per-topic `BuiltInPartitioner`).
+        let partitioner: Option<Arc<dyn Partitioner>> = None;
+
+        // Java line 407-409: maxRequestSize, totalMemorySize, compression.
+        let max_request_size = config.get_int(producer_config::MAX_REQUEST_SIZE_CONFIG)?;
+        let total_memory_size = config.get_long(producer_config::BUFFER_MEMORY_CONFIG)?;
+        let compression = configure_compression(&config)?;
+
+        // Java line 411-412: maxBlockTimeMs, deliveryTimeoutMs.
+        let max_block_time_ms = config.get_long(producer_config::MAX_BLOCK_MS_CONFIG)?;
+        let delivery_timeout_ms = configure_delivery_timeout(&config)?;
+
+        // Java line 414-415: apiVersions, transactionManager.
+        let api_versions = api_versions.unwrap_or_else(|| Arc::new(crate::ApiVersions::new()));
+        // Milestone-1 contract (Phase 6 plug-in note) — always None for
+        // both the producer field and the borrow handed to Sender /
+        // RecordAccumulator below. `TransactionManager` does not impl
+        // `Clone` (it's a placeholder unit struct), so we construct
+        // fresh `None`s at each call site.
+        let transaction_manager: Option<TransactionManager> = None;
+
+        // Java line 417-422: PartitionerConfig (adaptive partitioning).
+        let enable_adaptive_partitioning = partitioner.is_none()
+            && config.get_boolean(producer_config::PARTITIONER_ADAPTIVE_PARTITIONING_ENABLE_CONFIG)?;
+        let partition_availability_timeout_ms =
+            config.get_long(producer_config::PARTITIONER_AVAILABILITY_TIMEOUT_MS_CONFIG)?;
+        let partitioner_config = crate::producer::internals::record_accumulator::PartitionerConfig::new(
+            enable_adaptive_partitioning,
+            partition_availability_timeout_ms,
+        );
+
+        // Java line 425: batchSize = max(1, batch.size).
+        let batch_size = std::cmp::max(1, config.get_int(producer_config::BATCH_SIZE_CONFIG)?);
+
+        // Java line 426-438: BufferPool + RecordAccumulator.
+        let buffer_pool = Arc::new(crate::producer::internals::buffer_pool::BufferPool::new(
+            total_memory_size,
+            batch_size,
+            time.clone(),
+            PRODUCER_METRIC_GROUP_NAME,
+        ));
+        let accumulator = Arc::new(RecordAccumulator::new(
+            log_context.clone(),
+            batch_size,
+            compression.compression_type(),
+            linger_ms(&config)?,
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            delivery_timeout_ms,
+            partitioner_config,
+            PRODUCER_METRIC_GROUP_NAME,
+            time.clone(),
+            None, // transaction_manager — Milestone-1 always None
+            buffer_pool,
+        ));
+
+        // Java line 440-452: parse bootstrap addresses, construct
+        // ProducerMetadata if not injected, bootstrap it.
+        let metadata: Arc<ProducerMetadata> = match metadata {
+            Some(m) => m,
+            None => {
+                let cluster_resource_listeners =
+                    Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new());
+                let m = ProducerMetadata::new(
+                    retry_backoff_ms,
+                    retry_backoff_max_ms,
+                    config.get_long(producer_config::METADATA_MAX_AGE_CONFIG)?,
+                    config.get_long(producer_config::METADATA_MAX_IDLE_CONFIG)?,
+                    log_context.clone(),
+                    cluster_resource_listeners,
+                    SystemTime::instance(),
+                )?;
+                // Java: `this.metadata.bootstrap(addresses)`. Parse
+                // bootstrap.servers using the configured DNS-lookup
+                // strategy.
+                let dns_lookup = crate::client_dns_lookup::ClientDnsLookup::for_config(
+                    config.get_string(producer_config::CLIENT_DNS_LOOKUP_CONFIG)?,
+                )?;
+                let urls = config.get_list(producer_config::BOOTSTRAP_SERVERS_CONFIG)?;
+                let addresses = crate::client_utils::parse_and_validate_addresses(urls, dns_lookup)?;
+                let address_pairs: Vec<(String, u16)> = addresses
+                    .iter()
+                    .map(|addr| (addr.host_name().to_owned(), addr.port()))
+                    .collect();
+                m.metadata().bootstrap(address_pairs);
+                m
+            },
+        };
+
+        // Java line 396-402: configured interceptors. Rust does not
+        // perform reflective class-loading from `interceptor.classes`;
+        // callers pass a pre-built list via the parameter. When None,
+        // construct an empty chain.
+        let interceptors: Arc<ProducerInterceptors<K, V>> =
+            interceptors.unwrap_or_else(|| Arc::new(ProducerInterceptors::new(Vec::new())));
+
+        // Java line 454: this.sender = newSender(...)
+        // We inline the relevant bits of `newSender(...)` (Java line 510)
+        // here. The Sender takes ownership of `kafka_client` (Java's
+        // `client`). Acks parsing mirrors Java's `Short.parseShort(
+        // producerConfig.getString(ProducerConfig.ACKS_CONFIG))`.
+        let acks_str = config.get_string(producer_config::ACKS_CONFIG)?;
+        let acks: i16 = acks_str
+            .parse::<i16>()
+            .map_err(|_| KafkaError::Config(format!("Invalid configuration value for 'acks': {acks_str}")))?;
+        let request_timeout_ms = config.get_int(producer_config::REQUEST_TIMEOUT_MS_CONFIG)?;
+        let max_inflight = config.get_int(producer_config::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION)?;
+        let retries = config.get_int(producer_config::RETRIES_CONFIG)?;
+
+        let sender = Sender::new(
+            log_context.clone(),
+            kafka_client,
+            metadata.clone(),
+            accumulator.clone(),
+            max_inflight == 1,
+            max_request_size,
+            acks,
+            retries,
+            time.clone(),
+            request_timeout_ms,
+            retry_backoff_ms,
+            None, // transaction_manager — Milestone-1 always None
+            client_id.clone(),
+        );
+
+        // Capture the running/force_close handles BEFORE moving the
+        // sender into the spawned task — Java's analogue is
+        // `sender.initiateClose()` / `sender.forceClose()` callable on
+        // the producer's `sender` field even after the IO thread starts.
+        let sender_running = sender_running_arc(&sender);
+        let sender_force_close = sender_force_close_arc(&sender);
+
+        // Java line 455-457: spawn the IO thread. CLAUDE.md rule 11 —
+        // `tokio::spawn` consumes a concrete `async fn` future, no
+        // `Pin<Box<dyn Future>>`.
+        //
+        // **Spawn-LAST discipline**: every error-returning path above
+        // returned `Err` without the JoinHandle existing, so on
+        // construction failure no background task is leaked.
+        let mut sender = sender;
+        let sender_task: JoinHandle<()> = tokio::spawn(async move {
+            sender.run_loop().await;
+        });
+
+        Ok(KafkaProducer {
+            client_id,
+            time,
+            log_context,
+            max_block_time_ms,
+            total_memory_size,
+            max_request_size,
+            partitioner_ignore_keys,
+            producer_config: config,
+            compression,
+            key_serializer,
+            value_serializer,
+            partitioner,
+            interceptors,
+            metadata,
+            accumulator,
+            transaction_manager,
+            api_versions,
+            sender_running,
+            sender_force_close,
+            sender_task: Some(sender_task),
+            _client_marker: std::marker::PhantomData,
+        })
+    }
+}
+
+// =====================================================================
+// Drop / shutdown
+// =====================================================================
+
+impl<K, V, C: KafkaClient> Drop for KafkaProducer<K, V, C> {
+    /// Java's `KafkaProducer.close(Duration.ofMillis(0), true)` cleanup
+    /// path — synchronous, force-close.
+    ///
+    /// Tokio constraint: `Drop` is a synchronous context. We **cannot**
+    /// `.await` the JoinHandle here (Tokio runtime cannot be re-entered
+    /// from sync drop). Instead we:
+    ///
+    /// 1. Flip `force_close` so the run loop bypasses the drain phase.
+    /// 2. Flip `running` so the run loop's `while running.load(Acquire)`
+    ///    exits on the next iteration.
+    /// 3. Call `JoinHandle::abort()` on the spawned task. The Sender's
+    ///    `run_loop` is designed to tolerate abort — it does not hold
+    ///    any non-droppable resources mid-loop.
+    ///
+    /// Phase 7e adds an async `close()` method that `await`s the
+    /// JoinHandle gracefully, intended to be called BEFORE drop.
+    fn drop(&mut self) {
+        use std::sync::atomic::Ordering;
+        self.sender_force_close.store(true, Ordering::Release);
+        self.sender_running.store(false, Ordering::Release);
+        if let Some(task) = self.sender_task.take() {
+            task.abort();
+        }
+    }
+}
+
+// =====================================================================
+// Helpers — translation of the static Java methods
+// `configureCompression`, `lingerMs`, `configureDeliveryTimeout`.
+// =====================================================================
+
+/// Translation of `KafkaProducer.configureCompression` at
+/// `KafkaProducer.java:542-563`.
+fn configure_compression(config: &ProducerConfig) -> Result<Box<dyn Compression>, KafkaError> {
+    let type_name = config.get_string(producer_config::COMPRESSION_TYPE_CONFIG)?;
+    let ctype = CompressionType::for_name(type_name)?;
+    Ok(match ctype {
+        CompressionType::None => Box::new(NoCompression::new()),
+        CompressionType::Gzip => {
+            let level = config.get_int(producer_config::COMPRESSION_GZIP_LEVEL_CONFIG)?;
+            let mut b = crate::common::compress::gzip_compression::Builder::new();
+            // Builder::level returns Result<Self, KafkaError>; bubble up.
+            b = b.level(level)?;
+            Box::new(b.build())
+        },
+        CompressionType::Lz4 => {
+            let level = config.get_int(producer_config::COMPRESSION_LZ4_LEVEL_CONFIG)?;
+            let mut b = crate::common::compress::lz4_compression::Builder::new();
+            b = b.level(level)?;
+            Box::new(b.build())
+        },
+        CompressionType::Zstd => {
+            let level = config.get_int(producer_config::COMPRESSION_ZSTD_LEVEL_CONFIG)?;
+            let mut b = crate::common::compress::zstd_compression::Builder::new();
+            b = b.level(level)?;
+            Box::new(b.build())
+        },
+        CompressionType::Snappy => Box::new(SnappyCompression::new()),
+    })
+}
+
+/// Translation of `KafkaProducer.lingerMs` at `KafkaProducer.java:565-567`.
+/// Java: `(int) Math.min(linger.ms, Integer.MAX_VALUE)`. Same semantics
+/// in Rust — clamp the i64 config to i32::MAX.
+fn linger_ms(config: &ProducerConfig) -> Result<i32, KafkaError> {
+    let v = config.get_long(producer_config::LINGER_MS_CONFIG)?;
+    Ok(std::cmp::min(v, i32::MAX as i64) as i32)
+}
+
+/// Translation of `KafkaProducer.configureDeliveryTimeout` at
+/// `KafkaProducer.java:569-587`.
+fn configure_delivery_timeout(config: &ProducerConfig) -> Result<i32, KafkaError> {
+    let delivery_timeout_ms = config.get_int(producer_config::DELIVERY_TIMEOUT_MS_CONFIG)?;
+    let linger = linger_ms(config)?;
+    let request_timeout_ms = config.get_int(producer_config::REQUEST_TIMEOUT_MS_CONFIG)?;
+    // Java: (int) Math.min((long) lingerMs + requestTimeoutMs, Integer.MAX_VALUE)
+    let linger_plus_request = std::cmp::min(linger as i64 + request_timeout_ms as i64, i32::MAX as i64) as i32;
+
+    if delivery_timeout_ms < linger_plus_request {
+        // Java: only throw when the user explicitly set delivery.timeout.ms.
+        if config
+            .inner()
+            .originals()
+            .contains_key(producer_config::DELIVERY_TIMEOUT_MS_CONFIG)
+        {
+            return Err(KafkaError::Config(format!(
+                "{} should be equal to or larger than {} + {}",
+                producer_config::DELIVERY_TIMEOUT_MS_CONFIG,
+                producer_config::LINGER_MS_CONFIG,
+                producer_config::REQUEST_TIMEOUT_MS_CONFIG,
+            )));
+        }
+        // Java: silently bumps to the lower bound.
+        Ok(linger_plus_request)
+    } else {
+        Ok(delivery_timeout_ms)
+    }
+}
+
+// Helper bridges to the `running_arc` / `force_close_arc` accessors that
+// are `#[cfg(test)]` on `Sender`. The producer needs access in non-test
+// builds too (Drop / Phase 7e close), so we re-route through internal
+// inspectors. These accessors mirror Java's `volatile boolean running` /
+// `volatile boolean forceClose` fields and exist on `Sender` since
+// Phase 6e (`force_close_arc` was already non-test; `running_arc` was
+// gated to tests). We rely only on the `pub(crate)` non-test
+// `force_close_arc` and add a parallel `running_arc` in this commit.
+fn sender_force_close_arc<C: KafkaClient>(sender: &Sender<C>) -> Arc<AtomicBool> {
+    sender.force_close_arc()
+}
+
+fn sender_running_arc<C: KafkaClient>(sender: &Sender<C>) -> Arc<AtomicBool> {
+    sender.running_arc()
 }
 
 #[cfg(test)]

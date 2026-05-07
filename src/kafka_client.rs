@@ -95,8 +95,15 @@ pub trait KafkaClient: std::marker::Send {
     /// `IllegalStateException` when a request was sent to an unready
     /// node — Rust translations should panic in that case (CLAUDE.md
     /// rule 10.1).
-    #[allow(async_fn_in_trait)]
-    async fn poll(&mut self, timeout_ms: i64, now: i64) -> Vec<ClientResponse>;
+    ///
+    /// Returns a `Send` future so [`Sender::run_loop`] (which awaits
+    /// `poll`) can be moved into a `tokio::spawn` task that is itself
+    /// `Send`. The async-fn-in-trait desugar would otherwise give a
+    /// non-`Send` future and break [`KafkaProducer`]'s constructor.
+    ///
+    /// [`Sender::run_loop`]: crate::producer::internals::sender::Sender::run_loop
+    /// [`KafkaProducer`]: crate::producer::KafkaProducer
+    fn poll(&mut self, timeout_ms: i64, now: i64) -> impl std::future::Future<Output = Vec<ClientResponse>> + Send;
 
     /// Disconnects the connection to a particular node, if there is one.
     /// Any pending `ClientRequest`s for this connection will receive
