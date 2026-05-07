@@ -56,3 +56,4 @@
 - [Phase 7b Producer trait](phase7b_producer_trait.md) — async-fn-in-trait (NOT dyn-compat), Java Future-collapse for `send`, deferred consumer-package methods, KafkaError::UnsupportedOperation
 - [Phase 7c KafkaProducer skeleton](phase7c_kafka_producer.md) — deferred public ctor, +Send on poll futures, Drop for spawned task, StubKafkaClient test mock
 - [Phase 7c Round 1 patterns](phase7c_round1_patterns.md) — log-vs-tracing translation, peek-handle-before-drop for Drop-side-effect tests, log_unused already exists in AbstractConfig
+- [Phase 7d send hot path](phase7d_send_path.md) — wait_on_metadata + partition + AppendCallbacksImpl + impl Producer; sender_wakeup deferred; double-fire interceptor fix on catch path
