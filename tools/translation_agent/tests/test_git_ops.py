@@ -431,3 +431,152 @@ def test_push_branch_force_default_false_omits_force_flag():
     sent = mrun.call_args[0][0]
     assert "--force" not in sent
     assert "--force-with-lease" not in sent
+
+
+# ---------------- commits_between ----------------
+
+
+def _commits_between_router(
+    *,
+    log_stdout: str = "",
+    until_already_present: bool = True,
+    bare_sha_fetch_succeeds: bool = True,
+):
+    """Default-success router for commits_between's call sequence.
+
+    The function's expected git invocations:
+      1. `git fetch origin <branch>` (refresh tip)
+      2. `git cat-file -e <until>^{commit}` (until present?)
+      3. (optional) `git fetch origin <until>` (bare-SHA fetch)
+      4. `git cat-file -e <since>^{commit}` -- and merge-base ancestry
+         against until -- via _ensure_commit_reachable
+      5. `git log --reverse <since>..<until> --format=%H`
+
+    `until_already_present=False` makes the first cat-file return 1
+    so commits_between issues the bare-SHA fetch.
+    `bare_sha_fetch_succeeds=False` makes the bare-SHA fetch fail.
+    """
+    state = {"cat_file_until_calls": 0}
+
+    def router(args, **_kwargs):
+        if args[3] == "fetch" and not any(
+            a.startswith("--deepen=") for a in args
+        ):
+            # Distinguish branch fetch vs bare-SHA fetch by the
+            # final positional arg. The branch is "trunk" in tests;
+            # any other arg shape we treat as the bare-SHA fetch.
+            if args[-1] == "trunk":
+                return _completed(0)
+            # Bare-SHA fetch
+            if bare_sha_fetch_succeeds:
+                return _completed(0)
+            return _completed(
+                128, "", "fatal: couldn't find remote ref"
+            )
+        if "cat-file" in args:
+            # The first cat-file probe targets `until`; the second
+            # (and later) target `since` via _ensure_commit_reachable.
+            state["cat_file_until_calls"] += 1
+            if state["cat_file_until_calls"] == 1:
+                return _completed(0 if until_already_present else 1)
+            return _completed(0)  # since IS present
+        if "merge-base" in args and "--is-ancestor" in args:
+            return _completed(0)
+        if "rev-parse" in args and "--is-shallow-repository" in args:
+            return _completed(0, "false\n")
+        if "log" in args and "--reverse" in args:
+            return _completed(0, log_stdout)
+        raise AssertionError(f"unexpected git call: {args}")
+
+    return router
+
+
+def test_commits_between_returns_full_range_oldest_first():
+    """No N cap; the whole `since..until` range is returned oldest-first."""
+    out = "c0\nc1\nc2\nc3\n"
+    with patch.object(
+        git_ops.subprocess, "run",
+        side_effect=_commits_between_router(log_stdout=out),
+    ) as mrun:
+        commits = git_ops.commits_between(
+            "/repo", since="base", until="head", branch="trunk",
+        )
+    log_call = next(
+        c for c in mrun.call_args_list
+        if "log" in c.args[0] and "--reverse" in c.args[0]
+    )
+    assert log_call.args[0] == [
+        "git", "-C", "/repo",
+        "log", "--reverse", "base..head", "--format=%H",
+    ]
+    assert commits == ["c0", "c1", "c2", "c3"]
+
+
+def test_commits_between_empty_range_returns_empty_list():
+    """since == until -> log emits nothing -> [] returned."""
+    with patch.object(
+        git_ops.subprocess, "run",
+        side_effect=_commits_between_router(log_stdout=""),
+    ):
+        assert git_ops.commits_between(
+            "/repo", since="x", until="x", branch="trunk",
+        ) == []
+
+
+def test_commits_between_skips_bare_sha_fetch_when_until_already_present():
+    """If `until` is in the local DB already, no bare-SHA fetch is issued.
+    Exactly one fetch (the branch tip refresh) should be observed."""
+    with patch.object(
+        git_ops.subprocess, "run",
+        side_effect=_commits_between_router(
+            log_stdout="x\n", until_already_present=True,
+        ),
+    ) as mrun:
+        git_ops.commits_between(
+            "/repo", since="base", until="head", branch="trunk",
+        )
+    fetches = [
+        c.args[0] for c in mrun.call_args_list
+        if c.args[0][3] == "fetch"
+        and not any(a.startswith("--deepen=") for a in c.args[0])
+    ]
+    assert len(fetches) == 1
+    assert fetches[0][-1] == "trunk"
+
+
+def test_commits_between_does_bare_sha_fetch_when_until_missing():
+    """If `until` isn't local, fetch by SHA. Two fetches: branch then SHA."""
+    with patch.object(
+        git_ops.subprocess, "run",
+        side_effect=_commits_between_router(
+            log_stdout="x\n", until_already_present=False,
+        ),
+    ) as mrun:
+        git_ops.commits_between(
+            "/repo", since="base", until="newhead", branch="trunk",
+        )
+    fetches = [
+        c.args[0] for c in mrun.call_args_list
+        if c.args[0][3] == "fetch"
+        and not any(a.startswith("--deepen=") for a in c.args[0])
+    ]
+    assert [f[-1] for f in fetches] == ["trunk", "newhead"]
+
+
+def test_commits_between_raises_when_bare_sha_fetch_fails():
+    """A failed `git fetch origin <until>` (private repo / unknown SHA)
+    must surface as GitError so the caller doesn't silently see [] from
+    a no-op log against a missing object."""
+    with patch.object(
+        git_ops.subprocess, "run",
+        side_effect=_commits_between_router(
+            until_already_present=False,
+            bare_sha_fetch_succeeds=False,
+        ),
+    ):
+        with pytest.raises(
+            git_ops.GitError, match="failed to fetch until commit",
+        ):
+            git_ops.commits_between(
+                "/repo", since="base", until="absent", branch="trunk",
+            )

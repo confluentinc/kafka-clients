@@ -36,9 +36,23 @@ import sys
 from pathlib import Path
 from typing import Optional, Sequence
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from . import db, git_ops, github, locked_db, prompts, r2, streaming, worktree
 
-from . import db, git_ops, github, prompts, r2, semaphore, streaming, worktree
+
+def _db_session(args: "argparse.Namespace", *, write: bool):
+    """Open a locked_db.session driven by `args`.
+
+    Both `--dry-run` and `--no-artifact-push` skip the lock + pull +
+    push subprocess calls. In dry-run mode we don't talk to Semaphore
+    at all; with --no-artifact-push the operator wants real LLM/git
+    work but no artifact RPCs -- typically used for local runs without
+    the Semaphore `artifact` CLI installed.
+    """
+    return locked_db.session(
+        args.db_path,
+        write=write,
+        dry_run=args.dry_run or args.no_artifact_push,
+    )
 
 
 def _r2_available() -> bool:
@@ -156,7 +170,109 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _run_seed(args: argparse.Namespace, conn) -> int:
+def _parse_pr_numbers(raw: str) -> list[int] | None:
+    """Parse a comma-separated PR-number string into a list of ints.
+
+    Returns None on any malformed input (empty, whitespace-only,
+    non-integer token, duplicate). The caller logs the user-facing
+    error and returns rc=2; this helper just signals "bad input."
+    """
+    parts = [p for p in raw.split(",") if p != ""]
+    if not parts:
+        return None
+    try:
+        nums = [int(p) for p in parts]
+    except ValueError:
+        return None
+    if len(set(nums)) != len(nums):
+        return None
+    return nums
+
+
+def _run_delete_prs(args: argparse.Namespace) -> int:
+    if not args.rust_branch or not args.pr_numbers:
+        missing = []
+        if not args.rust_branch:
+            missing.append("--rust-branch")
+        if not args.pr_numbers:
+            missing.append("--pr-numbers")
+        log.error("--delete-prs requires: %s", ", ".join(missing))
+        return 2
+
+    pr_numbers = _parse_pr_numbers(args.pr_numbers)
+    if pr_numbers is None:
+        log.error(
+            "--delete-prs: --pr-numbers must be a non-empty comma-"
+            "separated list of unique integers (e.g. '123,456'); got %r",
+            args.pr_numbers,
+        )
+        return 2
+
+    # Pre-flight pass: validate everything BEFORE any mutation. A
+    # failure here means rc=1 with the DB and GitHub completely
+    # untouched -- the operator's --rust-branch acts as a safety scope
+    # against typos that would otherwise delete the wrong PRs.
+    targets: list[tuple[int, str]] = []
+    for n in pr_numbers:
+        with _db_session(args, write=False) as conn:
+            row = db.get_pr(conn, n)
+        if row is None:
+            log.error(
+                "--delete-prs: PR %d not found in pr_commit -- aborting",
+                n,
+            )
+            return 1
+        if row["rust_branch"] != args.rust_branch:
+            log.error(
+                "--delete-prs: PR %d belongs to rust_branch=%s, not %s "
+                "-- aborting (no changes made)",
+                n, row["rust_branch"], args.rust_branch,
+            )
+            return 1
+        targets.append((n, github.branch_name_for_ak(row["ak_commit"])))
+
+    if args.dry_run:
+        log.info(
+            "--delete-prs --dry-run: %d PR(s) would be deleted on rust_branch=%s",
+            len(targets), args.rust_branch,
+        )
+        for pr_number, branch in targets:
+            log.info("  would delete: PR %d branch=%s", pr_number, branch)
+        return 0
+
+    # Execute. Per design: GitHub branch FIRST (closes the PR
+    # implicitly), then DB row. Fail-fast on real gh errors (auth,
+    # network, 5xx). A "branch already gone" response is a soft
+    # success: log it, then proceed to delete the DB row so the run
+    # continues with remaining PRs.
+    for pr_number, branch in targets:
+        try:
+            github.delete_remote_branch(args.rust_repo_path, branch)
+            branch_outcome = "removed"
+        except github.GhBranchAlreadyGone as e:
+            log.info(
+                "--delete-prs: branch %s for PR %d already gone on remote, "
+                "proceeding to remove DB row (%s)",
+                branch, pr_number, e,
+            )
+            branch_outcome = "already gone"
+        except github.GhError as e:
+            log.error(
+                "--delete-prs: failed to delete branch %s for PR %d: %s "
+                "-- aborting (DB row not touched for this PR)",
+                branch, pr_number, e,
+            )
+            return 1
+        with _db_session(args, write=True) as conn:
+            db.delete_pr_commit(conn, pr_number)
+        log.info(
+            "Deleted PR %d (branch=%s %s, pr_commit row removed)",
+            pr_number, branch, branch_outcome,
+        )
+    return 0
+
+
+def _run_seed(args: argparse.Namespace) -> int:
     required = ("ak_branch", "ak_commit", "rust_branch")
     missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
     if missing:
@@ -168,20 +284,22 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
         # the operator sees and matches the post-state of the DB.
         # Always log the count (even 0) so the operator gets
         # confirmation the flag took effect.
-        deleted = db.cleanup_pr_commits_for_rust_branch(
-            conn, args.rust_branch,
-        )
+        with _db_session(args, write=True) as conn:
+            deleted = db.cleanup_pr_commits_for_rust_branch(
+                conn, args.rust_branch,
+            )
         log.info(
             "Cleaned up %d pr_commit row(s) for rust_branch=%s",
             deleted, args.rust_branch,
         )
 
     try:
-        result = db.seed_correspondence(
-            conn,
-            args.ak_branch, args.ak_commit, args.rust_branch,
-            force=args.force,
-        )
+        with _db_session(args, write=True) as conn:
+            result = db.seed_correspondence(
+                conn,
+                args.ak_branch, args.ak_commit, args.rust_branch,
+                force=args.force,
+            )
     except ValueError as e:
         log.error("%s", e)
         return 1
@@ -205,10 +323,19 @@ def _run_seed(args: argparse.Namespace, conn) -> int:
     return 0
 
 
-def _run_pr_mode(args: argparse.Namespace, conn) -> int:
-    pr = db.get_pr(conn, args.pr)
+def _run_pr_mode(args: argparse.Namespace) -> int:
+    """Entry point for `--pr N` mode.
+
+    Reads the row's current status and runs the next applicable step,
+    cascading until it hits the human gate (status 2 = plan_created)
+    or completes the impl transition 3 -> 4. Each step's DB I/O is in
+    its own `_db_session` block so the lock is held only for the read
+    or write op, never across the LLM call.
+    """
+    with _db_session(args, write=False) as conn:
+        pr = db.get_pr(conn, args.pr)
+
     if pr is None:
-        # Behavior diverges by intent:
         # - `--pr <N>` (status check, auto-triggered by Semaphore on
         #   every PR build): missing rows are the NORMAL case for any
         #   PR that isn't a translation PR managed by the orchestrator.
@@ -227,75 +354,384 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
             "by the orchestrator, skipping", args.pr,
         )
         return 0
-    if not args.plan_approve:
-        for k, v in pr.items():
-            print(f"{k}: {v}")
+
+    if args.plan_approve:
+        return _run_pr_plan_approve(args, pr)
+
+    # Cascade loop. Re-read the row at the top of every iteration so
+    # that if another runner advanced it between my steps, I see the
+    # new status and dispatch correctly (or noop). Bound at 5 as a
+    # defensive cap -- the status enum naturally bounds it at 2
+    # transitions per invocation (0 -> 1 -> 2 stops at the human gate).
+    for _ in range(5):
+        with _db_session(args, write=False) as conn:
+            pr = db.get_pr(conn, args.pr)
+        if pr is None:
+            log.info(
+                "PR %d row vanished mid-cascade; stopping.", args.pr,
+            )
+            return 0
+        st = pr["status"]
+
+        if st == db.STATUS_NO_PLAN:                  # 0
+            err = _do_dep_eval_step(args, pr)
+            if err is not None:
+                return 1
+            continue  # cascade to status 1
+
+        if st == db.STATUS_DEPENDENCIES_EVALUATED:   # 1
+            err = _do_plan_step(args, pr)
+            if err is not None:
+                return 1
+            return 0  # human gate at status 2
+
+        if st == db.STATUS_PLAN_CREATED:             # 2
+            log.info(
+                "PR #%d at status 2 (plan_created); "
+                "waiting for manual --plan-approve.",
+                args.pr,
+            )
+            return 0
+
+        if st == db.STATUS_PLAN_APPROVED:            # 3
+            err = _do_impl_step(args, pr)
+            if err is not None:
+                return 1
+            return 0
+
+        if st == db.STATUS_IMPLEMENTATION_DONE:      # 4
+            log.info(
+                "PR #%d already at status 4 (implementation_done); "
+                "no work to do.",
+                args.pr,
+            )
+            return 0
+
+        log.warning(
+            "PR #%d at unexpected status %d; stopping cascade.",
+            args.pr, st,
+        )
+        return 1
+
+    log.warning(
+        "Cascade for PR #%d did not terminate after 5 iterations.",
+        args.pr,
+    )
+    return 1
+
+
+def _run_pr_plan_approve(args, pr) -> int:
+    """Handle `--pr N --plan-approve`. Idempotent on the impl side: if
+    the row is already at status 3 (impl was started but didn't finish,
+    or the operator re-promoted), skip mark_plan_approved and run impl
+    directly. Status 4 noop. Status 0/1 raise ValueError out of
+    mark_plan_approved -> return 1 so operator misuse is loud.
+    """
+    if pr["status"] >= db.STATUS_IMPLEMENTATION_DONE:
+        log.info(
+            "PR %d already at status %d (implementation_done); "
+            "nothing to do for --plan-approve.",
+            args.pr, pr["status"],
+        )
         return 0
 
-    # Step 7: flip 2 -> 3, then cascade into step 8 for this PR.
-    try:
-        db.mark_plan_approved(conn, args.pr)
-    except ValueError as e:
-        log.error("%s", e)
-        return 1
-    log.info("PR %d marked plan_approved (status %d)", args.pr, db.STATUS_PLAN_APPROVED)
-
-    # Programmatic body marker for the 2 -> 3 transition. No LLM call:
-    # nothing new has happened content-wise vs status 2, so a full
-    # regeneration would just rewrite near-identical text. Skipped for
-    # synthetic dry-run rows (no real PR) and dry-run mode (no remote
-    # writes). Cosmetic: failure is a warning, not a blocker.
-    if not args.dry_run and args.pr >= 0:
-        approval_line = f"✓ Plan approved on {_dt.date.today().isoformat()}"
+    if pr["status"] < db.STATUS_PLAN_APPROVED:
         try:
-            github.prepend_pr_body(args.rust_repo_path, args.pr, approval_line)
-            log.info("PR #%d: prepended approval marker to body", args.pr)
-        except github.GhError as e:
-            log.warning(
-                "PR #%d approval body prepend failed: %s", args.pr, e,
-            )
+            with _db_session(args, write=True) as conn:
+                db.mark_plan_approved(conn, args.pr)
+        except ValueError as e:
+            log.error("%s", e)
+            return 1
+        log.info(
+            "PR %d marked plan_approved (status %d)",
+            args.pr, db.STATUS_PLAN_APPROVED,
+        )
 
-    pr = db.get_pr(conn, args.pr)
+        # Programmatic body marker for the 2 -> 3 transition. No LLM
+        # call: nothing has happened content-wise vs status 2, so a
+        # full regeneration would just rewrite near-identical text.
+        # Skipped for synthetic dry-run rows (no real PR) and dry-run
+        # mode (no remote writes). Cosmetic: failure is a warning,
+        # not a blocker.
+        if not args.dry_run and args.pr >= 0:
+            approval_line = (
+                f"✓ Plan approved on {_dt.date.today().isoformat()}"
+            )
+            try:
+                github.prepend_pr_body(
+                    args.rust_repo_path, args.pr, approval_line,
+                )
+                log.info(
+                    "PR #%d: prepended approval marker to body", args.pr,
+                )
+            except github.GhError as e:
+                log.warning(
+                    "PR #%d approval body prepend failed: %s",
+                    args.pr, e,
+                )
+
+        # Re-fetch the row after the status transition.
+        with _db_session(args, write=False) as conn:
+            pr = db.get_pr(conn, args.pr)
+
     if pr["ak_branch"] is None:
         log.error(
-            "PR %d has no ak_branch recorded -- cannot record correspondence "
-            "after implementation. This row predates the schema with ak_branch; "
-            "re-create it via a sweep.",
+            "PR %d has no ak_branch recorded -- cannot record "
+            "correspondence after implementation. This row predates "
+            "the schema with ak_branch; re-create it via a sweep.",
             args.pr,
         )
         return 1
+
+    err = _do_impl_step(args, pr)
+    if err is not None:
+        return 1
+    return 0
+
+
+def _dep_blocks_step(
+    args, pr, dep_column: str, threshold: int, phase: str,
+) -> bool:
+    """True iff this PR's `dep_column` (an AK SHA) points to a PR on the
+    same rust_branch whose status is below `threshold`. False if the
+    dep is satisfied (status >= threshold) or unresolvable (the dep PR
+    row was deleted or archived and the dep column wasn't nulled).
+
+    Replaces the SQL-JOIN-based gating that lived inside the deleted
+    `get_unblocked_for_status` query: per-PR cascade looks up one dep
+    at a time rather than scanning the whole branch.
+
+    Phase ("plan"/"impl") just controls the log message wording.
+    """
+    pr_number = pr["pr_number"]
+    dep_sha = pr[dep_column]
+    with _db_session(args, write=False) as conn:
+        dep_row = db.get_pr_commit_by_branch_and_ak(
+            conn, pr["rust_branch"], dep_sha,
+        )
+    if dep_row is None:
+        # The dep column points at an AK SHA we no longer have a row
+        # for -- either the dep was deleted via --delete-prs without
+        # nulling out dependents, or some other inconsistency. Stalling
+        # is safer than running impl on broken state.
+        log.info(
+            "PR #%d %s blocked: dep AK %s has no pr_commit row "
+            "on rust_branch=%s (likely deleted out-of-band) -- "
+            "row stays at status %d",
+            pr_number, phase, dep_sha[:12],
+            pr["rust_branch"], pr["status"],
+        )
+        return True
+    if dep_row["status"] < threshold:
+        log.info(
+            "PR #%d %s blocked: dep PR #%s (AK %s) is at status %d, "
+            "need >= %d -- row stays at status %d",
+            pr_number, phase, dep_row["pr_number"], dep_sha[:12],
+            dep_row["status"], threshold, pr["status"],
+        )
+        return True
+    return False
+
+
+def _do_dep_eval_step(args, pr):
+    """Run dep-eval for a status-0 row. Computes the bounded candidate
+    range from the cursor to this PR's ak_commit, invokes _dep_eval_one
+    (which calls r2 outside the lock), then writes the resulting deps
+    under a write session. Returns None on success or a non-empty
+    error string on failure (already persisted via set_last_error).
+    """
+    pr_number = pr["pr_number"]
+
+    with _db_session(args, write=False) as conn:
+        cursor = db.get_latest_correspondence(conn, pr["rust_branch"])
+    if cursor is None:
+        err = (
+            f"no branch_commit cursor for rust_branch={pr['rust_branch']}; "
+            f"cannot determine dep-eval candidate range"
+        )
+        log.error("PR #%d: %s", pr_number, err)
+        with _db_session(args, write=True) as conn:
+            db.set_last_error(conn, pr_number, err)
+        return err
+
+    try:
+        candidate_aks = git_ops.commits_between(
+            args.ak_repo_path,
+            since=cursor["ak_commit"],
+            until=pr["ak_commit"],
+            branch=pr["ak_branch"] or cursor["ak_branch"],
+        )
+    except git_ops.GitError as e:
+        err = f"failed to compute dep candidates: {e}"
+        log.error("PR #%d: %s", pr_number, err)
+        with _db_session(args, write=True) as conn:
+            db.set_last_error(conn, pr_number, err)
+        return err
+
+    if args.dry_run and not _r2_available():
+        log.info(
+            "[dry-run] would dep-eval PR #%d (AK %s) -- "
+            "r2 not on PATH, skipping",
+            pr_number, pr["ak_commit"][:12],
+        )
+        return None
+    if args.dry_run:
+        log.info(
+            "[dry-run] r2 is on PATH -- running dep-eval for PR #%d",
+            pr_number,
+        )
+
+    plan_dep, impl_dep, err_msg = _dep_eval_one(args, pr, candidate_aks)
+    if err_msg:
+        log.error("PR #%d: %s", pr_number, err_msg)
+        if not args.dry_run:
+            with _db_session(args, write=True) as conn:
+                db.set_last_error(conn, pr_number, err_msg)
+        return err_msg
+
+    # Out-of-candidate-range deps treated as None (per spec: a dep must
+    # be a still-in-flight commit between the cursor and this PR).
+    valid_aks = set(candidate_aks)
+    if plan_dep and plan_dep not in valid_aks:
+        log.warning(
+            "PR #%d plan_dep %s not in candidates -- treating as None",
+            pr_number, plan_dep[:12],
+        )
+        plan_dep = None
+    if impl_dep and impl_dep not in valid_aks:
+        log.warning(
+            "PR #%d impl_dep %s not in candidates -- treating as None",
+            pr_number, impl_dep[:12],
+        )
+        impl_dep = None
+
+    with _db_session(args, write=True) as conn:
+        db.update_dependencies(conn, pr_number, plan_dep, impl_dep)
+    log.info(
+        "PR #%d -> status %d (plan_dep=%s, impl_dep=%s)",
+        pr_number, db.STATUS_DEPENDENCIES_EVALUATED,
+        (plan_dep[:12] if plan_dep else None),
+        (impl_dep[:12] if impl_dep else None),
+    )
+
+    plan_dep_pr = _lookup_dep_pr_number(args, pr["rust_branch"], plan_dep)
+    impl_dep_pr = _lookup_dep_pr_number(args, pr["rust_branch"], impl_dep)
+    _update_pr_dep_section(args, pr_number, plan_dep_pr, impl_dep_pr)
+    _apply_label_transition(
+        args, pr_number, add=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
+    )
+    return None
+
+
+def _do_plan_step(args, pr):
+    """Run plan generation for a status-1 row. Returns None on success
+    or a non-empty error string on failure.
+
+    Gated on `pr["plan_dependency"]`: if there's a plan_dep AK SHA,
+    the dep PR's status must be >= STATUS_PLAN_APPROVED. Otherwise the
+    step noops (returns None) and the row stays at status 1 -- a future
+    `--pr N` build (after the dep advances) will pick it up.
+    """
+    pr_number = pr["pr_number"]
+
+    if pr["plan_dependency"]:
+        if _dep_blocks_step(
+            args, pr, "plan_dependency", db.STATUS_PLAN_APPROVED, "plan",
+        ):
+            return None
+
+    if args.dry_run and not _r2_available():
+        log.info(
+            "[dry-run] would generate plan for PR #%d -- "
+            "r2 not on PATH, skipping",
+            pr_number,
+        )
+        return None
+    if args.dry_run:
+        log.info(
+            "[dry-run] r2 is on PATH -- generating plan for PR #%d "
+            "(no push, worktree preserved)",
+            pr_number,
+        )
+
+    err, _ = _run_plan_one(args, pr)
+    if err:
+        log.error("PR #%d (plan): %s", pr_number, err)
+        if not args.dry_run:
+            with _db_session(args, write=True) as conn:
+                db.set_last_error(conn, pr_number, err)
+        return err
+
+    label = " [dry-run]" if args.dry_run else ""
+    with _db_session(args, write=True) as conn:
+        db.mark_plan_created(conn, pr_number)
+    log.info(
+        "PR #%d -> status %d (plan_created)%s",
+        pr_number, db.STATUS_PLAN_CREATED, label,
+    )
+    _apply_label_transition(
+        args, pr_number,
+        remove=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
+        add=(prompts.LABEL_PLAN_CREATED,),
+    )
+    return None
+
+
+def _do_impl_step(args, pr):
+    """Run implementation for a status-3 row. Returns None on success
+    or a non-empty error string on failure.
+
+    Gated on `pr["implementation_dependency"]`: if there's an impl_dep
+    AK SHA, the dep PR's status must be >= STATUS_IMPLEMENTATION_DONE.
+    Otherwise the step noops (returns None) and the row stays at
+    status 3 -- a future `--pr N` (after the dep advances) picks it up.
+    """
+    pr_number = pr["pr_number"]
+
+    if pr["implementation_dependency"]:
+        if _dep_blocks_step(
+            args, pr, "implementation_dependency",
+            db.STATUS_IMPLEMENTATION_DONE, "impl",
+        ):
+            return None
 
     if args.dry_run and not _r2_available():
         log.info(
             "[dry-run] would implement PR #%d -- r2 not on PATH, skipping",
-            args.pr,
+            pr_number,
         )
-        return 0
+        return None
     if args.dry_run:
         log.info(
-            "[dry-run] r2 is on PATH -- running impl (no push, worktree "
-            "preserved)"
+            "[dry-run] r2 is on PATH -- running impl for PR #%d "
+            "(no push, worktree preserved)",
+            pr_number,
         )
 
     err, sha = _run_impl_one(args, pr)
     if err:
-        log.error("PR #%d implementation failed: %s", args.pr, err)
+        log.error("PR #%d (impl): %s", pr_number, err)
         if not args.dry_run:
-            db.set_last_error(conn, args.pr, err)
-        return 1
-    db.mark_implementation_done(
-        conn, args.pr,
-        ak_branch=pr["ak_branch"],
-        ak_commit=pr["ak_commit"],
-        rust_branch=pr["rust_branch"],
-    )
+            with _db_session(args, write=True) as conn:
+                db.set_last_error(conn, pr_number, err)
+        return err
+
+    ak_branch = pr["ak_branch"] or args.ak_branch
+    with _db_session(args, write=True) as conn:
+        db.mark_implementation_done(
+            conn, pr_number,
+            ak_branch=ak_branch,
+            ak_commit=pr["ak_commit"],
+            rust_branch=pr["rust_branch"],
+        )
     label = " [dry-run]" if args.dry_run else ""
     log.info(
         "PR #%d -> status %d (implementation_done) sha=%s%s",
-        args.pr, db.STATUS_IMPLEMENTATION_DONE, sha[:12], label,
+        pr_number, db.STATUS_IMPLEMENTATION_DONE,
+        sha[:12] if sha else "??", label,
     )
     _apply_label_transition(
-        args, args.pr,
+        args, pr_number,
         remove=(
             prompts.LABEL_DEPENDENCIES_EVALUATED,
             prompts.LABEL_PLAN_CREATED,
@@ -303,11 +739,11 @@ def _run_pr_mode(args: argparse.Namespace, conn) -> int:
         ),
         add=(prompts.LABEL_IMPLEMENTATION_DONE,),
     )
-    return 0
+    return None
 
 
 def _check_pr_closures_and_advance_cursor(
-    args: argparse.Namespace, conn, ak_commits, cursor,
+    args: argparse.Namespace, ak_commits, cursor,
 ) -> "Optional[str]":
     """Walk `ak_commits` in chronological order; for each one whose
     pr_commit row is present AND whose GitHub PR is CLOSED or MERGED,
@@ -320,6 +756,10 @@ def _check_pr_closures_and_advance_cursor(
 
     Returns the new cursor `ak_commit` value if advanced, or None
     otherwise. No-ops in dry-run mode and when ak_commits is empty.
+
+    Each DB op runs inside its own `_db_session` so the lock is not
+    held across the GitHub `gh pr view` round-trip in the loop body --
+    those network calls happen entirely outside the lock.
     """
     if args.dry_run or not ak_commits:
         return None
@@ -327,7 +767,10 @@ def _check_pr_closures_and_advance_cursor(
     new_ak = None
 
     for ak in ak_commits:
-        row = db.get_pr_commit_by_branch_and_ak(conn, args.rust_branch, ak)
+        with _db_session(args, write=False) as conn:
+            row = db.get_pr_commit_by_branch_and_ak(
+                conn, args.rust_branch, ak,
+            )
         if row is None:
             break  # unprocessed commit -> stop
         if row["pr_number"] is None or row["pr_number"] < 0:
@@ -346,10 +789,11 @@ def _check_pr_closures_and_advance_cursor(
         if state == "OPEN":
             break  # still in flight -> stop
         # CLOSED or MERGED -> archive (MERGED only) + null-out deps + delete.
-        db.archive_pr_commit(
-            conn, row["pr_number"],
-            rust_commit=merge_sha if state == "MERGED" else None,
-        )
+        with _db_session(args, write=True) as conn:
+            db.archive_pr_commit(
+                conn, row["pr_number"],
+                rust_commit=merge_sha if state == "MERGED" else None,
+            )
         new_ak = ak
         if state == "MERGED":
             log.info(
@@ -365,17 +809,20 @@ def _check_pr_closures_and_advance_cursor(
             )
 
     if new_ak is not None:
-        db.seed_correspondence(
-            conn, cursor["ak_branch"], new_ak,
-            args.rust_branch, force=True,
-        )
+        with _db_session(args, write=True) as conn:
+            db.seed_correspondence(
+                conn, cursor["ak_branch"], new_ak,
+                args.rust_branch, force=True,
+            )
         log.info("Cursor advanced: ak=%s", new_ak[:12])
     return new_ak
 
 
-def _run_sweep(args: argparse.Namespace, conn) -> int:
+def _run_sweep(args: argparse.Namespace) -> int:
     required = ("ak_repo_path", "rust_branch")
-    num_commits=2
+    # Sweep narrowed to global cursor administration: dep-eval + plan +
+    # impl now run per-PR (driven by Semaphore on each PR build)
+    num_commits = 10
     missing = [f"--{r.replace('_', '-')}" for r in required if not getattr(args, r)]
     if missing:
         log.error("sweep mode requires: %s", ", ".join(missing))
@@ -384,7 +831,8 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
     # Step 2: find the AK cursor for this Rust branch. The cursor row (PK is
     # rust_branch alone) tells us which AK branch + commit we're tracking, so
     # sweep mode does not take --ak-branch on the CLI.
-    cursor = db.get_latest_correspondence(conn, args.rust_branch)
+    with _db_session(args, write=False) as conn:
+        cursor = db.get_latest_correspondence(conn, args.rust_branch)
     if cursor is None:
         log.error(
             "No branch_commit row for rust_branch=%s. Use --seed to bootstrap.",
@@ -415,10 +863,11 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
     # the branch_commit cursor accordingly. If the cursor moved, re-fetch
     # the next batch from the new position before creating new PRs.
     new_cursor_ak = _check_pr_closures_and_advance_cursor(
-        args, conn, ak_commits, cursor,
+        args, ak_commits, cursor,
     )
     if new_cursor_ak is not None:
-        cursor = db.get_latest_correspondence(conn, args.rust_branch)
+        with _db_session(args, write=False) as conn:
+            cursor = db.get_latest_correspondence(conn, args.rust_branch)
         try:
             ak_commits = git_ops.next_commits(
                 args.ak_repo_path, since=cursor["ak_commit"],
@@ -437,116 +886,41 @@ def _run_sweep(args: argparse.Namespace, conn) -> int:
     # Step 3 (cont): create branches + draft PRs, insert into pr_commit.
     new_pr_count = 0
     for ak_commit in ak_commits:
-        rc = _create_pr_for_ak_commit(args, conn, ak_branch, ak_commit)
+        rc = _create_pr_for_ak_commit(args, ak_branch, ak_commit)
         if rc:
             new_pr_count += 1
 
     log.info("Sweep step 3 done. Created %d new PR(s).", new_pr_count)
 
-    # Steps 4-5: dependency evaluation for all status-0 rows.
-    _run_dep_eval(args, conn)
-
-    # Steps 6 + 8: plan generation and implementation, dispatched concurrently
-    # to a single shared executor (per design step 9). The unblocked predicate
-    # keeps the two task types dependency-safe.
-    _run_plan_and_impl(args, conn)
-
+    # Sweep is intentionally limited to: closure check + cursor advance
+    # + create new draft PRs. Dep-evaluation, plan generation, and
+    # implementation are driven by Semaphore on each PR build via
+    # `--pr <N>` (see _run_pr_mode), which cascades through the row's
+    # statuses until it hits the human gate at status 2 (or completes
+    # 3 -> 4 after manual --plan-approve).
     return 0
 
 
-def _run_dep_eval(args: argparse.Namespace, conn) -> None:
-    """Step 4-5: for each status-0 row, run r2 dep-eval in parallel, transition 0 -> 1."""
-    rows = db.get_pr_commits_by_status(
-        conn, db.STATUS_NO_PLAN, rust_branch=args.rust_branch
-    )
-    if not rows:
-        return
-    log.info("Evaluating dependencies for %d status-0 PR(s)", len(rows))
-
-    batch_aks = [r["ak_commit"] for r in rows]
-
-    # Extended dry-run: if r2 is on PATH we DO run dep-eval (it's read-only,
-    # produces JSON only) and DO persist the resulting deps. If r2 is absent
-    # we just log what would happen.
-    if args.dry_run and not _r2_available():
-        for r in rows:
-            log.info(
-                "[dry-run] would dep-eval PR #%d (AK %s) -- r2 not on PATH, skipping",
-                r["pr_number"], r["ak_commit"][:12],
-            )
-        return
-    if args.dry_run:
-        log.info("[dry-run] r2 is on PATH -- running dep-eval on %d row(s)", len(rows))
-
-    with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
-        futures = {
-            pool.submit(_dep_eval_one, args, r, batch_aks): r for r in rows
-        }
-        valid_aks = set(batch_aks)
-        for fut in as_completed(futures):
-            row = futures[fut]
-            pr_number = row["pr_number"]
-            try:
-                plan_dep, impl_dep, err = fut.result()
-            except Exception as e:
-                err = f"dep-eval worker crashed: {e}"
-                plan_dep = impl_dep = None
-            if err:
-                log.error("PR #%d: %s", pr_number, err)
-                db.set_last_error(conn, pr_number, err)
-                continue
-            # Out-of-batch deps are treated as None (per spec: dep must be
-            # "among those in the table").
-            if plan_dep and plan_dep not in valid_aks:
-                log.warning(
-                    "PR #%d plan_dep %s not in batch -- treating as None",
-                    pr_number, plan_dep[:12],
-                )
-                plan_dep = None
-            if impl_dep and impl_dep not in valid_aks:
-                log.warning(
-                    "PR #%d impl_dep %s not in batch -- treating as None",
-                    pr_number, impl_dep[:12],
-                )
-                impl_dep = None
-            db.update_dependencies(conn, pr_number, plan_dep, impl_dep)
-            log.info(
-                "PR #%d -> status %d (plan_dep=%s, impl_dep=%s)",
-                pr_number,
-                db.STATUS_DEPENDENCIES_EVALUATED,
-                (plan_dep[:12] if plan_dep else None),
-                (impl_dep[:12] if impl_dep else None),
-            )
-            # Resolve dep AK SHAs to PR numbers within the same rust
-            # branch (out-of-batch deps were already coerced to None
-            # above, so any non-None dep here has a pr_commit row).
-            plan_dep_pr = _lookup_dep_pr_number(
-                conn, args.rust_branch, plan_dep,
-            )
-            impl_dep_pr = _lookup_dep_pr_number(
-                conn, args.rust_branch, impl_dep,
-            )
-            _update_pr_dep_section(
-                args, pr_number, plan_dep_pr, impl_dep_pr,
-            )
-            _apply_label_transition(
-                args, pr_number, add=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
-            )
-
-
-def _dep_eval_one(args, row, batch_aks):
+def _dep_eval_one(args, row, candidate_aks):
     """Run r2 sandbox claude for dep-eval on one commit.
 
-    Returns `(plan_dep, impl_dep, err)`. On success err is None and the deps
-    may each be a SHA string or None. On failure plan_dep and impl_dep are
-    both None and err is a non-empty error message.
+    `candidate_aks` is the set of AK SHAs the inner claude is told to
+    consider as possible dependencies. With per-PR cascade dispatch
+    (one row at a time), this is the bounded range
+    `git log <cursor>..<this PR's ak_commit>` on the AK branch -- i.e.
+    every still-in-flight commit on the same Rust branch that's an
+    ancestor of this PR's commit.
+
+    Returns `(plan_dep, impl_dep, err)`. On success err is None and the
+    deps may each be a SHA string or None. On failure plan_dep and
+    impl_dep are both None and err is a non-empty error message.
     """
     pr_number = row["pr_number"]
     ak_commit = row["ak_commit"]
-    other = [sha for sha in batch_aks if sha != ak_commit]
+    other = [sha for sha in candidate_aks if sha != ak_commit]
     batch_listing = (
         "\n".join(f"- {sha}" for sha in other)
-        if other else "(no other commits in this batch)"
+        if other else "(no other candidate commits)"
     )
     prompt = prompts.DEPENDENCY_EVAL_PROMPT_TEMPLATE.format(
         ak_commit=ak_commit,
@@ -570,150 +944,21 @@ def _dep_eval_one(args, row, batch_aks):
     return parsed[0], parsed[1], None
 
 
-def _run_plan_and_impl(args: argparse.Namespace, conn) -> None:
-    """Sweep steps 6 + 8: plan generation and implementation in parallel."""
-    plan_rows = db.get_unblocked_for_status(
-        conn,
-        status=db.STATUS_DEPENDENCIES_EVALUATED,
-        blocking_status_min=db.STATUS_PLAN_APPROVED,
-        dep_column="plan_dependency",
-        rust_branch=args.rust_branch,
-    )
-    impl_rows = db.get_unblocked_for_status(
-        conn,
-        status=db.STATUS_PLAN_APPROVED,
-        blocking_status_min=db.STATUS_IMPLEMENTATION_DONE,
-        dep_column="implementation_dependency",
-        rust_branch=args.rust_branch,
-    )
-    if not plan_rows and not impl_rows:
-        # Surface row counts at every status so the operator can see
-        # WHY there's nothing to do this sweep. E.g. "plan_created=10"
-        # means everything is waiting for manual --plan-approve, not
-        # that the sweep is broken.
-        breakdown = {
-            s: len(db.get_pr_commits_by_status(
-                conn, status=s, rust_branch=args.rust_branch,
-            ))
-            for s in (
-                db.STATUS_NO_PLAN,
-                db.STATUS_DEPENDENCIES_EVALUATED,
-                db.STATUS_PLAN_CREATED,
-                db.STATUS_PLAN_APPROVED,
-                db.STATUS_IMPLEMENTATION_DONE,
-            )
-        }
-        breakdown_str = ", ".join(
-            f"{db.STATUS_NAMES[s]}={breakdown[s]}" for s in sorted(breakdown)
-        )
-        log.info(
-            "No unblocked plan or implementation work this sweep "
-            "(rust_branch=%s row counts: %s)",
-            args.rust_branch, breakdown_str,
-        )
-        return
-    log.info(
-        "Dispatching %d plan-generation task(s) and %d implementation task(s) "
-        "(max_parallel=%d)",
-        len(plan_rows), len(impl_rows), args.max_parallel,
-    )
-
-    # Extended dry-run: with r2 on PATH we DO run plan/impl r2 calls
-    # inside per-PR worktrees (which are preserved for inspection), but
-    # the prompt tells claude not to push and we don't advance DB status
-    # or update branch_commit. Without r2 we just log "would ..." like
-    # before.
-    if args.dry_run and not _r2_available():
-        for r in plan_rows:
-            log.info(
-                "[dry-run] would generate plan for PR #%d -- r2 not on PATH, skipping",
-                r["pr_number"],
-            )
-        for r in impl_rows:
-            log.info(
-                "[dry-run] would implement PR #%d -- r2 not on PATH, skipping",
-                r["pr_number"],
-            )
-        return
-    if args.dry_run:
-        log.info(
-            "[dry-run] r2 is on PATH -- running plan/impl tasks (no push, "
-            "worktree preserved)"
-        )
-
-    with ThreadPoolExecutor(max_workers=args.max_parallel) as pool:
-        futures = {}
-        for r in plan_rows:
-            futures[pool.submit(_run_plan_one, args, r)] = ("plan", r)
-        for r in impl_rows:
-            futures[pool.submit(_run_impl_one, args, r)] = ("impl", r)
-
-        for fut in as_completed(futures):
-            kind, row = futures[fut]
-            pr_number = row["pr_number"]
-            try:
-                err, sha = fut.result()
-            except Exception as e:
-                err = f"{kind} worker crashed: {e}"
-                sha = None
-            if err:
-                log.error("PR #%d (%s): %s", pr_number, kind, err)
-                if not args.dry_run:
-                    db.set_last_error(conn, pr_number, err)
-                continue
-            # Persist the status transition AND (for impl) the
-            # branch_commit row -- in both real and dry-run mode. Dry-run
-            # doesn't push to origin or to the Semaphore artifact, so the
-            # write stays purely local; the operator can clean up via
-            # `DELETE FROM pr_commit WHERE pr_number < 0` if they later
-            # want to switch this DB path to a real run.
-            label = " [dry-run]" if args.dry_run else ""
-            if kind == "plan":
-                db.mark_plan_created(conn, pr_number)
-                log.info(
-                    "PR #%d -> status %d (plan_created)%s",
-                    pr_number, db.STATUS_PLAN_CREATED, label,
-                )
-                _apply_label_transition(
-                    args, pr_number,
-                    remove=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
-                    add=(prompts.LABEL_PLAN_CREATED,),
-                )
-            else:
-                # impl: row["ak_branch"] should be populated by the sweep.
-                ak_branch = row["ak_branch"] or args.ak_branch
-                db.mark_implementation_done(
-                    conn, pr_number,
-                    ak_branch=ak_branch,
-                    ak_commit=row["ak_commit"],
-                    rust_branch=row["rust_branch"],
-                )
-                log.info(
-                    "PR #%d -> status %d (implementation_done) sha=%s%s",
-                    pr_number, db.STATUS_IMPLEMENTATION_DONE,
-                    sha[:12] if sha else "??", label,
-                )
-                _apply_label_transition(
-                    args, pr_number,
-                    remove=(
-                        prompts.LABEL_DEPENDENCIES_EVALUATED,
-                        prompts.LABEL_PLAN_CREATED,
-                        prompts.LABEL_IMPLEMENTATION_NEEDED,
-                    ),
-                    add=(prompts.LABEL_IMPLEMENTATION_DONE,),
-                )
-
-
 def _lookup_dep_pr_number(
-    conn, rust_branch: str, ak_commit: Optional[str],
+    args: argparse.Namespace, rust_branch: str, ak_commit: Optional[str],
 ) -> Optional[int]:
     """Resolve a dep AK SHA to its pr_commit.pr_number on `rust_branch`,
     or None if the SHA is None or no row matches. Synthetic dry-run
     rows (negative pr_number) are returned as-is and treated as None
-    by callers (the dep section won't render a #-link for them)."""
+    by callers (the dep section won't render a #-link for them).
+
+    Opens its own `_db_session` so the lock is held only for the
+    single read and released before any caller-side I/O.
+    """
     if not ak_commit:
         return None
-    row = db.get_pr_commit_by_branch_and_ak(conn, rust_branch, ak_commit)
+    with _db_session(args, write=False) as conn:
+        row = db.get_pr_commit_by_branch_and_ak(conn, rust_branch, ak_commit)
     if row is None:
         return None
     pr_number = row["pr_number"]
@@ -1080,7 +1325,7 @@ def _run_impl_one(args, row):
 
 
 def _create_pr_for_ak_commit(
-    args: argparse.Namespace, conn, ak_branch: str, ak_commit: str,
+    args: argparse.Namespace, ak_branch: str, ak_commit: str,
 ) -> bool:
     """Create the branch + draft PR + pr_commit row for a single AK commit.
 
@@ -1151,9 +1396,10 @@ def _create_pr_for_ak_commit(
             log.error("Failed to create PR for %s: %s", branch_name, e)
             return False
 
-    inserted = db.insert_pr_commit(
-        conn, pr_number, args.rust_branch, ak_branch, ak_commit,
-    )
+    with _db_session(args, write=True) as conn:
+        inserted = db.insert_pr_commit(
+            conn, pr_number, args.rust_branch, ak_branch, ak_commit,
+        )
     label = "[dry-run] " if args.dry_run else ""
     if inserted:
         log.info(
@@ -1164,7 +1410,8 @@ def _create_pr_for_ak_commit(
             _next_sweep_action_for_status(db.STATUS_NO_PLAN),
         )
     else:
-        existing = db.get_pr(conn, pr_number)
+        with _db_session(args, write=False) as conn:
+            existing = db.get_pr(conn, pr_number)
         status = existing["status"] if existing is not None else None
         if status is None:
             log.info(
@@ -1228,35 +1475,18 @@ def main(argv: Sequence[str] | None = None) -> int:
         level=logging.DEBUG if args.verbose else logging.INFO,
         format="[%(asctime)s] %(levelname)s %(name)s: %(message)s",
     )
-    conn = db.connect(args.db_path)
-    db.migrate(conn)
-    # State-mutating modes push the DB back to Semaphore at the end (in a
-    # try/finally so partial work is still persisted). --seed mutates state
-    # too; --pr (status check, no --plan-approve) does not.
-    push_artifact = (
-        not args.no_artifact_push and not args.dry_run
-        and (args.seed or args.plan_approve or
-             (args.pr is None))  # sweep mode
-    )
-    rc = 1
-    try:
-        if args.seed:
-            rc = _run_seed(args, conn)
-        elif args.pr is not None:
-            rc = _run_pr_mode(args, conn)
-        else:
-            rc = _run_sweep(args, conn)
-    finally:
-        # Close the connection BEFORE pushing to flush WAL etc.
-        conn.close()
-        if push_artifact:
-            try:
-                semaphore.push_project_artifact(args.artifact_name, args.db_path)
-            except FileNotFoundError as e:
-                log.error("Artifact push skipped: %s", e)
-            except Exception as e:
-                log.error("Artifact push failed: %s", e)
-    return rc
+    # No long-lived sqlite connection here: every db.* call goes through
+    # `_db_session` -> `locked_db.session` -> per-op lock + pull + (push
+    # if write) + release. The end-of-run artifact push that used to
+    # live here is no longer needed: each write is published as soon as
+    # its session commits.
+    if args.seed:
+        return _run_seed(args)
+    if args.delete_prs:
+        return _run_delete_prs(args)
+    if args.pr is not None:
+        return _run_pr_mode(args)
+    return _run_sweep(args)
 
 
 if __name__ == "__main__":

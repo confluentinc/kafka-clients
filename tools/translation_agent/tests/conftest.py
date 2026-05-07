@@ -64,6 +64,43 @@ def _no_pr_description_update_by_default(request):
         yield
 
 
+@pytest.fixture(autouse=True)
+def _no_artifact_io_in_cli_tests(request, monkeypatch):
+    """For test_cli.py: replace the four `locked_db` artifact primitives
+    (push-no-force = lock acquire, yank = lock release, pull = DB pull,
+    push = DB push) with silent no-ops so the suite can run in
+    environments without the Semaphore `artifact` CLI installed.
+
+    Tests that specifically want to verify artifact-IO behavior should
+    re-patch the same target with their own mock -- pytest's
+    `monkeypatch` here uses fixture finalization order, so a later
+    `with patch(...)` inside a test overrides this autouse default.
+
+    Scoped to `test_cli.py` only -- test_locked_db.py / test_semaphore.py
+    exercise the artifact path directly and must NOT have it stubbed.
+    """
+    if request.path.name != "test_cli.py":
+        yield
+        return
+    monkeypatch.setattr(
+        "translation_agent.locked_db.semaphore.push_project_artifact_no_force",
+        lambda name, file_path: None,
+    )
+    monkeypatch.setattr(
+        "translation_agent.locked_db.semaphore.push_project_artifact",
+        lambda name, file_path: None,
+    )
+    monkeypatch.setattr(
+        "translation_agent.locked_db.semaphore.yank_project_artifact",
+        lambda name: None,
+    )
+    monkeypatch.setattr(
+        "translation_agent.locked_db.semaphore.pull_project_artifact",
+        lambda name, dest_dir: None,
+    )
+    yield
+
+
 @pytest.fixture
 def real_pr_description():
     """Opt-out marker for the autouse PR-description mock above.

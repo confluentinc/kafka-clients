@@ -148,21 +148,25 @@ def _ensure_commit_reachable(
     remote: str = "origin",
     deepen_step: int = 50,
     max_deepens: int = 200,
+    ref: str = "FETCH_HEAD",
 ) -> None:
     """Deepen the shallow clone of `branch` until `commit` is reachable
-    from FETCH_HEAD (the just-fetched tip of `branch`).
+    from `ref` (default FETCH_HEAD = the just-fetched tip of `branch`).
 
     The probe uses `_commit_reachable_from` -- object present AND
-    ancestor of FETCH_HEAD -- not just object presence. This matters
+    ancestor of `ref` -- not just object presence. This matters
     for the Semaphore submodule init case: the parent repo's submodule
     pointer can land the cursor commit as a separate shallow root,
     disconnected from the branch tip. A presence-only probe would
     falsely succeed and the subsequent log range would be empty (or
     raise downstream).
 
-    Caller must have run `git fetch <remote> <branch>` first so
-    FETCH_HEAD is set to the branch's tip. Each deepen fetch also
-    refreshes FETCH_HEAD.
+    With the default `ref="FETCH_HEAD"`, caller must have run
+    `git fetch <remote> <branch>` first so FETCH_HEAD is set to the
+    branch's tip. The deepen fetches inside this function will refresh
+    FETCH_HEAD on each round, but with a non-default `ref` (e.g. a
+    fixed SHA used by `commits_between`) that doesn't matter -- the
+    ancestry probe targets the caller-supplied ref, not FETCH_HEAD.
 
     On a shallow clone, runs `git fetch --deepen=<deepen_step>
     <remote> <branch>` repeatedly until: (a) cursor becomes reachable,
@@ -170,7 +174,7 @@ def _ensure_commit_reachable(
     (c) `max_deepens` rounds exhausted. Cases (b) and (c) without
     success raise GitError -- the cursor is not on this branch.
     """
-    if _commit_reachable_from(repo_path, commit):
+    if _commit_reachable_from(repo_path, commit, ref=ref):
         return
     if not _is_shallow(repo_path):
         raise GitError(
@@ -189,7 +193,7 @@ def _ensure_commit_reachable(
             raise GitError(
                 f"failed to deepen shallow clone (round {round_idx + 1}): {e}"
             ) from e
-        if _commit_reachable_from(repo_path, commit):
+        if _commit_reachable_from(repo_path, commit, ref=ref):
             return
         if not _is_shallow(repo_path):
             # The deepen exhausted the remote's history; if cursor
@@ -274,6 +278,77 @@ def next_commits(
     )
     commits = [line.strip() for line in out.splitlines() if line.strip()]
     return commits[:n]
+
+
+def commits_between(
+    repo_path: str, since: str, until: str, branch: str,
+    *,
+    remote: str = "origin",
+    deepen_step: int = 50,
+    max_deepens: int = 200,
+) -> List[str]:
+    """Return commit SHAs in `(since, until]` on `branch`, oldest-to-newest.
+
+    Differs from `next_commits` in two ways:
+
+    1. **Bounded by an explicit `until` SHA** rather than FETCH_HEAD /
+       branch tip. Used by per-PR dep-eval to enumerate the candidate
+       set for one PR: every AK commit between the cursor (`since`)
+       and the PR's own `ak_commit` (`until`).
+    2. **Returns the full range**, no `n=` cap -- the bounded-range
+       query is naturally bounded by the AK commit graph.
+
+    Steps:
+    - Fetch `<remote>/<branch>` so we have the latest tip locally and
+      can deepen its history if needed.
+    - If `until` isn't already in the local object DB, fetch it by
+      bare SHA. This works on GitHub by default (the server has
+      `uploadpack.allowAnySHA1InWant=true`) and is the only reliable
+      way to materialize a specific historical commit that may have
+      fallen out of the shallow window.
+    - Reuse `_ensure_commit_reachable` (with `ref=until`) to deepen
+      until `since` is an ancestor of `until` -- same shallow-clone
+      / Semaphore-submodule-init handling as `next_commits`.
+    - Walk `git log <since>..<until> --reverse --format=%H` and
+      return the SHAs.
+
+    Returns `[]` when `since == until` (empty range, exclusive lower
+    bound). Raises `GitError` if the bare-SHA fetch fails (private
+    repo / wrong remote) or if `since` is not an ancestor of `until`
+    in a fully-fetched clone.
+    """
+    try:
+        _run_git(repo_path, ["fetch", remote, branch])
+    except GitError as e:
+        raise GitError(
+            f"failed to fetch {remote}/{branch} "
+            f"for commits_between: {e}"
+        ) from e
+
+    if not _commit_present(repo_path, until):
+        try:
+            _run_git(repo_path, ["fetch", remote, until])
+        except GitError as e:
+            raise GitError(
+                f"failed to fetch until commit {until} from {remote} "
+                f"(server may not allow bare-SHA fetch): {e}"
+            ) from e
+
+    _ensure_commit_reachable(
+        repo_path, since, branch,
+        remote=remote, deepen_step=deepen_step, max_deepens=max_deepens,
+        ref=until,
+    )
+
+    out = _run_git(
+        repo_path,
+        [
+            "log", "--reverse",
+            f"{since}..{until}",
+            "--format=%H",
+        ],
+    )
+    return [line.strip() for line in out.splitlines() if line.strip()]
 
 
 def commit_subject(repo_path: str, commit: str) -> str:
