@@ -915,12 +915,18 @@ fn config() -> &'static ConfigDef {
 /// over a `HashMap<String, String>`.
 pub struct ProducerConfig {
     inner: AbstractConfig,
+    /// Post-processed override map applied on top of [`Self::inner`]'s
+    /// parsed values. Mirrors Java's `postProcessParsedConfig` mutating the
+    /// `parsedValues` map (entries `acks`, `client.id`, and possibly
+    /// `enable.idempotence`).
+    post_processed: HashMap<String, ConfigValue>,
 }
 
 impl std::fmt::Debug for ProducerConfig {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ProducerConfig")
             .field("originals", self.inner.originals())
+            .field("post_processed", &self.post_processed)
             .finish()
     }
 }
@@ -937,7 +943,7 @@ impl ProducerConfig {
     ///   docs for rationale and pointers to the re-enable phase.
     pub fn new(props: HashMap<String, String>) -> Result<Self, KafkaError> {
         let inner = AbstractConfig::new(config(), props)?;
-        let cfg = ProducerConfig { inner };
+        let mut cfg = ProducerConfig { inner, post_processed: HashMap::new() };
         cfg.post_process_parsed_config()?;
         Ok(cfg)
     }
@@ -999,42 +1005,82 @@ impl ProducerConfig {
 
     /// `getString(name)`. Mirrors Java's `AbstractConfig.getString(String)`.
     pub fn get_string(&self, name: &str) -> Result<&str, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_str()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a string: {v:?}")));
+        }
         self.inner.get_string(name)
     }
 
     /// `getInt(name)`.
     pub fn get_int(&self, name: &str) -> Result<i32, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_i32()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not an int: {v:?}")));
+        }
         self.inner.get_int(name)
     }
 
     /// `getLong(name)`.
     pub fn get_long(&self, name: &str) -> Result<i64, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_i64()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a long: {v:?}")));
+        }
         self.inner.get_long(name)
     }
 
     /// `getShort(name)`.
     pub fn get_short(&self, name: &str) -> Result<i16, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_i16()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a short: {v:?}")));
+        }
         self.inner.get_short(name)
     }
 
     /// `getDouble(name)`.
     pub fn get_double(&self, name: &str) -> Result<f64, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_f64()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a double: {v:?}")));
+        }
         self.inner.get_double(name)
     }
 
     /// `getBoolean(name)`.
     pub fn get_boolean(&self, name: &str) -> Result<bool, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_bool()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a boolean: {v:?}")));
+        }
         self.inner.get_boolean(name)
     }
 
     /// `getList(name)`.
     pub fn get_list(&self, name: &str) -> Result<&[String], KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_list()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a list: {v:?}")));
+        }
         self.inner.get_list(name)
     }
 
     /// `getClass(name)` — returns the FQCN string (no reflective class
     /// loading in Rust).
     pub fn get_class(&self, name: &str) -> Result<&str, KafkaError> {
+        if let Some(v) = self.post_processed.get(name) {
+            return v
+                .as_str()
+                .ok_or_else(|| KafkaError::Config(format!("Configuration '{name}' is not a class: {v:?}")));
+        }
         self.inner.get_class(name)
     }
 
@@ -1049,26 +1095,83 @@ impl ProducerConfig {
     }
 
     // -------------------------------------------------------------
-    // postProcessParsedConfig — Phase 7a (4/N) will land the full
-    // implementation. The Phase 7a (3/N) commit ships the schema and
-    // constructor; the post-process step here only enforces the
-    // Milestone-1 rejections so the constructor cannot accept an
-    // unsupported configuration.
+    // postProcessParsedConfig — mirrors Java's
+    // `protected Map<String, Object> postProcessParsedConfig(Map<String, Object>)`
+    // override on AbstractConfig (ProducerConfig.java line 569-577).
+    //
+    // Order matches Java:
+    // 1. CommonClientConfigs.postValidateSaslMechanismConfig
+    // 2. CommonClientConfigs.warnDisablingExponentialBackoff
+    // 3. CommonClientConfigs.postProcessReconnectBackoffConfigs
+    // 4. postProcessAndValidateIdempotenceConfigs
+    // 5. maybeOverrideClientId
+    //
+    // Milestone-1 hard rejections (enable.idempotence=true,
+    // transactional.id=<set>) run *before* steps 4 & 5 so
+    // PRODUCER_CLIENT_ID_SEQUENCE doesn't burn an id on configurations
+    // we're about to reject. Step 1 is a no-op for non-SASL protocols
+    // (Milestone-1 enforces that via the `security.protocol` validator).
     // -------------------------------------------------------------
 
-    fn post_process_parsed_config(&self) -> Result<(), KafkaError> {
-        // Will be expanded in Phase 7a (4/N) to include
-        // postProcessReconnectBackoffConfigs, parseAcks,
-        // maybeOverrideClientId, and the full idempotence
-        // post-validation. For now we only enforce the Milestone-1
-        // rejections so an unsupported configuration cannot slip
-        // through.
-        self.reject_milestone_1_unsupported()
+    fn post_process_parsed_config(&mut self) -> Result<(), KafkaError> {
+        // Step 1 — validate SASL mechanism iff security.protocol is
+        // SASL-bearing. With Milestone-1 the validator on
+        // `security.protocol` rejects SASL_PLAINTEXT/SASL_SSL before we
+        // reach this point. The call is preserved for parity.
+        let security_protocol = self
+            .inner
+            .get_string(common_client_configs::SECURITY_PROTOCOL_CONFIG)?
+            .to_owned();
+        let sasl_mech = self
+            .inner
+            .values()
+            .get(crate::common::config::sasl_configs::SASL_MECHANISM)
+            .and_then(ConfigValue::as_str)
+            .map(str::to_owned);
+        common_client_configs::post_validate_sasl_mechanism_config(&security_protocol, sasl_mech.as_deref())?;
+
+        // Step 2 — log a warning when retry / connection-setup backoff
+        // base > max.
+        let retry_backoff_ms = self.inner.get_long(RETRY_BACKOFF_MS_CONFIG)?;
+        let retry_backoff_max_ms = self.inner.get_long(RETRY_BACKOFF_MAX_MS_CONFIG)?;
+        let conn_setup_ms = self.inner.get_long(SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG)?;
+        let conn_setup_max_ms = self.inner.get_long(SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG)?;
+        common_client_configs::warn_disabling_exponential_backoff(
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            conn_setup_ms,
+            conn_setup_max_ms,
+        );
+
+        // Step 3 — exponential reconnect-backoff override.
+        let originals = self.inner.originals();
+        let overrides = common_client_configs::post_process_reconnect_backoff_configs(
+            originals.contains_key(RECONNECT_BACKOFF_MS_CONFIG),
+            originals.contains_key(RECONNECT_BACKOFF_MAX_MS_CONFIG),
+        );
+        if overrides.override_max_to_base {
+            let base = self.inner.get_long(RECONNECT_BACKOFF_MS_CONFIG)?;
+            self.post_processed
+                .insert(RECONNECT_BACKOFF_MAX_MS_CONFIG.to_owned(), ConfigValue::Long(base));
+        }
+
+        // Milestone-1 hard rejections (run before steps 4 & 5 so
+        // PRODUCER_CLIENT_ID_SEQUENCE is not advanced for rejected
+        // configurations).
+        self.reject_milestone_1_unsupported()?;
+
+        // Step 4 — postProcessAndValidateIdempotenceConfigs.
+        self.post_process_and_validate_idempotence_configs()?;
+
+        // Step 5 — maybeOverrideClientId.
+        self.maybe_override_client_id()?;
+
+        Ok(())
     }
 
     fn reject_milestone_1_unsupported(&self) -> Result<(), KafkaError> {
         // 1. enable.idempotence=true rejected.
-        if self.get_boolean(ENABLE_IDEMPOTENCE_CONFIG)? {
+        if self.inner.get_boolean(ENABLE_IDEMPOTENCE_CONFIG)? {
             return Err(KafkaError::Config(
                 "Idempotent producer is not supported in this milestone (Milestone-1). Set enable.idempotence=false. \
                  See Milestone-1/PLAN.md."
@@ -1076,16 +1179,146 @@ impl ProducerConfig {
             ));
         }
         // 2. transactional.id non-null/non-empty rejected.
-        if self.originals().contains_key(TRANSACTIONAL_ID_CONFIG)
-            && let Some(raw) = self.originals().get(TRANSACTIONAL_ID_CONFIG)
+        if let Some(raw) = self.inner.originals().get(TRANSACTIONAL_ID_CONFIG)
             && !raw.is_empty()
         {
             return Err(KafkaError::Config(
-                "Transactional producer is not supported in this milestone (Milestone-1). Unset transactional.id. \
-                 See Milestone-1/PLAN.md."
+                "Transactional producer is not supported in this milestone (Milestone-1). Unset transactional.id. See \
+                 Milestone-1/PLAN.md."
                     .to_owned(),
             ));
         }
+        Ok(())
+    }
+
+    /// Mirrors `ProducerConfig.parseAcks(String)` (line 653). Converts
+    /// `"all"` → `"-1"`, otherwise parses as a `short` and returns its
+    /// canonical string form.
+    fn parse_acks(acks_string: &str) -> Result<String, KafkaError> {
+        let trimmed = acks_string.trim();
+        if trimmed.eq_ignore_ascii_case("all") {
+            return Ok("-1".to_owned());
+        }
+        match trimmed.parse::<i16>() {
+            Ok(n) => Ok(n.to_string()),
+            Err(_) => Err(KafkaError::Config(format!(
+                "Invalid configuration value for 'acks': {acks_string}"
+            ))),
+        }
+    }
+
+    /// Mirrors `ProducerConfig.maybeOverrideClientId(Map)` (line 579).
+    /// Sets `client.id` to `producer-<transactional-id-or-seq>` when the
+    /// user did not configure one explicitly.
+    fn maybe_override_client_id(&mut self) -> Result<(), KafkaError> {
+        let user_configured = self.inner.originals().contains_key(CLIENT_ID_CONFIG);
+        let refined = if user_configured {
+            self.inner.get_string(CLIENT_ID_CONFIG)?.to_owned()
+        } else {
+            // `transactional.id` may be `Null` (default) or a non-empty
+            // string. Milestone-1 rejects non-null/non-empty values
+            // upstream, so by the time we get here `transactional.id` is
+            // always null/empty.
+            let transactional_id = self.inner.values().get(TRANSACTIONAL_ID_CONFIG).and_then(|v| match v {
+                ConfigValue::String(s) if !s.is_empty() => Some(s.clone()),
+                _ => None,
+            });
+            match transactional_id {
+                Some(s) => format!("producer-{s}"),
+                None => format!(
+                    "producer-{}",
+                    PRODUCER_CLIENT_ID_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                ),
+            }
+        };
+        self.post_processed
+            .insert(CLIENT_ID_CONFIG.to_owned(), ConfigValue::String(refined));
+        Ok(())
+    }
+
+    /// Mirrors `ProducerConfig.postProcessAndValidateIdempotenceConfigs(Map)`
+    /// (line 591). Validates idempotence dependencies (`acks=all`,
+    /// `retries>0`, `max.in.flight<=5`), updates `acks`, and surfaces the
+    /// `transaction.timeout.ms`/`transaction.two.phase.commit.enable`
+    /// mutual-exclusion error.
+    fn post_process_and_validate_idempotence_configs(&mut self) -> Result<(), KafkaError> {
+        // Translate `acks` to its canonical numeric form (Java's
+        // `parseAcks`). Always overwritten in `post_processed` so all
+        // downstream readers see the canonical form ("-1" or "0"/"1").
+        let acks_str = self.inner.get_string(ACKS_CONFIG)?.to_owned();
+        let parsed_acks = Self::parse_acks(&acks_str)?;
+        self.post_processed
+            .insert(ACKS_CONFIG.to_owned(), ConfigValue::String(parsed_acks.clone()));
+
+        let user_configured_idempotence = self.inner.originals().contains_key(ENABLE_IDEMPOTENCE_CONFIG);
+        let mut idempotence_enabled = self.inner.get_boolean(ENABLE_IDEMPOTENCE_CONFIG)?;
+        let mut should_disable_idempotence = false;
+
+        if idempotence_enabled {
+            let retries = self.inner.get_int(RETRIES_CONFIG)?;
+            if retries == 0 {
+                if user_configured_idempotence {
+                    return Err(KafkaError::Config(format!(
+                        "Must set {RETRIES_CONFIG} to non-zero when using the idempotent producer."
+                    )));
+                }
+                log::info!("Idempotence will be disabled because {RETRIES_CONFIG} is set to 0.");
+                should_disable_idempotence = true;
+            }
+
+            // Java parses `acksStr` as `Short.parseShort` — at this
+            // point `parsed_acks` is the canonical numeric form so we
+            // can parse it directly.
+            let acks_short: i16 = parsed_acks
+                .parse()
+                .map_err(|_| KafkaError::Config(format!("Invalid configuration value for 'acks': {acks_str}")))?;
+            if acks_short != -1 {
+                if user_configured_idempotence {
+                    return Err(KafkaError::Config(format!(
+                        "Must set {ACKS_CONFIG} to all in order to use the idempotent producer. Otherwise we cannot \
+                         guarantee idempotence."
+                    )));
+                }
+                log::info!(
+                    "Idempotence will be disabled because {ACKS_CONFIG} is set to {acks_short}, not set to 'all'."
+                );
+                should_disable_idempotence = true;
+            }
+
+            let in_flight = self.inner.get_int(MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION)?;
+            if MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION_FOR_IDEMPOTENCE < in_flight {
+                return Err(KafkaError::Config(format!(
+                    "To use the idempotent producer, {MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION} must be set to at most \
+                     5. Current value is {in_flight}."
+                )));
+            }
+        }
+
+        if should_disable_idempotence {
+            self.post_processed
+                .insert(ENABLE_IDEMPOTENCE_CONFIG.to_owned(), ConfigValue::Boolean(false));
+            idempotence_enabled = false;
+        }
+
+        // Validate `transactional.id` after idempotence post-validation
+        // because `enable.idempotence` may have been overridden above.
+        let user_configured_transactions = self.inner.originals().contains_key(TRANSACTIONAL_ID_CONFIG);
+        if !idempotence_enabled && user_configured_transactions {
+            return Err(KafkaError::Config(format!(
+                "Cannot set a {TRANSACTIONAL_ID_CONFIG} without also enabling idempotence."
+            )));
+        }
+
+        // Two-phase commit + transaction timeout mutual exclusion.
+        let enable_2pc = self.inner.get_boolean(TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG)?;
+        let user_configured_txn_timeout = self.inner.originals().contains_key(TRANSACTION_TIMEOUT_CONFIG);
+        if enable_2pc && user_configured_txn_timeout {
+            return Err(KafkaError::Config(format!(
+                "Cannot set {TRANSACTION_TIMEOUT_CONFIG} when {TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG} is set to \
+                 true. Transactions will not expire with two-phase commit enabled."
+            )));
+        }
+
         Ok(())
     }
 }
@@ -1181,7 +1414,8 @@ mod tests {
         // Defaults that the producer internals consume.
         assert_eq!(cfg.get_int(BATCH_SIZE_CONFIG).unwrap(), 16_384);
         assert_eq!(cfg.get_long(LINGER_MS_CONFIG).unwrap(), 5);
-        assert_eq!(cfg.get_string(ACKS_CONFIG).unwrap(), "all");
+        // post-processed: "all" → "-1" (matches Java parseAcks).
+        assert_eq!(cfg.get_string(ACKS_CONFIG).unwrap(), "-1");
         assert!(!cfg.get_boolean(ENABLE_IDEMPOTENCE_CONFIG).unwrap());
     }
 
