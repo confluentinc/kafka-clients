@@ -646,13 +646,294 @@ fn sender_running_arc<C: KafkaClient>(sender: &Sender<C>) -> Arc<AtomicBool> {
 
 #[cfg(test)]
 mod tests {
-    //! Phase 7c skeleton tests live in the `kafka_producer.rs` file but
-    //! are gated to compile-time checks until commit 5 lands the
-    //! construction tests. The struct is skeleton-only at this point.
+    //! Phase 7c construction tests.
+    //!
+    //! These tests cover the construction path only — `send`, `flush`,
+    //! `close`, etc. land in Phase 7d/7e. Each test either:
+    //! * verifies a `ProducerConfig::new(props)` rejection that would
+    //!   bubble up before reaching `KafkaProducer::new`, or
+    //! * exercises [`KafkaProducer::new_for_test`] (the working
+    //!   construction path) with a minimal local mock [`KafkaClient`].
+    //!
+    //! The Java analogues all live in `KafkaProducerTest.java`. Where a
+    //! Java test exercises construction-only behaviour, we translate it
+    //! here. Tests that exercise `send` / metrics / interceptor close /
+    //! transactional methods are deferred to Phase 7d/7e/7f.
+    //!
+    //! ## Java tests translated here
+    //!
+    //! * `testNoSerializerProvided` — covered by the
+    //!   `ProducerConfig::append_serializer_to_config` path; this file
+    //!   asserts the producer-level surface still rejects the
+    //!   `Milestone-1`-flavored configs (idempotence / transactional /
+    //!   SASL).
+    //! * `testConstructorWithSerializers` — covered here as
+    //!   `constructs_with_minimum_config_via_new_for_test` (Phase 7c
+    //!   does not wire the public `new(props)` to a real NetworkClient
+    //!   — see module docs).
 
     use super::*;
+    use crate::ClientRequest;
+    use crate::ClientResponse;
+    use crate::RequestCompletionHandler;
+    use crate::common::Node;
+    use crate::common::requests::AbstractRequestBuilder;
+    use crate::common::serialization::serdes::{ByteArrayOwnedSerializer, StringOwnedSerializer};
+    use crate::producer::producer_config::{
+        BOOTSTRAP_SERVERS_CONFIG, ENABLE_IDEMPOTENCE_CONFIG, KEY_SERIALIZER_CLASS_CONFIG, TRANSACTIONAL_ID_CONFIG,
+        VALUE_SERIALIZER_CLASS_CONFIG,
+    };
+    use std::collections::HashMap;
+    use std::time::Duration;
 
-    /// Compile-only check that the struct's type parameters compose.
-    /// Real instantiation requires the public constructor (commit 2).
-    fn _assert_type_compiles<K, V, C: KafkaClient>(_p: KafkaProducer<K, V, C>) {}
+    /// Minimal in-test [`KafkaClient`] that does nothing — used by the
+    /// construction tests because the only Sender behaviour exercised
+    /// here is "spawn the run loop, then drop / close it". The Sender's
+    /// run loop calls `client.poll(timeout, now).await` repeatedly; this
+    /// mock returns an empty `Vec` after the requested timeout (with a
+    /// generous floor).
+    ///
+    /// Distinct from `sender::tests::MockClientImpl` (which is
+    /// `pub(super)` to that file). Keeping the producer-side mock local
+    /// keeps the cross-file coupling minimal.
+    struct StubKafkaClient {
+        wakeups: Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl StubKafkaClient {
+        fn new() -> Self {
+            Self { wakeups: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }
+        }
+    }
+
+    impl KafkaClient for StubKafkaClient {
+        fn is_ready(&self, _node: &Node, _now: i64) -> bool {
+            false
+        }
+        fn ready(&mut self, _node: &Node, _now: i64) -> bool {
+            false
+        }
+        fn connection_delay(&self, _node: &Node, _now: i64) -> i64 {
+            i64::MAX
+        }
+        fn poll_delay_ms(&self, _node: &Node, _now: i64) -> i64 {
+            i64::MAX
+        }
+        fn connection_failed(&self, _node: &Node) -> bool {
+            false
+        }
+        fn authentication_error(&self, _node: &Node) -> Option<KafkaError> {
+            None
+        }
+        fn send(&mut self, _request: ClientRequest, _now: i64) {
+            // No-op — Phase 7c never sends anything.
+        }
+        fn poll(
+            &mut self,
+            timeout_ms: i64,
+            _now: i64,
+        ) -> impl std::future::Future<Output = Vec<ClientResponse>> + Send {
+            // Yield briefly so the run loop's `while running` can observe
+            // a `force_close` flip set by `Drop`. Without this, the run
+            // loop keeps spinning on a synchronous "no-op poll" and the
+            // JoinHandle never finishes.
+            let timeout_ms = timeout_ms.max(0) as u64;
+            async move {
+                tokio::time::sleep(Duration::from_millis(timeout_ms.min(50))).await;
+                Vec::new()
+            }
+        }
+        fn disconnect(&mut self, _node_id: i32) {}
+        fn close_connection(&mut self, _node_id: i32) {}
+        fn least_loaded_node(&mut self, _now: i64) -> crate::LeastLoadedNode {
+            crate::LeastLoadedNode::new(None, false)
+        }
+        fn in_flight_request_count(&self) -> i32 {
+            0
+        }
+        fn has_in_flight_requests(&self) -> bool {
+            false
+        }
+        fn in_flight_request_count_for(&self, _node_id: i32) -> i32 {
+            0
+        }
+        fn has_in_flight_requests_for(&self, _node_id: i32) -> bool {
+            false
+        }
+        fn has_ready_nodes(&self, _now: i64) -> bool {
+            false
+        }
+        fn wakeup(&self) {
+            self.wakeups.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        }
+        fn new_client_request(
+            &mut self,
+            _node_id: Arc<str>,
+            _request_builder: Arc<dyn AbstractRequestBuilder>,
+            _created_time_ms: i64,
+            _expect_response: bool,
+        ) -> ClientRequest {
+            // Construction tests never call this — but the trait requires
+            // an impl. Build a stub.
+            unreachable!("Phase 7c construction tests do not produce ClientRequests");
+        }
+        fn new_client_request_with_callback(
+            &mut self,
+            _node_id: Arc<str>,
+            _request_builder: Arc<dyn AbstractRequestBuilder>,
+            _created_time_ms: i64,
+            _expect_response: bool,
+            _request_timeout_ms: i32,
+            _callback: Option<Arc<dyn RequestCompletionHandler>>,
+        ) -> ClientRequest {
+            unreachable!("Phase 7c construction tests do not produce ClientRequests");
+        }
+        fn initiate_close(&mut self) {}
+        fn close(&mut self) {}
+        fn active(&self) -> bool {
+            true
+        }
+    }
+
+    /// Minimum-viable props: bootstrap.servers + serializer FQCNs.
+    fn minimal_props() -> HashMap<String, String> {
+        let mut m = HashMap::new();
+        m.insert(BOOTSTRAP_SERVERS_CONFIG.to_owned(), "localhost:9092".to_owned());
+        m.insert(
+            KEY_SERIALIZER_CLASS_CONFIG.to_owned(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_owned(),
+        );
+        m.insert(
+            VALUE_SERIALIZER_CLASS_CONFIG.to_owned(),
+            "org.apache.kafka.common.serialization.StringSerializer".to_owned(),
+        );
+        m
+    }
+
+    /// Translation of `KafkaProducerTest.testConstructorWithSerializers`
+    /// (Java line 521) — minimum-viable construction path. Phase 7c uses
+    /// `new_for_test` because the public `new(props)` defers to Phase 7d/8.
+    #[tokio::test]
+    async fn constructs_with_minimum_config_via_new_for_test() {
+        let cfg = ProducerConfig::new(minimal_props()).expect("valid config");
+        let client = StubKafkaClient::new();
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<String>> = Box::new(StringOwnedSerializer::default());
+        let producer = KafkaProducer::<Vec<u8>, String, StubKafkaClient>::new_for_test(
+            cfg, key_ser, value_ser, None, client, None, None, None,
+        )
+        .expect("construction succeeds");
+
+        // The auto-assigned client.id has the form `producer-N` where N is
+        // the next value of the process-global PRODUCER_CLIENT_ID_SEQUENCE.
+        assert!(
+            producer.client_id().starts_with("producer-"),
+            "client_id should be auto-assigned, got {:?}",
+            producer.client_id(),
+        );
+    }
+
+    /// Translation of the Milestone-1 idempotence rejection — the
+    /// rejection happens inside `ProducerConfig::new`, so the producer
+    /// constructor is never reached with this config.
+    #[test]
+    fn rejects_idempotence_true() {
+        let mut props = minimal_props();
+        props.insert(ENABLE_IDEMPOTENCE_CONFIG.to_owned(), "true".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)), "expected Config error, got {err:?}");
+        assert!(
+            err.message().contains("Milestone-1"),
+            "expected Milestone-1 in error message, got: {}",
+            err.message(),
+        );
+    }
+
+    /// Translation of the Milestone-1 transactional.id rejection.
+    #[test]
+    fn rejects_transactional_id() {
+        let mut props = minimal_props();
+        props.insert(TRANSACTIONAL_ID_CONFIG.to_owned(), "my-tx-id".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)), "expected Config error, got {err:?}");
+        assert!(
+            err.message().contains("Milestone-1"),
+            "expected Milestone-1 in error message, got: {}",
+            err.message(),
+        );
+    }
+
+    /// Translation of the SASL rejection at the security.protocol
+    /// validator (Milestone-1 Phase 9 prereq).
+    #[test]
+    fn rejects_sasl_security_protocol() {
+        let mut props = minimal_props();
+        props.insert(
+            crate::common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            "SASL_SSL".to_owned(),
+        );
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)), "expected Config error, got {err:?}");
+    }
+
+    /// Public `new` and `with_serializers` are deferred — the
+    /// `DefaultMetadataUpdater` translation must land first. This test
+    /// pins the deferred error message so users get a clear pointer at
+    /// the (eventual) replacement constructor.
+    #[test]
+    fn public_new_returns_unsupported_operation_in_milestone_1() {
+        // `unwrap_err` requires `T: Debug`; `KafkaProducer` is not
+        // `Debug` (it owns a `JoinHandle` and other non-Debug fields).
+        // Use a `let-else` instead.
+        let Err(err) = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(minimal_props()) else {
+            panic!("expected Err in Milestone-1");
+        };
+        assert!(matches!(err, KafkaError::UnsupportedOperation(_)));
+        assert!(
+            err.message().contains("DefaultMetadataUpdater"),
+            "expected DefaultMetadataUpdater in error message, got: {}",
+            err.message(),
+        );
+    }
+
+    /// Verify that dropping the producer aborts the spawned Sender task.
+    /// Java's `KafkaProducer.close(Duration.ofMillis(0), true)` does the
+    /// same on the construction-failure path.
+    #[tokio::test]
+    async fn drop_aborts_sender_task() {
+        let cfg = ProducerConfig::new(minimal_props()).expect("valid config");
+        let client = StubKafkaClient::new();
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+
+        // Capture the running flag before the producer moves the Sender
+        // into the spawned task — this gives us an external observer
+        // independent of the JoinHandle.
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg, key_ser, value_ser, None, client, None, None, None,
+        )
+        .expect("construction succeeds");
+
+        let running = producer.sender_running.clone();
+        // Sanity: while alive, `running` is true.
+        assert!(running.load(std::sync::atomic::Ordering::Acquire));
+
+        // Drop. The drop impl flips `running` to false and aborts the
+        // task.
+        drop(producer);
+
+        // After drop, `running` must be false.
+        assert!(
+            !running.load(std::sync::atomic::Ordering::Acquire),
+            "Drop should have flipped running=false"
+        );
+    }
+
+    /// Phase 7c does not yet implement `Producer` for `KafkaProducer`.
+    /// This compile-only function pins that fact: if a future commit
+    /// adds the impl prematurely, this stub will need to be updated.
+    fn _phase_7c_does_not_impl_producer<K, V, C: KafkaClient>(_p: KafkaProducer<K, V, C>) {
+        // Intentionally empty — the absence of a `Producer<K, V>` impl
+        // is the contract documented at module-level.
+    }
 }
