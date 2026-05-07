@@ -1691,16 +1691,47 @@ mod tests {
 
     // Java: `testTwoPhaseCommitIncompatibleWithTransactionTimeout`.
     //
-    // SKIPPED for Milestone-1. The Java test sets
-    // `enable.idempotence=true` AND `transactional.id="test-txn-id"`
-    // both of which are rejected at construction in Milestone-1
-    // (idempotent + transactional producers are out of scope until
-    // Phases 8 & 9). Re-translating this test verbatim would only
-    // exercise the Milestone-1 rejection paths, not the
-    // 2pc/transaction-timeout mutual exclusion logic Java intends to
-    // exercise.
+    // The Java test additionally sets `enable.idempotence=true` and
+    // `transactional.id="test-txn-id"` — both rejected at construction
+    // in Milestone-1 (idempotent + transactional producers are out of
+    // scope until Phases 8 & 9). However, the underlying invariant that
+    // Java's test exercises (`transaction.two.phase.commit.enable=true`
+    // is mutually exclusive with a user-supplied `transaction.timeout.ms`)
+    // is reachable in Milestone-1 without those two properties. We
+    // therefore translate the Milestone-1-reachable subset here. The
+    // success cases (2pc=true alone, or timeout alone) are also covered
+    // for symmetry with Java.
     //
-    // TODO Phase 9: re-enable when transactional.id is permitted again.
+    // TODO Phase 9: also add the variants that combine 2pc with
+    // `enable.idempotence=true` and `transactional.id="test-txn-id"`
+    // once those are permitted again — at which point this should be
+    // renamed back to `test_two_phase_commit_incompatible_with_transaction_timeout`
+    // and the additional setters reinstated to match Java verbatim.
+    #[test]
+    fn test_two_phase_commit_rejects_explicit_transaction_timeout() {
+        // 2pc=true + explicit transaction.timeout.ms must reject.
+        let mut props = minimal_props();
+        props.insert(TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG.to_owned(), "true".to_owned());
+        props.insert(TRANSACTION_TIMEOUT_CONFIG.to_owned(), "60000".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        let msg = err.message();
+        let expected_msg = format!(
+            "Cannot set {TRANSACTION_TIMEOUT_CONFIG} when {TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG} is set to \
+             true. Transactions will not expire with two-phase commit enabled."
+        );
+        assert_eq!(msg, expected_msg);
+
+        // 2pc=true alone (no explicit timeout) must succeed.
+        let mut props = minimal_props();
+        props.insert(TRANSACTION_TWO_PHASE_COMMIT_ENABLE_CONFIG.to_owned(), "true".to_owned());
+        ProducerConfig::new(props).expect("2pc=true without explicit timeout is valid");
+
+        // Explicit timeout alone (no 2pc) must succeed.
+        let mut props = minimal_props();
+        props.insert(TRANSACTION_TIMEOUT_CONFIG.to_owned(), "60000".to_owned());
+        ProducerConfig::new(props).expect("explicit timeout without 2pc is valid");
+    }
 
     /// Java: `testValidateConfigPropertiesFile`.
     ///
