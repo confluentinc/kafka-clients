@@ -46,8 +46,8 @@
 //!
 //! # Milestone-1 stubs
 //!
-//! Every transactional method (`init_transactions`, `begin_transaction`,
-//! `commit_transaction`, `abort_transaction`, `prepare_transaction`)
+//! Every transactional method on the trait (`init_transactions`,
+//! `begin_transaction`, `commit_transaction`, `abort_transaction`)
 //! returns [`KafkaError::UnsupportedOperation`] in this milestone. The
 //! `transactional.id` config is rejected by [`ProducerConfig`] post-
 //! processing (see Phase 7a), so any caller would already have failed
@@ -121,17 +121,12 @@ pub trait Producer<K, V>: Send + Sync {
     /// will never reach this method in normal use.
     ///
     /// See `KafkaProducer#initTransactions()`.
-    fn init_transactions(&self) -> Result<(), KafkaError>;
-
-    /// Like [`Producer::init_transactions`] but allows a previously-
-    /// prepared two-phase-commit transaction to be retained across
-    /// process restart.
     ///
-    /// **Milestone-1**: Always returns
-    /// [`KafkaError::UnsupportedOperation`].
-    ///
-    /// See `KafkaProducer#initTransactions(boolean)`.
-    fn init_transactions_with_keep_prepared(&self, keep_prepared_txn: bool) -> Result<(), KafkaError>;
+    /// Per CLAUDE.md rule 9.1, Java's blocking `void initTransactions()`
+    /// becomes `async fn` in Rust. Milestone-1 always rejects
+    /// immediately, but the signature is future-proof for when the
+    /// transaction coordinator round-trip lands in Phase 9.
+    fn init_transactions(&self) -> impl std::future::Future<Output = Result<(), KafkaError>> + Send;
 
     /// Should be called before the start of each new transaction.
     ///
@@ -139,7 +134,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// [`KafkaError::UnsupportedOperation`].
     ///
     /// See `KafkaProducer#beginTransaction()`.
-    fn begin_transaction(&self) -> Result<(), KafkaError>;
+    fn begin_transaction(&self) -> impl std::future::Future<Output = Result<(), KafkaError>> + Send;
 
     /// Commits the ongoing transaction.
     ///
@@ -147,7 +142,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// [`KafkaError::UnsupportedOperation`].
     ///
     /// See `KafkaProducer#commitTransaction()`.
-    fn commit_transaction(&self) -> Result<(), KafkaError>;
+    fn commit_transaction(&self) -> impl std::future::Future<Output = Result<(), KafkaError>> + Send;
 
     /// Aborts the ongoing transaction.
     ///
@@ -155,17 +150,7 @@ pub trait Producer<K, V>: Send + Sync {
     /// [`KafkaError::UnsupportedOperation`].
     ///
     /// See `KafkaProducer#abortTransaction()`.
-    fn abort_transaction(&self) -> Result<(), KafkaError>;
-
-    /// Prepares the current ongoing transaction for a two-phase
-    /// commit. Returns `true` if the producer succeeded in preparing
-    /// the transaction.
-    ///
-    /// **Milestone-1**: Always returns
-    /// [`KafkaError::UnsupportedOperation`].
-    ///
-    /// See `KafkaProducer#prepareTransaction()`.
-    fn prepare_transaction(&self) -> Result<bool, KafkaError>;
+    fn abort_transaction(&self) -> impl std::future::Future<Output = Result<(), KafkaError>> + Send;
 
     /// Asynchronously send a record to a topic.
     ///
@@ -272,27 +257,19 @@ mod tests {
     struct StubProducer;
 
     impl Producer<Vec<u8>, Vec<u8>> for StubProducer {
-        fn init_transactions(&self) -> Result<(), KafkaError> {
+        async fn init_transactions(&self) -> Result<(), KafkaError> {
             Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
         }
 
-        fn init_transactions_with_keep_prepared(&self, _keep_prepared_txn: bool) -> Result<(), KafkaError> {
+        async fn begin_transaction(&self) -> Result<(), KafkaError> {
             Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
         }
 
-        fn begin_transaction(&self) -> Result<(), KafkaError> {
+        async fn commit_transaction(&self) -> Result<(), KafkaError> {
             Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
         }
 
-        fn commit_transaction(&self) -> Result<(), KafkaError> {
-            Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
-        }
-
-        fn abort_transaction(&self) -> Result<(), KafkaError> {
-            Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
-        }
-
-        fn prepare_transaction(&self) -> Result<bool, KafkaError> {
+        async fn abort_transaction(&self) -> Result<(), KafkaError> {
             Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
         }
 
@@ -337,21 +314,11 @@ mod tests {
     const MS1_TELEMETRY_MSG: &str = "Client telemetry is not implemented in Milestone-1.";
 
     /// Verifies the trait compiles and a generic function over `P:
-    /// Producer<K, V>` can dispatch its sync methods.
+    /// Producer<K, V>` can dispatch its sync method (`metrics`).
     #[test]
-    fn trait_is_implementable_and_dispatches() {
+    fn trait_is_implementable_and_dispatches_sync() {
         fn check<P: Producer<Vec<u8>, Vec<u8>>>(p: &P) -> Result<(), KafkaError> {
-            // Every transactional method should reject in Milestone-1.
-            assert!(matches!(p.init_transactions(), Err(KafkaError::UnsupportedOperation(_))));
-            assert!(matches!(
-                p.init_transactions_with_keep_prepared(true),
-                Err(KafkaError::UnsupportedOperation(_))
-            ));
-            assert!(matches!(p.begin_transaction(), Err(KafkaError::UnsupportedOperation(_))));
-            assert!(matches!(p.commit_transaction(), Err(KafkaError::UnsupportedOperation(_))));
-            assert!(matches!(p.abort_transaction(), Err(KafkaError::UnsupportedOperation(_))));
-            assert!(matches!(p.prepare_transaction(), Err(KafkaError::UnsupportedOperation(_))));
-            // Metrics returns the empty stub.
+            // The only sync method on the trait — metrics returns the empty stub.
             assert!(p.metrics().is_empty());
             Ok(())
         }
@@ -362,6 +329,13 @@ mod tests {
     #[tokio::test]
     async fn async_methods_dispatch_through_trait() {
         let p = StubProducer;
+
+        // Every transactional method should reject in Milestone-1.
+        assert!(matches!(p.init_transactions().await, Err(KafkaError::UnsupportedOperation(_))));
+        assert!(matches!(p.begin_transaction().await, Err(KafkaError::UnsupportedOperation(_))));
+        assert!(matches!(p.commit_transaction().await, Err(KafkaError::UnsupportedOperation(_))));
+        assert!(matches!(p.abort_transaction().await, Err(KafkaError::UnsupportedOperation(_))));
+
         let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition("t", Some(0), None, None).unwrap();
         // Stub returns Err for `send` so just verify dispatch works.
         assert!(p.send(record).await.is_err());

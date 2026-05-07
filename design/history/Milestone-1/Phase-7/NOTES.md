@@ -32,3 +32,23 @@ Each sub-phase ends green on
 
 - Open: `COMMENTS.7.md`
 - Resolved: `COMMENTS.DONE.7.md`
+
+## Phase 7c carry-over notes
+
+Verified against `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java`
+during the Phase 7b Round 1 fixup (Critic 7 Suggestion 1):
+
+- `KafkaProducer.java` defines exactly one transaction-init method:
+  `public void initTransactions()` at line 648. **No** `initTransactions(boolean keepPreparedTxn)`
+  overload exists in this 4.2 source.
+- `prepareTransaction` does **not** exist on `KafkaProducer` — it only
+  appears on `internals/TransactionManager.java:342`, which is package-
+  private internal API and is not exposed on either the `Producer`
+  interface or `KafkaProducer`.
+
+Phase 7c **MUST** re-verify against `KafkaProducer.java` whether either
+of these methods has appeared since (e.g. via a back-port). If yes,
+they translate as inherent `impl KafkaProducer` methods (not trait
+methods on `Producer`). If no, they remain absent. In either case the
+Milestone-1 behavior is `KafkaError::UnsupportedOperation` per the skip
+list above.
