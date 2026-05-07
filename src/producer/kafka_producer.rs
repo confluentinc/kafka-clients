@@ -2696,6 +2696,76 @@ mod tests {
         assert!(producer.partitioner.is_some(), "partitioner should be wired");
     }
 
+    /// End-to-end check that `partitioner.class=RoundRobinPartitioner`
+    /// actually routes through the wired partitioner on the
+    /// [`Self::partition`] hot path. Builds a 3-partition topic, calls
+    /// `partition()` 6 times via the keyed branch (the
+    /// `RoundRobinPartitioner` ignores the key and uses an internal
+    /// counter), and asserts each partition is visited at least once.
+    /// This is the regression guard against the Phase 7d state where
+    /// `partitioner.class` was silently ignored.
+    #[tokio::test]
+    async fn partitioner_class_round_robin_distributes_across_partitions() {
+        use std::collections::HashSet;
+        let mut props = minimal_props();
+        props.insert(
+            producer_config::PARTITIONER_CLASS_CONFIG.to_owned(),
+            "RoundRobinPartitioner".to_owned(),
+        );
+        let cfg = ProducerConfig::new(props).expect("config");
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+
+        let pm = ProducerMetadata::new(
+            50,
+            100,
+            300_000,
+            300_000,
+            LogContext::new(),
+            Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new()),
+            time.clone(),
+        )
+        .expect("producer metadata");
+        let now = time.milliseconds();
+        pm.add("topic", now);
+        pm.update_with_current_request_version(&build_single_topic_response("topic", 3), false, now)
+            .expect("metadata update");
+
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            Box::new(ByteArrayOwnedSerializer),
+            Box::new(ByteArrayOwnedSerializer),
+            Some(pm),
+            StubKafkaClient::new(),
+            None,
+            None,
+            Some(time.clone()),
+        )
+        .expect("producer construction");
+        assert!(producer.partitioner.is_some(), "partitioner.class should be wired");
+
+        let cluster = producer.metadata.metadata().fetch();
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition(
+            "topic",
+            None,
+            Some(b"key".to_vec()),
+            Some(b"v".to_vec()),
+        )
+        .expect("record");
+
+        let mut seen = HashSet::new();
+        for _ in 0..6 {
+            let p = producer
+                .partition(&record, Some(b"key"), Some(b"v"), &cluster)
+                .expect("partition");
+            seen.insert(p);
+        }
+        assert_eq!(
+            seen,
+            HashSet::from([0_i32, 1, 2]),
+            "RoundRobinPartitioner should hit every partition over 6 calls"
+        );
+    }
+
     /// Unrecognised `partitioner.class` strings are rejected with
     /// [`KafkaError::Config`]. Mirrors Java's reflective
     /// `ClassNotFoundException` re-wrapped as `KafkaException` at the
