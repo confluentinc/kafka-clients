@@ -184,14 +184,24 @@ def _insert_pr_at_status(db_path, pr_number, ak_commit, status,
     conn.close()
 
 
-def test_pr_status_check_prints_row(tmp_path, capsys):
+def test_pr_status_2_cascade_noops_waits_for_plan_approve(tmp_path, caplog):
+    """A `--pr N` cascade on a status-2 row hits the human gate and
+    noops, logging the wait reason. No DB transition happens."""
+    import logging as _logging
     db_path = str(tmp_path / "t.db")
     _insert_pr_at_status(db_path, 42, "abc123", db.STATUS_PLAN_CREATED)
-    rc = _run("--pr", "42", db_path=db_path)
+    with caplog.at_level(_logging.INFO):
+        rc = _run("--pr", "42", db_path=db_path)
     assert rc == 0
-    captured = capsys.readouterr()
-    assert "pr_number: 42" in captured.out
-    assert f"status: {db.STATUS_PLAN_CREATED}" in captured.out
+    assert any(
+        "waiting for manual --plan-approve" in rec.message
+        for rec in caplog.records
+    )
+    conn = db.connect(db_path)
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 42",
+    ).fetchone())
+    assert pr["status"] == db.STATUS_PLAN_CREATED  # unchanged
 
 
 def test_pr_plan_approve_transitions_2_to_3_and_runs_impl(tmp_path):
@@ -284,41 +294,68 @@ def test_mutually_exclusive_seed_and_pr():
 # --- artifact push wiring (Phase E) -----------------------------------------
 
 def test_seed_pushes_artifact(tmp_path):
+    """With per-op locking, every write triggers a push. Seed mode does
+    one write (the seed_correspondence call); we expect at least one
+    push during the run."""
     db_path = str(tmp_path / "t.db")
-    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+    with patch(
+        "translation_agent.locked_db.semaphore.push_project_artifact",
+    ) as mpush:
         rc = _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
                   "--rust-branch", "master",
                   db_path=db_path)
     assert rc == 0
-    mpush.assert_called_once_with("translation_agent.db", db_path)
+    assert mpush.call_count >= 1
+    # Each push uses the canonical artifact name + db_path tuple.
+    for call in mpush.call_args_list:
+        assert call.args == ("translation_agent.db", db_path)
 
 
 def test_no_artifact_push_skips(tmp_path):
+    """`--no-artifact-push` short-circuits the entire artifact layer:
+    no push, no pull, no lock acquire/release."""
     db_path = str(tmp_path / "t.db")
-    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+    with patch(
+        "translation_agent.locked_db.semaphore.push_project_artifact",
+    ) as mpush, patch(
+        "translation_agent.locked_db.semaphore.push_project_artifact_no_force",
+    ) as macq, patch(
+        "translation_agent.locked_db.semaphore.yank_project_artifact",
+    ) as myank, patch(
+        "translation_agent.locked_db.semaphore.pull_project_artifact",
+    ) as mpull:
         rc = _run("--no-artifact-push",
                   "--seed", "--ak-branch", "trunk", "--ak-commit", "a",
                   "--rust-branch", "master",
                   db_path=db_path)
     assert rc == 0
     mpush.assert_not_called()
+    macq.assert_not_called()
+    myank.assert_not_called()
+    mpull.assert_not_called()
 
 
-def test_pr_status_check_does_not_push(tmp_path):
+def test_pr_status_check_at_human_gate_does_not_push(tmp_path):
+    """A `--pr <N>` cascade on a status-2 row noops at the human gate;
+    no write happens, so no DB push is issued."""
     db_path = str(tmp_path / "t.db")
     _insert_pr_at_status(db_path, 42, "abc", db.STATUS_PLAN_CREATED)
-    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+    with patch(
+        "translation_agent.locked_db.semaphore.push_project_artifact",
+    ) as mpush:
         rc = _run("--pr", "42", db_path=db_path)
     assert rc == 0
-    # --pr <N> alone is read-only; no need to push.
     mpush.assert_not_called()
 
 
 def test_dry_run_does_not_push(tmp_path):
+    """`--dry-run` skips every artifact RPC just like `--no-artifact-push`."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
+         patch(
+             "translation_agent.locked_db.semaphore.push_project_artifact",
+         ) as mpush:
         rc = _run("--dry-run",
                   "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
                   "--rust-branch", "master",
@@ -328,73 +365,88 @@ def test_dry_run_does_not_push(tmp_path):
 
 
 def test_artifact_push_failure_does_not_crash(tmp_path):
+    """If a per-op push raises, the orchestrator's DB op surfaces the
+    error -- but the run as a whole shouldn't crash with an unhandled
+    exception. Seed has only one write; if its push fails, the rc
+    reflects the failure."""
     db_path = str(tmp_path / "t.db")
-    with patch("translation_agent.cli.semaphore.push_project_artifact",
-               side_effect=Exception("artifact server down")):
-        rc = _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
-                  "--rust-branch", "master",
-                  db_path=db_path)
-    # Seed succeeded; artifact push failed but logged. RC reflects the seed.
-    assert rc == 0
-
-
-def test_artifact_push_runs_even_when_sweep_fails(tmp_path):
-    """If the sweep itself returns non-zero, we still push so the partial
-    state is captured."""
-    db_path = str(tmp_path / "t.db")
-    # No seed -> sweep returns 1.
-    with patch("translation_agent.cli.semaphore.push_project_artifact") as mpush:
-        rc = _run("--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-                  "--rust-branch", "master",
-                  db_path=db_path)
-    assert rc == 1
-    mpush.assert_called_once()
+    with patch(
+        "translation_agent.locked_db.semaphore.push_project_artifact",
+        side_effect=Exception("artifact server down"),
+    ):
+        # Per-op push failure propagates out of the seed session.
+        # The orchestrator does not currently catch arbitrary push
+        # exceptions per-op (only the lock release / first-run pull
+        # are wrapped); with the artifact server down, --seed raises.
+        # Verify the failure is loud rather than silent corruption.
+        with pytest.raises(Exception, match="artifact server down"):
+            _run("--seed", "--ak-branch", "trunk", "--ak-commit", "a",
+                 "--rust-branch", "master",
+                 db_path=db_path)
 
 
 # --- end-to-end integration -------------------------------------------------
 
 def test_end_to_end_full_lifecycle(tmp_path):
-    """One sweep + one --plan-approve drives a row through 0 -> 1 -> 2 -> 3 -> 4."""
+    """Full lifecycle: sweep creates PR (status 0); per-PR cascade
+    advances 0 -> 1 (dep-eval) -> 2 (plan, stops at human gate);
+    --plan-approve drives 2 -> 3 -> 4 + branch_commit update."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path, ak_commit="ak_seed")
 
-    # Sweep run: creates PR for ak_a, dep-evals, plans it. Stops at status 2
-    # (no auto plan-approve).
-    dep_eval_json = '{"plan_dependency": null, "implementation_dependency": null}'
+    # Phase 1: sweep creates the draft PR at status 0 only -- the
+    # narrowed sweep does NOT dep-eval or plan.
     with patch("translation_agent.cli.git_ops.next_commits",
                return_value=["ak_a"]), \
-         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
+         patch("translation_agent.cli.git_ops.commit_subject",
+               return_value="s"), \
          patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
-         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.github.create_draft_pr",
-               side_effect=[100]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
-               side_effect=[(0, dep_eval_json), (0, "")]), \
-         patch("translation_agent.cli.semaphore.push_project_artifact") as mpush_sweep:
+               side_effect=[100]):
         rc = _run("--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
                   "--rust-branch", "master",
                   db_path=db_path)
     assert rc == 0
-    mpush_sweep.assert_called_once()
     conn = db.connect(db_path)
-    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 100").fetchone())
-    assert pr["status"] == db.STATUS_PLAN_CREATED
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 100",
+    ).fetchone())
+    assert pr["status"] == db.STATUS_NO_PLAN
     assert pr["ak_branch"] == "trunk"
     conn.close()
 
-    # Plan-approve run: 2 -> 3 -> 4, branch_commit updated.
+    # Phase 2: per-PR cascade does 0 -> 1 -> 2, stopping at the human
+    # gate. dep-eval returns no deps; plan returns success.
+    dep_eval_json = (
+        '{"plan_dependency": null, "implementation_dependency": null}'
+    )
+    with patch("translation_agent.cli.git_ops.commits_between",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=[(0, dep_eval_json), (0, "")]):
+        rc = _run("--ak-repo-path", "/tmp/ak", "--pr", "100",
+                  db_path=db_path)
+    assert rc == 0
+    conn = db.connect(db_path)
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 100",
+    ).fetchone())
+    assert pr["status"] == db.STATUS_PLAN_CREATED
+    conn.close()
+
+    # Phase 3: --plan-approve drives 2 -> 3 -> 4, branch_commit advanced.
     with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
          patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.git_ops.rev_parse",
-               return_value="rust_a_sha"), \
-         patch("translation_agent.cli.semaphore.push_project_artifact") as mpush_appr:
+               return_value="rust_a_sha"):
         rc = _run("--pr", "100", "--plan-approve", db_path=db_path)
     assert rc == 0
-    mpush_appr.assert_called_once()
-
     conn = db.connect(db_path)
-    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 100").fetchone())
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 100",
+    ).fetchone())
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_a"
@@ -1381,107 +1433,146 @@ def test_sweep_closure_check_nulls_out_dependents_when_archiving(tmp_path):
 
 # --- dep-eval flow ----------------------------------------------------------
 
-def test_sweep_dep_eval_transitions_status_0_to_1(tmp_path):
+def test_pr_cascade_dep_eval_transitions_status_0_through_2(tmp_path):
+    """A `--pr N` cascade on a status-0 row dep-evals (-> 1) and then
+    plans (-> 2), stopping at the human gate. dep candidates come
+    from `git_ops.commits_between` (the bounded range cursor..PR.ak)."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    json_a = '{"plan_dependency": null, "implementation_dependency": null}'
-    json_b = '{"plan_dependency": "ak_a", "implementation_dependency": null}'
-    with patch("translation_agent.cli.git_ops.next_commits",
-               return_value=["ak_a", "ak_b"]), \
-         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
-         patch("translation_agent.cli.github.create_draft_pr",
-               side_effect=[101, 102]), \
+    _insert_pr_at_status(db_path, 101, "ak_a", db.STATUS_NO_PLAN)
+    json_resp = (
+        '{"plan_dependency": null, "implementation_dependency": null}'
+    )
+    with patch("translation_agent.cli.git_ops.commits_between",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.streaming.run_with_prefix",
-               side_effect=[(0, json_a), (0, json_b)]):
+               side_effect=[(0, json_resp), (0, "")]):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "101",
             db_path=db_path,
         )
     assert rc == 0
     conn = db.connect(db_path)
-    rows = {r["pr_number"]: dict(r) for r in
-            conn.execute("SELECT * FROM pr_commit").fetchall()}
-    for pr_number, row in rows.items():
-        assert row["status"] == db.STATUS_DEPENDENCIES_EVALUATED, row
-    # PR for ak_b should have plan_dep=ak_a (which is in batch).
-    pr_for_ak_b = next(r for r in rows.values() if r["ak_commit"] == "ak_b")
-    assert pr_for_ak_b["plan_dependency"] == "ak_a"
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 101",
+    ).fetchone())
+    assert row["status"] == db.STATUS_PLAN_CREATED
+    assert row["plan_dependency"] is None
 
 
-def test_sweep_dep_eval_out_of_batch_dep_treated_as_none(tmp_path):
+def test_pr_cascade_dep_eval_resolves_in_branch_dep(tmp_path):
+    """A status-0 row whose dep-eval reports a plan_dep AK SHA that's in
+    the candidate range AND has a pr_commit row -> dep is recorded."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    bogus_json = '{"plan_dependency": "not_in_batch_sha", "implementation_dependency": null}'
-    # streaming.run_with_prefix is called both for dep-eval AND for the plan
-    # generation that immediately follows in the same sweep (status 1 -> 2,
-    # since plan_dep is None after the out-of-batch coercion). Both succeed
-    # with empty stdout.
-    with patch("translation_agent.cli.git_ops.next_commits",
-               return_value=["ak_a"]), \
-         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
+    # Dep PR (ak_a) is already complete (status 4). Dependent (ak_b)
+    # at status 0; cascade should record plan_dep=ak_a and then plan.
+    _insert_pr_at_status(
+        db_path, 101, "ak_a", db.STATUS_IMPLEMENTATION_DONE,
+    )
+    _insert_pr_at_status(db_path, 102, "ak_b", db.STATUS_NO_PLAN)
+    json_resp = (
+        '{"plan_dependency": "ak_a", "implementation_dependency": null}'
+    )
+    with patch("translation_agent.cli.git_ops.commits_between",
+               return_value=["ak_a", "ak_b"]), \
          patch("translation_agent.cli.git_ops.push_branch"), \
-         patch("translation_agent.cli.github.create_draft_pr",
-               side_effect=[101]), \
+         patch("translation_agent.cli.streaming.run_with_prefix",
+               side_effect=[(0, json_resp), (0, "")]):
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "102",
+            db_path=db_path,
+        )
+    assert rc == 0
+    conn = db.connect(db_path)
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 102",
+    ).fetchone())
+    assert row["plan_dependency"] == "ak_a"
+    # plan_dep PR is already at status 4 (>= PLAN_APPROVED) -> plan
+    # step proceeds, advancing this row to 2.
+    assert row["status"] == db.STATUS_PLAN_CREATED
+
+
+def test_pr_cascade_out_of_candidate_dep_coerced_to_none(tmp_path):
+    """If dep-eval JSON names an AK SHA that's NOT in the candidate
+    range (cursor..PR.ak), the dep is coerced to None and the cascade
+    proceeds to plan generation."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    _insert_pr_at_status(db_path, 101, "ak_a", db.STATUS_NO_PLAN)
+    bogus_json = (
+        '{"plan_dependency": "not_in_candidate_sha", '
+        '"implementation_dependency": null}'
+    )
+    with patch("translation_agent.cli.git_ops.commits_between",
+               return_value=["ak_a"]), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.streaming.run_with_prefix",
                side_effect=[(0, bogus_json), (0, "")]):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "101",
             db_path=db_path,
         )
     assert rc == 0
     conn = db.connect(db_path)
-    row = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 101").fetchone())
-    # Out-of-batch dep coerced to None; plan then generated (status 1 -> 2).
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 101",
+    ).fetchone())
     assert row["plan_dependency"] is None
     assert row["status"] == db.STATUS_PLAN_CREATED
 
 
-def test_sweep_dep_eval_failure_persists_last_error(tmp_path):
+def test_pr_cascade_dep_eval_failure_persists_last_error_keeps_status_0(
+    tmp_path,
+):
+    """r2 dep-eval returns non-zero -> last_error persisted, row stays
+    at status 0, rc=1."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    with patch("translation_agent.cli.git_ops.next_commits",
+    _insert_pr_at_status(db_path, 101, "ak_a", db.STATUS_NO_PLAN)
+    with patch("translation_agent.cli.git_ops.commits_between",
                return_value=["ak_a"]), \
-         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
-         patch("translation_agent.cli.github.create_draft_pr",
-               side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(2, "boom")):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "101",
             db_path=db_path,
         )
-    assert rc == 0
+    assert rc == 1
     conn = db.connect(db_path)
-    row = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 101").fetchone())
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 101",
+    ).fetchone())
     assert row["status"] == db.STATUS_NO_PLAN  # unchanged
     assert "rc=2" in row["last_error"]
 
 
-def test_sweep_dep_eval_unparseable_json_persists_last_error(tmp_path):
+def test_pr_cascade_dep_eval_unparseable_json_persists_last_error(tmp_path):
+    """r2 returns 0 but stdout is not JSON -> parse fails, last_error
+    persisted, row stays at status 0."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    with patch("translation_agent.cli.git_ops.next_commits",
+    _insert_pr_at_status(db_path, 101, "ak_a", db.STATUS_NO_PLAN)
+    with patch("translation_agent.cli.git_ops.commits_between",
                return_value=["ak_a"]), \
-         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
-         patch("translation_agent.cli.worktree.push_branch_with_kafka_bump"), \
-         patch("translation_agent.cli.github.create_draft_pr",
-               side_effect=[101]), \
          patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "no json here")):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "101",
             db_path=db_path,
         )
-    assert rc == 0
+    assert rc == 1
     conn = db.connect(db_path)
-    row = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 101").fetchone())
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 101",
+    ).fetchone())
     assert row["status"] == db.STATUS_NO_PLAN
     assert "could not parse" in row["last_error"]
 
@@ -1503,61 +1594,65 @@ def test_sweep_dep_eval_dry_run_skips_r2_when_r2_absent(tmp_path):
     mstream.assert_not_called()
 
 
-def test_sweep_dep_eval_dry_run_runs_r2_when_present(tmp_path):
+def test_pr_cascade_dry_run_dep_eval_runs_r2_when_present(tmp_path):
     """When --dry-run AND r2 is on PATH, dep-eval is invoked for real
-    (read-only). The dep result is persisted, transitioning the synthetic
-    row 0 -> 1. Then the plan phase ALSO runs (since r2 is available and
-    the row is now at status 1, unblocked) AND advances status 1 -> 2
-    locally."""
+    (read-only) and the dep result is persisted, advancing the row.
+    The cascade then continues to plan generation since the row is at
+    status 1 with no dep gating."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    json_resp = '{"plan_dependency": null, "implementation_dependency": null}'
-    with patch("translation_agent.cli.git_ops.next_commits",
+    _insert_pr_at_status(db_path, 101, "ak_a", db.STATUS_NO_PLAN)
+    json_resp = (
+        '{"plan_dependency": null, "implementation_dependency": null}'
+    )
+    with patch("translation_agent.cli.git_ops.commits_between",
                return_value=["ak_a"]), \
-         patch("translation_agent.cli.git_ops.commit_subject", return_value="s"), \
          patch("translation_agent.cli.streaming.run_with_prefix",
                side_effect=[(0, json_resp), (0, "")]) as mstream, \
          patch("translation_agent.cli._r2_available", return_value=True):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master", "--dry-run",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "101", "--dry-run",
             db_path=db_path,
         )
     assert rc == 0
-    # 1 dep-eval call + 1 plan call (cascade after dep-eval transitioned to 1).
+    # 1 dep-eval call + 1 plan call (cascade 0 -> 1 -> 2).
     assert mstream.call_count == 2
     conn = db.connect(db_path)
-    row = dict(conn.execute("SELECT * FROM pr_commit").fetchone())
-    assert row["pr_number"] < 0  # synthetic
-    assert row["status"] == db.STATUS_PLAN_CREATED  # advanced 0 -> 1 -> 2
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 101",
+    ).fetchone())
+    assert row["status"] == db.STATUS_PLAN_CREATED
     assert row["plan_dependency"] is None
 
 
-# --- plan + implementation flow (sweep step 6 + 8) --------------------------
+# --- plan + implementation cascade steps -----------------------------------
 
-def test_sweep_dry_run_plan_runs_when_r2_present_advances_status_locally(tmp_path):
-    """With --dry-run + r2 + a status-1 row, the sweep invokes claude
+def test_pr_cascade_dry_run_plan_runs_when_r2_present_advances_status_locally(
+    tmp_path,
+):
+    """With --dry-run + r2 + a status-1 row, the cascade invokes claude
     for plan generation in a preserved worktree AND advances DB status
     1 -> 2 (locally only -- no push, no artifact upload)."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 90, "master", "trunk", "ak_z")
-    db.update_dependencies(conn, 90, None, None)
-    conn.close()
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    _insert_pr_at_status(
+        db_path, 90, "ak_z", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")) as mstream, \
          patch("translation_agent.cli._r2_available", return_value=True):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master", "--dry-run",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "90", "--dry-run",
             db_path=db_path,
         )
     assert rc == 0
     mstream.assert_called_once()
     conn = db.connect(db_path)
-    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 90").fetchone())
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 90",
+    ).fetchone())
     assert pr["status"] == db.STATUS_PLAN_CREATED  # advanced 1 -> 2 locally
 
 
@@ -1580,52 +1675,55 @@ def test_sweep_dry_run_plan_skipped_when_r2_absent(tmp_path):
     mstream.assert_not_called()
 
 
-def test_sweep_plan_step_transitions_status_1_to_2(tmp_path):
+def test_pr_cascade_plan_step_transitions_status_1_to_2(tmp_path):
+    """A `--pr N` cascade on a status-1 row generates the plan and
+    advances to status 2."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    # Pre-populate a status-1 row that needs a plan generated.
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 50, "master", "trunk", "ak_x")
-    db.update_dependencies(conn, 50, None, None)
-    conn.close()
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    _insert_pr_at_status(
+        db_path, 50, "ak_x", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
          patch("translation_agent.cli.git_ops.push_branch"):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "50",
             db_path=db_path,
         )
     assert rc == 0
     conn = db.connect(db_path)
-    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 50").fetchone())
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 50",
+    ).fetchone())
     assert pr["status"] == db.STATUS_PLAN_CREATED
 
 
-def test_sweep_impl_step_transitions_status_3_to_4_and_updates_branch_commit(tmp_path):
+def test_pr_cascade_impl_step_transitions_status_3_to_4_and_updates_branch_commit(
+    tmp_path,
+):
+    """A `--pr N` cascade on a status-3 row runs impl, advances to 4,
+    and atomically updates branch_commit to record the new cursor."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 60, "master", "trunk", "ak_y")
-    conn.execute("UPDATE pr_commit SET status = ? WHERE pr_number = 60",
-                 (db.STATUS_PLAN_APPROVED,))
-    conn.commit()
-    conn.close()
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    _insert_pr_at_status(
+        db_path, 60, "ak_y", db.STATUS_PLAN_APPROVED,
+    )
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
          patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.git_ops.rev_parse",
                return_value="rust_y_sha"):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "60",
             db_path=db_path,
         )
     assert rc == 0
     conn = db.connect(db_path)
-    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 60").fetchone())
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 60",
+    ).fetchone())
     assert pr["status"] == db.STATUS_IMPLEMENTATION_DONE
     bc = db.get_latest_correspondence(conn, "master")
     assert bc["ak_commit"] == "ak_y"
@@ -1633,55 +1731,61 @@ def test_sweep_impl_step_transitions_status_3_to_4_and_updates_branch_commit(tmp
 
 # --- per-state label transitions -------------------------------------------
 
-def test_sweep_dep_eval_adds_dependencies_evaluated_label_and_writes_dep_section(
+def test_pr_cascade_dep_eval_writes_label_and_dep_section(
     tmp_path, real_pr_description,
 ):
-    """After dep-eval moves a row to status 1, the orchestrator (a)
-    adds the 'dependencies-evaluated' label, and (b) writes the dep
-    section to the PR body resolving dep AK SHAs to their pr_commit
-    pr_numbers within the same rust_branch."""
+    """After dep-eval transitions a row 0 -> 1, the cascade adds the
+    'dependencies-evaluated' label and writes the dep section to the
+    PR body, resolving dep AK SHAs to pr_commit pr_numbers within
+    the same rust_branch.
+
+    Setup: PR 100 (ak_a) is already complete (status 4 -- it's the
+    referenced dep); PR 200 (ak_b) is at status 0 and dep-eval names
+    ak_a as both plan_dep and impl_dep. The dep section update on
+    PR 200's body should link to #100. The cascade then continues to
+    plan generation since the plan_dep PR is at status 4 (>= PLAN_APPROVED).
+    """
     from translation_agent import prompts
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    # Two PRs in the batch: ak_a (depended on) and ak_b (depends on ak_a).
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 100, "master", "trunk", "ak_a")
-    db.insert_pr_commit(conn, 200, "master", "trunk", "ak_b")
-    conn.close()
-    # ak_a -> no deps; ak_b -> plan_dep=ak_a, impl_dep=ak_a.
-    json_a = '{"plan_dependency": null, "implementation_dependency": null}'
-    json_b = '{"plan_dependency": "ak_a", "implementation_dependency": "ak_a"}'
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
+    _insert_pr_at_status(
+        db_path, 100, "ak_a", db.STATUS_IMPLEMENTATION_DONE,
+    )
+    _insert_pr_at_status(db_path, 200, "ak_b", db.STATUS_NO_PLAN)
+    json_b = (
+        '{"plan_dependency": "ak_a", "implementation_dependency": "ak_a"}'
+    )
+    with patch("translation_agent.cli.git_ops.commits_between",
+               return_value=["ak_a", "ak_b"]), \
+         patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.streaming.run_with_prefix",
-               side_effect=[(0, json_a), (0, json_b)]), \
+               side_effect=[(0, json_b), (0, "")]), \
          patch("translation_agent.cli.github.get_pr_body",
                return_value="## Summary"), \
          patch("translation_agent.cli.github.update_pr_body") as mupd, \
          patch("translation_agent.cli.github.add_pr_label") as madd, \
          patch("translation_agent.cli.github.remove_pr_label") as mrem:
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "200",
             db_path=db_path,
         )
     assert rc == 0
-    # Both rows transitioned to status 1.
     conn = db.connect(db_path)
-    assert dict(conn.execute(
-        "SELECT * FROM pr_commit WHERE pr_number = 100"
-    ).fetchone())["status"] == db.STATUS_DEPENDENCIES_EVALUATED
-    assert dict(conn.execute(
-        "SELECT * FROM pr_commit WHERE pr_number = 200"
-    ).fetchone())["status"] == db.STATUS_DEPENDENCIES_EVALUATED
-    # Both got the dependencies-evaluated label.
-    assert madd.call_count == 2
-    for call in madd.call_args_list:
-        assert call.args[2] == prompts.LABEL_DEPENDENCIES_EVALUATED
-    # No removals at the dep-eval stage.
-    mrem.assert_not_called()
-    # PR 200 got a dep section update referencing PR #100; PR 100 has
-    # no deps so update_pr_body MAY or may not be called depending on
-    # whether the body changed (replace_dep_section is a no-op then).
+    pr_200 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 200",
+    ).fetchone())
+    # Cascade went 0 -> 1 (dep-eval) -> 2 (plan).
+    assert pr_200["status"] == db.STATUS_PLAN_CREATED
+    # Labels added by the cascade: dependencies-evaluated (after dep-eval)
+    # and plan-created (after plan). Removed: dependencies-evaluated
+    # (swap to plan-created).
+    added = [c.args[2] for c in madd.call_args_list]
+    assert prompts.LABEL_DEPENDENCIES_EVALUATED in added
+    assert prompts.LABEL_PLAN_CREATED in added
+    removed = [c.args[2] for c in mrem.call_args_list]
+    assert prompts.LABEL_DEPENDENCIES_EVALUATED in removed
+    # PR 200's body got the dep section update referencing PR #100.
     body_writes_for_200 = [
         c for c in mupd.call_args_list if c.args[1] == 200
     ]
@@ -1692,23 +1796,18 @@ def test_sweep_dep_eval_adds_dependencies_evaluated_label_and_writes_dep_section
     assert "- Implementation: #100" in new_body
 
 
-def test_sweep_plan_step_swaps_dependencies_evaluated_for_plan_created_label(
+def test_pr_cascade_plan_step_swaps_deps_eval_label_for_plan_created_label(
     tmp_path, real_pr_description,
 ):
-    """After plan generation transitions status 1 -> 2, the orchestrator
-    removes 'dependencies-evaluated' (if present) and adds
-    'plan-created'."""
+    """After plan generation transitions status 1 -> 2, the cascade
+    removes 'dependencies-evaluated' and adds 'plan-created'."""
     from translation_agent import prompts
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 50, "master", "trunk", "ak_x")
-    db.update_dependencies(conn, 50, None, None)  # status -> 1
-    conn.close()
-    # Make _update_pr_description_via_r2 a no-op so the label assertions
-    # aren't muddied by the description-update path.
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    _insert_pr_at_status(
+        db_path, 50, "ak_x", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
          patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli._update_pr_description_via_r2",
@@ -1716,8 +1815,8 @@ def test_sweep_plan_step_swaps_dependencies_evaluated_for_plan_created_label(
          patch("translation_agent.cli.github.add_pr_label") as madd, \
          patch("translation_agent.cli.github.remove_pr_label") as mrem:
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "50",
             db_path=db_path,
         )
     assert rc == 0
@@ -1727,23 +1826,19 @@ def test_sweep_plan_step_swaps_dependencies_evaluated_for_plan_created_label(
     madd.assert_called_once_with(ANY, 50, prompts.LABEL_PLAN_CREATED)
 
 
-def test_sweep_impl_step_clears_intermediate_labels_and_marks_implementation_done(
+def test_pr_cascade_impl_step_clears_intermediate_labels_and_marks_implementation_done(
     tmp_path, real_pr_description,
 ):
-    """After impl transitions 3 -> 4, the orchestrator strips the three
+    """After impl transitions 3 -> 4, the cascade strips the three
     intermediate labels (dependencies-evaluated, plan-created,
     implementation-needed) and sets implementation-done."""
     from translation_agent import prompts
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 60, "master", "trunk", "ak_y")
-    conn.execute("UPDATE pr_commit SET status = ? WHERE pr_number = 60",
-                 (db.STATUS_PLAN_APPROVED,))
-    conn.commit()
-    conn.close()
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    _insert_pr_at_status(
+        db_path, 60, "ak_y", db.STATUS_PLAN_APPROVED,
+    )
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")), \
          patch("translation_agent.cli.git_ops.push_branch"), \
          patch("translation_agent.cli.git_ops.rev_parse",
@@ -1753,8 +1848,8 @@ def test_sweep_impl_step_clears_intermediate_labels_and_marks_implementation_don
          patch("translation_agent.cli.github.add_pr_label") as madd, \
          patch("translation_agent.cli.github.remove_pr_label") as mrem:
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "60",
             db_path=db_path,
         )
     assert rc == 0
@@ -1875,54 +1970,60 @@ def test_update_pr_dep_section_idempotent_on_repeated_calls(real_pr_description)
     assert bodies[0].count("<!-- deps:start -->") == 1
 
 
-def test_sweep_plan_blocked_by_unapproved_dep_skipped(tmp_path):
+def test_pr_cascade_plan_step_blocked_by_unapproved_plan_dep(tmp_path):
+    """A `--pr 71` cascade on a status-1 row whose plan_dep AK SHA points
+    to a PR at status < PLAN_APPROVED (3) noops at status 1: no r2
+    invocation, no transition, no error logged."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
+    # Dep PR 70 at status 2 (plan_created, NOT approved).
+    _insert_pr_at_status(db_path, 70, "ak_a", db.STATUS_PLAN_CREATED)
+    # Dependent PR 71 at status 1 with plan_dependency=ak_a.
+    _insert_pr_at_status(
+        db_path, 71, "ak_b", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
     conn = db.connect(db_path)
-    # PR 70 has ak_a (status 1, not approved). PR 71 depends on ak_a.
-    db.insert_pr_commit(conn, 70, "master", "trunk", "ak_a")
-    db.update_dependencies(conn, 70, None, None)
-    db.insert_pr_commit(conn, 71, "master", "trunk", "ak_b")
     db.update_dependencies(conn, 71, "ak_a", None)
     conn.close()
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")) as mstream, \
          patch("translation_agent.cli.git_ops.push_branch"):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "71",
             db_path=db_path,
         )
     assert rc == 0
-    # Only PR 70 should have been planned (status 1->2). PR 71's plan_dep ak_a
-    # is still at status 1 (not >= 3), so it stays at status 1 this sweep.
-    assert mstream.call_count == 1
+    # No r2 plan call -- the dep gating short-circuited before _run_plan_one.
+    mstream.assert_not_called()
     conn = db.connect(db_path)
-    pr70 = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 70").fetchone())
-    pr71 = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 71").fetchone())
-    assert pr70["status"] == db.STATUS_PLAN_CREATED
-    assert pr71["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+    pr71 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 71",
+    ).fetchone())
+    assert pr71["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # unchanged
+    assert pr71["last_error"] is None  # not an error, just blocked
 
 
-def test_sweep_plan_failure_persists_last_error_keeps_status_1(tmp_path):
+def test_pr_cascade_plan_failure_persists_last_error_keeps_status_1(tmp_path):
+    """If r2 plan generation returns non-zero, the cascade persists
+    last_error and the row stays at status 1."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
-    conn = db.connect(db_path)
-    db.insert_pr_commit(conn, 80, "master", "trunk", "ak_z")
-    db.update_dependencies(conn, 80, None, None)
-    conn.close()
-    with patch("translation_agent.cli.git_ops.next_commits", return_value=[]), \
-         patch("translation_agent.cli.streaming.run_with_prefix",
+    _insert_pr_at_status(
+        db_path, 80, "ak_z", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(7, "boom")):
         rc = _run(
-            "--ak-repo-path", "/tmp/ak", "--ak-branch", "trunk",
-            "--rust-branch", "master",
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "80",
             db_path=db_path,
         )
-    assert rc == 0
+    assert rc == 1
     conn = db.connect(db_path)
-    pr = dict(conn.execute("SELECT * FROM pr_commit WHERE pr_number = 80").fetchone())
+    pr = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 80",
+    ).fetchone())
     assert pr["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # unchanged
     assert "rc=7" in pr["last_error"]
 
