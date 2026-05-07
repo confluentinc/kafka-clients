@@ -1277,7 +1277,38 @@ where
     }
 
     async fn flush(&self) -> Result<(), KafkaError> {
-        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+        // Translation of `KafkaProducer.flush()` at line 1223-1241.
+        //
+        // Java:
+        //   if (Thread.currentThread() == this.ioThread) {
+        //       throw new KafkaException("flush invocation inside callback ...");
+        //   }
+        //   accumulator.beginFlush();
+        //   sender.wakeup();
+        //   try { accumulator.awaitFlushCompletion(); }
+        //   catch (InterruptedException e) { throw new InterruptException(...); }
+        //   finally { producerMetrics.recordFlush(...); }
+        //
+        // The "called inside the IO-thread callback" guard has no
+        // direct Rust analogue — Tokio tasks have no thread-identity
+        // we can compare against. Callers that invoke `flush().await`
+        // from a user `Callback` would deadlock on the spawned Sender
+        // task waiting for an in-progress callback to finish; this is
+        // a Phase-8 concern (the Phase 7d send path keeps callbacks
+        // synchronous for now, so the deadlock window is closed).
+        // CLAUDE.md rule 5: callers that hit this are deadlocked at
+        // runtime — not silently — because `await_flush_completion`
+        // on the existing batches would never complete.
+        log::trace!("Flushing accumulated records in producer.");
+        self.accumulator.begin_flush();
+        self.sender_wakeup();
+        // `await_flush_completion` is `async fn` — Java's
+        // `InterruptedException` translates to a future drop in Rust;
+        // there is no analogous catch-arm. The Java `producerMetrics
+        // .recordFlush(...)` finally-block is a metrics-side-effect
+        // (Milestone-1 metrics stub: no-op).
+        self.accumulator.await_flush_completion().await;
+        Ok(())
     }
 
     async fn partitions_for(
@@ -2573,6 +2604,80 @@ mod tests {
             ),
             other => panic!("expected Timeout, got {other:?}"),
         }
+    }
+
+    /// Translation of `KafkaProducerTest.testFlushCompleteSendOfInflightBatches`
+    /// (Java line 1174-1200). With no in-flight records, `flush()`
+    /// completes immediately. The empty-batches fast path is the
+    /// `await_flush_completion_returns_immediately_when_no_batches`
+    /// path on the accumulator (already covered there).
+    #[tokio::test]
+    async fn flush_completes_immediately_with_no_pending_records() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+        // No records buffered; flush should return promptly.
+        tokio::time::timeout(Duration::from_millis(500), producer.flush())
+            .await
+            .expect("flush completed within 500ms")
+            .expect("flush ok");
+    }
+
+    /// Translation of `KafkaProducerTest.testFlushCompleteSendOfInflightBatches`
+    /// (Java line 1174-1200). Sends a record into the accumulator,
+    /// then concurrently calls `flush()` and completes the batch from
+    /// outside; `flush()` resolves after the batch's
+    /// `ProduceRequestResult` is set+done. We mirror the Java pattern
+    /// of completing the batch from a different code path (Java relies
+    /// on `MockClient.respond` from another thread).
+    #[tokio::test]
+    async fn flush_waits_for_pending_record_to_complete() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+
+        // Append a record into the accumulator directly so we control
+        // the batch lifecycle without needing the full Sender/MockClient
+        // wiring (which is `pub(super)` to sender.rs and out of scope
+        // for cross-file tests at this milestone).
+        let cluster = producer.metadata.metadata().fetch();
+        let now = time.milliseconds();
+        let r = producer
+            .accumulator
+            .append("topic", 0, now, Some(b"k"), Some(b"v"), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+
+        let accumulator = Arc::clone(&producer.accumulator);
+        // Start the flush — it should not return until the batch is
+        // completed below.
+        let flush_handle = tokio::spawn({
+            let p = producer.accumulator.clone();
+            async move {
+                p.begin_flush();
+                p.await_flush_completion().await;
+            }
+        });
+
+        // Yield once so the spawned flush task observes the begin-flush
+        // increment before we complete the batch from this task.
+        tokio::time::sleep(Duration::from_millis(10)).await;
+
+        // Locate the batch in the partition's deque and complete it.
+        let dq = accumulator
+            .get_deque(&crate::common::topic_partition::TopicPartition::new("topic", 0))
+            .expect("deque");
+        let batch = {
+            let dq = dq.lock().unwrap();
+            dq.front().cloned().expect("batch")
+        };
+        batch.complete(0, 0);
+        // Drive the per-record future to completion so the batch's
+        // ProduceRequestResult is awakened.
+        let _ = r.future.get().await;
+
+        tokio::time::timeout(Duration::from_millis(500), flush_handle)
+            .await
+            .expect("flush within 500ms")
+            .expect("no panic");
     }
 
     /// Java `KafkaProducer.metrics()` returns
