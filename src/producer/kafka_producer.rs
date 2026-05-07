@@ -1951,6 +1951,15 @@ mod tests {
     /// record overflows the cap, `do_send` returns
     /// [`KafkaError::RecordTooLarge`], and the interceptor's
     /// `onSendError` fires.
+    ///
+    /// Also pins the Java `catch (ApiException e)` arm at `KafkaProducer.java:1056-1068`:
+    /// `RecordTooLargeException` is a Java `ApiException`, so the
+    /// user-supplied `Callback.onCompletion(_, e)` MUST fire exactly
+    /// once (Java line 1058-1062), in addition to
+    /// `interceptors.onSendError`. The interceptor sees the error event
+    /// exactly once because the catch arm fires the user callback
+    /// directly, not via `appendCallbacks.onCompletion` (which would
+    /// re-enter `interceptors.onAcknowledgement`).
     #[tokio::test]
     async fn send_returns_record_too_large_and_fires_interceptor_on_send_error() {
         use std::sync::atomic::{AtomicUsize, Ordering};
@@ -1996,13 +2005,129 @@ mod tests {
             Some(b"value-bytes".to_vec()),
         )
         .expect("record");
-        let err = producer.send(record).await.expect_err("expected RecordTooLarge");
+
+        // Counting user callback: tracks fire count + the error variant
+        // observed. For `ApiException` Java fires this exactly once.
+        let user_callback_count = Arc::new(AtomicUsize::new(0));
+        let user_callback_saw_record_too_large = Arc::new(AtomicUsize::new(0));
+        let cb_count = Arc::clone(&user_callback_count);
+        let cb_kind = Arc::clone(&user_callback_saw_record_too_large);
+        let user_cb: Box<dyn Callback> =
+            Box::new(move |_metadata: Option<&RecordMetadata>, error: Option<&KafkaError>| {
+                cb_count.fetch_add(1, Ordering::Relaxed);
+                if matches!(error, Some(KafkaError::RecordTooLarge(_))) {
+                    cb_kind.fetch_add(1, Ordering::Relaxed);
+                }
+            });
+
+        let err = producer
+            .send_with_callback(record, Some(user_cb))
+            .await
+            .expect_err("expected RecordTooLarge");
         assert!(matches!(err, KafkaError::RecordTooLarge(_)), "got {err:?}");
+        assert!(
+            err.message().contains("max.request.size"),
+            "expected error message to reference max.request.size, got: {}",
+            err.message()
+        );
         assert_eq!(on_send_count.load(Ordering::Relaxed), 1, "onSend should fire exactly once");
         assert_eq!(
             on_ack_with_error_count.load(Ordering::Relaxed),
             1,
             "onSendError → on_acknowledgement(error) should fire exactly once"
+        );
+        // Java `catch (ApiException e)` arm: user callback fires once.
+        assert_eq!(
+            user_callback_count.load(Ordering::Relaxed),
+            1,
+            "user callback should fire exactly once for ApiException error (RecordTooLarge)"
+        );
+        assert_eq!(
+            user_callback_saw_record_too_large.load(Ordering::Relaxed),
+            1,
+            "user callback should observe the RecordTooLarge variant"
+        );
+    }
+
+    /// Pins the Java `catch (KafkaException e)` / `catch (Exception e)`
+    /// arms at `KafkaProducer.java:1069-1081`: when `do_send` raises a
+    /// non-`ApiException` (e.g. `IllegalStateException` from
+    /// `throwIfProducerClosed`), the user callback MUST NOT fire — Java
+    /// rethrows synchronously without invoking it (line 1072 / 1076 /
+    /// 1080). Only `interceptors.onSendError` fires, then the error is
+    /// surfaced via the returned `Result::Err`.
+    ///
+    /// This test would fail before the catch-fan-out fix because the
+    /// pre-fix Rust code fired the user callback for every error type.
+    #[tokio::test]
+    async fn send_does_not_fire_user_callback_for_non_api_exception() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingInterceptor {
+            on_ack_with_error_count: Arc<AtomicUsize>,
+        }
+        impl ProducerInterceptor<Vec<u8>, Vec<u8>> for CountingInterceptor {
+            fn on_send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> ProducerRecord<Vec<u8>, Vec<u8>> {
+                record
+            }
+            fn on_acknowledgement(
+                &self,
+                _metadata: Option<&RecordMetadata>,
+                exception: Option<&KafkaError>,
+                _headers: &crate::common::header::RecordHeaders,
+            ) {
+                if exception.is_some() {
+                    self.on_ack_with_error_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let on_ack_with_error_count = Arc::new(AtomicUsize::new(0));
+        let interceptor: Box<dyn ProducerInterceptor<Vec<u8>, Vec<u8>>> =
+            Box::new(CountingInterceptor { on_ack_with_error_count: Arc::clone(&on_ack_with_error_count) });
+        let interceptors = Arc::new(ProducerInterceptors::new(vec![interceptor]));
+
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), Some(Arc::clone(&interceptors)), None);
+
+        // Simulate close BEFORE the send call — `throwIfProducerClosed`
+        // raises `IllegalStateException` (NOT an `ApiException`).
+        producer.sender_running.store(false, Ordering::Release);
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::new("topic", Some(b"v".to_vec())).expect("record");
+
+        let user_callback_count = Arc::new(AtomicUsize::new(0));
+        let cb_count = Arc::clone(&user_callback_count);
+        let user_cb: Box<dyn Callback> =
+            Box::new(move |_metadata: Option<&RecordMetadata>, _error: Option<&KafkaError>| {
+                cb_count.fetch_add(1, Ordering::Relaxed);
+            });
+
+        let err = producer
+            .send_with_callback(record, Some(user_cb))
+            .await
+            .expect_err("send should reject after close");
+        // Sanity: the error is the non-API `IllegalState` variant.
+        match &err {
+            KafkaError::IllegalState(msg) => assert!(
+                msg.contains("Cannot perform operation after producer has been closed"),
+                "got: {msg}"
+            ),
+            other => panic!("expected IllegalState, got {other:?}"),
+        }
+        assert!(!err.is_api_exception(), "IllegalState must classify as non-ApiException");
+
+        // Java `catch (Exception e)` arm: interceptor fires, user
+        // callback does NOT.
+        assert_eq!(
+            user_callback_count.load(Ordering::Relaxed),
+            0,
+            "user callback MUST NOT fire for non-ApiException errors (Java catch (Exception) arm rethrows without invoking callback)"
+        );
+        assert_eq!(
+            on_ack_with_error_count.load(Ordering::Relaxed),
+            1,
+            "interceptor.onSendError → on_acknowledgement(error) should still fire exactly once"
         );
     }
 
