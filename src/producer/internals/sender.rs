@@ -400,6 +400,17 @@ impl<C: KafkaClient> Sender<C> {
     }
 
     /// Mirrors Java's `isRunning()`.
+    ///
+    /// Reads the same atomic exposed by [`Self::running_arc`]. Use this
+    /// inspector when the caller still owns `&Sender` (e.g. in-process
+    /// tests that construct the sender directly). After the sender has
+    /// been moved into a `tokio::spawn` task — which is what
+    /// `KafkaProducer` does — there is no `&Sender` left to call
+    /// `is_running()` on; callers in that case capture the
+    /// [`Self::running_arc`] handle before spawn and read the flag
+    /// through the `Arc<AtomicBool>` directly. Both paths read the same
+    /// underlying atomic with `Ordering::Acquire`, so observers always
+    /// see consistent state.
     pub(crate) fn is_running(&self) -> bool {
         self.running.load(Ordering::Acquire)
     }
@@ -408,6 +419,8 @@ impl<C: KafkaClient> Sender<C> {
     /// sender into a `tokio::spawn` task still flip the flag from
     /// outside the task to drive the loop's exit path. Used by
     /// `KafkaProducer::Drop` (Phase 7c) and the Phase 7e async `close`.
+    ///
+    /// See [`Self::is_running`] for the `&Sender`-borrow analogue.
     pub(crate) fn running_arc(&self) -> Arc<AtomicBool> {
         Arc::clone(&self.running)
     }
