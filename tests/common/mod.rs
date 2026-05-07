@@ -33,6 +33,10 @@ mod test_generated {
 #[allow(unused_imports)]
 pub use test_generated::*;
 
+// General-purpose async test utilities (no broker required).
+#[allow(dead_code)]
+pub mod test_utils;
+
 // Integration test infrastructure — only compiled when the feature is enabled.
 // Allow dead_code because these modules are utility libraries used by separate
 // integration test crates, so rustc can't see the cross-crate usage.
