@@ -277,15 +277,31 @@ impl<K, V, C: KafkaClient> KafkaProducer<K, V, C> {
 // Tests (and Phase 7d/7e wiring) use the [`KafkaProducer::new_for_test`]
 // pkg-private constructor that takes a pre-built [`KafkaClient`].
 
-/// Phase 7c marker error message returned by the public constructors
-/// until [`crate::NetworkClient`]'s `DefaultMetadataUpdater` is
-/// translated. Matches CLAUDE.md rule 5: a Java path that's not yet
-/// implemented surfaces an explicit `KafkaError`, not a silent stub or
-/// a hang.
+/// Phase 7c/7e marker error message returned by the public
+/// constructors until [`crate::NetworkClient`]'s
+/// `DefaultMetadataUpdater` is translated. Matches CLAUDE.md rule 5:
+/// a Java path that's not yet implemented surfaces an explicit
+/// `KafkaError`, not a silent stub or a hang.
+///
+/// **Phase 7e disposition**: `DefaultMetadataUpdater` is a >300-LOC
+/// inner class on Java's `NetworkClient` that drives the metadata
+/// negotiation request/response loop. Translating it requires
+/// `MetadataRequest`/`MetadataResponse` plumbing through the
+/// in-flight tracker, not just the data-types translation we already
+/// have. It is deferred to Phase 8 (integration testing milestone).
+///
+/// Until then:
+///
+/// * Unit tests use [`KafkaProducer::new_for_test`] which accepts a
+///   pre-built [`KafkaClient`] — typically a [`crate::NetworkClient`]
+///   with a [`crate::ManualMetadataUpdater`] (test-friendly) or a
+///   stub mock.
+/// * Integration tests against a real broker land in Phase 8 with the
+///   `DefaultMetadataUpdater` translation.
 const PRODUCTION_NETWORK_CLIENT_DEFERRED: &str = "KafkaProducer::new and ::with_serializers are deferred until \
-     NetworkClient's DefaultMetadataUpdater is translated (Phase 7d/8 \
-     prereq). Use KafkaProducer::new_for_test in unit tests, or wait \
-     for the Phase 8 wiring.";
+     NetworkClient's DefaultMetadataUpdater is translated (Phase 8). \
+     Use KafkaProducer::new_for_test (with a ManualMetadataUpdater or \
+     a test mock client) in unit tests until then.";
 
 impl<K, V> KafkaProducer<K, V, crate::NetworkClient<crate::common::network::Selector, crate::ManualMetadataUpdater>>
 where
@@ -297,16 +313,23 @@ where
     /// `KafkaProducer.java:283`.
     ///
     /// Note: after creating a `KafkaProducer` you must always
-    /// [`KafkaProducer::close`] it to avoid resource leaks.
+    /// [`crate::producer::Producer::close`] it to avoid resource leaks.
     ///
-    /// # Phase 7c deferral
+    /// # Milestone-1 deferral
     ///
     /// This constructor returns
-    /// [`KafkaError::UnsupportedOperation`] in this milestone — the
+    /// [`KafkaError::UnsupportedOperation`] in Milestone-1 — the
     /// production NetworkClient path requires `DefaultMetadataUpdater`,
-    /// which is not yet translated. See module-level docs and
-    /// [`KafkaProducer::new_for_test`] for the working construction
-    /// surface. Phase 7d/8 will lift this restriction.
+    /// a >300-LOC inner class on Java's `NetworkClient` that has not
+    /// yet been translated. The deferred-error message points callers
+    /// at the Phase 8 lift point and at [`KafkaProducer::new_for_test`]
+    /// for unit-test construction.
+    ///
+    /// Phase 7e otherwise wires every Producer trait method end-to-end
+    /// (see [`Self::new_for_test`] for the working surface). Once
+    /// Phase 8 lands the metadata updater, this stub is replaced with
+    /// the full `NetworkClient` construction — no further changes to
+    /// the public method signature.
     pub fn new(_props: HashMap<String, String>) -> Result<Self, KafkaError> {
         Err(KafkaError::UnsupportedOperation(PRODUCTION_NETWORK_CLIENT_DEFERRED.to_owned()))
     }
@@ -316,9 +339,10 @@ where
     /// Mirrors `KafkaProducer(Map<String, Object>, Serializer<K>,
     /// Serializer<V>)` at `KafkaProducer.java:300`.
     ///
-    /// # Phase 7c deferral
+    /// # Milestone-1 deferral
     ///
-    /// Same deferral as [`Self::new`].
+    /// Same deferral as [`Self::new`] — see that method's rustdoc for
+    /// the rationale and the Phase 8 lift point.
     pub fn with_serializers(
         _props: HashMap<String, String>,
         _key_serializer: Box<dyn Serializer<K>>,
@@ -1382,11 +1406,11 @@ impl<K: Send + Sync + 'static, V: Send + Sync + 'static> AppendCallbacks for App
 // or hanging futures — the explicit `Err` makes the unimplemented path
 // observable to callers.
 
-/// Phase 7d marker error message returned by every Producer trait
-/// method except `send` / `send_with_callback`. The included sub-phase
-/// number tells callers (and reviewers) which milestone removes the
-/// stub.
-const PHASE_7E_DEFERRED: &str = "flush/close/partitions_for/metrics: implemented in Phase 7e";
+/// Phase 7e marker error messages for trait methods that remain
+/// stubbed in Milestone-1. The sub-phase / milestone marker tells
+/// callers (and reviewers) which milestone removes the stub. After
+/// Phase 7e the only stubbed methods are the four transactional ones
+/// and `client_instance_id` (telemetry).
 const PHASE_9_TXN_DEFERRED: &str = "Transactional producer is not supported in Milestone-1.";
 const TELEMETRY_DEFERRED: &str = "Client telemetry is not implemented in Milestone-1.";
 
