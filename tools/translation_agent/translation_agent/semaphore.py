@@ -49,3 +49,58 @@ def push_project_artifact(name: str, file_path: str) -> None:
         [ARTIFACT_BINARY, "push", "project", file_path, "--force"],
         check=True,
     )
+
+
+def push_project_artifact_no_force(name: str, file_path: str) -> None:
+    """Push file_path to project artifact `name` WITHOUT --force.
+
+    Used as the lock-acquire primitive: when the artifact already exists,
+    the CLI returns non-zero and `subprocess.run(check=True)` raises
+    CalledProcessError. Callers (locked_db.acquire_lock) catch that and
+    treat it as "lock currently held by another runner."
+
+    Raises FileNotFoundError if the `artifact` binary is not on PATH.
+    """
+    if shutil.which(ARTIFACT_BINARY) is None:
+        raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
+    subprocess.run(
+        [ARTIFACT_BINARY, "push", "project", file_path],
+        check=True,
+        capture_output=True,
+    )
+
+
+def pull_project_artifact(name: str, dest_dir: str) -> None:
+    """Pull project artifact `name` into `dest_dir` with --force overwrite.
+
+    Raises FileNotFoundError if the `artifact` binary is not on PATH;
+    raises subprocess.CalledProcessError on non-zero exit (e.g. the
+    artifact does not exist -- callers decide whether that's fatal).
+    """
+    if shutil.which(ARTIFACT_BINARY) is None:
+        raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
+    log.info("Pulling Semaphore project artifact %r into %s", name, dest_dir)
+    subprocess.run(
+        [ARTIFACT_BINARY, "pull", "project", name,
+         "--destination", dest_dir, "--force"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def yank_project_artifact(name: str) -> None:
+    """Delete project artifact `name` from the artifact store.
+
+    Used as the lock-release primitive. Raises FileNotFoundError if the
+    `artifact` binary is not on PATH; raises subprocess.CalledProcessError
+    on non-zero exit (e.g. artifact already gone -- callers may choose
+    to log-and-continue rather than abort).
+    """
+    if shutil.which(ARTIFACT_BINARY) is None:
+        raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
+    log.info("Yanking Semaphore project artifact %r", name)
+    subprocess.run(
+        [ARTIFACT_BINARY, "yank", "project", name],
+        check=True,
+        capture_output=True,
+    )
