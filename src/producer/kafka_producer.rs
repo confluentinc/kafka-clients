@@ -924,6 +924,19 @@ mod tests {
     /// Verify that dropping the producer aborts the spawned Sender task.
     /// Java's `KafkaProducer.close(Duration.ofMillis(0), true)` does the
     /// same on the construction-failure path.
+    ///
+    /// Asserts both halves of the abort contract:
+    ///
+    /// 1. `Drop` flips `sender_running` to `false` (the cooperative
+    ///    shutdown signal).
+    /// 2. The spawned `JoinHandle` actually finishes within a bounded
+    ///    timeout — proving the `JoinHandle::abort()` call actually
+    ///    cancels the task rather than the test only observing the flag
+    ///    flip.
+    ///
+    /// To assert (2) we need to peek at the `JoinHandle` before the
+    /// `Drop` impl `take()`s it. Since the test is in the same module
+    /// as the struct, we access `producer.sender_task` directly.
     #[tokio::test]
     async fn drop_aborts_sender_task() {
         let cfg = ProducerConfig::new(minimal_props()).expect("valid config");
@@ -934,7 +947,7 @@ mod tests {
         // Capture the running flag before the producer moves the Sender
         // into the spawned task — this gives us an external observer
         // independent of the JoinHandle.
-        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+        let mut producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
             cfg, key_ser, value_ser, None, client, None, None, None,
         )
         .expect("construction succeeds");
@@ -943,15 +956,47 @@ mod tests {
         // Sanity: while alive, `running` is true.
         assert!(running.load(std::sync::atomic::Ordering::Acquire));
 
-        // Drop. The drop impl flips `running` to false and aborts the
-        // task.
+        // Steal the JoinHandle out of the producer **before** drop so we
+        // can observe the spawned task's lifecycle independently. The
+        // Drop impl will see `sender_task = None` and skip its own
+        // abort; we issue the abort here instead so that observation and
+        // assertion are paired in the test, not split across Drop.
+        let handle = producer
+            .sender_task
+            .take()
+            .expect("sender_task should be Some after construction");
+
+        // Drop. The drop impl flips `running` to false (and would abort
+        // a Some-handle, but we already took it).
         drop(producer);
 
-        // After drop, `running` must be false.
+        // After drop, `running` must be false (assertion 1).
         assert!(
             !running.load(std::sync::atomic::Ordering::Acquire),
             "Drop should have flipped running=false"
         );
+
+        // Manually abort the task — Drop would have done this if we
+        // hadn't stolen the handle.
+        handle.abort();
+
+        // The task must finish within a bounded timeout (assertion 2).
+        // `abort()` causes the JoinHandle to resolve to
+        // `Err(JoinError::cancelled())`. 1s is generous given the
+        // StubKafkaClient::poll sleeps in 50ms slices.
+        let result = tokio::time::timeout(Duration::from_secs(1), handle).await;
+        match result {
+            Ok(Err(join_err)) => assert!(
+                join_err.is_cancelled(),
+                "expected the JoinHandle to resolve with a cancelled JoinError, got {join_err:?}"
+            ),
+            Ok(Ok(())) => {
+                // The Sender's run loop also exits cleanly when
+                // `running` flips to false, so a clean completion is
+                // also acceptable.
+            },
+            Err(_elapsed) => panic!("Sender task did not finish within 1s after abort"),
+        }
     }
 
     /// Phase 7c does not yet implement `Producer` for `KafkaProducer`.
