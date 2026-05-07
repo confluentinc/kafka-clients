@@ -1282,17 +1282,35 @@ where
 
     async fn partitions_for(
         &self,
-        _topic: &str,
+        topic: &str,
     ) -> Result<Vec<crate::common::partition_info::PartitionInfo>, KafkaError> {
-        Err(KafkaError::UnsupportedOperation(PHASE_7E_DEFERRED.to_owned()))
+        // Java line 1255-1262:
+        //   Objects.requireNonNull(topic, "topic cannot be null");
+        //   try {
+        //       return waitOnMetadata(topic, null, time.milliseconds(),
+        //                             maxBlockTimeMs).cluster.partitionsForTopic(topic);
+        //   } catch (InterruptedException e) {
+        //       throw new InterruptException(e);
+        //   }
+        //
+        // The Rust translation drops the explicit null check (the
+        // `&str` parameter cannot be null in Rust) and the
+        // `InterruptedException` catch (Tokio cancellation surfaces
+        // through the future being dropped, not as an exception).
+        let now_ms = self.time.milliseconds();
+        let cluster_and_wait = self.wait_on_metadata(topic, None, now_ms, self.max_block_time_ms).await?;
+        Ok(cluster_and_wait.cluster.partitions_for_topic(topic).to_vec())
     }
 
     fn metrics(&self) -> crate::producer::ProducerMetrics {
-        // Java returns an unmodifiable view of the metrics map. Phase 7e
-        // wires the stub to an empty map (matching Phase 7b's
-        // `ProducerMetrics` placeholder type alias). The map allocation
-        // is one-shot per call; callers only inspect `is_empty()` /
-        // `len()` until full metrics land.
+        // Java returns an unmodifiable view of the metrics map
+        // (`Collections.unmodifiableMap(this.metrics.metrics())` at
+        // `KafkaProducer.java:1268-1270`). Milestone-1 returns an
+        // empty map per the metrics-stub pattern documented on
+        // [`crate::producer::ProducerMetrics`]: the proper translation
+        // of `MetricName` / `KafkaMetric` is deferred. Callers that
+        // only inspect `is_empty()` / `len()` will keep compiling once
+        // the proper type lands.
         crate::producer::ProducerMetrics::new()
     }
 
@@ -2481,6 +2499,91 @@ mod tests {
             "expected error to include the config key + the unrecognised value, got: {}",
             err.message(),
         );
+    }
+
+    // ============================================================
+    // Phase 7e — `partitions_for` / `metrics`
+    // ============================================================
+
+    /// Translation of `KafkaProducerTest.testPartitionsForReturnsTopicPartitions`
+    /// (covered indirectly by Java's `testCloseWhenWaitingForMetadataUpdate`
+    /// + the implicit `partitionsForTopic` round-trip): when metadata
+    /// for the topic is already cached, `partitions_for` returns the
+    /// list of `PartitionInfo` for that topic in partition-index order.
+    #[tokio::test]
+    async fn partitions_for_returns_partitions_when_metadata_cached() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 3, time.clone(), None, None);
+        let partitions = producer.partitions_for("topic").await.expect("partitions_for");
+        assert_eq!(partitions.len(), 3, "expected three partitions");
+        let mut partition_ids: Vec<i32> = partitions.iter().map(|p| p.partition()).collect();
+        partition_ids.sort();
+        assert_eq!(partition_ids, vec![0, 1, 2]);
+    }
+
+    /// Translation of `KafkaProducerTest.testCloseWhenWaitingForMetadataUpdate`
+    /// behaviour partial: `partitions_for` on an unknown topic blocks
+    /// until `max.block.ms` and then surfaces
+    /// [`KafkaError::Timeout`]. Java surfaces a `TimeoutException`
+    /// (subclass of `KafkaException`) here.
+    #[tokio::test]
+    async fn partitions_for_unknown_topic_returns_timeout() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        // Construct a producer with a pre-populated metadata snapshot
+        // for "topic" — the test queries an *absent* topic so the wait
+        // loop exits via the deadline.
+        let mut props = minimal_props();
+        // Use a tiny max.block.ms so the test finishes quickly.
+        props.insert(producer_config::MAX_BLOCK_MS_CONFIG.to_owned(), "50".to_owned());
+        let cfg = ProducerConfig::new(props).expect("config");
+        let pm = ProducerMetadata::new(
+            50,
+            100,
+            300_000,
+            300_000,
+            LogContext::new(),
+            Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new()),
+            time.clone(),
+        )
+        .expect("producer metadata");
+        let now = time.milliseconds();
+        pm.add("topic", now);
+        pm.update_with_current_request_version(&build_single_topic_response("topic", 1), false, now)
+            .expect("metadata update");
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            Box::new(ByteArrayOwnedSerializer),
+            Box::new(ByteArrayOwnedSerializer),
+            Some(pm),
+            StubKafkaClient::new(),
+            None,
+            None,
+            Some(time.clone()),
+        )
+        .expect("producer construction");
+
+        let err = producer
+            .partitions_for("absent-topic")
+            .await
+            .expect_err("absent-topic must time out");
+        match err {
+            KafkaError::Timeout(msg) => assert!(
+                msg.contains("absent-topic") && msg.contains("not present in metadata"),
+                "got: {msg}"
+            ),
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+    }
+
+    /// Java `KafkaProducer.metrics()` returns
+    /// `Collections.unmodifiableMap(this.metrics.metrics())`.
+    /// Milestone-1 returns an empty map (metric-stub pattern).
+    #[tokio::test]
+    async fn metrics_returns_empty_map_in_milestone_1() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+        let m = producer.metrics();
+        assert!(m.is_empty(), "Milestone-1 metrics map is empty");
     }
 
     /// No `partitioner.class` set → no partitioner wired (built-in
