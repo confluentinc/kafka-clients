@@ -388,19 +388,34 @@ mod tests {
     /// elided in Rust because the `impl Into<Arc<str>>` parameter has
     /// no `null` representation — the constraint is enforced at the
     /// type level, so the runtime guard is unnecessary. The other two
-    /// cases are translated directly.
+    /// cases are translated directly. Per DoD #3, the human-readable
+    /// error message is asserted alongside the variant — Java's
+    /// `IllegalArgumentException` message text is part of the public
+    /// behavioural contract so we keep it byte-for-byte.
     #[test]
     fn invalid_records() {
-        // Java: negative timestamp
+        // Java: negative timestamp — message string mirrors
+        // `ProducerRecord.java` line 87:
+        //   "Invalid timestamp: %d. Timestamp should always be non-negative or null."
         let err =
             ProducerRecord::<String, i32>::with_timestamp("test", Some(0), Some(-1), Some("key".to_string()), Some(1))
                 .expect_err("Expected error to be raised because of negative timestamp");
         assert_eq!(err, ProducerRecordError::NegativeTimestamp(-1));
+        assert_eq!(
+            err.to_string(),
+            "Invalid timestamp: -1. Timestamp should always be non-negative or null."
+        );
 
-        // Java: negative partition
+        // Java: negative partition — message mirrors `ProducerRecord.java`
+        // line 90:
+        //   "Invalid partition: %d. Partition number should always be non-negative or null."
         let err = ProducerRecord::<String, i32>::with_partition("test", Some(-1), Some("key".to_string()), Some(1))
             .expect_err("Expected error to be raised because of negative partition");
         assert_eq!(err, ProducerRecordError::NegativePartition(-1));
+        assert_eq!(
+            err.to_string(),
+            "Invalid partition: -1. Partition number should always be non-negative or null."
+        );
     }
 
     /// Java accepts `""` as a valid topic at construction (the broker
