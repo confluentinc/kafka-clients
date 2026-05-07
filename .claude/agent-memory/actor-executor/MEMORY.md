@@ -47,4 +47,8 @@
 - [Phase 6d RecordAccumulator](phase6d_record_accumulator.md) — lock-then-await pattern, AppendCallbacks upcasting, KAFKA-19012 surrogate buffer, Outcome enum for drain
 - [Phase 6d Round 1 patterns](phase6d_round1_patterns.md) — interleaved-drain stress shape, leader-epoch test pattern, cancellation-guard test scaffolding, get_key_value Arc<str> reuse, checked_add overflow idiom, skip-rationale tightening rule
 - [Phase 6e Sender + MockClient subset](phase6e_sender.md) — Sender struct generic over KafkaClient, pending_responses by correlation_id (NOT via callback), ProduceRequestBuilder local to sender.rs, AbstractResponse::as_any, MockClientImpl subset
+- [Phase 6e Round 1 patterns](phase6e_round1_patterns.md) — Java instanceof→Rust enum-list audit, async catch_unwind via futures_util, MockClient panic injection, KIP-951 PartitionResponseRow, MockClient 3-tick disconnect→resend
+- [Phase 6e Round 2 patterns](phase6e_round2_patterns.md) — test-passes-for-wrong-reason fidelity check, current_thread starvation from sync mocks, sync-callback→async bridge via spawn+JoinHandle gather
 - [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
+- [Phase 7a config validators](phase7a_config_validators.md) — CaseInsensitive/NonEmpty/ValidList added; SSL/SASL helpers as ConfigDef methods delegating to free fns
+- [Phase 7a ProducerConfig](phase7a_producer_config.md) — post_processed overlay, i64-Range cast, post-process ordering for error-message parity, Milestone-1 deviations
