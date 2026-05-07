@@ -809,17 +809,46 @@ where
     /// [`Producer::send`] / [`Producer::send_with_callback`] then
     /// awaits.
     ///
-    /// On any pre-append exception (closed producer, metadata timeout,
-    /// invalid topic, serialization failure, record-too-large), this
-    /// method:
+    /// # Catch fan-out
     ///
-    /// 1. fires `interceptors.on_send_error(record, tp, err)`
-    ///    (Java line 1064);
-    /// 2. fires the user callback with `(synthesised_metadata, err)`
-    ///    if one was provided (Java line 1058-1062);
-    /// 3. returns the error.
+    /// Java's `doSend` has four distinct catch arms (`KafkaProducer.java:1056-1081`)
+    /// with different fire-up rules:
     ///
-    /// A success returns the `Arc<FutureRecordMetadata>` produced by
+    /// | Java arm            | User callback | `interceptors.onSendError` | Behaviour |
+    /// |---------------------|:-------------:|:--------------------------:|-----------|
+    /// | `ApiException`      | yes           | yes                        | returns `FutureFailure(e)` |
+    /// | `InterruptedException` | no         | yes                        | rethrows wrapped as `InterruptException` |
+    /// | `KafkaException`    | no            | yes                        | rethrows |
+    /// | `Exception` (catch-all) | no        | yes                        | rethrows |
+    ///
+    /// Only the `ApiException` arm fires the user `Callback` — the other
+    /// three arms fire `onSendError` (interceptor) and let the throw
+    /// propagate synchronously to the caller. A user holding both a
+    /// `Callback` AND awaiting `Future.get()` would otherwise observe the
+    /// error event *twice* on non-API errors.
+    ///
+    /// The Rust translation has no rethrow-vs-return distinction (every
+    /// `Err` flows through the same `Result`), so the parity rule is
+    /// "fire the user callback only when `err.is_api_exception()`":
+    ///
+    /// * `RecordTooLarge`, `Timeout`, `InvalidTopic`, `Disconnect`, etc.
+    ///   (`is_api_exception() = true`) — fire user callback + interceptor,
+    ///   matching Java's `catch (ApiException e)` arm.
+    /// * `Serialization`, `Config`, `Interrupt`, `Generic` (= bare
+    ///   `KafkaException`), `IllegalArgument`, `IllegalState`,
+    ///   `UnsupportedOperation` (`is_api_exception() = false`) — fire
+    ///   interceptor only, matching the `catch (KafkaException|InterruptedException|Exception)`
+    ///   arms.
+    ///
+    /// Crucially, Java fires the *user callback directly* (not via
+    /// `appendCallbacks.onCompletion`), so it does NOT re-enter
+    /// `interceptors.onAcknowledgement` — otherwise each interceptor
+    /// would observe two error events per failed send. The Rust
+    /// translation mirrors exactly: extract the user callback from
+    /// `append_cb`, fire it directly, then fire
+    /// `interceptors.on_send_error` separately.
+    ///
+    /// On success, returns the `Arc<FutureRecordMetadata>` produced by
     /// the accumulator — the caller awaits it for the broker ack.
     pub(crate) async fn do_send(
         &self,
@@ -838,27 +867,23 @@ where
         match self.do_send_inner(&record, Arc::clone(&append_cb)).await {
             Ok(future) => Ok(future),
             Err(err) => {
-                // Java line 1056-1081 — every `catch` arm runs:
-                //
-                //   if (callback != null) {
-                //       TopicPartition tp = appendCallbacks.topicPartition();
-                //       RecordMetadata nullMetadata = new RecordMetadata(...);
-                //       callback.onCompletion(nullMetadata, e);   // user-only
-                //   }
-                //   this.errors.record();
-                //   this.interceptors.onSendError(record, tp, e);
-                //
-                // Crucially Java fires the *user callback directly*
-                // (not via `appendCallbacks.onCompletion`), so it does
-                // NOT re-enter `interceptors.onAcknowledgement` —
-                // otherwise each interceptor would observe two error
-                // events per failed send. The Rust translation mirrors
-                // exactly: fire the user callback only (extracted from
-                // `append_cb`), then fire `interceptors.on_send_error`.
+                // Per the catch-fan-out doc above: fire the user
+                // callback ONLY when the error is a Java `ApiException`
+                // subclass. Other Java arms (`KafkaException`,
+                // `InterruptedException`, `Exception`) fire only the
+                // interceptor and rethrow.
                 let tp = append_cb.topic_partition();
-                let null_metadata =
-                    RecordMetadata::new(tp.clone(), -1, -1, crate::common::record::record_batch::NO_TIMESTAMP, -1, -1);
-                if let Some(user_cb) = append_cb.user_callback.as_ref() {
+                if err.is_api_exception()
+                    && let Some(user_cb) = append_cb.user_callback.as_ref()
+                {
+                    let null_metadata = RecordMetadata::new(
+                        tp.clone(),
+                        -1,
+                        -1,
+                        crate::common::record::record_batch::NO_TIMESTAMP,
+                        -1,
+                        -1,
+                    );
                     user_cb.on_completion(Some(&null_metadata), Some(&err));
                 }
                 self.interceptors.on_send_error(Some(&record), Some(tp), &err);
@@ -926,12 +951,23 @@ where
         let partition =
             self.partition(record, serialized_key.as_deref(), serialized_value.as_deref(), cluster.as_ref())?;
 
-        // Java line 1026-1027: setReadOnly + headers.toArray. The Rust
-        // translation makes the headers read-only at the source — the
-        // batch's headers are a `Vec<RecordHeader>` clone of the
-        // record's headers, so the original headers can stay mutable on
-        // the user's `ProducerRecord` if they kept it.
-        // We pass the headers slice directly into `accumulator.append`.
+        // Java line 1026: `setReadOnly(record.headers());` flips the
+        // user's `RecordHeaders` to read-only after the partition was
+        // computed, so a misbehaving interceptor (or the user) cannot
+        // mutate them between `partition()` and `accumulator.append()`
+        // and create a partition/headers inconsistency.
+        //
+        // Rust's ownership model provides the same guarantee for free:
+        // `do_send`'s receiver is `record: ProducerRecord<K, V>` (by
+        // value — moved out of `Producer::send_with_callback`'s
+        // intercepted record), so the user no longer holds any
+        // reference to the original `Headers`. Past this point the only
+        // reader of `record.headers()` is `do_send_inner` itself, and
+        // the headers `Vec` we pass to `accumulator.append` below is a
+        // shallow `cloned()` collection — interceptors run before the
+        // record reaches `do_send` (in `Producer::send_with_callback`),
+        // so the read-only flag has no Rust counterpart to defend
+        // against. No `set_read_only` call is needed.
         let headers = record.headers();
         // Java's `record.headers().toArray()` builds a defensive `Header[]`
         // copy. The Rust accumulator takes `&[RecordHeader]`. Borrow

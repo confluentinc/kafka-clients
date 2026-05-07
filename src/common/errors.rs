@@ -256,6 +256,71 @@ impl KafkaError {
         matches!(self, KafkaError::TransactionAborted(_))
     }
 
+    /// True iff this error type is a subclass of Java's
+    /// `org.apache.kafka.common.errors.ApiException` (the public protocol
+    /// exception base class). The Java `KafkaProducer.doSend` catch chain
+    /// only fires the user `Callback` for `ApiException` errors — other
+    /// (`KafkaException`, `InterruptedException`, generic `Exception`) arms
+    /// fire `interceptors.onSendError` and rethrow synchronously without
+    /// invoking the user callback. The Rust translation uses this
+    /// classifier in [`crate::producer::KafkaProducer::do_send`]'s catch
+    /// path to match Java's per-arm fan-out.
+    ///
+    /// Variants returning `false` are those whose Java class is a direct
+    /// `KafkaException` subclass (`SerializationException`, `ConfigException`,
+    /// `InterruptException`, the bare `KafkaException` itself), or a stdlib
+    /// `RuntimeException` (`IllegalArgumentException`, `IllegalStateException`,
+    /// `UnsupportedOperationException`).
+    pub fn is_api_exception(&self) -> bool {
+        match self {
+            // ----- ApiException subclasses (public protocol). -----
+            KafkaError::Api(_)
+            | KafkaError::UnknownServer(_)
+            | KafkaError::Timeout(_)
+            | KafkaError::Disconnect(_)
+            | KafkaError::CorruptRecord(_)
+            | KafkaError::Network(_)
+            | KafkaError::LeaderNotAvailable(_)
+            | KafkaError::NotLeaderOrFollower(_)
+            | KafkaError::UnknownTopicOrPartition(_)
+            | KafkaError::UnknownTopicId(_)
+            | KafkaError::KafkaStorage(_)
+            | KafkaError::NotEnoughReplicas(_)
+            | KafkaError::NotEnoughReplicasAfterAppend(_)
+            | KafkaError::StaleMetadata(_)
+            | KafkaError::InvalidRequiredAcks(_)
+            | KafkaError::RecordTooLarge(_)
+            | KafkaError::RecordTooLargeClient(_)
+            | KafkaError::InvalidTopic(_)
+            | KafkaError::InvalidRecord(_)
+            | KafkaError::OutOfOrderSequence(_)
+            | KafkaError::UnknownProducerId(_)
+            | KafkaError::UnsupportedVersion(_)
+            | KafkaError::InvalidRequest(_)
+            | KafkaError::Authentication(_)
+            | KafkaError::Authorization(_)
+            | KafkaError::TopicAuthorization(_)
+            | KafkaError::ClusterAuthorization(_)
+            | KafkaError::ProducerFenced(_)
+            | KafkaError::InvalidProducerEpoch(_)
+            | KafkaError::TransactionAborted(_)
+            | KafkaError::BufferExhausted(_) => true,
+
+            // ----- Direct KafkaException subclasses (NOT ApiException). -----
+            // Java: `SerializationException extends KafkaException`,
+            // `ConfigException extends KafkaException`,
+            // `InterruptException extends KafkaException`. The bare
+            // `Generic` carries `KafkaException` itself.
+            KafkaError::Generic(_)
+            | KafkaError::Serialization(_)
+            | KafkaError::Config(_)
+            | KafkaError::Interrupt(_) => false,
+
+            // ----- stdlib RuntimeException — Java's catch (Exception) arm. -----
+            KafkaError::IllegalArgument(_) | KafkaError::IllegalState(_) | KafkaError::UnsupportedOperation(_) => false,
+        }
+    }
+
     /// On-wire / client error code. Server-side codes match Kafka's
     /// `Errors.code()`; client-side codes follow librdkafka conventions.
     pub fn code(&self) -> i16 {
@@ -474,6 +539,54 @@ mod tests {
         assert!(!KafkaError::Authentication("t".into()).is_retriable());
         assert!(!KafkaError::Config("t".into()).is_retriable());
         assert!(!KafkaError::InvalidRequiredAcks("t".into()).is_retriable());
+    }
+
+    #[test]
+    fn api_exception_classifier_matches_java_hierarchy() {
+        // Variants that are subclasses of Java's `ApiException`.
+        assert!(KafkaError::Api("".into()).is_api_exception());
+        assert!(KafkaError::UnknownServer("".into()).is_api_exception());
+        assert!(KafkaError::Timeout("".into()).is_api_exception());
+        assert!(KafkaError::Disconnect("".into()).is_api_exception());
+        assert!(KafkaError::CorruptRecord("".into()).is_api_exception());
+        assert!(KafkaError::Network("".into()).is_api_exception());
+        assert!(KafkaError::LeaderNotAvailable("".into()).is_api_exception());
+        assert!(KafkaError::NotLeaderOrFollower("".into()).is_api_exception());
+        assert!(KafkaError::UnknownTopicOrPartition("".into()).is_api_exception());
+        assert!(KafkaError::UnknownTopicId("".into()).is_api_exception());
+        assert!(KafkaError::KafkaStorage("".into()).is_api_exception());
+        assert!(KafkaError::NotEnoughReplicas("".into()).is_api_exception());
+        assert!(KafkaError::NotEnoughReplicasAfterAppend("".into()).is_api_exception());
+        assert!(KafkaError::StaleMetadata("".into()).is_api_exception());
+        assert!(KafkaError::InvalidRequiredAcks("".into()).is_api_exception());
+        assert!(KafkaError::RecordTooLarge("".into()).is_api_exception());
+        assert!(KafkaError::RecordTooLargeClient("".into()).is_api_exception());
+        assert!(KafkaError::InvalidTopic("".into()).is_api_exception());
+        assert!(KafkaError::InvalidRecord("".into()).is_api_exception());
+        assert!(KafkaError::OutOfOrderSequence("".into()).is_api_exception());
+        assert!(KafkaError::UnknownProducerId("".into()).is_api_exception());
+        assert!(KafkaError::UnsupportedVersion("".into()).is_api_exception());
+        assert!(KafkaError::InvalidRequest("".into()).is_api_exception());
+        assert!(KafkaError::Authentication("".into()).is_api_exception());
+        assert!(KafkaError::Authorization("".into()).is_api_exception());
+        assert!(KafkaError::TopicAuthorization("".into()).is_api_exception());
+        assert!(KafkaError::ClusterAuthorization("".into()).is_api_exception());
+        assert!(KafkaError::ProducerFenced("".into()).is_api_exception());
+        assert!(KafkaError::InvalidProducerEpoch("".into()).is_api_exception());
+        assert!(KafkaError::TransactionAborted("".into()).is_api_exception());
+        // BufferExhaustedException extends TimeoutException → ApiException.
+        assert!(KafkaError::BufferExhausted("".into()).is_api_exception());
+
+        // Direct `KafkaException` subclasses (NOT ApiException).
+        assert!(!KafkaError::Generic("".into()).is_api_exception());
+        assert!(!KafkaError::Serialization("".into()).is_api_exception());
+        assert!(!KafkaError::Config("".into()).is_api_exception());
+        assert!(!KafkaError::Interrupt("".into()).is_api_exception());
+
+        // stdlib RuntimeException — Java's catch (Exception) arm.
+        assert!(!KafkaError::IllegalArgument("".into()).is_api_exception());
+        assert!(!KafkaError::IllegalState("".into()).is_api_exception());
+        assert!(!KafkaError::UnsupportedOperation("".into()).is_api_exception());
     }
 
     #[test]
