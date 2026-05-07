@@ -552,6 +552,7 @@ where
 
 /// Output of [`KafkaProducer::wait_on_metadata`]. Mirrors Java's
 /// private `KafkaProducer.ClusterAndWaitTime` (line 1518).
+#[derive(Debug)]
 pub(crate) struct ClusterAndWaitTime {
     /// The cluster snapshot at the time the wait completed — the same
     /// snapshot used by the caller for partitioning and append.
@@ -837,21 +838,30 @@ where
         match self.do_send_inner(&record, Arc::clone(&append_cb)).await {
             Ok(future) => Ok(future),
             Err(err) => {
-                // Java line 1056-1081 — every `catch` arm fires
-                // `interceptors.onSendError(record, tp, e)` and then
-                // either rethrows or wraps in a failed Future.
+                // Java line 1056-1081 — every `catch` arm runs:
+                //
+                //   if (callback != null) {
+                //       TopicPartition tp = appendCallbacks.topicPartition();
+                //       RecordMetadata nullMetadata = new RecordMetadata(...);
+                //       callback.onCompletion(nullMetadata, e);   // user-only
+                //   }
+                //   this.errors.record();
+                //   this.interceptors.onSendError(record, tp, e);
+                //
+                // Crucially Java fires the *user callback directly*
+                // (not via `appendCallbacks.onCompletion`), so it does
+                // NOT re-enter `interceptors.onAcknowledgement` —
+                // otherwise each interceptor would observe two error
+                // events per failed send. The Rust translation mirrors
+                // exactly: fire the user callback only (extracted from
+                // `append_cb`), then fire `interceptors.on_send_error`.
                 let tp = append_cb.topic_partition();
-                self.interceptors.on_send_error(Some(&record), Some(tp.clone()), &err);
-                // Java line 1058-1062: the user-supplied callback is
-                // also fired with the synthesized null-metadata. The
-                // user callback was moved into `append_cb`; route via
-                // its `Callback::on_completion` so the same lifecycle
-                // hook fires as Java's
-                // `appendCallbacks.onCompletion(...)` would on a
-                // success path.
                 let null_metadata =
-                    RecordMetadata::new(tp, -1, -1, crate::common::record::record_batch::NO_TIMESTAMP, -1, -1);
-                append_cb.on_completion(Some(&null_metadata), Some(&err));
+                    RecordMetadata::new(tp.clone(), -1, -1, crate::common::record::record_batch::NO_TIMESTAMP, -1, -1);
+                if let Some(user_cb) = append_cb.user_callback.as_ref() {
+                    user_cb.on_completion(Some(&null_metadata), Some(&err));
+                }
+                self.interceptors.on_send_error(Some(&record), Some(tp), &err);
                 Err(err)
             },
         }
@@ -1721,5 +1731,426 @@ mod tests {
     ) {
         fn check<K, V, P: crate::producer::Producer<K, V>>(_p: P) {}
         check::<K, V, _>(p);
+    }
+
+    // ============================================================
+    // Phase 7d send-path tests (Java: KafkaProducerTest.java)
+    // ============================================================
+    //
+    // Covers the `send` body up to the point of accumulator append.
+    // Tests that depend on the full broker round-trip (`Sender` driving
+    // the produce request to completion) are deferred to Phase 7f
+    // because `MockClientImpl` is `pub(super)` in `sender.rs` and
+    // lifting visibility is out of scope here.
+
+    use crate::common::cluster::Cluster;
+    use crate::common::message::metadata_response_data::{
+        MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+    };
+    use crate::common::record::record_batch::NO_PARTITION_LEADER_EPOCH;
+    use crate::common::requests::metadata_response::MetadataResponse;
+    use crate::common::utils::MockTime;
+    use crate::common::uuid::Uuid;
+    use crate::producer::Producer;
+    use crate::producer::ProducerInterceptor;
+
+    /// Build a single-broker, single-topic-with-N-partitions metadata
+    /// response. Used by tests that need to pre-populate
+    /// [`ProducerMetadata`] before calling `send`.
+    fn build_single_topic_response(topic: &str, num_partitions: i32) -> MetadataResponse {
+        let nodes = [Node::new(0, "localhost".to_owned(), 1969)];
+        let topic = MetadataResponseTopic {
+            error_code: 0,
+            name: Some(topic.to_owned()),
+            topic_id: Uuid::new(0, 0),
+            is_internal: false,
+            partitions: (0..num_partitions)
+                .map(|p| MetadataResponsePartition {
+                    error_code: 0,
+                    partition_index: p,
+                    leader_id: 0,
+                    leader_epoch: NO_PARTITION_LEADER_EPOCH,
+                    replica_nodes: vec![0],
+                    isr_nodes: vec![0],
+                    offline_replicas: Vec::new(),
+                    unknown_tagged_fields: Vec::new(),
+                })
+                .collect(),
+            topic_authorized_operations: -1,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let data = MetadataResponseData {
+            throttle_time_ms: 0,
+            brokers: nodes
+                .iter()
+                .map(|n| MetadataResponseBroker {
+                    node_id: n.id(),
+                    host: n.host().to_owned(),
+                    port: n.port(),
+                    rack: None,
+                    unknown_tagged_fields: Vec::new(),
+                })
+                .collect(),
+            cluster_id: Some(String::new()),
+            controller_id: 0,
+            topics: vec![topic],
+            cluster_authorized_operations: 0,
+            error_code: 0,
+            unknown_tagged_fields: Vec::new(),
+        };
+        MetadataResponse::new(data, true)
+    }
+
+    /// Build a producer with pre-populated metadata for `topic`/N
+    /// partitions. The Sender is spawned but the `StubKafkaClient`
+    /// never sends real traffic, so any `accumulator.append` succeeds
+    /// and the resulting future is left pending unless we drive it.
+    fn build_test_producer(
+        topic: &str,
+        num_partitions: i32,
+        time: Arc<dyn Time>,
+        interceptors: Option<Arc<ProducerInterceptors<Vec<u8>, Vec<u8>>>>,
+        max_request_size: Option<i32>,
+    ) -> KafkaProducer<Vec<u8>, Vec<u8>, StubKafkaClient> {
+        let mut props = minimal_props();
+        if let Some(cap) = max_request_size {
+            props.insert(producer_config::MAX_REQUEST_SIZE_CONFIG.to_owned(), cap.to_string());
+        }
+        let cfg = ProducerConfig::new(props).expect("config");
+
+        // Build ProducerMetadata + populate it with the test topic.
+        let pm = ProducerMetadata::new(
+            50,
+            100,
+            300_000,
+            300_000,
+            LogContext::new(),
+            Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new()),
+            time.clone(),
+        )
+        .expect("producer metadata");
+        let now = time.milliseconds();
+        pm.add(topic, now);
+        pm.update_with_current_request_version(&build_single_topic_response(topic, num_partitions), false, now)
+            .expect("metadata update");
+
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let client = StubKafkaClient::new();
+        KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            key_ser,
+            value_ser,
+            Some(pm),
+            client,
+            interceptors,
+            None,
+            Some(time),
+        )
+        .expect("producer construction")
+    }
+
+    /// Translation of `KafkaProducerTest.testHeadersSuccess`
+    /// (Java line 1083). Verifies a record's partition explicitly
+    /// requested via `ProducerRecord::with_partition` is honoured by
+    /// `partition()` (Java line 1024). We invoke the private helper
+    /// directly so the assertion is independent of broker-ack timing.
+    #[tokio::test]
+    async fn partition_honours_explicit_record_partition() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 3, time.clone(), None, None);
+        let cluster = producer.metadata.metadata().fetch();
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition(
+            "topic",
+            Some(2),
+            Some(b"k".to_vec()),
+            Some(b"v".to_vec()),
+        )
+        .expect("record");
+        let p = producer
+            .partition(&record, Some(b"k"), Some(b"v"), &cluster)
+            .expect("partition");
+        assert_eq!(p, 2, "explicit record partition should win");
+    }
+
+    /// `partition()` returns UNKNOWN_PARTITION when no key, no
+    /// explicit partition, and no user partitioner — Java line 1494.
+    #[tokio::test]
+    async fn partition_returns_unknown_when_no_key_no_partition() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 3, time.clone(), None, None);
+        let cluster = producer.metadata.metadata().fetch();
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition("topic", None, None, Some(b"v".to_vec()))
+            .expect("record");
+        let p = producer.partition(&record, None, Some(b"v"), &cluster).expect("partition");
+        assert_eq!(p, RecordMetadata::UNKNOWN_PARTITION);
+    }
+
+    /// `partition()` hashes the key when no explicit partition and a
+    /// key is present (Java line 1490-1492). The test asserts the
+    /// returned partition is in `[0, num_partitions)`.
+    #[tokio::test]
+    async fn partition_hashes_key_when_no_explicit_partition() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 3, time.clone(), None, None);
+        let cluster = producer.metadata.metadata().fetch();
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition(
+            "topic",
+            None,
+            Some(b"my-key".to_vec()),
+            Some(b"v".to_vec()),
+        )
+        .expect("record");
+        let p = producer
+            .partition(&record, Some(b"my-key"), Some(b"v"), &cluster)
+            .expect("partition");
+        assert!((0..3).contains(&p), "expected hashed partition in [0,3), got {p}");
+    }
+
+    /// Translation of `KafkaProducerTest.testInterceptorPartitionSetOnTooLargeRecord`
+    /// (Java line 1252). With `max.request.size = 1`, even a tiny
+    /// record overflows the cap, `do_send` returns
+    /// [`KafkaError::RecordTooLarge`], and the interceptor's
+    /// `onSendError` fires.
+    #[tokio::test]
+    async fn send_returns_record_too_large_and_fires_interceptor_on_send_error() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct CountingInterceptor {
+            on_send_count: Arc<AtomicUsize>,
+            on_ack_with_error_count: Arc<AtomicUsize>,
+        }
+        impl ProducerInterceptor<Vec<u8>, Vec<u8>> for CountingInterceptor {
+            fn on_send(&self, record: ProducerRecord<Vec<u8>, Vec<u8>>) -> ProducerRecord<Vec<u8>, Vec<u8>> {
+                self.on_send_count.fetch_add(1, Ordering::Relaxed);
+                record
+            }
+            fn on_acknowledgement(
+                &self,
+                _metadata: Option<&RecordMetadata>,
+                exception: Option<&KafkaError>,
+                _headers: &crate::common::header::RecordHeaders,
+            ) {
+                if exception.is_some() {
+                    self.on_ack_with_error_count.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+
+        let on_send_count = Arc::new(AtomicUsize::new(0));
+        let on_ack_with_error_count = Arc::new(AtomicUsize::new(0));
+        let interceptor: Box<dyn ProducerInterceptor<Vec<u8>, Vec<u8>>> = Box::new(CountingInterceptor {
+            on_send_count: Arc::clone(&on_send_count),
+            on_ack_with_error_count: Arc::clone(&on_ack_with_error_count),
+        });
+        let interceptors = Arc::new(ProducerInterceptors::new(vec![interceptor]));
+
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        // max_request_size = 1 — even a tiny record overflows (the
+        // batch overhead alone is much larger than 1 byte).
+        let producer = build_test_producer("topic", 1, time.clone(), Some(Arc::clone(&interceptors)), Some(1));
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition(
+            "topic",
+            None,
+            Some(b"k".to_vec()),
+            Some(b"value-bytes".to_vec()),
+        )
+        .expect("record");
+        let err = producer.send(record).await.expect_err("expected RecordTooLarge");
+        assert!(matches!(err, KafkaError::RecordTooLarge(_)), "got {err:?}");
+        assert_eq!(on_send_count.load(Ordering::Relaxed), 1, "onSend should fire exactly once");
+        assert_eq!(
+            on_ack_with_error_count.load(Ordering::Relaxed),
+            1,
+            "onSendError → on_acknowledgement(error) should fire exactly once"
+        );
+    }
+
+    /// Java's `throwIfProducerClosed` — `send` after the producer's
+    /// running flag is flipped returns `IllegalState`. Mirrors the
+    /// Java's "Cannot perform operation after producer has been closed"
+    /// invariant at `KafkaProducer.java:957-958`.
+    #[tokio::test]
+    async fn send_after_close_returns_illegal_state() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+
+        // Simulate close: flip the running flag (Phase 7e's `close()`
+        // does this through `Sender::initiate_close`; here we exercise
+        // the invariant directly).
+        producer.sender_running.store(false, std::sync::atomic::Ordering::Release);
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::new("topic", Some(b"v".to_vec())).expect("record");
+        let err = producer.send(record).await.expect_err("send should reject after close");
+        match err {
+            KafkaError::IllegalState(msg) => assert!(
+                msg.contains("Cannot perform operation after producer has been closed"),
+                "got: {msg}"
+            ),
+            other => panic!("expected IllegalState, got {other:?}"),
+        }
+    }
+
+    /// `partition()` rejects a user partitioner that returns a
+    /// negative number (Java line 1483-1486 — `IllegalArgumentException`).
+    /// Validates the Rust translation as `KafkaError::IllegalArgument`.
+    #[tokio::test]
+    async fn partition_user_partitioner_negative_returns_illegal_argument() {
+        struct EvilPartitioner;
+        impl Partitioner for EvilPartitioner {
+            fn partition(
+                &self,
+                _topic: &str,
+                _key: Option<&dyn std::any::Any>,
+                _key_bytes: Option<&[u8]>,
+                _value: Option<&dyn std::any::Any>,
+                _value_bytes: Option<&[u8]>,
+                _cluster: &Cluster,
+            ) -> i32 {
+                -7
+            }
+        }
+
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let mut producer = build_test_producer("topic", 1, time.clone(), None, None);
+        producer.partitioner = Some(Arc::new(EvilPartitioner));
+        let cluster = producer.metadata.metadata().fetch();
+
+        let record =
+            ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition("topic", None, Some(b"k".to_vec()), Some(b"v".to_vec()))
+                .expect("record");
+        let err = producer
+            .partition(&record, Some(b"k"), Some(b"v"), &cluster)
+            .expect_err("expected IllegalArgument");
+        match err {
+            KafkaError::IllegalArgument(msg) => assert!(msg.contains("-7"), "got: {msg}"),
+            other => panic!("expected IllegalArgument, got {other:?}"),
+        }
+    }
+
+    /// Verifies the AppendCallbacks topic_partition() falls through
+    /// the priority chain set_partition > record_partition > UNKNOWN.
+    #[test]
+    fn append_callbacks_topic_partition_priority() {
+        let interceptors: Arc<ProducerInterceptors<Vec<u8>, Vec<u8>>> = Arc::new(ProducerInterceptors::new(Vec::new()));
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition(
+            "topic",
+            Some(7),
+            Some(b"k".to_vec()),
+            Some(b"v".to_vec()),
+        )
+        .expect("record");
+        let cb = AppendCallbacksImpl::<Vec<u8>, Vec<u8>>::new(None, Arc::clone(&interceptors), &record);
+
+        // Before set_partition, falls back to record_partition.
+        let tp = cb.topic_partition();
+        assert_eq!(tp.partition(), 7);
+        // (Java caches the result; once published OnceLock pins.) The
+        // record's explicit partition won, so a subsequent
+        // `set_partition` would be racy against published value — but
+        // in the producer the `set_partition` is called BEFORE the
+        // first `topic_partition()` access so the order matches Java.
+    }
+
+    /// Mirror of the priority chain: when no explicit record partition,
+    /// `set_partition` is the source of truth.
+    #[test]
+    fn append_callbacks_topic_partition_uses_set_partition_when_record_has_none() {
+        let interceptors: Arc<ProducerInterceptors<Vec<u8>, Vec<u8>>> = Arc::new(ProducerInterceptors::new(Vec::new()));
+        let record =
+            ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition("topic", None, Some(b"k".to_vec()), Some(b"v".to_vec()))
+                .expect("record");
+        let cb = AppendCallbacksImpl::<Vec<u8>, Vec<u8>>::new(None, Arc::clone(&interceptors), &record);
+
+        // Pre-set: UNKNOWN_PARTITION.
+        cb.set_partition(4);
+        let tp = cb.topic_partition();
+        assert_eq!(tp.partition(), 4);
+    }
+
+    /// Translation of `KafkaProducerTest.testTopicNotExistingInMetadata`
+    /// (Java line 993-1031, partial). When the topic carries
+    /// `InvalidTopicException` (error code 17) in the metadata
+    /// response, the cluster's `invalid_topics()` set picks it up and
+    /// `wait_on_metadata` short-circuits with
+    /// [`KafkaError::InvalidTopic`].
+    #[tokio::test]
+    async fn wait_on_metadata_rejects_invalid_topic() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+
+        // Inject "bad-topic" with error_code=17 (InvalidTopicException).
+        // The metadata snapshot's invalid-topics set picks this up
+        // through the existing Metadata::update path.
+        let bad_topic = MetadataResponseTopic {
+            error_code: 17, // InvalidTopicException
+            name: Some("bad-topic".to_owned()),
+            topic_id: Uuid::new(0, 0),
+            is_internal: false,
+            partitions: Vec::new(),
+            topic_authorized_operations: -1,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let data = MetadataResponseData {
+            throttle_time_ms: 0,
+            brokers: vec![MetadataResponseBroker {
+                node_id: 0,
+                host: "localhost".to_owned(),
+                port: 1969,
+                rack: None,
+                unknown_tagged_fields: Vec::new(),
+            }],
+            cluster_id: Some(String::new()),
+            controller_id: 0,
+            topics: vec![bad_topic],
+            cluster_authorized_operations: 0,
+            error_code: 0,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let response = MetadataResponse::new(data, true);
+        producer.metadata.add("bad-topic", time.milliseconds());
+        producer
+            .metadata
+            .update_with_current_request_version(&response, false, time.milliseconds())
+            .expect("metadata update");
+
+        let err = producer
+            .wait_on_metadata("bad-topic", None, time.milliseconds(), 0)
+            .await
+            .expect_err("expected InvalidTopic");
+        assert!(matches!(err, KafkaError::InvalidTopic(_)), "got {err:?}");
+    }
+
+    /// Translation of the metadata-timeout path of
+    /// `KafkaProducerTest.testMetadataTimeoutWithMissingTopic`
+    /// (Java line 851-888). When the topic is unknown in metadata and
+    /// the deadline elapses, `wait_on_metadata` returns
+    /// [`KafkaError::Timeout`] with the Java-verbatim error message.
+    #[tokio::test]
+    async fn wait_on_metadata_returns_timeout_for_unknown_topic() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        // `build_test_producer` populates metadata for "topic"; we
+        // request a different topic name so the wait loop does not
+        // short-circuit.
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+
+        let now = time.milliseconds();
+        let err = producer
+            .wait_on_metadata("absent-topic", None, now, 50)
+            .await
+            .expect_err("expected Timeout");
+        match err {
+            KafkaError::Timeout(msg) => {
+                assert!(
+                    msg.contains("absent-topic") && msg.contains("not present in metadata"),
+                    "got: {msg}",
+                );
+            },
+            other => panic!("expected Timeout, got {other:?}"),
+        }
     }
 }
