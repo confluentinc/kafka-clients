@@ -256,3 +256,173 @@ to `at_least_send_buffer_lower_bound` /
 `at_least_recv_buffer_lower_bound`, dropping the false `zero_or_more_*`
 claim. Added a 4-line comment that mirrors Java's inline `atLeast(...)`
 call sites and notes the actual `>= -1` semantics.
+
+---
+
+# Critic 7 — Phase 7b Round 1 review (resolved)
+
+Reviewed commits `c63329c` (Producer trait skeleton + UnsupportedOperation),
+`26073a3` (ProducerRecordTest / RecordMetadataTest gap audit), `f222f20`
+(memory).
+
+## Method-by-method audit of `Producer.java` against `src/producer/producer.rs`
+
+| Java method | Rust method | Status |
+|---|---|---|
+| `void initTransactions()` | `init_transactions(&self) -> Result<(), KafkaError>` | OK (Suggestion 2 follow-up: async-ified in `0fc8655`) |
+| `void beginTransaction()` | `begin_transaction(&self) -> Result<(), KafkaError>` | OK (Suggestion 2 follow-up) |
+| `void sendOffsetsToTransaction(Map, ConsumerGroupMetadata)` | (deferred) | OK — module rustdoc cites Phase 9 owner |
+| `void commitTransaction()` | `commit_transaction(&self) -> Result<(), KafkaError>` | OK (Suggestion 2 follow-up) |
+| `void abortTransaction()` | `abort_transaction(&self) -> Result<(), KafkaError>` | OK (Suggestion 2 follow-up) |
+| `void registerMetricForSubscription(KafkaMetric)` | (deferred) | OK — module rustdoc cites metrics-translation owner |
+| `void unregisterMetricFromSubscription(KafkaMetric)` | (deferred) | OK — same |
+| `Future<RecordMetadata> send(ProducerRecord)` | `async fn send(...)` | OK; `Future`-collapse rationale documented |
+| `Future<RecordMetadata> send(ProducerRecord, Callback)` | `async fn send_with_callback(...)` | OK |
+| `void flush()` | `async fn flush(...)` | OK |
+| `List<PartitionInfo> partitionsFor(String)` | `async fn partitions_for(&self, topic: &str)` | OK; `&str` matches CLAUDE.md rule 12 |
+| `Map<MetricName, ? extends Metric> metrics()` | `metrics(&self) -> ProducerMetrics` (alias for `HashMap<String, ()>`) | OK; placeholder type alias documented |
+| `Uuid clientInstanceId(Duration)` | `async fn client_instance_id(&self, timeout: Duration)` | OK; message byte-exact |
+| `void close()` | `async fn close(&self)` | OK |
+| `void close(Duration)` | `async fn close_with_timeout(&self, timeout: Duration)` | OK |
+
+The Java interface (`kafka/clients/.../producer/Producer.java`) has
+**14 methods**. The trait covers 12 + 2 documented deferrals.
+
+After Round 1 fixup (`0fc8655`):
+- `init_transactions_with_keep_prepared` and `prepare_transaction` are
+  removed (not on Java's interface — see Suggestion 1 disposition).
+- The four transactional methods are now `async fn` (see Suggestion 2
+  disposition).
+
+## Trait-shape compliance — verified
+
+- `async fn` in trait (no `#[async_trait]` macro): confirmed at
+  `producer.rs`. No `Pin<Box<dyn Future>>`.
+- `Send + Sync` trait bound: `producer.rs:113`.
+- Module-inception `#[allow(...)]` documented: `producer/mod.rs:28`.
+- `pub use producer::{Producer, ProducerMetrics};` in `producer/mod.rs:45`.
+- License header: `producer.rs:1-13`.
+- Deferred methods enumerated in module-level rustdoc with owning
+  phase: `producer.rs:62-77`.
+
+## `UnsupportedOperation` variant — verified
+
+- Defined at `errors.rs:199`.
+- `Display` via `java_class_name(): "UnsupportedOperationException"` +
+  message → `errors.rs:350, 437-446`.
+- `is_retriable() == false`, `is_fatal() == false`,
+  `txn_requires_abort() == false` — verified via test
+  `unsupported_operation_is_neither_retriable_nor_fatal`
+  (`errors.rs:569-584`).
+- `code()` returns `ERR_CODE_CONFIG` (`errors.rs:305`).
+- `client_instance_id` message byte-exact:
+  `"Client telemetry is not implemented in Milestone-1."`.
+
+## Test gap-fill (commit `26073a3`) — verified
+
+- Java `ProducerRecordTest#testEqualsAndHashCode` ↔ Rust
+  `equals_and_hash_code` (`producer_record.rs:351-382`). 1:1.
+- Java `ProducerRecordTest#testInvalidRecords` ↔ Rust
+  `invalid_records` (`producer_record.rs:395-419`). The null-topic
+  case is structurally elided (Rust `impl Into<Arc<str>>` cannot be
+  null at the type level — rationale documented in test rustdoc).
+  The negative-timestamp / negative-partition cases are tested with
+  byte-exact error message assertions matching `ProducerRecord.java:74,77`.
+- Java `RecordMetadataTest#testConstructionWithMissingBatchIndex` ↔
+  Rust `test_construction_with_missing_batch_index`
+  (`record_metadata.rs:132-147`). 1:1.
+- Java `RecordMetadataTest#testConstructionWithBatchIndexOffset` ↔
+  Rust `test_construction_with_batch_index_offset`
+  (`record_metadata.rs:151-166`). 1:1.
+
+No `@Test` cases missed.
+
+## Memory commit `f222f20` — verified
+
+- Touches only `.claude/agent-memory/actor-executor/MEMORY.md` and
+  `phase7b_producer_trait.md`.
+- No edits to `CLAUDE.md` or `.claude/rules/`.
+
+## Round 1 verdict: accepted with 2 Suggestion items, both fixed in `0fc8655`
+
+---
+
+## Suggestion 1 — `init_transactions_with_keep_prepared` and `prepare_transaction` are not in the Java interface
+
+- **File**: `src/producer/producer.rs:134, 168`
+- **Severity**: Suggestion
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/producer/Producer.java`
+- **Description**: The trait declares two methods that do not exist
+  on the Java `Producer<K, V>` interface in this 4.2 source:
+  - `init_transactions_with_keep_prepared(&self, keep_prepared_txn: bool)`
+    — Java has only `void initTransactions()` (no boolean overload).
+    `KafkaProducer.java` likewise has a single `public void initTransactions()`
+    at line 648 with no overload.
+  - `prepare_transaction(&self) -> Result<bool, KafkaError>`
+    — `prepareTransaction()` exists only on
+    `internals/TransactionManager.java:342`, which is package-private
+    internal API. It is not exposed on `Producer` or `KafkaProducer`.
+- **Expected**: Per DoD #7 ("Are there structs or traits that aren't
+  present in Java codebase? Avoid adding new structs or traits that
+  aren't present in Java codebase"), neither method should be on the
+  trait. The brief that drove Phase 7b listed both as expected — but
+  the Java source disagrees. Either (a) drop both methods from the
+  trait, or (b) keep them with a rustdoc note citing the
+  Confluent-internal / KIP-derived rationale they originate from.
+- **Actual**: Both methods are present on the trait, returning
+  `KafkaError::UnsupportedOperation`. The commit message says they
+  "exist to satisfy the Java interface shape" but the Java interface
+  shape does not include them.
+- **Action**: Recorded for follow-up — the manager may prefer to
+  keep the surface and revisit when transactional support lands. Not
+  blocking Phase 7c since `KafkaProducer` will simply implement them
+  to delegate to `UnsupportedOperation` regardless.
+
+**Disposition**: Fixed in commit `0fc8655` (fixup! c63329c). Both
+methods deleted from the trait and the `StubProducer` test impl.
+Verified against Java sources: `Producer.java:45` exposes only the
+single `void initTransactions()` and `KafkaProducer.java:648` has no
+overload; `prepareTransaction` exists only on the package-private
+`internals/TransactionManager.java:342`. A Phase 7c carry-over note in
+`Phase-7/NOTES.md` directs Phase 7c to re-verify against
+`KafkaProducer.java` whether either method has been back-ported as an
+inherent method, and to translate them as inherent `impl KafkaProducer`
+methods (not trait methods) if so.
+
+---
+
+## Suggestion 2 — `init_transactions` returns `Result<(), KafkaError>` but Java is sync `void` throwing checked exceptions
+
+- **File**: `src/producer/producer.rs:124`
+- **Severity**: Suggestion
+- **Java Reference**: `Producer.java:45` (`void initTransactions()`)
+- **Description**: The transactional `*Transaction` methods on the
+  Java interface are synchronous (`void`, not `Future`) — they block
+  on broker round-trips. CLAUDE.md rule 9.1 says "if a method is
+  blocking in Java it should async in Rust". The Rust translation
+  declared them as **sync** `fn` returning `Result`, not `async fn`.
+- **Expected**: For Java-blocking → Rust-async parity, these should
+  be `async fn -> Result<(), KafkaError>`. The current shape will be
+  awkward when the real `KafkaProducer` impl arrives — the body needs
+  to await the broker round-trip but the trait method is sync.
+- **Actual**: `init_transactions`, `init_transactions_with_keep_prepared`,
+  `begin_transaction`, `commit_transaction`, `abort_transaction`,
+  `prepare_transaction` are all sync `fn`. The other Java-blocking
+  methods on the trait (`send`, `flush`, `partitions_for`, `close`,
+  `client_instance_id`) are correctly `async fn`.
+- **Note**: For Milestone-1 these methods always return
+  `UnsupportedOperation` so the sync/async mismatch is hidden. But it
+  becomes a source-breaking change when transactions land in Phase 9
+  (any downstream caller written against the sync signature will need
+  to add `.await`). Worth fixing now while no one consumes the trait.
+
+**Disposition**: Fixed in commit `0fc8655` (fixup! c63329c). The four
+remaining transactional methods (`init_transactions`,
+`begin_transaction`, `commit_transaction`, `abort_transaction`) now
+return `impl Future<Output = Result<(), KafkaError>> + Send`, matching
+the existing `async fn` shape used by `send`/`flush`/`partitions_for`/
+`close`/`client_instance_id`. The bodies still resolve immediately to
+`KafkaError::UnsupportedOperation` in Milestone-1, but the signature is
+future-proof for Phase 9. The `StubProducer` test impl and the
+`async_methods_dispatch_through_trait` test were updated in lockstep;
+no production callers exist yet (verified via grep).
