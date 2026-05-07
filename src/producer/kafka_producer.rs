@@ -368,9 +368,32 @@ where
         // Java line 369-375: partitionerPlugin = config.getConfiguredInstance(...)
         // Rust does not perform reflective class-loading from the
         // `partitioner.class` config; advanced custom partitioners must
-        // be provided via the (future) Phase 7d builder API. Until then
+        // be provided via the (future) Phase 7e builder API. Until then
         // we always select `None` (= built-in adaptive partitioner —
         // accumulator handles per-topic `BuiltInPartitioner`).
+        //
+        // Operator-visible warning: if the user supplied a non-default
+        // `partitioner.class`, surface the deferral so they don't get a
+        // silent fallback to sticky partitioning. Once Phase 7e wires
+        // `new(props)` to a real `NetworkClient`, this warn becomes a
+        // hard rejection (or routes through the builder API).
+        if config
+            .inner()
+            .originals()
+            .contains_key(producer_config::PARTITIONER_CLASS_CONFIG)
+        {
+            warn!(
+                "Phase 7e: '{}' loading is not yet implemented; using built-in adaptive partitioning (sticky-by-default). \
+                 Configured value '{}' is ignored.",
+                producer_config::PARTITIONER_CLASS_CONFIG,
+                config
+                    .inner()
+                    .originals()
+                    .get(producer_config::PARTITIONER_CLASS_CONFIG)
+                    .map(String::as_str)
+                    .unwrap_or(""),
+            );
+        }
         let partitioner: Option<Arc<dyn Partitioner>> = None;
 
         // Java line 407-409: maxRequestSize, totalMemorySize, compression.
