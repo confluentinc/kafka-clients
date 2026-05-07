@@ -38,7 +38,7 @@ from typing import Optional, Sequence
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from . import db, git_ops, github, prompts, semaphore, streaming, worktree
+from . import db, git_ops, github, prompts, r2, semaphore, streaming, worktree
 
 
 def _r2_available() -> bool:
@@ -555,7 +555,7 @@ def _dep_eval_one(args, row, batch_aks):
     )
     try:
         rc, captured = streaming.run_with_prefix(
-            ["r2", "sandbox", "claude", "-p", prompt],
+            [*r2.R2_CLAUDE_CMD_PREFIX, "-p", prompt],
             pr_number=pr_number,
         )
     except FileNotFoundError as e:
@@ -844,7 +844,7 @@ def _update_pr_description_via_r2(
     )
     try:
         rc, _ = streaming.run_with_prefix(
-            ["r2", "sandbox", "claude", "-p", prompt],
+            [*r2.R2_CLAUDE_CMD_PREFIX, "-p", prompt],
             pr_number=pr_number,
             cwd=str(wt),
         )
@@ -944,7 +944,7 @@ def _run_plan_one(args, row):
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
-                    ["r2", "sandbox", "claude", "-p", prompt],
+                    [*r2.R2_CLAUDE_CMD_PREFIX, "-p", prompt],
                     pr_number=pr_number,
                     cwd=str(wt),
                 )
@@ -1022,7 +1022,7 @@ def _run_impl_one(args, row):
         ) as wt:
             try:
                 rc, _ = streaming.run_with_prefix(
-                    ["r2", "sandbox", "claude", "-p", prompt],
+                    [*r2.R2_CLAUDE_CMD_PREFIX, "-p", prompt],
                     pr_number=pr_number,
                     cwd=str(wt),
                 )
