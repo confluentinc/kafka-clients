@@ -21,6 +21,12 @@
 pub mod buffer_exhausted_error;
 pub mod callback;
 pub mod partitioner;
+// `producer.rs` defines the `Producer` trait. The file stem matches the
+// parent module name by design — Java's `Producer` interface lives at
+// the top of the `producer` package, so the Rust translation does too.
+// See CLAUDE.md rule 2.
+#[allow(clippy::module_inception)]
+pub mod producer;
 pub mod producer_config;
 pub mod producer_interceptor;
 pub mod producer_record;
@@ -36,6 +42,7 @@ pub(crate) mod internals;
 pub use buffer_exhausted_error::BufferExhaustedError;
 pub use callback::Callback;
 pub use partitioner::Partitioner;
+pub use producer::{Producer, ProducerMetrics};
 pub use producer_config::ProducerConfig;
 pub use producer_interceptor::ProducerInterceptor;
 pub use producer_record::{ProducerRecord, ProducerRecordError};

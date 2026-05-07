@@ -188,6 +188,15 @@ pub enum KafkaError {
     /// E.g. appending to a closed `MemoryRecordsBuilder`. Carried here for
     /// the same reason as `IllegalArgument`.
     IllegalState(String),
+    /// Operation not supported (Java `UnsupportedOperationException`).
+    /// Used to reject API surfaces that are stubbed off in this milestone
+    /// — for example transactional methods on the producer interface
+    /// pre-Milestone-9, or telemetry-only methods like
+    /// `Producer::client_instance_id`. Non-retriable, non-fatal:
+    /// the caller is expected to avoid the call rather than recover from
+    /// it. Carried here for the same reason as `IllegalArgument` /
+    /// `IllegalState`.
+    UnsupportedOperation(String),
 }
 
 impl KafkaError {
@@ -293,6 +302,7 @@ impl KafkaError {
             KafkaError::Config(_) => ERR_CODE_CONFIG,
             KafkaError::IllegalArgument(_) => ERR_CODE_CONFIG,
             KafkaError::IllegalState(_) => ERR_CODE_CONFIG,
+            KafkaError::UnsupportedOperation(_) => ERR_CODE_CONFIG,
         }
     }
 
@@ -337,6 +347,7 @@ impl KafkaError {
             KafkaError::Config(_) => "ConfigException",
             KafkaError::IllegalArgument(_) => "IllegalArgumentException",
             KafkaError::IllegalState(_) => "IllegalStateException",
+            KafkaError::UnsupportedOperation(_) => "UnsupportedOperationException",
         }
     }
 
@@ -380,7 +391,8 @@ impl KafkaError {
             | KafkaError::BufferExhausted(m)
             | KafkaError::Config(m)
             | KafkaError::IllegalArgument(m)
-            | KafkaError::IllegalState(m) => m.as_str(),
+            | KafkaError::IllegalState(m)
+            | KafkaError::UnsupportedOperation(m) => m.as_str(),
         }
     }
 
@@ -551,5 +563,23 @@ mod tests {
 
         let err = KafkaError::Timeout(String::new());
         assert_eq!(err.to_string(), "TimeoutException");
+    }
+
+    #[test]
+    fn unsupported_operation_is_neither_retriable_nor_fatal() {
+        let err = KafkaError::UnsupportedOperation("transactions are not supported in Milestone-1".into());
+        // Mirrors Java's UnsupportedOperationException: not a RetriableException
+        // subclass, and not in the producer's "fatal" set (which is bound to
+        // auth / fencing / version-mismatch). Callers are expected to avoid
+        // the call rather than recover from it.
+        assert!(!err.is_retriable());
+        assert!(!err.is_fatal());
+        assert!(!err.txn_requires_abort());
+        assert_eq!(err.java_class_name(), "UnsupportedOperationException");
+        assert_eq!(err.message(), "transactions are not supported in Milestone-1");
+        assert_eq!(
+            err.to_string(),
+            "UnsupportedOperationException: transactions are not supported in Milestone-1"
+        );
     }
 }
