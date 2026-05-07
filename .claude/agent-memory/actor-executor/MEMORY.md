@@ -53,3 +53,4 @@
 - [Phase 7a config validators](phase7a_config_validators.md) — CaseInsensitive/NonEmpty/ValidList added; SSL/SASL helpers as ConfigDef methods delegating to free fns
 - [Phase 7a ProducerConfig](phase7a_producer_config.md) — post_processed overlay, i64-Range cast, post-process ordering for error-message parity, Milestone-1 deviations
 - [Phase 7a Round 1 patterns](phase7a_round1_patterns.md) — anchor-import smell, public/private DOC gradient, append-not-replace deviation notes, reachable-subset skip rationales
+- [Phase 7b Producer trait](phase7b_producer_trait.md) — async-fn-in-trait (NOT dyn-compat), Java Future-collapse for `send`, deferred consumer-package methods, KafkaError::UnsupportedOperation
