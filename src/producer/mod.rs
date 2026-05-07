@@ -20,6 +20,7 @@
 
 pub mod buffer_exhausted_error;
 pub mod callback;
+pub mod kafka_producer;
 pub mod partitioner;
 // `producer.rs` defines the `Producer` trait. The file stem matches the
 // parent module name by design — Java's `Producer` interface lives at
@@ -41,6 +42,7 @@ pub(crate) mod internals;
 
 pub use buffer_exhausted_error::BufferExhaustedError;
 pub use callback::Callback;
+pub use kafka_producer::KafkaProducer;
 pub use partitioner::Partitioner;
 pub use producer::{Producer, ProducerMetrics};
 pub use producer_config::ProducerConfig;
