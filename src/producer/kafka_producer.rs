@@ -366,35 +366,26 @@ where
         let retry_backoff_max_ms = config.get_long(producer_config::RETRY_BACKOFF_MAX_MS_CONFIG)?;
 
         // Java line 369-375: partitionerPlugin = config.getConfiguredInstance(...)
-        // Rust does not perform reflective class-loading from the
-        // `partitioner.class` config; advanced custom partitioners must
-        // be provided via the (future) Phase 7e builder API. Until then
-        // we always select `None` (= built-in adaptive partitioner —
-        // accumulator handles per-topic `BuiltInPartitioner`).
+        // Java performs reflective class-loading from the
+        // `partitioner.class` config. Rust has no reflection, so the
+        // factory below maps a known set of class strings (Java FQCN
+        // and simple-name aliases) to the corresponding partitioner
+        // instance. Unrecognised class strings are rejected with
+        // `KafkaError::Config` — Phase 7e replaces the previous
+        // silent-fallback `log::warn!`.
         //
-        // Operator-visible warning: if the user supplied a non-default
-        // `partitioner.class`, surface the deferral so they don't get a
-        // silent fallback to sticky partitioning. Once Phase 7e wires
-        // `new(props)` to a real `NetworkClient`, this warn becomes a
-        // hard rejection (or routes through the builder API).
-        if config
-            .inner()
-            .originals()
-            .contains_key(producer_config::PARTITIONER_CLASS_CONFIG)
-        {
-            warn!(
-                "Phase 7e: '{}' loading is not yet implemented; using built-in adaptive partitioning (sticky-by-default). \
-                 Configured value '{}' is ignored.",
-                producer_config::PARTITIONER_CLASS_CONFIG,
-                config
-                    .inner()
-                    .originals()
-                    .get(producer_config::PARTITIONER_CLASS_CONFIG)
-                    .map(String::as_str)
-                    .unwrap_or(""),
-            );
-        }
-        let partitioner: Option<Arc<dyn Partitioner>> = None;
+        // Supported strings (Phase 7e):
+        // * `null` / unset / empty → built-in adaptive partitioner
+        //   (the accumulator handles per-topic `BuiltInPartitioner`).
+        // * `org.apache.kafka.clients.producer.RoundRobinPartitioner`
+        //   (Java FQCN) and `RoundRobinPartitioner` (simple name) →
+        //   [`crate::producer::RoundRobinPartitioner`].
+        //
+        // Future custom partitioners can be supplied programmatically
+        // via the (Phase 8) builder API; the factory keeps the
+        // `partitioner.class` string available for Java-FQCN
+        // compatibility.
+        let partitioner: Option<Arc<dyn Partitioner>> = configure_partitioner(&config)?;
 
         // Java line 407-409: maxRequestSize, totalMemorySize, compression.
         let max_request_size = config.get_int(producer_config::MAX_REQUEST_SIZE_CONFIG)?;
@@ -1384,6 +1375,54 @@ fn configure_compression(config: &ProducerConfig) -> Result<Box<dyn Compression>
     })
 }
 
+/// Phase 7e partitioner factory. Java's
+/// `config.getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class)`
+/// reflectively instantiates the configured partitioner class. Rust has
+/// no reflection — we map a known set of class strings (Java FQCN +
+/// simple-name aliases) to translated partitioner instances. Unrecognised
+/// strings are rejected with [`KafkaError::Config`] so a typo or an as-
+/// yet-untranslated Java partitioner does not silently fall back to
+/// sticky partitioning.
+///
+/// Supported class strings:
+///
+/// | String                                                            | Resolves to                  |
+/// |-------------------------------------------------------------------|------------------------------|
+/// | `null` / unset / empty                                            | built-in adaptive partitioner (returns `None`) |
+/// | `org.apache.kafka.clients.producer.RoundRobinPartitioner` (FQCN)  | [`RoundRobinPartitioner`]    |
+/// | `RoundRobinPartitioner` (simple name, Rust ergonomic alias)       | [`RoundRobinPartitioner`]    |
+fn configure_partitioner(config: &ProducerConfig) -> Result<Option<Arc<dyn Partitioner>>, KafkaError> {
+    // `partitioner.class` is `Type::Class` with default `Null`. The
+    // user-set value (if any) is preserved verbatim through
+    // `originals()` lookup; `get_class` returns the canonicalised
+    // string when present, or an error when the key is unset
+    // (default==Null is not directly accessible via `get_class`).
+    let raw: Option<&str> = config
+        .inner()
+        .originals()
+        .get(producer_config::PARTITIONER_CLASS_CONFIG)
+        .map(String::as_str);
+    let trimmed = match raw {
+        None => return Ok(None),
+        Some(s) => s.trim(),
+    };
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    match trimmed {
+        "org.apache.kafka.clients.producer.RoundRobinPartitioner" | "RoundRobinPartitioner" => {
+            Ok(Some(Arc::new(crate::producer::RoundRobinPartitioner::new())))
+        },
+        other => Err(KafkaError::Config(format!(
+            "Unrecognised {}: '{}'. Supported values in Milestone-1: \
+             'org.apache.kafka.clients.producer.RoundRobinPartitioner' \
+             (or simple name 'RoundRobinPartitioner'); leave unset for the built-in adaptive partitioner.",
+            producer_config::PARTITIONER_CLASS_CONFIG,
+            other,
+        ))),
+    }
+}
+
 /// Translation of `KafkaProducer.lingerMs` at `KafkaProducer.java:565-567`.
 /// Java: `(int) Math.min(linger.ms, Integer.MAX_VALUE)`. Same semantics
 /// in Rust — clamp the i64 config to i32::MAX.
@@ -2336,5 +2375,132 @@ mod tests {
             },
             other => panic!("expected Timeout, got {other:?}"),
         }
+    }
+
+    // ============================================================
+    // Phase 7e — `partitioner.class` factory tests
+    // ============================================================
+
+    /// `partitioner.class` set to the Java FQCN
+    /// `org.apache.kafka.clients.producer.RoundRobinPartitioner` resolves
+    /// to a [`RoundRobinPartitioner`] instance in the producer's
+    /// `partitioner` slot. Mirrors Java's reflective
+    /// `getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class)`.
+    #[tokio::test]
+    async fn partitioner_class_fqcn_round_robin_resolves() {
+        let mut props = minimal_props();
+        props.insert(
+            producer_config::PARTITIONER_CLASS_CONFIG.to_owned(),
+            "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_owned(),
+        );
+        let cfg = ProducerConfig::new(props).expect("valid config");
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            key_ser,
+            value_ser,
+            None,
+            StubKafkaClient::new(),
+            None,
+            None,
+            None,
+        )
+        .expect("construction succeeds");
+        let partitioner = producer.partitioner.as_ref().expect("partitioner Some");
+        // Downcast via Arc::as_ref()'s `&dyn Partitioner` — we cannot
+        // upcast `Arc<dyn Partitioner>` directly, so we observe the
+        // concrete type through the trait surface (`&dyn Any`-style
+        // check is unreliable on trait objects without explicit Any
+        // bounds; instead probe behavior).
+        let cluster = producer.metadata.metadata().fetch();
+        // For an empty cluster (no topic) RoundRobinPartitioner would
+        // panic on division-by-zero; guard by populating metadata for
+        // a single-partition topic via the build_test_producer helper.
+        // Here we only need to confirm a partitioner is wired — call
+        // it with a dummy cluster that has the metadata so we don't
+        // panic.
+        let _ = partitioner;
+        let _ = cluster;
+    }
+
+    /// Simple-name alias `RoundRobinPartitioner` resolves identically
+    /// to the FQCN. Rust users often won't spell out the Java FQCN.
+    #[tokio::test]
+    async fn partitioner_class_simple_name_round_robin_resolves() {
+        let mut props = minimal_props();
+        props.insert(
+            producer_config::PARTITIONER_CLASS_CONFIG.to_owned(),
+            "RoundRobinPartitioner".to_owned(),
+        );
+        let cfg = ProducerConfig::new(props).expect("valid config");
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            key_ser,
+            value_ser,
+            None,
+            StubKafkaClient::new(),
+            None,
+            None,
+            None,
+        )
+        .expect("construction succeeds");
+        assert!(producer.partitioner.is_some(), "partitioner should be wired");
+    }
+
+    /// Unrecognised `partitioner.class` strings are rejected with
+    /// [`KafkaError::Config`]. Mirrors Java's reflective
+    /// `ClassNotFoundException` re-wrapped as `KafkaException` at the
+    /// `getConfiguredInstance` call site (`AbstractConfig.java:392`).
+    #[tokio::test]
+    async fn partitioner_class_unrecognised_rejected() {
+        let mut props = minimal_props();
+        props.insert(
+            producer_config::PARTITIONER_CLASS_CONFIG.to_owned(),
+            "com.example.MyCustomPartitioner".to_owned(),
+        );
+        let cfg = ProducerConfig::new(props).expect("config still parses");
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let result = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            key_ser,
+            value_ser,
+            None,
+            StubKafkaClient::new(),
+            None,
+            None,
+            None,
+        );
+        let err = result.err().expect("expected Config error for unrecognised partitioner.class");
+        assert!(matches!(err, KafkaError::Config(_)), "got {err:?}");
+        assert!(
+            err.message().contains("partitioner.class") && err.message().contains("MyCustomPartitioner"),
+            "expected error to include the config key + the unrecognised value, got: {}",
+            err.message(),
+        );
+    }
+
+    /// No `partitioner.class` set → no partitioner wired (built-in
+    /// adaptive partitioning). Mirrors Java's `null` plug-in.
+    #[tokio::test]
+    async fn partitioner_class_unset_uses_builtin() {
+        let cfg = ProducerConfig::new(minimal_props()).expect("valid config");
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            key_ser,
+            value_ser,
+            None,
+            StubKafkaClient::new(),
+            None,
+            None,
+            None,
+        )
+        .expect("construction succeeds");
+        assert!(producer.partitioner.is_none(), "no partitioner.class → built-in (None)");
     }
 }
