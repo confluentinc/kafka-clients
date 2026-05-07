@@ -426,3 +426,176 @@ the existing `async fn` shape used by `send`/`flush`/`partitions_for`/
 future-proof for Phase 9. The `StubProducer` test impl and the
 `async_methods_dispatch_through_trait` test were updated in lockstep;
 no production callers exist yet (verified via grep).
+
+---
+
+# Critic 7 — Phase 7c Round 1 review (resolved)
+
+Reviewed commits `f540846`, `b696f5d`, `848f9a1`, `0b8b1d9` on branch
+`fresh-impl`.
+
+---
+
+## Suggestion 1: `NETWORK_THREAD_PREFIX` exported but never used to identify the spawned task
+
+- **File**: `src/producer/kafka_producer.rs:99,497-499`
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducer.java:455-457`
+
+```rust
+pub const NETWORK_THREAD_PREFIX: &str = "kafka-producer-network-thread";
+…
+let sender_task: JoinHandle<()> = tokio::spawn(async move {
+    sender.run_loop().await;
+});
+```
+
+Java sets `ioThreadName = NETWORK_THREAD_PREFIX + " | " + clientId` and
+hands it to `Sender.SenderThread`. Tokio doesn't expose native task
+names, but the equivalent observability hook is `tracing::info_span!`.
+The constant is defined and exported but never used to instrument the
+spawned future, so log lines emitted from inside `run_loop` carry only
+whatever the `LogContext` prefixes (which already includes the
+`clientId`). Net result: equivalent observability, but the constant is
+dead weight in this commit.
+
+**Recommendation**: either drop `NETWORK_THREAD_PREFIX` from the public
+export until Phase 7e wires it into a `tracing::info_span!`-instrumented
+spawn, or wrap the spawned future:
+
+```rust
+let span = tracing::info_span!("kafka-producer-network-thread", client_id = %client_id);
+let sender_task = tokio::spawn(async move { sender.run_loop().instrument(span).await });
+```
+
+The latter matches Java's intent without adding runtime cost.
+
+**Disposition**: Fixed in commit `973218a` (fixup! `b696f5d`). Chose
+option (a) — demoted the constant to a documented module-level comment
+explaining the `tracing` rationale and the conditions under which the
+constant should be reintroduced (i.e., when/if the codebase adopts
+`tracing` for span instrumentation). Option (b) was rejected because
+this crate uses `log`, not `tracing`, and adding `tracing` as a
+dependency for one constant is overkill. The Sender's `LogContext`
+already prefixes every log line with `[Producer clientId=...]`, so the
+per-message context Java provides via the thread name is preserved
+without the prefix constant.
+
+---
+
+## Suggestion 2: `configure_delivery_timeout` silent bump emits no log warning
+
+- **File**: `src/producer/kafka_producer.rs:603-629`
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducer.java:582-587`
+
+When the user **didn't** explicitly set `delivery.timeout.ms` and the
+default is too low, Java logs:
+
+```java
+log.warn("{} should be equal to or larger than {} + {}. Setting it to {}.",
+    ProducerConfig.DELIVERY_TIMEOUT_MS_CONFIG, ProducerConfig.LINGER_MS_CONFIG,
+    ProducerConfig.REQUEST_TIMEOUT_MS_CONFIG, deliveryTimeoutMs);
+```
+
+so operators can see the auto-bump in their logs. The Rust translation
+silently returns `linger_plus_request` without a log line. This is a
+behavioral divergence affecting observability, not correctness — the
+returned value is correct.
+
+**Recommendation**: emit `tracing::warn!("…Setting it to {}", linger_plus_request)`
+in the silent-bump branch before returning. Tracing is already in scope
+(`use tracing::*` exists elsewhere in the file ecosystem).
+
+**Disposition**: Fixed in commit `973218a` (fixup! `b696f5d`). Translated
+as `log::warn!` (the crate uses `log`, not `tracing`) with the same format
+string Java uses verbatim:
+`"{} should be equal to or larger than {} + {}. Setting it to {}."`.
+Operators now see the auto-bump in their logs as in Java.
+
+---
+
+## Suggestion 3: `config.logUnused()` not translated (Java line 458)
+
+- **File**: `src/producer/kafka_producer.rs:497-499` (constructor tail)
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducer.java:458`
+
+Java's constructor calls `config.logUnused()` immediately after spawning
+the IO thread — this prints a `WARN` for every config key the user
+provided but the producer didn't consume (typically due to typos or
+stale configs). The Rust constructor doesn't call any equivalent.
+`AbstractConfig::log_unused()` exists in this repo (verified) and is
+called from other config-consumer paths.
+
+**Recommendation**: insert `config.log_unused();` (or the equivalent
+method name) after the `tokio::spawn`, mirroring Java's order. Helps
+users catch typo'd configs early. Low-risk addition.
+
+**Disposition**: Fixed in commit `973218a` (fixup! `b696f5d`). Added
+`config.inner().log_unused()` immediately after the `tokio::spawn`,
+mirroring Java line 458. `AbstractConfig::log_unused()` was already
+implemented (Phase 1 backfill not needed) and tracks accessed keys via
+`AbstractConfig::touch` on every typed `get_*` accessor.
+
+---
+
+## Suggestion 4: Sender's `pub(crate) running_arc` ungate doesn't audit the prior test-only `Sender::is_running()` accessor
+
+- **File**: `src/producer/internals/sender.rs:402-405,407-413`
+- **Severity**: Suggestion
+- **Context**: The Phase 7c diff at `sender.rs` ungates `running_arc` /
+  `force_close_arc` from `#[cfg(test)]` to `pub(crate)` because
+  `KafkaProducer::Drop` (production code) needs them. Good. But the
+  *same file* has a sibling accessor `pub(crate) fn is_running(&self) -> bool`
+  at line 402-405 that reads the same atomic via `&Sender`. If
+  production code later wants to ask "is the sender running?" it has two
+  paths: read the atomic via `running_arc().load(Acquire)`, or call
+  `is_running()`. Both work, but they're equivalent and one of them
+  predates the Phase 7c ungating without a doc note tying the two
+  together.
+
+**Recommendation**: at the next opportunity, add a one-line cross-doc
+to `is_running` mentioning `running_arc()` is the analogous accessor
+for the moved-into-spawn case. Phase 7e (which adds async `close`)
+will be a natural place to clean this up. Not blocking — just keeps
+the surface coherent for the next maintainer.
+
+**Disposition**: Fixed in commit `fabe23b` (fixup! `b696f5d`). Added
+cross-doc on both `Sender::is_running` and `Sender::running_arc` so
+future maintainers see the two accessors are coherent — both read the
+same `running` atomic with `Ordering::Acquire`. The split exists
+because `is_running` requires `&Sender` (in-process tests that own the
+struct directly) while `running_arc` is the accessor used by callers
+that move the sender into a `tokio::spawn` task and need to flip the
+flag from outside the spawn.
+
+---
+
+## Nit 1: `drop_aborts_sender_task` test verifies the flag flip but not the abort
+
+- **File**: `src/producer/kafka_producer.rs:903-930`
+- **Severity**: Nit
+- **Description**: The test name asserts that `Drop` aborts the spawned
+  task; the test body only asserts that `running` is `false` after drop.
+  But the Drop body explicitly calls `self.sender_running.store(false, …)`
+  on every drop path, so the assertion passes regardless of whether
+  `JoinHandle::abort()` was called. To actually verify the abort, the
+  test would need to capture a counter / completion channel from the
+  spawned task before drop and assert it observed shutdown — or capture
+  the JoinHandle externally and `tokio::time::timeout(…, handle).await`
+  verify it completed.
+
+**Recommendation**: either rename the test to
+`drop_flips_running_flag` (truthful), or extend it to verify the task
+actually finished. Since `StubKafkaClient::poll` does a 50ms sleep,
+the second option is cheap.
+
+**Disposition**: Fixed in commit `62bad53` (fixup! `848f9a1`).
+Strengthened the test to verify both halves of the abort contract:
+(1) `Drop` flips `sender_running` to `false`, and (2) the spawned
+`JoinHandle` actually finishes within a bounded timeout. The test
+steals `producer.sender_task` before drop, then `tokio::time::timeout(1s, handle).await`
+proves the task ran to completion or was cancelled. Accepts either a
+cancelled JoinError (the abort path) or `Ok(())` (the cooperative
+running-flag-flip path) — both prove the task actually exited.
