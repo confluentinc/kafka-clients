@@ -345,6 +345,198 @@ impl Validator for NonNullValidator {
     }
 }
 
+/// Validator that constrains a string to a fixed set, case-insensitively.
+/// Mirrors `ConfigDef.CaseInsensitiveValidString`.
+#[derive(Debug)]
+pub struct CaseInsensitiveValidString {
+    /// Original (mixed-case) values for the diagnostic message.
+    valid_values: Vec<String>,
+    /// Pre-uppercased values for the membership check.
+    valid_values_upper: Vec<String>,
+}
+
+impl CaseInsensitiveValidString {
+    /// `ConfigDef.CaseInsensitiveValidString.in(...)`.
+    pub fn in_set<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        let valid_values: Vec<String> = values.into_iter().map(Into::into).collect();
+        let valid_values_upper = valid_values.iter().map(|s| s.to_ascii_uppercase()).collect();
+        CaseInsensitiveValidString { valid_values, valid_values_upper }
+    }
+}
+
+impl Validator for CaseInsensitiveValidString {
+    fn ensure_valid(&self, name: &str, value: &ConfigValue) -> Result<(), KafkaError> {
+        // Java treats `null` (here [`ConfigValue::Null`]) as an invalid value
+        // because it cannot be a member of any set. The original Java
+        // throws `ConfigException(name, null, ...)` and the message text is
+        // shown below.
+        let s = match value {
+            ConfigValue::Null => {
+                return Err(config_exception::new(
+                    name,
+                    value,
+                    &format!("String must be one of (case insensitive): {}", self.valid_values.join(", ")),
+                ));
+            },
+            _ => value.as_str().ok_or_else(|| {
+                config_exception::new(name, value, "Value must be a string for CaseInsensitiveValidString validator")
+            })?,
+        };
+        let upper = s.to_ascii_uppercase();
+        if self.valid_values_upper.iter().any(|v| v == &upper) {
+            Ok(())
+        } else {
+            Err(config_exception::new(
+                name,
+                value,
+                &format!("String must be one of (case insensitive): {}", self.valid_values.join(", ")),
+            ))
+        }
+    }
+
+    fn description(&self) -> String {
+        format!("(case insensitive) [{}]", self.valid_values.join(", "))
+    }
+}
+
+/// Validator that rejects empty strings. `null` (i.e. [`ConfigValue::Null`])
+/// is allowed by this validator — Java's check is `s != null && s.isEmpty()`,
+/// so callers must pair it with [`NonNullValidator`] when null must also
+/// be rejected. Mirrors `ConfigDef.NonEmptyString`.
+#[derive(Debug)]
+pub struct NonEmptyString;
+
+impl Validator for NonEmptyString {
+    fn ensure_valid(&self, name: &str, value: &ConfigValue) -> Result<(), KafkaError> {
+        match value {
+            ConfigValue::Null => Ok(()),
+            _ => {
+                let s = value.as_str().ok_or_else(|| {
+                    config_exception::new(name, value, "Value must be a string for NonEmptyString validator")
+                })?;
+                if s.is_empty() {
+                    Err(config_exception::new(name, value, "String must be non-empty"))
+                } else {
+                    Ok(())
+                }
+            },
+        }
+    }
+
+    fn description(&self) -> String {
+        "non-empty string".to_owned()
+    }
+}
+
+/// Validator for [`Type::List`] config values. Mirrors `ConfigDef.ValidList`.
+///
+/// Constructed via [`ValidList::any_non_duplicate_values`] (the producer's
+/// usage) which permits any string value but rejects duplicates and
+/// (optionally) emptiness/nullness.
+#[derive(Debug)]
+pub struct ValidList {
+    /// Allowed values; if empty, any string is permitted (Java's
+    /// `anyNonDuplicateValues`). When non-empty, each entry must match one
+    /// of these strings.
+    valid_strings: Vec<String>,
+    is_empty_allowed: bool,
+    is_null_allowed: bool,
+}
+
+impl ValidList {
+    /// `ConfigDef.ValidList.anyNonDuplicateValues(isEmptyAllowed,
+    /// isNullAllowed)`. Permits any string value; rejects duplicates and
+    /// (depending on the flags) empty / null lists.
+    pub fn any_non_duplicate_values(is_empty_allowed: bool, is_null_allowed: bool) -> Self {
+        ValidList { valid_strings: Vec::new(), is_empty_allowed, is_null_allowed }
+    }
+
+    /// `ConfigDef.ValidList.in(String...)` — only the given strings are
+    /// permitted. Java derives `isEmptyAllowed=true, isNullAllowed=false`.
+    pub fn in_set<I, S>(values: I) -> Self
+    where
+        I: IntoIterator<Item = S>,
+        S: Into<String>,
+    {
+        ValidList {
+            valid_strings: values.into_iter().map(Into::into).collect(),
+            is_empty_allowed: true,
+            is_null_allowed: false,
+        }
+    }
+}
+
+impl Validator for ValidList {
+    fn ensure_valid(&self, name: &str, value: &ConfigValue) -> Result<(), KafkaError> {
+        // Null handling matches Java: if `isNullAllowed`, return; else error.
+        if matches!(value, ConfigValue::Null) {
+            if self.is_null_allowed {
+                return Ok(());
+            }
+            return Err(config_exception::message(format!(
+                "Configuration '{name}' values must not be null."
+            )));
+        }
+        let list = value
+            .as_list()
+            .ok_or_else(|| config_exception::new(name, value, "Value must be a list for ValidList validator"))?;
+
+        if !self.is_empty_allowed && list.is_empty() {
+            let valid_str = if self.valid_strings.is_empty() {
+                "any non-empty value".to_owned()
+            } else {
+                format!("[{}]", self.valid_strings.join(", "))
+            };
+            return Err(config_exception::message(format!(
+                "Configuration '{name}' must not be empty. Valid values include: {valid_str}"
+            )));
+        }
+
+        // Duplicate detection mirrors Java's `Set.copyOf(values).size() !=
+        // values.size()` check.
+        let mut seen: std::collections::HashSet<&str> = std::collections::HashSet::with_capacity(list.len());
+        for v in list {
+            if !seen.insert(v.as_str()) {
+                return Err(config_exception::message(format!(
+                    "Configuration '{name}' values must not be duplicated."
+                )));
+            }
+        }
+
+        // Per-value checks: empty entries always rejected; if a fixed
+        // valid_strings set is present, each value must belong to it.
+        let has_valid_strings = !self.valid_strings.is_empty();
+        for entry in list {
+            if entry.is_empty() {
+                return Err(config_exception::message(format!(
+                    "Configuration '{name}' values must not be empty."
+                )));
+            }
+            if has_valid_strings && !self.valid_strings.iter().any(|v| v == entry) {
+                let single = ConfigValue::String(entry.clone());
+                return Err(config_exception::new(
+                    name,
+                    &single,
+                    &format!("String must be one of: {}", self.valid_strings.join(", ")),
+                ));
+            }
+        }
+        Ok(())
+    }
+
+    fn description(&self) -> String {
+        if self.valid_strings.is_empty() {
+            String::new()
+        } else {
+            format!("[{}]", self.valid_strings.join(", "))
+        }
+    }
+}
+
 /// A single configuration key. Mirrors `ConfigDef.ConfigKey`.
 pub struct ConfigKey {
     pub name: String,
@@ -696,5 +888,99 @@ mod tests {
             .define("a", Type::String, Some(ConfigValue::Null), Some(validator), Importance::Low, "")
             .unwrap_err();
         assert!(err.message().contains("entry must be non null"));
+    }
+
+    #[test]
+    fn case_insensitive_valid_string_accepts_any_case() {
+        let v = CaseInsensitiveValidString::in_set(["PLAINTEXT", "SSL"]);
+        v.ensure_valid("k", &ConfigValue::String("plaintext".into())).unwrap();
+        v.ensure_valid("k", &ConfigValue::String("Ssl".into())).unwrap();
+        v.ensure_valid("k", &ConfigValue::String("SSL".into())).unwrap();
+    }
+
+    #[test]
+    fn case_insensitive_valid_string_rejects_unknown_with_key_in_message() {
+        let v = CaseInsensitiveValidString::in_set(["PLAINTEXT", "SSL"]);
+        let err = v
+            .ensure_valid("security.protocol", &ConfigValue::String("abc".into()))
+            .unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("security.protocol"), "got: {msg}");
+        assert!(msg.contains("(case insensitive)"), "got: {msg}");
+    }
+
+    #[test]
+    fn case_insensitive_valid_string_rejects_null() {
+        let v = CaseInsensitiveValidString::in_set(["A", "B"]);
+        let err = v.ensure_valid("k", &ConfigValue::Null).unwrap_err();
+        assert!(err.message().contains("(case insensitive)"));
+    }
+
+    #[test]
+    fn non_empty_string_allows_null() {
+        // Java behaviour: NonEmptyString lets null pass — only empty strings
+        // are rejected. Pair with NonNullValidator to also reject null.
+        NonEmptyString.ensure_valid("k", &ConfigValue::Null).unwrap();
+    }
+
+    #[test]
+    fn non_empty_string_rejects_empty() {
+        let err = NonEmptyString
+            .ensure_valid("transactional.id", &ConfigValue::String(String::new()))
+            .unwrap_err();
+        assert!(err.message().contains("non-empty"));
+    }
+
+    #[test]
+    fn non_empty_string_accepts_non_empty() {
+        NonEmptyString.ensure_valid("k", &ConfigValue::String("foo".into())).unwrap();
+    }
+
+    #[test]
+    fn valid_list_any_rejects_duplicates() {
+        let v = ValidList::any_non_duplicate_values(true, false);
+        let value = ConfigValue::List(vec!["a".into(), "b".into(), "a".into()]);
+        let err = v.ensure_valid("interceptor.classes", &value).unwrap_err();
+        assert!(err.message().contains("must not be duplicated"));
+    }
+
+    #[test]
+    fn valid_list_any_accepts_unique() {
+        let v = ValidList::any_non_duplicate_values(true, false);
+        v.ensure_valid("k", &ConfigValue::List(vec!["a".into(), "b".into()])).unwrap();
+    }
+
+    #[test]
+    fn valid_list_rejects_empty_when_not_allowed() {
+        let v = ValidList::any_non_duplicate_values(false, false);
+        let err = v.ensure_valid("bootstrap.servers", &ConfigValue::List(vec![])).unwrap_err();
+        assert!(err.message().contains("must not be empty"));
+    }
+
+    #[test]
+    fn valid_list_accepts_empty_when_allowed() {
+        let v = ValidList::any_non_duplicate_values(true, false);
+        v.ensure_valid("k", &ConfigValue::List(vec![])).unwrap();
+    }
+
+    #[test]
+    fn valid_list_rejects_null_when_not_allowed() {
+        let v = ValidList::any_non_duplicate_values(true, false);
+        let err = v.ensure_valid("bootstrap.servers", &ConfigValue::Null).unwrap_err();
+        assert!(err.message().contains("must not be null"));
+    }
+
+    #[test]
+    fn valid_list_accepts_null_when_allowed() {
+        let v = ValidList::any_non_duplicate_values(true, true);
+        v.ensure_valid("k", &ConfigValue::Null).unwrap();
+    }
+
+    #[test]
+    fn valid_list_rejects_empty_entries() {
+        let v = ValidList::any_non_duplicate_values(true, false);
+        let value = ConfigValue::List(vec!["a".into(), String::new(), "b".into()]);
+        let err = v.ensure_valid("k", &value).unwrap_err();
+        assert!(err.message().contains("values must not be empty"));
     }
 }
