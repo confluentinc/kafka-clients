@@ -189,6 +189,11 @@ impl<K, V> ProducerRecord<K, V> {
     pub fn partition(&self) -> Option<i32> {
         self.partition
     }
+
+    /// Consume this record and return its parts.
+    pub fn into_parts(self) -> (String, Option<i32>, Option<i64>, RecordHeaders, Option<K>, Option<V>) {
+        (self.topic, self.partition, self.timestamp, self.headers, self.key, self.value)
+    }
 }
 
 impl<K: PartialEq, V: PartialEq> PartialEq for ProducerRecord<K, V> {
