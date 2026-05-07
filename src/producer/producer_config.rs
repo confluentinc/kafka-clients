@@ -1107,10 +1107,16 @@ impl ProducerConfig {
     // 5. maybeOverrideClientId
     //
     // Milestone-1 hard rejections (enable.idempotence=true,
-    // transactional.id=<set>) run *before* steps 4 & 5 so
-    // PRODUCER_CLIENT_ID_SEQUENCE doesn't burn an id on configurations
-    // we're about to reject. Step 1 is a no-op for non-SASL protocols
-    // (Milestone-1 enforces that via the `security.protocol` validator).
+    // transactional.id=<set>) run *between* steps 4 and 5. This
+    // ordering preserves Java's `testUpperboundCheckOfEnableIdempotence`
+    // error message exactly (the in-flight upper-bound check is part of
+    // step 4 and Java throws *before* the brief's Milestone-1 hard
+    // rejection runs). Step 5 is the only step that has externally
+    // visible side effects (PRODUCER_CLIENT_ID_SEQUENCE increment), so
+    // running rejections before it still keeps sequence ids from
+    // burning on rejected configurations. Step 1 is a no-op for
+    // non-SASL protocols (Milestone-1 enforces that via the
+    // `security.protocol` validator).
     // -------------------------------------------------------------
 
     fn post_process_parsed_config(&mut self) -> Result<(), KafkaError> {
@@ -1155,13 +1161,28 @@ impl ProducerConfig {
                 .insert(RECONNECT_BACKOFF_MAX_MS_CONFIG.to_owned(), ConfigValue::Long(base));
         }
 
-        // Milestone-1 hard rejections (run before steps 4 & 5 so
-        // PRODUCER_CLIENT_ID_SEQUENCE is not advanced for rejected
-        // configurations).
-        self.reject_milestone_1_unsupported()?;
+        // Milestone-1 hard rejection: transactional.id. This runs
+        // *before* step 4 because step 4 itself raises
+        // "Cannot set transactional.id without also enabling
+        // idempotence" (since Milestone-1 defaults idempotence to
+        // false), which would shadow the Milestone-1-specific
+        // message.
+        self.reject_milestone_1_transactional_id()?;
 
         // Step 4 — postProcessAndValidateIdempotenceConfigs.
+        // This *must* run before the Milestone-1 idempotence-rejection
+        // so that `testUpperboundCheckOfEnableIdempotence` (Java) sees
+        // the canonical error message verbatim. The Milestone-1
+        // rejection for `enable.idempotence=true` runs immediately
+        // after.
         self.post_process_and_validate_idempotence_configs()?;
+
+        // Milestone-1 hard rejection: enable.idempotence=true. Runs
+        // after step 4 (so the in-flight upperbound check fires first
+        // when the user combined `enable.idempotence=true` with a
+        // too-large `max.in.flight`) but before step 5 so
+        // PRODUCER_CLIENT_ID_SEQUENCE is not advanced.
+        self.reject_milestone_1_idempotence()?;
 
         // Step 5 — maybeOverrideClientId.
         self.maybe_override_client_id()?;
@@ -1169,22 +1190,35 @@ impl ProducerConfig {
         Ok(())
     }
 
-    fn reject_milestone_1_unsupported(&self) -> Result<(), KafkaError> {
-        // 1. enable.idempotence=true rejected.
-        if self.inner.get_boolean(ENABLE_IDEMPOTENCE_CONFIG)? {
-            return Err(KafkaError::Config(
-                "Idempotent producer is not supported in this milestone (Milestone-1). Set enable.idempotence=false. \
-                 See Milestone-1/PLAN.md."
-                    .to_owned(),
-            ));
-        }
-        // 2. transactional.id non-null/non-empty rejected.
+    /// Milestone-1 hard rejection for `transactional.id`. Runs before the
+    /// Java idempotence post-validation because that step raises a
+    /// different error ("Cannot set transactional.id without also
+    /// enabling idempotence") under our Milestone-1 default
+    /// (`enable.idempotence=false`), which would shadow the
+    /// Milestone-1-specific message users expect.
+    fn reject_milestone_1_transactional_id(&self) -> Result<(), KafkaError> {
         if let Some(raw) = self.inner.originals().get(TRANSACTIONAL_ID_CONFIG)
             && !raw.is_empty()
         {
             return Err(KafkaError::Config(
                 "Transactional producer is not supported in this milestone (Milestone-1). Unset transactional.id. See \
                  Milestone-1/PLAN.md."
+                    .to_owned(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Milestone-1 hard rejection for `enable.idempotence=true`. Runs
+    /// *after* the Java idempotence post-validation so that users who
+    /// pair `enable.idempotence=true` with a too-large
+    /// `max.in.flight.requests.per.connection` see Java's canonical
+    /// upper-bound error message before the Milestone-1 message.
+    fn reject_milestone_1_idempotence(&self) -> Result<(), KafkaError> {
+        if self.inner.get_boolean(ENABLE_IDEMPOTENCE_CONFIG)? {
+            return Err(KafkaError::Config(
+                "Idempotent producer is not supported in this milestone (Milestone-1). Set enable.idempotence=false. \
+                 See Milestone-1/PLAN.md."
                     .to_owned(),
             ));
         }
@@ -1454,5 +1488,336 @@ mod tests {
         let err = ProducerConfig::append_serializer_to_config(&configs, None, None).unwrap_err();
         assert!(matches!(err, KafkaError::Config(_)));
         assert!(err.message().contains(KEY_SERIALIZER_CLASS_CONFIG));
+    }
+
+    // =================================================================
+    // Translations of `org.apache.kafka.clients.producer.ProducerConfigTest`.
+    // The test names match the Java methods (camelCase → snake_case) so
+    // future review can grep across both codebases.
+    // =================================================================
+
+    const KEY_SERIALIZER_CLASS: &str = "org.apache.kafka.common.serialization.ByteArraySerializer";
+    const VALUE_SERIALIZER_CLASS: &str = "org.apache.kafka.common.serialization.StringSerializer";
+
+    /// Java: `testAppendSerializerToConfig`.
+    ///
+    /// Java passes Serializer instances; Rust passes the FQCN strings since
+    /// Rust does not perform reflective class loading.
+    #[test]
+    fn test_append_serializer_to_config() {
+        // Case 1: both serializer classes already in the map, no instances supplied.
+        let mut configs: HashMap<String, Option<String>> = HashMap::new();
+        configs.insert(KEY_SERIALIZER_CLASS_CONFIG.to_owned(), Some(KEY_SERIALIZER_CLASS.to_owned()));
+        configs.insert(
+            VALUE_SERIALIZER_CLASS_CONFIG.to_owned(),
+            Some(VALUE_SERIALIZER_CLASS.to_owned()),
+        );
+        let new_configs = ProducerConfig::append_serializer_to_config(&configs, None, None).unwrap();
+        assert_eq!(
+            new_configs.get(KEY_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(KEY_SERIALIZER_CLASS.to_owned()))
+        );
+        assert_eq!(
+            new_configs.get(VALUE_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(VALUE_SERIALIZER_CLASS.to_owned()))
+        );
+
+        // Case 2: only value class in map, key supplied as instance.
+        let mut configs: HashMap<String, Option<String>> = HashMap::new();
+        configs.insert(
+            VALUE_SERIALIZER_CLASS_CONFIG.to_owned(),
+            Some(VALUE_SERIALIZER_CLASS.to_owned()),
+        );
+        let new_configs =
+            ProducerConfig::append_serializer_to_config(&configs, Some(KEY_SERIALIZER_CLASS), None).unwrap();
+        assert_eq!(
+            new_configs.get(KEY_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(KEY_SERIALIZER_CLASS.to_owned()))
+        );
+        assert_eq!(
+            new_configs.get(VALUE_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(VALUE_SERIALIZER_CLASS.to_owned()))
+        );
+
+        // Case 3: only key class in map, value supplied as instance.
+        let mut configs: HashMap<String, Option<String>> = HashMap::new();
+        configs.insert(KEY_SERIALIZER_CLASS_CONFIG.to_owned(), Some(KEY_SERIALIZER_CLASS.to_owned()));
+        let new_configs =
+            ProducerConfig::append_serializer_to_config(&configs, None, Some(VALUE_SERIALIZER_CLASS)).unwrap();
+        assert_eq!(
+            new_configs.get(KEY_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(KEY_SERIALIZER_CLASS.to_owned()))
+        );
+        assert_eq!(
+            new_configs.get(VALUE_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(VALUE_SERIALIZER_CLASS.to_owned()))
+        );
+
+        // Case 4: empty map, both supplied as instances.
+        let configs: HashMap<String, Option<String>> = HashMap::new();
+        let new_configs = ProducerConfig::append_serializer_to_config(
+            &configs,
+            Some(KEY_SERIALIZER_CLASS),
+            Some(VALUE_SERIALIZER_CLASS),
+        )
+        .unwrap();
+        assert_eq!(
+            new_configs.get(KEY_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(KEY_SERIALIZER_CLASS.to_owned()))
+        );
+        assert_eq!(
+            new_configs.get(VALUE_SERIALIZER_CLASS_CONFIG),
+            Some(&Some(VALUE_SERIALIZER_CLASS.to_owned()))
+        );
+    }
+
+    /// Java: `testAppendSerializerToConfigWithException`.
+    #[test]
+    fn test_append_serializer_to_config_with_exception() {
+        // Case 1: key explicitly null in map, value class set, no key
+        // serializer supplied — must throw.
+        let mut configs: HashMap<String, Option<String>> = HashMap::new();
+        configs.insert(KEY_SERIALIZER_CLASS_CONFIG.to_owned(), None);
+        configs.insert(
+            VALUE_SERIALIZER_CLASS_CONFIG.to_owned(),
+            Some(VALUE_SERIALIZER_CLASS.to_owned()),
+        );
+        let err =
+            ProducerConfig::append_serializer_to_config(&configs, None, Some(VALUE_SERIALIZER_CLASS)).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+
+        // Case 2: value explicitly null in map, key class set, no value
+        // serializer supplied — must throw.
+        let mut configs: HashMap<String, Option<String>> = HashMap::new();
+        configs.insert(KEY_SERIALIZER_CLASS_CONFIG.to_owned(), Some(KEY_SERIALIZER_CLASS.to_owned()));
+        configs.insert(VALUE_SERIALIZER_CLASS_CONFIG.to_owned(), None);
+        let err = ProducerConfig::append_serializer_to_config(&configs, Some(KEY_SERIALIZER_CLASS), None).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+    }
+
+    /// Java: `testInvalidCompressionType`.
+    #[test]
+    fn test_invalid_compression_type() {
+        let mut props = minimal_props();
+        props.insert(COMPRESSION_TYPE_CONFIG.to_owned(), "abc".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains(COMPRESSION_TYPE_CONFIG));
+    }
+
+    /// Java: `testInvalidSecurityProtocol`.
+    #[test]
+    fn test_invalid_security_protocol() {
+        let mut props = minimal_props();
+        props.insert(common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(), "abc".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains(common_client_configs::SECURITY_PROTOCOL_CONFIG));
+    }
+
+    /// Java: `testDefaultMetadataRecoveryStrategy`.
+    #[test]
+    fn test_default_metadata_recovery_strategy() {
+        let cfg = ProducerConfig::new(minimal_props()).unwrap();
+        assert_eq!(
+            cfg.get_string(common_client_configs::METADATA_RECOVERY_STRATEGY_CONFIG)
+                .unwrap(),
+            MetadataRecoveryStrategy::Rebootstrap.name(),
+        );
+    }
+
+    /// Java: `testInvalidMetadataRecoveryStrategy`.
+    #[test]
+    fn test_invalid_metadata_recovery_strategy() {
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::METADATA_RECOVERY_STRATEGY_CONFIG.to_owned(),
+            "abc".to_owned(),
+        );
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains(common_client_configs::METADATA_RECOVERY_STRATEGY_CONFIG));
+    }
+
+    /// Java: `testCaseInsensitiveSecurityProtocol`.
+    ///
+    /// **Milestone-1 deviation**: Java uses `SASL_SSL.toLowerCase()` here.
+    /// SASL is rejected at the validator in Milestone-1 (Phase 9 will
+    /// re-enable). We substitute `Ssl` (mixed-case) to exercise the same
+    /// case-insensitive behaviour. See design/history/Milestone-1/PLAN.md.
+    #[test]
+    fn test_case_insensitive_security_protocol() {
+        let mixed_case = "Ssl";
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            mixed_case.to_owned(),
+        );
+        let cfg = ProducerConfig::new(props).unwrap();
+        // Originals preserve the user-supplied casing exactly (Java parity).
+        assert_eq!(
+            cfg.originals()
+                .get(common_client_configs::SECURITY_PROTOCOL_CONFIG)
+                .map(String::as_str),
+            Some(mixed_case),
+        );
+    }
+
+    /// Java: `testUpperboundCheckOfEnableIdempotence`.
+    ///
+    /// We exercise the message-content assertion using the path Java
+    /// reaches when the user explicitly opts into idempotence and pushes
+    /// `max.in.flight.requests.per.connection` beyond 5 — the validator
+    /// throws **before** the Milestone-1 `enable.idempotence=true`
+    /// rejection (the brief explicitly preserves this test).
+    #[test]
+    fn test_upperbound_check_of_enable_idempotence() {
+        let in_flight = "6";
+        let mut props = minimal_props();
+        props.insert(MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION.to_owned(), in_flight.to_owned());
+        props.insert(ENABLE_IDEMPOTENCE_CONFIG.to_owned(), "true".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        let expected_msg = format!(
+            "To use the idempotent producer, {MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION} must be set to at most 5. \
+             Current value is {in_flight}."
+        );
+        assert_eq!(err.message(), expected_msg);
+
+        // With max.in.flight=5 the test would normally pass. Milestone-1
+        // rejects `enable.idempotence=true` upstream, which is exercised
+        // by `test_idempotence_true_rejected_in_milestone_1`. Asserting
+        // that path here would be a duplicate.
+    }
+
+    // Java: `testTwoPhaseCommitIncompatibleWithTransactionTimeout`.
+    //
+    // SKIPPED for Milestone-1. The Java test sets
+    // `enable.idempotence=true` AND `transactional.id="test-txn-id"`
+    // both of which are rejected at construction in Milestone-1
+    // (idempotent + transactional producers are out of scope until
+    // Phases 8 & 9). Re-translating this test verbatim would only
+    // exercise the Milestone-1 rejection paths, not the
+    // 2pc/transaction-timeout mutual exclusion logic Java intends to
+    // exercise.
+    //
+    // TODO Phase 9: re-enable when transactional.id is permitted again.
+
+    /// Java: `testValidateConfigPropertiesFile`.
+    ///
+    /// Java reads `kafka/config/producer.properties` from disk via
+    /// `System.getProperty("user.dir")`. The Rust translation reads our
+    /// own copy at `tests/data/producer.properties` (with
+    /// `enable.idempotence=true` commented out — Milestone-1 deviation
+    /// documented in that file).
+    #[test]
+    fn test_validate_config_properties_file() {
+        let manifest = std::env::var("CARGO_MANIFEST_DIR").expect("CARGO_MANIFEST_DIR set by cargo");
+        let path = std::path::Path::new(&manifest).join("tests/data/producer.properties");
+        let contents = std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+        let mut props: HashMap<String, String> = HashMap::new();
+        for raw_line in contents.lines() {
+            let line = raw_line.trim();
+            if line.is_empty() || line.starts_with('#') || line.starts_with('!') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
+                props.insert(k.trim().to_owned(), v.trim().to_owned());
+            }
+        }
+        // Constructing must succeed (Milestone-1 deviations listed in
+        // tests/data/producer.properties).
+        let cfg = ProducerConfig::new(props).expect("producer.properties is valid");
+        // Every key in `originals` must be a known schema key.
+        let def = ProducerConfig::config_def();
+        for key in cfg.originals().keys() {
+            assert!(def.config_key(key).is_some(), "Invalid configuration key: {key}");
+        }
+    }
+
+    // ----- Milestone-1 hard rejections -----
+
+    /// Sets `enable.idempotence=true`; the constructor must reject with a
+    /// message that contains the literal `Milestone-1`.
+    #[test]
+    fn test_idempotence_true_rejected_in_milestone_1() {
+        let mut props = minimal_props();
+        props.insert(ENABLE_IDEMPOTENCE_CONFIG.to_owned(), "true".to_owned());
+        // Default `max.in.flight=5` lets the idempotence-validator pass;
+        // the Milestone-1 hard rejection runs *after* the validator.
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        let msg = err.message();
+        assert!(msg.contains("Milestone-1"), "got: {msg}");
+        assert!(msg.contains("enable.idempotence=false"), "got: {msg}");
+    }
+
+    /// Sets `transactional.id=foo`; the constructor must reject with a
+    /// message that contains the literal `Milestone-1`.
+    #[test]
+    fn test_transactional_id_rejected_in_milestone_1() {
+        let mut props = minimal_props();
+        props.insert(TRANSACTIONAL_ID_CONFIG.to_owned(), "foo".to_owned());
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        let msg = err.message();
+        assert!(msg.contains("Milestone-1"), "got: {msg}");
+        assert!(msg.contains("transactional.id"), "got: {msg}");
+    }
+
+    /// Sets `security.protocol=SASL_SSL`; the validator on the
+    /// `security.protocol` key (restricted to `{PLAINTEXT, SSL}` in
+    /// Milestone-1) must reject with a message that contains the literal
+    /// `security.protocol`.
+    #[test]
+    fn test_sasl_ssl_rejected_in_milestone_1() {
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            "SASL_SSL".to_owned(),
+        );
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains(common_client_configs::SECURITY_PROTOCOL_CONFIG));
+    }
+
+    // ----- Auxiliary tests for parseAcks (Java parseAcks line 653) -----
+
+    #[test]
+    fn parse_acks_translates_all_to_minus_one() {
+        assert_eq!(ProducerConfig::parse_acks("all").unwrap(), "-1");
+        assert_eq!(ProducerConfig::parse_acks("All").unwrap(), "-1");
+        assert_eq!(ProducerConfig::parse_acks("ALL").unwrap(), "-1");
+    }
+
+    #[test]
+    fn parse_acks_passes_numeric_through() {
+        assert_eq!(ProducerConfig::parse_acks("0").unwrap(), "0");
+        assert_eq!(ProducerConfig::parse_acks("1").unwrap(), "1");
+        assert_eq!(ProducerConfig::parse_acks("-1").unwrap(), "-1");
+    }
+
+    #[test]
+    fn parse_acks_rejects_garbage() {
+        let err = ProducerConfig::parse_acks("xyz").unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("acks"));
+    }
+
+    #[test]
+    fn maybe_override_client_id_uses_user_value_when_provided() {
+        let mut props = minimal_props();
+        props.insert(CLIENT_ID_CONFIG.to_owned(), "my-client".to_owned());
+        let cfg = ProducerConfig::new(props).unwrap();
+        assert_eq!(cfg.get_string(CLIENT_ID_CONFIG).unwrap(), "my-client");
+    }
+
+    #[test]
+    fn maybe_override_client_id_falls_back_to_sequence() {
+        let cfg = ProducerConfig::new(minimal_props()).unwrap();
+        let client_id = cfg.get_string(CLIENT_ID_CONFIG).unwrap();
+        assert!(
+            client_id.starts_with("producer-"),
+            "expected 'producer-<seq>' got '{client_id}'"
+        );
     }
 }
