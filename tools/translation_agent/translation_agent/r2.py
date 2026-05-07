@@ -25,6 +25,12 @@ from dataclasses import dataclass
 
 
 R2_BINARY = "r2"
+# Canonical prefix for every `r2 sandbox claude` invocation. `--model
+# opus` is pinned here (rather than at each call site) so a single edit
+# changes the model fleet-wide and call sites can't drift. Position
+# matters: it lands after `claude` (so `r2 sandbox` forwards it instead
+# of consuming it) and call sites append `-p <prompt>` after it.
+R2_CLAUDE_CMD_PREFIX = [R2_BINARY, "sandbox", "claude", "--model", "opus"]
 R2_NOT_INSTALLED_MSG = (
     "`r2` binary not found on PATH. The translation agent requires r2 to "
     "spawn sandboxed Claude Code instances. See README.md for installation."
@@ -54,7 +60,7 @@ def run_r2_claude(prompt: str, timeout: float | None = None) -> R2Result:
     """
     check_r2_available()
     proc = subprocess.run(
-        [R2_BINARY, "sandbox", "claude", "-p", prompt],
+        [*R2_CLAUDE_CMD_PREFIX, "-p", prompt],
         capture_output=True,
         text=True,
         timeout=timeout,

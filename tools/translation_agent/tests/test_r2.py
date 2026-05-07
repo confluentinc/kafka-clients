@@ -38,7 +38,7 @@ def test_run_r2_claude_invokes_subprocess():
          patch.object(r2.subprocess, "run", return_value=fake_completed) as mrun:
         result = r2.run_r2_claude("hello")
     mrun.assert_called_once_with(
-        ["r2", "sandbox", "claude", "-p", "hello"],
+        ["r2", "sandbox", "claude", "--model", "opus", "-p", "hello"],
         capture_output=True,
         text=True,
         timeout=None,
