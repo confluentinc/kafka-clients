@@ -49,7 +49,7 @@ use crate::common::config::abstract_config::AbstractConfig;
 use crate::common::config::config_def::{
     CaseInsensitiveValidString, ConfigDef, ConfigValue, Importance, NonEmptyString, Range, Type, ValidList, Validator,
 };
-use crate::common::config::{config_exception, sasl_configs, ssl_configs};
+use crate::common::config::config_exception;
 use crate::common::errors::KafkaError;
 use crate::common::record::CompressionType;
 use crate::common_client_configs;
@@ -389,9 +389,13 @@ fn build_config_def() -> ConfigDef {
         ]));
     let zero_or_more_i32: Arc<dyn Validator> = Arc::new(Range::at_least(0_i32));
     let zero_or_more_i64: Arc<dyn Validator> = Arc::new(Range::at_least(0_f64));
-    let zero_or_more_send_buffer: Arc<dyn Validator> =
+    // Java: `atLeast(CommonClientConfigs.SEND_BUFFER_LOWER_BOUND)` /
+    // `atLeast(CommonClientConfigs.RECEIVE_BUFFER_LOWER_BOUND)`. Both lower
+    // bounds are `-1` (Kafka semantics: "use OS default"), so these
+    // validators accept `>= -1`.
+    let at_least_send_buffer_lower_bound: Arc<dyn Validator> =
         Arc::new(Range::at_least(common_client_configs::SEND_BUFFER_LOWER_BOUND));
-    let zero_or_more_recv_buffer: Arc<dyn Validator> =
+    let at_least_recv_buffer_lower_bound: Arc<dyn Validator> =
         Arc::new(Range::at_least(common_client_configs::RECEIVE_BUFFER_LOWER_BOUND));
     let metadata_max_idle_validator: Arc<dyn Validator> = Arc::new(Range::at_least(5_000_f64));
     let one_or_more_i32: Arc<dyn Validator> = Arc::new(Range::at_least(1_i32));
@@ -572,7 +576,7 @@ fn build_config_def() -> ConfigDef {
         SEND_BUFFER_CONFIG,
         Type::Int,
         Some(ConfigValue::Int(128 * 1024)),
-        Some(zero_or_more_send_buffer),
+        Some(at_least_send_buffer_lower_bound),
         Importance::Medium,
         common_client_configs::SEND_BUFFER_DOC,
     )
@@ -581,7 +585,7 @@ fn build_config_def() -> ConfigDef {
         RECEIVE_BUFFER_CONFIG,
         Type::Int,
         Some(ConfigValue::Int(32 * 1024)),
-        Some(zero_or_more_recv_buffer),
+        Some(at_least_recv_buffer_lower_bound),
         Importance::Medium,
         common_client_configs::RECEIVE_BUFFER_DOC,
     )
@@ -1374,14 +1378,6 @@ impl ProducerConfig {
         Ok(())
     }
 }
-
-// `sasl_configs` and `ssl_configs` are imported above so that the
-// `with_client_*_support` calls in `build_config_def` resolve. Re-export
-// is intentionally not done here — callers depend on the canonical paths.
-#[allow(unused_imports)]
-use sasl_configs as _sasl_anchor;
-#[allow(unused_imports)]
-use ssl_configs as _ssl_anchor;
 
 #[cfg(test)]
 mod tests {
