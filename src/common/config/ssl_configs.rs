@@ -32,12 +32,12 @@ use crate::common::errors::KafkaError;
 
 pub const SSL_PROTOCOL_CONFIG: &str = "ssl.protocol";
 pub const SSL_PROTOCOL_DOC: &str = concat!(
-    "The SSL protocol used to generate the SSLContext. The default is 'TLSv1.3', which should be fine for most cases. ",
-    "Allowed values in recent JVMs are 'TLSv1.2' and 'TLSv1.3'. 'TLS', 'TLSv1.1', 'SSL', 'SSLv2' and 'SSLv3' ",
-    "may be supported in older JVMs, but their usage is discouraged due to known security vulnerabilities. ",
-    "With the default value for this config and 'ssl.enabled.protocols', clients will downgrade to 'TLSv1.2' if ",
-    "the server does not support 'TLSv1.3'. If this config is set to 'TLSv1.2', clients will not use 'TLSv1.3' even ",
-    "if it is one of the values in ssl.enabled.protocols and the server only supports 'TLSv1.3'.",
+    "The SSL protocol used to generate the SSLContext. The default is 'TLSv1.3', ",
+    "which should be fine for most use cases. A typical alternative to the default is 'TLSv1.2'. Allowed values for ",
+    "this config are dependent on the JVM. ",
+    "Clients using the defaults for this config and 'ssl.enabled.protocols' will downgrade to 'TLSv1.2' if ",
+    "the server does not support 'TLSv1.3'. If this config is set to 'TLSv1.2', however, clients will not use 'TLSv1.3' even ",
+    "if it is one of the values in <code>ssl.enabled.protocols</code> and the server only supports 'TLSv1.3'.",
 );
 pub const DEFAULT_SSL_PROTOCOL: &str = "TLSv1.3";
 
@@ -53,10 +53,12 @@ pub const SSL_CIPHER_SUITES_DOC: &str = concat!(
 
 pub const SSL_ENABLED_PROTOCOLS_CONFIG: &str = "ssl.enabled.protocols";
 pub const SSL_ENABLED_PROTOCOLS_DOC: &str = concat!(
-    "The list of protocols enabled for SSL connections. The default is 'TLSv1.2,TLSv1.3' when running with Java 11 or ",
-    "newer, 'TLSv1.2' otherwise. With the default value for Java 11, clients and servers will prefer TLSv1.3 if both ",
-    "support it and fallback to TLSv1.2 otherwise (assuming both support at least TLSv1.2). This default should be fine ",
-    "for most cases. Also see the config documentation for `ssl.protocol`.",
+    "The list of protocols enabled for SSL connections. ",
+    "The default is 'TLSv1.2,TLSv1.3'. This means that clients and servers will prefer TLSv1.3 if both support it ",
+    "and fallback to TLSv1.2 otherwise (assuming both support at least TLSv1.2). This default should be fine for most use ",
+    "cases. If this configuration is set to an empty list, Kafka will use the protocols enabled by default in the underlying SSLEngine, ",
+    "which may include additional protocols depending on the JVM version. ",
+    "Also see the config documentation for <code>ssl.protocol</code> to understand how it can impact the TLS version negotiation behavior.",
 );
 pub const DEFAULT_SSL_ENABLED_PROTOCOLS: &str = "TLSv1.2,TLSv1.3";
 
