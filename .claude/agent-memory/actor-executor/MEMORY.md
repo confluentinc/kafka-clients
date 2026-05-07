@@ -58,3 +58,4 @@
 - [Phase 7c Round 1 patterns](phase7c_round1_patterns.md) — log-vs-tracing translation, peek-handle-before-drop for Drop-side-effect tests, log_unused already exists in AbstractConfig
 - [Phase 7d send hot path](phase7d_send_path.md) — wait_on_metadata + partition + AppendCallbacksImpl + impl Producer; sender_wakeup deferred; double-fire interceptor fix on catch path
 - [Phase 7d Round 1 patterns](phase7d_round1_patterns.md) — Java exception class hierarchy contract for catch-arm fan-out, is_api_exception classifier, Phase deferral warn pattern, ownership-as-readonly rustdoc
+- [Phase 7e public surface](phase7e_public_surface.md) — partitioner.class factory, Mutex<Option<JoinHandle>> for idempotent close, inline initiate_close, DefaultMetadataUpdater Phase 8 deferral

@@ -180,3 +180,96 @@ Every other trait method (`init_transactions`, `flush`,
 sub-phase lands. This mirrors Java's "rejected at construction" stance
 for transactional methods and the "wait for the impl" stance for the
 non-transactional ones.
+
+## Phase 7e — landed (6 commits)
+
+After Phase 7e, `impl Producer for KafkaProducer` is complete for
+every non-transactional, non-telemetry method:
+
+| Method | Status |
+|--------|--------|
+| `send` / `send_with_callback` | wired (Phase 7d) |
+| `flush` | wired (Phase 7e) |
+| `partitions_for` | wired (Phase 7e) |
+| `metrics` | empty-map stub (Milestone-1 metric stub pattern) |
+| `close` / `close_with_timeout` | wired (Phase 7e) |
+| `init/begin/commit/abort_transaction` | `KafkaError::UnsupportedOperation` (Phase 9) |
+| `client_instance_id` | `KafkaError::UnsupportedOperation` (Milestone-1 telemetry stub) |
+
+### `partitioner.class` wired (commit 1/N)
+
+The Phase 7d `log::warn!` placeholder is removed. A new private
+`configure_partitioner` helper maps known class strings to translated
+partitioner instances:
+
+* `null` / unset / empty → built-in adaptive partitioner (`None`).
+* `org.apache.kafka.clients.producer.RoundRobinPartitioner` (Java FQCN)
+  AND `RoundRobinPartitioner` (simple-name alias) → `RoundRobinPartitioner`.
+* anything else → `KafkaError::Config(...)`.
+
+The simple-name alias is a Rust ergonomic add-on; the FQCN is kept for
+Java-config compatibility. Once Phase 8 lifts the public ctor the
+factory threads through unchanged.
+
+### `flush` / `partitions_for` / `metrics` (commits 2-3/N)
+
+* `flush` calls `accumulator.begin_flush()`, the Phase 7d `sender_wakeup`
+  no-op, and `accumulator.await_flush_completion().await`. The Java
+  "called inside callback" guard has no Tokio analogue — documented
+  in the rustdoc as a Phase 8 hazard (a user calling `flush().await`
+  from inside a `Callback` body would deadlock).
+* `partitions_for` calls `wait_on_metadata` and returns
+  `cluster.partitions_for_topic(topic).to_vec()`. Drops Java's
+  `Objects.requireNonNull(topic)` (`&str` cannot be null in Rust) and
+  the `InterruptedException` catch.
+* `metrics` returns an empty `ProducerMetrics` (= `HashMap<String, ()>`).
+  The proper translation of `MetricName` / `KafkaMetric` is deferred;
+  callers that inspect `is_empty()` / `len()` will keep compiling once
+  the proper type lands.
+
+### `close` (commit 4/N) — async, idempotent, bounded
+
+* `JoinHandle` storage flipped from `Option<JoinHandle<()>>` to
+  `Mutex<Option<JoinHandle<()>>>` so `&self async fn close` can
+  `take()` the handle for awaiting.
+* Idempotency via `Arc<AtomicBool> closed.swap(true, AcqRel)` — a
+  second call returns `Ok(())` immediately without touching the
+  JoinHandle.
+* Graceful path (timeout > 0): inline `Sender::initiate_close`
+  semantics from the producer side (the Sender was moved into
+  `tokio::spawn`; the producer no longer holds it). Then
+  `tokio::time::timeout(timeout, JoinHandle).await`.
+* Force-close path (timeout == 0): `force_close=true`,
+  `accumulator.close()`, `JoinHandle::abort()`, await the cancelled
+  handle so observers see the task fully terminated.
+* The `Utils.closeQuietly(serializers, partitioner, interceptors, ...)`
+  chain is a no-op in Milestone-1 (every plug-in has a no-op default
+  `close()`); will be added when a non-trivial impl lands.
+
+### `DefaultMetadataUpdater` deferred to Phase 8 (commit 5/N)
+
+Java's `DefaultMetadataUpdater` is a >300-LOC inner class on
+`NetworkClient`. It drives the metadata-negotiation request/response
+loop and pulls in `MetadataRequest` / `MetadataResponse` plumbing
+through the in-flight tracker. Translating in isolation would touch
+four other modules; better paired with Phase 8 broker-loopback testing.
+
+The public `KafkaProducer::new(props)` and `with_serializers(...)`
+constructors return `KafkaError::UnsupportedOperation` with a Phase 8
+marker. Unit tests use `KafkaProducer::new_for_test` (with a
+`ManualMetadataUpdater` or a stub mock client) — every Phase 7e
+trait-method test exercises the public surface end-to-end through
+this path.
+
+### Caveats for Phase 7f / Phase 8
+
+* `close` idempotency uses an `AtomicBool` flag. Java's
+  `testCloseIsIdempotent` (if it exists) might depend on a specific
+  exception when close is called twice — confirm Phase 7f sees the
+  same `Ok(())` shape rather than a Java-specific re-throw.
+* `flush()` from inside a `Callback` body deadlocks the runtime —
+  Phase 8 may add a `tokio::task::id()` guard once the spawned-task
+  comparator API stabilises.
+* `wait_on_metadata` still calls the no-op `sender_wakeup` (Phase 7d
+  deferred). Phase 8 should expose an `Arc<dyn Fn() + Send + Sync>`
+  wake handle from the Sender at construction time.
