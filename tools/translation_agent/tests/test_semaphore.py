@@ -34,3 +34,58 @@ def test_push_invokes_subprocess():
         ["artifact", "push", "project", "/tmp/db.sqlite", "--force"],
         check=True,
     )
+
+
+def test_push_no_force_raises_when_artifact_binary_missing():
+    with patch.object(semaphore.shutil, "which", return_value=None):
+        with pytest.raises(FileNotFoundError, match="`artifact` binary"):
+            semaphore.push_project_artifact_no_force("lk", "/tmp/lock")
+
+
+def test_push_no_force_invokes_subprocess_without_force_flag():
+    with patch.object(
+        semaphore.shutil, "which", return_value="/usr/local/bin/artifact"
+    ), patch.object(semaphore.subprocess, "run") as mrun:
+        semaphore.push_project_artifact_no_force("lk", "/tmp/lock")
+    mrun.assert_called_once_with(
+        ["artifact", "push", "project", "/tmp/lock"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_pull_raises_when_artifact_binary_missing():
+    with patch.object(semaphore.shutil, "which", return_value=None):
+        with pytest.raises(FileNotFoundError, match="`artifact` binary"):
+            semaphore.pull_project_artifact("td", "/tmp")
+
+
+def test_pull_invokes_subprocess():
+    with patch.object(
+        semaphore.shutil, "which", return_value="/usr/local/bin/artifact"
+    ), patch.object(semaphore.subprocess, "run") as mrun:
+        semaphore.pull_project_artifact("td", "/tmp")
+    mrun.assert_called_once_with(
+        ["artifact", "pull", "project", "td",
+         "--destination", "/tmp", "--force"],
+        check=True,
+        capture_output=True,
+    )
+
+
+def test_yank_raises_when_artifact_binary_missing():
+    with patch.object(semaphore.shutil, "which", return_value=None):
+        with pytest.raises(FileNotFoundError, match="`artifact` binary"):
+            semaphore.yank_project_artifact("lk")
+
+
+def test_yank_invokes_subprocess():
+    with patch.object(
+        semaphore.shutil, "which", return_value="/usr/local/bin/artifact"
+    ), patch.object(semaphore.subprocess, "run") as mrun:
+        semaphore.yank_project_artifact("lk")
+    mrun.assert_called_once_with(
+        ["artifact", "yank", "project", "lk"],
+        check=True,
+        capture_output=True,
+    )
