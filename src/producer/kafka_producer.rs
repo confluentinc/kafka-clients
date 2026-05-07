@@ -77,20 +77,26 @@ use log::warn;
 use tokio::task::JoinHandle;
 
 use crate::KafkaClient;
+use crate::common::cluster::Cluster;
 use crate::common::compress::{Compression, NoCompression, SnappyCompression};
 use crate::common::errors::KafkaError;
 use crate::common::record::CompressionType;
 use crate::common::serialization::Serializer;
+use crate::common::topic_partition::TopicPartition;
 use crate::common::utils::log_context::LogContext;
 use crate::common::utils::system_time::SystemTime;
 use crate::common::utils::time::Time;
+use crate::producer::callback::Callback;
+use crate::producer::internals::built_in_partitioner;
 use crate::producer::internals::producer_interceptors::ProducerInterceptors;
 use crate::producer::internals::producer_metadata::ProducerMetadata;
-use crate::producer::internals::record_accumulator::RecordAccumulator;
+use crate::producer::internals::record_accumulator::{AppendCallbacks, RecordAccumulator};
 use crate::producer::internals::sender::Sender;
 use crate::producer::internals::transaction_manager::TransactionManager;
 use crate::producer::partitioner::Partitioner;
 use crate::producer::producer_config::{self, ProducerConfig};
+use crate::producer::producer_record::ProducerRecord;
+use crate::producer::record_metadata::RecordMetadata;
 
 /// Java's `KafkaProducer.JMX_PREFIX`.
 pub const JMX_PREFIX: &str = "kafka.producer";
@@ -709,6 +715,200 @@ where
     /// Documented in `design/history/Milestone-1/Phase-7/NOTES.md`.
     fn sender_wakeup(&self) {
         // Intentional no-op — see method docstring.
+    }
+}
+
+// =====================================================================
+// `partition` — Java `KafkaProducer.java:1476`
+// =====================================================================
+
+impl<K: 'static, V: 'static, C: KafkaClient + 'static> KafkaProducer<K, V, C>
+where
+    K: Send,
+    V: Send,
+{
+    /// Compute the partition for the given record. Mirrors Java's
+    /// private `partition(record, serializedKey, serializedValue, cluster)`
+    /// at `KafkaProducer.java:1476`.
+    ///
+    /// Lookup order:
+    ///
+    /// 1. `record.partition()` — caller-specified, returned as-is;
+    /// 2. user-configured [`Partitioner`] — invoked for the topic and
+    ///    bytes; rejected with [`KafkaError::IllegalArgument`] if it
+    ///    returns a negative number;
+    /// 3. `serialized_key` present and `partitioner.ignore.keys=false` —
+    ///    hash via [`built_in_partitioner::partition_for_key`];
+    /// 4. otherwise — return [`RecordMetadata::UNKNOWN_PARTITION`] so the
+    ///    accumulator's built-in adaptive partitioner picks one.
+    fn partition(
+        &self,
+        record: &ProducerRecord<K, V>,
+        serialized_key: Option<&[u8]>,
+        serialized_value: Option<&[u8]>,
+        cluster: &Cluster,
+    ) -> Result<i32, KafkaError> {
+        // Java line 1477-1478: explicit partition wins.
+        if let Some(p) = record.partition() {
+            return Ok(p);
+        }
+
+        // Java line 1480-1488: user-configured partitioner.
+        if let Some(partitioner) = self.partitioner.as_ref() {
+            // Java passes `record.key()` / `record.value()` as
+            // `Object`. Rust's [`Partitioner::partition`] takes
+            // `Option<&dyn Any>` for the same purpose. The trait method
+            // requires `K: 'static` / `V: 'static` to safely upcast to
+            // `&dyn Any`; we already constrain that on the impl.
+            let key_any: Option<&dyn std::any::Any> = record.key().map(|k| k as &dyn std::any::Any);
+            let value_any: Option<&dyn std::any::Any> = record.value().map(|v| v as &dyn std::any::Any);
+            let custom =
+                partitioner.partition(record.topic(), key_any, serialized_key, value_any, serialized_value, cluster);
+            if custom < 0 {
+                return Err(KafkaError::IllegalArgument(format!(
+                    "The partitioner generated an invalid partition number: {custom}. \
+                     Partition number should always be non-negative."
+                )));
+            }
+            return Ok(custom);
+        }
+
+        // Java line 1490-1495: hash by key OR signal UNKNOWN_PARTITION.
+        if let Some(key) = serialized_key
+            && !self.partitioner_ignore_keys
+        {
+            let num_partitions = cluster.partitions_for_topic(record.topic()).len() as i32;
+            return Ok(built_in_partitioner::partition_for_key(key, num_partitions));
+        }
+        Ok(RecordMetadata::UNKNOWN_PARTITION)
+    }
+}
+
+// =====================================================================
+// `AppendCallbacks` — Java `KafkaProducer.java:1568` inner class
+// =====================================================================
+
+/// Internal callbacks passed to [`RecordAccumulator::append`]. Mirrors
+/// Java's private inner class
+/// `KafkaProducer.AppendCallbacks implements RecordAccumulator.AppendCallbacks`.
+///
+/// Responsibilities:
+///
+/// * call [`ProducerInterceptors::on_acknowledgement`] on completion;
+/// * forward to the user-supplied [`Callback`], if any;
+/// * record the resolved partition once the accumulator picks one
+///   (Java's `setPartition`); the producer reads back the
+///   `topic_partition()` to compute the final
+///   [`RecordMetadata`] used in error paths.
+///
+/// Java holds `topic` / `recordPartition` / `headers` extracted from the
+/// record so the closure does not pin a reference to the user's
+/// `ProducerRecord` for the batch's lifetime. We mirror this — the
+/// struct stores the topic and original partition (if any) but does not
+/// hold the record itself.
+struct AppendCallbacksImpl<K, V> {
+    user_callback: Option<Box<dyn Callback>>,
+    interceptors: Arc<ProducerInterceptors<K, V>>,
+    topic: Arc<str>,
+    record_partition: Option<i32>,
+    headers: crate::common::header::RecordHeaders,
+    // Java: `private volatile int partition = RecordMetadata.UNKNOWN_PARTITION;`
+    // We use an atomic so `set_partition` (called from the accumulator
+    // task) and `topic_partition()` (called from the sender task) can
+    // race safely.
+    partition: std::sync::atomic::AtomicI32,
+    // Java: `private volatile TopicPartition topicPartition;` lazily
+    // computed in `topicPartition()`. Rust's `OnceLock` mirrors the
+    // semantics with a one-shot publish.
+    topic_partition: std::sync::OnceLock<TopicPartition>,
+}
+
+impl<K, V> AppendCallbacksImpl<K, V> {
+    fn new(
+        user_callback: Option<Box<dyn Callback>>,
+        interceptors: Arc<ProducerInterceptors<K, V>>,
+        record: &ProducerRecord<K, V>,
+    ) -> Self {
+        Self {
+            user_callback,
+            interceptors,
+            topic: Arc::clone(record.topic_arc()),
+            record_partition: record.partition(),
+            headers: record.headers().clone(),
+            partition: std::sync::atomic::AtomicI32::new(RecordMetadata::UNKNOWN_PARTITION),
+            topic_partition: std::sync::OnceLock::new(),
+        }
+    }
+
+    /// Mirrors Java's `topicPartition()` (line 1620). Lazily resolves
+    /// the topic-partition from the most-specific partition known
+    /// (`set_partition` > `record_partition` > `UNKNOWN_PARTITION`).
+    fn topic_partition(&self) -> TopicPartition {
+        if let Some(tp) = self.topic_partition.get() {
+            return tp.clone();
+        }
+        let p = self.partition.load(std::sync::atomic::Ordering::Acquire);
+        let resolved = if p != RecordMetadata::UNKNOWN_PARTITION {
+            p
+        } else {
+            self.record_partition.unwrap_or(RecordMetadata::UNKNOWN_PARTITION)
+        };
+        let tp = TopicPartition::new(Arc::clone(&self.topic), resolved);
+        // OnceLock::set may race; either winner publishes the same
+        // logical value (the partition is monotone — once set by the
+        // accumulator it does not change), so we ignore the Err.
+        let _ = self.topic_partition.set(tp.clone());
+        tp
+    }
+
+    /// Mirrors Java's `getPartition()` accessor (line 1616).
+    #[allow(dead_code)] // Used by Phase 7d's do_send via topic_partition()
+    fn get_partition(&self) -> i32 {
+        self.partition.load(std::sync::atomic::Ordering::Acquire)
+    }
+}
+
+impl<K: Send + Sync + 'static, V: Send + Sync + 'static> Callback for AppendCallbacksImpl<K, V> {
+    /// Java's `onCompletion(metadata, exception)` (line 1596).
+    ///
+    /// Java synthesises a `RecordMetadata` with `-1` placeholders when
+    /// the accumulator passes `null`; the Rust translation honours the
+    /// trait's `Option<&RecordMetadata>` shape — `None` propagates to
+    /// interceptors and the user callback so they can distinguish "no
+    /// metadata available" from "metadata says offset=-1".
+    fn on_completion(&self, metadata: Option<&RecordMetadata>, error: Option<&KafkaError>) {
+        // Java: synthesise a placeholder when metadata is null.
+        let synthesised: Option<RecordMetadata> = match metadata {
+            Some(_) => None,
+            None => {
+                let tp = self.topic_partition();
+                Some(RecordMetadata::new(
+                    tp,
+                    -1,
+                    -1,
+                    crate::common::record::record_batch::NO_TIMESTAMP,
+                    -1,
+                    -1,
+                ))
+            },
+        };
+        let metadata_ref: Option<&RecordMetadata> = metadata.or(synthesised.as_ref());
+        // Java line 1600: interceptors fire first.
+        self.interceptors.on_acknowledgement(metadata_ref, error, &self.headers);
+        // Java line 1601-1602: user callback fires after interceptors.
+        if let Some(user_cb) = &self.user_callback {
+            user_cb.on_completion(metadata_ref, error);
+        }
+    }
+}
+
+impl<K: Send + Sync + 'static, V: Send + Sync + 'static> AppendCallbacks for AppendCallbacksImpl<K, V> {
+    /// Java's `setPartition(int)` (line 1606). The accumulator calls
+    /// this once per record after picking the effective partition.
+    fn set_partition(&self, partition: i32) {
+        debug_assert_ne!(partition, RecordMetadata::UNKNOWN_PARTITION);
+        self.partition.store(partition, std::sync::atomic::Ordering::Release);
+        log::trace!("Attempting to append record to topic {} partition {}", self.topic, partition,);
     }
 }
 
