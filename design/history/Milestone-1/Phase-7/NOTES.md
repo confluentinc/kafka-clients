@@ -103,3 +103,42 @@ When Phase 7d adds `impl Producer for KafkaProducer`:
 - The local `StubKafkaClient` test mock is intentionally minimal —
   Phase 7f's `KafkaProducerTest` translation may need to extend it or
   switch to `sender::tests::MockClientImpl` (currently `pub(super)`).
+
+## Phase 7d — landed
+
+### `sender.wakeup()` is currently a no-op on the producer
+
+Java's `KafkaProducer.waitOnMetadata` (`KafkaProducer.java:1129`) calls
+`sender.wakeup()` between `metadata.requestUpdateForTopic(topic)` and
+`metadata.awaitUpdate(version, remainingWaitMs)`. The Rust translation
+spawns the Sender into a `tokio::spawn` task at construction time and
+moves the [`KafkaClient`] into the task, so the producer no longer
+owns a reference it can call `client.wakeup()` on.
+
+**Impact:** A missed wake-up does NOT hang the producer — the Sender's
+`run_once` re-fetches the metadata snapshot on every iteration and the
+`await_update` deadline is bounded by `max.block.ms`. The worst-case
+latency penalty is one Sender tick (`linger.ms + request.timeout.ms`).
+
+**Resolution path** (deferred to a follow-up): expose an
+`Arc<dyn Fn() + Send + Sync>` wake handle from the Sender at
+construction time (captured pre-spawn from the underlying
+`KafkaClient::wakeup` if the client is `Arc`-wrapped, or via a
+`tokio::sync::Notify` driven into the run loop via a `select!` arm).
+
+### `partitioner: Option<Arc<dyn Partitioner>>` still always `None`
+
+The Java `partition.class` reflective instantiation has no Rust
+analogue and Phase 7d does not yet add a builder API to inject one.
+The accumulator's built-in adaptive partitioner handles every code
+path Phase 7d needs; custom partitioners land with the public-ctor
+builder in Phase 7e/8.
+
+### `Producer` trait methods covered: `send` and `send_with_callback`
+
+Every other trait method (`init_transactions`, `flush`,
+`partitions_for`, `close`, …) returns
+`KafkaError::UnsupportedOperation("…Phase 7e")` until the matching
+sub-phase lands. This mirrors Java's "rejected at construction" stance
+for transactional methods and the "wait for the impl" stance for the
+non-transactional ones.

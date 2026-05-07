@@ -541,6 +541,178 @@ where
 }
 
 // =====================================================================
+// `waitOnMetadata` — Java `KafkaProducer.java:1100`
+// =====================================================================
+
+/// Output of [`KafkaProducer::wait_on_metadata`]. Mirrors Java's
+/// private `KafkaProducer.ClusterAndWaitTime` (line 1518).
+pub(crate) struct ClusterAndWaitTime {
+    /// The cluster snapshot at the time the wait completed — the same
+    /// snapshot used by the caller for partitioning and append.
+    pub(crate) cluster: Arc<crate::common::cluster::Cluster>,
+    /// Milliseconds spent waiting for metadata.
+    pub(crate) waited_on_metadata_ms: i64,
+}
+
+impl<K, V, C: KafkaClient + 'static> KafkaProducer<K, V, C>
+where
+    K: Send + 'static,
+    V: Send + 'static,
+{
+    /// Wait for cluster metadata including partitions for the given topic
+    /// to be available.
+    ///
+    /// Mirrors Java's private
+    /// `waitOnMetadata(String topic, Integer partition, long nowMs, long maxWaitMs)`
+    /// at `KafkaProducer.java:1100`.
+    ///
+    /// Java blocks on `metadata.awaitUpdate(version, remainingWaitMs)`
+    /// inside `Object.wait` (synchronized on the producer-metadata
+    /// monitor). Per CLAUDE.md rule 9.1 the Rust translation is
+    /// `async fn` and awaits [`ProducerMetadata::await_update`].
+    ///
+    /// Returns the cluster snapshot containing the topic's metadata plus
+    /// the time waited in milliseconds. Returns
+    /// [`KafkaError::InvalidTopic`] if the topic is in `cluster.invalid_topics()`,
+    /// [`KafkaError::Timeout`] if the deadline elapses without metadata
+    /// becoming available, or whatever fatal error has been set on the
+    /// metadata instance.
+    pub(crate) async fn wait_on_metadata(
+        &self,
+        topic: &str,
+        partition: Option<i32>,
+        now_ms: i64,
+        max_wait_ms: i64,
+    ) -> Result<ClusterAndWaitTime, KafkaError> {
+        // Java line 1101: `Cluster cluster = metadata.fetch();`
+        let mut cluster = self.metadata.metadata().fetch();
+
+        // Java line 1103-1104: invalid-topic short-circuit.
+        if cluster.invalid_topics().any(|t| t == topic) {
+            return Err(KafkaError::InvalidTopic(topic.to_owned()));
+        }
+
+        // Java line 1107: `metadata.add(topic, nowMs)`.
+        self.metadata.add(topic, now_ms);
+
+        let mut partitions_count: Option<usize> = cluster.partition_count_for_topic(topic);
+        // Java line 1112: cached metadata short-circuit.
+        if let Some(count) = partitions_count
+            && partition.is_none_or(|p| (p as usize) < count)
+        {
+            return Ok(ClusterAndWaitTime { cluster, waited_on_metadata_ms: 0 });
+        }
+
+        // Java line 1115-1117: enter the wait loop.
+        let mut remaining_wait_ms = max_wait_ms;
+        let mut elapsed: i64 = 0;
+        loop {
+            // Java line 1122-1126: trace-log the request.
+            match partition {
+                Some(p) => log::trace!("Requesting metadata update for partition {p} of topic {topic}."),
+                None => log::trace!("Requesting metadata update for topic {topic}."),
+            }
+            // Java line 1127: re-add the topic so its expiry is reset.
+            self.metadata.add(topic, now_ms.saturating_add(elapsed));
+            // Java line 1128: bump the request version for the topic.
+            let version = self.metadata.request_update_for_topic(topic);
+            // Java line 1129: wake the sender so the metadata request
+            // gets dispatched promptly.
+            self.sender_wakeup();
+            // Java line 1131: await the next metadata version.
+            let await_result = self.metadata.await_update(version, remaining_wait_ms).await;
+            if let Err(err) = await_result {
+                // Java line 1132-1138: rethrow timeouts with a topic-
+                // friendly error message; all other errors propagate
+                // unchanged.
+                if matches!(err, KafkaError::Timeout(_)) {
+                    return Err(self.metadata_timeout_error(partitions_count, topic, partition, max_wait_ms));
+                }
+                // Java's "Producer closed while send in progress" mapping
+                // happens at the caller (`do_send`); here we surface the
+                // raw error and let the caller wrap it.
+                return Err(err);
+            }
+            cluster = self.metadata.metadata().fetch();
+            elapsed = self.time.milliseconds().saturating_sub(now_ms);
+            // Java line 1142-1148: deadline exceeded.
+            if elapsed >= max_wait_ms {
+                return Err(self.metadata_timeout_error(partitions_count, topic, partition, max_wait_ms));
+            }
+            // Java line 1149: propagate any topic-specific error
+            // (`InvalidTopicException`, `TopicAuthorizationException`,
+            // ...) recorded on the latest metadata response.
+            self.metadata.metadata().maybe_throw_error_for_topic(topic)?;
+            remaining_wait_ms = max_wait_ms - elapsed;
+            partitions_count = cluster.partition_count_for_topic(topic);
+            // Java line 1152: exit when partition count is known and
+            // covers the requested partition.
+            if let Some(count) = partitions_count
+                && partition.is_none_or(|p| (p as usize) < count)
+            {
+                break;
+            }
+        }
+
+        Ok(ClusterAndWaitTime { cluster, waited_on_metadata_ms: elapsed })
+    }
+
+    /// Build the Java-equivalent timeout error message at
+    /// `KafkaProducer.java:1159`.
+    fn metadata_timeout_error(
+        &self,
+        partitions_count: Option<usize>,
+        topic: &str,
+        partition: Option<i32>,
+        max_wait_ms: i64,
+    ) -> KafkaError {
+        let msg = match partitions_count {
+            None => format!("Topic {topic} not present in metadata after {max_wait_ms} ms."),
+            Some(count) => format!(
+                "Partition {} of topic {topic} with partition count {count} is not present in metadata after {max_wait_ms} ms.",
+                partition.unwrap_or(-1),
+            ),
+        };
+        // Java propagates the underlying retriable exception's cause when
+        // present; Rust's `KafkaError::Timeout` carries the message only.
+        // The cause-chain is preserved in spirit by surfacing fatal errors
+        // separately via `maybe_throw_error_for_topic`.
+        KafkaError::Timeout(msg)
+    }
+
+    /// Internal helper that mirrors Java's `sender.wakeup()` from
+    /// `KafkaProducer.java:1129` (called from inside the wait-loop in
+    /// `waitOnMetadata`).
+    ///
+    /// **Phase 7d behaviour: no-op.** The Sender owns its
+    /// [`KafkaClient`] by value and is moved into a `tokio::spawn` task
+    /// at construction time, so the producer no longer holds a reference
+    /// it could call `client.wakeup()` on. Adding a wake handle would
+    /// require either:
+    ///
+    /// 1. an `Arc<dyn Fn() + Send + Sync>` extracted from the client
+    ///    pre-spawn (only viable if the `wakeup` call is `'static` — i.e.
+    ///    the client is itself an `Arc<…>` field), or
+    /// 2. a `tokio::sync::Notify` plus a `select!` arm in the Sender's
+    ///    `run_loop` (invasive — Phase 6e's loop is `poll` + `handle`,
+    ///    no async wake point).
+    ///
+    /// Both are deferred to a follow-up. The wake-up is a **latency
+    /// optimisation**, not a correctness requirement: the Sender's
+    /// `run_once` re-fetches the metadata snapshot on every iteration,
+    /// requests metadata refreshes for unknown-leader topics, and the
+    /// await-timeout in [`Self::wait_on_metadata`] is bounded by
+    /// `max.block.ms`. A missed wake-up degrades first-send latency by
+    /// at most one Sender tick (`linger.ms` + `request.timeout.ms`), it
+    /// never hangs.
+    ///
+    /// Documented in `design/history/Milestone-1/Phase-7/NOTES.md`.
+    fn sender_wakeup(&self) {
+        // Intentional no-op — see method docstring.
+    }
+}
+
+// =====================================================================
 // Drop / shutdown
 // =====================================================================
 
