@@ -887,3 +887,258 @@ longer a near-duplicate of the simple-name test. Rustdoc rewritten
 to accurately describe what the test does and how it differs from
 its siblings. End-to-end distribution behaviour remains pinned by
 `partitioner_class_round_robin_distributes_across_partitions`.
+
+---
+
+# Round 1 — Phase 7f review (resolved)
+
+Review window: commits `11c83cb` (MockClientImpl visibility hoist),
+`c5109d0` (KafkaProducerTest non-tx/non-metrics/non-telemetry
+translations), `d980c9a` (agent-memory) on branch `fresh-impl`.
+
+Java reference: `kafka/clients/src/test/java/org/apache/kafka/clients/producer/KafkaProducerTest.java`
+(2952 LOC, 82 annotated test methods — `@Test` + `@ParameterizedTest`).
+
+## Scope
+
+- 24 Java tests translated + 1 cross-reference sentinel
+  (`test_interceptor_partition_set_on_too_large_record_already_translated`).
+- 56 Java tests skipped, with rationale.
+- 1 production fix: `KafkaProducer::close_inner` calls
+  `self.metadata.close()` in both arms (graceful + force-close).
+- Test count 1176 → 1201 (+25). Lint, format-check clean.
+
+## Verdict: **accepted with 4 Suggestions; no Blocking issues.**
+
+Phase 7 overall is **ready to close** once the suggestions are
+either fixed or explicitly archived as "deferred / acknowledged".
+
+## Issue: Skip-block missing one Java @Test (`closeShouldBeIdempotent`)
+
+- **File**: `src/producer/kafka_producer.rs`
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducerTest.java:1156` (`closeShouldBeIdempotent`)
+- **Description**: I enumerated the 82 annotated Java test methods,
+  cross-referenced against the 25 translated + 56 skipped lines.
+  All but one accounted for. `closeShouldBeIdempotent` (Java line 1156)
+  is *already* covered by Phase 7e's `close_is_idempotent`
+  (`kafka_producer.rs:3074`), but the Phase 7f skip block does not
+  cite it, so the actor's claim "every Java @Test is accounted for in
+  either a translation above or one of these skip lines" is one short.
+- **Expected**: Add one line to the skip block (or use the same
+  cross-reference sentinel pattern as
+  `test_interceptor_partition_set_on_too_large_record_already_translated`)
+  so the audit trail closes cleanly:
+  `closeShouldBeIdempotent (line 1156) — already covered by close_is_idempotent (Phase 7e)`.
+- **Actual**: The skip block jumps from `closeWithNegativeTimestampShouldThrow`
+  (line 1164) to nothing for line 1156. Reviewers walking the skip
+  block top-to-bottom will not find this entry.
+
+**Disposition**: Fixed in commit `3253e76` (fixup! c5109d0).
+Added a new "SKIP — already covered by Phase 7e" sub-heading to the
+skip block in the `kafka_producer.rs` test module:
+
+```
+// SKIP — already covered by Phase 7e:
+//  * closeShouldBeIdempotent (line 1156) — COVERED by Phase 7e
+//    `close_is_idempotent` — not duplicated here.
+```
+
+The audit trail now closes cleanly: the 82 annotated Java tests are
+fully accounted for via 25 translations + 1 cross-reference sentinel
++ 56 explicit skip entries.
+
+## Issue: `metadata.close()` Phase 8 carry-over not in NOTES.md
+
+- **File**: `design/history/Milestone-1/Phase-7/NOTES.md`
+- **Severity**: Suggestion
+- **Java Reference**: `Sender.java:298` → `NetworkClient.java:1325-1326`
+  (Java's `client.close()` → `DefaultMetadataUpdater.close()` →
+  `metadata.close()` chain)
+- **Description**: The actor's commit message and source-comment
+  rustdoc for the new `self.metadata.close()` calls
+  (`kafka_producer.rs:1213` and `:1286`) explicitly mark this as a
+  Phase 8 carry-over: "Phase 8 will move this call back into the
+  equivalent `client.close()` path once `DefaultMetadataUpdater` is
+  translated." But NOTES.md has no new Phase 7f section that
+  consolidates this carry-over alongside the existing Phase 7e ones.
+  Phase 8 reviewers reading only NOTES.md will not see the
+  obligation; they have to grep the source comments.
+- **Expected**: Add a "Phase 7f — landed" section to NOTES.md with at
+  minimum one sub-bullet:
+  `metadata.close() inlined in close_inner; move back into client.close() chain once DefaultMetadataUpdater lands (Phase 8)`.
+- **Actual**: NOTES.md ends at "Phase 7e Round 1 carry-overs" with no
+  Phase 7f section. The other claimed Phase 8 carry-overs
+  (closeQuietly chain, partitioner reflective, metric/interceptor
+  reflective) are visible in the existing Phase 7d/7e blocks; only
+  the new metadata.close() one is not consolidated.
+
+**Disposition**: Fixed in commit `3253e76` (fixup! c5109d0).
+Added a "Phase 7f — landed (3 commits)" section to
+`design/history/Milestone-1/Phase-7/NOTES.md` summarising both
+landed commits (`11c83cb` MockClientImpl hoist, `c5109d0` test
+translation + `metadata.close()` production fix) and listing two
+explicit Phase 7f → Phase 8 carry-overs:
+
+1. The `metadata.close()` ordering: move the call back into the
+   `client.close() → DefaultMetadataUpdater.close() → metadata.close()`
+   chain when `DefaultMetadataUpdater` is translated, and remove the
+   explicit `metadata.close()` calls from `KafkaProducer::close_inner`.
+2. The 50-record flush-test fidelity rewrite (Suggestion #4) is also
+   consolidated in the same block.
+
+## Issue: `metadata.close()` in graceful-close arm runs BEFORE run-loop drain
+
+- **File**: `src/producer/kafka_producer.rs:1213`
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducer.java:1417-1429` (graceful close
+  sequence: `sender.initiateClose()` → `ioThread.join(timeout)` → on
+  termination, the run-loop's `client.close()` calls
+  `metadata.close()`)
+- **Description**: In Java's graceful close, `metadata.close()` runs
+  *after* the run-loop drains naturally — not before. A `send`
+  blocked in `wait_on_metadata.await_update` may receive a successful
+  metadata response if the Sender ticks once more before exiting. In
+  the Rust translation, `metadata.close()` is called *before* the
+  `tokio::select!` over the JoinHandle, so any in-flight
+  `await_update` is aborted immediately even if the run loop would
+  have produced a metadata response within the deadline. For the
+  *force-close* arm (Duration::ZERO) this is correct behavior; for
+  the *graceful* arm it's a mild divergence.
+- **Expected**: One of:
+  1. Move `self.metadata.close()` in the graceful arm to *after* the
+     `select!` block (i.e. after the run-loop terminates cleanly OR
+     was aborted on deadline-elapse), so blocked sends still have a
+     chance to receive metadata during the graceful window. Document
+     why the call still appears in the deadline-elapsed branch (parity
+     with force-close).
+  2. Acknowledge this as a deliberate Milestone-1 simplification in
+     NOTES.md and the rustdoc, with a Phase 8 carry-over to wire the
+     call into the eventual `DefaultMetadataUpdater::close()` chain so
+     the ordering matches Java automatically.
+- **Actual**: The current graceful path calls `metadata.close()` at
+  line 1213 — before `wakeup()`, before the JoinHandle await. A
+  `send` mid-`await_update` aborts on the metadata-close, even if the
+  graceful timeout has not elapsed and the run loop could have
+  completed the metadata fetch.
+- **Note**: The pinning test
+  (`test_close_when_waiting_for_metadata_update`) only exercises the
+  Duration::ZERO force-close arm, so the graceful-arm divergence is
+  unobserved by tests. A targeted test on the graceful arm would
+  surface this; without one, treat as Suggestion not Blocking.
+
+**Disposition**: Fixed in commit `3253e76` (fixup! c5109d0). Took
+option (2): documented as a deliberate Milestone-1 simplification.
+Expanded the existing rustdoc block at the `metadata.close()` call
+site in `close_inner` (graceful arm) with an "ORDERING DIVERGENCE vs
+Java" sub-paragraph that explains the divergence, why it is
+functionally equivalent in Milestone-1 (both paths set the metadata
+closed flag and `wait_on_metadata` unblocks either way), and points
+at `Phase-7/NOTES.md` "Phase 7f carry-overs" for the lift point.
+Restoring Java's exact ordering is part of the Phase 8
+`DefaultMetadataUpdater` translation (Suggestion #2's NOTES.md
+carry-over).
+
+## Issue: 50-record flush test bypasses `producer.send()`
+
+- **File**: `src/producer/kafka_producer.rs:4624`
+  (`test_flush_complete_send_of_inflight_batches_50_records`)
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducerTest.java:1191-1198` —
+  `producer.send(new ProducerRecord<>("topic", "value" + i))`
+- **Description**: The Java test sends 50 records via
+  `producer.send()`, exercising the full hot path (interceptors,
+  partitioner, serializers, `do_send`, `wait_on_metadata`, accumulator
+  append). The Rust translation calls `producer.accumulator.append()`
+  directly with a manually-fetched cluster snapshot. The flush
+  semantics being tested ("`flush()` blocks until in-flight `send`s
+  complete") are still pinned — the futures are produced by
+  `accumulator.append`, the spawned Sender drains them, and the
+  staged MockClient responses ack them — but the *integration* of
+  `flush` with the public `send` surface is not what this test
+  verifies.
+- **Expected**: Either swap to `producer.send(record).await` for each
+  of the 50 sends so the test mirrors the Java contract end-to-end,
+  OR add a rustdoc note explaining that the bypass is deliberate (and
+  why — e.g. partition-determinism for the staged response set) so
+  reviewers don't think the public surface is being tested.
+- **Actual**: The test rustdoc/comments justify the bypass as "to
+  keep the test deterministic w.r.t. partition assignment"
+  (lines 4732-4734) but doesn't explicitly tag it as a fidelity
+  divergence vs the Java test.
+
+**Disposition**: Fixed in commit `3253e76` (fixup! c5109d0). Added
+a DEVIATION block to the test rustdoc explaining that Rust uses
+`accumulator.append()` directly to avoid coordinating per-record
+MockClient broker-response ticks (each `producer.send().await`
+would otherwise serialize against a Sender tick), while still
+proving the Phase 7e `flush()` semantic
+(`begin_flush() → await_flush_completion()`). Phase 8 may rewrite
+the test to drive the public `send()` surface end-to-end once the
+`MockClient` harness has a multi-record helper. This Phase 8
+follow-up is also recorded in the NOTES.md "Phase 7f carry-overs"
+block (Suggestion #2's fix).
+
+## Verified-good areas (no findings)
+
+- **MockClientImpl visibility hoist (`11c83cb`)**: pure
+  `pub(super)` → `pub(crate)` flip on the `tests` submodule and on
+  every `MockClientImpl` method. No production logic changed; no
+  symbols leaked to non-test builds (`#[cfg(test)]` gating preserved).
+- **`build_produce_response_for_test` cross-module helper**: thin
+  `pub(crate)` wrapper around the existing local
+  `build_produce_response`. No struct fields exposed; no new
+  invariants pinned. Will not be a maintenance burden in Phase 8.
+- **Production fix correctness (graceful path aside)**: the
+  force-close arm's `metadata.close()` is genuinely needed and
+  test-pinned by `test_close_when_waiting_for_metadata_update`
+  (line 4788). I empirically confirmed the test passes; without the
+  fix, the spawned `send` would hang on `wait_on_metadata` until
+  `max.block.ms = 60_000` elapsed and the surrounding 5-second test
+  bound would fail. `Metadata::close()` is idempotent (sets a flag
+  and calls `notify_waiters()`, both idempotent).
+- **Drop-tracking pattern for serializer/interceptor/partitioner
+  close-counts**: `Arc<AtomicUsize>` → `Drop` impl is the correct
+  Rust analogue of Java's static-counter idiom and is consistent
+  across `testSerializerClose`, `testInterceptorConstructClose`,
+  `testPartitionerClose`.
+- **`testNullTopicName` / `testPartitionsForWithNullTopic` skip
+  rationale**: Java raises NPE/IllegalArgument on null. Rust's
+  `&str` / `impl Into<Arc<str>>` cannot represent null at all — the
+  skip is the correct adaptation. The Rust translation does not
+  silently substitute "empty string" for "null" (which would have
+  tested a different code path); it skips with a justified rationale.
+- **`testHeadersSuccess` / `testHeadersFailure` deviation**: rustdoc
+  clearly documents that Rust's by-value `send(record)` makes Java's
+  post-send `record.headers().is_read_only()` check a compile-time
+  invariant. The round-trip portion of each test (record with
+  headers traverses send + accumulator + mock-broker ack) is still
+  exercised.
+- **Skip-rationale block structure**: every entry cites a Java line
+  number; entries are grouped by skip reason (transactional /
+  metrics-telemetry / null-rejection / Duration-non-negative /
+  reflective-load / other). Phase 8/9 reviewers walking the block
+  can audit the exhaustiveness check at a glance.
+- **Memory commit (`d980c9a`)**: touches only
+  `.claude/agent-memory/actor-executor/`. No CLAUDE.md or
+  `.claude/rules/` edits.
+
+## DoD sign-off
+
+- All Phase 7f translations green.
+- Production fix (`metadata.close()` in close path) genuinely needed,
+  test-pinned, idempotent.
+- One Java @Test (`closeShouldBeIdempotent`) missing from the
+  skip-block audit (already covered by `close_is_idempotent` from
+  Phase 7e — Suggestion 1).
+- Phase 7f Phase-8 carry-over (`metadata.close()` lift point) not in
+  NOTES.md — Suggestion 2.
+- Graceful-close `metadata.close()` ordering vs Java — mild
+  divergence in untested arm — Suggestion 3.
+- 50-record flush test bypasses `producer.send` — fidelity
+  Suggestion 4.
+
+## Round 1 verdict: accepted with 4 Suggestions — Phase 7 overall ready to close.
+
+All four Suggestions resolved in fixup commit `3253e76`
+(fixup! c5109d0).

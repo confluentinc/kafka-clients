@@ -501,3 +501,125 @@ variant.
 ## Round 1 verdict: accepted with minor follow-ups
 
 No Blocking issues. Two Suggestions (timeout-elapsed close branch; multi-record flush test) and one Nit (FQCN test body redundancy) should be addressed before Phase 7f if convenient — none rise to a blocker for closing Phase 7e.
+
+---
+
+# Round 2 — Phase 7e accepted
+
+Review window: fixup commits `5e3c2b5`, `c448b6e`, archive commit
+`f28ce1e`, memory commit `dd109db` on branch `fresh-impl`.
+
+## Per-fixup verifications
+
+### Suggestion #1 — close-timeout-handle divergence (`5e3c2b5`)
+
+`close_inner` graceful path now matches Java's "ioThread terminated"
+post-condition exactly. Verified at `src/producer/kafka_producer.rs:1221-1262`:
+
+- `tokio::select!` over `&mut handle` (arm 1) and
+  `tokio::time::sleep(timeout)` (arm 2). Random selector is fine —
+  there is no ordering requirement; either both finish at once
+  (graceful drain raced the deadline, both paths terminate the task)
+  or one wins by a clear margin. `biased;` would not change behavior.
+- Arm 1 (graceful drain finished) returns `Ok(())` without aborting,
+  preserving Java's "clean exit" path.
+- Arm 2 (deadline elapsed) flips `force_close`, calls `sender_wakeup()`,
+  `handle.abort()`, then `let _ = handle.await;` to await the cancelled
+  handle. By the time `close_inner` returns, the spawned task is
+  guaranteed terminated — the function's contract now matches Java's
+  `ioThread.join()` post-condition byte-for-byte.
+
+**Cancellation safety per CLAUDE.md rule 9.6: confirmed.** The losing
+arm of `select!` is dropped, not run. Arm 1's `&mut JoinHandle` future
+holds only a borrow — dropping the borrow releases nothing the task
+depends on (`JoinHandle` is the canonical cancellation-safe future).
+Arm 2's `tokio::time::sleep(timeout)` is trivially cancellation-safe
+(no side effects, just a timer). Neither arm has side effects beyond
+its winning-path body — there are no counters incremented, channels
+sent on, or buffers written *inside* the arm expressions. The
+post-elapsed-arm bookkeeping (`force_close.store`, `wakeup`, `abort`,
+`await`) is in the body of the arm, which only runs on win. Clean.
+
+The close_test pin (`close_with_short_timeout_force_closes_and_waits_for_termination`)
+is a genuine regression catcher. Mental simulation against pre-fix code:
+
+- Pre-fix elapsed path: `force_close.store(true)`, return. The handle
+  was already consumed by `tokio::time::timeout(timeout, handle).await`,
+  so no abort, no second await.
+- Spawned task: still polling on its 50ms cadence (StubKafkaClient's
+  `poll` increments the counter and sleeps 50ms). The `force_close`
+  flag is observed only on the next yield point inside the run loop.
+- Test: snapshot polls counter at close-return, sleep 200ms (4×
+  poll cadence), re-snapshot. On pre-fix code, ~3-4 increments
+  would happen → snapshots differ → `assert_eq!` fires.
+- Post-fix: `handle.abort()` + `handle.await` drains the task before
+  close returns → snapshots equal.
+
+The 80ms pre-close priming (`assert!(polls.load(Relaxed) >= 1)`) is
+defensive against the trivial-zero-pass case, which would otherwise
+make the test green for the wrong reason. Good test hygiene.
+
+The `polls: Arc<AtomicUsize>` field on `StubKafkaClient` is read in
+test code only; it's incremented in the production-path `poll` impl
+but the field itself is mock-only state (the StubKafkaClient is a
+`#[cfg(test)]` mod artifact). No production state leakage.
+
+### Nit #1 — FQCN test rewrite (`c448b6e`)
+
+`partitioner_class_fqcn_round_robin_resolves` now exercises the trait
+surface. Verified at `src/producer/kafka_producer.rs:2671-2732`:
+
+- Metadata populated for a 3-partition topic via
+  `pm.update_with_current_request_version(&build_single_topic_response("topic", 3), …)`.
+- `Partitioner::partition("topic", None, Some(b"key"), None, Some(b"v"), &cluster)`
+  invoked on the FQCN-resolved instance.
+- Assertion `(0..3).contains(&part)` proves the partitioner is
+  callable and returns a valid partition for the cluster.
+- Distinct from `partitioner_class_simple_name_round_robin_resolves`
+  (which still does construction-only). End-to-end distribution is
+  pinned by `partitioner_class_round_robin_distributes_across_partitions`.
+
+Rustdoc rewritten to describe what the test does and how it differs
+from siblings. No rustdoc-vs-body mismatch remains.
+
+### Archive integrity (`f28ce1e`)
+
+- `COMMENTS.7.md`: Suggestion #2 retained at lines 462-475 with
+  "Naturally deferred to Phase 7f" disposition. Rationale (MockClientImpl
+  visibility) cited. Tracked in NOTES.md.
+- `COMMENTS.DONE.7.md`: Round 1 — Phase 7e block at lines 820-889
+  includes Suggestion #1 with `Disposition: Fixed in commit 5e3c2b5
+  (fixup! e3ca2d3)` and Nit #1 with `Disposition: Fixed in commit
+  c448b6e (fixup! 3b39142)`. Both fixup SHAs accurately cite the
+  original commits.
+- `NOTES.md` lines 277-291: Phase 7e Round 1 carry-over section
+  records Suggestion #1 as resolved within Milestone-1 (no Phase 8
+  outstanding); Phase 7f carry-over for the multi-record flush test
+  with the MockClientImpl visibility prerequisite.
+
+### Memory commit (`dd109db`)
+
+Touches only `.claude/agent-memory/actor-executor/`. No CLAUDE.md
+or `.claude/rules/` edits. Memory file at
+`.claude/agent-memory/actor-executor/phase7e_round1_patterns.md`.
+
+### New-defect scan
+
+- `git show 5e3c2b5`: no new `tokio::select!` arms with side effects
+  beyond the verified close_inner block; no new `Box<dyn Future>`
+  introductions; no Mutex guards held across `.await` (the
+  `sender_task.lock().take()` at line 1186 drops the guard before
+  the select).
+- `git show c448b6e`: purely test-only changes.
+- Test count: 1175 → 1176 (+1, the regression test).
+- Lint, format-check clean (per actor's report; verified
+  `cargo test --lib` returns 1176 passed locally).
+
+## DoD sign-off
+
+- All Phase 7e Round 1 actionable items resolved.
+- Suggestion #2 deferred to Phase 7f with explicit dependency on
+  `MockClientImpl` visibility hoist; tracked in NOTES.md.
+- No new defects introduced by either fixup.
+
+## Round 2 verdict: accepted — Phase 7e ready to close.
