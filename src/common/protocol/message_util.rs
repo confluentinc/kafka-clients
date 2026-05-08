@@ -48,7 +48,7 @@ pub fn compare_raw_tagged_fields(first: Option<&[RawTaggedField]>, second: Optio
 /// 2. Allocates a buffer of that size
 /// 3. Writes the message to the buffer
 /// 4. Resets the buffer position to 0 for reading
-pub fn to_byte_buffer_accessor(message: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
+pub fn to_byte_buffer_accessor(message: &mut impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
     let mut cache = ObjectSerializationCache::new();
     let message_size = message.size(&mut cache, version)?;
     let mut bytes = ByteBufferAccessor::new(message_size as usize);
@@ -87,7 +87,7 @@ mod tests {
             Ok(())
         }
         fn write(
-            &self,
+            &mut self,
             writable: &mut dyn Writable,
             _cache: &ObjectSerializationCache,
             _version: i16,
@@ -105,8 +105,8 @@ mod tests {
 
     #[test]
     fn test_to_byte_buffer_accessor() {
-        let msg = TestMsg { value: 42 };
-        let mut acc = to_byte_buffer_accessor(&msg, 0).unwrap();
+        let mut msg = TestMsg { value: 42 };
+        let mut acc = to_byte_buffer_accessor(&mut msg, 0).unwrap();
         assert_eq!(acc.read_int().unwrap(), 42);
     }
 

@@ -62,7 +62,7 @@ pub trait RequestBuilder: Send {
     /// # Errors
     ///
     /// Returns an error if the version is unsupported or preconditions are violated.
-    fn build(&self) -> io::Result<ConcreteRequest> {
+    fn build(&mut self) -> io::Result<ConcreteRequest> {
         self.build_version(self.latest_allowed_version())
     }
 
@@ -71,7 +71,7 @@ pub trait RequestBuilder: Send {
     /// # Errors
     ///
     /// Returns an error if the version is unsupported or preconditions are violated.
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest>;
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest>;
 }
 
 /// Enum dispatch for all supported Kafka request types.
@@ -124,13 +124,13 @@ impl ConcreteRequest {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn to_send(&self, header: &RequestHeader) -> io::Result<ByteBufferSend> {
+    pub fn to_send(&mut self, header: &RequestHeader) -> io::Result<ByteBufferSend> {
         match self {
-            Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data()),
-            Self::Metadata(r) => SendBuilder::build_request_send(header, r.data()),
-            Self::Produce(r) => SendBuilder::build_request_send(header, r.data()),
-            Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data()),
-            Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::Metadata(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::Produce(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data_mut()),
+            Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data_mut()),
         }
     }
 
@@ -142,7 +142,7 @@ impl ConcreteRequest {
     ///
     /// Returns an error if the header API key or version does not match this request,
     /// or if serialization fails.
-    pub fn serialize_with_header(&self, header: &RequestHeader) -> io::Result<ByteBufferAccessor> {
+    pub fn serialize_with_header(&mut self, header: &RequestHeader) -> io::Result<ByteBufferAccessor> {
         if header.api_key() != self.api_key() {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -163,21 +163,22 @@ impl ConcreteRequest {
                 ),
             ));
         }
+        let version = self.version();
         match self {
             Self::ApiVersions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Metadata(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Produce(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::SaslHandshake(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::SaslAuthenticate(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
         }
     }
@@ -189,18 +190,19 @@ impl ConcreteRequest {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn serialize(&self) -> io::Result<ByteBufferAccessor> {
+    pub fn serialize(&mut self) -> io::Result<ByteBufferAccessor> {
+        let version = self.version();
         match self {
-            Self::ApiVersions(r) => Self::serialize_body(r.data(), r.version()),
-            Self::Metadata(r) => Self::serialize_body(r.data(), r.version()),
-            Self::Produce(r) => Self::serialize_body(r.data(), r.version()),
-            Self::SaslHandshake(r) => Self::serialize_body(r.data(), r.version()),
-            Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), r.version()),
+            Self::ApiVersions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::Metadata(r) => Self::serialize_body(r.data_mut(), version),
+            Self::Produce(r) => Self::serialize_body(r.data_mut(), version),
+            Self::SaslHandshake(r) => Self::serialize_body(r.data_mut(), version),
+            Self::SaslAuthenticate(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
     /// Serializes a message body at a given version.
-    fn serialize_body(msg: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
+    fn serialize_body(msg: &mut impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
         let mut cache = crate::common::protocol::ObjectSerializationCache::new();
         let size = Message::size(msg, &mut cache, version)?;
         let mut buf = ByteBufferAccessor::new(size as usize);
