@@ -458,6 +458,94 @@ def test_help_runs():
     assert exc.value.code == 0
 
 
+def test_allow_missing_artifact_outside_seed_mode_returns_2(tmp_path):
+    """--allow-missing-artifact is meaningful only with --seed. Passing
+    it with sweep / --pr / --delete-prs MUST fail loud (rc=2) so an
+    operator who set it expecting the tolerance for some other mode
+    finds out immediately rather than silently getting the strict
+    fail-loud behavior."""
+    db_path = str(tmp_path / "t.db")
+    rc = _run(
+        "--allow-missing-artifact",
+        "--ak-repo-path", "/tmp/ak", "--rust-branch", "master",
+        db_path=db_path,
+    )
+    assert rc == 2
+
+
+def test_seed_with_allow_missing_artifact_passes_flag_through(
+    tmp_path, monkeypatch,
+):
+    """--seed --allow-missing-artifact reaches locked_db.session as
+    `allow_missing=True`. We capture the kwargs at the locked_db
+    boundary to pin the wiring contract end-to-end."""
+    db_path = str(tmp_path / "t.db")
+    captured_kwargs = []
+
+    @contextmanager
+    def fake_session(db_path, **kwargs):
+        captured_kwargs.append(kwargs)
+        conn = db.connect(db_path)
+        try:
+            db.migrate(conn)
+            yield conn
+            if kwargs.get("write"):
+                conn.commit()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(
+        "translation_agent.cli.locked_db.session", fake_session,
+    )
+    rc = _run(
+        "--seed", "--allow-missing-artifact",
+        "--ak-branch", "trunk", "--ak-commit", "a",
+        "--rust-branch", "master",
+        db_path=db_path,
+    )
+    assert rc == 0
+    assert captured_kwargs, "expected at least one locked_db.session call"
+    for kwargs in captured_kwargs:
+        assert kwargs["allow_missing"] is True
+
+
+def test_seed_without_allow_missing_artifact_passes_false_through(
+    tmp_path, monkeypatch,
+):
+    """Default --seed (no --allow-missing-artifact flag) reaches
+    locked_db.session with allow_missing=False, so a re-seed gets
+    fail-loud behavior on a transient pull failure rather than the
+    silent first-bootstrap tolerance."""
+    db_path = str(tmp_path / "t.db")
+    captured_kwargs = []
+
+    @contextmanager
+    def fake_session(db_path, **kwargs):
+        captured_kwargs.append(kwargs)
+        conn = db.connect(db_path)
+        try:
+            db.migrate(conn)
+            yield conn
+            if kwargs.get("write"):
+                conn.commit()
+        finally:
+            conn.close()
+
+    monkeypatch.setattr(
+        "translation_agent.cli.locked_db.session", fake_session,
+    )
+    rc = _run(
+        "--seed",
+        "--ak-branch", "trunk", "--ak-commit", "a",
+        "--rust-branch", "master",
+        db_path=db_path,
+    )
+    assert rc == 0
+    assert captured_kwargs, "expected at least one locked_db.session call"
+    for kwargs in captured_kwargs:
+        assert kwargs["allow_missing"] is False
+
+
 # --- sweep mode -------------------------------------------------------------
 
 def _seed_db(db_path, ak_commit="ak0"):

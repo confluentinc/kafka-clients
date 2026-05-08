@@ -161,24 +161,44 @@ def release_lock() -> None:
         )
 
 
-def pull_db(db_path: str, *, name: str = DB_ARTIFACT_NAME_DEFAULT) -> None:
+def pull_db(
+    db_path: str, *,
+    name: str = DB_ARTIFACT_NAME_DEFAULT,
+    allow_missing: bool = False,
+) -> None:
     """Pull the DB artifact into the directory containing `db_path`.
 
-    First-run tolerant: if the artifact does not exist yet (the very
-    first sweep on a fresh project), the CLI returns non-zero; we log
-    info and return so the orchestrator can create the DB from scratch
-    via `db.migrate`. This mirrors the `|| true` semantics already used
-    in the Semaphore YAML prologue (.semaphore/*.yml).
+    Default behavior is **strict**: any pull failure (artifact missing,
+    network error, server down) raises so the orchestrator never
+    operates against stale local state and then push-overwrites the
+    canonical artifact with our outdated view. The CLI exit code does
+    not distinguish "artifact not found" from "transient infra error",
+    so we treat both the same to be safe.
+
+    `allow_missing=True` (set only from seed mode) tolerates a pull
+    failure ONLY when there's no local file at `db_path`. The
+    rationale: a missing local file is the unambiguous "truly first
+    run, nothing to operate against" signal. If a local file exists
+    AND the pull failed, the artifact COULD exist on the server (the
+    failure could be transient infra) and our local file COULD be
+    stale -- proceeding would risk push-overwriting the canonical
+    state with our outdated view. Operator must `rm` the local file
+    to signal explicit intent to bootstrap fresh.
     """
     dest_dir = str(Path(db_path).parent or ".")
     try:
         semaphore.pull_project_artifact(name, dest_dir)
     except subprocess.CalledProcessError as e:
-        log.info(
-            "DB artifact pull failed (likely first run): %s. "
-            "Proceeding with whatever DB is present locally at %s.",
-            e, db_path,
-        )
+        if allow_missing and not os.path.exists(db_path):
+            log.info(
+                "DB artifact pull failed AND no local DB at %s "
+                "(allow_missing=True, treating as first-run seed): %s. "
+                "Proceeding to create a fresh DB locally.",
+                db_path, e,
+            )
+            return
+        # Fail loud: do NOT operate against stale local state.
+        raise
 
 
 def push_db(db_path: str, *, name: str = DB_ARTIFACT_NAME_DEFAULT) -> None:
@@ -193,7 +213,10 @@ def push_db(db_path: str, *, name: str = DB_ARTIFACT_NAME_DEFAULT) -> None:
 
 @contextlib.contextmanager
 def session(
-    db_path: str, *, write: bool, dry_run: bool = False,
+    db_path: str, *,
+    write: bool,
+    dry_run: bool = False,
+    allow_missing: bool = False,
 ) -> Iterator[sqlite3.Connection]:
     """Acquire lock + pull DB + open conn + yield + close + (push if write) + release.
 
@@ -207,6 +230,9 @@ def session(
     - Exception in commit (rare) -> same as above: no push.
     - Clean exit + write=True -> commit + push (in that order).
     - Clean exit + write=False -> no commit, no push.
+    - DB pull failure (any reason) -> raises by default. Pass
+      `allow_missing=True` from seed mode only -- that's the one
+      legitimate "first-run, artifact may not exist yet" scenario.
 
     In `dry_run=True` mode all subprocess calls are skipped: just open
     the local DB, yield, close. This matches the existing dry-run
@@ -225,7 +251,7 @@ def session(
 
     acquire_lock()
     try:
-        pull_db(db_path)
+        pull_db(db_path, allow_missing=allow_missing)
         conn = db.connect(db_path)
         push_after = False
         try:

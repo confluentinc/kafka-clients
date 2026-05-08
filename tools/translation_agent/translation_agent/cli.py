@@ -44,7 +44,11 @@ from typing import Optional, Sequence
 from . import db, git_ops, github, locked_db, prompts, r2, streaming, worktree
 
 
-def _db_session(args: "argparse.Namespace", *, write: bool):
+def _db_session(
+    args: "argparse.Namespace", *,
+    write: bool,
+    allow_missing: bool = False,
+):
     """Open a locked_db.session driven by `args`.
 
     Both `--dry-run` and `--no-artifact-push` skip the lock + pull +
@@ -52,11 +56,18 @@ def _db_session(args: "argparse.Namespace", *, write: bool):
     at all; with --no-artifact-push the operator wants real LLM/git
     work but no artifact RPCs -- typically used for local runs without
     the Semaphore `artifact` CLI installed.
+
+    `allow_missing=True` should ONLY be set by seed mode. In every
+    other mode, a missing or unreachable artifact must hard-fail
+    rather than let the orchestrator operate against stale local
+    state and then push-overwrite the canonical artifact with our
+    outdated view.
     """
     return locked_db.session(
         args.db_path,
         write=write,
         dry_run=args.dry_run or args.no_artifact_push,
+        allow_missing=allow_missing,
     )
 
 
@@ -177,6 +188,17 @@ def _build_parser() -> argparse.ArgumentParser:
              "stale/failed rows would otherwise be picked up by the "
              "next sweep's unblocked-predicate checks. Independent of "
              "--force; the two compose.",
+    )
+    parser.add_argument(
+        "--allow-missing-artifact", action="store_true",
+        help="With --seed only: tolerate a DB-artifact pull failure "
+             "and proceed to create a fresh local DB. Use this ONLY "
+             "for the very first bootstrap of a new project where "
+             "the artifact does not exist yet. For re-seeds (where "
+             "the artifact should exist), do NOT pass this flag -- "
+             "without it, a transient pull failure becomes a hard "
+             "error rather than silently overwriting the canonical "
+             "artifact with an empty local DB.",
     )
 
     # --delete-prs args.
@@ -303,7 +325,14 @@ def _run_seed(args: argparse.Namespace) -> int:
         # the operator sees and matches the post-state of the DB.
         # Always log the count (even 0) so the operator gets
         # confirmation the flag took effect.
-        with _db_session(args, write=True) as conn:
+        # allow_missing comes from the operator-supplied
+        # --allow-missing-artifact flag; True only for first-ever
+        # bootstrap. For re-seeds the operator omits the flag so a
+        # transient pull failure surfaces loudly rather than silently
+        # creating an empty DB and overwriting the canonical artifact.
+        with _db_session(
+            args, write=True, allow_missing=args.allow_missing_artifact,
+        ) as conn:
             deleted = db.cleanup_pr_commits_for_rust_branch(
                 conn, args.rust_branch,
             )
@@ -313,7 +342,9 @@ def _run_seed(args: argparse.Namespace) -> int:
         )
 
     try:
-        with _db_session(args, write=True) as conn:
+        with _db_session(
+            args, write=True, allow_missing=args.allow_missing_artifact,
+        ) as conn:
             result = db.seed_correspondence(
                 conn,
                 args.ak_branch, args.ak_commit, args.rust_branch,
@@ -1499,6 +1530,21 @@ def main(argv: Sequence[str] | None = None) -> int:
     # if write) + release. The end-of-run artifact push that used to
     # live here is no longer needed: each write is published as soon as
     # its session commits.
+
+    # --allow-missing-artifact is meaningful only with --seed. Reject
+    # the combination loudly elsewhere so an operator who sets it
+    # expecting it to apply (e.g. for sweep on a fresh project) finds
+    # out immediately rather than getting silent fail-loud behavior.
+    if args.allow_missing_artifact and not args.seed:
+        log.error(
+            "--allow-missing-artifact is only valid with --seed. "
+            "It exists to tolerate a missing DB artifact during the "
+            "very first bootstrap; for sweep / --pr / --delete-prs "
+            "modes the artifact must always exist (operating against "
+            "stale local state and pushing back would lose data)."
+        )
+        return 2
+
     if args.seed:
         return _run_seed(args)
     if args.delete_prs:
