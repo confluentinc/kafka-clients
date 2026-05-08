@@ -23,6 +23,9 @@ use super::NetworkSend;
 use std::collections::HashMap;
 use std::io;
 use std::net::SocketAddr;
+use std::sync::Arc;
+
+use tokio::sync::Notify;
 
 /// See [`Selectable::connect`] — use the platform default buffer size.
 pub const USE_DEFAULT_BUFFER_SIZE: i32 = -1;
@@ -60,6 +63,15 @@ pub trait Selectable: Send {
 
     /// Wakeup this selector if it is blocked on I/O.
     fn wakeup(&self);
+
+    /// Returns the [`Notify`] handle used by the selector's poll loop.
+    ///
+    /// Callers can use this to share the selector's wakeup mechanism,
+    /// ensuring that `notify_one()` on the returned handle causes the
+    /// selector's `poll()` to return promptly.
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        Arc::new(Notify::new())
+    }
 
     /// Close this selector.
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
