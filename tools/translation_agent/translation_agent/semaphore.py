@@ -36,18 +36,49 @@ ARTIFACT_NOT_INSTALLED_MSG = (
 log = logging.getLogger(__name__)
 
 
+def _run_artifact(argv: list) -> None:
+    """Run the artifact CLI with `argv`. On non-zero exit, log the
+    captured stderr (and stdout, if non-empty) at ERROR level before
+    re-raising the CalledProcessError.
+
+    Without this, `subprocess.run(check=True, capture_output=True)`
+    swallows the CLI's diagnostic output into the exception object
+    and the operator only sees `Command [...] returned non-zero exit
+    status N` -- useless for figuring out whether the failure was
+    "unknown flag", "permission denied", "namespace not found", or
+    something else. The exception still propagates so all existing
+    catch sites (locked_db.acquire_lock retry, locked_db.pull_db
+    allow_missing tolerance) work unchanged.
+    """
+    try:
+        subprocess.run(argv, check=True, capture_output=True)
+    except subprocess.CalledProcessError as e:
+        if e.stderr:
+            log.error(
+                "artifact CLI failed (rc=%d, argv=%s): %s",
+                e.returncode, argv,
+                e.stderr.decode("utf-8", errors="replace").strip(),
+            )
+        if e.stdout:
+            log.error(
+                "artifact CLI stdout: %s",
+                e.stdout.decode("utf-8", errors="replace").strip(),
+            )
+        raise
+
+
 def push_project_artifact(name: str, file_path: str) -> None:
     """Push file_path to the Semaphore project-level artifact `name`.
 
     Raises FileNotFoundError if the `artifact` binary is not on PATH; raises
-    subprocess.CalledProcessError on non-zero exit.
+    subprocess.CalledProcessError on non-zero exit (with the CLI's
+    stderr surfaced via _run_artifact's ERROR log).
     """
     if shutil.which(ARTIFACT_BINARY) is None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
     log.info("Pushing %s to Semaphore project artifact %r", file_path, name)
-    subprocess.run(
+    _run_artifact(
         [ARTIFACT_BINARY, "push", "project", file_path, "--force"],
-        check=True,
     )
 
 
@@ -78,13 +109,11 @@ def push_project_artifact_no_force(
     log.info(
         "Pushing %s to Semaphore project artifact %s", file_path, destination,
     )
-    subprocess.run(
+    _run_artifact(
         [
             ARTIFACT_BINARY, "push", "project", file_path,
             "--destination", destination,
         ],
-        check=True,
-        capture_output=True,
     )
 
 
@@ -98,11 +127,9 @@ def pull_project_artifact(name: str, dest_dir: str) -> None:
     if shutil.which(ARTIFACT_BINARY) is None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
     log.info("Pulling Semaphore project artifact %r into %s", name, dest_dir)
-    subprocess.run(
+    _run_artifact(
         [ARTIFACT_BINARY, "pull", "project", name,
          "--destination", dest_dir, "--force"],
-        check=True,
-        capture_output=True,
     )
 
 
@@ -117,8 +144,6 @@ def yank_project_artifact(name: str) -> None:
     if shutil.which(ARTIFACT_BINARY) is None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
     log.info("Yanking Semaphore project artifact %r", name)
-    subprocess.run(
+    _run_artifact(
         [ARTIFACT_BINARY, "yank", "project", name],
-        check=True,
-        capture_output=True,
     )
