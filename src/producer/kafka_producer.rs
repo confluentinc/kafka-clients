@@ -1805,9 +1805,13 @@ mod tests {
     /// mock returns an empty `Vec` after the requested timeout (with a
     /// generous floor).
     ///
-    /// Distinct from `sender::tests::MockClientImpl` (which is
-    /// `pub(super)` to that file). Keeping the producer-side mock local
-    /// keeps the cross-file coupling minimal.
+    /// Distinct from `sender::tests::MockClientImpl`. The latter is now
+    /// reachable cross-module (Phase 7f hoisted its visibility from
+    /// `pub(super)` to `pub(crate)`) and is the right choice for the
+    /// metadata- and broker-loopback-style translations of
+    /// `KafkaProducerTest.java`. `StubKafkaClient` stays the simpler
+    /// option for construction / Drop / close-lifecycle tests that
+    /// never need pre-staged responses.
     struct StubKafkaClient {
         wakeups: Arc<std::sync::atomic::AtomicUsize>,
         /// Increments on every entry to `poll`. Tests use this to
@@ -2117,9 +2121,10 @@ mod tests {
     //
     // Covers the `send` body up to the point of accumulator append.
     // Tests that depend on the full broker round-trip (`Sender` driving
-    // the produce request to completion) are deferred to Phase 7f
-    // because `MockClientImpl` is `pub(super)` in `sender.rs` and
-    // lifting visibility is out of scope here.
+    // the produce request to completion) live in the Phase 7f translation
+    // block below and use [`crate::producer::internals::sender::tests::MockClientImpl`]
+    // (whose visibility was hoisted from `pub(super)` to `pub(crate)` at
+    // the start of Phase 7f).
 
     use crate::common::cluster::Cluster;
     use crate::common::message::metadata_response_data::{
@@ -2964,8 +2969,10 @@ mod tests {
 
         // Append a record into the accumulator directly so we control
         // the batch lifecycle without needing the full Sender/MockClient
-        // wiring (which is `pub(super)` to sender.rs and out of scope
-        // for cross-file tests at this milestone).
+        // wiring. The Phase 7f translation
+        // `flush_completes_send_of_in_flight_batches_50_records` below
+        // does exercise the full Sender/MockClient round-trip; this
+        // single-record variant stays direct-append for clarity.
         let cluster = producer.metadata.metadata().fetch();
         let now = time.milliseconds();
         let r = producer

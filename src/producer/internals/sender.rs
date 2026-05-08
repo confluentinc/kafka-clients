@@ -1338,9 +1338,17 @@ fn panic_payload_message(payload: &Box<dyn std::any::Any + Send>) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     //! Translation of `SenderTest` (non-transactional cases only — see
     //! module docs).
+    //!
+    //! Visibility note: this module is `pub(crate)` so `MockClientImpl`
+    //! is reachable from sibling test modules — e.g.
+    //! `kafka_producer.rs::tests` needs the full mock for the Phase 7f
+    //! producer-with-mock-broker translations of `KafkaProducerTest.java`
+    //! (`testMetadataFetch`, `testFlushCompleteSendOfInflightBatches`,
+    //! etc.). Items remain `#[cfg(test)]`-gated, so production builds
+    //! see nothing.
 
     use std::sync::atomic::AtomicI32;
     use std::time::Duration;
@@ -1377,7 +1385,7 @@ mod tests {
     /// simulation, network/auth exception injection, `setNodeApiVersions`).
     /// Coordinator/transactional matchers are NOT implemented — see
     /// module rustdoc.
-    pub(super) struct MockClientImpl {
+    pub(crate) struct MockClientImpl {
         time: Arc<dyn Time>,
         correlation: AtomicI32,
         client_id: Arc<str>,
@@ -1428,11 +1436,11 @@ mod tests {
     }
 
     impl MockClientImpl {
-        pub(super) fn new(time: Arc<dyn Time>) -> Self {
+        pub(crate) fn new(time: Arc<dyn Time>) -> Self {
             Self::with_client_id(time, Arc::from("mockClientId"))
         }
 
-        pub(super) fn with_client_id(time: Arc<dyn Time>, client_id: Arc<str>) -> Self {
+        pub(crate) fn with_client_id(time: Arc<dyn Time>, client_id: Arc<str>) -> Self {
             Self {
                 time,
                 correlation: AtomicI32::new(0),
@@ -1451,7 +1459,7 @@ mod tests {
         }
 
         /// Test-only: arm a one-shot panic on the next `poll()` call.
-        pub(super) fn set_panic_on_next_poll(&mut self, msg: &str) {
+        pub(crate) fn set_panic_on_next_poll(&mut self, msg: &str) {
             self.panic_on_next_poll = Some(msg.to_string());
         }
 
@@ -1459,7 +1467,7 @@ mod tests {
         /// Caller observes a non-zero value once the armed
         /// [`Self::set_panic_on_next_poll`] has actually tripped (i.e.
         /// `poll` was reached AND the panic was triggered).
-        pub(super) fn panic_trip_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
+        pub(crate) fn panic_trip_counter(&self) -> Arc<std::sync::atomic::AtomicUsize> {
             Arc::clone(&self.panic_trip_count)
         }
 
@@ -1468,7 +1476,7 @@ mod tests {
         }
 
         /// Mirrors `MockClient.prepareResponse(AbstractResponse)`.
-        pub(super) fn prepare_response(&mut self, response: Box<dyn AbstractResponse>) {
+        pub(crate) fn prepare_response(&mut self, response: Box<dyn AbstractResponse>) {
             self.future_responses.push_back(FutureResponse {
                 node_id: None,
                 response: Some(response),
@@ -1478,7 +1486,7 @@ mod tests {
         }
 
         /// Mirrors `MockClient.prepareResponse(AbstractResponse, boolean)`.
-        pub(super) fn prepare_response_with_disconnect(
+        pub(crate) fn prepare_response_with_disconnect(
             &mut self,
             response: Option<Box<dyn AbstractResponse>>,
             disconnected: bool,
@@ -1493,12 +1501,12 @@ mod tests {
 
         /// Mirrors `MockClient.respond(AbstractResponse)` — pops the next
         /// in-flight request and answers it.
-        pub(super) fn respond(&mut self, response: Box<dyn AbstractResponse>) {
+        pub(crate) fn respond(&mut self, response: Box<dyn AbstractResponse>) {
             self.respond_with_disconnect(Some(response), false);
         }
 
         /// Mirrors `MockClient.respond(AbstractResponse, boolean)`.
-        pub(super) fn respond_with_disconnect(
+        pub(crate) fn respond_with_disconnect(
             &mut self,
             response: Option<Box<dyn AbstractResponse>>,
             disconnected: bool,
@@ -1519,12 +1527,12 @@ mod tests {
         }
 
         /// Pop a queued request with no response (for disconnect tests).
-        pub(super) fn requests_count(&self) -> usize {
+        pub(crate) fn requests_count(&self) -> usize {
             self.requests.len()
         }
 
         /// Test-only: peek next pending request.
-        pub(super) fn next_request_destination(&self) -> Option<&str> {
+        pub(crate) fn next_request_destination(&self) -> Option<&str> {
             self.requests.front().map(|r| r.destination())
         }
 
@@ -1547,7 +1555,7 @@ mod tests {
 
         /// Convenience used by SenderTest disconnect cases. Mirrors
         /// `MockClient.disconnect(String)`.
-        pub(super) fn disconnect_node(&mut self, node_id: i32) {
+        pub(crate) fn disconnect_node(&mut self, node_id: i32) {
             let now = self.time.milliseconds();
             let mut survivors: std::collections::VecDeque<ClientRequest> = std::collections::VecDeque::new();
             while let Some(req) = self.requests.pop_front() {
@@ -1852,7 +1860,7 @@ mod tests {
     /// Test fixture: build a ProducerMetadata + Sender + RecordAccumulator
     /// with the cluster fully populated for a single topic of 3 partitions
     /// on broker 0.
-    pub(super) struct TestSetup {
+    pub(crate) struct TestSetup {
         pub sender: Sender<MockClientImpl>,
         pub accum: Arc<RecordAccumulator>,
         pub metadata: Arc<ProducerMetadata>,
