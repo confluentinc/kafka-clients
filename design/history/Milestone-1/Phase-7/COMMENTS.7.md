@@ -349,3 +349,155 @@ condition in the error message. The construction-test suite proves the
 wiring shape is sound via `new_for_test`. Phase 7d/8 can lift the
 deferral once `DefaultMetadataUpdater` lands without revisiting the
 skeleton itself.
+
+---
+
+# Round 2 — Phase 7d accepted
+
+Review window: fixup commits `67ea5df`, `bfba26c`, `0e2dd8e`, plus
+archive commit `b8d9a39` and agent-memory commit `48d36f6` on branch
+`fresh-impl`.
+
+Java references re-checked:
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java` (catch chain at lines 1056-1081).
+- `kafka/clients/src/main/java/org/apache/kafka/common/errors/ApiException.java`,
+  `BufferExhaustedException.java`, `SerializationException.java`,
+  `ConfigException.java`, `InterruptException.java` (parent-class verification).
+
+## Per-fixup verifications
+
+| Fixup | Issue | Status |
+|-------|-------|--------|
+| `67ea5df` | Suggestion 1 (catch fan-out) + Nit 1 (`setReadOnly` rustdoc). | OK — `KafkaError::is_api_exception()` added with explicit per-variant match (no `_ =>` wildcard), gates the user-callback fire in `do_send`'s `Err` arm. Order matches Java: user callback fires before `interceptors.on_send_error`. The `setReadOnly` rustdoc accurately notes that `do_send` consumes `record` by value, so no Rust counterpart is needed. |
+| `bfba26c` | Test pinning. | OK — strengthens `send_returns_record_too_large_and_fires_interceptor_on_send_error` (RecordTooLarge IS an `ApiException` → user callback count = 1) and adds `send_does_not_fire_user_callback_for_non_api_exception` (close → `IllegalState` is NOT an `ApiException` → user callback count = 0, interceptor count = 1). |
+| `0e2dd8e` | Suggestion 2 (partitioner.class warn). | OK — `log::warn!` fires from the `new_for_test` body when `config.inner().originals().contains_key(PARTITIONER_CLASS_CONFIG)`, including the configured value and a Phase 7e marker. Default config (no key set) does not warn. |
+| `b8d9a39` | Archive integrity. | OK — Phase 7d Round 1 review and Phase 7c Round 2 acceptance both moved to `COMMENTS.DONE.7.md` with disposition annotations citing fixup SHAs. NOTES.md updated with the Phase 7e MUST-wire-`partitioner.class` carry-over. |
+| `48d36f6` | Memory update. | OK — only `.claude/agent-memory/actor-executor/` paths; no CLAUDE.md / `.claude/rules/` edits. |
+
+## Truth-table verification — `is_api_exception()`
+
+Cross-checked the four ambiguous variants against Java source in
+`kafka/`:
+
+- `BufferExhaustedException extends TimeoutException` → ApiException → `true`. ✓
+- `SerializationException extends KafkaException` (NOT ApiException) → `false`. ✓
+- `ConfigException extends KafkaException` → `false`. ✓
+- `InterruptException extends KafkaException` → `false`. ✓
+
+The match is exhaustive: 31 `true` + 4 direct-`KafkaException` `false`
++ 3 stdlib-`RuntimeException` `false` = 38 variants, matching the
+total `KafkaError` variant count. No silent default arm — adding a new
+variant in the future will trigger a compile error, forcing a deliberate
+classification. Test `api_exception_classifier_matches_java_hierarchy`
+covers every variant explicitly.
+
+## Test pin — would it catch the original bug?
+
+Yes. Mental simulation against pre-fix `do_send` (unconditional
+`if let Some(user_cb) = … { user_cb.on_completion(…); }` in the `Err`
+arm):
+
+1. Test #2 (`send_does_not_fire_user_callback_for_non_api_exception`)
+   closes the producer pre-send. `throwIfProducerClosed` raises
+   `KafkaError::IllegalState`. Pre-fix code would have fired the user
+   callback → counter = 1. Test asserts counter = 0 → **fails on
+   pre-fix code, passes on post-fix code.** Genuine pin.
+2. Test #1 (RecordTooLarge) is an upgrade: it now also asserts the
+   user callback fires exactly once (RecordTooLarge IS an
+   `ApiException`), pinning the positive case.
+
+## `log::warn!` false-positive check
+
+The trigger is `originals().contains_key(PARTITIONER_CLASS_CONFIG)` —
+`originals()` returns only operator-supplied keys (not defaults), so
+the warn fires iff the user explicitly set `partitioner.class` in
+their config map. Default-config construction stays silent.
+
+## New-defect scan
+
+- `67ea5df`: production change is small and tightly scoped — no panic,
+  no `unwrap`, exhaustive match, no widened visibility. The 4 doc
+  blocks (catch fan-out table + setReadOnly rationale) are accurate
+  and tied to specific Java line numbers.
+- `bfba26c`: test-only changes (`mod tests` block). No production
+  scope creep. `producer.sender_running.store(false, …)` reaches into
+  a `pub(crate)` field, which is the existing test-seam pattern.
+- `0e2dd8e`: only the `if … contains_key … { warn!(…) }` block plus
+  three `Phase 7d` → `Phase 7e` rustdoc string updates. No collateral.
+
+## DoD sign-off
+
+- `cargo test --lib` 1161 passing (was 1159 at start of Round 1
+  fixups; +2 for the new fan-out tests). The new
+  `api_exception_classifier_matches_java_hierarchy` is co-counted in
+  the same 1161.
+- Lint, format-check clean (per Round 2 brief).
+- Per-fixup verification: all 5 commits OK.
+- Java parity: `is_api_exception()` truth table verified against
+  Apache Kafka 4.2 source; catch-arm fan-out matches Java line
+  1056-1081 exactly.
+- Test pinning: would fail on pre-fix code → genuine regression
+  guard.
+- New-defect scan: no production scope creep, no panic/unwrap, no
+  silent classification fallback.
+
+## Round 2 verdict: accepted — Phase 7d ready to close.
+
+# Round 1 — Phase 7e review (open items)
+
+Review window: commits `3b39142`, `b7d5425`, `3ce4b7f`, `e3ca2d3`,
+`38b0439`, `36f55bc`, `9b24291` on branch `fresh-impl`.
+
+Java references (Apache Kafka 4.2):
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java`
+- `kafka/clients/src/test/java/org/apache/kafka/clients/producer/KafkaProducerTest.java`
+
+Round 1 verdict: **0 Blocking, 2 Suggestion, 1 Nit.** Suggestion #1
+(close timeout-elapsed branch) and Nit #1 (FQCN test redundancy)
+are resolved in Round 1 fixups `5e3c2b5` / `c448b6e` and archived to
+`COMMENTS.DONE.7.md`. The remaining open item is Suggestion #2,
+naturally deferred to Phase 7f because it depends on the
+`MockClientImpl` visibility hoist that Phase 7f will perform.
+
+## Issue: `flush` 50-record concurrency parity test missing
+- **File**: `src/producer/kafka_producer.rs:2899-2948` (and Java `KafkaProducerTest.java:1174-1200`)
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducerTest.java:1174` `testFlushCompleteSendOfInflightBatches`
+- **Description**: The Rust `flush_waits_for_pending_record_to_complete` covers the single-batch case. Java's `testFlushCompleteSendOfInflightBatches` sends 50 records, asserts none are done, then asserts all 50 are done after `flush()`. The Rust version sends one record via the accumulator directly (bypassing `producer.send`) because the `MockClientImpl` test mock is `pub(super)` to `sender.rs`. The 50-record concurrency assertion (the actual scenario operators encounter) is not exercised. Phase 7f should rectify when `MockClientImpl` is hoisted; flagging here so it isn't lost.
+- **Expected**: Phase 7f's `KafkaProducerTest` translation should include the multi-record version with assertion that all per-record futures resolve after `flush().await`.
+- **Actual**: Single-record variant only.
+
+**Disposition**: Naturally deferred to Phase 7f. The translation
+requires `MockClientImpl` to be hoisted from `pub(super)` (sender.rs)
+to `pub(crate)`, which is a Phase 7f concern (broader
+`KafkaProducerTest` translation). Tracked in `NOTES.md` as a Phase 7f
+carry-over; will be archived once that phase lands the multi-record
+variant.
+
+## Areas verified clean
+
+- `configure_partitioner` factory — FQCN + simple-name aliases map correctly; unset → `Ok(None)` (default sticky); unrecognised → `KafkaError::Config` with the unrecognised name AND a list of supported alternatives (`kafka_producer.rs:1660-1666`); error-message content is asserted in `partitioner_class_unrecognised_rejected` (`err.message().contains("partitioner.class")` and `contains("MyCustomPartitioner")`).
+- Java's `partitionerPlugin.get() == null` check at line 417 is mirrored exactly: `enable_adaptive_partitioning = partitioner.is_none() && config.get_boolean(...)` (`kafka_producer.rs:450`).
+- Phase 7d `log::warn!` placeholder removed (verified: no `warn!` in `new_for_test` body other than the unrelated `configure_delivery_timeout` silent-bump warn at line 1704, which translates a Java warn).
+- `partitions_for` correctly threads through `wait_on_metadata` → `cluster.partitions_for_topic(topic).to_vec()`; both timeout and cached-metadata paths tested with error-message assertion.
+- `metrics()` returns the empty `ProducerMetrics` map; trait-return-type matches Phase 7b alias.
+- `flush()` calls `accumulator.begin_flush()`, `sender_wakeup()` (Phase 7d no-op), then awaits `accumulator.await_flush_completion()`. Empty-accumulator and pending-record paths both tested.
+- `close_inner` idempotency via `Arc<AtomicBool> closed.swap(true, AcqRel)` — verified by `close_is_idempotent`. The `Drop` impl correctly observes `None` for the JoinHandle slot after explicit close (verified by `close_completes_cleanly_with_no_pending_records`'s post-condition assert).
+- Trait completion: every non-transactional, non-telemetry method is wired; the four transaction methods + `client_instance_id` return `KafkaError::UnsupportedOperation` with milestone-citing messages (`PHASE_9_TXN_DEFERRED`, `TELEMETRY_DEFERRED`).
+- Java `KafkaProducer` does NOT have a `listTopics()` method (verified via grep on `KafkaProducer.java`); the `Producer` trait correctly omits it.
+- Phase 8 carry-overs in `NOTES.md` lines 264-275 list: (a) `close` idempotency potential Java-divergence, (b) `flush`-from-callback deadlock with Phase 8 `tokio::task::id()` plan, (c) `sender_wakeup` no-op with the wake-handle plan. Plus the Phase 7e "landed" section (lines 184-262) explicitly cites `DefaultMetadataUpdater` as the lift point for the public ctor.
+- New-defect scan: no `tokio::select!` introduced; `Mutex::lock()` calls all release the guard before any `.await` (verified at lines 1186, 1581, 2982); no per-call `Box<dyn Future>` on send path; the new factory function is config-time, not on the send path.
+- License headers preserved on the only modified file (`kafka_producer.rs`).
+- No CLAUDE.md / `.claude/rules/` edits in the Phase 7e commits.
+- Memory file at `.claude/agent-memory/actor-executor/phase7e_public_surface.md` (correct location).
+
+## DoD sign-off
+
+- Build, test, lint, format-check clean (per actor's report; verified `cargo build` clean).
+- Test count delta: 1161 → 1175 (+14), distributed across the six Phase 7e fixes per the per-commit messages.
+- All translatable Java tests are accounted for: `testFlushCompleteSendOfInflightBatches` (single-record variant), `testPartitionsFor*` (cached + unknown-topic timeout), `testMetricsReporterAutoGeneratedClientId` (N/A — telemetry stub), `testFlushMeasureLatency` (N/A — metrics stub), `testPartitionsForWithNullTopic` (N/A — `&str` cannot be null), `shouldCloseProperlyAndThrowIfInterrupted` (N/A — Tokio cancellation has no `InterruptException` shape), `testCloseWhenWaitingForMetadataUpdate` and the `testCloseIsForcedOnPending*` family (deferred to Phase 7f when `MockClientImpl` is hoisted).
+- Hot-path allocation audit: `flush`, `close`, `partitions_for`, `metrics` are NOT on the per-record send path. The `configure_partitioner` factory is config-time. No new send-path allocations introduced.
+
+## Round 1 verdict: accepted with minor follow-ups
+
+No Blocking issues. Two Suggestions (timeout-elapsed close branch; multi-record flush test) and one Nit (FQCN test body redundancy) should be addressed before Phase 7f if convenient — none rise to a blocker for closing Phase 7e.

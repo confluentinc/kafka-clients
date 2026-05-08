@@ -273,3 +273,19 @@ this path.
 * `wait_on_metadata` still calls the no-op `sender_wakeup` (Phase 7d
   deferred). Phase 8 should expose an `Arc<dyn Fn() + Send + Sync>`
   wake handle from the Sender at construction time.
+
+### Phase 7e Round 1 carry-overs
+
+* **(Resolved in Round 1 fixup `5e3c2b5`)** Graceful-close
+  timeout-elapsed branch now matches Java's "ioThread terminated"
+  post-condition: `tokio::select!` between the `JoinHandle` and a
+  `tokio::time::sleep(timeout)` arm; on elapse, `force_close=true`,
+  wake, `handle.abort()`, then `await` the cancelled handle. No
+  Phase 8 work outstanding for this divergence — pinned by
+  `close_with_short_timeout_force_closes_and_waits_for_termination`.
+* **Phase 7f carry-over** — hoist `MockClientImpl` visibility from
+  `pub(super)` (sender.rs) to `pub(crate)` and translate
+  `testFlushCompleteSendOfInflightBatches` (50 records, all per-record
+  futures must resolve after `flush().await`). Phase 7e tests cover
+  the single-record variant only because `MockClientImpl` is not
+  reachable from `kafka_producer.rs`.

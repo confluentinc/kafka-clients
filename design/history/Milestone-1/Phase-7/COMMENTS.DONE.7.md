@@ -814,3 +814,76 @@ counterpart to defend against. No `set_read_only` API was added.
 
 **Accepted.** All Suggestions and the Nit fixed in Round-1 fixup
 commits. Phase 7d ready to close.
+
+---
+
+# Round 1 — Phase 7e (resolved blocks)
+
+Review window: commits `3b39142`, `b7d5425`, `3ce4b7f`, `e3ca2d3`,
+`38b0439`, `36f55bc`, `9b24291` on branch `fresh-impl`.
+
+Java references (Apache Kafka 4.2):
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java`
+- `kafka/clients/src/test/java/org/apache/kafka/clients/producer/KafkaProducerTest.java`
+
+Round 1 verdict: **0 Blocking, 2 Suggestion, 1 Nit.** Suggestion #1
+and Nit #1 are resolved here in Round 1 fixups. Suggestion #2
+(`testFlushCompleteSendOfInflightBatches` 50-record concurrency
+test) remains in `COMMENTS.7.md` and is deferred to Phase 7f, where
+`MockClientImpl` will be hoisted from `pub(super)` to `pub(crate)`
+and the multi-record flush test can land alongside the broader
+`KafkaProducerTest` translation.
+
+## Issue: graceful close timeout-elapsed branch leaves the JoinHandle
+- **File**: `src/producer/kafka_producer.rs:1207-1236`
+- **Severity**: Suggestion
+- **Java Reference**: `KafkaProducer.java:1432-1446`
+- **Description**: In `close_inner` graceful path, when `tokio::time::timeout(timeout, handle).await` elapses (the `Err(_elapsed)` arm), the `handle` is consumed by `tokio::time::timeout` and cannot be re-awaited. The actor sets `force_close=true` and relies on the `Drop` impl's `handle.abort()` to terminate the spawned task on producer drop. Java instead performs `sender.forceClose()` followed by an unbounded `ioThread.join()` (line 1441) inside the same `close()` call, so by the time `close()` returns, the IO thread is guaranteed terminated. The Rust translation returns `Ok(())` while the spawned task may still be running (it observes `force_close` only on the next yield). Tests do not exercise this branch (no test passes a graceful-close timeout shorter than the Sender drain duration). Functionally bounded — the next `Drop` does abort the task — but a `close().await` returning `Ok(())` while the IO task is still live diverges from Java's "ioThread terminated" post-condition.
+- **Expected**: Either (a) restructure to use `select!` between a `tokio::time::sleep(timeout)` arm and the `JoinHandle` arm so the elapsed path can still abort + await the handle, or (b) document the divergence in `close_inner` rustdoc and `NOTES.md` as an explicit Phase 8 carry-over.
+- **Actual**: The handle is consumed; force-close is set; the function returns `Ok(())` without ensuring the spawned task has terminated.
+
+**Disposition**: Fixed in commit `5e3c2b5` (fixup! e3ca2d3).
+Restructured with `tokio::select!` per option (a). Arm 1 awaits
+`&mut handle` (cancellation-safe — losing arm drops the borrow,
+not the task). Arm 2 sleeps the timeout; on elapse it flips
+`force_close`, wakes the loop, calls `handle.abort()`, and `await`s
+the cancelled handle so close-return implies task-terminated. The
+`tokio::time::sleep` arm itself is trivially cancellation-safe.
+Added `close_with_short_timeout_force_closes_and_waits_for_termination`
+(test count 1175 → 1176) which:
+
+1. Wires an undrained batch (StubKafkaClient never sends), so the
+   graceful drain spins forever.
+2. Adds a `polls` counter on `StubKafkaClient` (incremented on
+   every `poll` entry) so tests can directly observe whether the
+   spawned task is still driving.
+3. Calls `close_with_timeout(50ms)`. The elapsed arm fires.
+4. Asserts close returns within 2s, `force_close=true`,
+   `accumulator.is_closed()`, and the polls counter does not
+   advance during a 200ms post-close window.
+
+The test would fail on pre-fix code: removing `handle.abort()` +
+`handle.await` from the elapsed arm would let the spawned task
+keep polling on its 50ms cadence; the 200ms post-close snapshot
+would not equal the at-return snapshot. Genuine regression pin.
+
+The Phase 8 carry-over note in `NOTES.md` is updated to record
+this fix (the Java-divergence is now resolved within Milestone-1).
+
+## Issue: nit — `partitioner_class_fqcn_round_robin_resolves` body is effectively empty
+- **File**: `src/producer/kafka_producer.rs:2636-2671`
+- **Severity**: Nit
+- **Java Reference**: n/a
+- **Description**: The test constructs a producer with `partitioner.class=FQCN` and only checks `producer.partitioner` is `Some`. The intent (per the rustdoc) was to also exercise the partitioner via `cluster`, but the body ends with `let _ = partitioner; let _ = cluster;` after fetching them. This makes the test functionally identical to `partitioner_class_simple_name_round_robin_resolves` (same construction-only assertion). The end-to-end behavior is covered by `partitioner_class_round_robin_distributes_across_partitions`, so coverage is fine, but the FQCN test rustdoc oversells: it claims "downcast via Arc::as_ref()" but never calls into the partitioner.
+- **Expected**: Either remove the unused `cluster` fetch / `let _` lines and simplify the rustdoc, or add a single `partitioner.partition(...)` call so the FQCN-vs-simple-name test does something different.
+- **Actual**: Two near-identical tests after the rustdoc is stripped.
+
+**Disposition**: Fixed in commit `c448b6e` (fixup! 3b39142).
+Took option (b): rewrote the test to populate metadata for a
+3-partition topic and dispatch through `Partitioner::partition` on
+the FQCN-resolved instance, asserting the returned partition is
+in [0, 3). The FQCN test now exercises the trait surface and is no
+longer a near-duplicate of the simple-name test. Rustdoc rewritten
+to accurately describe what the test does and how it differs from
+its siblings. End-to-end distribution behaviour remains pinned by
+`partitioner_class_round_robin_distributes_across_partitions`.
