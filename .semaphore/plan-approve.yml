@@ -36,5 +36,5 @@ blocks:
             # through into the cascade, the dep-eval step would need
             # the AK repo path. Cheap to pass; avoids a re-trigger
             # of the same TypeError-on-None-path trap that PR-mode hit.
-            - translation-agent --ak-repo-path "./kafka" \
+            - translation-agent --ak-repo-path "./kafka"
                 --pr "${SEMAPHORE_GIT_PR_NUMBER}" --plan-approve
