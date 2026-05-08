@@ -1202,36 +1202,62 @@ where
             self.accumulator.close();
             self.sender_running.store(false, Ordering::Release);
             self.sender_wakeup();
-            // Java line 1422-1429: ioThread.join(remainingMs).
-            if let Some(handle) = task {
-                match tokio::time::timeout(timeout, handle).await {
-                    Ok(Ok(())) => {
-                        // Sender exited cleanly within the deadline —
-                        // pending records were drained before the
-                        // run-loop's `while !force_close && (has_undrained
-                        // || has_in_flight)` predicate flipped to false.
+            // Java line 1422-1429: ioThread.join(remainingMs); if the
+            // join times out, line 1434-1446 force-closes and joins
+            // again unbounded. The combination guarantees that by the
+            // time `close()` returns the IO thread is terminated.
+            //
+            // We mirror that two-step shape with `tokio::select!`:
+            // the deadline arm flips `force_close` and then `await`s
+            // the (now-aborted) handle, so post-condition `task is
+            // terminated` holds on every code path.
+            //
+            // Cancellation safety: the losing arm of `select!` is
+            // dropped, not run. `tokio::time::sleep` is trivially safe
+            // to drop; the `&mut JoinHandle` reference in the second
+            // arm only releases the borrow — the task itself is
+            // unaffected (per CLAUDE.md rule 9.6 — `JoinHandle` is the
+            // canonical example of a cancellation-safe future).
+            if let Some(mut handle) = task {
+                tokio::select! {
+                    join_result = &mut handle => {
+                        match join_result {
+                            Ok(()) => {
+                                // Sender exited cleanly within the
+                                // deadline — pending records were
+                                // drained before the run-loop's
+                                // `while !force_close && (has_undrained
+                                // || has_in_flight)` predicate flipped
+                                // to false.
+                            },
+                            Err(join_err) => {
+                                // Panicked task or cancelled.
+                                // Java surfaces these as `KafkaException`.
+                                log::error!(
+                                    "Sender task did not exit cleanly: {join_err}",
+                                );
+                            },
+                        }
                     },
-                    Ok(Err(join_err)) => {
-                        // Join error: panicked task or cancelled.
-                        // Java surfaces these as `KafkaException`.
-                        log::error!("Sender task did not exit cleanly: {join_err}");
-                    },
-                    Err(_elapsed) => {
+                    _ = tokio::time::sleep(timeout) => {
                         // Java line 1434-1446: deadline exceeded —
-                        // force-close and final-join. The handle was
-                        // consumed by `tokio::time::timeout`; we no
-                        // longer have it. Flip `force_close` so the
-                        // run loop's drain phase aborts.
+                        // `sender.forceClose()` then unbounded
+                        // `ioThread.join()`. We flip `force_close`,
+                        // wake the loop, then `abort()` + `await` to
+                        // guarantee post-condition "task terminated".
                         log::info!(
                             "Proceeding to force close the producer since pending requests could not be \
                              completed within timeout {timeout_ms} ms."
                         );
                         self.sender_force_close.store(true, Ordering::Release);
-                        // Without the JoinHandle we cannot await again;
-                        // the run loop's drain stage observes
-                        // `force_close=true` on its next yield point and
-                        // bails. The `Drop` impl will perform the abort
-                        // when the producer is dropped.
+                        self.sender_wakeup();
+                        handle.abort();
+                        // `JoinHandle::abort()` causes the next poll to
+                        // resolve with a cancelled `JoinError`. Awaiting
+                        // it here matches Java's unbounded final join —
+                        // by the time we return, the spawned task is
+                        // guaranteed terminated.
+                        let _ = handle.await;
                     },
                 }
             }
@@ -1784,11 +1810,18 @@ mod tests {
     /// keeps the cross-file coupling minimal.
     struct StubKafkaClient {
         wakeups: Arc<std::sync::atomic::AtomicUsize>,
+        /// Increments on every entry to `poll`. Tests use this to
+        /// observe that the spawned `Sender::run_loop` has stopped
+        /// driving (post-`abort()` the counter must stop advancing).
+        polls: Arc<std::sync::atomic::AtomicUsize>,
     }
 
     impl StubKafkaClient {
         fn new() -> Self {
-            Self { wakeups: Arc::new(std::sync::atomic::AtomicUsize::new(0)) }
+            Self {
+                wakeups: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+                polls: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            }
         }
     }
 
@@ -1823,6 +1856,7 @@ mod tests {
             // a `force_close` flip set by `Drop`. Without this, the run
             // loop keeps spinning on a synchronous "no-op poll" and the
             // JoinHandle never finishes.
+            self.polls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let timeout_ms = timeout_ms.max(0) as u64;
             async move {
                 tokio::time::sleep(Duration::from_millis(timeout_ms.min(50))).await;
@@ -3030,6 +3064,145 @@ mod tests {
         );
         // Accumulator must be closed.
         assert!(producer.accumulator.is_closed());
+    }
+
+    /// `close_with_timeout(short)` on a producer with an undrained batch
+    /// MUST take the timeout-elapsed branch in [`KafkaProducer::close_inner`]
+    /// and STILL guarantee the spawned [`Sender::run_loop`] task is
+    /// terminated by the time `close` returns. Mirrors Java's
+    /// `KafkaProducer.java:1432-1446` post-condition where after
+    /// `sender.forceClose()` + `ioThread.join()` the IO thread is
+    /// guaranteed to have stopped. Pre-fix, the Rust translation
+    /// consumed the JoinHandle inside `tokio::time::timeout` and
+    /// returned `Ok(())` while the task was still polling.
+    ///
+    /// Test shape:
+    ///
+    /// 1. Append a batch into the accumulator that the `StubKafkaClient`
+    ///    will never drain (`StubKafkaClient::ready` returns `false`).
+    ///    `has_undrained()` therefore stays true and the run loop's
+    ///    drain phase keeps spinning until `force_close` is observed.
+    /// 2. Snapshot the `polls` counter on the StubKafkaClient. The
+    ///    spawned task increments it on every entry to `poll`.
+    /// 3. Call `close_with_timeout(50ms)`. The graceful drain cannot
+    ///    complete in 50ms (run loop spins at 50ms-per-poll), so the
+    ///    timeout-elapsed arm fires.
+    /// 4. Assert close returns within a generous outer wall-clock
+    ///    bound (timeout + abort + join overhead).
+    /// 5. Assert `force_close=true`, accumulator closed, and the
+    ///    sender_task slot is `None` (proves close took the handle).
+    /// 6. Sleep 200ms and re-snapshot the `polls` counter — it MUST
+    ///    not have advanced. This is the direct termination-proof:
+    ///    if the spawned task were still running it would still be
+    ///    polling on its 50ms cadence.
+    #[tokio::test]
+    async fn close_with_short_timeout_force_closes_and_waits_for_termination() {
+        use std::sync::atomic::Ordering;
+
+        let cfg = ProducerConfig::new(minimal_props()).expect("valid config");
+        let client = StubKafkaClient::new();
+        // Capture the polls counter BEFORE the client is moved into
+        // the producer's spawned Sender; this is our external observer
+        // for "is the run loop still alive".
+        let polls = Arc::clone(&client.polls);
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        // Build ProducerMetadata + populate it with the test topic so
+        // `accumulator.append` can resolve the partition.
+        let pm = ProducerMetadata::new(
+            50,
+            100,
+            300_000,
+            300_000,
+            LogContext::new(),
+            Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new()),
+            time.clone(),
+        )
+        .expect("producer metadata");
+        let now = time.milliseconds();
+        pm.add("topic", now);
+        pm.update_with_current_request_version(&build_single_topic_response("topic", 1), false, now)
+            .expect("metadata update");
+
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
+            cfg,
+            key_ser,
+            value_ser,
+            Some(pm),
+            client,
+            None,
+            None,
+            Some(time.clone()),
+        )
+        .expect("producer construction");
+
+        // Append a batch the StubKafkaClient will never drain.
+        let cluster = producer.metadata.metadata().fetch();
+        let _r = producer
+            .accumulator
+            .append("topic", 0, now, Some(b"k"), Some(b"v"), &[], None, 1000, now, &cluster)
+            .await
+            .expect("append");
+        // `has_undrained()` must hold so the drain phase actually spins.
+        assert!(producer.accumulator.has_undrained(), "expected an undrained batch");
+
+        // Give the spawned Sender at least one poll cycle so the run loop
+        // is genuinely "live" before we close. Without this, a fast race
+        // could make the test pass for the wrong reason (no polls yet,
+        // so post-close polls counter == 0 trivially).
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(
+            polls.load(Ordering::Relaxed) >= 1,
+            "expected the spawned Sender to have polled at least once before close"
+        );
+
+        // Call close with a short timeout. The graceful drain cannot
+        // complete (StubKafkaClient never sends), so the timeout-elapsed
+        // arm fires. The fix guarantees the function awaits the aborted
+        // JoinHandle before returning.
+        let close_start = std::time::Instant::now();
+        let close_timeout = Duration::from_millis(50);
+        // Outer wall-clock cap: generous (timeout + spawn-task abort +
+        // join overhead). 2s is plenty on slow CI; if the producer's
+        // close hangs we want to fail loudly via the outer timeout
+        // rather than the test runner's per-test deadline.
+        tokio::time::timeout(Duration::from_secs(2), producer.close_with_timeout(close_timeout))
+            .await
+            .expect("close_with_timeout did not return within 2s — JoinHandle abort path is wedged")
+            .expect("close ok");
+        let close_elapsed = close_start.elapsed();
+
+        // The timeout-elapsed branch fired (we requested 50ms; the
+        // graceful drain spins forever in this configuration).
+        assert!(
+            close_elapsed >= close_timeout,
+            "close returned in {close_elapsed:?}, expected at least the {close_timeout:?} timeout to elapse",
+        );
+        // Force-close was flipped on the elapsed-arm path.
+        assert!(
+            producer.sender_force_close.load(Ordering::Acquire),
+            "force_close must be true after the timeout-elapsed branch",
+        );
+        // Accumulator was closed during the graceful-init step.
+        assert!(producer.accumulator.is_closed());
+        // close_inner took the JoinHandle for awaiting.
+        assert!(
+            producer.sender_task.lock().unwrap().is_none(),
+            "JoinHandle should have been taken by close_inner",
+        );
+
+        // Direct termination proof: the spawned task must have stopped
+        // polling. Snapshot, sleep past one poll cadence, snapshot
+        // again — equality proves the task has exited.
+        let polls_at_return = polls.load(Ordering::Relaxed);
+        tokio::time::sleep(Duration::from_millis(200)).await;
+        let polls_after_wait = polls.load(Ordering::Relaxed);
+        assert_eq!(
+            polls_at_return, polls_after_wait,
+            "Sender::run_loop is still polling after close returned (was {polls_at_return}, now {polls_after_wait}) — close did not await the aborted JoinHandle to termination",
+        );
     }
 
     /// After `close()`, a subsequent `send()` must fail with
