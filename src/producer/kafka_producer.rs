@@ -2663,9 +2663,16 @@ mod tests {
 
     /// `partitioner.class` set to the Java FQCN
     /// `org.apache.kafka.clients.producer.RoundRobinPartitioner` resolves
-    /// to a [`RoundRobinPartitioner`] instance in the producer's
-    /// `partitioner` slot. Mirrors Java's reflective
+    /// to a [`RoundRobinPartitioner`] instance and exercises the wired
+    /// instance via [`Partitioner::partition`]. Mirrors Java's reflective
     /// `getConfiguredInstance(PARTITIONER_CLASS_CONFIG, Partitioner.class)`.
+    ///
+    /// Distinguishes itself from
+    /// [`partitioner_class_simple_name_round_robin_resolves`] by also
+    /// dispatching through the trait surface (proves the FQCN-resolved
+    /// `Arc<dyn Partitioner>` is callable, not just `Some(...)`).
+    /// End-to-end distribution behaviour is asserted in
+    /// [`partitioner_class_round_robin_distributes_across_partitions`].
     #[tokio::test]
     async fn partitioner_class_fqcn_round_robin_resolves() {
         let mut props = minimal_props();
@@ -2674,34 +2681,54 @@ mod tests {
             "org.apache.kafka.clients.producer.RoundRobinPartitioner".to_owned(),
         );
         let cfg = ProducerConfig::new(props).expect("valid config");
+
+        // Populate metadata for a 3-partition topic so the partitioner
+        // call below has partitions to choose from (RoundRobinPartitioner
+        // would panic on `numPartitions == 0`, mirroring Java's
+        // `ArithmeticException`).
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let pm = ProducerMetadata::new(
+            50,
+            100,
+            300_000,
+            300_000,
+            LogContext::new(),
+            Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new()),
+            time.clone(),
+        )
+        .expect("producer metadata");
+        let now = time.milliseconds();
+        pm.add("topic", now);
+        pm.update_with_current_request_version(&build_single_topic_response("topic", 3), false, now)
+            .expect("metadata update");
+
         let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
         let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
         let producer = KafkaProducer::<Vec<u8>, Vec<u8>, StubKafkaClient>::new_for_test(
             cfg,
             key_ser,
             value_ser,
-            None,
+            Some(pm),
             StubKafkaClient::new(),
             None,
             None,
-            None,
+            Some(time),
         )
         .expect("construction succeeds");
+
         let partitioner = producer.partitioner.as_ref().expect("partitioner Some");
-        // Downcast via Arc::as_ref()'s `&dyn Partitioner` — we cannot
-        // upcast `Arc<dyn Partitioner>` directly, so we observe the
-        // concrete type through the trait surface (`&dyn Any`-style
-        // check is unreliable on trait objects without explicit Any
-        // bounds; instead probe behavior).
         let cluster = producer.metadata.metadata().fetch();
-        // For an empty cluster (no topic) RoundRobinPartitioner would
-        // panic on division-by-zero; guard by populating metadata for
-        // a single-partition topic via the build_test_producer helper.
-        // Here we only need to confirm a partitioner is wired — call
-        // it with a dummy cluster that has the metadata so we don't
-        // panic.
-        let _ = partitioner;
-        let _ = cluster;
+        // Dispatch through the trait surface. The return value is the
+        // RoundRobinPartitioner's first counter value mod numPartitions
+        // (== 0 on a fresh instance), but we only assert "in range" so
+        // the test isn't sensitive to internal counter init.
+        let key_bytes: &[u8] = b"key";
+        let value_bytes: &[u8] = b"v";
+        let part = partitioner.partition("topic", None, Some(key_bytes), None, Some(value_bytes), &cluster);
+        assert!(
+            (0..3).contains(&part),
+            "FQCN-resolved partitioner returned out-of-range partition {part}",
+        );
     }
 
     /// Simple-name alias `RoundRobinPartitioner` resolves identically
