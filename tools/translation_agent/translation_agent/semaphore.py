@@ -22,6 +22,7 @@ side. The pull is the pipeline's responsibility (`artifact pull project
 """
 
 import logging
+import os
 import shutil
 import subprocess
 
@@ -120,16 +121,25 @@ def push_project_artifact_no_force(
 def pull_project_artifact(name: str, dest_dir: str) -> None:
     """Pull project artifact `name` into `dest_dir` with --force overwrite.
 
+    The Semaphore `artifact pull --destination` flag expects a FILE
+    path, not a directory; passing a bare directory like '.' yields
+    "failed to create local file '.': open .: is a directory". So
+    we compute the full destination as `<dest_dir>/<name>` and pass
+    that explicitly. The local file lands at exactly that path.
+
     Raises FileNotFoundError if the `artifact` binary is not on PATH;
     raises subprocess.CalledProcessError on non-zero exit (e.g. the
     artifact does not exist -- callers decide whether that's fatal).
     """
     if shutil.which(ARTIFACT_BINARY) is None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
-    log.info("Pulling Semaphore project artifact %r into %s", name, dest_dir)
+    dest_path = os.path.join(dest_dir, name)
+    log.info(
+        "Pulling Semaphore project artifact %r to %s", name, dest_path,
+    )
     _run_artifact(
         [ARTIFACT_BINARY, "pull", "project", name,
-         "--destination", dest_dir, "--force"],
+         "--destination", dest_path, "--force"],
     )
 
 

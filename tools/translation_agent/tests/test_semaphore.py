@@ -95,13 +95,16 @@ def test_pull_raises_when_artifact_binary_missing():
 
 
 def test_pull_invokes_subprocess():
+    """The CLI's --destination flag expects a FILE path (not a dir);
+    pull_project_artifact computes <dest_dir>/<name> and passes that
+    explicitly so the local file lands at exactly that path."""
     with patch.object(
         semaphore.shutil, "which", return_value="/usr/local/bin/artifact"
     ), patch.object(semaphore.subprocess, "run") as mrun:
-        semaphore.pull_project_artifact("td", "/tmp")
+        semaphore.pull_project_artifact("translation_agent.db", "/tmp")
     mrun.assert_called_once_with(
-        ["artifact", "pull", "project", "td",
-         "--destination", "/tmp", "--force"],
+        ["artifact", "pull", "project", "translation_agent.db",
+         "--destination", "/tmp/translation_agent.db", "--force"],
         check=True,
         capture_output=True,
     )
