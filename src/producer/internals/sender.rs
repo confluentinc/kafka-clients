@@ -1857,6 +1857,21 @@ pub(crate) mod tests {
         Box::new(ProduceResponse::new(data))
     }
 
+    /// Cross-module re-export for tests outside `sender.rs`.
+    /// Phase 7f's `kafka_producer.rs` test module needs to pre-stage
+    /// produce responses on the `MockClientImpl` it hands to the
+    /// producer; this function is the public-to-the-crate-test wrapper
+    /// around the local helper above.
+    pub(crate) fn build_produce_response_for_test(
+        topic: &str,
+        topic_id: Uuid,
+        partition: i32,
+        offset: i64,
+        error: Errors,
+    ) -> Box<dyn AbstractResponse> {
+        build_produce_response(topic, topic_id, partition, offset, error, 0)
+    }
+
     /// Test fixture: build a ProducerMetadata + Sender + RecordAccumulator
     /// with the cluster fully populated for a single topic of 3 partitions
     /// on broker 0.
