@@ -60,3 +60,4 @@
 - [Phase 7d Round 1 patterns](phase7d_round1_patterns.md) — Java exception class hierarchy contract for catch-arm fan-out, is_api_exception classifier, Phase deferral warn pattern, ownership-as-readonly rustdoc
 - [Phase 7e public surface](phase7e_public_surface.md) — partitioner.class factory, Mutex<Option<JoinHandle>> for idempotent close, inline initiate_close, DefaultMetadataUpdater Phase 8 deferral
 - [Phase 7e Round 1 patterns](phase7e_round1_patterns.md) — select! over &mut JoinHandle for Java join() parity, external counter for termination-proof tests, FQCN-vs-simple-name test differentiation
+- [Phase 7f KafkaProducer tests](phase7f_kafkaproducer_tests.md) — pub(crate) tests-mod hoist for cross-module mock, Drop-as-CLOSE_COUNT, metadata.close production gap surfaced
