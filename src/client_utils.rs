@@ -69,7 +69,7 @@ fn filter_preferred_addresses(all_addresses: &[IpAddr]) -> Vec<IpAddr> {
 /// - No valid addresses can be resolved after validation.
 ///
 /// These correspond to Java's `ConfigException`.
-pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<SocketAddr>, KafkaError> {
+pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<(String, SocketAddr)>, KafkaError> {
     let mut addresses = Vec::new();
     for url in urls {
         let trimmed = url.trim();
@@ -109,6 +109,8 @@ pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<SocketAddr>, 
         }
 
         // Resolve the host:port to socket addresses via DNS.
+        // Preserve the original hostname for TLS SNI (Java's InetSocketAddress
+        // does this via getHostString()).
         let addr_str = if host.contains(':') {
             // IPv6: must be bracketed for to_socket_addrs
             format!("[{}]:{}", host, port)
@@ -127,7 +129,9 @@ pub fn parse_and_validate_addresses(urls: &[String]) -> Result<Vec<SocketAddr>, 
                         host
                     );
                 } else {
-                    addresses.extend(resolved);
+                    for addr in resolved {
+                        addresses.push((host.to_string(), addr));
+                    }
                 }
             },
             Err(_) => {
@@ -229,7 +233,7 @@ mod tests {
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
-        assert_eq!(addrs[0].port(), 9092);
+        assert_eq!(addrs[0].1.port(), 9092);
     }
 
     /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — multiple servers.
@@ -274,7 +278,7 @@ mod tests {
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
-        assert_eq!(addrs[0].port(), 9092);
+        assert_eq!(addrs[0].1.port(), 9092);
     }
 
     /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — IPv6 addresses.
@@ -287,8 +291,8 @@ mod tests {
         assert!(result.is_ok());
         let addrs = result.unwrap();
         assert!(!addrs.is_empty());
-        assert_eq!(addrs[0].port(), 8000);
-        assert!(addrs[0].ip().is_ipv6(), "Expected IPv6 address, got: {}", addrs[0].ip());
+        assert_eq!(addrs[0].1.port(), 8000);
+        assert!(addrs[0].1.ip().is_ipv6(), "Expected IPv6 address, got: {}", addrs[0].1.ip());
     }
 
     /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — mixed IPv6 and hostname.
@@ -307,21 +311,17 @@ mod tests {
 
     /// Translated from `ClientUtilsTest.testParseAndValidateAddresses` — hostname preservation.
     ///
-    /// Java's `InetSocketAddress` preserves the original hostname, but Rust's `SocketAddr`
-    /// only contains the resolved IP. This is a known behavioral difference.
-    /// We verify that "localhost" resolves and the port is preserved.
+    /// Java's `InetSocketAddress` preserves the original hostname via `getHostString()`.
+    /// We now preserve the hostname alongside the resolved `SocketAddr` for TLS SNI.
     #[test]
     fn test_parse_and_validate_addresses_hostname_port_preserved() {
         let urls = vec!["localhost:10000".to_string()];
         let result = parse_and_validate_addresses(&urls);
         assert!(result.is_ok());
         let addrs = result.unwrap();
-        // localhost may resolve to one or more addresses (both IPv4 and IPv6)
         assert!(!addrs.is_empty());
-        // Note: Java preserves "localhost" as the hostname via InetSocketAddress.getHostName().
-        // Rust's SocketAddr contains the resolved IP (127.0.0.1 or ::1), losing the hostname.
-        // This is a known difference documented here. The port is still preserved.
-        for addr in &addrs {
+        for (host, addr) in &addrs {
+            assert_eq!("localhost", host);
             assert_eq!(10000, addr.port());
         }
     }
@@ -431,7 +431,7 @@ mod tests {
         // Each localhost may resolve to multiple addresses (IPv4 + IPv6),
         // so we check at least 3 addresses and that all 3 ports are present.
         assert!(addrs.len() >= 3, "Expected at least 3 addresses, got: {}", addrs.len());
-        let ports: std::collections::HashSet<u16> = addrs.iter().map(|a| a.port()).collect();
+        let ports: std::collections::HashSet<u16> = addrs.iter().map(|a| a.1.port()).collect();
         assert!(ports.contains(&9997));
         assert!(ports.contains(&9998));
         assert!(ports.contains(&9999));
