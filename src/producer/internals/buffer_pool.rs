@@ -314,7 +314,7 @@ impl BufferPool {
     ///   compression
     pub fn deallocate_with_size(&self, buffer: Vec<u8>, size: usize) {
         let mut inner = self.inner.lock().unwrap();
-        if size == self.poolable_size && size == buffer.capacity() {
+        if size == self.poolable_size {
             inner.free.push_back(buffer);
         } else {
             drop(buffer);
