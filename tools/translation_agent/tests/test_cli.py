@@ -1615,6 +1615,34 @@ def test_pr_cascade_out_of_candidate_dep_coerced_to_none(tmp_path):
     assert row["status"] == db.STATUS_PLAN_CREATED
 
 
+def test_pr_cascade_dep_eval_without_ak_repo_path_errors_clearly(tmp_path):
+    """REGRESSION: a `--pr N` cascade on a status-0 row WITHOUT
+    `--ak-repo-path` must fail with a clean rc=1 + actionable
+    last_error, not a TypeError 4 frames deep in subprocess.run.
+
+    Phase B refactor moved dep-eval from sweep to per-PR cascade; the
+    cascade needs args.ak_repo_path to call git_ops.commits_between.
+    Without the precondition guard, the failure is a generic stdlib
+    TypeError ("expected str, bytes or os.PathLike object, not
+    NoneType") that gives the operator nothing actionable.
+    """
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    _insert_pr_at_status(db_path, 92, "ak_a", db.STATUS_NO_PLAN)
+    # Note: no `--ak-repo-path` argument.
+    rc = _run(
+        "--pr", "92",
+        db_path=db_path,
+    )
+    assert rc == 1
+    conn = db.connect(db_path)
+    row = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 92",
+    ).fetchone())
+    assert row["status"] == db.STATUS_NO_PLAN  # unchanged
+    assert "--ak-repo-path is required" in row["last_error"]
+
+
 def test_pr_cascade_dep_eval_failure_persists_last_error_keeps_status_0(
     tmp_path,
 ):

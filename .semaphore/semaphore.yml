@@ -2,14 +2,19 @@ version: v1.0
 name: Translation agent
 
 # Single CI pipeline that conditionally:
-#  - on the configured main branch (push, not PR) -> runs the full sweep
-#    (dependency evaluation, plan generation, implementation)
+#  - on the configured main branch (push, not PR) -> runs the narrowed
+#    sweep (closure check + cursor advance + create up to 10 new draft
+#    PRs). Sweep no longer dispatches dep-eval / plan / impl -- those
+#    are driven per-PR by the cascade below.
 #  - on a PR build whose head branch is NOT the main branch -> runs
-#    `translation-agent --pr <N>` (status check only)
+#    `translation-agent --pr <N>` cascade. The cascade reads the row's
+#    current status and runs the next applicable step:
+#      0 -> 1 (dep-eval) -> 2 (plan, stops at human gate)
+#      3 -> 4 (impl, only after `--plan-approve`)
 #  - on a PR build whose head branch IS the main branch -> SKIP both
 #    phases. We never want a human's PR-against-main review to also
 #    trigger a full sweep (which would publish new translation PRs
-#    mid-review) or a per-PR status check (the PR isn't a translation
+#    mid-review) or a per-PR cascade (the PR isn't a translation
 #    PR managed by the orchestrator).
 #  - otherwise -> no-op
 #
@@ -86,8 +91,10 @@ blocks:
                   --ak-repo-path "${AK_REPO_PATH}" \
                   --rust-branch "${MAIN_BRANCH}"
               elif [ -n "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
-                echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} (status check only)"
-                translation-agent --pr "${SEMAPHORE_GIT_PR_NUMBER}"
+                echo "PR build -- running --pr ${SEMAPHORE_GIT_PR_NUMBER} cascade"
+                translation-agent \
+                  --ak-repo-path "${AK_REPO_PATH}" \
+                  --pr "${SEMAPHORE_GIT_PR_NUMBER}"
               else
                 echo "Skipping: not on ${MAIN_BRANCH} and no PR number set"
               fi

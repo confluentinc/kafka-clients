@@ -592,6 +592,25 @@ def _do_dep_eval_step(args, pr):
     """
     pr_number = pr["pr_number"]
 
+    # Guard at the precondition boundary: the cascade enters dep-eval
+    # for status-0 rows and IMMEDIATELY needs args.ak_repo_path to call
+    # git_ops.commits_between. Without it, we'd crash 4 frames deep in
+    # subprocess.run with "expected str, bytes or os.PathLike object,
+    # not NoneType". Better to fail loud here with an actionable message
+    # the operator can act on, persisted to last_error so it's visible
+    # in the pr_commit row after the run.
+    if not args.ak_repo_path:
+        err = (
+            "--ak-repo-path is required for dep-eval (cascading "
+            "status 0 -> 1 needs the AK git repo to compute the "
+            "candidate dep range). Re-run with --ak-repo-path set, "
+            "or set AK_REPO_PATH in the Semaphore env."
+        )
+        log.error("PR #%d: %s", pr_number, err)
+        with _db_session(args, write=True) as conn:
+            db.set_last_error(conn, pr_number, err)
+        return err
+
     with _db_session(args, write=False) as conn:
         cursor = db.get_latest_correspondence(conn, pr["rust_branch"])
     if cursor is None:
