@@ -51,8 +51,18 @@ def push_project_artifact(name: str, file_path: str) -> None:
     )
 
 
-def push_project_artifact_no_force(name: str, file_path: str) -> None:
+def push_project_artifact_no_force(
+    name: str, file_path: str, destination: str = None,
+) -> None:
     """Push file_path to project artifact `name` WITHOUT --force.
+
+    `destination` (optional) overrides the remote artifact name. When
+    omitted, defaults to `file_path` (the CLI then uses the local
+    file's basename). Use `destination` to upload a local file under
+    a controlled remote name -- e.g., the lock primitive uploads
+    `/tmp/translation_agent.db.lock` under destination
+    `translation_agent.db.lock` so release_lock's yank targets the
+    right artifact.
 
     Used as the lock-acquire primitive: when the artifact already exists,
     the CLI returns non-zero and `subprocess.run(check=True)` raises
@@ -61,10 +71,18 @@ def push_project_artifact_no_force(name: str, file_path: str) -> None:
 
     Raises FileNotFoundError if the `artifact` binary is not on PATH.
     """
+    if not destination:
+        destination = file_path
     if shutil.which(ARTIFACT_BINARY) is None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
+    log.info(
+        "Pushing %s to Semaphore project artifact %s", file_path, destination,
+    )
     subprocess.run(
-        [ARTIFACT_BINARY, "push", "project", file_path],
+        [
+            ARTIFACT_BINARY, "push", "project", file_path,
+            "--destination", destination,
+        ],
         check=True,
         capture_output=True,
     )

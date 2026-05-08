@@ -84,7 +84,7 @@ def _no_artifact_io_in_cli_tests(request, monkeypatch):
         return
     monkeypatch.setattr(
         "translation_agent.locked_db.semaphore.push_project_artifact_no_force",
-        lambda name, file_path: None,
+        lambda name, file_path, destination=None: None,
     )
     monkeypatch.setattr(
         "translation_agent.locked_db.semaphore.push_project_artifact",

@@ -43,12 +43,44 @@ def test_push_no_force_raises_when_artifact_binary_missing():
 
 
 def test_push_no_force_invokes_subprocess_without_force_flag():
+    """Without an explicit `destination`, the subprocess argv uses the
+    local file_path as the destination (the CLI then derives the
+    artifact name from its basename). No --force flag is passed."""
     with patch.object(
         semaphore.shutil, "which", return_value="/usr/local/bin/artifact"
     ), patch.object(semaphore.subprocess, "run") as mrun:
         semaphore.push_project_artifact_no_force("lk", "/tmp/lock")
     mrun.assert_called_once_with(
-        ["artifact", "push", "project", "/tmp/lock"],
+        [
+            "artifact", "push", "project", "/tmp/lock",
+            "--destination", "/tmp/lock",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    sent = mrun.call_args[0][0]
+    assert "--force" not in sent
+
+
+def test_push_no_force_with_explicit_destination_overrides_remote_name():
+    """With an explicit `destination`, the remote artifact is named
+    after `destination`, NOT after the local file's basename. This is
+    the mechanism the lock primitive uses to ensure the artifact
+    always lands as `translation_agent.db.lock` regardless of where
+    the local lock file lives on disk."""
+    with patch.object(
+        semaphore.shutil, "which", return_value="/usr/local/bin/artifact"
+    ), patch.object(semaphore.subprocess, "run") as mrun:
+        semaphore.push_project_artifact_no_force(
+            "lk", "/tmp/translation_agent.db.lock",
+            destination="translation_agent.db.lock",
+        )
+    mrun.assert_called_once_with(
+        [
+            "artifact", "push", "project",
+            "/tmp/translation_agent.db.lock",
+            "--destination", "translation_agent.db.lock",
+        ],
         check=True,
         capture_output=True,
     )

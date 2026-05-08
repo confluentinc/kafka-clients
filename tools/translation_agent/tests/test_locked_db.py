@@ -76,12 +76,12 @@ def test_acquire_lock_raises_timeout_after_all_retries_fail():
 
 def test_acquire_lock_writes_holder_payload_with_required_fields():
     """The lock artifact body is JSON with runner_id, acquired_at, pid."""
-    captured_paths = []
+    captured_bodies = []
 
-    def fake_push(name, file_path):
+    def fake_push(name, file_path, destination=None):
         # Capture the on-disk file content before acquire_lock unlinks it.
         with open(file_path) as f:
-            captured_paths.append(f.read())
+            captured_bodies.append(f.read())
 
     with patch.object(
         locked_db.semaphore, "push_project_artifact_no_force",
@@ -91,34 +91,60 @@ def test_acquire_lock_writes_holder_payload_with_required_fields():
             retries=1, retry_delay_s=0,
             sleep_fn=lambda _: None,
         )
-    assert len(captured_paths) == 1
-    body = json.loads(captured_paths[0])
+    assert len(captured_bodies) == 1
+    body = json.loads(captured_bodies[0])
     assert set(body.keys()) == {"runner_id", "acquired_at", "pid"}
     assert isinstance(body["pid"], int)
     assert body["pid"] == os.getpid()
 
 
 def test_acquire_lock_cleans_up_tmpfile_on_timeout():
-    """The local tmp file is unlinked even when acquire fails."""
-    tmp_paths = []
+    """The local lock file is unlinked even when acquire fails. Path
+    is fixed (`LOCK_LOCAL_PATH`), so the same path is captured each
+    retry; the file should be gone after the final attempt."""
     err = subprocess.CalledProcessError(1, ["artifact"])
-
-    def capture_path(name, file_path):
-        tmp_paths.append(file_path)
-        raise err
-
     with patch.object(
         locked_db.semaphore, "push_project_artifact_no_force",
-        side_effect=capture_path,
+        side_effect=err,
     ):
         with pytest.raises(locked_db.LockTimeoutError):
             locked_db.acquire_lock(
                 retries=2, retry_delay_s=0,
                 sleep_fn=lambda _: None,
             )
-    # Same tmp path each retry; should be unlinked after the final attempt.
-    assert tmp_paths
-    assert not os.path.exists(tmp_paths[-1])
+    assert not os.path.exists(locked_db.LOCK_LOCAL_PATH)
+
+
+def test_acquire_lock_pushes_with_canonical_destination():
+    """REGRESSION: the `destination` arg passed to
+    `push_project_artifact_no_force` MUST equal LOCK_ARTIFACT_NAME so
+    the resulting remote artifact has that name and release_lock's yank
+    targets it correctly.
+
+    The earlier implementation relied on the artifact CLI deriving the
+    artifact name from the file's basename, and the local file had a
+    randomized basename like `translation_agent_lock_0hi1bkbn.lock`.
+    Result: each runner pushed a uniquely-named artifact -> no
+    contention check fired -> the lock silently allowed concurrent
+    runners into the critical section, AND the artifact store
+    accumulated orphan lock files. The fix routes through the
+    `destination` parameter so the remote name is explicit and pinned.
+    """
+    captured_destinations = []
+
+    def capture(name, file_path, destination=None):
+        captured_destinations.append(destination)
+
+    with patch.object(
+        locked_db.semaphore, "push_project_artifact_no_force",
+        side_effect=capture,
+    ):
+        locked_db.acquire_lock(
+            retries=1, retry_delay_s=0,
+            sleep_fn=lambda _: None,
+        )
+    assert len(captured_destinations) == 1
+    assert captured_destinations[0] == locked_db.LOCK_ARTIFACT_NAME
 
 
 # ---------- release_lock ----------

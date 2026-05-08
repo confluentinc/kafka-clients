@@ -54,6 +54,7 @@ if TYPE_CHECKING:
 
 
 LOCK_ARTIFACT_NAME = "translation_agent.db.lock"
+LOCK_LOCAL_PATH = os.path.join(tempfile.gettempdir(), LOCK_ARTIFACT_NAME)
 DB_ARTIFACT_NAME_DEFAULT = "translation_agent.db"
 
 
@@ -98,22 +99,21 @@ def acquire_lock(
         payload = _holder_payload()
     body = json.dumps(payload, sort_keys=True)
 
-    # NamedTemporaryFile with delete=False so the artifact CLI can read
-    # the path after we close it. We unlink in `finally` regardless of
-    # outcome -- the lock artifact lives in the artifact store, not on
-    # local disk.
-    with tempfile.NamedTemporaryFile(
-        mode="w", suffix=".lock", delete=False,
-        prefix="translation_agent_lock_",
-    ) as tmp:
+    # Fixed local path: the Semaphore `artifact push project <file>` CLI
+    # derives the artifact name from the file's basename (no `--name`
+    # flag exists), so the local file MUST be named LOCK_ARTIFACT_NAME
+    # for the resulting artifact to match what release_lock yanks. The
+    # actual mutex is the artifact server's "exists" check on the
+    # without-`--force` push -- the local path just carries the
+    # holder payload and doesn't need to be unique per call.
+    with open(LOCK_LOCAL_PATH, "w") as tmp:
         tmp.write(body)
-        tmp_path = tmp.name
 
     try:
         for attempt in range(1, retries + 1):
             try:
                 semaphore.push_project_artifact_no_force(
-                    LOCK_ARTIFACT_NAME, tmp_path,
+                    LOCK_ARTIFACT_NAME, LOCK_LOCAL_PATH, LOCK_ARTIFACT_NAME
                 )
                 log.debug("Acquired DB lock on attempt %d/%d", attempt, retries)
                 return
@@ -132,8 +132,12 @@ def acquire_lock(
             f"`artifact yank project {LOCK_ARTIFACT_NAME}`"
         )
     finally:
+        # Best-effort cleanup of the local file. The lock artifact
+        # itself lives in the Semaphore artifact store and is released
+        # via release_lock -> yank; the local file is just payload
+        # and a leftover doesn't affect correctness.
         try:
-            os.unlink(tmp_path)
+            os.unlink(LOCK_LOCAL_PATH)
         except OSError:
             pass
 
