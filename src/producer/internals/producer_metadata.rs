@@ -24,12 +24,12 @@ use std::collections::{HashMap, HashSet};
 use std::ops::Deref;
 use std::sync::{Arc, Mutex};
 
-use log::debug;
-
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::protocol::Errors;
 use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::MetadataResponse;
+use crate::common::utils::LogContext;
+use crate::kafka_debug;
 use crate::metadata::Metadata;
 
 /// Producer-specific inner state, protected by its own mutex.
@@ -83,6 +83,34 @@ impl ProducerMetadata {
         metadata_idle_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
     ) -> Self {
+        Self::with_log_context(
+            refresh_backoff_ms,
+            refresh_backoff_max_ms,
+            metadata_expire_ms,
+            metadata_idle_ms,
+            cluster_resource_listeners,
+            LogContext::empty(),
+        )
+    }
+
+    /// Creates a new `ProducerMetadata` with a `LogContext`.
+    ///
+    /// # Arguments
+    /// * `refresh_backoff_ms` - The minimum amount of time between metadata refreshes
+    /// * `refresh_backoff_max_ms` - The maximum amount of time to wait between metadata
+    ///   refreshes
+    /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
+    /// * `metadata_idle_ms` - The idle time after which an unused topic is removed
+    /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    /// * `log_context` - Contextual log message prefix
+    pub fn with_log_context(
+        refresh_backoff_ms: i64,
+        refresh_backoff_max_ms: i64,
+        metadata_expire_ms: i64,
+        metadata_idle_ms: i64,
+        cluster_resource_listeners: ClusterResourceListeners,
+        log_context: LogContext,
+    ) -> Self {
         let inner = Arc::new(Mutex::new(ProducerMetadataInner {
             topics: HashMap::new(),
             new_topics: HashSet::new(),
@@ -92,6 +120,7 @@ impl ProducerMetadata {
 
         // Closure for retain_topic_fn: checks the topics map and removes expired entries
         let retain_inner = Arc::clone(&inner);
+        let retain_log_context = log_context.clone();
         let retain_topic_fn = Box::new(move |topic: &str, _is_internal: bool, now_ms: i64| -> bool {
             let mut state = retain_inner.lock().unwrap();
             let expire_ms = state.topics.get(topic).copied();
@@ -99,9 +128,12 @@ impl ProducerMetadata {
                 None => false,
                 Some(_) if state.new_topics.contains(topic) => true,
                 Some(expiry) if expiry <= now_ms => {
-                    debug!(
+                    kafka_debug!(
+                        retain_log_context,
                         "Removing unused topic {} from the metadata list, expiryMs {} now {}",
-                        topic, expiry, now_ms
+                        topic,
+                        expiry,
+                        now_ms
                     );
                     state.topics.remove(topic);
                     false
@@ -157,6 +189,7 @@ impl ProducerMetadata {
                 new_topics_request_builder_fn: Some(new_topics_request_builder_fn),
                 post_update_fn: Some(post_update_fn),
             },
+            log_context,
         ));
 
         Self { metadata, inner }
