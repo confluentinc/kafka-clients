@@ -1210,6 +1210,23 @@ where
             // call back into the equivalent `client.close()` path once
             // `DefaultMetadataUpdater` is translated; until then the
             // producer's close path closes the metadata directly.
+            //
+            // ORDERING DIVERGENCE vs Java (graceful arm only): Java's
+            // chain places `metadata.close()` AFTER the run-loop drain
+            // (it fires from `client.close()` which Sender.run calls on
+            // its way out). Rust calls `metadata.close()` BEFORE the
+            // `tokio::select!` over the JoinHandle here, so a `send`
+            // mid-`wait_on_metadata.await_update` aborts immediately
+            // even when the graceful timeout has not elapsed and the
+            // run loop could still produce a metadata response.
+            // Functionally equivalent for Milestone-1 (both paths set
+            // the metadata closed flag and the Sender's
+            // `wait_on_metadata` await unblocks either way), but the
+            // exact ordering only matches Java's contract once
+            // `DefaultMetadataUpdater::close()` lands in Phase 8 and
+            // the call moves back into the `client.close()` chain.
+            // See `Phase-7/NOTES.md` "Phase 7f carry-overs" for the
+            // lift point.
             self.metadata.close();
             self.sender_wakeup();
             // Java line 1422-1429: ioThread.join(remainingMs); if the
@@ -4620,6 +4637,18 @@ mod tests {
     /// variant `flush_waits_for_pending_record_to_complete` was the
     /// best the Phase 7e Round 1 fixup could do without
     /// `MockClientImpl` reachable cross-module).
+    ///
+    /// DEVIATION: Java sends via `producer.send(record, callback)`
+    /// (fire-and-forget callback path); Rust uses
+    /// `accumulator.append()` directly to avoid coordinating MockClient
+    /// broker-response ticks per record (each `producer.send().await`
+    /// would otherwise serialize against a Sender tick, requiring 50
+    /// staged metadata + produce response choreography). The test
+    /// still proves the Phase 7e `flush()` semantic:
+    /// `begin_flush() → await_flush_completion()` waits for all
+    /// in-flight batches to ack. Phase 8 may rewrite once the
+    /// `MockClient` harness has a multi-record helper that drives the
+    /// public `send()` surface end-to-end.
     #[tokio::test]
     async fn test_flush_complete_send_of_inflight_batches_50_records() {
         use crate::common::protocol::Errors;
@@ -4951,6 +4980,10 @@ mod tests {
     // SKIP — Rust `Duration` is non-negative by construction:
     //  * closeWithNegativeTimestampShouldThrow (line 1164) —
     //    `std::time::Duration::from_millis(-100)` is a compile error
+    //
+    // SKIP — already covered by Phase 7e:
+    //  * closeShouldBeIdempotent (line 1156) — COVERED by Phase 7e
+    //    `close_is_idempotent` — not duplicated here.
     //
     // SKIP — Java reflective config-class loading not implemented in
     // Milestone-1:

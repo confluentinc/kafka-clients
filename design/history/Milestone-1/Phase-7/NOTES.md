@@ -289,3 +289,48 @@ this path.
   futures must resolve after `flush().await`). Phase 7e tests cover
   the single-record variant only because `MockClientImpl` is not
   reachable from `kafka_producer.rs`.
+
+## Phase 7f — landed (3 commits)
+
+### `MockClientImpl` visibility hoist (commit `11c83cb`)
+
+`pub(super)` → `pub(crate)` on the `sender::tests` submodule and on
+every `MockClientImpl` method. No production logic changed; no symbols
+leak to non-test builds (`#[cfg(test)]` gating preserved). Unblocks
+`KafkaProducerTest` translations that need to drive broker-response
+choreography from `kafka_producer.rs`.
+
+### `KafkaProducerTest` non-transactional translation (commit `c5109d0`)
+
+24 Java tests translated + 1 cross-reference sentinel + 56 skipped
+with rationale (transactional / metrics-telemetry / null-rejection /
+Duration-non-negative / reflective-load / other). One production fix
+landed: `KafkaProducer::close_inner` calls `self.metadata.close()` in
+both arms (graceful + force-close) so blocked `send`s in
+`wait_on_metadata.await_update` unblock promptly on close. Test count
+1176 → 1201 (+25). See the skip block at the bottom of
+`kafka_producer.rs`'s test module for the full enumerated audit.
+
+### Phase 7f carry-overs (Phase 8 obligations)
+
+* **`metadata.close()` ordering**: when `DefaultMetadataUpdater` lands,
+  move `metadata.close()` back into the `client.close() →
+  DefaultMetadataUpdater.close() → metadata.close()` chain
+  (`NetworkClient.java:1325-1326`), and remove the explicit
+  `metadata.close()` calls from `KafkaProducer::close_inner` (lines
+  1213 and 1286 at time of writing). Java's chain places
+  `metadata.close()` AFTER the run-loop drains via `client.close()`;
+  Rust currently calls it BEFORE the JoinHandle await in
+  graceful-close. Functionally equivalent in Milestone-1 (both paths
+  set the metadata closed flag and the Sender's `wait_on_metadata`
+  await unblocks either way), but the exact ordering only matches
+  Java's contract once `DefaultMetadataUpdater` is translated.
+  Restore Java ordering then.
+* **50-record flush test fidelity**: rewrite
+  `test_flush_complete_send_of_inflight_batches_50_records` to drive
+  records through `producer.send().await` rather than
+  `accumulator.append()` directly, once the `MockClient` harness has
+  a multi-record helper that handles per-send Sender-tick
+  coordination. The flush semantic itself is already pinned;
+  Phase 8 lifts the test to exercise the full public-surface hot
+  path.
