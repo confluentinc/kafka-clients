@@ -1,0 +1,141 @@
+# Translation Plan: MINOR — Rename `createGroupTombstoneRecords` to `createGroupTombStoneRecordsAndCancelTimers`
+
+**AK commit:** `437337cf370b5204e7ddff3da4550730c1334617`
+**AK branch:** trunk
+**PR:** #103
+**Rust branch:** `kafka-translate/437337cf370b5204e7ddff3da4550730c1334617`
+
+---
+
+## Summary of the Apache Kafka Commit
+
+This is a **minor refactoring** in the group coordinator module. No new functionality is added.
+
+**Motivation:** The method `createGroupTombstoneRecords` in `GroupMetadataManager` was previously
+updated to also cancel timers (specifically the streams initial rebalance timeout timer) when
+creating tombstone records for group deletion. The method name no longer accurately described its
+behavior, so it was renamed to `createGroupTombstoneRecordsAndCancelTimers`.
+
+**Changes applied in AK:**
+
+1. **Renamed method** in `GroupMetadataManager`:
+   - `createGroupTombstoneRecords(String, List<CoordinatorRecord>)` -> `createGroupTombstoneRecordsAndCancelTimers(...)`
+   - `createGroupTombstoneRecords(Group, List<CoordinatorRecord>)` -> `createGroupTombstoneRecordsAndCancelTimers(...)`
+
+2. **Refactored timer cancellation** — moved the timer cancel logic out of
+   `GroupMetadataManager` into a new `cancelTimers` method on the `Group` interface:
+   - Added `default void cancelTimers(CoordinatorTimer<Void, CoordinatorRecord> timer) {}` to `Group` interface.
+   - `StreamsGroup` overrides `cancelTimers` to cancel its initial rebalance timeout timer.
+   - The `streamsInitialRebalanceKey` in `GroupMetadataManager` now delegates to
+     `StreamsGroup.initialRebalanceTimeoutKey(groupId)`.
+
+3. **Updated all call sites** in `GroupMetadataManager` and `GroupCoordinatorShard` to use
+   the new method name.
+
+4. **Updated tests** in `GroupCoordinatorShardTest`, `GroupMetadataManagerTest`, and added
+   new tests in `StreamsGroupTest` for the `cancelTimers` method.
+
+**Changed files:**
+```
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/Group.java
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorShard.java
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManager.java
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/streams/StreamsGroup.java
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupCoordinatorShardTest.java (test)
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/GroupMetadataManagerTest.java (test)
+group-coordinator/src/main/java/org/apache/kafka/coordinator/group/streams/StreamsGroupTest.java (test)
+```
+
+---
+
+## Rust Translation Analysis
+
+### Does the group coordinator exist in Rust?
+
+No. The Rust codebase does not currently contain any group coordinator implementation.
+There is no equivalent of:
+- `GroupMetadataManager`
+- `GroupCoordinatorShard`
+- `Group` interface / trait
+- `StreamsGroup`
+
+The Rust project currently implements client-side protocol handling (producers, consumers,
+request/response types) but not server-side coordinator logic.
+
+### Is there production code to translate?
+
+No. Since the group coordinator module has not been translated to Rust, there is no
+existing Rust code that corresponds to any of the files modified in this commit.
+
+### What needs to be done?
+
+**Nothing.** This commit is a pure server-side refactoring (method rename + moving timer
+cancellation responsibility to the `Group` implementations). Since:
+
+1. The group coordinator is not yet implemented in Rust.
+2. No client-facing API or protocol behavior changed.
+3. No wire protocol, message format, or configuration was modified.
+
+There is no actionable translation work for this commit.
+
+---
+
+## Implementation Plan
+
+### Phase 1 — No-op
+
+This commit requires no changes to the Rust codebase. It is a server-side internal
+refactoring with no client-visible effects.
+
+When the group coordinator is eventually translated to Rust, the translated code should
+use the *final* naming convention (`create_group_tombstone_records_and_cancel_timers`)
+and the design pattern where each `Group` trait implementation provides its own
+`cancel_timers` method. This will happen naturally by translating from the current
+state of the Java code at that time.
+
+### Phase 2 — Verification
+
+Confirm via `cargo build` and `cargo test` that the existing codebase is unaffected
+(no changes were made).
+
+---
+
+## Files to Create / Modify
+
+| File | Action | Reason |
+|------|--------|--------|
+| (none) | — | No Rust code corresponds to the changed Java files |
+
+No changes to `src/` or `tests/` are required.
+
+---
+
+## Design Notes for Future Translation
+
+When the group coordinator is eventually ported to Rust, the following design patterns
+from this commit should be adopted:
+
+1. **`Group` trait** should include a `cancel_timers(&self, timer: &CoordinatorTimer)` method
+   with a default no-op implementation.
+2. **`StreamsGroup`** should override `cancel_timers` to cancel the initial rebalance
+   timeout using a key generated by `StreamsGroup::initial_rebalance_timeout_key(group_id)`.
+3. **Method naming** should reflect all side effects — e.g.,
+   `create_group_tombstone_records_and_cancel_timers` rather than just
+   `create_group_tombstone_records`.
+
+---
+
+## Out of Scope
+
+- Translating the group coordinator module — it is a large server-side component not
+  yet present in the Rust codebase.
+- Any client-side changes — this commit has no client-facing effects.
+
+---
+
+## Definition of Done
+
+- [x] Design document written and committed.
+- [x] No Rust code changes needed (confirmed by analysis).
+- [ ] `cargo build` succeeds (no regressions).
+- [ ] `cargo test` passes (no regressions).
