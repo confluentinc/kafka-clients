@@ -25,7 +25,12 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::common::KafkaError;
+use crate::common::config::sasl_configs;
+use crate::common::config::ssl_configs;
+use crate::common::config::{SaslConfig, SslConfig};
 use crate::common::record::CompressionType;
+use crate::common::security::SecurityProtocol;
+use crate::common_client_configs;
 
 /// Maximum number of in-flight requests per connection when idempotence is enabled.
 /// Aligned with `ProducerStateEntry.NUM_BATCHES_TO_RETAIN` on the broker.
@@ -46,6 +51,17 @@ pub struct ProducerConfig {
 
     /// `client.id` - An id string to pass to the server when making requests.
     pub(crate) client_id: String,
+
+    // --- Security ---
+    /// `security.protocol` - Protocol used to communicate with brokers.
+    /// Default: `SecurityProtocol::Plaintext`.
+    pub(crate) security_protocol: SecurityProtocol,
+
+    /// SASL configuration (mechanism, JAAS config, credentials).
+    pub(crate) sasl_config: SaslConfig,
+
+    /// SSL/TLS configuration.
+    pub(crate) ssl_config: SslConfig,
 
     // --- Batching ---
     /// `batch.size` - The producer will attempt to batch records together into fewer
@@ -174,6 +190,9 @@ impl Default for ProducerConfig {
         Self {
             bootstrap_servers: Vec::new(),
             client_id: String::new(),
+            security_protocol: SecurityProtocol::Plaintext,
+            sasl_config: SaslConfig::default(),
+            ssl_config: SslConfig::default(),
             batch_size: 16384,
             linger_ms: 5,
             buffer_memory: 32 * 1024 * 1024,
@@ -274,6 +293,12 @@ impl ProducerConfig {
     pub const TRANSACTIONAL_ID_CONFIG: &'static str = "transactional.id";
     /// Config key: `transaction.timeout.ms`
     pub const TRANSACTION_TIMEOUT_CONFIG: &'static str = "transaction.timeout.ms";
+    /// Config key: `security.protocol`
+    pub const SECURITY_PROTOCOL_CONFIG: &'static str = common_client_configs::SECURITY_PROTOCOL_CONFIG;
+    /// Config key: `sasl.mechanism`
+    pub const SASL_MECHANISM_CONFIG: &'static str = sasl_configs::SASL_MECHANISM;
+    /// Config key: `sasl.jaas.config`
+    pub const SASL_JAAS_CONFIG: &'static str = sasl_configs::SASL_JAAS_CONFIG;
 
     /// Creates a `ProducerConfig` from a map of string key-value pairs.
     ///
@@ -293,7 +318,7 @@ impl ProducerConfig {
         for (key, value) in props {
             match key.as_str() {
                 Self::BOOTSTRAP_SERVERS_CONFIG => {
-                    config.bootstrap_servers = value.split(',').map(|s| s.trim().to_string()).collect();
+                    config.bootstrap_servers = Self::parse_list_dedup(key, value);
                 },
                 Self::CLIENT_ID_CONFIG => {
                     config.client_id = value.to_string();
@@ -380,6 +405,29 @@ impl ProducerConfig {
                 Self::TRANSACTION_TIMEOUT_CONFIG => {
                     config.transaction_timeout_ms = Self::parse_i32(key, value)?;
                 },
+                Self::SECURITY_PROTOCOL_CONFIG => {
+                    config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
+                        KafkaError::illegal_argument(format!(
+                            "Invalid value for '{}': {}. Valid values are: {:?}",
+                            key,
+                            value,
+                            SecurityProtocol::names()
+                        ))
+                    })?;
+                },
+                Self::SASL_MECHANISM_CONFIG => {
+                    config.sasl_config.mechanism = value.to_string();
+                },
+                Self::SASL_JAAS_CONFIG => {
+                    config.sasl_config.jaas_config = if value.is_empty() {
+                        None
+                    } else {
+                        Some(value.to_string())
+                    };
+                },
+                key if key.starts_with("ssl.") => {
+                    Self::parse_ssl_config(&mut config.ssl_config, key, value);
+                },
                 _ => {
                     warn!("Unknown producer configuration key: {}", key);
                 },
@@ -414,6 +462,26 @@ impl ProducerConfig {
         }
     }
 
+    /// Parses a comma-separated list value, deduplicating entries while preserving
+    /// first-occurrence order. If duplicates are found, emits a `warn!` log.
+    ///
+    /// Mirrors the deduplication behavior added to `ConfigDef.parse()` in
+    /// KAFKA-19875 for `ValidList`-typed configs.
+    fn parse_list_dedup(key: &str, value: &str) -> Vec<String> {
+        use std::collections::HashSet;
+        let original: Vec<String> = value.split(',').map(|s| s.trim().to_string()).collect();
+        let mut seen = HashSet::new();
+        let deduped: Vec<String> = original.iter().filter(|s| seen.insert((*s).clone())).cloned().collect();
+        if deduped.len() != original.len() {
+            warn!(
+                "Configuration key \"{}\" contains duplicate values. Duplicates will be removed. \
+                 The original value is: {:?}, the updated value is: {:?}",
+                key, original, deduped
+            );
+        }
+        deduped
+    }
+
     /// Parses the acks string, converting "all" to -1.
     pub fn parse_acks(acks_string: &str) -> Result<i16, String> {
         let trimmed = acks_string.trim();
@@ -423,6 +491,50 @@ impl ProducerConfig {
             trimmed
                 .parse::<i16>()
                 .map_err(|_| format!("Invalid configuration value for 'acks': {acks_string}"))
+        }
+    }
+
+    fn parse_ssl_config(ssl: &mut SslConfig, key: &str, value: &str) {
+        match key {
+            ssl_configs::SSL_TRUSTSTORE_LOCATION_CONFIG => {
+                ssl.truststore_location = Some(value.to_string());
+            },
+            ssl_configs::SSL_TRUSTSTORE_PASSWORD_CONFIG => {
+                ssl.truststore_password = Some(value.to_string());
+            },
+            ssl_configs::SSL_TRUSTSTORE_CERTIFICATES_CONFIG => {
+                ssl.truststore_certificates = Some(value.to_string());
+            },
+            ssl_configs::SSL_TRUSTSTORE_TYPE_CONFIG => {
+                ssl.truststore_type = value.to_string();
+            },
+            ssl_configs::SSL_KEYSTORE_LOCATION_CONFIG => {
+                ssl.keystore_location = Some(value.to_string());
+            },
+            ssl_configs::SSL_KEYSTORE_PASSWORD_CONFIG => {
+                ssl.keystore_password = Some(value.to_string());
+            },
+            ssl_configs::SSL_KEYSTORE_KEY_CONFIG => {
+                ssl.keystore_key = Some(value.to_string());
+            },
+            ssl_configs::SSL_KEYSTORE_CERTIFICATE_CHAIN_CONFIG => {
+                ssl.keystore_certificate_chain = Some(value.to_string());
+            },
+            ssl_configs::SSL_KEYSTORE_TYPE_CONFIG => {
+                ssl.keystore_type = value.to_string();
+            },
+            ssl_configs::SSL_KEY_PASSWORD_CONFIG => {
+                ssl.key_password = Some(value.to_string());
+            },
+            ssl_configs::SSL_ENDPOINT_IDENTIFICATION_ALGORITHM_CONFIG => {
+                ssl.endpoint_identification_algorithm = value.to_string();
+            },
+            ssl_configs::SSL_ENABLED_PROTOCOLS_CONFIG => {
+                ssl.enabled_protocols = Self::parse_list_dedup(key, value);
+            },
+            _ => {
+                warn!("Unknown SSL configuration key: {}", key);
+            },
         }
     }
 }
@@ -532,5 +644,88 @@ mod tests {
         assert_eq!(ProducerConfig::parse_acks("0"), Ok(0));
         assert_eq!(ProducerConfig::parse_acks("1"), Ok(1));
         assert!(ProducerConfig::parse_acks("invalid").is_err());
+    }
+
+    /// Translated from `ProducerConfigTest.testInvalidSecurityProtocol`.
+    #[test]
+    fn test_invalid_security_protocol() {
+        let mut props = HashMap::new();
+        props.insert("security.protocol".to_string(), "abc".to_string());
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let err = ProducerConfig::from_properties(&props).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(
+            msg.contains("security.protocol"),
+            "Error message should contain config key, got: {}",
+            msg
+        );
+    }
+
+    /// Translated from `ProducerConfigTest.testCaseInsensitiveSecurityProtocol`.
+    #[test]
+    fn test_case_insensitive_security_protocol() {
+        let mut props = HashMap::new();
+        props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.security_protocol, SecurityProtocol::SaslSsl);
+    }
+
+    #[test]
+    fn test_sasl_config_from_properties() {
+        let mut props = HashMap::new();
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert(
+            "sasl.jaas.config".to_string(),
+            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"secret\";"
+                .to_string(),
+        );
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.sasl_config.mechanism, "PLAIN");
+        assert_eq!(config.sasl_config.resolve_username(), Some("alice"));
+        assert_eq!(config.sasl_config.resolve_password(), Some("secret"));
+    }
+
+    /// Translated from the spirit of `ConfigDefTest.testParsedValueWillRemoveDuplicatesInValidList`.
+    /// Verifies that duplicate `bootstrap.servers` entries are silently dropped.
+    #[test]
+    fn test_bootstrap_servers_dedup() {
+        let mut props = HashMap::new();
+        props.insert("bootstrap.servers".to_string(), "host1:9092,host2:9093,host1:9092".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.bootstrap_servers, vec!["host1:9092", "host2:9093"]);
+    }
+
+    /// Verifies that duplicate `ssl.enabled.protocols` entries are silently dropped.
+    #[test]
+    fn test_ssl_enabled_protocols_dedup() {
+        let mut props = HashMap::new();
+        props.insert("ssl.enabled.protocols".to_string(), "TLSv1.3,TLSv1.2,TLSv1.3".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(config.ssl_config.enabled_protocols, vec!["TLSv1.3", "TLSv1.2"]);
+    }
+
+    /// Verifies that a list with no duplicates passes through unchanged.
+    #[test]
+    fn test_parse_list_dedup_no_duplicates() {
+        let result = ProducerConfig::parse_list_dedup("test.key", "a,b,c");
+        assert_eq!(result, vec!["a", "b", "c"]);
+    }
+
+    #[test]
+    fn test_ssl_config_from_properties() {
+        let mut props = HashMap::new();
+        props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
+        props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
+        props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
+        props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
+        let config = ProducerConfig::from_properties(&props).unwrap();
+        assert_eq!(
+            config.ssl_config.truststore_location.as_deref(),
+            Some("/path/to/truststore.pem")
+        );
+        assert_eq!(config.ssl_config.keystore_location.as_deref(), Some("/path/to/keystore.pem"));
+        assert_eq!(config.ssl_config.endpoint_identification_algorithm, "");
     }
 }
