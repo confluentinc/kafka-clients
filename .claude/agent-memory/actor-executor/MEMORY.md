@@ -61,3 +61,5 @@
 - [Phase 7e public surface](phase7e_public_surface.md) — partitioner.class factory, Mutex<Option<JoinHandle>> for idempotent close, inline initiate_close, DefaultMetadataUpdater Phase 8 deferral
 - [Phase 7e Round 1 patterns](phase7e_round1_patterns.md) — select! over &mut JoinHandle for Java join() parity, external counter for termination-proof tests, FQCN-vs-simple-name test differentiation
 - [Phase 7f KafkaProducer tests](phase7f_kafkaproducer_tests.md) — pub(crate) tests-mod hoist for cross-module mock, Drop-as-CLOSE_COUNT, metadata.close production gap surfaced
+- [Phase 8.0 DefaultMetadataUpdater](phase8_0_default_metadata_updater.md) — Option<M> take/put-back + MetadataUpdaterContext callback trait + Metadata builder-factory injection
+- [Phase 8.0 KafkaProducer::new wiring](phase8_0_kafka_producer_new.md) — three-layer constructor (new -> with_serializers -> from_config); ApiVersions divergence + SSL deferral patterns
