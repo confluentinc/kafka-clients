@@ -20,3 +20,9 @@ Every change must at least pass all of the following before it is considered com
 
 9. Are unit tests, integration tests, Python, C tests passing?
    Use `make verify` to run all tests and format checks and lint checks. If there are any failing test or check fix them before considering the change done.
+
+10. **Consumer trait surface check** (when translating consumer files):
+    - The top-level `Consumer<K, V>` dispatch is a single `#[async_trait]` trait with `Box<dyn Consumer<K, V>>` from the factory. No enum dispatch wrapping `AsyncKafkaConsumer` / `MockConsumer`.
+    - Per-record traits (`Deserializer`, `Serializer`, anything on the `Fetcher` / `FetchCollector` path) do NOT use `#[async_trait]` — sync `fn` or generic dispatch only.
+    - No `block_on`-wrapped sync façade for any async consumer method (see `consumer-threading.md` §1).
+    - `#[async_trait]` is used with default `Send` bound (no `?Send`).
