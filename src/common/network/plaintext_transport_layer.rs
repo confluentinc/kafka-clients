@@ -16,7 +16,9 @@
 
 use std::io::{self, IoSlice};
 use std::net::SocketAddr;
+use std::task::{Context, Poll};
 
+use tokio::io::ReadBuf;
 use tokio::net::TcpStream;
 
 use crate::common::network::TransferableChannel;
@@ -246,6 +248,29 @@ impl TransportLayer for PlaintextTransportLayer {
             .as_ref()
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?
             .peer_addr()
+    }
+
+    fn poll_read_ready(&self, cx: &mut Context<'_>) -> Poll<()> {
+        // Tokio's TcpStream doesn't expose a direct `poll_read_ready`
+        // accessor on its public API; instead we use `poll_peek` with
+        // a single-byte scratch buffer. `poll_peek` is non-destructive
+        // (the byte stays in the kernel buffer) and registers the
+        // context's waker if no data is available — exactly the
+        // readiness-notification semantics Java's `nio.Selector` uses
+        // for `OP_READ`. Returning `Poll::Ready` on EOF is intentional:
+        // the upper layer's `read()` call will surface the EOF as
+        // `UnexpectedEof` and trigger the disconnect path.
+        match self.stream.as_ref() {
+            None => Poll::Ready(()),
+            Some(s) => {
+                let mut byte = [0u8; 1];
+                let mut buf = ReadBuf::new(&mut byte);
+                match s.poll_peek(cx, &mut buf) {
+                    Poll::Ready(_) => Poll::Ready(()),
+                    Poll::Pending => Poll::Pending,
+                }
+            },
+        }
     }
 }
 

@@ -92,8 +92,11 @@
 //! for the per-test mapping.
 
 use std::collections::{BTreeSet, HashMap, HashSet};
+use std::future::Future;
 use std::net::SocketAddr;
+use std::pin::Pin;
 use std::sync::Arc;
+use std::task::{Context, Poll};
 use std::time::Duration;
 
 use tokio::net::{TcpSocket, TcpStream};
@@ -105,6 +108,7 @@ use crate::common::network::channel_builder::ChannelBuilder;
 use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
 use crate::common::network::network_receive::UNLIMITED;
 use crate::common::network::selectable::{Selectable, USE_DEFAULT_BUFFER_SIZE};
+use crate::common::network::transport_layer::TransportLayer;
 use crate::common::network::{ChannelState, ChannelStateName, KafkaChannel, NetworkReceive, NetworkSend, Receive};
 use crate::common::utils::Time;
 
@@ -969,29 +973,70 @@ impl Selectable for Selector {
 
         let timeout = Duration::from_millis(timeout_ms.max(0) as u64);
         // If we already have work to do — connect events, completed
-        // receives or a buffered receive — short-circuit the sleep so
-        // `poll(0)` returns immediately.
+        // receives, a buffered receive, or a queued send waiting to be
+        // pushed to the wire — short-circuit the sleep so `poll(0)`
+        // returns immediately. Java's `nio.Selector` wakes on
+        // OP_WRITE-ready when the underlying socket has buffer space;
+        // the Tokio equivalent for a queued-but-not-yet-written send
+        // is simply "skip the sleep and run `drive_channel_io` which
+        // will issue the `try_write_vectored`". Phase 8a.0: missing
+        // the `has_send()` check here was the wire-protocol blocker —
+        // a freshly-queued ApiVersionsRequest would sit unwritten for
+        // the entire `default.request.timeout.ms` (30s) window before
+        // the post-select `drive_channel_io` actually wrote it.
         let has_immediate_work = !self.connected.is_empty()
             || !self.disconnected.is_empty()
             || !self.completed_receives.is_empty()
-            || self.channels.values().any(|c| c.has_bytes_buffered());
+            || self.channels.values().any(|c| c.has_bytes_buffered())
+            || self.channels.values().any(|c| c.has_send());
         if !has_immediate_work && timeout_ms > 0 {
-            // Race the timeout against the next connect-event arrival.
-            // The connect-task mpsc is the only thing that wakes us
-            // mid-sleep — read/write progress happens synchronously
-            // inside the `drive_channel_io` loop below.
+            // Race the timeout against the next connect-event arrival
+            // OR socket readability on any open channel. Java's
+            // `nio.Selector.select(timeout)` wakes on OS-level readiness
+            // notifications; the Tokio equivalent is per-stream
+            // `TcpStream::readable()` futures. Without the readiness
+            // arm the poll loop sleeps for the full `timeout` while
+            // bytes sit unread on the socket — a 30s `request.timeout.ms`
+            // floor means a 30s latency on every response in production
+            // (Phase 8a.0).
             //
-            // SAFETY: `recv()` is cancellation-safe (Tokio mpsc); the
-            // arms only mutate local state, no MutexGuard across the
-            // await (CLAUDE.md 9.6).
+            // SAFETY: all three arms are cancellation-safe (Tokio mpsc
+            // recv, time sleep, and `wait_any_channel_readable` which
+            // drops its borrowed futures on cancellation). No
+            // MutexGuard across await (CLAUDE.md 9.6).
+            //
+            // Borrow split: `self.connect_rx` is `&mut`-borrowed by the
+            // recv arm; `self.channels` is `&`-borrowed for the
+            // readability arm. Splitting `self` into independent
+            // borrows via local re-bindings is required to satisfy the
+            // borrow checker.
+            //
+            // `KafkaChannel` is `!Sync` (its `Box<dyn Authenticator>`
+            // field has no `Sync` bound) so we cannot hold `&KafkaChannel`
+            // across an `.await`. Instead we collect the underlying
+            // `&(dyn TransportLayer + Sync)` references — every
+            // production transport (`PlaintextTransportLayer`,
+            // `SslTransportLayer`) is `Sync`, so `&dyn TransportLayer
+            // + Sync` is `Send` and can cross await points safely.
+            let connect_rx = &mut self.connect_rx;
+            let channels = &self.channels;
+            let transports: Vec<&(dyn TransportLayer + Sync)> = channels
+                .values()
+                .filter(|c| c.ready() && c.transport_layer_ref().is_open())
+                .map(|c| c.transport_layer_sync_ref())
+                .collect();
+            let mut connect_event_opt: Option<Option<ConnectEvent>> = None;
             tokio::select! {
                 biased;
-                event = self.connect_rx.recv() => {
-                    if let Some(ev) = event {
-                        self.dispatch_connect_event(ev);
-                    }
+                event = connect_rx.recv() => {
+                    connect_event_opt = Some(event);
                 },
+                _ = wait_any_transport_readable(&transports), if !transports.is_empty() => {},
                 _ = tokio::time::sleep(timeout) => {},
+            }
+            drop(transports);
+            if let Some(Some(ev)) = connect_event_opt {
+                self.dispatch_connect_event(ev);
             }
             // Drain any remaining queued events.
             self.drain_connect_events();
@@ -1142,6 +1187,51 @@ impl Drop for Selector {
                 task.handle.abort();
             }
         }
+    }
+}
+
+/// Future that resolves when **any** of the supplied transports
+/// reports its underlying socket is read-ready. Phase 8a.0 — used
+/// inside [`Selector::poll`]'s `select!` block to wake the I/O loop on
+/// OS-level read readiness (the Tokio equivalent of Java's
+/// `nio.Selector.select(timeout)` returning when any registered
+/// `SelectionKey` becomes readable).
+///
+/// The future is cancellation-safe: it borrows the transports and
+/// polls each transport's [`TransportLayer::poll_read_ready`] in
+/// round-robin order. If cancelled (the `select!` arm loses), the
+/// borrows are dropped without side effects — each transport's
+/// waker is registered and will fire on the next OS-level read
+/// notification, which the next poll loop iteration picks up.
+///
+/// The `+ Sync` bound on the trait object is what lets the future
+/// itself be `Send` (so it satisfies the `+ Send` bound on
+/// [`Selectable::poll`]'s return type): `&T: Send` iff `T: Sync`.
+fn wait_any_transport_readable<'a>(transports: &'a [&'a (dyn TransportLayer + Sync)]) -> WaitAnyTransportReadable<'a> {
+    WaitAnyTransportReadable { transports }
+}
+
+struct WaitAnyTransportReadable<'a> {
+    transports: &'a [&'a (dyn TransportLayer + Sync)],
+}
+
+impl<'a> Future for WaitAnyTransportReadable<'a> {
+    type Output = ();
+
+    fn poll(self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Self::Output> {
+        // Poll each transport. If any is ready, return Ready.
+        // Otherwise each transport has registered the same context's
+        // waker — Tokio will wake us when any of them becomes
+        // readable. Empty input → Pending forever (never selected
+        // because the `select!` guard `if !transports.is_empty()`
+        // skips this arm in that case).
+        let this = self.get_mut();
+        for t in this.transports.iter() {
+            if let Poll::Ready(()) = t.poll_read_ready(cx) {
+                return Poll::Ready(());
+            }
+        }
+        Poll::Pending
     }
 }
 

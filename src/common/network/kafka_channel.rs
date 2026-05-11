@@ -117,7 +117,13 @@ impl ChannelMuteState {
 /// Owned trait object alias for the transport layer the channel uses.
 /// `Send` is required so a `KafkaChannel` can be moved between Tokio
 /// tasks (Phase 5c will park each channel on its own read/write task).
-pub type BoxedTransport = Box<dyn TransportLayer + std::marker::Send>;
+/// `Sync` is required so [`Selector::poll`] can hold
+/// `&(dyn TransportLayer + Sync)` references across an `.await` point
+/// (Phase 8a.0 readiness-notification arm). Both production
+/// transports (`PlaintextTransportLayer`, `SslTransportLayer`) are
+/// already `Sync` — adding the bound here just makes the constraint
+/// explicit at the type-alias level.
+pub type BoxedTransport = Box<dyn TransportLayer + std::marker::Send + std::marker::Sync>;
 
 /// Owned trait object alias for the channel's authenticator.
 pub type BoxedAuthenticator = Box<dyn Authenticator>;
@@ -506,6 +512,23 @@ impl KafkaChannel {
     /// are both done. Mirrors Java's `ready()`.
     pub fn ready(&self) -> bool {
         self.transport_layer.ready() && self.authenticator.complete()
+    }
+
+    /// Borrow the underlying transport layer. Phase 8a.0 — needed by
+    /// the `Selector` poll loop to register socket-readiness wakeups
+    /// without owning the transport. Mirrors Java's package-private
+    /// `transportLayer()` getter the Selector uses to dispatch reads.
+    pub fn transport_layer_ref(&self) -> &dyn TransportLayer {
+        self.transport_layer.as_ref()
+    }
+
+    /// Variant of [`Self::transport_layer_ref`] that preserves the
+    /// `+ Sync` bound, so the borrow can cross `.await` points
+    /// (`&T: Send` iff `T: Sync`). Used by the [`Selector`]'s
+    /// readiness-notification select arm — see
+    /// [`crate::common::network::selector::wait_any_transport_readable`].
+    pub fn transport_layer_sync_ref(&self) -> &(dyn TransportLayer + Sync) {
+        self.transport_layer.as_ref()
     }
 
     /// Returns true iff there is an in-progress send. Mirrors Java's

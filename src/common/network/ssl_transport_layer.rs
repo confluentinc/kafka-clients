@@ -868,6 +868,27 @@ impl TransportLayer for SslTransportLayer {
             .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "transport closed"))?
             .peer_addr()
     }
+
+    fn poll_read_ready(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        // SSL transport wraps the same underlying TcpStream — the
+        // OS-level readiness signal is identical. rustls's own state
+        // machine internally buffers plaintext (`has_bytes_buffered`),
+        // and the upper Selector's `has_immediate_work` check picks up
+        // that signal separately. Here we only need to wake when raw
+        // ciphertext is available on the socket; the read path will
+        // drive the rustls state machine to surface plaintext.
+        match self.stream.as_ref() {
+            None => std::task::Poll::Ready(()),
+            Some(s) => {
+                let mut byte = [0u8; 1];
+                let mut buf = tokio::io::ReadBuf::new(&mut byte);
+                match s.poll_peek(cx, &mut buf) {
+                    std::task::Poll::Ready(_) => std::task::Poll::Ready(()),
+                    std::task::Poll::Pending => std::task::Poll::Pending,
+                }
+            },
+        }
+    }
 }
 
 /// Bridge `SslTransportLayer` to `io::Read` so it can be passed as

@@ -16,6 +16,7 @@
 
 use std::io;
 use std::net::SocketAddr;
+use std::task::{Context, Poll};
 
 use crate::common::network::TransferableChannel;
 use crate::common::security::auth::KafkaPrincipal;
@@ -155,4 +156,22 @@ pub trait TransportLayer: TransferableChannel {
     /// Peer (remote) address of the underlying socket. Mirrors Java's
     /// `transportLayer.socketChannel().socket().getRemoteSocketAddress()`.
     fn peer_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Poll the underlying socket for readability. Used by
+    /// [`crate::common::network::Selector::poll`] to wake from its
+    /// timeout sleep when bytes arrive on any open channel — the Tokio
+    /// equivalent of Java's `nio.Selector.select(timeout)` returning on
+    /// OS-level read readiness.
+    ///
+    /// Returns `Poll::Ready(())` when the underlying socket has bytes
+    /// available (or is in a state that should be checked, such as
+    /// EOF); `Poll::Pending` registers the context's waker so Tokio
+    /// will re-poll when readability changes.
+    ///
+    /// Default implementation returns `Poll::Ready(())` so a transport
+    /// that doesn't model OS-level readiness still works (the upper
+    /// poll loop falls back to the timeout-driven retry path).
+    fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
 }
