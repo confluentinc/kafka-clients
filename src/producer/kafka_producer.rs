@@ -314,11 +314,42 @@ where
     /// agnostic byte vectors (`Vec<u8>`) — the historical default for
     /// producers that delegate encoding entirely to the caller. Other
     /// element types must use [`Self::with_serializers`].
+    ///
+    /// **The `key.serializer` and `value.serializer` config keys are
+    /// NOT consulted by this constructor.** Any FQCN supplied via
+    /// `props` is silently overridden by the type-driven
+    /// [`SupportsDefaultSerializer`] dispatch. If `props` contains
+    /// either key, a `log::warn!` is emitted so operators can spot
+    /// the divergence. Callers that need to honor the config-string
+    /// FQCN must construct the serializer explicitly and use
+    /// [`Self::with_serializers`].
     pub fn new(props: HashMap<String, String>) -> Result<Self, KafkaError>
     where
         K: SupportsDefaultSerializer,
         V: SupportsDefaultSerializer,
     {
+        // Mirror Java's contract by surfacing the silent FQCN
+        // override as a warn. Java would reflectively load the named
+        // class; Rust uses the type parameter's
+        // [`SupportsDefaultSerializer`] impl and ignores the string.
+        // Pattern matches the `partitioner.class`-not-found warn at
+        // `kafka_producer.rs:1938-1944` for symmetry.
+        if props.contains_key(producer_config::KEY_SERIALIZER_CLASS_CONFIG) {
+            warn!(
+                "{} is set in producer config but KafkaProducer::new() uses the type-driven default \
+                 serializer (SupportsDefaultSerializer impl). The configured FQCN is ignored. \
+                 Use KafkaProducer::with_serializers(...) to supply a Serializer instance directly.",
+                producer_config::KEY_SERIALIZER_CLASS_CONFIG,
+            );
+        }
+        if props.contains_key(producer_config::VALUE_SERIALIZER_CLASS_CONFIG) {
+            warn!(
+                "{} is set in producer config but KafkaProducer::new() uses the type-driven default \
+                 serializer (SupportsDefaultSerializer impl). The configured FQCN is ignored. \
+                 Use KafkaProducer::with_serializers(...) to supply a Serializer instance directly.",
+                producer_config::VALUE_SERIALIZER_CLASS_CONFIG,
+            );
+        }
         let key_serializer = K::default_serializer();
         let value_serializer = V::default_serializer();
         Self::with_serializers(props, key_serializer, value_serializer)
@@ -343,7 +374,14 @@ where
     /// [`ProducerConfig`] instead of raw properties. Callers that
     /// programmatically assemble a config (instead of parsing a
     /// `HashMap`) use this entry point.
-    pub fn from_config(
+    ///
+    /// `pub(crate)` (not `pub`) because Java has no equivalent of
+    /// this constructor — `KafkaProducer.java` only exposes a
+    /// `Map<String, Object>` form. The `tests/integration/`
+    /// crate-internal tests reach this via the same-crate `pub(crate)`
+    /// visibility; external callers must use [`Self::with_serializers`]
+    /// or [`Self::new`].
+    pub(crate) fn from_config(
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K>>,
         value_serializer: Box<dyn Serializer<V>>,
@@ -400,12 +438,21 @@ where
 /// `V: SupportsDefaultSerializer`. The default impl is provided for
 /// `Vec<u8>` — Java's most-common producer shape.
 ///
-/// Java accepts arbitrary FQCN strings via `key.serializer` /
-/// `value.serializer` config and reflectively instantiates them; Rust
-/// has no equivalent so callers with non-`Vec<u8>` types must use
-/// [`KafkaProducer::with_serializers`] and supply the serializer
-/// directly.
-pub trait SupportsDefaultSerializer: Sized {
+/// **The `key.serializer` and `value.serializer` config keys are NOT
+/// consulted by the [`KafkaProducer::new`] path.** Java's reflective
+/// FQCN loading has no Rust equivalent; the type system drives
+/// serializer selection via this trait instead. Callers with
+/// non-`Vec<u8>` types — or callers who want to honor the Java
+/// config-string contract — must use [`KafkaProducer::with_serializers`]
+/// and supply the serializer instance directly.
+///
+/// `pub(crate)`: this trait is part of the internal Rust API surface
+/// for the byte-array-default producer shape, not a Java-parity type
+/// (Java has no equivalent). Downstream crates extending it would
+/// solidify a non-Java surface that future Java-parity work might
+/// want to remove. If a future use case needs to opt in additional
+/// types, surface a documented `IntoSerializer<T>` trait instead.
+pub(crate) trait SupportsDefaultSerializer: Sized {
     /// Construct the default serializer for this type.
     fn default_serializer() -> Box<dyn Serializer<Self>>;
 }

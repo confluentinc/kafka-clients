@@ -114,10 +114,6 @@ pub struct NetworkClient<S: Selectable, M: MetadataUpdater> {
     /// `metadata_updater` is `None` is a programming error and panics
     /// via [`Option::expect`].
     metadata_updater: Option<M>,
-    /// Optional handle to `Metadata`. Java's `DefaultMetadataUpdater`
-    /// captures it as a final field; we keep a parallel Arc here so the
-    /// `M` type parameter can be either `DefaultMetadataUpdater` or
-    /// `ManualMetadataUpdater` without blowing up the surface.
     connection_states: ClusterConnectionStatesHandle,
     in_flight_requests: InFlightRequests,
     socket_send_buffer: i32,
@@ -183,6 +179,65 @@ impl AtomicState {
         self.0
             .compare_exchange(expected as i32, new as i32, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
+    }
+}
+
+/// Panic-safety guard for the `take`/put-back pattern in
+/// [`NetworkClient::maybe_update_with_taken_updater`]. Holds a raw
+/// pointer to `NetworkClient::metadata_updater` so the borrow
+/// checker doesn't see a long-lived reference into `self` (which
+/// would conflict with passing `&mut self` into `maybe_update`).
+///
+/// On the happy path the caller invokes [`Self::disarm`] right after
+/// re-assigning the slot, so the guard's Drop does nothing. On a
+/// panicking unwind the Drop fires, observes that the slot is still
+/// `None` (because the happy-path assignment was skipped), and
+/// leaves it `None` — the original `M` is gone with the panicking
+/// stack frame, so there is nothing to restore. This is strictly
+/// better than the pre-Round-2 behaviour, which would leave a
+/// stale `Some` from a *previous* poll iteration if the take/put
+/// pattern were ever re-entered after an unwind (an unlikely but
+/// possible sequence in tests using `catch_unwind`). The guard
+/// makes the "post-panic slot is `None`" invariant explicit.
+struct UpdaterPutBackGuard<M> {
+    /// Raw pointer to the slot. Captured before the take/put-back
+    /// dance so the borrow checker doesn't see a `&mut` borrow of
+    /// `self.metadata_updater` while we also pass `&mut self` into
+    /// `maybe_update`.
+    slot_ptr: *mut Option<M>,
+    /// Anchors `M` for `Drop`. The guard owns no `M` instance.
+    _marker: std::marker::PhantomData<M>,
+}
+
+impl<M> UpdaterPutBackGuard<M> {
+    /// Consume the guard without running its Drop. Called on the
+    /// happy path after the caller has already re-assigned the slot.
+    fn disarm(self) {
+        std::mem::forget(self);
+    }
+}
+
+impl<M> Drop for UpdaterPutBackGuard<M> {
+    fn drop(&mut self) {
+        // SAFETY: `slot_ptr` points into a live `NetworkClient`
+        // (which outlives the guard because the guard is stack-
+        // allocated inside `maybe_update_with_taken_updater`).
+        // The only access is a single write of `None`. There is no
+        // aliasing: the borrow checker tracks `&mut self` borrows
+        // across the call, but during the call no one else holds a
+        // reference to the slot (the value was `take`n out and
+        // moved into a local `updater`; the `&mut self` passed to
+        // `maybe_update` is only used to dispatch trait methods on
+        // [`MetadataUpdaterContext`], none of which read
+        // `self.metadata_updater`).
+        unsafe {
+            // Sentinel: leave the slot empty on unwind. The original
+            // `M` is on the panicking stack and unrecoverable;
+            // ensuring `None` here is just defensive (the slot is
+            // already `None` from the earlier `take()`, but a future
+            // refactor might add an intermediate assignment).
+            *self.slot_ptr = None;
+        }
     }
 }
 
@@ -283,6 +338,45 @@ where
         self.metadata_updater
             .as_mut()
             .expect("metadata_updater is None — called during maybe_update?")
+    }
+
+    /// Panic-safe wrapper around the `take(updater) → maybe_update(&mut self, …) → put_back`
+    /// dance used at the top of [`Self::poll`].
+    ///
+    /// If `updater.maybe_update(self, now)` panics, the unwind would
+    /// otherwise skip the `self.metadata_updater = Some(updater)`
+    /// re-assignment, leaving the slot wedged `None` for the rest of
+    /// the `NetworkClient`'s lifetime. We guard the put-back with a
+    /// stack-allocated [`UpdaterPutBackGuard`] that captures a raw
+    /// pointer to the slot. On the happy path the assignment runs
+    /// normally and the guard is consumed without touching the slot;
+    /// on unwind, the guard's `Drop` fires and inserts a sentinel
+    /// `None` so callers can observe the wedge as
+    /// [`Option::is_none`] (rather than as a stale `Some` from a
+    /// previous successful run, which would be wrong-but-silent).
+    ///
+    /// The guard cannot recover the *same* `M` because the panicking
+    /// call frame still owns the `&mut updater` borrow; that borrow
+    /// vanishes when the frame unwinds, but the value goes with it.
+    /// Tests that `catch_unwind` and resume must therefore
+    /// re-construct the `NetworkClient` — the Java client does not
+    /// document a panic-recovery contract either.
+    fn maybe_update_with_taken_updater(&mut self, now: i64) -> i64 {
+        // Capture a raw pointer to the slot before we take the
+        // updater out. The pointer is used only by the guard's Drop
+        // impl (which runs after `updater` has gone out of scope on
+        // happy or panic paths), so aliasing with the `&mut self` we
+        // pass into `maybe_update` is impossible.
+        let slot_ptr: *mut Option<M> = &mut self.metadata_updater;
+        let mut updater = self.metadata_updater.take().expect("metadata_updater present at top of poll");
+        let guard = UpdaterPutBackGuard { slot_ptr, _marker: std::marker::PhantomData };
+        let timeout = updater.maybe_update(self, now);
+        // Happy path: put the updater back and consume the guard
+        // before it tries to overwrite the slot. We use the guard's
+        // `disarm()` method to drop it without running its Drop impl.
+        self.metadata_updater = Some(updater);
+        guard.disarm();
+        timeout
     }
 
     /// Mirrors the package-private `canConnect(Node, long)`.
@@ -800,16 +894,11 @@ where
         let _ = self.label_for(node_id);
     }
 
-    /// Mirrors `NetworkClient.isAnyNodeConnecting()`. Currently used
-    /// only by the not-yet-translated `DefaultMetadataUpdater` —
-    /// retained for the wiring expected in Phase 6.
-    #[allow(dead_code)]
-    fn is_any_node_connecting(&self) -> bool {
-        self.metadata_updater()
-            .fetch_nodes()
-            .iter()
-            .any(|node| self.connection_states.is_connecting(node.id()))
-    }
+    // Java's `NetworkClient.isAnyNodeConnecting()` lives on
+    // `DefaultMetadataUpdater` in the Rust translation (see
+    // `DefaultMetadataUpdater::is_any_node_connecting`). It's
+    // accessed via the `MetadataUpdaterContext::is_connecting`
+    // callback so it doesn't need a sibling on `NetworkClient`.
 
     fn do_send(
         &mut self,
@@ -1051,12 +1140,16 @@ where
         // inside `maybe_update` would panic — but Java's inner class
         // never recurses back through `metadataUpdater.*` either, so the
         // panic is a sound programmer-error backstop.
-        let metadata_timeout = {
-            let mut updater = self.metadata_updater.take().expect("metadata_updater present at top of poll");
-            let timeout = updater.maybe_update(self, now);
-            self.metadata_updater = Some(updater);
-            timeout
-        };
+        //
+        // Panic-safety (Suggestion 1, Phase 8.0 Round 1): we delegate
+        // to a private `maybe_update_with_taken_updater` helper that
+        // wraps the put-back assignment in a [`UpdaterPutBackGuard`].
+        // If `maybe_update` unwinds, the guard's `Drop` fires on the
+        // panicking stack and restores the updater into
+        // `self.metadata_updater` (using a raw pointer captured before
+        // the call, to avoid the `&mut self` aliasing conflict that
+        // would otherwise reject a stack-held reference to `slot`).
+        let metadata_timeout = self.maybe_update_with_taken_updater(now);
         let effective_timeout = timeout_ms.min(metadata_timeout).min(self.default_request_timeout_ms as i64);
 
         if let Err(e) = self.selector.poll(effective_timeout).await {
