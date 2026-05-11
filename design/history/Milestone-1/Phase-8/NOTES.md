@@ -11,6 +11,7 @@ variants. **No SASL** (Phase 9).
 
 | # | Scope | Test entry point |
 |---|---|---|
+| 8.0 | **Prerequisite (planning gap surfaced by Actor 8 before 8a):** translate `NetworkClient.DefaultMetadataUpdater` (Java inner class, `NetworkClient.java:1174–1380`) as a top-level `DefaultMetadataUpdater` struct in `src/default_metadata_updater.rs` implementing the existing `MetadataUpdater` trait; promote `KafkaProducer::new` / `with_serializers` from `Err(UnsupportedOperation)` stubs to working public constructors that wire `NetworkClient<Selector, DefaultMetadataUpdater>`. Phase 7 deferred this to Phase 8 (see `src/producer/kafka_producer.rs:286–352` rustdoc + `Phase-7/COMMENTS.DONE.7.md:951–985`). | unit tests only |
 | 8a | `producer_smoke_test.rs` scaffold + PLAINTEXT 1k-record happy path; single broker, 3 partitions; assert acks + RecordMetadata partition/offset shape | `tests/integration/producer_smoke_test.rs` |
 | 8b | Per-partition monotonic-offset assertion + partitioner consistency (record's selected partition == acked partition); multi-partition (≥3). Folds in the Phase-7f 50-record `flush()` fidelity carry-over. | extend 8a |
 | 8c | End-to-end byte fidelity: consume produced batch via `kafka-console-consumer` (`docker exec`) and assert key/value bytes match per partition | extend 8a |
@@ -97,15 +98,17 @@ These were tagged "Phase 8" in `COMMENTS.DONE.7.md`:
 
 1. ✅ Plan approved (user, 2026-05-11).
 2. ✅ This NOTES.md created.
-3. Spawn **Actor 8** for sub-phase 8a (PLAINTEXT scaffold + happy
-   path). Commit-per-sub-step cadence.
-4. Spawn **Critic 8** to review 8a commits → comments to
+3. ✅ Phase 8.0 prerequisite added after Actor 8's first attempt
+   surfaced the `DefaultMetadataUpdater` planning gap (user approved
+   2026-05-11).
+4. Spawn **Actor 8** for sub-phase 8.0 (`DefaultMetadataUpdater` +
+   public ctor wiring).
+5. Spawn **Critic 8** to review 8.0 commits → comments to
    `COMMENTS.8.md`.
-5. Spawn Actor 8 to fix → fixup commit → archive resolved items to
-   `COMMENTS.DONE.8.md`.
-6. Loop 4–5 until `COMMENTS.8.md` open issues == 0, then proceed to
-   8b. Repeat for 8b–8f.
-7. Phase 8 closes when 8f's 3-consecutive-run gate is green and all
+6. Loop fixup-and-review until `COMMENTS.8.md` is empty for 8.0,
+   then proceed to 8a (PLAINTEXT scaffold + happy path).
+7. Repeat steps 4–6 for 8b through 8f.
+8. Phase 8 closes when 8f's 3-consecutive-run gate is green and all
    comment files are resolved.
 
 Agent number for this phase: **N = 8**.
