@@ -1,0 +1,49 @@
+version: v1.0
+name: Ask agent
+
+# Manual promotion target from semaphore.yml. Triggers on the per-PR
+# build; spawns a sandboxed claude with the reviewer's USER_COMMAND and,
+# depending on the PR's current status:
+#   1 (dependencies_evaluated) -> answer-only (PR comment)
+#   2 (plan_created) / 3 (plan_approved) -> answer + plan-fixup commits
+#   4 (implementation_done) -> answer + plan-or-impl-fixup commits
+# The PR's status is NEVER advanced. Fixup commits (statuses 2/3/4) are
+# pushed by the orchestrator, not from inside r2 (sandbox denies push).
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-2
+
+blocks:
+  - name: Ask
+    task:
+      jobs:
+        - name: ask
+          commands:
+            - checkout
+            - git submodule update --init --depth=1 kafka
+            - sem-version python 3.10
+            - sudo apt install -y cmake rustup && rustup default stable
+            - (cd tools/translation_agent && pip install -e '.[dev]')
+            - artifact pull project translation_agent.db
+            - |
+              set -e
+              if [ -z "${SEMAPHORE_GIT_PR_NUMBER}" ]; then
+                echo "ERROR: this promotion must be triggered from a PR build."
+                echo "       SEMAPHORE_GIT_PR_NUMBER is unset."
+                exit 1
+              fi
+              if [ -z "${USER_COMMAND}" ]; then
+                echo "ERROR: USER_COMMAND parameter is required."
+                echo "       Set it in the Semaphore promotion UI."
+                exit 1
+              fi
+            # Ensure all Python dependencies are installed
+            - make
+            # --ak-repo-path is passed defensively (mirrors plan-approve.yml).
+            # --ask is the new side-channel mode: it never advances the PR's
+            # status; it just runs r2 sandbox claude with the reviewer's text
+            # and (depending on status) posts a PR comment and/or pushes
+            # fixup commits.
+            - translation-agent --ak-repo-path "./kafka"
+                --pr "${SEMAPHORE_GIT_PR_NUMBER}" --ask "${USER_COMMAND}"

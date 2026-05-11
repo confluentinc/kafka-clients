@@ -55,6 +55,11 @@ impl SaslHandshakeRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut SaslHandshakeRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -126,7 +131,7 @@ impl RequestBuilder for SaslHandshakeRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         Ok(ConcreteRequest::SaslHandshake(SaslHandshakeRequest::new(
             self.data.clone(),
             version,
@@ -157,7 +162,7 @@ mod tests {
     fn test_builder_build() {
         let mut data = SaslHandshakeRequestData::new();
         data.set_mechanism("PLAIN".to_string());
-        let builder = SaslHandshakeRequestBuilder::new(data);
+        let mut builder = SaslHandshakeRequestBuilder::new(data);
         let request = builder.build().unwrap();
         assert_eq!(*request.api_key(), ApiKeys::SASL_HANDSHAKE);
         if let ConcreteRequest::SaslHandshake(r) = &request {
@@ -216,8 +221,8 @@ mod tests {
 
         let mut data = SaslHandshakeRequestData::new();
         data.set_mechanism("PLAIN".to_string());
-        let builder = SaslHandshakeRequestBuilder::new(data);
-        let request = builder.build().unwrap();
+        let mut builder = SaslHandshakeRequestBuilder::new(data);
+        let mut request = builder.build().unwrap();
 
         let serialized = request.serialize().unwrap();
         // Corrupt the length of the SASL mechanism string (i16 at offset 0)

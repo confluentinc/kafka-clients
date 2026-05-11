@@ -19,8 +19,7 @@
 //!
 //! In Java, `SslFactory` delegates to `SslEngineFactory` which creates `SSLEngine`
 //! instances from a `SSLContext`. In Rust, this is simplified to build an
-//! `Arc<rustls::ClientConfig>` from [`SslConfig`], using `rustls` for TLS and
-//! `tokio-rustls` for async I/O integration.
+//! `Arc<rustls::ClientConfig>` from [`SslConfig`], using `rustls` for TLS.
 //!
 //! Key differences:
 //! - Only PEM format is supported. JKS and PKCS12 return an error.
@@ -37,7 +36,6 @@ use std::sync::Arc;
 use rustls::client::danger::{HandshakeSignatureValid, ServerCertVerified, ServerCertVerifier};
 use rustls::pki_types::{CertificateDer, PrivateKeyDer, ServerName};
 use rustls::{ClientConfig, DigitallySignedStruct, RootCertStore, SignatureScheme};
-use tokio_rustls::TlsConnector;
 
 /// SSL/TLS factory that builds `Arc<rustls::ClientConfig>` from [`SslConfig`].
 ///
@@ -126,11 +124,6 @@ impl SslFactory {
         };
 
         Ok(Self { client_config: Arc::new(config), hostname_verification })
-    }
-
-    /// Creates a `TlsConnector` from the compiled client configuration.
-    pub fn create_tls_connector(&self) -> TlsConnector {
-        TlsConnector::from(self.client_config.clone())
     }
 
     /// Converts a peer hostname string to a `ServerName` for TLS SNI.
@@ -655,14 +648,6 @@ B2V9lhUZNk+pRjtJw9unpXsM
             result.unwrap_err().to_string().contains("No certificates found"),
             "Should report no certs found in invalid PEM"
         );
-    }
-
-    #[test]
-    fn test_create_tls_connector() {
-        let config = SslConfig::default();
-        let factory = SslFactory::new(&config).unwrap();
-        let _connector = factory.create_tls_connector();
-        // Just verify it doesn't panic
     }
 
     #[test]

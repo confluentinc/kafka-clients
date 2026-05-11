@@ -254,7 +254,7 @@ fn test_string_serialization_various_lengths() -> io::Result<()> {
 /// Test bytes serialization
 #[test]
 fn test_bytes_serialization() -> io::Result<()> {
-    let request = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::new();
+    let mut request = add_partitions_to_txn_request_data::AddPartitionsToTxnRequestData::new();
     // Note: Our current implementation may not have all fields properly typed
     // This test demonstrates the pattern
 
@@ -272,7 +272,7 @@ fn test_bytes_serialization() -> io::Result<()> {
 #[test]
 fn test_version_validation() {
     // Test that invalid versions are rejected
-    let request = produce_request_data::ProduceRequestData::new();
+    let mut request = produce_request_data::ProduceRequestData::new();
 
     // Version too low (ProduceRequest starts at version 3)
     let mut write_buffer = ByteBufferAccessor::new(1024);
@@ -289,7 +289,7 @@ fn test_version_validation() {
 #[test]
 fn test_empty_message_serialization() -> io::Result<()> {
     // Test that default/empty messages serialize correctly
-    let request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
+    let mut request = add_offsets_to_txn_request_data::AddOffsetsToTxnRequestData::new();
 
     for version in 0..=3 {
         let mut write_buffer = ByteBufferAccessor::new(1024);
@@ -312,20 +312,20 @@ fn test_primitive_types() -> io::Result<()> {
     // Test various primitive values
     request.timeout_ms = 0;
     request.acks = -1;
-    test_produce_write_read(&request, 3)?;
+    test_produce_write_read(&mut request, 3)?;
 
     request.timeout_ms = i32::MAX;
     request.acks = i16::MAX;
-    test_produce_write_read(&request, 3)?;
+    test_produce_write_read(&mut request, 3)?;
 
     request.timeout_ms = i32::MIN;
     request.acks = i16::MIN;
-    test_produce_write_read(&request, 3)?;
+    test_produce_write_read(&mut request, 3)?;
 
     Ok(())
 }
 
-fn test_produce_write_read(request: &produce_request_data::ProduceRequestData, version: i16) -> io::Result<()> {
+fn test_produce_write_read(request: &mut produce_request_data::ProduceRequestData, version: i16) -> io::Result<()> {
     let mut write_buffer = ByteBufferAccessor::new(2048);
     request.write(&mut write_buffer, version)?;
 
