@@ -446,13 +446,21 @@ where
 /// config-string contract — must use [`KafkaProducer::with_serializers`]
 /// and supply the serializer instance directly.
 ///
-/// `pub(crate)`: this trait is part of the internal Rust API surface
-/// for the byte-array-default producer shape, not a Java-parity type
-/// (Java has no equivalent). Downstream crates extending it would
-/// solidify a non-Java surface that future Java-parity work might
-/// want to remove. If a future use case needs to opt in additional
-/// types, surface a documented `IntoSerializer<T>` trait instead.
-pub(crate) trait SupportsDefaultSerializer: Sized {
+/// **Visibility note**: this trait is `pub` because Phase 8a needed
+/// to expose `default_metadata_updater::DefaultMetadataUpdater` (the
+/// concrete `C` of the production producer constructor) — which then
+/// makes `KafkaProducer::<Vec<u8>, Vec<u8>, NetworkClient<Selector,
+/// DefaultMetadataUpdater>>::new` itself reachable from downstream
+/// crates, so any `pub(crate)` trait bound on it triggers Rust's
+/// "more private than item" rule. The trait is `#[doc(hidden)]` so it
+/// stays off the public docs.rs surface, matching Critic 8's Phase
+/// 8.0 Suggestion 3 intent (not part of the Java public API).
+/// Downstream crates extending it would solidify a non-Java surface
+/// that future Java-parity work might want to remove. If a future
+/// use case needs to opt in additional types, surface a documented
+/// `IntoSerializer<T>` trait instead.
+#[doc(hidden)]
+pub trait SupportsDefaultSerializer: Sized {
     /// Construct the default serializer for this type.
     fn default_serializer() -> Box<dyn Serializer<Self>>;
 }

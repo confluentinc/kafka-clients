@@ -73,7 +73,19 @@ impl InProgressData {
 /// **Java's contract**: this class is package-private, *not* thread-safe.
 /// The Rust translation reflects that by taking `&mut self` on every
 /// state-mutating method (matching the [`MetadataUpdater`] trait).
-pub(crate) struct DefaultMetadataUpdater {
+///
+/// **Visibility note**: Java's inner class is package-private; the
+/// Rust public producer constructor returns
+/// `KafkaProducer<K, V, NetworkClient<Selector, DefaultMetadataUpdater>>`
+/// — a type that downstream crates (including the in-tree integration
+/// tests) must be able to *name* transitively, otherwise the type-
+/// checker rejects every binding of the returned value. The struct
+/// is therefore `pub` with a `#[doc(hidden)]` marker on the module to
+/// keep it off the public docs.rs surface. Callers should hold the
+/// returned value via the `Producer` trait or via type inference, not
+/// reach for the concrete name.
+#[doc(hidden)]
+pub struct DefaultMetadataUpdater {
     /// Java: `private final Metadata metadata`. Held as an `Arc` so the
     /// `NetworkClient` constructor can hand a clone to the producer while
     /// the updater keeps its own reference for the response loop.

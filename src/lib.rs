@@ -32,7 +32,21 @@ pub mod common;
 pub mod common_client_configs;
 pub mod connection_state;
 pub mod default_host_resolver;
-pub(crate) mod default_metadata_updater;
+// Phase 8.0 translated Java's package-private inner class
+// `NetworkClient.DefaultMetadataUpdater` as a free struct here.
+// Although Java's surface is package-private, the Rust visibility model
+// can't replicate that exactly — Rust public callers (including
+// integration tests in a separate test crate) need to *name* the type
+// transitively because `KafkaProducer::with_serializers` returns
+// `KafkaProducer<K, V, NetworkClient<Selector, DefaultMetadataUpdater>>`.
+// Demoting the module to `pub(crate)` makes the public constructor
+// unusable from downstream crates (the compiler refuses any value
+// whose type names a private item). We expose the module `pub` and
+// keep an `#[doc(hidden)]` marker so docs.rs renders an Anti-API
+// stamp — callers should hold the value behind the `Producer` trait
+// or via inference, not reach for the type by name.
+#[doc(hidden)]
+pub mod default_metadata_updater;
 pub mod host_resolver;
 pub mod in_flight_requests;
 pub mod kafka_client;
