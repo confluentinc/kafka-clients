@@ -22,6 +22,9 @@
 #[path = "../common/mod.rs"]
 mod common;
 
+// Phase 8a — producer-side smoke test (PLAINTEXT, 1000 records, 3 partitions).
+mod producer_smoke_test;
+
 // Performance tests — added when performance infrastructure landed.
 // Uncomment as integration tests are translated:
 // mod performance_test;
