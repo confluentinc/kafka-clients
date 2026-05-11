@@ -286,4 +286,69 @@ mod tests {
         let total: i32 = counts.values().sum();
         assert!(total >= 1);
     }
+
+    /// Hex-fixture regression test, added in Phase 8a.0 per PLAN.md
+    /// Risk #1 ("wire-protocol byte-vector divergence from Java" — capture
+    /// hex fixtures from Java, assert bytes literally).
+    ///
+    /// Bytes were captured live during the
+    /// `producer_smoke_plaintext_1000_records` integration test, off an
+    /// Apache Kafka 4.2.0 broker (`apache/kafka:4.2.0` Testcontainer) that
+    /// successfully decoded the request and replied with a well-formed
+    /// `ApiVersionsResponse` containing all 75 api keys it supports. The
+    /// payload below is the exact `header + body` byte sequence the Rust
+    /// `NetworkClient` writes for an `ApiVersionsRequest` v4 with:
+    /// `correlation_id = 0`, `client_id = "producer-smoke-test"` (header
+    /// v2, length-prefixed), `client_software_name = "apache-kafka-java"`
+    /// (compact-string), and `client_software_version = "0.1.0"`
+    /// (compact-string). Plus a zero-length tagged-fields varint at the
+    /// end of both the header and the body (flexible-version trailers).
+    ///
+    /// Byte breakdown:
+    /// - `00 12` — api_key = 18 (ApiVersions)
+    /// - `00 04` — api_version = 4
+    /// - `00 00 00 00` — correlation_id = 0
+    /// - `00 13` — i16 client_id length = 19 (note: length-prefixed even
+    ///   at header v2, per `RequestHeader.json`'s
+    ///   `flexibleVersions: "none"` override for the `ClientId` field —
+    ///   older brokers must be able to read this even when the client is
+    ///   newer)
+    /// - 19 bytes — "producer-smoke-test"
+    /// - `00` — header tagged-fields varint = 0
+    /// - `12` — compact-string length+1 = 18 → 17 bytes for
+    ///   client_software_name
+    /// - 17 bytes — "apache-kafka-java"
+    /// - `06` — compact-string length+1 = 6 → 5 bytes for
+    ///   client_software_version
+    /// - 5 bytes — "0.1.0"
+    /// - `00` — body tagged-fields varint = 0
+    ///
+    /// Total: 55 bytes — matches what was observed on the wire.
+    #[test]
+    fn hex_fixture_api_versions_request_v4_apache_kafka_4_2() {
+        const FIXTURE: &[u8] = &[
+            0x00, 0x12, 0x00, 0x04, 0x00, 0x00, 0x00, 0x00, 0x00, 0x13, 0x70, 0x72, 0x6f, 0x64, 0x75, 0x63, 0x65, 0x72,
+            0x2d, 0x73, 0x6d, 0x6f, 0x6b, 0x65, 0x2d, 0x74, 0x65, 0x73, 0x74, 0x00, 0x12, 0x61, 0x70, 0x61, 0x63, 0x68,
+            0x65, 0x2d, 0x6b, 0x61, 0x66, 0x6b, 0x61, 0x2d, 0x6a, 0x61, 0x76, 0x61, 0x06, 0x30, 0x2e, 0x31, 0x2e, 0x30,
+            0x00,
+        ];
+
+        // Encode a request matching the fixture's exact values.
+        let api_versions = ApiKeys::for_id(18).expect("API_VERSIONS");
+        let request = ApiVersionsRequest::new(
+            ApiVersionsRequestData {
+                client_software_name: "apache-kafka-java".to_owned(),
+                client_software_version: "0.1.0".to_owned(),
+                unknown_tagged_fields: Vec::new(),
+            },
+            4,
+        );
+        let header = crate::common::requests::RequestHeader::new(api_versions, 4, "producer-smoke-test", 0);
+        let bytes = AbstractRequest::serialize_with_header(&request, &header).expect("serialize");
+
+        assert_eq!(
+            bytes, FIXTURE,
+            "ApiVersionsRequest v4 wire bytes diverged from the captured Kafka 4.2.0 fixture"
+        );
+    }
 }
