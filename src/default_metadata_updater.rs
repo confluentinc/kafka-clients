@@ -86,15 +86,33 @@ pub(crate) struct DefaultMetadataUpdater {
     /// began. Set to `Some(0)` by [`Self::initiate_rebootstrap`] to force
     /// rebootstrap on the next `needs_rebootstrap` check.
     metadata_attempt_start_ms: Option<i64>,
+    /// Java's inner class captures `NetworkClient.metadataRecoveryStrategy`
+    /// via inner-class field access (`NetworkClient.java:1297`). The Rust
+    /// translation copies the value at construction time so
+    /// [`Self::handle_successful_response`] can gate the
+    /// `REBOOTSTRAP_REQUIRED` branch on the strategy without taking a
+    /// fresh context callback at response-handling time (responses are
+    /// dispatched from `NetworkClient::handle_completed_receives`, where
+    /// the updater is owned exclusively by the slot — there is no
+    /// `&mut dyn MetadataUpdaterContext` available).
+    metadata_recovery_strategy: MetadataRecoveryStrategy,
 }
 
 impl DefaultMetadataUpdater {
-    /// Mirrors Java's `DefaultMetadataUpdater(Metadata)`.
+    /// Mirrors Java's `DefaultMetadataUpdater(Metadata)` plus an explicit
+    /// `metadataRecoveryStrategy` parameter — Java's inner class reads the
+    /// strategy off the enclosing `NetworkClient` instance; Rust passes it
+    /// in at construction (see field doc).
     // Phase 8.0 (3/N) wires this into [`crate::producer::KafkaProducer::new`];
     // until then the only callers are unit tests.
     #[allow(dead_code)]
-    pub(crate) fn new(metadata: Arc<Metadata>) -> Self {
-        DefaultMetadataUpdater { metadata, in_progress: None, metadata_attempt_start_ms: None }
+    pub(crate) fn new(metadata: Arc<Metadata>, metadata_recovery_strategy: MetadataRecoveryStrategy) -> Self {
+        DefaultMetadataUpdater {
+            metadata,
+            in_progress: None,
+            metadata_attempt_start_ms: None,
+            metadata_recovery_strategy,
+        }
     }
 
     /// Borrow the shared [`Metadata`] handle (a clone of the `Arc`). Used
@@ -106,9 +124,25 @@ impl DefaultMetadataUpdater {
         Arc::clone(&self.metadata)
     }
 
-    /// Mirrors `hasFetchInProgress()`.
-    fn has_fetch_in_progress(&self) -> bool {
+    /// Mirrors `hasFetchInProgress()`. `pub(crate)` so the
+    /// `network_client::tests::maybe_update_unsupported_version_clears_in_progress`
+    /// regression can assert the wedge fix from Round 1 of Phase 8.0.
+    pub(crate) fn has_fetch_in_progress(&self) -> bool {
         self.in_progress.is_some()
+    }
+
+    /// Test-only helper used by the Round-1→Round-2 wedge-fix
+    /// regression in `network_client.rs::tests` to clear the
+    /// `in_progress` slot that a pre-test connect loop leaves
+    /// behind (the MockSelector's first ready iteration dispatches
+    /// a real un-pinned metadata request before the test can pin
+    /// the api-version island). Java exposes no equivalent — the
+    /// JUnit equivalent uses `MockClient.prepareResponse(...)` to
+    /// satisfy the request synchronously; we don't have that
+    /// affordance against `MockSelector`.
+    #[cfg(test)]
+    pub(crate) fn clear_in_progress_for_test(&mut self) {
+        self.in_progress = None;
     }
 
     /// Mirrors `initiateRebootstrap()` — set the attempt window to 0 so
@@ -134,11 +168,35 @@ impl DefaultMetadataUpdater {
                 "Sending metadata request {:?} to node {}",
                 request_and_version.request_builder, node
             );
-            self.in_progress = Some(InProgressData::new(
-                request_and_version.request_version,
-                request_and_version.is_partial_update,
-            ));
-            context.send_internal_metadata_request(request_and_version.request_builder, node_id_label, now);
+            // Send first, then assign `in_progress` — mirrors Java's
+            // `NetworkClient.java:1343-1344`. The Rust translation
+            // additionally rolls back `in_progress` on send failure
+            // (the `Err(_)` arm below) because the
+            // `MetadataUpdaterContext` take/put window in
+            // [`crate::NetworkClient::poll`] prevents the
+            // `do_send` UnsupportedVersion arms from reaching the
+            // updater to call `handle_failed_request` themselves.
+            // Without this, an `UnsupportedVersion` on internal
+            // METADATA dispatch would permanently wedge
+            // `in_progress` (the wire request never goes out, so no
+            // response will ever clear it).
+            let request_version = request_and_version.request_version;
+            let is_partial_update = request_and_version.is_partial_update;
+            match context.send_internal_metadata_request(request_and_version.request_builder, node_id_label, now) {
+                Ok(()) => {
+                    self.in_progress = Some(InProgressData::new(request_version, is_partial_update));
+                },
+                Err(err) => {
+                    // Java's `doSend` UnsupportedVersion arm calls
+                    // `metadataUpdater.handleFailedRequest(now, Some(uve))`
+                    // synchronously (`NetworkClient.java:595`). The Rust
+                    // updater is `&mut self` here, so do the same
+                    // bookkeeping locally.
+                    self.handle_failed_request(now, Some(err));
+                    // No `in_progress` assignment — request never went
+                    // on the wire, no response will arrive to clear it.
+                },
+            }
             return context.default_request_timeout_ms() as i64;
         }
 
@@ -322,23 +380,15 @@ impl MetadataUpdater for DefaultMetadataUpdater {
             );
         }
 
-        // Decide how to apply the response.
-        // Note: we read `metadata_recovery_strategy` from the underlying
-        // [`Metadata`] handle (Java's inner class captures the enclosing
-        // `NetworkClient.metadataRecoveryStrategy` field; the Rust
-        // equivalent lives on the producer's network client and is
-        // surfaced here via the response-time conditional only — see
-        // [`Metadata::metadata_recovery_strategy_for_response`] if/when
-        // this needs to dispatch beyond REBOOTSTRAP).
-        let is_rebootstrap_required = metadata_response.top_level_error() == Errors::RebootstrapRequired;
+        // Decide how to apply the response. Java's check at
+        // `NetworkClient.java:1297` is gated on **both**
+        // `metadataRecoveryStrategy == REBOOTSTRAP` AND `topLevelError() ==
+        // REBOOTSTRAP_REQUIRED`. The strategy gate is captured on the
+        // updater at construction time (see field doc).
+        let is_rebootstrap_required = self.metadata_recovery_strategy == MetadataRecoveryStrategy::Rebootstrap
+            && metadata_response.top_level_error() == Errors::RebootstrapRequired;
 
         if is_rebootstrap_required {
-            // Java's check is gated on `metadataRecoveryStrategy ==
-            // REBOOTSTRAP`. We surface the REBOOTSTRAP_REQUIRED error
-            // upstream to NetworkClient via metadata.rebootstrap() — the
-            // gate is enforced by the caller (NetworkClient::poll only
-            // dispatches to handleRebootstrap when the strategy is
-            // REBOOTSTRAP).
             info!("Rebootstrap requested by server.");
             self.initiate_rebootstrap();
         } else if metadata_response.brokers().is_empty() {
@@ -401,11 +451,14 @@ mod tests {
     //! methods that don't require a [`MetadataUpdaterContext`] callback
     //! into a real `NetworkClient`.
     //!
-    //! Tests that *do* require the full `NetworkClient` (the
-    //! `maybe_update`-driven send loop, `testRebootstrap`,
-    //! `testInflightRequestsDuringRebootstrap`) live in
-    //! `network_client.rs::tests` because they exercise the integrated
-    //! behaviour.
+    //! Tests that *do* require the full `NetworkClient` integration
+    //! (the `maybe_update`-driven send loop, `testRebootstrap`,
+    //! `testInflightRequestsDuringRebootstrap`) will land in Phase 8a
+    //! under `tests/integration/producer_smoke_test.rs` per
+    //! `design/history/Milestone-1/Phase-8/NOTES.md`. The
+    //! `maybe_update`-driven UnsupportedVersion regression for
+    //! Blocking 2 of Round 1 lives in `network_client.rs::tests`
+    //! (`maybe_update_unsupported_version_clears_in_progress`).
 
     use super::*;
     use crate::common::internals::cluster_resource_listeners::ClusterResourceListeners;
@@ -426,7 +479,17 @@ mod tests {
     }
 
     fn updater_with_metadata(metadata: Arc<Metadata>) -> DefaultMetadataUpdater {
-        DefaultMetadataUpdater::new(metadata)
+        // Default strategy `None` matches the Java client's default
+        // (`MetadataRecoveryStrategy.NONE`) and exercises the
+        // un-gated path through `handle_successful_response`.
+        DefaultMetadataUpdater::new(metadata, MetadataRecoveryStrategy::None)
+    }
+
+    fn updater_with_metadata_and_strategy(
+        metadata: Arc<Metadata>,
+        strategy: MetadataRecoveryStrategy,
+    ) -> DefaultMetadataUpdater {
+        DefaultMetadataUpdater::new(metadata, strategy)
     }
 
     #[test]
@@ -490,6 +553,91 @@ mod tests {
         updater.handle_failed_request(0, Some(fatal));
         let err = metadata.maybe_throw_fatal_error().unwrap_err();
         assert!(matches!(err, KafkaError::Authentication(_)));
+    }
+
+    /// Blocking 1 (Round 1) regression. Mirrors Java's gate at
+    /// `NetworkClient.java:1297`: under `metadata.recovery.strategy=None`
+    /// (the default), a REBOOTSTRAP_REQUIRED response must take the
+    /// "empty brokers" branch — calling `metadata.failed_update(now)`
+    /// to advance the failed-update backoff — rather than the
+    /// `initiate_rebootstrap` branch, which would mutate
+    /// `metadata_attempt_start_ms` for a strategy that won't act on it
+    /// and would skip the failed-update bookkeeping.
+    #[test]
+    fn handle_successful_response_rebootstrap_required_skipped_when_strategy_is_none() {
+        use crate::common::message::metadata_response_data::MetadataResponseData;
+        use crate::common::protocol::api_keys::ApiKeys;
+
+        let metadata = fresh_metadata();
+        let mut updater = updater_with_metadata_and_strategy(Arc::clone(&metadata), MetadataRecoveryStrategy::None);
+        updater.in_progress = Some(InProgressData::new(0, false));
+        // Snapshot attempt-start-ms before the call: it must remain
+        // untouched (we'd otherwise see `Some(0)` from initiate_rebootstrap).
+        updater.metadata_attempt_start_ms = Some(500);
+
+        let metadata_key = ApiKeys::for_id(3).expect("METADATA");
+        let header = RequestHeader::new(metadata_key, 12, "client-id", 42);
+
+        // REBOOTSTRAP_REQUIRED carries an empty broker list — Java's
+        // server-side semantics for this error code.
+        let mut data = MetadataResponseData::new();
+        data.error_code = Errors::RebootstrapRequired.code();
+        let response = MetadataResponse::new(data, true);
+
+        // Snapshot the failed-update counter via `time_to_allow_update`
+        // (Java's failed_update bumps `attempts`; the post-failure
+        // backoff window grows).
+        let before_failed_update_window = metadata.time_to_allow_update(0);
+
+        updater.handle_successful_response(&header, 1_000, response);
+
+        // The strategy-gate is `None` → initiate_rebootstrap MUST NOT
+        // have run → metadata_attempt_start_ms is unchanged.
+        assert_eq!(
+            updater.metadata_attempt_start_ms,
+            Some(500),
+            "REBOOTSTRAP branch ran under strategy=None and clobbered metadata_attempt_start_ms",
+        );
+        // `failed_update(now)` must have been invoked from the
+        // empty-brokers arm → the failed-update backoff bumps.
+        let after_failed_update_window = metadata.time_to_allow_update(0);
+        assert!(
+            after_failed_update_window >= before_failed_update_window,
+            "failed_update was skipped → backoff window did not advance ({} → {})",
+            before_failed_update_window,
+            after_failed_update_window,
+        );
+        // in_progress must be cleared regardless of branch.
+        assert!(!updater.has_fetch_in_progress());
+    }
+
+    /// Companion to the `None` test: under
+    /// `metadata.recovery.strategy=Rebootstrap`, the same response
+    /// hits the `initiate_rebootstrap` branch and forces
+    /// `metadata_attempt_start_ms = Some(0)`.
+    #[test]
+    fn handle_successful_response_rebootstrap_required_takes_branch_when_strategy_is_rebootstrap() {
+        use crate::common::message::metadata_response_data::MetadataResponseData;
+        use crate::common::protocol::api_keys::ApiKeys;
+
+        let metadata = fresh_metadata();
+        let mut updater =
+            updater_with_metadata_and_strategy(Arc::clone(&metadata), MetadataRecoveryStrategy::Rebootstrap);
+        updater.in_progress = Some(InProgressData::new(0, false));
+        updater.metadata_attempt_start_ms = Some(500);
+
+        let metadata_key = ApiKeys::for_id(3).expect("METADATA");
+        let header = RequestHeader::new(metadata_key, 12, "client-id", 42);
+
+        let mut data = MetadataResponseData::new();
+        data.error_code = Errors::RebootstrapRequired.code();
+        let response = MetadataResponse::new(data, true);
+
+        updater.handle_successful_response(&header, 1_000, response);
+
+        // initiate_rebootstrap forces the window to 0.
+        assert_eq!(updater.metadata_attempt_start_ms, Some(0));
+        assert!(!updater.has_fetch_in_progress());
     }
 
     /// Java `testRebootstrap` exercises `needsRebootstrap` (via

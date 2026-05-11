@@ -130,7 +130,8 @@ mod tests {
             _builder: MetadataRequestBuilder,
             _node_id_label: Arc<str>,
             _now: i64,
-        ) {
+        ) -> Result<(), KafkaError> {
+            Ok(())
         }
         fn reconnect_backoff_ms(&self) -> i64 {
             50

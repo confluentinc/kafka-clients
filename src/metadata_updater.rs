@@ -72,7 +72,21 @@ pub trait MetadataUpdaterContext {
     /// The `node_id_label` parameter is the `Arc<str>` form of
     /// `node.id_string()` — sharing it avoids per-call allocation
     /// (CLAUDE.md rule 11).
-    fn send_internal_metadata_request(&mut self, builder: MetadataRequestBuilder, node_id_label: Arc<str>, now: i64);
+    ///
+    /// Returns `Err(...)` when the underlying `do_send` rejected the
+    /// request (`UnsupportedVersionException` on a METADATA api-key
+    /// version island, or a `builder.build(version)` failure). The
+    /// updater is responsible for routing the failure into its own
+    /// `handle_failed_request` path — the `NetworkClient` cannot do
+    /// it itself because the updater is owned by the caller's stack
+    /// during the take/put window in
+    /// [`crate::NetworkClient::poll`].
+    fn send_internal_metadata_request(
+        &mut self,
+        builder: MetadataRequestBuilder,
+        node_id_label: Arc<str>,
+        now: i64,
+    ) -> Result<(), KafkaError>;
 
     /// Read the enclosing `NetworkClient.reconnectBackoffMs`. Used as
     /// the timeout when no node is connection-ready.

@@ -499,14 +499,14 @@ fn build_production_network_client(
     let connections_max_idle_ms = config.get_long(producer_config::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
     let selector = Selector::new(connections_max_idle_ms, time.clone(), channel_builder);
 
-    let updater = DefaultMetadataUpdater::new(metadata);
-
-    let host_resolver: Box<dyn crate::host_resolver::HostResolver> =
-        Box::new(crate::default_host_resolver::DefaultHostResolver);
-
     let recovery_str = config.get_string(crate::common_client_configs::METADATA_RECOVERY_STRATEGY_CONFIG)?;
     let metadata_recovery_strategy =
         crate::metadata_recovery_strategy::MetadataRecoveryStrategy::from_name(recovery_str)?;
+
+    let updater = DefaultMetadataUpdater::new(metadata, metadata_recovery_strategy);
+
+    let host_resolver: Box<dyn crate::host_resolver::HostResolver> =
+        Box::new(crate::default_host_resolver::DefaultHostResolver);
 
     crate::NetworkClient::new(
         selector,

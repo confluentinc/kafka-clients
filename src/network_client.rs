@@ -861,27 +861,25 @@ where
                     );
                     if !is_internal_request {
                         self.aborted_sends.push(response);
+                        // Telemetry api keys
+                        // (`GET_TELEMETRY_SUBSCRIPTIONS=71`,
+                        // `PUSH_TELEMETRY=72`) — skipped per Phase 5d scope.
+                        return Ok(());
                     } else if api_key_id == ApiKeys::for_id(3).expect("METADATA").id {
                         // Java's `doSend` UnsupportedVersion path forwards
                         // the failure to the metadata updater so an
                         // in-progress fetch is retired and backoff
-                        // advances; mirrors `cancel_in_flight_requests`
-                        // for the disconnect case (see line 326).
+                        // advances (`NetworkClient.java:595`).
                         //
-                        // The `if let Some(...)` guard handles re-entry
-                        // from the [`MetadataUpdaterContext`] dispatch:
-                        // when `send_internal_metadata_request` calls
-                        // back into `do_send`, the updater has been
-                        // temporarily taken out of `self`. Java's
-                        // sibling does the same operation under the
-                        // inner-class self-reference, which the Rust
-                        // wrap can't model — we drop the
-                        // `handle_failed_request` call (the metadata
-                        // request itself never made it onto the wire,
-                        // so there's no in-progress state to clear).
-                        if let Some(updater) = self.metadata_updater.as_mut() {
-                            updater.handle_failed_request(now, Some(e));
-                        }
+                        // The Rust translation has a take/put window in
+                        // [`Self::poll`]: when `send_internal_metadata_request`
+                        // re-enters `do_send`, `self.metadata_updater` is
+                        // `None`. We propagate the error to
+                        // `send_internal_metadata_request`, which forwards
+                        // it back to the updater (alive on the caller's
+                        // stack) via its `Result` return so the updater
+                        // can invoke its own `handle_failed_request`.
+                        return Err(e);
                     }
                     // Telemetry api keys
                     // (`GET_TELEMETRY_SUBSCRIPTIONS=71`,
@@ -910,12 +908,11 @@ where
                 );
                 if !is_internal_request {
                     self.aborted_sends.push(response);
+                    return Ok(());
                 } else if api_key_id == ApiKeys::for_id(3).expect("METADATA").id {
-                    // See sibling-arm comment above — same Java contract
-                    // for the `builder.build(version)` failure path.
-                    if let Some(updater) = self.metadata_updater.as_mut() {
-                        updater.handle_failed_request(now, Some(e));
-                    }
+                    // See sibling-arm comment above — same propagate-to-updater
+                    // contract for the `builder.build(version)` failure path.
+                    return Err(e);
                 }
                 return Ok(());
             },
@@ -1358,10 +1355,20 @@ where
         builder: crate::common::requests::MetadataRequestBuilder,
         node_id_label: Arc<str>,
         now: i64,
-    ) {
+    ) -> Result<(), KafkaError> {
         // Java: `void sendInternalMetadataRequest(MetadataRequest.Builder builder, String nodeConnectionId, long now)`
         // — `newClientRequest(nodeConnectionId, builder, now, true)` then
         // `doSend(clientRequest, true, now)`.
+        //
+        // The `do_send` internal-METADATA UnsupportedVersion arms
+        // (lines ~880 and ~915) cannot reach the updater because the
+        // take/put window in [`Self::poll`] has temporarily moved it
+        // out of `self`. Propagate the error back to the updater so it
+        // can route it through its own `handle_failed_request` path
+        // (mirrors Java's `metadataUpdater.handleFailedRequest` call
+        // at `NetworkClient.java:595`, which Java can make
+        // unconditionally because its inner-class field reference
+        // doesn't require take/put).
         let arc_builder: Arc<dyn AbstractRequestBuilder> = Arc::new(builder);
         let client_request = self.new_client_request_with_callback_internal(
             node_id_label,
@@ -1371,15 +1378,7 @@ where
             self.default_request_timeout_ms,
             None,
         );
-        if let Err(e) = self.do_send(client_request, true, now) {
-            // Java's doSend for internal METADATA propagates failure via
-            // `metadataUpdater.handleFailedRequest`. We're inside the
-            // context dispatch (the updater is `None` right now), so we
-            // can't call `metadata_updater_mut().handle_failed_request`
-            // here. The do_send aborted_sends path already records the
-            // failure for the next poll; just log.
-            error!("Failed to send internal METADATA request: {}", e);
-        }
+        self.do_send(client_request, true, now)
     }
 
     fn reconnect_backoff_ms(&self) -> i64 {
@@ -2165,18 +2164,28 @@ mod tests {
     }
 
     /// Java: regression for `NetworkClient.doSend` UnsupportedVersion +
-    /// internal METADATA path. Mirrors the corresponding `else if
-    /// (apiKey == ApiKeys.METADATA)` branch of `doSend` (line 594 in
-    /// `NetworkClient.java`): the metadata-updater's
-    /// `handleFailedRequest` callback must fire so an in-progress fetch
-    /// is retired.
+    /// internal METADATA path (`NetworkClient.java:594`). Java's
+    /// `doSend` arm calls
+    /// `metadataUpdater.handleFailedRequest(now, Some(uve))`
+    /// synchronously. The Rust translation has a take/put window
+    /// (see [`NetworkClient::poll`]) during which the updater is owned
+    /// by the caller's stack, so `do_send` cannot itself reach the
+    /// updater. The Rust contract is therefore: `do_send` for an
+    /// internal METADATA UnsupportedVersion returns `Err(...)`, and
+    /// the caller (`MetadataUpdaterContext::send_internal_metadata_request`)
+    /// propagates the error to the updater so it can route the
+    /// failure through its own `handle_failed_request`.
     ///
-    /// The Phase 5d translation initially dropped this callback (the
-    /// `is_internal_request=true` arm only handled `aborted_sends`); a
-    /// `DefaultMetadataUpdater` (Phase 6+) would have stuck waiting for
-    /// a response that will never arrive.
+    /// This test exercises the lower-level `do_send` contract; the
+    /// integrated `maybe_update` pin lives in
+    /// `maybe_update_unsupported_version_clears_in_progress` below.
+    ///
+    /// The Phase 5d translation initially dropped this callback
+    /// entirely (the `is_internal_request=true` arm only handled
+    /// `aborted_sends`); a `DefaultMetadataUpdater` (Phase 6+) would
+    /// have stuck waiting for a response that will never arrive.
     #[tokio::test]
-    async fn do_send_unsupported_version_internal_metadata_fires_failed_request() {
+    async fn do_send_unsupported_version_internal_metadata_propagates_err() {
         let time = Arc::new(MockTime::default());
         let selector = MockSelector::new(Arc::clone(&time));
         let view = MockSelectorView::new(selector.clone());
@@ -2232,23 +2241,179 @@ mod tests {
         );
         // Send as `is_internal_request=true` to exercise the METADATA arm.
         let now = time.milliseconds();
-        client
-            .do_send(req, true, now)
-            .expect("do_send returns Ok even on UnsupportedVersion");
+        let result = client.do_send(req, true, now);
 
         // The METADATA UnsupportedVersion arm must:
         //   1. NOT push to `aborted_sends` (those are only for non-internal).
-        //   2. Fire `metadata_updater.handle_failed_request` with `Some(err)`.
+        //   2. Return `Err(UnsupportedVersion)` so the caller's
+        //      `send_internal_metadata_request` propagates it to the
+        //      updater (which is on the caller stack, not in
+        //      `self.metadata_updater`).
+        //   3. NOT call `handle_failed_request` itself — that's the
+        //      updater's responsibility once it receives the `Err`.
+        assert!(
+            matches!(result, Err(KafkaError::UnsupportedVersion(_))),
+            "do_send must return Err(UnsupportedVersion) for internal METADATA UVE, got {:?}",
+            result,
+        );
         assert!(
             client.aborted_sends.is_empty(),
             "aborted_sends must be untouched for internal requests"
         );
         let calls = recorded.lock().unwrap();
-        assert_eq!(calls.len(), 1, "expected exactly one handle_failed_request call");
         assert!(
-            matches!(&calls[0], Some(KafkaError::UnsupportedVersion(_))),
-            "expected an UnsupportedVersion error, got {:?}",
-            calls[0]
+            calls.is_empty(),
+            "do_send must NOT directly call handle_failed_request — that's the updater's path; got {:?}",
+            *calls
+        );
+    }
+
+    /// Blocking 2 (Round 1) regression. Exercises the integrated
+    /// `DefaultMetadataUpdater::maybe_update` path against a
+    /// `NetworkClient` whose `ApiVersions` pin the METADATA range to
+    /// an unreachable version. After the call:
+    ///
+    /// * `in_progress` MUST be `None` (no wire request went out;
+    ///   nothing will ever clear `in_progress` otherwise).
+    /// * `metadata.failed_update` MUST have fired — observable via
+    ///   `is_update_due` no longer being immediate (the backoff
+    ///   advances).
+    ///
+    /// Companion to `do_send_unsupported_version_internal_metadata_propagates_err`,
+    /// which only exercises the low-level `do_send` contract.
+    #[tokio::test]
+    async fn maybe_update_unsupported_version_clears_in_progress() {
+        use crate::default_metadata_updater::DefaultMetadataUpdater;
+        use crate::metadata::Metadata;
+        use crate::metadata_updater::MetadataUpdater;
+
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        let node = test_node();
+
+        // Build a `DefaultMetadataUpdater` over a fresh `Metadata`
+        // populated with `node` via `bootstrap(...)`.
+        let metadata = Arc::new(
+            Metadata::new(
+                50,
+                50,
+                5_000,
+                crate::common::utils::LogContext::default(),
+                Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::default()),
+            )
+            .expect("metadata constructs"),
+        );
+        metadata.bootstrap(vec![(node.host().to_owned(), node.port() as u16)]);
+        metadata.request_update(true);
+        // After bootstrap, `Metadata::fetch().nodes()` contains a
+        // synthesized "bootstrap" node whose id is `-1`. The real
+        // `node` we want the request to dispatch against has id ≥ 0,
+        // so we need to drive a connect first (the bootstrap node is
+        // not the same as our test node). Instead we'll build the
+        // updater against a manually-curated Cluster: re-bootstrap is
+        // sufficient for `fetch_nodes()` to return *some* node id, and
+        // we'll pin api_versions for that specific id.
+        let bootstrap_node_id = metadata.fetch().nodes()[0].id();
+
+        let updater = DefaultMetadataUpdater::new(Arc::clone(&metadata), MetadataRecoveryStrategy::None);
+
+        let mut client = NetworkClient::new(
+            view,
+            updater,
+            Arc::from("mock-client"),
+            i32::MAX,
+            10_000,
+            100_000,
+            64 * 1024,
+            64 * 1024,
+            1_000,
+            5_000,
+            127_000,
+            Arc::clone(&time) as Arc<dyn crate::common::utils::Time>,
+            /* discover= */ false,
+            ApiVersions::new(),
+            Box::new(DefaultHostResolver),
+            i64::MAX,
+            MetadataRecoveryStrategy::None,
+        )
+        .expect("NetworkClient::new");
+
+        // Drive the connect → READY on the bootstrap node so
+        // `can_send_request` returns true. With `discover=false` and
+        // a `MockSelector`, the second `poll()` iteration will already
+        // dispatch a real (unpinned) metadata request because
+        // `maybe_update` runs inside `poll`. That dispatch leaves
+        // `in_progress = Some(...)` and short-circuits subsequent
+        // `maybe_update` calls. To exercise the UnsupportedVersion
+        // arm specifically, we'll clear `in_progress` below before
+        // pinning the api-version island and invoking
+        // `maybe_update` directly.
+        let bootstrap_node = metadata.fetch().nodes()[0].clone();
+        for _ in 0..5 {
+            if client.ready(&bootstrap_node, time.milliseconds()) {
+                break;
+            }
+            client.poll(0, time.milliseconds()).await;
+        }
+        assert!(client.is_ready(&bootstrap_node, time.milliseconds()));
+
+        // The previous connect loop may have left a stale
+        // `in_progress = Some(...)` from a real dispatch (the
+        // MockSelector accepted the bytes but never replies). Clear
+        // it so the next `maybe_update` actually proceeds to the
+        // dispatch arm.
+        if let Some(updater) = client.metadata_updater.as_mut() {
+            updater.clear_in_progress_for_test();
+        }
+
+        // Pin the bootstrap node's METADATA range to v20..v20 — an
+        // island unreachable by `MetadataRequestBuilder` so
+        // `latest_usable_version_in_range` returns
+        // `UnsupportedVersion`.
+        let metadata_api_id = ApiKeys::for_id(3).expect("METADATA").id;
+        let high_version_only = NodeApiVersions::create_single(metadata_api_id, 20, 20).expect("single api version");
+        client.api_versions.update(bootstrap_node_id, Arc::new(high_version_only));
+
+        // Drive `maybe_update` past the backoff window. With
+        // `refresh_backoff_ms=50`, advancing past the configured
+        // window means `time_to_next_update` returns 0, so
+        // `maybe_update` proceeds to dispatch the request → hits the
+        // UnsupportedVersion arm.
+        time.sleep(200);
+        let now = time.milliseconds();
+        assert!(
+            client.api_versions.get(bootstrap_node_id).is_some(),
+            "test pre-condition: api_versions pinned for the bootstrap node",
+        );
+
+        let _timeout = {
+            let mut updater = client.metadata_updater.take().expect("metadata_updater present");
+            let t = updater.maybe_update(&mut client, now);
+            client.metadata_updater = Some(updater);
+            t
+        };
+
+        // The wedge-fix Definition of Done: `in_progress` must be
+        // `None`. Without the Round-1 → Round-2 fix it would be
+        // `Some(InProgressData(...))` forever.
+        let updater_ref = client.metadata_updater.as_ref().expect("updater restored");
+        assert!(
+            !updater_ref.has_fetch_in_progress(),
+            "in_progress must be None after UnsupportedVersion on internal METADATA dispatch",
+        );
+
+        // `metadata.failed_update(now)` ran inside the updater's
+        // `handle_failed_request` → backoff advanced (we can no longer
+        // request_update through the timestamp instantly).
+        // Verify by re-reading attempts via a known side-effect:
+        // `time_to_allow_update(now)` returns a positive backoff
+        // window proportional to the new attempt count.
+        let backoff_after_fail = metadata.time_to_allow_update(now);
+        assert!(
+            backoff_after_fail > 0,
+            "failed_update was not invoked; backoff window = {} (expected > 0)",
+            backoff_after_fail,
         );
     }
 
