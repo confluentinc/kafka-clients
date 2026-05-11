@@ -60,6 +60,7 @@ use crate::common::internals::cluster_resource_listeners::ClusterResourceListene
 use crate::common::node::Node;
 use crate::common::protocol::Errors;
 use crate::common::record::record_batch::NO_PARTITION_LEADER_EPOCH;
+use crate::common::requests::metadata_request::MetadataRequestBuilder;
 use crate::common::requests::metadata_response::{MetadataResponse, PartitionMetadata};
 use crate::common::topic_partition::TopicPartition;
 use crate::common::utils::ExponentialBackoff;
@@ -77,6 +78,18 @@ use crate::metadata_snapshot::MetadataSnapshot;
 /// composition: callers that want subclass-style override (e.g.
 /// `ProducerMetadata`) inject a closure here.
 pub type RetainTopicFn = Arc<dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + Send + Sync>;
+
+/// Factory for the [`MetadataRequestBuilder`] used by
+/// `new_metadata_request_and_version`. Mirrors the Java overridable
+/// `newMetadataRequestBuilder()` /
+/// `newMetadataRequestBuilderForNewTopics()` pair.
+///
+/// The `is_partial` flag distinguishes "fetch all known topics" (false,
+/// Java's `newMetadataRequestBuilder`) from "fetch only newly-added
+/// topics" (true, Java's `newMetadataRequestBuilderForNewTopics`).
+/// Returning `None` for the partial variant disables partial updates
+/// (matches Java's default-returning-null `newMetadataRequestBuilderForNewTopics`).
+pub type MetadataRequestBuilderFn = Arc<dyn Fn(bool) -> Option<MetadataRequestBuilder> + std::marker::Send + Sync>;
 
 /// A class encapsulating some of the logic around metadata.
 ///
@@ -151,16 +164,26 @@ struct MetadataInner {
     bootstrap_addresses: Vec<(String, u16)>,
     /// Predicate injected by subclasses (Java) — Rust uses a closure.
     retain_topic: Option<RetainTopicFn>,
+    /// Builder factory injected by subclasses (Java) — Rust uses a
+    /// closure. See [`MetadataRequestBuilderFn`].
+    request_builder_fn: Option<MetadataRequestBuilderFn>,
 }
 
 /// Snapshot of the current request build state.
 ///
-/// Mirrors the Java inner class `Metadata.MetadataRequestAndVersion`. The
-/// `MetadataRequest::Builder` translation lands in Phase 5; for now this
-/// struct just captures the version + isPartialUpdate metadata so the
-/// future builder wiring has a place to land.
-#[derive(Debug, Clone, PartialEq, Eq)]
+/// Mirrors the Java inner class `Metadata.MetadataRequestAndVersion`.
+/// The `request_builder` field carries the [`MetadataRequestBuilder`]
+/// that `DefaultMetadataUpdater` should hand to `NetworkClient`. Java's
+/// inner class exposes it as `public final` so callers can read it
+/// directly; the Rust equivalent is `pub`.
+///
+/// Note: this struct intentionally does **not** derive `PartialEq` /
+/// `Eq` — [`MetadataRequestBuilder`] holds non-comparable state and
+/// callers should compare on the version / partial-update flag if they
+/// need equality, not the builder.
+#[derive(Debug, Clone)]
 pub struct MetadataRequestAndVersion {
+    pub request_builder: MetadataRequestBuilder,
     pub request_version: i32,
     pub is_partial_update: bool,
 }
@@ -243,6 +266,7 @@ impl Metadata {
             last_seen_leader_epochs: HashMap::new(),
             bootstrap_addresses: Vec::new(),
             retain_topic: None,
+            request_builder_fn: None,
         };
 
         Ok(Metadata {
@@ -265,6 +289,20 @@ impl Metadata {
     pub fn set_retain_topic_fn(&self, retain_topic: RetainTopicFn) {
         let mut inner = self.inner.lock().expect("metadata mutex poisoned");
         inner.retain_topic = Some(retain_topic);
+    }
+
+    /// Inject a custom `newMetadataRequestBuilder` factory. Java uses
+    /// subclass override; the Rust translation uses composition so
+    /// `ProducerMetadata` can install its topic-name-aware factory
+    /// without inheritance. See [`MetadataRequestBuilderFn`].
+    ///
+    /// Default (no closure installed) behaves like Java's base
+    /// `Metadata.newMetadataRequestBuilder` which returns
+    /// `MetadataRequest.Builder.allTopics()` for full updates and `null`
+    /// for partial-new-topics (i.e. partial updates disabled).
+    pub fn set_request_builder_fn(&self, builder_fn: MetadataRequestBuilderFn) {
+        let mut inner = self.inner.lock().expect("metadata mutex poisoned");
+        inner.request_builder_fn = Some(builder_fn);
     }
 
     /// Get the current cluster info without blocking. Mirrors `fetch()`.
@@ -897,14 +935,39 @@ impl Metadata {
     }
 
     /// Mirrors `newMetadataRequestAndVersion(long)`. Returns the request
-    /// version and isPartialUpdate flag derived from internal state. The
-    /// `MetadataRequest::Builder` lives in Phase 5; this surface is the
-    /// stub `Metadata` exposes today.
+    /// version, isPartialUpdate flag, and the [`MetadataRequestBuilder`]
+    /// that the caller should hand to the network client.
+    ///
+    /// Java decides between a partial update (only newly-added topics)
+    /// and a full update (all known topics) based on
+    /// `needFullUpdate` and the metadata-expiry window. The Rust
+    /// translation uses the same gate; the builder is constructed by the
+    /// injected [`MetadataRequestBuilderFn`] (Java's
+    /// subclass-override `newMetadataRequestBuilder()` /
+    /// `newMetadataRequestBuilderForNewTopics()`). When no factory is
+    /// installed, full updates default to `allTopics()` and partial
+    /// updates are disabled — matching Java's base-class behaviour
+    /// (`Metadata.newMetadataRequestBuilderForNewTopics` returns `null`).
     pub fn new_metadata_request_and_version(&self, now_ms: i64) -> MetadataRequestAndVersion {
         let inner = self.inner.lock().expect("metadata mutex poisoned");
-        let is_partial_update =
+        let want_partial =
             !inner.need_full_update && inner.last_successful_refresh_ms + inner.metadata_expire_ms > now_ms;
-        MetadataRequestAndVersion { request_version: inner.request_version, is_partial_update }
+        // Java's algorithm:
+        //   if (want_partial) { request = newMetadataRequestBuilderForNewTopics() }  // may return null
+        //   if (request == null) { request = newMetadataRequestBuilder(); is_partial = false; }
+        let (builder, is_partial_update) = match (&inner.request_builder_fn, want_partial) {
+            (Some(factory), true) => match factory(true) {
+                Some(b) => (b, true),
+                None => (factory(false).unwrap_or_else(MetadataRequestBuilder::all_topics), false),
+            },
+            (Some(factory), false) => (factory(false).unwrap_or_else(MetadataRequestBuilder::all_topics), false),
+            (None, _) => (MetadataRequestBuilder::all_topics(), false),
+        };
+        MetadataRequestAndVersion {
+            request_builder: builder,
+            request_version: inner.request_version,
+            is_partial_update,
+        }
     }
 
     /// Internal accessor for [`crate::producer::internals::ProducerMetadata`]
@@ -2158,9 +2221,23 @@ mod tests {
 
     /// Java: `testPartialMetadataUpdate` (`MetadataTest.java:641-702`).
     /// Drives the partial-vs-full update transitions.
+    ///
+    /// Java's test installs an anonymous subclass override that makes
+    /// `newMetadataRequestBuilderForNewTopics()` return a non-null
+    /// builder (the base class returns `null`, which disables partial
+    /// updates). The Rust translation installs the equivalent
+    /// closure-factory via [`Metadata::set_request_builder_fn`] so the
+    /// gate-based `is_partial_update` flag actually reaches the
+    /// partial-update branch.
     #[test]
     fn partial_metadata_update_full_vs_partial() {
         let metadata = fresh_metadata();
+        // Java subclass override: `newMetadataRequestBuilderForNewTopics`
+        // returns the same builder as `newMetadataRequestBuilder()` (so
+        // partial updates are enabled with the all-topics shape).
+        metadata.set_request_builder_fn(Arc::new(|_is_partial| {
+            Some(crate::common::requests::MetadataRequestBuilder::all_topics())
+        }));
         assert!(!metadata.update_requested());
 
         // Request a metadata update — must be full.

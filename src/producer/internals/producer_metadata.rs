@@ -110,6 +110,21 @@ impl ProducerMetadata {
                 ProducerMetadata::retain_topic_inner(&state_for_predicate, &log_context_for_predicate, topic, now_ms)
             }));
 
+        // Install the `newMetadataRequestBuilder` / `…ForNewTopics`
+        // overrides on the inner `Metadata`. Java's `ProducerMetadata`
+        // overrides both to fetch only the topics the producer knows
+        // about (full update) and only the newly-added topics (partial).
+        let state_for_builder = Arc::clone(&producer.state);
+        producer.metadata.set_request_builder_fn(Arc::new(move |is_partial| {
+            let state = state_for_builder.lock().expect("producer metadata mutex poisoned");
+            let topics: Vec<String> = if is_partial {
+                state.new_topics.iter().cloned().collect()
+            } else {
+                state.topics.keys().cloned().collect()
+            };
+            Some(crate::common::requests::MetadataRequestBuilder::for_topic_names(topics, true))
+        }));
+
         Ok(producer)
     }
 

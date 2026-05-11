@@ -105,7 +105,15 @@ enum State {
 /// (matching [`KafkaClient`]).
 pub struct NetworkClient<S: Selectable, M: MetadataUpdater> {
     selector: S,
-    metadata_updater: M,
+    /// `Option<M>` (not bare `M`) so the implementation can briefly take
+    /// the updater out of the struct while invoking
+    /// [`MetadataUpdater::maybe_update`] with `&mut self` as the
+    /// [`MetadataUpdaterContext`]. The slot is `Some` outside of
+    /// [`Self::poll`]'s metadata-update step; calling other
+    /// methods (`handle_failed_request`, `fetch_nodes`, …) while
+    /// `metadata_updater` is `None` is a programming error and panics
+    /// via [`Option::expect`].
+    metadata_updater: Option<M>,
     /// Optional handle to `Metadata`. Java's `DefaultMetadataUpdater`
     /// captures it as a final field; we keep a parallel Arc here so the
     /// `M` type parameter can be either `DefaultMetadataUpdater` or
@@ -219,7 +227,7 @@ where
         .map_err(KafkaError::IllegalArgument)?;
         Ok(NetworkClient {
             selector,
-            metadata_updater,
+            metadata_updater: Some(metadata_updater),
             connection_states,
             in_flight_requests: InFlightRequests::new(max_in_flight_requests_per_connection),
             socket_send_buffer,
@@ -257,6 +265,24 @@ where
     /// Mirrors `NetworkClient.discoverBrokerVersions()`.
     pub fn discover_broker_versions(&self) -> bool {
         self.discover_broker_versions
+    }
+
+    /// Borrow the metadata updater. Panics if invoked while the
+    /// updater is temporarily out (i.e. during the `maybe_update` call
+    /// path in [`Self::poll`]). Mirrors Java's "always present" inner-class
+    /// reference; the `Option` wrap is purely a Rust borrow-checker
+    /// affordance.
+    fn metadata_updater(&self) -> &M {
+        self.metadata_updater
+            .as_ref()
+            .expect("metadata_updater is None — called during maybe_update?")
+    }
+
+    /// Mutable borrow companion to [`Self::metadata_updater`].
+    fn metadata_updater_mut(&mut self) -> &mut M {
+        self.metadata_updater
+            .as_mut()
+            .expect("metadata_updater is None — called during maybe_update?")
     }
 
     /// Mirrors the package-private `canConnect(Node, long)`.
@@ -323,7 +349,7 @@ where
                 }
             } else if request.header.api_key().expect("known").id == ApiKeys::for_id(3).expect("METADATA").id {
                 // METADATA = 3
-                self.metadata_updater.handle_failed_request(now, None);
+                self.metadata_updater_mut().handle_failed_request(now, None);
             }
             // Telemetry api keys (GET_TELEMETRY_SUBSCRIPTIONS=71,
             // PUSH_TELEMETRY=72) — skipped per Phase 5d scope.
@@ -381,7 +407,7 @@ where
         }
         let auth_error = disconnect_state.exception().cloned();
         self.cancel_in_flight_requests(node_id, now, Some(responses), timed_out);
-        self.metadata_updater.handle_server_disconnect(now, node_id, auth_error);
+        self.metadata_updater_mut().handle_server_disconnect(now, node_id, auth_error);
     }
 
     fn process_timeout_disconnection(&mut self, responses: &mut Vec<ClientResponse>, node_id: i32, now: i64) {
@@ -499,7 +525,7 @@ where
                 match self.parse_metadata_response_payload(&mut accessor, &req.header) {
                     Ok(meta) => {
                         self.maybe_throttle(&meta, req.header.api_version(), source, now);
-                        self.metadata_updater.handle_successful_response(&req.header, now, meta);
+                        self.metadata_updater_mut().handle_successful_response(&req.header, now, meta);
                     },
                     Err(e) => {
                         error!("Failed to parse internal METADATA response from node {}: {}", source, e);
@@ -715,10 +741,10 @@ where
         if self.metadata_recovery_strategy != MetadataRecoveryStrategy::Rebootstrap {
             return;
         }
-        if !self.metadata_updater.needs_rebootstrap(now, self.rebootstrap_trigger_ms) {
+        if !self.metadata_updater().needs_rebootstrap(now, self.rebootstrap_trigger_ms) {
             return;
         }
-        let nodes = self.metadata_updater.fetch_nodes();
+        let nodes = self.metadata_updater().fetch_nodes();
         for node in nodes {
             let node_id = node.id();
             self.selector.close_connection(node_id);
@@ -727,7 +753,7 @@ where
                 self.process_disconnection(responses, node_id, now, ChannelState::local_close(), false);
             }
         }
-        self.metadata_updater.rebootstrap(now);
+        self.metadata_updater_mut().rebootstrap(now);
     }
 
     fn initiate_connect(&mut self, node: &Node, now: i64) {
@@ -741,7 +767,18 @@ where
             Err(e) => {
                 warn!("Error connecting to node {}: {}", node, e);
                 self.connection_states.disconnected(node_id, now);
-                self.metadata_updater.handle_server_disconnect(now, node_id, None);
+                // `if let Some(...)` guards re-entry from the
+                // `MetadataUpdaterContext` dispatch where the updater
+                // has been temporarily taken out of `self`. Java's
+                // sibling-class invocation does not have the equivalent
+                // null-check because the inner-class reference is
+                // always live; the Rust wrap can't model that, so we
+                // skip the callback if the updater is missing — the
+                // updater's own state-machine treats a missing connect
+                // attempt as "no in-progress fetch to clear".
+                if let Some(updater) = self.metadata_updater.as_mut() {
+                    updater.handle_server_disconnect(now, node_id, None);
+                }
                 return;
             },
         };
@@ -753,7 +790,10 @@ where
         {
             warn!("Error connecting to node {}: {}", node, e);
             self.connection_states.disconnected(node_id, now);
-            self.metadata_updater.handle_server_disconnect(now, node_id, None);
+            // See comment above — same re-entry guard.
+            if let Some(updater) = self.metadata_updater.as_mut() {
+                updater.handle_server_disconnect(now, node_id, None);
+            }
         }
         // Pre-populate the label for the new node so we don't allocate
         // on the response path.
@@ -765,7 +805,7 @@ where
     /// retained for the wiring expected in Phase 6.
     #[allow(dead_code)]
     fn is_any_node_connecting(&self) -> bool {
-        self.metadata_updater
+        self.metadata_updater()
             .fetch_nodes()
             .iter()
             .any(|node| self.connection_states.is_connecting(node.id()))
@@ -827,7 +867,21 @@ where
                         // in-progress fetch is retired and backoff
                         // advances; mirrors `cancel_in_flight_requests`
                         // for the disconnect case (see line 326).
-                        self.metadata_updater.handle_failed_request(now, Some(e));
+                        //
+                        // The `if let Some(...)` guard handles re-entry
+                        // from the [`MetadataUpdaterContext`] dispatch:
+                        // when `send_internal_metadata_request` calls
+                        // back into `do_send`, the updater has been
+                        // temporarily taken out of `self`. Java's
+                        // sibling does the same operation under the
+                        // inner-class self-reference, which the Rust
+                        // wrap can't model — we drop the
+                        // `handle_failed_request` call (the metadata
+                        // request itself never made it onto the wire,
+                        // so there's no in-progress state to clear).
+                        if let Some(updater) = self.metadata_updater.as_mut() {
+                            updater.handle_failed_request(now, Some(e));
+                        }
                     }
                     // Telemetry api keys
                     // (`GET_TELEMETRY_SUBSCRIPTIONS=71`,
@@ -859,7 +913,9 @@ where
                 } else if api_key_id == ApiKeys::for_id(3).expect("METADATA").id {
                     // See sibling-arm comment above — same Java contract
                     // for the `builder.build(version)` failure path.
-                    self.metadata_updater.handle_failed_request(now, Some(e));
+                    if let Some(updater) = self.metadata_updater.as_mut() {
+                        updater.handle_failed_request(now, Some(e));
+                    }
                 }
                 return Ok(());
             },
@@ -925,7 +981,7 @@ where
     fn is_ready(&self, node: &Node, now: i64) -> bool {
         // If we need to update metadata, declare nothing ready so
         // metadata requests take priority.
-        !self.metadata_updater.is_update_due(now) && self.can_send_request(node.id(), now)
+        !self.metadata_updater().is_update_due(now) && self.can_send_request(node.id(), now)
     }
 
     fn ready(&mut self, node: &Node, now: i64) -> bool {
@@ -987,7 +1043,23 @@ where
             return responses;
         }
 
-        let metadata_timeout = self.metadata_updater.maybe_update(now);
+        // Java's `DefaultMetadataUpdater.maybeUpdate(long)` reaches back
+        // into the enclosing `NetworkClient` for `canSendRequest`,
+        // `sendInternalMetadataRequest`, `initiateConnect`, …. The Rust
+        // translation can't model that inner-class access, so we take
+        // the updater out, hand `&mut self` to it as the
+        // `MetadataUpdaterContext`, and put the updater back when the
+        // call returns. The slot is `Some` everywhere else; calling any
+        // other helper that goes through `self.metadata_updater()` from
+        // inside `maybe_update` would panic — but Java's inner class
+        // never recurses back through `metadataUpdater.*` either, so the
+        // panic is a sound programmer-error backstop.
+        let metadata_timeout = {
+            let mut updater = self.metadata_updater.take().expect("metadata_updater present at top of poll");
+            let timeout = updater.maybe_update(self, now);
+            self.metadata_updater = Some(updater);
+            timeout
+        };
         let effective_timeout = timeout_ms.min(metadata_timeout).min(self.default_request_timeout_ms as i64);
 
         if let Err(e) = self.selector.poll(effective_timeout).await {
@@ -1038,7 +1110,7 @@ where
     }
 
     fn least_loaded_node(&mut self, now: i64) -> LeastLoadedNode {
-        let nodes = self.metadata_updater.fetch_nodes();
+        let nodes = self.metadata_updater().fetch_nodes();
         if nodes.is_empty() {
             // Java throws IllegalStateException; mirror with a panic
             // (programmer-error invariant — caller must populate nodes).
@@ -1180,10 +1252,146 @@ where
         let _ = self.state.compare_and_swap(State::Active, State::Closing);
         if self.state.compare_and_swap(State::Closing, State::Closed) {
             self.selector.close();
-            self.metadata_updater.close();
+            self.metadata_updater_mut().close();
         } else {
             warn!("Attempting to close NetworkClient that has already been closed.");
         }
+    }
+}
+
+// ---------------------------------------------------------------------
+// MetadataUpdaterContext impl — surfaces NetworkClient's private helpers
+// to DefaultMetadataUpdater::maybe_update via &mut dyn dispatch.
+// ---------------------------------------------------------------------
+impl<S, M> crate::metadata_updater::MetadataUpdaterContext for NetworkClient<S, M>
+where
+    S: Selectable,
+    M: MetadataUpdater,
+{
+    fn least_loaded_node(&mut self, now: i64, nodes: &[Node]) -> LeastLoadedNode {
+        // The public [`KafkaClient::least_loaded_node`] reads nodes from
+        // `self.metadata_updater().fetch_nodes()`. Inside the context
+        // dispatch we're called with the updater already taken out of
+        // `self`, so we re-implement the algorithm against the supplied
+        // `nodes` slice. The body is a verbatim translation of the
+        // `KafkaClient::least_loaded_node` implementation above — kept
+        // here as a dedicated path so the bare-trait method does not
+        // need to learn about Phase 8 callback semantics.
+        if nodes.is_empty() {
+            // Java throws IllegalStateException; mirror with a panic
+            // (programmer-error invariant — caller must populate nodes).
+            // Phase 8.0 note: `DefaultMetadataUpdater` guarantees its
+            // own non-empty nodes list before invoking this callback
+            // (it falls through to `reconnect_backoff_ms` when
+            // `fetch_nodes()` is empty), so the panic is unreachable in
+            // normal operation.
+            panic!("There are no nodes in the Kafka cluster");
+        }
+        let mut inflight = i32::MAX;
+        let mut found_connecting: Option<&Node> = None;
+        let mut found_can_connect: Option<&Node> = None;
+        let mut found_ready: Option<&Node> = None;
+        let mut at_least_one_connection_ready = false;
+
+        let n = nodes.len();
+        let offset = if n > 0 { rand::rng().random_range(0..n) } else { 0 };
+        for i in 0..n {
+            let idx = (offset + i) % n;
+            let node = &nodes[idx];
+            let id = node.id();
+
+            if !at_least_one_connection_ready
+                && self.connection_states.is_ready(id, now)
+                && self.selector.is_channel_ready(id)
+            {
+                at_least_one_connection_ready = true;
+            }
+
+            if self.can_send_request(id, now) {
+                let curr_inflight = self.in_flight_requests.count_for(id);
+                if curr_inflight == 0 {
+                    return LeastLoadedNode::new(Some(node.clone()), true);
+                } else if curr_inflight < inflight {
+                    inflight = curr_inflight;
+                    found_ready = Some(node);
+                }
+            } else if self.connection_states.is_preparing_connection(id) {
+                found_connecting = Some(node);
+            } else if self.connection_states.can_connect(id, now)
+                && (found_can_connect.is_none()
+                    || self.connection_states.last_connect_attempt_ms(found_can_connect.unwrap().id())
+                        > self.connection_states.last_connect_attempt_ms(id))
+            {
+                found_can_connect = Some(node);
+            }
+        }
+
+        if let Some(node) = found_ready {
+            LeastLoadedNode::new(Some(node.clone()), at_least_one_connection_ready)
+        } else if let Some(node) = found_connecting {
+            LeastLoadedNode::new(Some(node.clone()), at_least_one_connection_ready)
+        } else if let Some(node) = found_can_connect {
+            LeastLoadedNode::new(Some(node.clone()), at_least_one_connection_ready)
+        } else {
+            LeastLoadedNode::new(None, at_least_one_connection_ready)
+        }
+    }
+
+    fn can_send_request(&self, node_id: i32, now: i64) -> bool {
+        NetworkClient::can_send_request(self, node_id, now)
+    }
+
+    fn can_connect(&self, node_id: i32, now: i64) -> bool {
+        self.connection_states.can_connect(node_id, now)
+    }
+
+    fn is_connecting(&self, node_id: i32) -> bool {
+        self.connection_states.is_connecting(node_id)
+    }
+
+    fn initiate_connect(&mut self, node: &Node, now: i64) {
+        NetworkClient::initiate_connect(self, node, now)
+    }
+
+    fn send_internal_metadata_request(
+        &mut self,
+        builder: crate::common::requests::MetadataRequestBuilder,
+        node_id_label: Arc<str>,
+        now: i64,
+    ) {
+        // Java: `void sendInternalMetadataRequest(MetadataRequest.Builder builder, String nodeConnectionId, long now)`
+        // — `newClientRequest(nodeConnectionId, builder, now, true)` then
+        // `doSend(clientRequest, true, now)`.
+        let arc_builder: Arc<dyn AbstractRequestBuilder> = Arc::new(builder);
+        let client_request = self.new_client_request_with_callback_internal(
+            node_id_label,
+            arc_builder,
+            now,
+            true,
+            self.default_request_timeout_ms,
+            None,
+        );
+        if let Err(e) = self.do_send(client_request, true, now) {
+            // Java's doSend for internal METADATA propagates failure via
+            // `metadataUpdater.handleFailedRequest`. We're inside the
+            // context dispatch (the updater is `None` right now), so we
+            // can't call `metadata_updater_mut().handle_failed_request`
+            // here. The do_send aborted_sends path already records the
+            // failure for the next poll; just log.
+            error!("Failed to send internal METADATA request: {}", e);
+        }
+    }
+
+    fn reconnect_backoff_ms(&self) -> i64 {
+        self.reconnect_backoff_ms
+    }
+
+    fn default_request_timeout_ms(&self) -> i32 {
+        self.default_request_timeout_ms
+    }
+
+    fn metadata_recovery_strategy(&self) -> MetadataRecoveryStrategy {
+        self.metadata_recovery_strategy
     }
 }
 
@@ -1934,8 +2142,8 @@ mod tests {
         fn is_update_due(&self, now: i64) -> bool {
             self.inner.is_update_due(now)
         }
-        fn maybe_update(&mut self, now: i64) -> i64 {
-            self.inner.maybe_update(now)
+        fn maybe_update(&mut self, context: &mut dyn crate::metadata_updater::MetadataUpdaterContext, now: i64) -> i64 {
+            self.inner.maybe_update(context, now)
         }
         fn handle_server_disconnect(&mut self, now: i64, node_id: i32, maybe_auth_error: Option<KafkaError>) {
             self.inner.handle_server_disconnect(now, node_id, maybe_auth_error);

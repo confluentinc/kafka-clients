@@ -32,6 +32,7 @@ pub mod common;
 pub mod common_client_configs;
 pub mod connection_state;
 pub mod default_host_resolver;
+pub(crate) mod default_metadata_updater;
 pub mod host_resolver;
 pub mod in_flight_requests;
 pub mod kafka_client;

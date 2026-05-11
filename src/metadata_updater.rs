@@ -17,9 +17,74 @@
 //! Note: the Java type lives in `org.apache.kafka.clients` (not `common`),
 //! so it sits at the crate root rather than under `common::`.
 
+use std::sync::Arc;
+
+use crate::LeastLoadedNode;
 use crate::common::Node;
 use crate::common::errors::KafkaError;
-use crate::common::requests::{MetadataResponse, RequestHeader};
+use crate::common::requests::{MetadataRequestBuilder, MetadataResponse, RequestHeader};
+use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
+
+/// Callback surface that [`MetadataUpdater::maybe_update`] uses to reach
+/// back into the enclosing `NetworkClient`. Java's `DefaultMetadataUpdater`
+/// is a (package-private) inner class on `NetworkClient` and reads /
+/// mutates the enclosing instance's state directly. The Rust translation
+/// can't model inner-class access; instead the `NetworkClient` implements
+/// this trait for itself and passes `&mut self` (typed as
+/// `&mut dyn MetadataUpdaterContext`) to the updater at call time.
+///
+/// **Java's contract**: the context methods correspond to Java's
+/// `NetworkClient` instance methods invoked by
+/// `DefaultMetadataUpdater.maybeUpdate(long, Node)`:
+///
+/// | Rust method                         | Java equivalent on `NetworkClient` |
+/// |-------------------------------------|------------------------------------|
+/// | [`Self::least_loaded_node`]         | `leastLoadedNode(long)` (but takes nodes via param to avoid the `metadataUpdater.fetchNodes()` recursion that Java permits) |
+/// | [`Self::can_send_request`]          | `canSendRequest(String, long)` |
+/// | [`Self::can_connect`]               | `connectionStates.canConnect(String, long)` |
+/// | [`Self::is_connecting`]             | `connectionStates.isConnecting(String)` |
+/// | [`Self::initiate_connect`]          | `initiateConnect(Node, long)` |
+/// | [`Self::send_internal_metadata_request`] | `sendInternalMetadataRequest(MetadataRequest.Builder, String, long)` |
+/// | [`Self::reconnect_backoff_ms`]      | `reconnectBackoffMs` (field) |
+/// | [`Self::default_request_timeout_ms`]| `defaultRequestTimeoutMs` (field) |
+/// | [`Self::metadata_recovery_strategy`]| `metadataRecoveryStrategy` (field) |
+pub trait MetadataUpdaterContext {
+    /// Mirrors Java's `NetworkClient.leastLoadedNode(long)`, but the
+    /// Java method internally calls `metadataUpdater.fetchNodes()` which
+    /// would recurse through the trait dispatch — pass the nodes
+    /// explicitly so the caller (the updater) controls the source of
+    /// truth.
+    fn least_loaded_node(&mut self, now: i64, nodes: &[Node]) -> LeastLoadedNode;
+
+    /// Mirrors `canSendRequest(String, long)`.
+    fn can_send_request(&self, node_id: i32, now: i64) -> bool;
+
+    /// Mirrors `connectionStates.canConnect(String, long)`.
+    fn can_connect(&self, node_id: i32, now: i64) -> bool;
+
+    /// Mirrors `connectionStates.isConnecting(String)`.
+    fn is_connecting(&self, node_id: i32) -> bool;
+
+    /// Mirrors `initiateConnect(Node, long)`.
+    fn initiate_connect(&mut self, node: &Node, now: i64);
+
+    /// Mirrors `sendInternalMetadataRequest(MetadataRequest.Builder, String, long)`.
+    /// The `node_id_label` parameter is the `Arc<str>` form of
+    /// `node.id_string()` — sharing it avoids per-call allocation
+    /// (CLAUDE.md rule 11).
+    fn send_internal_metadata_request(&mut self, builder: MetadataRequestBuilder, node_id_label: Arc<str>, now: i64);
+
+    /// Read the enclosing `NetworkClient.reconnectBackoffMs`. Used as
+    /// the timeout when no node is connection-ready.
+    fn reconnect_backoff_ms(&self) -> i64;
+
+    /// Read the enclosing `NetworkClient.defaultRequestTimeoutMs`. Used
+    /// to derive `waitForMetadataFetch` when a fetch is in progress.
+    fn default_request_timeout_ms(&self) -> i32;
+
+    /// Read the enclosing `NetworkClient.metadataRecoveryStrategy`.
+    fn metadata_recovery_strategy(&self) -> MetadataRecoveryStrategy;
+}
 
 /// The interface used by `NetworkClient` to request cluster metadata
 /// info to be updated and to retrieve the cluster nodes from such
@@ -43,8 +108,11 @@ pub trait MetadataUpdater: std::marker::Send {
     /// the time until the metadata update (which would be 0 if an update
     /// has been started as a result of this call).
     ///
-    /// Mirrors `MetadataUpdater.maybeUpdate(long)`.
-    fn maybe_update(&mut self, now: i64) -> i64;
+    /// Mirrors `MetadataUpdater.maybeUpdate(long)`. The `context`
+    /// parameter is the Rust-translation hook that gives the updater
+    /// access to the enclosing `NetworkClient`'s private helpers; see
+    /// [`MetadataUpdaterContext`].
+    fn maybe_update(&mut self, context: &mut dyn MetadataUpdaterContext, now: i64) -> i64;
 
     /// Handle a server disconnect. Mirrors
     /// `MetadataUpdater.handleServerDisconnect(long, String, Optional<AuthenticationException>)`.

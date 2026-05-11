@@ -21,6 +21,7 @@ use crate::MetadataUpdater;
 use crate::common::Node;
 use crate::common::errors::KafkaError;
 use crate::common::requests::{MetadataResponse, RequestHeader};
+use crate::metadata_updater::MetadataUpdaterContext;
 
 /// A simple implementation of `MetadataUpdater` that returns the cluster
 /// nodes set via the constructor or via `set_nodes`.
@@ -67,7 +68,7 @@ impl MetadataUpdater for ManualMetadataUpdater {
         false
     }
 
-    fn maybe_update(&mut self, _now: i64) -> i64 {
+    fn maybe_update(&mut self, _context: &mut dyn MetadataUpdaterContext, _now: i64) -> i64 {
         i64::MAX
     }
 
@@ -101,13 +102,57 @@ mod tests {
     //! does not slip through.
 
     use super::*;
+    use crate::LeastLoadedNode;
+    use crate::common::requests::MetadataRequestBuilder;
+    use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
+    use std::sync::Arc;
+
+    /// No-op [`MetadataUpdaterContext`] for tests of impls that do not
+    /// touch the context — i.e. [`ManualMetadataUpdater`] which returns
+    /// `i64::MAX` from `maybe_update`.
+    struct NoopContext;
+    impl MetadataUpdaterContext for NoopContext {
+        fn least_loaded_node(&mut self, _now: i64, _nodes: &[Node]) -> LeastLoadedNode {
+            LeastLoadedNode::new(None, false)
+        }
+        fn can_send_request(&self, _node_id: i32, _now: i64) -> bool {
+            false
+        }
+        fn can_connect(&self, _node_id: i32, _now: i64) -> bool {
+            false
+        }
+        fn is_connecting(&self, _node_id: i32) -> bool {
+            false
+        }
+        fn initiate_connect(&mut self, _node: &Node, _now: i64) {}
+        fn send_internal_metadata_request(
+            &mut self,
+            _builder: MetadataRequestBuilder,
+            _node_id_label: Arc<str>,
+            _now: i64,
+        ) {
+        }
+        fn reconnect_backoff_ms(&self) -> i64 {
+            50
+        }
+        fn default_request_timeout_ms(&self) -> i32 {
+            30_000
+        }
+        fn metadata_recovery_strategy(&self) -> MetadataRecoveryStrategy {
+            MetadataRecoveryStrategy::None
+        }
+    }
 
     #[test]
     fn default_has_no_nodes() {
         let updater = ManualMetadataUpdater::new();
         assert!(updater.fetch_nodes().is_empty());
         assert!(!updater.is_update_due(0));
-        assert_eq!(MetadataUpdater::maybe_update(&mut ManualMetadataUpdater::new(), 0), i64::MAX);
+        let mut ctx = NoopContext;
+        assert_eq!(
+            MetadataUpdater::maybe_update(&mut ManualMetadataUpdater::new(), &mut ctx, 0),
+            i64::MAX
+        );
     }
 
     #[test]
