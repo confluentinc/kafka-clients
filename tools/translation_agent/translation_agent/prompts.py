@@ -183,6 +183,125 @@ Body shape (~400 words max, reviewers shouldn't have to scroll):
 """
 
 
+# Shared instruction block embedded in every ASK_* prompt: claude must
+# write its answer to ./ask_answer.md AND the file's first lines must be
+# the user's command quoted as a markdown blockquote (one `> ` prefix
+# per line of the original). The orchestrator relays the file as-is into
+# a PR comment, so this is the ONLY guarantee the question shows up
+# verbatim in the review thread.
+_ASK_ANSWER_FILE_INSTRUCTION = """\
+Write your answer to ./ask_answer.md. The FIRST lines of the file MUST
+be the reviewer's command below quoted as a markdown blockquote -- prefix
+EACH line of the original command with `> ` (a greater-than sign and a
+space), preserving line breaks. Then a blank line, then your answer.
+
+Reviewer's command (verbatim, between the BEGIN/END markers):
+--- BEGIN REVIEWER COMMAND ---
+{user_command}
+--- END REVIEWER COMMAND ---
+"""
+
+
+ASK_QUESTION_ONLY_PROMPT_TEMPLATE = """\
+You are answering a reviewer's question about an in-flight translation
+PR. The PR has been dependency-evaluated but no plan has been written
+yet, so this invocation is QUESTION-ONLY: you must not edit any file
+other than ./ask_answer.md, and you must not create any commits. The
+orchestrator will discard any commits you make.
+
+Context:
+- AK commit:       {ak_commit}
+- AK branch:       {ak_branch}
+- PR number:       #{pr_number}
+- Rust branch:     {branch_name}
+- Rust repo root:  current working directory
+
+""" + _ASK_ANSWER_FILE_INSTRUCTION + """\
+
+IMPORTANT:
+- Do NOT enter plan mode. Use the Write tool directly to create
+  ./ask_answer.md, then exit.
+- Do NOT run `git commit`, `git push`, or `gh pr edit` -- the sandbox
+  denies the latter two and the orchestrator will discard any commits.
+- Exit 0 once ./ask_answer.md exists and starts with the quoted command.
+"""
+
+
+ASK_PLAN_FIXUP_PROMPT_TEMPLATE = """\
+You are responding to a reviewer's request about an in-flight
+translation PR whose translation plan has already been written. You
+may either (a) just answer in ./ask_answer.md, or (b) answer AND
+adjust the plan with one or more git fixup commits.
+
+Context:
+- AK commit:       {ak_commit}
+- AK branch:       {ak_branch}
+- PR number:       #{pr_number}
+- Rust branch:     {branch_name}
+- Plan file:       {plan_path}
+- Rust repo root:  current working directory
+
+""" + _ASK_ANSWER_FILE_INSTRUCTION + """\
+
+If the reviewer is asking for plan changes:
+1. Edit {plan_path} to apply them.
+2. Find the SHA of the commit that introduced the plan:
+   `git log -1 --format=%H -- {plan_path}` -- that is the fixup target.
+3. Create a fixup commit:
+   `git add {plan_path} && git commit --fixup=<that-sha>` and ensure
+   the commit message body starts with the same `> `-quoted reviewer
+   command you put at the top of ./ask_answer.md (use `git commit
+   --fixup=<sha> -m "fixup! <subject>" -m "<quoted command>"` or open
+   the editor; either works).
+4. You may make multiple fixup commits if the change spans logically
+   distinct parts of the plan.
+
+IMPORTANT:
+- Do NOT enter plan mode. Edit and commit directly.
+- Do NOT run `git push` or `gh pr edit` -- they are denied in this
+  sandbox; the orchestrator pushes after you exit.
+- Exit 0 once ./ask_answer.md exists and (if you made any) the fixup
+  commits are on the branch tip.
+"""
+
+
+ASK_IMPL_OR_PLAN_FIXUP_PROMPT_TEMPLATE = """\
+You are responding to a reviewer's request about a translation PR whose
+implementation has already landed locally on this branch. You may
+either (a) just answer in ./ask_answer.md, or (b) answer AND adjust
+the plan or the implementation (or both) with git fixup commits.
+
+Context:
+- AK commit:       {ak_commit}
+- AK branch:       {ak_branch}
+- PR number:       #{pr_number}
+- Rust branch:     {branch_name}
+- Plan file:       {plan_path}
+- Rust repo root:  current working directory
+
+""" + _ASK_ANSWER_FILE_INSTRUCTION + """\
+
+If the reviewer is asking for code or plan changes:
+1. Make the edits.
+2. For each change, identify the commit it logically belongs to via
+   `git log` (look for the commit that introduced the file or the
+   relevant block). That commit's SHA is the fixup target.
+3. Create one fixup commit per logical change:
+   `git add <files> && git commit --fixup=<that-sha>` and ensure each
+   commit message body starts with the same `> `-quoted reviewer
+   command you put at the top of ./ask_answer.md.
+4. If the change touches Rust source, run `make verify` to confirm
+   it still builds and tests pass before committing.
+
+IMPORTANT:
+- Do NOT enter plan mode. Edit, build/test, and commit directly.
+- Do NOT run `git push` or `gh pr edit` -- they are denied in this
+  sandbox; the orchestrator pushes after you exit.
+- Exit 0 once ./ask_answer.md exists and (if you made any) the fixup
+  commits are on the branch tip.
+"""
+
+
 DRY_RUN_NOTE = """\
 NOTE: This is a dry run. The worktree and your commits will be
 preserved on disk for inspection but the orchestrator will skip the

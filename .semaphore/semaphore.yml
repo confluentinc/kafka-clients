@@ -104,3 +104,14 @@ blocks:
 promotions:
   - name: Approve plan and implement
     pipeline_file: plan-approve.yml
+  - name: Ask agent
+    pipeline_file: ask.yml
+    parameters:
+      env_vars:
+        - name: USER_COMMAND
+          required: true
+          description: "Free-text instruction passed verbatim to a sandboxed
+            claude. The agent's answer is posted as a PR comment with this
+            text quoted. At status 1 the agent answers only; at 2/3/4 the
+            agent may also produce git fixup commits which the orchestrator
+            pushes."

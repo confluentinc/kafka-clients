@@ -373,6 +373,18 @@ def push_new_branch(
     )
 
 
+def reset_hard(repo_path: str, target_ref: str) -> None:
+    """`git -C <repo_path> reset --hard <target_ref>`.
+
+    Used by `--ask` at status `dependencies_evaluated` to discard any
+    commits the sandboxed agent produced when only an answer (no code
+    change) was requested. The worktree itself is destroyed on context
+    exit; this just ensures the local branch ref doesn't carry the
+    discarded commits forward.
+    """
+    _run_git(repo_path, ["reset", "--hard", target_ref])
+
+
 def push_branch(
     repo_path: str,
     branch_name: str,

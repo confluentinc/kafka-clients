@@ -149,6 +149,19 @@ def _build_parser() -> argparse.ArgumentParser:
             "Semaphore CI manual-promotion jobs."
         ),
     )
+    parser.add_argument(
+        "--ask", metavar="TEXT", default=None,
+        help=(
+            "With --pr <N>: run the 'Ask agent' side-channel. The text is "
+            "passed verbatim to a sandboxed claude. At status 1 "
+            "(dependencies_evaluated) the agent answers only (any commits "
+            "it makes are discarded). At status 2/3 (plan_created / "
+            "plan_approved) the agent may also amend the plan with fixup "
+            "commits. At status 4 (implementation_done) the agent may also "
+            "amend the implementation. The PR's status is never advanced. "
+            "Used by Semaphore CI manual-promotion jobs."
+        ),
+    )
 
     # Sweep-mode args.
     parser.add_argument("--ak-repo-path", help="Path to a local clone of the AK repo.")
@@ -390,12 +403,18 @@ def _run_pr_mode(args: argparse.Namespace) -> int:
         #   every PR build): missing rows are the NORMAL case for any
         #   PR that isn't a translation PR managed by the orchestrator.
         #   Return 0 so we don't fail CI for unrelated PRs.
-        # - `--pr <N> --plan-approve` (manual promotion): approving a
-        #   plan for a non-existent PR is a real operator error;
+        # - `--pr <N> --plan-approve` or `--ask` (manual promotions):
+        #   acting on a non-existent PR is a real operator error;
         #   surface it loudly with rc=1.
         if args.plan_approve:
             log.error(
                 "No pr_commit row for PR %d -- cannot --plan-approve a PR "
+                "the orchestrator doesn't know about", args.pr,
+            )
+            return 1
+        if args.ask is not None:
+            log.error(
+                "No pr_commit row for PR %d -- cannot --ask about a PR "
                 "the orchestrator doesn't know about", args.pr,
             )
             return 1
@@ -404,6 +423,9 @@ def _run_pr_mode(args: argparse.Namespace) -> int:
             "by the orchestrator, skipping", args.pr,
         )
         return 0
+
+    if args.ask is not None:
+        return _run_pr_ask(args, pr)
 
     if args.plan_approve:
         return _run_pr_plan_approve(args, pr)
@@ -537,6 +559,255 @@ def _run_pr_plan_approve(args, pr) -> int:
     if err is not None:
         return 1
     return 0
+
+
+def _ask_prompt_for_status(status: int) -> Optional[str]:
+    """Pick the right ASK_* template for `status`, or None if `status`
+    is one of the no-go states (0 = no plan exists yet to discuss,
+    anything outside the documented enum). Status 3 maps to the same
+    plan-fixup template as status 2 by design decision.
+    """
+    if status == db.STATUS_DEPENDENCIES_EVALUATED:
+        return prompts.ASK_QUESTION_ONLY_PROMPT_TEMPLATE
+    if status in (db.STATUS_PLAN_CREATED, db.STATUS_PLAN_APPROVED):
+        return prompts.ASK_PLAN_FIXUP_PROMPT_TEMPLATE
+    if status == db.STATUS_IMPLEMENTATION_DONE:
+        return prompts.ASK_IMPL_OR_PLAN_FIXUP_PROMPT_TEMPLATE
+    return None
+
+
+def _run_pr_ask(args: argparse.Namespace, pr) -> int:
+    """Handle `--pr N --ask <text>`. Side-channel that lets a reviewer
+    feed a free-text instruction to a sandboxed claude. Behavior is
+    status-aware: question-only at status 1, plan-fixup at status 2/3,
+    plan-or-impl-fixup at status 4. The PR's status is NEVER advanced
+    by this function -- ask is read-only with respect to the state
+    machine.
+
+    The agent runs inside a per-PR worktree (same isolation as
+    `_run_plan_one` / `_run_impl_one`); afterwards the orchestrator:
+      * publishes ./ask_answer.md as a new PR comment via
+        `gh pr comment`, AND
+      * either pushes any new commits the agent made (statuses 2/3/4),
+      * or hard-resets the local branch to its pre-run HEAD if the
+        agent made commits while at status 1 (question-only mode).
+
+    The worktree itself is destroyed on context exit either way.
+    """
+    pr_number = pr["pr_number"]
+    status = pr["status"]
+    user_command = args.ask
+
+    template = _ask_prompt_for_status(status)
+    if template is None:
+        log.error(
+            "PR #%d at status %d (%s): --ask is not supported in this "
+            "state. Ask is available at status 1 (dependencies_evaluated), "
+            "2 (plan_created), 3 (plan_approved), and 4 "
+            "(implementation_done).",
+            pr_number, status, db.STATUS_NAMES.get(status, "?"),
+        )
+        return 1
+
+    if not user_command.strip():
+        log.error(
+            "PR #%d: --ask requires a non-empty command (got %r)",
+            pr_number, user_command,
+        )
+        return 1
+
+    branch_name = github.branch_name_for_ak(pr["ak_commit"])
+    plan_path = f"./design/history/{pr_number}_description/plan.md"
+    prompt = template.format(
+        user_command=user_command,
+        ak_commit=pr["ak_commit"],
+        ak_branch=pr["ak_branch"] or "(unknown)",
+        pr_number=pr_number,
+        branch_name=branch_name,
+        plan_path=plan_path,
+    )
+    if args.dry_run:
+        prompt = prompt + "\n" + prompts.DRY_RUN_NOTE
+
+    if args.dry_run and not _r2_available():
+        log.info(
+            "[dry-run] would --ask PR #%d (status %d) -- "
+            "r2 not on PATH, skipping",
+            pr_number, status,
+        )
+        return 0
+    if args.dry_run:
+        log.info(
+            "[dry-run] r2 is on PATH -- running --ask for PR #%d "
+            "(no push, worktree preserved)",
+            pr_number,
+        )
+
+    # Status 4 needs the full make-build env so the agent can `make
+    # verify` after editing Rust source. Status 1/2/3 only need the
+    # kafka submodule populated (cheap), not the Cargo+cmake+python
+    # build chain (slow). Match the plan-phase precedent: read-only /
+    # plan-only modes don't need a build.
+    needs_build = status == db.STATUS_IMPLEMENTATION_DONE
+
+    try:
+        with worktree.worktree_for_branch(
+            args.rust_repo_path, branch_name,
+            cleanup=not args.dry_run,
+            base_remote_branch=(
+                args.rust_branch if args.dry_run else None
+            ),
+            ak_commit=pr["ak_commit"],
+            ak_branch=pr["ak_branch"] or "trunk",
+            build=needs_build,
+        ) as wt:
+            try:
+                pre_head = git_ops.rev_parse(str(wt), "HEAD")
+            except git_ops.GitError as e:
+                return _ask_log_and_return(
+                    pr_number, f"failed to read pre-run HEAD: {e}",
+                )
+
+            try:
+                rc, _ = streaming.run_with_prefix(
+                    [*r2.R2_CLAUDE_CMD_PREFIX, "-p", prompt],
+                    pr_number=pr_number,
+                    cwd=str(wt),
+                )
+            except FileNotFoundError as e:
+                return _ask_log_and_return(
+                    pr_number, f"r2 not on PATH: {e}",
+                )
+            except Exception as e:
+                return _ask_log_and_return(
+                    pr_number, f"r2 ask invocation crashed: {e}",
+                )
+            if rc != 0:
+                return _ask_log_and_return(
+                    pr_number, f"r2 ask failed (rc={rc})",
+                )
+
+            try:
+                post_head = git_ops.rev_parse(str(wt), "HEAD")
+            except git_ops.GitError as e:
+                return _ask_log_and_return(
+                    pr_number, f"failed to read post-run HEAD: {e}",
+                )
+
+            answer_path = wt / "ask_answer.md"
+            if not answer_path.exists():
+                return _ask_log_and_return(
+                    pr_number,
+                    "r2 ask did not produce ./ask_answer.md "
+                    "(the agent must always write an answer)",
+                )
+            try:
+                answer_size = answer_path.stat().st_size
+            except OSError as e:
+                return _ask_log_and_return(
+                    pr_number, f"failed to stat ./ask_answer.md: {e}",
+                )
+            if answer_size == 0:
+                return _ask_log_and_return(
+                    pr_number, "./ask_answer.md is empty",
+                )
+
+            # Comment first, push (or reset) second. The comment is the
+            # only artifact the reviewer sees in their PR feed; we want
+            # it to land even if a subsequent push would fail.
+            if not args.dry_run and pr_number >= 0:
+                try:
+                    github.add_pr_comment(
+                        args.rust_repo_path, pr_number, str(answer_path),
+                    )
+                    log.info(
+                        "PR #%d: posted --ask answer comment", pr_number,
+                    )
+                except github.GhError as e:
+                    log.warning(
+                        "PR #%d: failed to post --ask answer comment: %s",
+                        pr_number, e,
+                    )
+            elif args.dry_run:
+                log.info(
+                    "[dry-run] PR #%d: would post --ask answer "
+                    "(./ask_answer.md, %d bytes)",
+                    pr_number, answer_size,
+                )
+
+            if status == db.STATUS_DEPENDENCIES_EVALUATED:
+                if post_head != pre_head:
+                    log.warning(
+                        "PR #%d --ask: agent made commits at status 1 "
+                        "(question-only mode); discarding them by "
+                        "resetting %s to pre-run HEAD %s",
+                        pr_number, branch_name, pre_head[:12],
+                    )
+                    try:
+                        git_ops.reset_hard(str(wt), pre_head)
+                    except git_ops.GitError as e:
+                        log.warning(
+                            "PR #%d: reset to pre-run HEAD failed: %s "
+                            "(worktree will be destroyed on exit anyway)",
+                            pr_number, e,
+                        )
+                # No push at status 1 regardless.
+            elif post_head != pre_head:
+                if args.dry_run:
+                    log.info(
+                        "[dry-run] PR #%d: would push %s "
+                        "(pre=%s, post=%s)",
+                        pr_number, branch_name,
+                        pre_head[:12], post_head[:12],
+                    )
+                else:
+                    try:
+                        git_ops.push_branch(
+                            args.rust_repo_path, branch_name, force=True,
+                        )
+                        log.info(
+                            "PR #%d --ask: pushed %s "
+                            "(pre=%s, post=%s)",
+                            pr_number, branch_name,
+                            pre_head[:12], post_head[:12],
+                        )
+                    except git_ops.GitError as e:
+                        log.error(
+                            "PR #%d: failed to push %s after --ask: %s",
+                            pr_number, branch_name, e,
+                        )
+                        return 1
+            else:
+                log.info(
+                    "PR #%d --ask: no commits made by agent; "
+                    "comment posted, nothing to push",
+                    pr_number,
+                )
+
+            if args.dry_run:
+                log.info(
+                    "[dry-run] PR #%d --ask worktree preserved at %s",
+                    pr_number, wt,
+                )
+    except worktree.WorktreeError as e:
+        return _ask_log_and_return(
+            pr_number, f"worktree setup failed: {e}",
+        )
+    return 0
+
+
+def _ask_log_and_return(pr_number: int, err: str) -> int:
+    """Log `err` for `pr_number` and return rc=1.
+
+    Tiny helper so the many failure-paths in `_run_pr_ask` stay
+    one-liners. We do NOT call `db.set_last_error` here: --ask is a
+    read-only-w.r.t.-state-machine side channel, and clobbering the
+    `last_error` column of the row would falsely flag the PR as having
+    a cascade failure -- the next `--pr <N>` build's automatic
+    retry would then try to repeat the wrong work.
+    """
+    log.error("PR #%d --ask: %s", pr_number, err)
+    return 1
 
 
 def _dep_blocks_step(
@@ -1549,6 +1820,25 @@ def main(argv: Sequence[str] | None = None) -> int:
     # if write) + release. The end-of-run artifact push that used to
     # live here is no longer needed: each write is published as soon as
     # its session commits.
+
+    # --ask is meaningful only with --pr <N> (it operates on a single
+    # PR row), and is mutually exclusive with --plan-approve (one
+    # advances the state machine, the other is a side-channel that
+    # must not). Catching these here keeps the rejection visible at
+    # CLI dispatch time rather than 30 seconds later inside _run_pr_mode.
+    if args.ask is not None and args.pr is None:
+        log.error(
+            "--ask requires --pr <N>. The text command operates on "
+            "exactly one PR.",
+        )
+        return 2
+    if args.ask is not None and args.plan_approve:
+        log.error(
+            "--ask and --plan-approve are mutually exclusive. "
+            "--plan-approve advances the state machine (status 2 -> 3 -> 4); "
+            "--ask is a side-channel that never changes status.",
+        )
+        return 2
 
     # --allow-missing-artifact is meaningful only with --seed. Reject
     # the combination loudly elsewhere so an operator who sets it

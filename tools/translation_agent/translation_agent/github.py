@@ -240,6 +240,33 @@ def update_pr_body(repo_path: str, pr_number: int, body: str) -> None:
         )
 
 
+def add_pr_comment(repo_path: str, pr_number: int, body_file: str) -> None:
+    """Post a new comment on PR `pr_number` whose body is the contents
+    of `body_file`. Wraps `gh pr comment <N> --body-file <path>`.
+
+    The body is fed via `--body-file` (not `--body`) so long markdown
+    bodies can't hit OS argv length limits. Each call posts a NEW
+    comment -- there is no read-modify-write semantics here, unlike
+    `update_pr_body` / `prepend_pr_body`.
+
+    Used by `--ask` to publish the agent's answer (already prefixed
+    with the user's question quoted as a markdown blockquote inside
+    the file). Sandbox is denied this `gh` subcommand by absence
+    from the allow-list -- only the orchestrator publishes to GitHub.
+    """
+    proc = subprocess.run(
+        ["gh", "pr", "comment", str(pr_number), "--body-file", body_file],
+        capture_output=True,
+        text=True,
+        cwd=repo_path,
+    )
+    if proc.returncode != 0:
+        raise GhError(
+            f"gh pr comment failed (rc={proc.returncode}): "
+            f"{proc.stderr.strip()}"
+        )
+
+
 def add_pr_label(repo_path: str, pr_number: int, label: str) -> None:
     """Apply `label` to PR `pr_number` via `gh pr edit <N> --add-label`.
 
