@@ -269,44 +269,27 @@ impl<K, V, C: KafkaClient> KafkaProducer<K, V, C> {
 // `KafkaProducer` then constructs a `NetworkClient` via
 // `ClientUtils.createNetworkClient` — that path requires Java's
 // `DefaultMetadataUpdater` (the package-private inner class on
-// `NetworkClient`). The Rust translation does not yet have a
-// `DefaultMetadataUpdater` translation; the public constructors below
-// honour Java's signature shape but currently delegate to a
-// `KafkaError::UnsupportedOperation` until that translation lands.
+// `NetworkClient`). Phase 8.0 translates that inner class as a free
+// `pub(crate) struct` in [`crate::default_metadata_updater`]; the
+// constructors below build a production [`crate::NetworkClient`] over
+// [`crate::common::network::Selector`] +
+// [`crate::default_metadata_updater::DefaultMetadataUpdater`] and hand
+// off to the visible-for-testing [`KafkaProducer::new_for_test`].
 //
-// Tests (and Phase 7d/7e wiring) use the [`KafkaProducer::new_for_test`]
-// pkg-private constructor that takes a pre-built [`KafkaClient`].
+// The `KafkaError::UnsupportedOperation` stub that previously lived
+// here is gone — callers can now construct a producer against a real
+// broker. Connection failures surface at first `send()` / `poll()`,
+// not at construction time (matching Java's lazy-connect semantics).
 
-/// Phase 7c/7e marker error message returned by the public
-/// constructors until [`crate::NetworkClient`]'s
-/// `DefaultMetadataUpdater` is translated. Matches CLAUDE.md rule 5:
-/// a Java path that's not yet implemented surfaces an explicit
-/// `KafkaError`, not a silent stub or a hang.
-///
-/// **Phase 7e disposition**: `DefaultMetadataUpdater` is a >300-LOC
-/// inner class on Java's `NetworkClient` that drives the metadata
-/// negotiation request/response loop. Translating it requires
-/// `MetadataRequest`/`MetadataResponse` plumbing through the
-/// in-flight tracker, not just the data-types translation we already
-/// have. It is deferred to Phase 8 (integration testing milestone).
-///
-/// Until then:
-///
-/// * Unit tests use [`KafkaProducer::new_for_test`] which accepts a
-///   pre-built [`KafkaClient`] — typically a [`crate::NetworkClient`]
-///   with a [`crate::ManualMetadataUpdater`] (test-friendly) or a
-///   stub mock.
-/// * Integration tests against a real broker land in Phase 8 with the
-///   `DefaultMetadataUpdater` translation.
-const PRODUCTION_NETWORK_CLIENT_DEFERRED: &str = "KafkaProducer::new and ::with_serializers are deferred until \
-     NetworkClient's DefaultMetadataUpdater is translated (Phase 8). \
-     Use KafkaProducer::new_for_test (with a ManualMetadataUpdater or \
-     a test mock client) in unit tests until then.";
-
-impl<K, V> KafkaProducer<K, V, crate::NetworkClient<crate::common::network::Selector, crate::ManualMetadataUpdater>>
+impl<K, V>
+    KafkaProducer<
+        K,
+        V,
+        crate::NetworkClient<crate::common::network::Selector, crate::default_metadata_updater::DefaultMetadataUpdater>,
+    >
 where
-    K: 'static,
-    V: 'static,
+    K: Send + 'static,
+    V: Send + 'static,
 {
     /// A producer is instantiated by providing a set of key-value pairs
     /// as configuration. Mirrors `KafkaProducer(Map<String, Object>)` at
@@ -315,23 +298,30 @@ where
     /// Note: after creating a `KafkaProducer` you must always
     /// [`crate::producer::Producer::close`] it to avoid resource leaks.
     ///
-    /// # Milestone-1 deferral
+    /// Construction failures surface as [`KafkaError`] variants: a
+    /// missing required config key returns `KafkaError::Config`,
+    /// invalid `bootstrap.servers` returns `KafkaError::Config`, and so
+    /// on. Connection failures (broker unreachable, TLS handshake
+    /// failure) are deferred to the first `send()` / `poll()` cycle —
+    /// matching Java's lazy-connect semantics.
     ///
-    /// This constructor returns
-    /// [`KafkaError::UnsupportedOperation`] in Milestone-1 — the
-    /// production NetworkClient path requires `DefaultMetadataUpdater`,
-    /// a >300-LOC inner class on Java's `NetworkClient` that has not
-    /// yet been translated. The deferred-error message points callers
-    /// at the Phase 8 lift point and at [`KafkaProducer::new_for_test`]
-    /// for unit-test construction.
-    ///
-    /// Phase 7e otherwise wires every Producer trait method end-to-end
-    /// (see [`Self::new_for_test`] for the working surface). Once
-    /// Phase 8 lands the metadata updater, this stub is replaced with
-    /// the full `NetworkClient` construction — no further changes to
-    /// the public method signature.
-    pub fn new(_props: HashMap<String, String>) -> Result<Self, KafkaError> {
-        Err(KafkaError::UnsupportedOperation(PRODUCTION_NETWORK_CLIENT_DEFERRED.to_owned()))
+    /// Java's public constructor reads `key.serializer` /
+    /// `value.serializer` as class-FQCN strings and reflectively
+    /// instantiates them. Rust has no reflection; the
+    /// `key_serializer` / `value_serializer` parameters of
+    /// [`Self::with_serializers`] take pre-built instances. This
+    /// `new()` overload exists only when both `K` and `V` are wire-
+    /// agnostic byte vectors (`Vec<u8>`) — the historical default for
+    /// producers that delegate encoding entirely to the caller. Other
+    /// element types must use [`Self::with_serializers`].
+    pub fn new(props: HashMap<String, String>) -> Result<Self, KafkaError>
+    where
+        K: SupportsDefaultSerializer,
+        V: SupportsDefaultSerializer,
+    {
+        let key_serializer = K::default_serializer();
+        let value_serializer = V::default_serializer();
+        Self::with_serializers(props, key_serializer, value_serializer)
     }
 
     /// A producer is instantiated by providing a set of key-value pairs
@@ -339,17 +329,204 @@ where
     /// Mirrors `KafkaProducer(Map<String, Object>, Serializer<K>,
     /// Serializer<V>)` at `KafkaProducer.java:300`.
     ///
-    /// # Milestone-1 deferral
-    ///
-    /// Same deferral as [`Self::new`] — see that method's rustdoc for
-    /// the rationale and the Phase 8 lift point.
+    /// See [`Self::new`] for failure semantics.
     pub fn with_serializers(
-        _props: HashMap<String, String>,
-        _key_serializer: Box<dyn Serializer<K>>,
-        _value_serializer: Box<dyn Serializer<V>>,
+        props: HashMap<String, String>,
+        key_serializer: Box<dyn Serializer<K>>,
+        value_serializer: Box<dyn Serializer<V>>,
     ) -> Result<Self, KafkaError> {
-        Err(KafkaError::UnsupportedOperation(PRODUCTION_NETWORK_CLIENT_DEFERRED.to_owned()))
+        let config = ProducerConfig::new(props)?;
+        Self::from_config(config, key_serializer, value_serializer)
     }
+
+    /// `with_serializers` companion that takes a pre-validated
+    /// [`ProducerConfig`] instead of raw properties. Callers that
+    /// programmatically assemble a config (instead of parsing a
+    /// `HashMap`) use this entry point.
+    pub fn from_config(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K>>,
+        value_serializer: Box<dyn Serializer<V>>,
+    ) -> Result<Self, KafkaError> {
+        let time: Arc<dyn Time> = SystemTime::instance();
+
+        // Build the ProducerMetadata first — DefaultMetadataUpdater
+        // captures its inner Arc<Metadata> for the response loop, but
+        // the producer struct holds the outer Arc<ProducerMetadata> for
+        // partition / new-topic management.
+        let producer_metadata = build_producer_metadata(&config, time.clone())?;
+        let metadata_handle = producer_metadata.metadata();
+
+        // Construct the production NetworkClient. The metadata updater
+        // shares the same Arc<Metadata> handle as the producer
+        // metadata, so metadata updates received over the wire flow
+        // back to the producer side.
+        //
+        // Note on ApiVersions: Java's producer constructor passes the
+        // *same* `apiVersions` instance to both the producer field and
+        // the NetworkClient. Rust represents the producer field as
+        // `Arc<ApiVersions>` but the NetworkClient struct holds
+        // `ApiVersions` by value (Phase 5d translation choice — Java's
+        // synchronized methods are translated as `&self` methods over a
+        // built-in `Mutex`). Sharing the same instance across the two
+        // would require an extra `Arc` wrap on NetworkClient's field;
+        // since the producer side never reads `api_versions` after
+        // construction (Sender does not use it either, Phase 6e), the
+        // Rust translation gives each owner its own instance and
+        // accepts the divergence. If a future phase introduces a read
+        // path on the producer side, the producer-side instance is the
+        // one tests inspect; integration tests rely on the Sender
+        // dispatching through the NetworkClient's instance.
+        let client_id_str = config.get_string(producer_config::CLIENT_ID_CONFIG)?;
+        let client_id_arc: Arc<str> = Arc::from(client_id_str);
+        let network_client = build_production_network_client(&config, metadata_handle, client_id_arc, time.clone())?;
+
+        Self::new_for_test(
+            config,
+            key_serializer,
+            value_serializer,
+            Some(producer_metadata),
+            network_client,
+            None,
+            None, // let new_for_test construct the producer-side Arc<ApiVersions>
+            Some(time),
+        )
+    }
+}
+
+/// Marker trait for record element types that have a default
+/// (no-config) serializer. The public no-args [`KafkaProducer::new`]
+/// requires both `K: SupportsDefaultSerializer` and
+/// `V: SupportsDefaultSerializer`. The default impl is provided for
+/// `Vec<u8>` — Java's most-common producer shape.
+///
+/// Java accepts arbitrary FQCN strings via `key.serializer` /
+/// `value.serializer` config and reflectively instantiates them; Rust
+/// has no equivalent so callers with non-`Vec<u8>` types must use
+/// [`KafkaProducer::with_serializers`] and supply the serializer
+/// directly.
+pub trait SupportsDefaultSerializer: Sized {
+    /// Construct the default serializer for this type.
+    fn default_serializer() -> Box<dyn Serializer<Self>>;
+}
+
+impl SupportsDefaultSerializer for Vec<u8> {
+    fn default_serializer() -> Box<dyn Serializer<Self>> {
+        Box::new(crate::common::serialization::serdes::ByteArrayOwnedSerializer)
+    }
+}
+
+/// Build the [`ProducerMetadata`] used by the production constructors.
+///
+/// Mirrors the `metadata = new ProducerMetadata(...)` block at
+/// `KafkaProducer.java:440-452`, including the
+/// `bootstrap.servers`-driven address parse and `metadata.bootstrap`
+/// call.
+fn build_producer_metadata(config: &ProducerConfig, time: Arc<dyn Time>) -> Result<Arc<ProducerMetadata>, KafkaError> {
+    let log_context = LogContext::with_prefix(Some(&format!(
+        "[Producer clientId={}] ",
+        config.get_string(producer_config::CLIENT_ID_CONFIG)?
+    )));
+    let cluster_resource_listeners =
+        Arc::new(crate::common::internals::cluster_resource_listeners::ClusterResourceListeners::new());
+    let metadata = ProducerMetadata::new(
+        config.get_long(producer_config::RETRY_BACKOFF_MS_CONFIG)?,
+        config.get_long(producer_config::RETRY_BACKOFF_MAX_MS_CONFIG)?,
+        config.get_long(producer_config::METADATA_MAX_AGE_CONFIG)?,
+        config.get_long(producer_config::METADATA_MAX_IDLE_CONFIG)?,
+        log_context,
+        cluster_resource_listeners,
+        time,
+    )?;
+
+    // Java: `this.metadata.bootstrap(addresses)`. Parse bootstrap.servers
+    // using the configured DNS-lookup strategy.
+    let dns_lookup = crate::client_dns_lookup::ClientDnsLookup::for_config(
+        config.get_string(producer_config::CLIENT_DNS_LOOKUP_CONFIG)?,
+    )?;
+    let urls = config.get_list(producer_config::BOOTSTRAP_SERVERS_CONFIG)?;
+    let addresses = crate::client_utils::parse_and_validate_addresses(urls, dns_lookup)?;
+    let address_pairs: Vec<(String, u16)> = addresses
+        .iter()
+        .map(|addr| (addr.host_name().to_owned(), addr.port()))
+        .collect();
+    metadata.metadata().bootstrap(address_pairs);
+    Ok(metadata)
+}
+
+/// Build the production [`crate::NetworkClient`] wired to the supplied
+/// [`crate::metadata::Metadata`] handle via
+/// [`crate::default_metadata_updater::DefaultMetadataUpdater`]. Mirrors
+/// the body of `ClientUtils.createNetworkClient(...)` —
+/// `Selector` + `NetworkClient` construction in one step.
+fn build_production_network_client(
+    config: &ProducerConfig,
+    metadata: Arc<crate::metadata::Metadata>,
+    client_id: Arc<str>,
+    time: Arc<dyn Time>,
+) -> Result<
+    crate::NetworkClient<crate::common::network::Selector, crate::default_metadata_updater::DefaultMetadataUpdater>,
+    KafkaError,
+> {
+    use crate::common::network::Selector;
+    use crate::common::network::channel_builders;
+    use crate::common::security::auth::SecurityProtocol;
+    use crate::default_metadata_updater::DefaultMetadataUpdater;
+
+    // Java's `ClientUtils.createChannelBuilder(...)` reads
+    // `security.protocol` and returns a configured ChannelBuilder. The
+    // Rust translation surfaces this through
+    // [`channel_builders::client_channel_builder`].
+    let security_protocol_str = config.get_string(crate::common_client_configs::SECURITY_PROTOCOL_CONFIG)?;
+    let security_protocol = SecurityProtocol::for_name(security_protocol_str)
+        .ok_or_else(|| KafkaError::Config(format!("Invalid security.protocol: {security_protocol_str}")))?;
+    // Milestone-1 supports only PLAINTEXT through `new` / `with_serializers`.
+    // SSL/SASL config plumbing lands in Phase 8e / Phase 9 — the
+    // ChannelBuilders factory still constructs SslChannelBuilder for
+    // SSL, but the producer-side config-to-SslConfig translation
+    // isn't wired here yet (the network_client.rs SSL tests build the
+    // SslConfig directly). Until then surface SSL with an explicit
+    // `KafkaError::UnsupportedOperation` rather than a half-wired path.
+    if !matches!(security_protocol, SecurityProtocol::Plaintext) {
+        return Err(KafkaError::UnsupportedOperation(format!(
+            "KafkaProducer::new only supports security.protocol=PLAINTEXT in Milestone-1; \
+             got '{security_protocol_str}'. SSL/SASL lands in Phase 8e/9."
+        )));
+    }
+    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, None)
+        .map_err(|e| KafkaError::Config(format!("Failed to construct channel builder: {e}")))?;
+
+    let connections_max_idle_ms = config.get_long(producer_config::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
+    let selector = Selector::new(connections_max_idle_ms, time.clone(), channel_builder);
+
+    let updater = DefaultMetadataUpdater::new(metadata);
+
+    let host_resolver: Box<dyn crate::host_resolver::HostResolver> =
+        Box::new(crate::default_host_resolver::DefaultHostResolver);
+
+    let recovery_str = config.get_string(crate::common_client_configs::METADATA_RECOVERY_STRATEGY_CONFIG)?;
+    let metadata_recovery_strategy =
+        crate::metadata_recovery_strategy::MetadataRecoveryStrategy::from_name(recovery_str)?;
+
+    crate::NetworkClient::new(
+        selector,
+        updater,
+        client_id,
+        config.get_int(producer_config::MAX_IN_FLIGHT_REQUESTS_PER_CONNECTION)?,
+        config.get_long(crate::common_client_configs::RECONNECT_BACKOFF_MS_CONFIG)?,
+        config.get_long(crate::common_client_configs::RECONNECT_BACKOFF_MAX_MS_CONFIG)?,
+        config.get_int(producer_config::SEND_BUFFER_CONFIG)?,
+        config.get_int(producer_config::RECEIVE_BUFFER_CONFIG)?,
+        config.get_int(producer_config::REQUEST_TIMEOUT_MS_CONFIG)?,
+        config.get_long(producer_config::SOCKET_CONNECTION_SETUP_TIMEOUT_MS_CONFIG)?,
+        config.get_long(producer_config::SOCKET_CONNECTION_SETUP_TIMEOUT_MAX_MS_CONFIG)?,
+        time,
+        true, // Java's `discoverBrokerVersions` is hard-coded `true` for the producer constructor.
+        crate::ApiVersions::new(),
+        host_resolver,
+        config.get_long(crate::common_client_configs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG)?,
+        metadata_recovery_strategy,
+    )
 }
 
 // =====================================================================
@@ -2031,22 +2208,55 @@ mod tests {
         assert!(matches!(err, KafkaError::Config(_)), "expected Config error, got {err:?}");
     }
 
-    /// Public `new` and `with_serializers` are deferred — the
-    /// `DefaultMetadataUpdater` translation must land first. This test
-    /// pins the deferred error message so users get a clear pointer at
-    /// the (eventual) replacement constructor.
+    /// Phase 8.0: the public `new(props)` constructor wires a
+    /// production [`NetworkClient`] with [`DefaultMetadataUpdater`].
+    /// Construction must succeed for a minimal valid config — the
+    /// `Err(UnsupportedOperation)` stub from Phase 7e is gone. The
+    /// producer's `Drop` impl aborts the spawned Sender task on the
+    /// way out, so an in-runtime test that drops the producer is the
+    /// natural shape.
+    ///
+    /// Connection failures against `localhost:1` (an unreachable
+    /// bootstrap server) surface at the first `send()` or `poll()`
+    /// cycle, not at construction — matching Java's lazy-connect
+    /// semantics. This test only validates the construction path.
+    #[tokio::test]
+    async fn public_new_constructs_against_minimal_config() {
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(minimal_props())
+            .expect("Phase 8.0: KafkaProducer::new succeeds with a valid config");
+        // The producer holds the spawned Sender task; closing or
+        // dropping releases it.
+        drop(producer);
+    }
+
+    /// Phase 8.0: `KafkaProducer::with_serializers` mirrors `new` but
+    /// accepts caller-supplied serializer instances. Same construction
+    /// success contract.
+    #[tokio::test]
+    async fn public_with_serializers_constructs_against_minimal_config() {
+        let key_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let value_ser: Box<dyn Serializer<Vec<u8>>> = Box::new(ByteArrayOwnedSerializer);
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::with_serializers(minimal_props(), key_ser, value_ser)
+            .expect("Phase 8.0: with_serializers succeeds with a valid config");
+        drop(producer);
+    }
+
+    /// SSL/SASL plumbing is deferred to Phase 8e / Phase 9. The
+    /// Milestone-1 public constructor rejects non-PLAINTEXT
+    /// `security.protocol` with an explicit
+    /// `KafkaError::UnsupportedOperation` (not the old blanket
+    /// "DefaultMetadataUpdater not translated" message).
     #[test]
-    fn public_new_returns_unsupported_operation_in_milestone_1() {
-        // `unwrap_err` requires `T: Debug`; `KafkaProducer` is not
-        // `Debug` (it owns a `JoinHandle` and other non-Debug fields).
-        // Use a `let-else` instead.
-        let Err(err) = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(minimal_props()) else {
-            panic!("expected Err in Milestone-1");
+    fn public_new_rejects_ssl_security_protocol_in_milestone_1() {
+        let mut props = minimal_props();
+        props.insert("security.protocol".to_owned(), "SSL".to_owned());
+        let Err(err) = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props) else {
+            panic!("expected Err for SSL in Milestone-1");
         };
         assert!(matches!(err, KafkaError::UnsupportedOperation(_)));
         assert!(
-            err.message().contains("DefaultMetadataUpdater"),
-            "expected DefaultMetadataUpdater in error message, got: {}",
+            err.message().contains("PLAINTEXT") || err.message().contains("Phase 8e"),
+            "expected PLAINTEXT / Phase 8e in error, got: {}",
             err.message(),
         );
     }
