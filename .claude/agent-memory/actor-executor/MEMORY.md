@@ -64,3 +64,4 @@
 - [Phase 8.0 DefaultMetadataUpdater](phase8_0_default_metadata_updater.md) — Option<M> take/put-back + MetadataUpdaterContext callback trait + Metadata builder-factory injection
 - [Phase 8.0 KafkaProducer::new wiring](phase8_0_kafka_producer_new.md) — three-layer constructor (new -> with_serializers -> from_config); ApiVersions divergence + SSL deferral patterns
 - [Phase 8.0 Round 1 patterns](phase8_0_round1_patterns.md) — inner-class field-capture as struct field; trait-method-returns-Result for take/put-pattern callback holes; raw-pointer Drop guard for panic-safe take/put; ApiVersions-not-Clone caveat
+- [Phase 8a blocker + visibility](phase8a_blocker_and_visibility.md) — integration tests are downstream-crate not same-crate; ApiVersions wire blocker on first real-broker exchange; `pub` + `#[doc(hidden)]` cordon for Rust-visibility-forced types
