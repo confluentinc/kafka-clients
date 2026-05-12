@@ -67,3 +67,4 @@
 - [Phase 8a blocker + visibility](phase8a_blocker_and_visibility.md) — integration tests are downstream-crate not same-crate; ApiVersions wire blocker on first real-broker exchange; `pub` + `#[doc(hidden)]` cordon for Rust-visibility-forced types
 - [Phase 8a.0 first-broker wire debug](phase8a0_wire_debug.md) — wire bytes were correct; bug was Selector::poll missing OP_READ arm + has_send() check — and the debug recipe
 - [Phase 8a.0 Round 2 Notify wakeup](phase8a0_round2_notify_wakeup.md) — `tokio::sync::Notify` replaces no-op `sender_wakeup`; Selector owns the Notify, producer extracts handle pre-spawn
+- [Phase 7g two-phase send](phase7g_two_phase_send.md) — `Result<KafkaFuture<RecordMetadata>, _>` restores Java parity; `Arc<dyn KafkaFutureOps>` wrapper, one alloc/send
