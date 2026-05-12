@@ -32,17 +32,54 @@
 //! generics rather than dyn-dispatch — `fn run<P: Producer<K, V>>(p:
 //! P)` instead of `fn run(p: &dyn Producer<K, V>)`.
 //!
-//! # `send` semantics and the Java `Future` collapse
+//! # `send` semantics — Java parity (Phase 7g)
 //!
-//! Java's `Future<RecordMetadata> send(...)` enqueues the record and
-//! returns a `Future` that the caller can either ignore (fire and
-//! forget) or block on later. The Rust analogue collapses both into
-//! one `async fn` that resolves only after the broker acknowledges
-//! (or fails) the record. Callers wanting fire-and-forget can
-//! [`tokio::spawn`] the returned future themselves. This trade-off
-//! keeps the public trait method `async fn`-shaped (no
-//! `Pin<Box<dyn Future>>`) while still expressing the full
-//! enqueue → ack flow as a single awaitable.
+//! Java's `Future<RecordMetadata> send(...)` enqueues the record
+//! synchronously (serialization, partition pick, accumulator
+//! append) and returns a `Future<RecordMetadata>` that resolves
+//! later when the broker acks. Java callers either drop the
+//! `Future` (fire-and-forget), `Future#get()` it (blocking), or
+//! `Future#get(timeout, unit)` it (blocking with deadline).
+//!
+//! Phase 7g restores that exact two-phase shape in Rust:
+//!
+//! ```text
+//! async fn send(record) -> Result<KafkaFuture<RecordMetadata>, KafkaError>
+//!                          \____________________________________________/
+//!                          outer Result = sync-throw enqueue path
+//!                          (serialization failure, accumulator wait
+//!                          timeout, metadata fetch error)
+//!                                       inner KafkaFuture = broker ack
+//!                                       (caller decides: drop, await,
+//!                                       or push to a completion task)
+//! ```
+//!
+//! The outer `async fn -> Result<_, _>` is async because the
+//! enqueue can yield in `wait_on_metadata` and `accumulator.append`
+//! (Java blocks the calling thread; Rust yields). The outer
+//! `Result` is Java's `throws ApiException` / `throws
+//! KafkaException`. The inner [`KafkaFuture<RecordMetadata>`] is
+//! Java's `Future<RecordMetadata>`.
+//!
+//! ## History note
+//!
+//! Phase 7b's translation collapsed both phases into a single
+//! `async fn -> Result<RecordMetadata, _>` and suggested callers
+//! who wanted fire-and-forget could `tokio::spawn` the returned
+//! future. That guidance contradicted **CLAUDE.md rule 11** (per-
+//! message `tokio::spawn` on the send path is the explicit anti-
+//! pattern: "avoid — use a shared completion task with a channel
+//! instead") and also changed the Java public-API contract (rule
+//! 4). Phase 7g reverts the collapse.
+//!
+//! ## Allocation cost
+//!
+//! Each `send(...)` returns a `KafkaFuture<RecordMetadata>` whose
+//! inner is `Arc<dyn KafkaFutureOps<RecordMetadata>>`. One heap
+//! allocation per send — same as Java's per-`Future` JVM
+//! allocation. See
+//! [`crate::common::kafka_future`] for the allocation-audit
+//! rationale.
 //!
 //! # Milestone-1 stubs
 //!
@@ -82,6 +119,7 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use crate::common::KafkaFuture;
 use crate::common::errors::KafkaError;
 use crate::common::partition_info::PartitionInfo;
 use crate::common::uuid::Uuid;
@@ -152,21 +190,37 @@ pub trait Producer<K, V>: Send + Sync {
     /// See `KafkaProducer#abortTransaction()`.
     fn abort_transaction(&self) -> impl std::future::Future<Output = Result<(), KafkaError>> + Send;
 
-    /// Asynchronously send a record to a topic.
+    /// Asynchronously send a record to a topic. Mirrors Java's
+    /// `Future<RecordMetadata> send(ProducerRecord<K, V> record)`.
     ///
-    /// Java's `send()` returns immediately with a `Future`. The Rust
-    /// translation collapses the enqueue and the broker-acknowledgement
-    /// into one `async fn` (see module-level docs for the rationale):
-    /// awaiting this method awaits both. Callers wanting fire-and-
-    /// forget should `tokio::spawn` the returned future themselves.
+    /// Returns a [`Result`] whose outer arm is the synchronous-enqueue
+    /// result (serialization, partition pick, accumulator-wait,
+    /// metadata fetch) and whose inner [`KafkaFuture<RecordMetadata>`]
+    /// resolves when the broker has acked (or finally failed) the
+    /// record. Callers wanting:
+    ///
+    /// * **fire-and-forget**: drop the returned `KafkaFuture` —
+    ///   matches Java's pattern of throwing away the `Future`.
+    /// * **blocking await**: call `.get().await` on the returned
+    ///   `KafkaFuture` — matches Java's `Future#get()`.
+    /// * **bounded wait**: call `.get_timeout(duration).await` —
+    ///   matches Java's `Future#get(long, TimeUnit)`.
+    ///
+    /// Per CLAUDE.md rule 11, this shape avoids per-message
+    /// `tokio::spawn` on the send path: callers that want
+    /// concurrent in-flights drive multiple `KafkaFuture`s in a
+    /// `FuturesUnordered` or push them through a single shared
+    /// completion task.
     ///
     /// See `KafkaProducer#send(ProducerRecord)`.
     fn send(
         &self,
         record: ProducerRecord<K, V>,
-    ) -> impl std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send;
+    ) -> impl std::future::Future<Output = Result<KafkaFuture<RecordMetadata>, KafkaError>> + Send;
 
     /// Asynchronously send a record with a user-supplied callback.
+    /// Mirrors Java's
+    /// `Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback)`.
     ///
     /// The callback is invoked exactly once per record at the same
     /// lifecycle point as Java's `Callback.onCompletion` — after the
@@ -175,12 +229,16 @@ pub trait Producer<K, V>: Send + Sync {
     /// [`Callback`](crate::producer::Callback) for the success/failure
     /// contract.
     ///
+    /// Return-shape parity with [`Producer::send`]: outer [`Result`] is
+    /// the sync-throw equivalent, inner [`KafkaFuture<RecordMetadata>`]
+    /// is the broker-ack future.
+    ///
     /// See `KafkaProducer#send(ProducerRecord, Callback)`.
     fn send_with_callback(
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Box<dyn Callback>>,
-    ) -> impl std::future::Future<Output = Result<RecordMetadata, KafkaError>> + Send;
+    ) -> impl std::future::Future<Output = Result<KafkaFuture<RecordMetadata>, KafkaError>> + Send;
 
     /// Make all buffered records immediately available to send (even
     /// if `linger.ms` is greater than 0) and block until completion of
@@ -273,7 +331,10 @@ mod tests {
             Err(KafkaError::UnsupportedOperation(MS1_TXN_MSG.into()))
         }
 
-        async fn send(&self, _record: ProducerRecord<Vec<u8>, Vec<u8>>) -> Result<RecordMetadata, KafkaError> {
+        async fn send(
+            &self,
+            _record: ProducerRecord<Vec<u8>, Vec<u8>>,
+        ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
             Err(KafkaError::UnsupportedOperation("stub".into()))
         }
 
@@ -281,7 +342,7 @@ mod tests {
             &self,
             _record: ProducerRecord<Vec<u8>, Vec<u8>>,
             _callback: Option<Box<dyn Callback>>,
-        ) -> Result<RecordMetadata, KafkaError> {
+        ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
             Err(KafkaError::UnsupportedOperation("stub".into()))
         }
 

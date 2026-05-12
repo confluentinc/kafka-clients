@@ -78,9 +78,11 @@ use log::warn;
 use tokio::task::JoinHandle;
 
 use crate::KafkaClient;
+use crate::common::KafkaFuture;
 use crate::common::cluster::Cluster;
 use crate::common::compress::{Compression, NoCompression, SnappyCompression};
 use crate::common::errors::KafkaError;
+use crate::common::kafka_future::KafkaFutureOps;
 use crate::common::record::CompressionType;
 use crate::common::serialization::Serializer;
 use crate::common::topic_partition::TopicPartition;
@@ -1806,7 +1808,7 @@ where
         Err(KafkaError::UnsupportedOperation(PHASE_9_TXN_DEFERRED.to_owned()))
     }
 
-    async fn send(&self, record: ProducerRecord<K, V>) -> Result<RecordMetadata, KafkaError> {
+    async fn send(&self, record: ProducerRecord<K, V>) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         self.send_with_callback(record, None).await
     }
 
@@ -1814,18 +1816,25 @@ where
         &self,
         record: ProducerRecord<K, V>,
         callback: Option<Box<dyn Callback>>,
-    ) -> Result<RecordMetadata, KafkaError> {
+    ) -> Result<KafkaFuture<RecordMetadata>, KafkaError> {
         // Java line 950: interceptors.onSend(record). Java's `onSend`
         // does not throw — it catches and logs interceptor exceptions.
         let intercepted = self.interceptors.on_send(record);
         // Java line 951: doSend with the (possibly modified) record.
+        //
+        // Phase 7g restores Java parity: `do_send` returns the
+        // `Arc<FutureRecordMetadata>` synchronously after enqueue, and
+        // we wrap it in a `KafkaFuture` for the caller. The broker
+        // ack is awaited later when (and if) the caller calls
+        // `.get().await`/`.get_timeout(...)` on the returned future.
         let future = self.do_send(intercepted, callback).await?;
-        // Per the Phase 7b decision (`producer.rs` module docs), Rust
-        // collapses Java's `Future<RecordMetadata>` into one async fn:
-        // the broker ack is awaited inline. Callers that want the
-        // Java fire-and-forget shape should `tokio::spawn` the future
-        // returned by `Producer::send` themselves.
-        future.get().await
+        // One `Arc<dyn KafkaFutureOps<RecordMetadata>>` allocation per
+        // send — mirrors Java's per-`Future` JVM allocation. The
+        // backing `FutureRecordMetadata` is already inside the
+        // accumulator's `ProducerBatch`; we just hand the caller a
+        // shared handle to it.
+        let ops: Arc<dyn KafkaFutureOps<RecordMetadata>> = future;
+        Ok(KafkaFuture::new(ops))
     }
 
     async fn flush(&self) -> Result<(), KafkaError> {
@@ -2878,6 +2887,46 @@ mod tests {
             ),
             other => panic!("expected IllegalState, got {other:?}"),
         }
+    }
+
+    /// Phase 7g parity pin: `Producer::send(record).await?` returns a
+    /// `KafkaFuture<RecordMetadata>` that is **not yet** `is_done()` at
+    /// the moment of return. This is the load-bearing Java-parity
+    /// invariant: Java's `Future<RecordMetadata>` is returned
+    /// synchronously after `accumulator.append` returns, well before
+    /// the broker has acked the record. The Rust translation
+    /// (Phase 7g) restores that two-phase split that Phase 7b
+    /// collapsed.
+    ///
+    /// Test setup uses `StubKafkaClient` (no real broker, no Sender
+    /// tick) so the broker ack never fires — the test exercises
+    /// **only** the post-enqueue, pre-ack window. If `send` were
+    /// awaiting the broker ack inline (Phase 7b shape), this test
+    /// would hang.
+    #[tokio::test]
+    async fn send_returns_pending_kafka_future() {
+        let time: Arc<dyn Time> = Arc::new(MockTime::with_initial(0, 0, 0));
+        let producer = build_test_producer("topic", 1, time.clone(), None, None);
+
+        let record = ProducerRecord::<Vec<u8>, Vec<u8>>::with_partition(
+            "topic",
+            Some(0),
+            Some(b"k".to_vec()),
+            Some(b"v".to_vec()),
+        )
+        .expect("record");
+
+        // The outer Result is Ok (enqueue succeeded), the inner future
+        // is not yet done (broker has not acked — StubKafkaClient
+        // never acks).
+        let future = producer.send(record).await.expect("enqueue should succeed");
+        assert!(
+            !future.is_done(),
+            "Java parity: KafkaFuture returned by send() must not be done before broker ack",
+        );
+
+        // Force-close so the test doesn't leak the spawned Sender.
+        producer.close_with_timeout(Duration::ZERO).await.expect("force-close");
     }
 
     /// `partition()` rejects a user partitioner that returns a
@@ -5236,8 +5285,8 @@ mod tests {
             .expect("send task did not panic");
         assert!(
             send_result.is_err(),
-            "send must surface an error after close, got Ok({:?})",
-            send_result.as_ref().map(|m| m.offset()),
+            "send must surface an error after close, got Ok(KafkaFuture {{ is_done: {:?} }})",
+            send_result.as_ref().map(|f| f.is_done()),
         );
     }
 

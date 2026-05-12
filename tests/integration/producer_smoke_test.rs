@@ -276,7 +276,13 @@ async fn producer_smoke_plaintext_1000_records() {
         let value = format!("v{i:04}").into_bytes();
         handles.push(tokio::spawn(async move {
             let record = ProducerRecord::with_key(topic, Some(key), Some(value)).expect("ProducerRecord::with_key");
-            producer.send(record).await
+            // Phase 7g (Java parity): send() returns
+            // Result<KafkaFuture<RecordMetadata>, KafkaError>. The
+            // outer Result is the sync-throw enqueue; the inner
+            // KafkaFuture is the broker-ack future. Java's
+            // `producer.send(...).get()` corresponds to
+            // `send(...).await?.get().await`.
+            producer.send(record).await?.get().await
         }));
     }
 
@@ -378,7 +384,16 @@ async fn close_flushes_pending_inflight() {
     {
         let record = ProducerRecord::with_key(topic_arc.clone(), Some(b"warmup".to_vec()), Some(b"warmup".to_vec()))
             .expect("ProducerRecord::with_key");
-        producer.send(record).await.expect("warmup send failed");
+        // Phase 7g: await the broker ack via `send().await?.get().await` —
+        // the warmup is `Future#get()`-shaped, blocking until the broker
+        // resolves the metadata-cache-populating record.
+        producer
+            .send(record)
+            .await
+            .expect("warmup enqueue failed")
+            .get()
+            .await
+            .expect("warmup send failed");
     }
 
     // Build 50 send futures WITHOUT spawning. Each future is held by
@@ -396,7 +411,11 @@ async fn close_flushes_pending_inflight() {
             let value = format!("cv{i:02}").into_bytes();
             async move {
                 let record = ProducerRecord::with_key(topic, Some(key), Some(value)).expect("ProducerRecord::with_key");
-                producer.send(record).await
+                // Phase 7g: send().await returns
+                // Result<KafkaFuture<RecordMetadata>, KafkaError>. Chain
+                // .get().await to await the broker ack, mirroring Java's
+                // `producer.send(...).get()`.
+                producer.send(record).await?.get().await
             }
         })
         .collect();
