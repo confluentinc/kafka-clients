@@ -113,3 +113,39 @@ land here.
 - **Expected**: Delete the second-paragraph comment (lines 117-120), or rewrite to describe what's actually there.
 - **Actual**: Future reader thinks `NetworkClient` holds a separate Metadata handle.
 - **Disposition**: Fixed in commit `c050fe8` (`fixup! a9f854d`). Stale paragraph deleted.
+
+---
+
+# Visibility correction (Phase 8a.0) — Suggestion 2/3 archive update
+
+During Phase 8a's first attempt, Actor 8's commit `45b70a2` promoted
+`DefaultMetadataUpdater` (struct + module) and `SupportsDefaultSerializer`
+(trait) from `pub(crate)` to `pub` + `#[doc(hidden)]`.
+
+Rationale:
+- `KafkaProducer::with_serializers` returns
+  `KafkaProducer<K, V, NetworkClient<Selector, DefaultMetadataUpdater>>`.
+  Downstream crates (including `tests/integration/*`, which are
+  separate downstream crates, NOT same-crate code as Critic 8's
+  Phase 8.0 Round-2 archive for Suggestion 2 claimed) cannot hold
+  ANY binding of a value whose type names a `pub(crate)` item.
+- `#[doc(hidden)]` preserves the no-Java-API-growth intent: the types
+  stay off docs.rs and are not surfaced as part of the documented public
+  API.
+- The earlier "Suggestion 2 fixed in `c050fe8`" disposition and
+  "Suggestion 3 fixed in `c050fe8`" disposition still stand for the
+  `from_config` visibility and the FQCN-key warn-log behaviour. Only
+  the `pub(crate)` claim for `DefaultMetadataUpdater` /
+  `SupportsDefaultSerializer` was structurally wrong; this block
+  records the correction.
+
+Files corrected:
+- `src/lib.rs:35-49` — `default_metadata_updater` module
+  `pub(crate) → pub` + `#[doc(hidden)]`.
+- `src/default_metadata_updater.rs:77-91` — `DefaultMetadataUpdater`
+  struct `pub(crate) → pub` + `#[doc(hidden)]`.
+- `src/producer/kafka_producer.rs:449-463` — `SupportsDefaultSerializer`
+  trait `pub(crate) → pub` + `#[doc(hidden)]`.
+
+Disposition: Applied in commit `45b70a2`. Critic 8 will verify the
+correction in their next review.
