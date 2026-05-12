@@ -2121,6 +2121,100 @@ mod tests {
             .expect("wakeup permit should be observable through the cloned handle");
     }
 
+    /// Phase 8a.0 Round 2 Suggestion 3 regression: pin
+    /// **wake-on-Notify**. A Selector parked in `poll(5000)` with
+    /// nothing else going on should return early when another task
+    /// calls `wakeup_notify_handle().notify_one()` — proving the
+    /// Notify arm in the `select!` short-circuits the timeout sleep.
+    /// Without the wake arm, this test would block for the full
+    /// 5 s timeout. The 200 ms upper bound is generous (the actual
+    /// wake should fire in microseconds on a healthy executor).
+    #[tokio::test]
+    async fn poll_wakes_when_notify_one_is_called() {
+        let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
+        let wake_handle = selector.wakeup_notify_handle();
+
+        // Schedule the wake from a sibling task after a short delay
+        // (longer than 0 so the poll has actually parked, shorter
+        // than the 5 s `poll` timeout so we detect early-return).
+        let waker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            wake_handle.notify_one();
+        });
+
+        let started = std::time::Instant::now();
+        // 5 s timeout: in the no-wake regression world the only way
+        // out of `poll` would be the timeout sleep.
+        let poll_result = tokio::time::timeout(Duration::from_millis(2_000), selector.poll(5_000)).await;
+        let elapsed = started.elapsed();
+        waker.await.expect("waker task");
+        // The outer Duration::from_millis(2_000) timeout exists so
+        // a failing test fails fast rather than waiting the full
+        // 5 s `poll` timeout. We assert the inner poll completed.
+        let inner = poll_result.expect("poll did not return inside 2 s — wake arm regressed");
+        inner.expect("poll returned Ok");
+        assert!(
+            elapsed < Duration::from_millis(200),
+            "poll returned but took longer than expected: {elapsed:?} (wake arm should fire in <20 ms after notify_one)"
+        );
+        selector.close();
+    }
+
+    /// Phase 8a.0 Round 2 Suggestion 3 regression: pin
+    /// **wake-on-read**. Echo-server tests elsewhere use a tight
+    /// `wait_for` loop with `poll(10)` which masks any wake-arm
+    /// regression (the test passes because the 10 ms tight loop
+    /// catches up). This test parks the Selector in
+    /// `poll(5000)`, then has the EchoServer write bytes to the
+    /// socket; the Selector's `wait_any_transport_readable` arm
+    /// must observe socket readability and return promptly. Without
+    /// it the test would block for the full 5 s timeout.
+    #[tokio::test]
+    async fn poll_wakes_when_socket_becomes_readable() {
+        let server = EchoServer::start().await;
+        let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
+
+        // Drive the connect + handshake to READY via the tight-loop
+        // wait_for helper. After this, the channel is open and the
+        // EchoServer-side reader is blocking on `read` — no bytes
+        // are in flight either way yet.
+        blocking_connect(&mut selector, 0, server.addr).await;
+
+        // Now write a single send so the server replies. The
+        // initial `poll` issues the send (because `has_send()` is
+        // true, the sleep-arm guard at line 1037 short-circuits);
+        // after that the channel is quiet again until the broker
+        // (EchoServer) writes its echo back.
+        selector.send(make_send(0, b"hello"));
+        // Run a single tick to push the send to the wire.
+        selector.poll(0).await.expect("send tick");
+
+        // The send is now on the wire; the EchoServer task will
+        // read it and write back. Our `poll(5000)` must wake on
+        // socket-readable. The 1 s outer timeout exists so a
+        // regression fails fast instead of waiting the full 5 s.
+        let started = std::time::Instant::now();
+        let inner = tokio::time::timeout(Duration::from_millis(1_000), selector.poll(5_000))
+            .await
+            .expect("poll did not return inside 1 s — wake-on-read regressed");
+        inner.expect("poll returned Ok");
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed < Duration::from_millis(500),
+            "poll returned but took longer than expected: {elapsed:?} (wake-on-read should fire promptly)"
+        );
+        // Verify the echoed payload actually landed.
+        assert!(
+            selector
+                .completed_receives()
+                .iter()
+                .any(|r| r.source() == "0" && payload_string(r) == "hello"),
+            "expected echoed receive after wake-on-read"
+        );
+        selector.close();
+        server.shutdown().await;
+    }
+
     /// Sanity: `pending_connects_len` is exposed for tests only and
     /// reflects in-flight connect tasks (mirroring Java's
     /// `immediatelyConnectedKeys` field reflection in
