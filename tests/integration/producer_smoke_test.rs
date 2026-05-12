@@ -416,11 +416,16 @@ async fn close_flushes_pending_inflight() {
     // snapshot now includes every batch (because they're all in the
     // accumulator before either future blocks meaningfully — Tokio
     // polls each branch of `join!` at least once before suspending).
-    // Close-timeout sizing: must comfortably exceed any realistic broker
-    // ack window for 50 small records with acks=all on a single-broker
-    // Testcontainer. Earlier 30s value raced ack-latency on slower
-    // machines, producing force-close and `IllegalState` send results.
-    // 90s gives generous headroom while still acting as a watchdog.
+    // Close-timeout sizing: 5s is a tight watchdog. With Phase 8a.0
+    // Round 2 Suggestion 1's `tokio::sync::Notify`-backed
+    // `sender_wakeup` (commit `397dc09`), close drains in
+    // microseconds — milliseconds at worst — for 50 small records on
+    // localhost. Pre-Suggestion-1, this used to sit at 90s to
+    // accommodate the 30s `default.request.timeout.ms` backstop tick
+    // (the no-op `sender_wakeup` left close-drain bounded only by
+    // that cap). With the real wake mechanism, 5s is ~1000x the
+    // expected drain time and still catches any future
+    // missed-wake regression.
     //
     // Contract pinned: graceful close MUST flush all pending sends
     // before its deadline. We assert that by measuring elapsed wall-
@@ -431,7 +436,7 @@ async fn close_flushes_pending_inflight() {
     // force-close) is a test failure. Do NOT tolerate `IllegalState`
     // here — this test exists specifically to pin the graceful-flush
     // contract.
-    const CLOSE_TIMEOUT: Duration = Duration::from_secs(90);
+    const CLOSE_TIMEOUT: Duration = Duration::from_secs(5);
     let producer_for_close = producer.clone();
     let close_start = Instant::now();
     let (send_results, close_result) = tokio::join!(
