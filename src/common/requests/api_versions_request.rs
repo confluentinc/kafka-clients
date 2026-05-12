@@ -291,13 +291,20 @@ mod tests {
     /// Risk #1 ("wire-protocol byte-vector divergence from Java" — capture
     /// hex fixtures from Java, assert bytes literally).
     ///
-    /// Bytes were captured live during the
-    /// `producer_smoke_plaintext_1000_records` integration test, off an
-    /// Apache Kafka 4.2.0 broker (`apache/kafka:4.2.0` Testcontainer) that
-    /// successfully decoded the request and replied with a well-formed
-    /// `ApiVersionsResponse` containing all 75 api keys it supports. The
-    /// payload below is the exact `header + body` byte sequence the Rust
-    /// `NetworkClient` writes for an `ApiVersionsRequest` v4 with:
+    /// **Important fixture asymmetry**: these bytes are the request payload
+    /// the **Rust** `NetworkClient` emits for the documented inputs,
+    /// verified by an Apache Kafka 4.2.0 broker (`apache/kafka:4.2.0`
+    /// Testcontainer) accepting the request and replying with a
+    /// well-formed `ApiVersionsResponse` containing all 75 api keys it
+    /// supports. This is **wire-compatibility-by-broker-acceptance**, not
+    /// byte-for-byte parity with the Java `KafkaProducer`'s emission — a
+    /// weaker invariant than PLAN.md Risk #1's letter ("capture hex
+    /// fixtures from the Java client"). The sibling response fixture in
+    /// `api_versions_response.rs` IS Java/broker-emitted and pins the
+    /// stronger invariant on the response-parse path.
+    ///
+    /// The payload below is the exact `header + body` byte sequence the
+    /// Rust `NetworkClient` writes for an `ApiVersionsRequest` v4 with:
     /// `correlation_id = 0`, `client_id = "producer-smoke-test"` (header
     /// v2, length-prefixed), `client_software_name = "apache-kafka-java"`
     /// (compact-string), and `client_software_version = "0.1.0"`
