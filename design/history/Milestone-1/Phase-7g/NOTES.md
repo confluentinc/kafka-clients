@@ -73,22 +73,112 @@ across the rest of Milestone-1 and into Milestone-2.
 - The Phase 8a.0 wake-on-read / Notify wiring (load-bearing — leave alone).
 - The Phase 8.0 `DefaultMetadataUpdater` translation.
 
-## Reference materials
+## Reference materials (Java only — do **not** look at the `master` branch)
 
-- `master:src/producer/kafka_producer.rs:798` — target signature.
-- `master:src/common/kafka_future.rs` — `KafkaFuture<T>` wrapper.
-- `master:src/producer/internals/future_record_metadata.rs` — internal future type.
-- `master:tests/integration/performance_test.rs:367` — example call site.
+User-stated constraint (2026-05-12): "do it based on md files and
+java, dont look at master." The translation must be derived from
+the Java sources and CLAUDE.md rules, not copied from
+`master`'s existing implementation. This produces a clean, principled
+translation rather than an inherited one.
 
-## Skip list (do not pull from master)
+Authoritative Java sources:
 
-Master has additional surface (`KafkaFutureOps::get_timeout`, `is_done`,
-chaining for batch splits, etc.). Pull **only** what's needed to
-unblock Phase 8a.1's perf test plus what the trait signature requires.
-A line-by-line port of master's `kafka_future.rs` is acceptable; a
-line-by-line port of master's `kafka_producer.rs` is **not** —
-fresh-impl has diverged on hundreds of unrelated lines, and only the
-`send` / `send_with_callback` bodies should change.
+- `kafka/clients/src/main/java/org/apache/kafka/common/KafkaFuture.java`
+  — abstract class implementing `java.util.concurrent.Future<T>`.
+  Defines the public method surface: `get()`, `get(timeout, unit)`,
+  `isDone()`, `isCancelled()`, `cancel()`. Plus additional methods
+  (`thenApply`, `whenComplete`, etc.) that are **not** part of the
+  Milestone-1 producer surface and should be deferred.
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/Producer.java`
+  — the interface defining `send(ProducerRecord<K, V>): Future<RecordMetadata>`
+  and `send(ProducerRecord<K, V>, Callback): Future<RecordMetadata>`.
+  Both methods are declared `throws InterruptException` (an
+  unchecked exception); Java callers also expect `KafkaException`
+  to surface on enqueue failure.
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java`
+  — concrete `send` impl. Examine the synchronous-throw vs.
+  Future-resolution split: `KafkaProducer.send` does
+  serialization → interceptors → partition resolution →
+  `accumulator.append`, then returns the `FutureRecordMetadata`
+  (or a synchronously-completed failed `FutureRecordMetadata`).
+  **No `.get()` is called inside `send`** — the broker-ack wait
+  happens later when the caller chooses to wait.
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/internals/FutureRecordMetadata.java`
+  — the package-private implementation of `Future<RecordMetadata>`.
+  Holds a `ProduceRequestResult` (shared per batch) plus per-record
+  fields. Phase 6 already translated this; do **not** rewrite it.
+- `kafka/clients/src/test/java/org/apache/kafka/clients/producer/KafkaProducerTest.java`
+  — call patterns. Look for uses of `send(...).get()`,
+  `send(...).get(timeout, unit)`, and patterns that drop the
+  returned `Future` (fire-and-forget).
+
+## Design principles (derive from CLAUDE.md, not from master)
+
+1. **CLAUDE.md rule 4**: "Never change the contract of public API."
+   Java's `send` returns a `Future<RecordMetadata>` immediately
+   after enqueue (sync part) and throws on enqueue failure. The
+   Rust translation must surface the same contract:
+   `async fn send(...) -> Result<KafkaFuture<RecordMetadata>, KafkaError>`.
+   - `async` because the enqueue itself can `.await` (buffer-pool
+     wait, metadata fetch) — Java blocks the calling thread, Rust
+     yields.
+   - `Result<_, KafkaError>` because Java throws on enqueue failure.
+   - `KafkaFuture<RecordMetadata>` because Java returns
+     `Future<RecordMetadata>` (a heap-allocated handle the caller
+     keeps).
+2. **CLAUDE.md rule 11**: "avoid `Pin<Box<dyn Future>>` per call —
+   prefer concrete `async fn` return types." This is about avoiding
+   type-erased boxed futures *where an `impl Future` would do*. It is
+   **not** a prohibition on the one heap allocation per send that
+   the Kafka contract requires (Java has the same cost via JVM
+   `Future` allocation). The `KafkaFuture<T>` wrapper holds one
+   `Arc<dyn KafkaFutureOps<T>>` per send; this is the intended
+   per-send cost.
+3. **CLAUDE.md rule 9.5**: "If Java guarantees exactly-once
+   callback invocation per record at a specific lifecycle point …
+   the Rust translation must invoke the equivalent at the same
+   point — not defer it or silently drop it." Phase 7d's interceptor
+   double-fire fix invariant must continue to hold: the
+   `on_acknowledgement` interceptor fires from the Sender loop
+   after broker ack, exactly once. The caller awaiting the returned
+   future doesn't change this.
+4. **CLAUDE.md rule 9.1**: "If a method is blocking in Java it
+   should async in Rust." Java's `send` is non-blocking (returns
+   the `Future` quickly), but the synchronous part (accumulator
+   append) can block on the buffer pool. The Rust `async fn send`
+   yields where Java blocks; the outer `Result` resolves before the
+   broker-ack future is awaited.
+
+## Translation map (Java → Rust)
+
+| Java member of `KafkaFuture<T>` / `Future<T>` | Rust equivalent | Where |
+|---|---|---|
+| `T get() throws InterruptedException, ExecutionException` | `pub async fn get(&self) -> Result<T, KafkaError>` | `src/common/kafka_future.rs` |
+| `T get(long timeout, TimeUnit unit) throws InterruptedException, ExecutionException, TimeoutException` | `pub async fn get_timeout(&self, timeout: Duration) -> Result<T, KafkaError>` | same |
+| `boolean isDone()` | `pub fn is_done(&self) -> bool` | same |
+| `boolean isCancelled()` | **Defer** — Java's `FutureRecordMetadata.isCancelled()` always returns `false`. Add as a TODO-free `pub fn is_cancelled(&self) -> bool { false }` or omit entirely. | — |
+| `boolean cancel(boolean mayInterruptIfRunning)` | **Defer** — Java's `FutureRecordMetadata.cancel()` always returns `false`. Same disposition as `isCancelled()`. | — |
+| `thenApply`, `whenComplete`, `complete`, `completeExceptionally` | **Out of Milestone-1** — none used by `KafkaProducer.send` callers. Do not translate. | — |
+
+The internal trait that wraps a concrete future type (like
+`FutureRecordMetadata`) into a `KafkaFuture` is a Rust-idiom-only
+abstraction — Java uses inheritance (abstract methods + subclass
+override). Translate that abstraction shape to a `pub(crate) trait
+KafkaFutureOps<T>` with the same abstract method set Java's
+`KafkaFuture` defines; wrap it in `pub struct KafkaFuture<T> { inner:
+Arc<dyn KafkaFutureOps<T>> }`. The trait is `pub(crate)` because
+Java's abstract methods are not public-API extension points for the
+producer use case.
+
+## Out of scope reminder
+
+- Compaction methods (`thenApply`, etc.) — defer to a future
+  milestone when the consumer / admin client need them.
+- Cancellation (`cancel`, `isCancelled`) — Java's
+  `FutureRecordMetadata` doesn't support it; Milestone-1 doesn't need
+  it. Document as deferred.
+- `MockProducer` — out of Milestone-1.
+- Master-branch implementation — **do not read**.
 
 ## DoD additions on top of `definition-of-done.md`
 
