@@ -213,3 +213,50 @@ review (`COMMENTS.8.md` lines 368-454). All were fixed in Round 2.
 - **Severity**: Hand-off (test contract tightening)
 - **Description**: Critic 8 Phase 8a.0 Round 1 hand-off note read: "the 90s close-timeout in the test is a watchdog, not the contract. If Suggestion 1 lands and `sender_wakeup` becomes a real wake, the close path should drain in <1s on localhost — tighten the assertion bound at that point so future regressions in the wake mechanism are caught by the test."
 - **Disposition**: Fixed in commit `b4685d1` (`fixup! 6a2014e`). `CLOSE_TIMEOUT` tightened from 90 s to 5 s. Manual run after Suggestion 1 landed: close drained in **2.697 ms** for 50 small records on localhost. Three consecutive Round-2 verification runs measured 4.2 ms / 2.2 ms / 3.6 ms. 5 s is ~1000× the post-fix drain time — generous watchdog, still tight enough to catch a future missed-wake regression. Strict-less assertion `close_elapsed < CLOSE_TIMEOUT` preserved.
+
+---
+
+# Visibility correction (Phase 8a.1) — `from_config` archive update
+
+`tests/integration/performance_test.rs` was muted in Phase 1 cleanup
+and re-enabled in Phase 8a.1 against the Phase 7g
+`Result<KafkaFuture<RecordMetadata>, KafkaError>` send shape. The
+perf test is the only legitimate external caller of
+`KafkaProducer::from_config` (it builds a producer from a
+pre-validated `ProducerConfig` instead of re-stringifying through a
+`HashMap`).
+
+The previous Critic 8 "Suggestion 2" disposition (commit `c050fe8`)
+demoted `from_config` from `pub` → `pub(crate)` on the premise that
+the only caller was same-crate test code. That premise was
+structurally wrong by the same Phase 8a.0 reasoning that promoted
+`DefaultMetadataUpdater` / `SupportsDefaultSerializer`:
+`tests/integration/*` is a downstream crate, NOT same-crate code.
+A `pub(crate)` `from_config` makes the perf test uncompilable.
+
+Rationale (same as Phase 8a.0):
+- `tests/integration/performance_test.rs` cannot reach a `pub(crate)`
+  constructor at all — it is a separate downstream crate of
+  `confluent-kafka-rust`.
+- `#[doc(hidden)]` preserves the no-Java-API-growth intent: the
+  constructor stays off docs.rs and is not surfaced as part of the
+  documented public API.
+- External callers should still prefer `with_serializers` (parses a
+  raw `HashMap<String, String>`) or `new` (no-args byte vector
+  default). `from_config` is the pre-validated `ProducerConfig`
+  shortcut — useful for perf tests and any caller assembling config
+  programmatically.
+
+Files corrected:
+- `src/producer/kafka_producer.rs:409` — `from_config`
+  `pub(crate) → pub` + `#[doc(hidden)]`. Rustdoc updated to call out
+  the visibility forcing function and pin the `#[doc(hidden)]`
+  rationale.
+
+Disposition: Applied in commit `3ddf99e` (`fixup! db0a1b8`).
+
+Smoke-run verification (`NUM_MESSAGES=1000 WARMUP_SECONDS=2
+TEST_DURATION_SECONDS=5 cargo test --features integration-tests
+performance_test --release`): 1000 messages sent / 1000 completed /
+0 errors / 997.68 msg/s throughput / 0.98 MiB/s / `producer.send()`
+median <5 us / metrics file written. Test runs to completion.
