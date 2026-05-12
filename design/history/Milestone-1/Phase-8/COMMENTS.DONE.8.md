@@ -149,3 +149,67 @@ Files corrected:
 
 Disposition: Applied in commit `45b70a2`. Critic 8 will verify the
 correction in their next review.
+
+---
+
+# Phase 8a.0 Round 1 — resolved findings
+
+The five blocks below correspond to Critic 8's Phase 8a.0 Round 1
+review (`COMMENTS.8.md` lines 368-454). All were fixed in Round 2.
+
+## Phase 8a.0 Suggestion 1: `sender_wakeup` is a no-op — causes 30s flush latency on every clean close
+
+- **File**: `src/producer/kafka_producer.rs:1005-1007` (definition), `src/producer/kafka_producer.rs:1463` (graceful close call site)
+- **Severity**: Suggestion (real production bug; long-standing, deferred at Phase 7d; surfaced visibly by Phase 8a integration test)
+- **Java Reference**: `KafkaProducer.java:1129` (`sender.wakeup()` during `waitOnMetadata`), `NetworkClient.java:1325-1326` (`wakeup()` → `selector.wakeup()`), `Sender.java:298` (close path)
+- **Description**: This is the root cause of the "30.005s, 30.007s, 30.005s" close-drain timing the actor flagged. The `KafkaProducer::send()` path appends to the accumulator (via `do_send` → `accumulator.append`) and then calls `sender_wakeup()` which **is documented as a no-op since Phase 7d**. The actor's rustdoc at `kafka_producer.rs:995-1002` correctly identifies the consequence: "A missed wake-up degrades first-send latency by at most one Sender tick (`linger.ms` + `request.timeout.ms`)". With `request.timeout.ms = 30000` (default), that is exactly the observed 30s clustering.
+- **Expected**: Add a real wake mechanism. Per the actor's own rustdoc, the two viable shapes are `Arc<dyn Fn() + Send + Sync>` extracted pre-spawn or a `tokio::sync::Notify` plus a `select!` arm in the Sender's `run_loop`. The latter is simpler — add a `Notify` field to `Sender`, replace `sender_wakeup`'s no-op body with `notify.notify_one()`, and add a `Notify::notified()` arm to the Selector's poll `select!` (or to the Sender's `run_once` outermost await). Java's `selector.wakeup()` is exactly this primitive.
+- **Actual**: Every clean close on a healthy broker paid a ~30s delay whenever the Sender was mid-poll at the moment of close. In long-running producers this also degraded first-send latency after an idle window.
+- **Disposition**: Fixed in commit `397dc09` (`fixup! 92f79af`). Approach (b) from the expected list — `tokio::sync::Notify` on `Selector` with a new arm in `Selector::poll`'s `tokio::select!`. `KafkaProducer` holds an `Option<Arc<Notify>>` extracted pre-spawn from the Selector via `Selector::wakeup_notify_handle()`. `Notify::notified` is documented cancellation-safe per CLAUDE.md rule 9.6. Manual integration measurement: close drained in **2.697 ms** for 50 small records on localhost (vs. ~30 s pre-fix). Three consecutive Round-2 verification runs measured close drains of 4.2 ms / 2.2 ms / 3.6 ms — all well under the new 5 s `CLOSE_TIMEOUT` (see test-tightening below).
+
+## Phase 8a.0 Suggestion 2: `default.request.timeout.ms` cap in `NetworkClient::poll` is **the** wake-up backstop — single point of failure
+
+- **File**: `src/network_client.rs:1153`
+- **Severity**: Suggestion (defense-in-depth)
+- **Java Reference**: `NetworkClient.java` (`poll`)
+- **Description**: `effective_timeout = timeout_ms.min(metadata_timeout).min(self.default_request_timeout_ms as i64)`. This 30s cap was, at the time of review, the **only** thing bounding Sender wake-up latency when (a) `sender_wakeup` was a no-op (Suggestion 1) and (b) there were no in-flight requests for the read-readiness wake to fire on. If a future refactor raised `default.request.timeout.ms` or removed this `.min()` cap because it looked redundant, every clean close would become unbounded by `i64::MAX`.
+- **Expected**: Once Suggestion 1 lands, leave this cap as-is but add a one-line comment "this is a backstop; the load-bearing wake is `Notify` via `sender_wakeup`".
+- **Actual**: Cap was undocumented and load-bearing.
+- **Disposition**: Fixed in commit `fec6b0a` (`fixup! 480d304`). Rustdoc-only. With Suggestion 1 landed in `397dc09`, the cap is now belt-and-suspenders — the load-bearing wake is the `Notify` chain. The new comment explicitly calls out the regression risk to future readers ("Do not remove this `.min()` even if it looks redundant — it is the floor that protects the close-drain contract from a missed-wake regression"). Expanded one line beyond Critic 8's expected minimum to also describe the mock-injected-client edge case where `sender_wakeup_notify` is `None`.
+
+## Phase 8a.0 Suggestion 3: No lib-level regression test pins the wake-on-read fix
+
+- **File**: `src/common/network/selector.rs:1192-1239` (new `wait_any_transport_readable`)
+- **Severity**: Suggestion (test coverage)
+- **Java Reference**: `kafka/clients/src/test/java/org/apache/kafka/common/network/SelectorTest.java` (existing echo-server based tests cover this transitively in Java)
+- **Description**: The wake-on-read fix is the load-bearing Phase 8a.0 production change. It was exercised end-to-end by `producer_smoke_plaintext_1000_records` (which requires Docker) but had no dedicated lib-level test. The existing Selector echo-server tests are tight enough loops that the previous bug (sleep-for-full-timeout) was masked — they all use short timeouts like `poll(0)` or wait-for inside a `wait_for` helper.
+- **Expected**: Add a `#[tokio::test]` in `src/common/network/selector.rs::tests` that: (1) connects two channels to the echo server, (2) calls `poll(5000)` (a 5s ceiling), (3) from another tokio task sends bytes on the underlying server socket so the kernel makes the client socket readable, (4) asserts `poll` returns within e.g. 100ms (well under the 5s timeout).
+- **Actual**: Wake-on-read was unverified at lib-test level.
+- **Disposition**: Fixed in commit `edcd5bc`. Two regression tests added in `selector.rs::tests`: (a) `poll_wakes_when_socket_becomes_readable` pins the wake-on-read fix from `480d304` using an `EchoServer` + connected channel + an outer `tokio::time::timeout(1_000ms, ...)` fast-fail wrapper, asserting `poll(5000)` returns in < 500 ms and the echoed payload lands in `completed_receives`; (b) `poll_wakes_when_notify_one_is_called` pins the Notify wake from `397dc09` using a sibling task that calls `notify_one()` after a 20 ms delay, asserting `poll(5000)` returns in < 200 ms. Both tests use generous bounds (real wake fires in microseconds) and outer-timeout fast-fail wrappers so a regression fails the test in 1-2 s instead of the full 5 s `poll` timeout. Test count: 1222 → 1224.
+
+## Phase 8a.0 Nit 1: Request hex-fixture documentation overclaims "captured live from broker"
+
+- **File**: `src/common/requests/api_versions_request.rs:288-308` (rustdoc on `hex_fixture_api_versions_request_v4_apache_kafka_4_2`)
+- **Severity**: Nit (test documentation precision)
+- **Java Reference**: PLAN.md Risk #1
+- **Description**: The fixture's rustdoc said bytes were "captured live during the `producer_smoke_plaintext_1000_records` integration test, off an Apache Kafka 4.2.0 broker that successfully decoded the request". True but read as if the **broker** emitted these bytes. They are **Rust-emitted bytes accepted by a Java broker** — a weaker invariant than "Java-emitted bytes that the Rust client must parse". The response fixture in the sibling file IS broker-emitted, no concern. PLAN.md Risk #1 specifies "capture hex fixtures from the Java client" which the response fixture satisfies; the request fixture proves wire-compat by acceptance.
+- **Expected**: Rewrite the first paragraph of the rustdoc to say "Bytes are the request payload the Rust client emits for the documented inputs, verified by Apache Kafka 4.2.0 accepting and successfully replying. Wire-compatibility-by-acceptance, not byte-for-byte match against Java's `KafkaProducer` emission."
+- **Actual**: Reader could conclude that broker emitted these request bytes.
+- **Disposition**: Fixed in commit `f568032` (`fixup! 30b2bc2`). Rustdoc-only. First paragraph rewritten to explicitly call out the fixture asymmetry: request fixture is Rust-emitted + broker-accepted (wire-compatibility-by-broker-acceptance), response fixture in `api_versions_response.rs` IS Java/broker-emitted (the stronger invariant on the response-parse path). Matches Critic 8's exact phrasing target.
+
+## Phase 8a.0 Nit 2: Stale rustdoc reference to `wait_any_channel_readable` (function is named `wait_any_transport_readable`)
+
+- **File**: `src/common/network/selector.rs:1004`
+- **Severity**: Nit (documentation drift)
+- **Java Reference**: N/A — Rust-only doc
+- **Description**: The `SAFETY:` block at line 1003-1006 mentioned `wait_any_channel_readable` which does not exist. The actual function is `wait_any_transport_readable`. Probably an earlier draft name.
+- **Expected**: Rename in the comment.
+- **Actual**: Future reader would grep for `wait_any_channel_readable` and find nothing.
+- **Disposition**: Fixed in commit `397dc09` (`fixup! 92f79af`) — folded into Suggestion 1's commit as a drive-by. The Suggestion-1 commit message explicitly mentions it under "Updated:". Verified with `grep -rn "wait_any_channel_readable" src/` → no matches.
+
+## Phase 8a.0 close-flush watchdog tightening (Critic 8 hand-off note)
+
+- **File**: `tests/integration/producer_smoke_test.rs:434` — `CLOSE_TIMEOUT`
+- **Severity**: Hand-off (test contract tightening)
+- **Description**: Critic 8 Phase 8a.0 Round 1 hand-off note read: "the 90s close-timeout in the test is a watchdog, not the contract. If Suggestion 1 lands and `sender_wakeup` becomes a real wake, the close path should drain in <1s on localhost — tighten the assertion bound at that point so future regressions in the wake mechanism are caught by the test."
+- **Disposition**: Fixed in commit `b4685d1` (`fixup! 6a2014e`). `CLOSE_TIMEOUT` tightened from 90 s to 5 s. Manual run after Suggestion 1 landed: close drained in **2.697 ms** for 50 small records on localhost. Three consecutive Round-2 verification runs measured 4.2 ms / 2.2 ms / 3.6 ms. 5 s is ~1000× the post-fix drain time — generous watchdog, still tight enough to catch a future missed-wake regression. Strict-less assertion `close_elapsed < CLOSE_TIMEOUT` preserved.
