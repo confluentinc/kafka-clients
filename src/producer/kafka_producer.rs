@@ -1175,10 +1175,15 @@ where
     ///
     /// Mirrors Java's private
     /// `Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback)`
-    /// at `KafkaProducer.java:981`. The Java `Future` collapses into the
-    /// returned [`Arc<FutureRecordMetadata>`] which the public
-    /// [`Producer::send`] / [`Producer::send_with_callback`] then
-    /// awaits.
+    /// at `KafkaProducer.java:981`. The returned
+    /// [`Arc<FutureRecordMetadata>`] is the broker-ack future; the
+    /// public [`Producer::send`] / [`Producer::send_with_callback`]
+    /// wrap it in [`crate::common::KafkaFuture`] and return it
+    /// synchronously to the caller (Java-parity: the caller drops,
+    /// awaits, or composes the future themselves). This is the
+    /// Phase-7g restored shape — Phase 7b inlined the broker ack
+    /// here, which contradicted Java's `Future<RecordMetadata>`
+    /// contract.
     ///
     /// # Catch fan-out
     ///

@@ -22,8 +22,20 @@
 //! futures cannot be cancelled in Java either (`cancel(boolean)` always
 //! returns `false`).
 //!
-//! Per CLAUDE.md rule 11, we avoid `Pin<Box<dyn Future>>` per record by
-//! exposing `get` as a concrete `async fn`.
+//! Per CLAUDE.md rule 11, the inherent `get` is a concrete `async fn`
+//! — no `Pin<Box<dyn Future>>` allocation per record on the in-crate
+//! call path (`ProducerBatch`, `Sender::complete_batch` etc. call the
+//! inherent method directly).
+//!
+//! Phase 7g adds a [`KafkaFutureOps`](crate::common::kafka_future::KafkaFutureOps)
+//! trait impl below so that
+//! [`KafkaProducer::send`](crate::producer::KafkaProducer) can wrap
+//! this future in [`KafkaFuture<RecordMetadata>`](crate::common::KafkaFuture).
+//! The trait method requires a boxed future (object-safety
+//! requirement); that boxing is the per-`KafkaFuture::get()`-call
+//! allocation, paid by callers who choose to wait — not by the
+//! producer's `send()` allocation, which is one shared `Arc<dyn
+//! KafkaFutureOps>`.
 
 #![allow(dead_code)] // Phase 6b (ProducerBatch) wires `chain` and `is_done`.
 
