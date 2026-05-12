@@ -160,6 +160,43 @@ impl FutureRecordMetadata {
     }
 }
 
+/// Wire [`FutureRecordMetadata`] into the
+/// [`KafkaFutureOps`](crate::common::kafka_future::KafkaFutureOps)
+/// trait so it can be wrapped in
+/// [`KafkaFuture<RecordMetadata>`](crate::common::KafkaFuture) on the
+/// `Producer::send` return path.
+///
+/// Mirrors the Java pattern where
+/// `org.apache.kafka.clients.producer.internals.FutureRecordMetadata`
+/// `implements Future<RecordMetadata>` and Java
+/// `KafkaProducer#send` returns the same `Future` shape callers can
+/// `.get()` on later. The Rust translation surfaces the same
+/// contract via [`KafkaFuture<RecordMetadata>`].
+///
+/// The trait's `get` returns a boxed future (object-safety
+/// requirement) but the boxed future is one Java-equivalent
+/// `Arc<dyn KafkaFutureOps<RecordMetadata>>` per send — same per-send
+/// allocation Java pays for `new FutureRecordMetadata(...)`.
+impl crate::common::kafka_future::KafkaFutureOps<crate::producer::record_metadata::RecordMetadata>
+    for FutureRecordMetadata
+{
+    fn get<'a>(
+        &'a self,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<crate::producer::record_metadata::RecordMetadata, KafkaError>>
+                + Send
+                + 'a,
+        >,
+    > {
+        Box::pin(self.get())
+    }
+
+    fn is_done(&self) -> bool {
+        self.is_done()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     //! Translation of `org.apache.kafka.clients.producer.internals.FutureRecordMetadataTest`.
@@ -300,5 +337,40 @@ mod tests {
         child.set(0, NO_TIMESTAMP, None);
         child.done();
         assert!(parent_future.is_done());
+    }
+
+    /// Phase 7g (2/N) — verify the `KafkaFutureOps` trait impl works
+    /// through the public [`KafkaFuture`](crate::common::KafkaFuture)
+    /// wrapper. This pins the round-trip Java's
+    /// `Producer#send` callers will see: `producer.send(r).await?`
+    /// returns a `KafkaFuture<RecordMetadata>`; `.get().await?`
+    /// resolves to the same `RecordMetadata` the inner
+    /// `FutureRecordMetadata::get().await` would produce.
+    #[tokio::test]
+    async fn kafka_future_wrapper_round_trips_via_trait_impl() {
+        use crate::common::KafkaFuture;
+        use crate::common::kafka_future::KafkaFutureOps;
+
+        let result = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
+        let frm = Arc::new(future_for(Arc::clone(&result)));
+        let frm_ops: Arc<dyn KafkaFutureOps<crate::producer::record_metadata::RecordMetadata>> = frm;
+        let kf = KafkaFuture::new(frm_ops);
+
+        // Before completion: is_done() should reflect the underlying
+        // FutureRecordMetadata::is_done() (false → completed flag not
+        // set yet).
+        assert!(!kf.is_done());
+
+        // Resolve out of band.
+        let result_for_task = Arc::clone(&result);
+        tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            result_for_task.set(123, NO_TIMESTAMP, None);
+            result_for_task.done();
+        });
+
+        let metadata = kf.get().await.expect("future should resolve");
+        assert_eq!(metadata.offset(), 123);
+        assert!(kf.is_done());
     }
 }
