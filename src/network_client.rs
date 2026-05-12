@@ -1150,6 +1150,19 @@ where
         // the call, to avoid the `&mut self` aliasing conflict that
         // would otherwise reject a stack-held reference to `slot`).
         let metadata_timeout = self.maybe_update_with_taken_updater(now);
+        // Backstop, not the primary wake mechanism. The load-bearing
+        // wake is `tokio::sync::Notify` via
+        // `Selector::wakeup_notify_handle()` (used by
+        // `KafkaProducer::sender_wakeup` — see Phase 8a.0 Round 2
+        // Suggestion 1). The `.min(self.default_request_timeout_ms as
+        // i64)` cap below is belt-and-suspenders: if a caller ever
+        // passes `i64::MAX` and the producer-side Notify wake is
+        // somehow missed (e.g. mock-injected client with no notify
+        // handle, or future refactor introducing a regression), the
+        // 30 s cap bounds Sender wake-up latency at the cost of a
+        // single skipped tick. Do not remove this `.min()` even if it
+        // looks redundant — it is the floor that protects the
+        // close-drain contract from a missed-wake regression.
         let effective_timeout = timeout_ms.min(metadata_timeout).min(self.default_request_timeout_ms as i64);
 
         if let Err(e) = self.selector.poll(effective_timeout).await {
