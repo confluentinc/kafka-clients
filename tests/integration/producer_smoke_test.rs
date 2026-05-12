@@ -37,7 +37,7 @@
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
 use std::sync::{Arc, Once};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use log::{Level, LevelFilter, Metadata as LogMetadata, Record};
 
@@ -416,7 +416,24 @@ async fn close_flushes_pending_inflight() {
     // snapshot now includes every batch (because they're all in the
     // accumulator before either future blocks meaningfully — Tokio
     // polls each branch of `join!` at least once before suspending).
+    // Close-timeout sizing: must comfortably exceed any realistic broker
+    // ack window for 50 small records with acks=all on a single-broker
+    // Testcontainer. Earlier 30s value raced ack-latency on slower
+    // machines, producing force-close and `IllegalState` send results.
+    // 90s gives generous headroom while still acting as a watchdog.
+    //
+    // Contract pinned: graceful close MUST flush all pending sends
+    // before its deadline. We assert that by measuring elapsed wall-
+    // clock and requiring it to be strictly less than the timeout —
+    // proving the close path drained rather than tripping the force-
+    // close branch. Every send future must then resolve with
+    // `Ok(RecordMetadata)`; any `Err` (including `IllegalState` from
+    // force-close) is a test failure. Do NOT tolerate `IllegalState`
+    // here — this test exists specifically to pin the graceful-flush
+    // contract.
+    const CLOSE_TIMEOUT: Duration = Duration::from_secs(90);
     let producer_for_close = producer.clone();
+    let close_start = Instant::now();
     let (send_results, close_result) = tokio::join!(
         async {
             let mut results: Vec<Result<RecordMetadata, KafkaError>> = Vec::with_capacity(CLOSE_FLUSH_RECORDS);
@@ -426,13 +443,21 @@ async fn close_flushes_pending_inflight() {
             }
             results
         },
-        async move { producer_for_close.close_with_timeout(Duration::from_secs(30)).await },
+        async move { producer_for_close.close_with_timeout(CLOSE_TIMEOUT).await },
     );
+    let close_elapsed = close_start.elapsed();
     close_result.expect("graceful close failed");
+    assert!(
+        close_elapsed < CLOSE_TIMEOUT,
+        "close did not drain before timeout: elapsed={close_elapsed:?} >= timeout={CLOSE_TIMEOUT:?} (force-close path likely)",
+    );
+    println!("close drained in {close_elapsed:?}");
 
     let mut metas: Vec<RecordMetadata> = Vec::with_capacity(CLOSE_FLUSH_RECORDS);
     for (i, r) in send_results.into_iter().enumerate() {
-        let meta = r.unwrap_or_else(|e| panic!("send #{i} failed after close: {e:?}"));
+        let meta = r.unwrap_or_else(|e| {
+            panic!("send #{i} failed after close (topic={topic}, expected graceful flush): {e:?}",)
+        });
         metas.push(meta);
     }
 
