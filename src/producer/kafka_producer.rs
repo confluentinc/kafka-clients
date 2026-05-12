@@ -72,6 +72,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
+use tokio::sync::Notify;
 
 use log::warn;
 use tokio::task::JoinHandle;
@@ -215,6 +216,28 @@ pub struct KafkaProducer<K, V, C: KafkaClient> {
     /// so [`Drop`] can flip them without re-entering the moved Sender.
     sender_running: Arc<std::sync::atomic::AtomicBool>,
     sender_force_close: Arc<std::sync::atomic::AtomicBool>,
+
+    /// Wakeup primitive used by [`Self::sender_wakeup`]. Java's
+    /// [`KafkaProducer::sender.wakeup()`] reaches into the live
+    /// `Sender` instance — but in Rust the `Sender` is moved into the
+    /// [`tokio::spawn`] task. We solve this by **extracting the
+    /// `Arc<Notify>` from the production [`crate::common::network::Selector`]
+    /// pre-spawn** (Java: `selector.wakeup()` is the underlying
+    /// primitive; the `Sender.wakeup()` -> `client.wakeup()` ->
+    /// `selector.wakeup()` chain bottoms out here) and storing it on
+    /// the producer.
+    ///
+    /// `None` when the test path injects a mock [`crate::KafkaClient`]
+    /// that has no underlying Selector to wake — `sender_wakeup` falls
+    /// back to a no-op there, matching the pre-Round-2 Phase-7d
+    /// behaviour for mocks.
+    ///
+    /// Phase 8a.0 Round 2 Suggestion 1: this is the load-bearing
+    /// wake. Without it, every `close` on a quiet connection paid the
+    /// `default.request.timeout.ms` cap (30 s by default) before the
+    /// Sender's poll-sleep would notice the freshly-flipped `running`
+    /// flag.
+    sender_wakeup_notify: Option<Arc<Notify>>,
 
     /// Java: `private final Sender.SenderThread ioThread`. Replaced
     /// with the `JoinHandle` of the `tokio::spawn` task running the
@@ -417,17 +440,19 @@ where
         // dispatching through the NetworkClient's instance.
         let client_id_str = config.get_string(producer_config::CLIENT_ID_CONFIG)?;
         let client_id_arc: Arc<str> = Arc::from(client_id_str);
-        let network_client = build_production_network_client(&config, metadata_handle, client_id_arc, time.clone())?;
+        let (network_client, wakeup_notify) =
+            build_production_network_client(&config, metadata_handle, client_id_arc, time.clone())?;
 
-        Self::new_for_test(
+        Self::new_for_test_with_wakeup(
             config,
             key_serializer,
             value_serializer,
             Some(producer_metadata),
             network_client,
             None,
-            None, // let new_for_test construct the producer-side Arc<ApiVersions>
+            None, // let new_for_test_with_wakeup construct the producer-side Arc<ApiVersions>
             Some(time),
+            Some(wakeup_notify),
         )
     }
 }
@@ -514,13 +539,24 @@ fn build_producer_metadata(config: &ProducerConfig, time: Arc<dyn Time>) -> Resu
 /// [`crate::default_metadata_updater::DefaultMetadataUpdater`]. Mirrors
 /// the body of `ClientUtils.createNetworkClient(...)` —
 /// `Selector` + `NetworkClient` construction in one step.
+///
+/// Returns both the [`NetworkClient`] and the [`Arc<Notify>`] wakeup
+/// handle extracted from the Selector pre-move (Phase 8a.0 Round 2
+/// Suggestion 1). The producer stores the handle on
+/// [`KafkaProducer::sender_wakeup_notify`] so `sender_wakeup` can
+/// short-circuit the Selector's poll-sleep after the
+/// `NetworkClient`/`Selector` has been moved into the spawned Sender
+/// task.
 fn build_production_network_client(
     config: &ProducerConfig,
     metadata: Arc<crate::metadata::Metadata>,
     client_id: Arc<str>,
     time: Arc<dyn Time>,
 ) -> Result<
-    crate::NetworkClient<crate::common::network::Selector, crate::default_metadata_updater::DefaultMetadataUpdater>,
+    (
+        crate::NetworkClient<crate::common::network::Selector, crate::default_metadata_updater::DefaultMetadataUpdater>,
+        Arc<Notify>,
+    ),
     KafkaError,
 > {
     use crate::common::network::Selector;
@@ -553,6 +589,11 @@ fn build_production_network_client(
 
     let connections_max_idle_ms = config.get_long(producer_config::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
     let selector = Selector::new(connections_max_idle_ms, time.clone(), channel_builder);
+    // Extract the wakeup handle BEFORE moving the Selector into the
+    // NetworkClient. After this, calling `notify_one()` on the
+    // returned Arc<Notify> wakes the Selector's poll-sleep
+    // regardless of which task owns the Selector itself.
+    let wakeup_notify = selector.wakeup_notify_handle();
 
     let recovery_str = config.get_string(crate::common_client_configs::METADATA_RECOVERY_STRATEGY_CONFIG)?;
     let metadata_recovery_strategy =
@@ -563,7 +604,7 @@ fn build_production_network_client(
     let host_resolver: Box<dyn crate::host_resolver::HostResolver> =
         Box::new(crate::default_host_resolver::DefaultHostResolver);
 
-    crate::NetworkClient::new(
+    let network_client = crate::NetworkClient::new(
         selector,
         updater,
         client_id,
@@ -581,7 +622,8 @@ fn build_production_network_client(
         host_resolver,
         config.get_long(crate::common_client_configs::METADATA_RECOVERY_REBOOTSTRAP_TRIGGER_MS_CONFIG)?,
         metadata_recovery_strategy,
-    )
+    )?;
+    Ok((network_client, wakeup_notify))
 }
 
 // =====================================================================
@@ -617,6 +659,43 @@ where
         interceptors: Option<Arc<ProducerInterceptors<K, V>>>,
         api_versions: Option<Arc<crate::ApiVersions>>,
         time: Option<Arc<dyn Time>>,
+    ) -> Result<Self, KafkaError> {
+        // Tests inject mock clients that have no Selector to wake;
+        // `sender_wakeup` falls back to a no-op (matching the
+        // pre-Round-2 behaviour). The production constructors call
+        // [`Self::new_for_test_with_wakeup`] directly and pass the
+        // freshly-extracted [`Arc<Notify>`] from the production
+        // [`crate::common::network::Selector`].
+        Self::new_for_test_with_wakeup(
+            config,
+            key_serializer,
+            value_serializer,
+            metadata,
+            kafka_client,
+            interceptors,
+            api_versions,
+            time,
+            None,
+        )
+    }
+
+    /// Identical to [`Self::new_for_test`] but accepts an explicit
+    /// [`Arc<Notify>`] used by [`Self::sender_wakeup`] to short-
+    /// circuit the production Selector's poll-sleep when records are
+    /// freshly appended. Phase 8a.0 Round 2 Suggestion 1 — the
+    /// load-bearing wake. Tests pass `None`; production constructors
+    /// pass the handle from `Selector::wakeup_notify_handle()`.
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn new_for_test_with_wakeup(
+        config: ProducerConfig,
+        key_serializer: Box<dyn Serializer<K>>,
+        value_serializer: Box<dyn Serializer<V>>,
+        metadata: Option<Arc<ProducerMetadata>>,
+        kafka_client: C,
+        interceptors: Option<Arc<ProducerInterceptors<K, V>>>,
+        api_versions: Option<Arc<crate::ApiVersions>>,
+        time: Option<Arc<dyn Time>>,
+        sender_wakeup_notify: Option<Arc<Notify>>,
     ) -> Result<Self, KafkaError> {
         // Java line 343:  this.time = time;
         let time: Arc<dyn Time> = time.unwrap_or_else(|| SystemTime::instance());
@@ -827,6 +906,7 @@ where
             api_versions,
             sender_running,
             sender_force_close,
+            sender_wakeup_notify,
             sender_task: std::sync::Mutex::new(Some(sender_task)),
             closed: Arc::new(AtomicBool::new(false)),
             _client_marker: std::marker::PhantomData,
@@ -979,31 +1059,32 @@ where
     /// `KafkaProducer.java:1129` (called from inside the wait-loop in
     /// `waitOnMetadata`).
     ///
-    /// **Phase 7d behaviour: no-op.** The Sender owns its
-    /// [`KafkaClient`] by value and is moved into a `tokio::spawn` task
-    /// at construction time, so the producer no longer holds a reference
-    /// it could call `client.wakeup()` on. Adding a wake handle would
-    /// require either:
+    /// **Phase 8a.0 Round 2 implementation** (Suggestion 1): the
+    /// producer holds an [`Arc<Notify>`] clone of the production
+    /// [`crate::common::network::Selector`]'s wakeup primitive
+    /// (`Selector::wakeup_notify_handle()`). Calling `notify_one()`
+    /// here parks a permit on the Notify; the Selector's
+    /// `tokio::select!` in its poll loop has a `notified()` arm that
+    /// fires on the next poll tick, short-circuiting the timeout
+    /// sleep. This is the load-bearing wake mirroring Java's
+    /// `selector.wakeup()` (via `Sender.wakeup()` →
+    /// `client.wakeup()` → `selector.wakeup()`).
     ///
-    /// 1. an `Arc<dyn Fn() + Send + Sync>` extracted from the client
-    ///    pre-spawn (only viable if the `wakeup` call is `'static` — i.e.
-    ///    the client is itself an `Arc<…>` field), or
-    /// 2. a `tokio::sync::Notify` plus a `select!` arm in the Sender's
-    ///    `run_loop` (invasive — Phase 6e's loop is `poll` + `handle`,
-    ///    no async wake point).
+    /// `None` means the test path injected a mock client with no
+    /// Selector to wake — `sender_wakeup` falls back to a no-op.
+    /// Production constructors always pass `Some(notify)`.
     ///
-    /// Both are deferred to a follow-up. The wake-up is a **latency
-    /// optimisation**, not a correctness requirement: the Sender's
-    /// `run_once` re-fetches the metadata snapshot on every iteration,
-    /// requests metadata refreshes for unknown-leader topics, and the
-    /// await-timeout in [`Self::wait_on_metadata`] is bounded by
-    /// `max.block.ms`. A missed wake-up degrades first-send latency by
-    /// at most one Sender tick (`linger.ms` + `request.timeout.ms`), it
-    /// never hangs.
-    ///
-    /// Documented in `design/history/Milestone-1/Phase-7/NOTES.md`.
+    /// CLAUDE.md rule 11 hot-path audit: `Notify::notify_one` is
+    /// constant-time, no allocation, no spawn. The `Arc::clone` here
+    /// is bumping a refcount — `Arc<Notify>` is `Send + Sync` and
+    /// `Notify::notify_one` takes `&self`, so we use `as_ref` to
+    /// avoid even the refcount bump on the hot path.
     fn sender_wakeup(&self) {
-        // Intentional no-op — see method docstring.
+        if let Some(notify) = self.sender_wakeup_notify.as_ref() {
+            notify.notify_one();
+        }
+        // None branch: test path with no Selector — no-op (matches
+        // pre-Round-2 behaviour for mock-injected clients).
     }
 }
 

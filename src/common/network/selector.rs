@@ -70,14 +70,16 @@
 //! * **`SelectorMetrics`**: replaced with `// metric stub` no-ops per
 //!   PLAN.md.
 //! * **`wakeup`**: Java's `wakeup()` aborts a blocking
-//!   `nioSelector.select(...)` from another thread. Tokio tasks wake
-//!   naturally when their futures resolve, and the Selector is
-//!   single-task here (`&mut self` on every method), so an explicit
-//!   wakeup is not needed — calls from another task would already need
-//!   a [`tokio::sync::mpsc`] hop, and that hop wakes the receiving task
-//!   when it lands. We keep [`Selectable::wakeup`] as a no-op to match
-//!   the trait shape; its only Java caller is
-//!   `NetworkClient.handleWakeup`, which Phase 5d will call as a no-op.
+//!   `nioSelector.select(...)` from another thread. We mirror this with
+//!   a [`tokio::sync::Notify`] (`wakeup_notify` on the Selector). The
+//!   `notify_one()` half is called from [`Selectable::wakeup`]; the
+//!   `notified()` half is one arm of the [`Self::poll`]
+//!   `tokio::select!`. Callers that want to wake a Selector moved into
+//!   a `tokio::spawn` task can obtain an `Arc<Notify>` via
+//!   [`Self::wakeup_notify_handle`] and call `notify_one()` directly.
+//!   This is the load-bearing primitive `KafkaProducer::sender_wakeup`
+//!   uses to short-circuit the Sender's poll-sleep when records are
+//!   freshly appended (Phase 8a.0 Round 2 Suggestion 1).
 //! * **`register(String, SocketChannel)`** (server-side accept path):
 //!   not translated. Producer never acts as a server.
 //!
@@ -98,6 +100,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
+use tokio::sync::Notify;
 
 use tokio::net::{TcpSocket, TcpStream};
 use tokio::sync::mpsc;
@@ -298,6 +301,20 @@ pub struct Selector {
     /// methods short-circuit. Mirrors Java's `nioSelector` being
     /// already closed.
     closed: bool,
+    /// Wakeup primitive. Java's `nioSelector.wakeup()` aborts the
+    /// in-progress `select(timeout)`; the Tokio equivalent is a
+    /// [`Notify`] arm inside our `tokio::select!`. Held as an
+    /// [`Arc`] so the producer can clone it pre-spawn and call
+    /// `notify_one()` from `KafkaProducer::sender_wakeup` after the
+    /// Sender has been moved into its `tokio::spawn` task.
+    ///
+    /// Cancellation-safety (CLAUDE.md 9.6): [`Notify::notified`] is
+    /// documented cancellation-safe; the Notify still considers a
+    /// pending `notify_one()` permit consumed only when a waiter
+    /// actually polls past the wake — losing the `notified()` arm
+    /// in `select!` does not lose the wake (it stays buffered on
+    /// the Notify until the next call).
+    wakeup_notify: Arc<Notify>,
 }
 
 impl Selector {
@@ -361,7 +378,23 @@ impl Selector {
             max_receive_size,
             idle_expiry_manager,
             closed: false,
+            wakeup_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// Return a clone of the wakeup [`Notify`]. Callers can keep this
+    /// handle even after the [`Selector`] has been moved into a
+    /// `tokio::spawn` task (Java's analogue: `Selector` is reachable
+    /// from the `KafkaProducer` even after the IO thread starts;
+    /// `selector.wakeup()` is callable from any thread).
+    ///
+    /// This is the load-bearing wake the Phase 8a.0 Suggestion 1
+    /// review demanded. The Selector's [`Self::poll`] races the
+    /// timeout sleep against `wakeup_notify.notified()`, so calling
+    /// `notify_one()` short-circuits the sleep and lets `poll`
+    /// observe freshly-queued work on the next iteration.
+    pub fn wakeup_notify_handle(&self) -> Arc<Notify> {
+        Arc::clone(&self.wakeup_notify)
     }
 
     /// Return a borrowed reference to a channel by id, or `None` if not
@@ -843,7 +876,22 @@ impl Selectable for Selector {
     }
 
     fn wakeup(&self) {
-        // No-op — see module docstring "Skipped vs. Java".
+        // Java: `nioSelector.wakeup()` — aborts the in-progress
+        // `select(timeout)`. Our equivalent: notify the Tokio
+        // `Notify` that the [`Self::poll`] `tokio::select!` races
+        // against the timeout sleep.
+        //
+        // `notify_one()` semantics: if a waiter is parked on
+        // `notified()`, wake it; otherwise buffer one permit so
+        // the next `notified()` call returns immediately. Either
+        // way the next call to `poll` short-circuits its sleep.
+        //
+        // CLAUDE.md rule 11 hot-path audit: `Notify::notify_one`
+        // is a constant-time atomic compare-and-swap — no
+        // allocation, no spawn, no Arc clone (the Notify itself
+        // is already held by `Arc` for cross-task sharing, but
+        // calling `notify_one()` doesn't touch the Arc count).
+        self.wakeup_notify.notify_one();
     }
 
     fn close(&mut self) {
@@ -1000,16 +1048,19 @@ impl Selectable for Selector {
             // floor means a 30s latency on every response in production
             // (Phase 8a.0).
             //
-            // SAFETY: all three arms are cancellation-safe (Tokio mpsc
-            // recv, time sleep, and `wait_any_channel_readable` which
-            // drops its borrowed futures on cancellation). No
-            // MutexGuard across await (CLAUDE.md 9.6).
+            // SAFETY: all four arms are cancellation-safe (Tokio mpsc
+            // recv, time sleep, `wait_any_transport_readable` which
+            // drops its borrowed futures on cancellation, and
+            // `Notify::notified` which is documented cancellation-
+            // safe — a pending permit survives the losing-arm drop).
+            // No MutexGuard across await (CLAUDE.md 9.6).
             //
             // Borrow split: `self.connect_rx` is `&mut`-borrowed by the
             // recv arm; `self.channels` is `&`-borrowed for the
-            // readability arm. Splitting `self` into independent
-            // borrows via local re-bindings is required to satisfy the
-            // borrow checker.
+            // readability arm; `self.wakeup_notify` is `&`-borrowed
+            // for the wake arm. Splitting `self` into independent
+            // borrows via local re-bindings is required to satisfy
+            // the borrow checker.
             //
             // `KafkaChannel` is `!Sync` (its `Box<dyn Authenticator>`
             // field has no `Sync` bound) so we cannot hold `&KafkaChannel`
@@ -1018,8 +1069,18 @@ impl Selectable for Selector {
             // production transport (`PlaintextTransportLayer`,
             // `SslTransportLayer`) is `Sync`, so `&dyn TransportLayer
             // + Sync` is `Send` and can cross await points safely.
+            //
+            // The `wakeup_notify` arm is Phase 8a.0 Round 2
+            // Suggestion 1: the load-bearing wake mirroring Java's
+            // `nioSelector.wakeup()`. Without it, the only way out
+            // of the sleep arm is the timeout (`default.request.
+            // timeout.ms`, default 30 s) or a fortuitous
+            // socket-readable event. Calling
+            // `Selector::wakeup_notify_handle().notify_one()` from
+            // any task now short-circuits the sleep.
             let connect_rx = &mut self.connect_rx;
             let channels = &self.channels;
+            let wakeup_notify = self.wakeup_notify.as_ref();
             let transports: Vec<&(dyn TransportLayer + Sync)> = channels
                 .values()
                 .filter(|c| c.ready() && c.transport_layer_ref().is_open())
@@ -1031,6 +1092,7 @@ impl Selectable for Selector {
                 event = connect_rx.recv() => {
                     connect_event_opt = Some(event);
                 },
+                _ = wakeup_notify.notified() => {},
                 _ = wait_any_transport_readable(&transports), if !transports.is_empty() => {},
                 _ = tokio::time::sleep(timeout) => {},
             }
@@ -1311,7 +1373,6 @@ mod tests {
     use bytes::Bytes;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     use tokio::net::TcpListener;
-    use tokio::sync::Notify;
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -2040,12 +2101,24 @@ mod tests {
         server.shutdown().await;
     }
 
-    /// `wakeup` is documented as a no-op (see module docstring). Just
-    /// pin the contract.
+    /// `wakeup` (Phase 8a.0 Round 2 Suggestion 1) buffers a permit on
+    /// the internal `Notify` even with no waiter — the next `poll`
+    /// `select!` arm sees the permit and exits its sleep immediately.
+    /// Pin both invariants: (1) calling `wakeup` before any waiter is
+    /// safe (no panic), (2) the `wakeup_notify_handle` accessor
+    /// returns a clone that shares the same permit slot.
     #[tokio::test]
-    async fn wakeup_is_noop() {
+    async fn wakeup_buffers_permit_and_handle_shares_slot() {
         let selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
         Selectable::wakeup(&selector);
+        // The handle is a clone of the same Arc, so a second waiter
+        // looking via the handle observes the same permit.
+        let handle = selector.wakeup_notify_handle();
+        // The next `notified()` call returns immediately because the
+        // permit is buffered.
+        tokio::time::timeout(Duration::from_millis(100), handle.notified())
+            .await
+            .expect("wakeup permit should be observable through the cloned handle");
     }
 
     /// Sanity: `pending_connects_len` is exposed for tests only and
