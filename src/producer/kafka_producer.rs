@@ -400,13 +400,21 @@ where
     /// programmatically assemble a config (instead of parsing a
     /// `HashMap`) use this entry point.
     ///
-    /// `pub(crate)` (not `pub`) because Java has no equivalent of
-    /// this constructor — `KafkaProducer.java` only exposes a
-    /// `Map<String, Object>` form. The `tests/integration/`
-    /// crate-internal tests reach this via the same-crate `pub(crate)`
-    /// visibility; external callers must use [`Self::with_serializers`]
-    /// or [`Self::new`].
-    pub(crate) fn from_config(
+    /// **Visibility note**: this constructor is `pub` + `#[doc(hidden)]`
+    /// because Java has no equivalent (`KafkaProducer.java` only exposes
+    /// the `Map<String, Object>` form). The `pub` is forced by Rust's
+    /// visibility model — `tests/integration/*` is a downstream crate,
+    /// not same-crate code, and the integration perf-test
+    /// (`tests/integration/performance_test.rs`) needs to build a
+    /// producer from a pre-validated [`ProducerConfig`] without
+    /// re-stringifying it through a `HashMap`. `#[doc(hidden)]` keeps
+    /// this off docs.rs so the documented Java-API parity surface is
+    /// not widened. Mirrors the Phase 8a.0 visibility correction for
+    /// [`crate::default_metadata_updater::DefaultMetadataUpdater`] and
+    /// [`SupportsDefaultSerializer`]. External callers should still
+    /// prefer [`Self::with_serializers`] or [`Self::new`].
+    #[doc(hidden)]
+    pub fn from_config(
         config: ProducerConfig,
         key_serializer: Box<dyn Serializer<K>>,
         value_serializer: Box<dyn Serializer<V>>,
