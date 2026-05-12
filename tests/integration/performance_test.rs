@@ -46,7 +46,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
-use confluent_kafka::common::serialization::ByteArraySerializer;
+use confluent_kafka::common::serialization::serdes::ByteArrayOwnedSerializer;
 use confluent_kafka::producer::KafkaProducer;
 use confluent_kafka::producer::Producer;
 use confluent_kafka::producer::ProducerConfig;
@@ -116,9 +116,7 @@ impl PerfTestConfig {
         if self.security_protocol.is_empty() {
             return vec![];
         }
-        let mut props = vec![
-            ("security.protocol".to_string(), self.security_protocol.clone()),
-        ];
+        let mut props = vec![("security.protocol".to_string(), self.security_protocol.clone())];
         if !self.sasl_mechanism.is_empty() {
             props.push(("sasl.mechanism".to_string(), self.sasl_mechanism.clone()));
         }
@@ -299,7 +297,10 @@ impl CumulativeStats {
 
 #[tokio::test(flavor = "multi_thread")]
 async fn performance_test() {
-    let _ = env_logger::builder().is_test(false).try_init();
+    // Logging initialization intentionally omitted: `env_logger` is not a
+    // workspace dependency and we cannot add one for a single integration
+    // test. The Rust producer emits diagnostics via the `log` facade; set
+    // `RUST_LOG=...` and attach a logger of your choice if you need them.
 
     let config = PerfTestConfig::from_env();
     let message_size = config.message_size() as u64;
@@ -362,12 +363,12 @@ async fn performance_test() {
     for (k, v) in config.sasl_props() {
         props.insert(k, v);
     }
-    let producer_config = ProducerConfig::from_properties(&props).expect("Invalid producer config");
+    let producer_config = ProducerConfig::new(props).expect("Invalid producer config");
 
-    let producer = KafkaProducer::<Vec<u8>, Vec<u8>>::from_config(
+    let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::from_config(
         producer_config,
-        Box::new(ByteArraySerializer),
-        Box::new(ByteArraySerializer),
+        Box::new(ByteArrayOwnedSerializer),
+        Box::new(ByteArrayOwnedSerializer),
     )
     .expect("Failed to create producer");
 
@@ -391,8 +392,9 @@ async fn performance_test() {
         let mut i = 0usize;
         while Instant::now() < warmup_end {
             let (key, value) = &messages[i % msg_count];
-            let record = ProducerRecord::with_key(topic.clone(), Some(key.as_slice()), Some(value.as_slice()));
-            if let Ok(future) = producer.send(record, None).await {
+            let record = ProducerRecord::with_key(topic.clone(), Some(key.clone()), Some(value.clone()))
+                .expect("ProducerRecord::with_key");
+            if let Ok(future) = producer.send(record).await {
                 let _ = future.get_timeout(Duration::from_secs(30)).await;
             }
             i += 1;
@@ -553,13 +555,14 @@ async fn performance_test() {
         // Disabled: record_build timing always reports 0.00 us/msg.
         // let t0 = Instant::now();
         let (key, value) = &messages[messages_sent as usize % msg_count];
-        let record = ProducerRecord::with_key(topic.clone(), Some(key.as_slice()), Some(value.as_slice()));
+        let record = ProducerRecord::with_key(topic.clone(), Some(key.clone()), Some(value.clone()))
+            .expect("ProducerRecord::with_key");
         // record_build_total_us.fetch_add(t0.elapsed().as_micros() as u64, Ordering::Relaxed);
 
         // start_time is reused for both end-to-end latency tracking (in completion task)
         // and producer.send() histogram bucketing — saves one Instant::now() per msg.
         let start_time = Instant::now();
-        match producer.send(record, None).await {
+        match producer.send(record).await {
             Ok(future) => {
                 let send_us = start_time.elapsed().as_micros() as u64;
                 send_total_us.fetch_add(send_us, Ordering::Relaxed);
