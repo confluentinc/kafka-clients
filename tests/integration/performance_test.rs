@@ -345,6 +345,13 @@ async fn performance_test() {
     }
 
     // --- Create producer ---
+    // `key.serializer` / `value.serializer` placeholders: Phase 7a's
+    // `ProducerConfig` keeps Java's contract — both keys are required
+    // with no default — and the validator runs before the
+    // `from_config` path swaps in the supplied serializer instances.
+    // The configured FQCN is ignored (Phase 8.0 emits a `log::warn!`
+    // for this), but the validator still demands the key be present.
+    // Mirrors `producer_smoke_test.rs:194-211`.
     let mut props = HashMap::from([
         ("bootstrap.servers".to_string(), bootstrap_servers.clone()),
         ("client.id".to_string(), "perf-test-rust".to_string()),
@@ -359,6 +366,16 @@ async fn performance_test() {
             config.max_in_flight.clone(),
         ),
         ("max.block.ms".to_string(), "60000".to_string()),
+        // Required-key placeholders; `from_config` ignores them and
+        // uses the explicit `ByteArrayOwnedSerializer` instances below.
+        (
+            "key.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        (
+            "value.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
     ]);
     for (k, v) in config.sasl_props() {
         props.insert(k, v);
