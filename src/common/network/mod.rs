@@ -61,7 +61,7 @@ pub use invalid_receive_error::InvalidReceiveError;
 pub use kafka_channel::{ChannelMuteEvent, ChannelMuteState, KafkaChannel};
 pub use listener_name::ListenerName;
 pub use network_receive::NetworkReceive;
-pub use network_send::NetworkSend;
+pub use network_send::{NetworkSend, SendCompletion};
 pub use plaintext_channel_builder::PlaintextChannelBuilder;
 pub use plaintext_transport_layer::PlaintextTransportLayer;
 pub use receive::Receive;
