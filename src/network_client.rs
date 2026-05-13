@@ -1019,6 +1019,17 @@ where
         let send: Box<dyn crate::common::network::Send + std::marker::Send> = Box::new(send_inner);
         let dest_arc = client_request.destination_arc();
 
+        // Build the NetworkSend up front so we can extract a cheap
+        // completion handle for the InFlightRequest BEFORE handing
+        // ownership to the selector — this is what makes
+        // `InFlightRequests::can_send_more` observe the channel's
+        // mid-write state (mirrors Java NetworkClient.java:608-617
+        // where the same `Send` reference is shared between
+        // `InFlightRequest.send` and `selector.send(new
+        // NetworkSend(destination, send))`).
+        let network_send = NetworkSend::new(dest_arc, send);
+        let completion = network_send.completion_handle();
+
         let in_flight = InFlightRequest::new(
             header,
             client_request.request_timeout_ms(),
@@ -1028,11 +1039,11 @@ where
             client_request.expect_response(),
             is_internal_request,
             Some(request),
-            None, // we hand the Send to Selector immediately
+            Some(completion),
             now,
         );
         self.in_flight_requests.add(in_flight);
-        self.selector.send(NetworkSend::new(dest_arc, send));
+        self.selector.send(network_send);
         Ok(())
     }
 
@@ -2546,6 +2557,17 @@ mod tests {
         // Send three (distinct correlation ids) MetadataRequests on the
         // same connection. Use `expect_response=true` so each request
         // is added to the in-flight deque.
+        //
+        // `poll(0)` is invoked between sends to match Java's
+        // `testDisconnectWithMultipleInFlights` (NetworkClientTest.java
+        // line 1057) — Java's `MockSelector.send()` queues into
+        // `initiatedSends`; only `poll()` flushes to `completedSends`
+        // (MockSelector.java:142). Phase 8a.2 fixes the
+        // `InFlightRequests::can_send_more` gate to actually observe
+        // the channel's mid-write state, so back-to-back `send()`s
+        // without an intervening `poll()` are now correctly rejected
+        // (mirroring Java's `peekFirst().send.completed()==false` path,
+        // InFlightRequests.java:99).
         let now = time.milliseconds();
         let mut correlation_ids: Vec<i32> = Vec::new();
         for _ in 0..3 {
@@ -2560,6 +2582,10 @@ mod tests {
             );
             correlation_ids.push(req.correlation_id());
             client.send(req, now);
+            // Drain the NetworkSend so the next can_send_more returns
+            // true — matches Java's `client.poll(0, now)` between
+            // sends in NetworkClientTest.java:1071,1075.
+            client.poll(0, now).await;
         }
         // Distinct correlation ids.
         assert_eq!(correlation_ids.len(), 3);
@@ -2768,6 +2794,111 @@ mod tests {
         assert!(
             !lln.has_node_available_or_connection_ready(),
             "no node ready and no connection in progress"
+        );
+    }
+
+    // -----------------------------------------------------------------
+    // Phase 8a.1 perf-crash diagnosis pin
+    // -----------------------------------------------------------------
+    //
+    // Pins the root cause of the 5-min max-rate perf crash. Under
+    // sustained load the producer panicked at `selector.rs:993` with
+    // `IllegalStateException: Attempt to begin a send operation with
+    //  prior send operation still in progress`. Java's `Selector.send`
+    // throws the same way — the defect is upstream: the gating check
+    // at `network_client.rs:808/390` is structurally unable to observe
+    // an in-progress send because `InFlightRequest.send` is always
+    // populated as `None` (network_client.rs:1031) — Rust ownership
+    // hands the `NetworkSend` to the Selector and leaves the
+    // `InFlightRequest` blind to it. Java shares the same `Send`
+    // reference between `InFlightRequest` and `KafkaChannel`.
+    //
+    // This test should FAIL today; once Phase 8a.2 lands the
+    // Java-parity send-reference sharing, it will pass.
+    #[tokio::test]
+    async fn can_send_request_observes_in_progress_send() {
+        let time = Arc::new(MockTime::default());
+        let selector = MockSelector::new(Arc::clone(&time));
+        let view = MockSelectorView::new(selector.clone());
+        let node = test_node();
+        let updater = ManualMetadataUpdater::with_nodes(vec![node.clone()]);
+
+        let mut client = NetworkClient::new(
+            view,
+            updater,
+            Arc::from("mock-client"),
+            i32::MAX,
+            10_000,
+            100_000,
+            64 * 1024,
+            64 * 1024,
+            1_000,
+            5_000,
+            127_000,
+            Arc::clone(&time) as Arc<dyn crate::common::utils::Time>,
+            /* discover= */ false,
+            ApiVersions::new(),
+            Box::new(DefaultHostResolver),
+            i64::MAX,
+            MetadataRecoveryStrategy::None,
+        )
+        .expect("NetworkClient::new");
+
+        // Drive connect -> READY.
+        for _ in 0..3 {
+            if client.ready(&node, time.milliseconds()) {
+                break;
+            }
+            client.poll(0, time.milliseconds()).await;
+        }
+        assert!(client.is_ready(&node, time.milliseconds()), "node not ready");
+
+        // Build and submit a request. The MockSelector accepts the
+        // `NetworkSend` into `initiated_sends` — it does NOT auto-
+        // complete (no implicit flush). Mirrors the real Selector's
+        // behaviour where the bytes sit in `KafkaChannel.send` until
+        // a subsequent `poll()` actually writes them.
+        let builder: Arc<dyn AbstractRequestBuilder> = Arc::new(MetadataRequestBuilder::all_topics());
+        let req = client.new_client_request_with_callback_internal(
+            Arc::from(node.id().to_string()),
+            builder,
+            time.milliseconds(),
+            true,
+            5_000,
+            None,
+        );
+        let now = time.milliseconds();
+        let result = client.do_send(req, true, now);
+        assert!(result.is_ok(), "first do_send must succeed");
+
+        // After do_send: a NetworkSend is sitting on the Selector for
+        // this node. NO poll has happened, so nothing has been
+        // flushed. A second do_send to this same node must therefore
+        // be gated off — Java's `peekFirst().send.completed()` would
+        // return false.
+        //
+        // Pin 1: the InFlightRequest we just pushed must hold a
+        // reference to the still-pending NetworkSend. Currently the
+        // `send` field is populated as `None` at
+        // network_client.rs:1031, breaking this contract.
+        let in_flight_send_known = client.in_flight_requests.last_sent(node.id()).send.is_some();
+        assert!(
+            in_flight_send_known,
+            "InFlightRequest.send must reference the pending NetworkSend so can_send_more can observe its completion state. \
+             Currently network_client.rs:1031 passes `None`, leaving the queue blind to the channel's mid-write state."
+        );
+
+        // Pin 2: the producer-facing gating MUST refuse a second send
+        // until the first is drained. With Pin 1 broken, `can_send_more`
+        // returns true unconditionally (in_flight_requests.rs:322), and
+        // the next do_send sails through the gate — which against the
+        // real Selector fires the IllegalStateException panic at
+        // selector.rs:993 / kafka_channel.rs:611.
+        let can_send_again = client.can_send_request(node.id(), now);
+        assert!(
+            !can_send_again,
+            "can_send_request must return false while a prior NetworkSend is undrained. \
+             Returning true here is the proximate cause of the 5-min perf-test crash."
         );
     }
 }

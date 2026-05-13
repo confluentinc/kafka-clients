@@ -45,7 +45,7 @@ use std::sync::atomic::{AtomicI32, Ordering};
 
 use crate::ClientResponse;
 use crate::RequestCompletionHandler;
-use crate::common::network::Send as NetworkSendTrait;
+use crate::common::network::SendCompletion;
 use crate::common::requests::{AbstractRequest, RequestHeader};
 
 /// An in-flight request awaiting a response from the broker.
@@ -71,9 +71,15 @@ pub(crate) struct InFlightRequest {
     /// `request` parameter accepts `null`).
     pub(crate) request: Option<Box<dyn AbstractRequest>>,
     pub(crate) is_internal_request: bool,
+    /// Cheap, observe-only handle to the paired `NetworkSend`'s
+    /// completion bit. Populated by `NetworkClient::do_send` before the
+    /// `NetworkSend` is handed to the selector, so
+    /// [`InFlightRequests::can_send_more`] can mirror Java's
+    /// `peekFirst().send.completed()` check (InFlightRequests.java:99).
+    ///
     /// `None` for synthetic / fault-injected request entries (Java's
     /// `send` parameter accepts `null`).
-    pub(crate) send: Option<Box<dyn NetworkSendTrait + std::marker::Send>>,
+    pub(crate) send: Option<SendCompletion>,
     pub(crate) send_time_ms: i64,
     pub(crate) created_time_ms: i64,
     pub(crate) request_timeout_ms: i32,
@@ -96,7 +102,7 @@ impl InFlightRequest {
         expect_response: bool,
         is_internal_request: bool,
         request: Option<Box<dyn AbstractRequest>>,
-        send: Option<Box<dyn NetworkSendTrait + std::marker::Send>>,
+        send: Option<SendCompletion>,
         send_time_ms: i64,
     ) -> Self {
         InFlightRequest {
@@ -317,8 +323,8 @@ impl InFlightRequests {
                     // Java's `peekFirst().send.completed()` would throw on
                     // a null `send` — the only way an `InFlightRequest`
                     // gets created with no send in production is internal
-                    // book-keeping. We treat the absence as "completed"
-                    // (the entry isn't blocking the wire).
+                    // book-keeping or tests. We treat the absence as
+                    // "completed" (the entry isn't blocking the wire).
                     None => true,
                 };
                 first_send_completed && (queue.len() as i32) < self.max_in_flight_requests_per_connection
