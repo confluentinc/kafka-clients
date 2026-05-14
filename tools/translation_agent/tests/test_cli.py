@@ -2088,8 +2088,9 @@ def test_update_pr_dep_section_idempotent_on_repeated_calls(real_pr_description)
 
 def test_pr_cascade_plan_step_blocked_by_unapproved_plan_dep(tmp_path):
     """A `--pr 71` cascade on a status-1 row whose plan_dep AK SHA points
-    to a PR at status < PLAN_APPROVED (3) noops at status 1: no r2
-    invocation, no transition, no error logged."""
+    to a PR at status < PLAN_APPROVED (3) AND whose GitHub PR is still
+    OPEN noops at status 1: no r2 invocation, no transition, no error
+    logged."""
     db_path = str(tmp_path / "t.db")
     _seed_db(db_path)
     # Dep PR 70 at status 2 (plan_created, NOT approved).
@@ -2103,13 +2104,18 @@ def test_pr_cascade_plan_step_blocked_by_unapproved_plan_dep(tmp_path):
     conn.close()
     with patch("translation_agent.cli.streaming.run_with_prefix",
                return_value=(0, "")) as mstream, \
-         patch("translation_agent.cli.git_ops.push_branch"):
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.github.get_pr_state",
+               return_value=("OPEN", None)) as mstate:
         rc = _run(
             "--ak-repo-path", "/tmp/ak",
             "--pr", "71",
             db_path=db_path,
         )
     assert rc == 0
+    # The GitHub fallback queried the dep PR's state.
+    mstate.assert_called_once()
+    assert mstate.call_args.args[1] == 70
     # No r2 plan call -- the dep gating short-circuited before _run_plan_one.
     mstream.assert_not_called()
     conn = db.connect(db_path)
@@ -2118,6 +2124,218 @@ def test_pr_cascade_plan_step_blocked_by_unapproved_plan_dep(tmp_path):
     ).fetchone())
     assert pr71["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # unchanged
     assert pr71["last_error"] is None  # not an error, just blocked
+
+
+def test_pr_cascade_plan_unblocks_when_dep_pr_merged_on_github(
+    tmp_path, real_pr_description,
+):
+    """When the local DB shows the dep below PLAN_APPROVED but its PR is
+    MERGED on GitHub, the cascade discharges the dependency and lets X
+    advance through plan generation. The DB row for the dep is NOT
+    archived here -- that remains the sweep's job."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    # Dep PR 70 at status 1 (dep_eval done, plan NOT approved).
+    _insert_pr_at_status(
+        db_path, 70, "ak_a", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    _insert_pr_at_status(
+        db_path, 71, "ak_b", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    conn = db.connect(db_path)
+    db.update_dependencies(conn, 71, "ak_a", None)
+    conn.close()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli._update_pr_description_via_r2",
+               return_value=None), \
+         patch("translation_agent.cli.github.add_pr_label"), \
+         patch("translation_agent.cli.github.remove_pr_label"), \
+         patch("translation_agent.cli.github.get_pr_state",
+               return_value=("MERGED", "merge_sha_a")) as mstate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "71",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_called_once()
+    assert mstate.call_args.args[1] == 70
+    # r2 plan WAS invoked -- the gate let it through.
+    mstream.assert_called()
+    conn = db.connect(db_path)
+    pr71 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 71",
+    ).fetchone())
+    assert pr71["status"] == db.STATUS_PLAN_CREATED  # advanced 1 -> 2
+    # Dep row 70 is NOT archived by the gate path; sweep owns archival.
+    pr70 = conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 70",
+    ).fetchone()
+    assert pr70 is not None
+
+
+def test_pr_cascade_plan_unblocks_when_dep_pr_closed_on_github(
+    tmp_path, real_pr_description,
+):
+    """CLOSED-without-merge has the same effect as MERGED: dep is
+    discharged, X proceeds. Mirrors the sweep's symmetric handling in
+    _check_pr_closures_and_advance_cursor."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    _insert_pr_at_status(db_path, 70, "ak_a", db.STATUS_PLAN_CREATED)
+    _insert_pr_at_status(
+        db_path, 71, "ak_b", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    conn = db.connect(db_path)
+    db.update_dependencies(conn, 71, "ak_a", None)
+    conn.close()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli._update_pr_description_via_r2",
+               return_value=None), \
+         patch("translation_agent.cli.github.add_pr_label"), \
+         patch("translation_agent.cli.github.remove_pr_label"), \
+         patch("translation_agent.cli.github.get_pr_state",
+               return_value=("CLOSED", None)) as mstate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "71",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_called_once()
+    mstream.assert_called()
+    conn = db.connect(db_path)
+    pr71 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 71",
+    ).fetchone())
+    assert pr71["status"] == db.STATUS_PLAN_CREATED
+
+
+def test_pr_cascade_plan_blocks_when_gh_state_check_fails(tmp_path):
+    """`gh pr view` failure during the GitHub fallback must NOT silently
+    unblock -- treat unknown state as 'still possibly OPEN' and block.
+    Matches the sweep's posture at _check_pr_closures_and_advance_cursor."""
+    from translation_agent import github as gh
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    _insert_pr_at_status(db_path, 70, "ak_a", db.STATUS_PLAN_CREATED)
+    _insert_pr_at_status(
+        db_path, 71, "ak_b", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    conn = db.connect(db_path)
+    db.update_dependencies(conn, 71, "ak_a", None)
+    conn.close()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.github.get_pr_state",
+               side_effect=gh.GhError("boom")) as mstate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "71",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_called_once()
+    mstream.assert_not_called()
+    conn = db.connect(db_path)
+    pr71 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 71",
+    ).fetchone())
+    assert pr71["status"] == db.STATUS_DEPENDENCIES_EVALUATED  # unchanged
+    # gh-failure is transient, NOT persisted to last_error: only a log warning.
+    assert pr71["last_error"] is None
+
+
+def test_pr_cascade_plan_blocks_for_synthetic_dep_pr_number_without_gh_call(
+    tmp_path,
+):
+    """Synthetic dep rows (pr_number < 0, used by dry-run) skip the
+    GitHub fallback entirely. Without a real PR to query, we just block
+    via the existing path."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    # Synthetic dep row at pr_number=-1.
+    _insert_pr_at_status(db_path, -1, "ak_a", db.STATUS_PLAN_CREATED)
+    _insert_pr_at_status(
+        db_path, 71, "ak_b", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    conn = db.connect(db_path)
+    db.update_dependencies(conn, 71, "ak_a", None)
+    conn.close()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.github.get_pr_state") as mstate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "71",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_not_called()
+    mstream.assert_not_called()
+    conn = db.connect(db_path)
+    pr71 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 71",
+    ).fetchone())
+    assert pr71["status"] == db.STATUS_DEPENDENCIES_EVALUATED
+
+
+def test_pr_cascade_impl_unblocks_when_dep_pr_merged_on_github(
+    tmp_path, real_pr_description,
+):
+    """Parity check for the impl gate: when the local DB shows the impl
+    dep below IMPLEMENTATION_DONE but its PR is MERGED, X advances
+    through impl. Same shared `_dep_blocks_step` helper covers both
+    plan and impl gates."""
+    db_path = str(tmp_path / "t.db")
+    _seed_db(db_path)
+    # Dep PR 80 at status 2 (plan_created), well below IMPLEMENTATION_DONE.
+    _insert_pr_at_status(db_path, 80, "ak_a", db.STATUS_PLAN_CREATED)
+    # X (PR 81) waiting on impl_dep=ak_a. update_dependencies resets
+    # status to DEPENDENCIES_EVALUATED, so promote to PLAN_APPROVED
+    # afterwards so the cascade dispatches to _do_impl_step.
+    _insert_pr_at_status(
+        db_path, 81, "ak_b", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    conn = db.connect(db_path)
+    db.update_dependencies(conn, 81, None, "ak_a")
+    conn.execute(
+        "UPDATE pr_commit SET status = ? WHERE pr_number = ?",
+        (db.STATUS_PLAN_APPROVED, 81),
+    )
+    conn.commit()
+    conn.close()
+    with patch("translation_agent.cli.streaming.run_with_prefix",
+               return_value=(0, "")) as mstream, \
+         patch("translation_agent.cli.git_ops.push_branch"), \
+         patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="rust_sha_b"), \
+         patch("translation_agent.cli._update_pr_description_via_r2",
+               return_value=None), \
+         patch("translation_agent.cli.github.add_pr_label"), \
+         patch("translation_agent.cli.github.remove_pr_label"), \
+         patch("translation_agent.cli.github.get_pr_state",
+               return_value=("MERGED", "merge_sha_a")) as mstate:
+        rc = _run(
+            "--ak-repo-path", "/tmp/ak",
+            "--pr", "81",
+            db_path=db_path,
+        )
+    assert rc == 0
+    mstate.assert_called_once()
+    assert mstate.call_args.args[1] == 80
+    mstream.assert_called()
+    conn = db.connect(db_path)
+    pr81 = dict(conn.execute(
+        "SELECT * FROM pr_commit WHERE pr_number = 81",
+    ).fetchone())
+    assert pr81["status"] == db.STATUS_IMPLEMENTATION_DONE  # advanced 3 -> 4
 
 
 def test_pr_cascade_plan_failure_persists_last_error_keeps_status_1(tmp_path):

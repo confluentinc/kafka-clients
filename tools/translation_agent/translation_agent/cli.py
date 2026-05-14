@@ -814,9 +814,11 @@ def _dep_blocks_step(
     args, pr, dep_column: str, threshold: int, phase: str,
 ) -> bool:
     """True iff this PR's `dep_column` (an AK SHA) points to a PR on the
-    same rust_branch whose status is below `threshold`. False if the
-    dep is satisfied (status >= threshold) or unresolvable (the dep PR
-    row was deleted or archived and the dep column wasn't nulled).
+    same rust_branch whose status is below `threshold` AND whose GitHub
+    PR is still OPEN. False if the dep is satisfied (status >= threshold),
+    unresolvable (the dep PR row was deleted or archived and the dep
+    column wasn't nulled), or its GitHub PR has been CLOSED or MERGED
+    even though the local status hasn't caught up yet.
 
     Replaces the SQL-JOIN-based gating that lived inside the deleted
     `get_unblocked_for_status` query: per-PR cascade looks up one dep
@@ -844,6 +846,36 @@ def _dep_blocks_step(
         )
         return True
     if dep_row["status"] < threshold:
+        # GitHub-state fallback: the local DB shows the dep below
+        # threshold, but its PR may already be CLOSED (abandoned) or
+        # MERGED while the sweep hasn't reconciled yet. Discharge the
+        # dependency in that case so the per-PR cascade doesn't stall
+        # waiting for the sweep. Skipped for synthetic rows
+        # (pr_number is None or < 0); on `gh` failure we block
+        # conservatively, matching the sweep's posture in
+        # _check_pr_closures_and_advance_cursor.
+        dep_pr_number = dep_row["pr_number"]
+        if dep_pr_number is not None and dep_pr_number > 0:
+            try:
+                state, _ = github.get_pr_state(
+                    args.rust_repo_path, dep_pr_number,
+                )
+            except github.GhError as e:
+                log.warning(
+                    "PR #%d %s gate: gh failed for dep PR #%d: %s -- "
+                    "blocking conservatively, row stays at status %d",
+                    pr_number, phase, dep_pr_number, e, pr["status"],
+                )
+                return True
+            if state in ("CLOSED", "MERGED"):
+                log.info(
+                    "PR #%d %s unblocked via GitHub fallback: dep "
+                    "PR #%d (AK %s) is %s on GitHub although DB "
+                    "status is %d (< %d)",
+                    pr_number, phase, dep_pr_number, dep_sha[:12],
+                    state, dep_row["status"], threshold,
+                )
+                return False
         log.info(
             "PR #%d %s blocked: dep PR #%s (AK %s) is at status %d, "
             "need >= %d -- row stays at status %d",
