@@ -73,6 +73,23 @@ def fake_streaming(monkeypatch):
     return mock
 
 
+@pytest.fixture(autouse=True)
+def _default_pr_body_mock(monkeypatch):
+    """Patch `github.get_pr_body` to a fixed string by default so tests
+    don't accidentally invoke real `gh pr view` against the developer's
+    repo. `_run_pr_ask` now calls this on every supported status, so
+    every integration test would otherwise be non-hermetic.
+
+    Tests that want to exercise the real path (or assert on the body)
+    re-patch the same target with `with patch(...)` inside the test;
+    the inner patch wins for its `with` scope.
+    """
+    monkeypatch.setattr(
+        "translation_agent.cli.github.get_pr_body",
+        lambda repo_path, pr_number: "default test PR body",
+    )
+
+
 @pytest.fixture
 def no_artifact_io(monkeypatch):
     """Stub out the four locked_db artifact RPCs so the suite runs in
@@ -139,6 +156,7 @@ def test_ask_question_only_template_substitutes_and_quotes_command():
         pr_number=42,
         branch_name="kafka-translate/abc123",
         plan_path="./design/history/42_description/plan.md",
+        pr_body="## Summary\n\nThe scope of this PR.",
     )
     assert "What does foo() do?" in p
     assert "--- BEGIN REVIEWER COMMAND ---" in p
@@ -158,6 +176,7 @@ def test_ask_plan_fixup_template_substitutes_and_allows_fixup_commits():
         pr_number=7,
         branch_name="kafka-translate/abc",
         plan_path="./design/history/7_description/plan.md",
+        pr_body="## Summary\n\nPlan-fixup PR body.",
     )
     assert "Please clarify the dependency rationale." in p
     assert "./design/history/7_description/plan.md" in p
@@ -174,6 +193,7 @@ def test_ask_impl_or_plan_fixup_template_allows_make_verify():
         pr_number=11,
         branch_name="kafka-translate/abc",
         plan_path="./design/history/11_description/plan.md",
+        pr_body="## Summary\n\nImpl-fixup PR body.",
     )
     assert "Add a doc comment to bar()." in p
     assert "make verify" in p
@@ -195,8 +215,36 @@ def test_ask_template_handles_multiline_command_with_backticks():
         user_command=multiline_cmd,
         ak_commit="abc", ak_branch="trunk", pr_number=1,
         branch_name="b", plan_path="p.md",
+        pr_body="(body)",
     )
     assert multiline_cmd in p
+
+
+@pytest.mark.parametrize(
+    "template",
+    [
+        prompts.ASK_QUESTION_ONLY_PROMPT_TEMPLATE,
+        prompts.ASK_PLAN_FIXUP_PROMPT_TEMPLATE,
+        prompts.ASK_IMPL_OR_PLAN_FIXUP_PROMPT_TEMPLATE,
+    ],
+)
+def test_ask_template_includes_pr_body_block(template):
+    """All three ask templates must inline the PR description between
+    BEGIN/END markers so the agent sees what the reviewer is reasoning
+    against. Verbatim body text appears between the markers."""
+    body = "## Summary\n\nThe quick brown fox jumps over the lazy dog."
+    p = template.format(
+        user_command="cmd", ak_commit="abc", ak_branch="trunk",
+        pr_number=1, branch_name="b", plan_path="p.md", pr_body=body,
+    )
+    assert "--- BEGIN PR DESCRIPTION ---" in p
+    assert "--- END PR DESCRIPTION ---" in p
+    assert body in p
+    # The body block precedes the reviewer-command block (so the agent
+    # reads the PR's stated scope before it sees the reviewer's question).
+    assert p.index("--- END PR DESCRIPTION ---") < p.index(
+        "--- BEGIN REVIEWER COMMAND ---"
+    )
 
 
 # --- Argparse / dispatch validation -----------------------------------------
@@ -603,3 +651,146 @@ def test_ask_does_not_advance_status_on_success(
             f"PR #{pr_num}: status changed from {status} to {actual}"
         )
         conn.close()
+
+
+# --- PR-body context (inlined into the prompt) -----------------------------
+
+def test_ask_includes_pr_body_in_prompt(
+    tmp_path, real_worktree, fake_streaming, no_artifact_io, monkeypatch,
+):
+    """The PR body fetched via gh must appear inside the prompt between
+    the BEGIN/END PR-DESCRIPTION markers, so the agent reads the same
+    context the reviewer is reasoning against."""
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(
+        db_path, 42, "abc", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    body_text = (
+        "## Summary\n\n"
+        "This PR translates `FetchRequest` from Java to Rust.\n\n"
+        "**Dependencies:**\n- Plan: #41"
+    )
+    monkeypatch.setattr(
+        "translation_agent.cli.github.get_pr_body",
+        lambda repo_path, pr_number: body_text,
+    )
+
+    def streaming_side_effect(*args, **kwargs):
+        _write_answer(real_worktree)
+        return (0, "ok")
+    fake_streaming.side_effect = streaming_side_effect
+
+    with patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="same"), \
+         patch("translation_agent.cli.github.add_pr_comment"):
+        rc = _run("--pr", "42", "--ask", "Q?", db_path=db_path)
+    assert rc == 0
+    # Prompt is the second positional arg to streaming.run_with_prefix:
+    # `[*r2.R2_CLAUDE_CMD_PREFIX, "-p", prompt]` -- index -1 is the
+    # prompt text itself.
+    cmd_args = fake_streaming.call_args.args[0]
+    prompt = cmd_args[-1]
+    assert "--- BEGIN PR DESCRIPTION ---" in prompt
+    assert "--- END PR DESCRIPTION ---" in prompt
+    assert body_text in prompt
+
+
+def test_ask_hard_fails_when_pr_body_fetch_fails(
+    tmp_path, fake_streaming, no_artifact_io, monkeypatch,
+):
+    """If `gh pr view` fails for the PR body, --ask must hard-fail with
+    rc=1 BEFORE creating the worktree or invoking r2. The PR description
+    is required context; better to surface the error than to send a
+    half-informed agent."""
+    from translation_agent import github as gh
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(
+        db_path, 42, "abc", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+
+    def boom(repo_path, pr_number):
+        raise gh.GhError("simulated gh failure")
+    monkeypatch.setattr(
+        "translation_agent.cli.github.get_pr_body", boom,
+    )
+
+    with patch(
+        "translation_agent.cli.worktree.worktree_for_branch",
+    ) as mwt, \
+         patch("translation_agent.cli.github.add_pr_comment") as mcomment:
+        rc = _run("--pr", "42", "--ask", "Q?", db_path=db_path)
+    assert rc == 1
+    # Fail-fast: worktree never opened, r2 never invoked, no comment.
+    mwt.assert_not_called()
+    fake_streaming.assert_not_called()
+    mcomment.assert_not_called()
+
+
+def test_ask_synthetic_pr_number_uses_placeholder_body(
+    tmp_path, real_worktree, fake_streaming, no_artifact_io, monkeypatch,
+):
+    """Synthetic (negative) pr_numbers skip the gh fetch entirely and
+    use a literal placeholder string. Mirrors the synthetic-pr_number
+    guard at the comment-posting site."""
+    sentinel = MagicMock(side_effect=AssertionError(
+        "github.get_pr_body must NOT be called for synthetic pr_numbers",
+    ))
+    monkeypatch.setattr(
+        "translation_agent.cli.github.get_pr_body", sentinel,
+    )
+
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(
+        db_path, -1, "abc", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+
+    def streaming_side_effect(*args, **kwargs):
+        _write_answer(real_worktree)
+        return (0, "ok")
+    fake_streaming.side_effect = streaming_side_effect
+
+    with patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="same"), \
+         patch("translation_agent.cli.github.add_pr_comment") as mcomment:
+        rc = _run("--pr", "-1", "--ask", "Q?", db_path=db_path)
+    assert rc == 0
+    sentinel.assert_not_called()
+    # No comment posted for synthetic pr_numbers (existing guard).
+    mcomment.assert_not_called()
+    # Prompt contains the placeholder, not a fetched body.
+    prompt = fake_streaming.call_args.args[0][-1]
+    assert "(synthetic PR; no description fetched)" in prompt
+
+
+def test_ask_empty_pr_body_renders_empty_markers(
+    tmp_path, real_worktree, fake_streaming, no_artifact_io, monkeypatch,
+):
+    """An empty PR body still renders the BEGIN/END markers (with
+    nothing between them), and the agent invocation proceeds normally.
+    The markers carry the meaning -- the absence of text between them
+    explicitly signals 'no description'."""
+    db_path = str(tmp_path / "t.db")
+    _insert_pr_at_status(
+        db_path, 42, "abc", db.STATUS_DEPENDENCIES_EVALUATED,
+    )
+    monkeypatch.setattr(
+        "translation_agent.cli.github.get_pr_body",
+        lambda repo_path, pr_number: "",
+    )
+
+    def streaming_side_effect(*args, **kwargs):
+        _write_answer(real_worktree)
+        return (0, "ok")
+    fake_streaming.side_effect = streaming_side_effect
+
+    with patch("translation_agent.cli.git_ops.rev_parse",
+               return_value="same"), \
+         patch("translation_agent.cli.github.add_pr_comment"):
+        rc = _run("--pr", "42", "--ask", "Q?", db_path=db_path)
+    assert rc == 0
+    fake_streaming.assert_called_once()
+    prompt = fake_streaming.call_args.args[0][-1]
+    assert (
+        "--- BEGIN PR DESCRIPTION ---\n\n--- END PR DESCRIPTION ---"
+        in prompt
+    )

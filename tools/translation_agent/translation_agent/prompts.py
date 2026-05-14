@@ -209,6 +209,18 @@ Reviewer's command (verbatim, between the BEGIN/END markers):
 """
 
 
+# The PR description as last seen on GitHub, inlined so the agent can
+# reason about the PR's stated scope, dep section, and summary without
+# having to fetch it itself. Concatenated into every ASK_*_TEMPLATE.
+_ASK_PR_DESCRIPTION_INSTRUCTION = """\
+PR description (verbatim, between the BEGIN/END markers):
+--- BEGIN PR DESCRIPTION ---
+{pr_body}
+--- END PR DESCRIPTION ---
+
+"""
+
+
 ASK_QUESTION_ONLY_PROMPT_TEMPLATE = """\
 You are answering a reviewer's question about an in-flight translation
 PR. The PR has been dependency-evaluated but no plan has been written
@@ -223,7 +235,7 @@ Context:
 - Rust branch:     {branch_name}
 - Rust repo root:  current working directory
 
-""" + _ASK_ANSWER_FILE_INSTRUCTION + """\
+""" + _ASK_PR_DESCRIPTION_INSTRUCTION + _ASK_ANSWER_FILE_INSTRUCTION + """\
 
 IMPORTANT:
 - Do NOT enter plan mode. Use the Write tool directly to create
@@ -248,7 +260,7 @@ Context:
 - Plan file:       {plan_path}
 - Rust repo root:  current working directory
 
-""" + _ASK_ANSWER_FILE_INSTRUCTION + """\
+""" + _ASK_PR_DESCRIPTION_INSTRUCTION + _ASK_ANSWER_FILE_INSTRUCTION + """\
 
 If the reviewer is asking for plan changes:
 1. Edit {plan_path} to apply them.
@@ -286,7 +298,7 @@ Context:
 - Plan file:       {plan_path}
 - Rust repo root:  current working directory
 
-""" + _ASK_ANSWER_FILE_INSTRUCTION + """\
+""" + _ASK_PR_DESCRIPTION_INSTRUCTION + _ASK_ANSWER_FILE_INSTRUCTION + """\
 
 If the reviewer is asking for code or plan changes:
 1. Make the edits.

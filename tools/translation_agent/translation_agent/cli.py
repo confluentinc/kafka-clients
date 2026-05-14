@@ -616,6 +616,22 @@ def _run_pr_ask(args: argparse.Namespace, pr) -> int:
         )
         return 1
 
+    # Fetch the PR description so the agent can reason about the PR's
+    # stated scope, dep section, and summary the same way the reviewer
+    # does. Required context: hard-fail on gh issues here so we don't
+    # pay the worktree-creation cost just to give the agent a stale
+    # answer. Synthetic pr_numbers (negative, used by tests) skip the
+    # fetch and get a placeholder.
+    if pr_number >= 0:
+        try:
+            pr_body = github.get_pr_body(args.rust_repo_path, pr_number)
+        except github.GhError as e:
+            return _ask_log_and_return(
+                pr_number, f"failed to fetch PR description: {e}",
+            )
+    else:
+        pr_body = "(synthetic PR; no description fetched)"
+
     branch_name = github.branch_name_for_ak(pr["ak_commit"])
     plan_path = f"./design/history/{pr_number}_description/plan.md"
     prompt = template.format(
@@ -625,6 +641,7 @@ def _run_pr_ask(args: argparse.Namespace, pr) -> int:
         pr_number=pr_number,
         branch_name=branch_name,
         plan_path=plan_path,
+        pr_body=pr_body,
     )
     if args.dry_run:
         prompt = prompt + "\n" + prompts.DRY_RUN_NOTE
