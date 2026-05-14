@@ -242,6 +242,60 @@ def test_format_dep_section_no_deps_returns_empty_string():
     assert github.format_dep_section(None, None) == ""
 
 
+def test_format_dep_section_with_reasons_renders_sub_bullets():
+    """When a reason is present alongside its dep, render it as a
+    nested list item under the dep line."""
+    s = github.format_dep_section(
+        plan_dep_pr_number=123, impl_dep_pr_number=456,
+        plan_dep_reason="Y added the request builder X uses.",
+        impl_dep_reason="X imports Y's RequestBuilder type.",
+    )
+    assert s == (
+        "**Dependencies:**\n"
+        "- Plan: #123\n"
+        "  - Reason: Y added the request builder X uses.\n"
+        "- Implementation: #456\n"
+        "  - Reason: X imports Y's RequestBuilder type."
+    )
+
+
+def test_format_dep_section_only_plan_reason_renders_only_plan_sub_bullet():
+    """Asymmetric reasons: plan has one, impl does not. The impl line
+    stays bare; no '  - Reason:' is appended to it."""
+    s = github.format_dep_section(
+        plan_dep_pr_number=123, impl_dep_pr_number=456,
+        plan_dep_reason="Y added the request builder X uses.",
+    )
+    assert s == (
+        "**Dependencies:**\n"
+        "- Plan: #123\n"
+        "  - Reason: Y added the request builder X uses.\n"
+        "- Implementation: #456"
+    )
+
+
+def test_format_dep_section_no_reasons_matches_legacy_output():
+    """Regression: without reasons, the rendered block is byte-for-byte
+    identical to the pre-reason output. Existing PRs that don't have
+    reasons must look unchanged."""
+    s = github.format_dep_section(
+        plan_dep_pr_number=123, impl_dep_pr_number=456,
+        plan_dep_reason=None, impl_dep_reason=None,
+    )
+    assert s == "**Dependencies:**\n- Plan: #123\n- Implementation: #456"
+
+
+def test_format_dep_section_empty_reason_skips_sub_bullet():
+    """Defensive: even if a caller bypasses the parser's normalization
+    and passes an empty string, the renderer still skips the sub-bullet
+    rather than emitting '  - Reason: '."""
+    s = github.format_dep_section(
+        plan_dep_pr_number=123, impl_dep_pr_number=456,
+        plan_dep_reason="", impl_dep_reason="",
+    )
+    assert s == "**Dependencies:**\n- Plan: #123\n- Implementation: #456"
+
+
 def test_replace_dep_section_prepends_when_no_existing_block():
     """Body has no orchestrator markers yet -> the new block lands at
     the top with a blank-line separator before the existing body."""

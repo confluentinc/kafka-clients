@@ -20,7 +20,7 @@ the orchestration code that invokes them.
 
 import json
 import re
-from typing import Optional, Tuple
+from typing import NamedTuple, Optional
 
 
 DEPENDENCY_EVAL_PROMPT_TEMPLATE = """\
@@ -43,12 +43,19 @@ Other AK commits in the current batch (any of these may be a dependency):
 
 Output a single JSON object on stdout, with no other text:
 
-{{"plan_dependency": "<full-sha or null>", "implementation_dependency": "<full-sha or null>"}}
+{{"plan_dependency": "<full-sha or null>", "plan_dependency_reason": "<one-sentence explanation or null>", "implementation_dependency": "<full-sha or null>", "implementation_dependency_reason": "<one-sentence explanation or null>"}}
 
 If the target's plan does not depend on any commit in the batch, set
 plan_dependency to null. Same for implementation_dependency. There must
 be at most one plan_dependency and at most one implementation_dependency
 (the LATEST one if multiple would otherwise apply).
+
+Reason fields:
+- If a dependency is null, its corresponding reason MUST also be null.
+- If a dependency is set, the reason should be a short single sentence
+  explaining why this commit's plan / implementation depends on the
+  named commit (e.g. "introduces the FetchRequest builder this commit
+  consumes").
 """
 
 
@@ -319,14 +326,38 @@ _JSON_OBJ_RE = re.compile(
 )
 
 
-def parse_dep_eval_json(
-    stdout: str,
-) -> Optional[Tuple[Optional[str], Optional[str]]]:
+class DepEvalResult(NamedTuple):
+    """Parsed dep-eval JSON: two SHA fields plus their per-dep reasons.
+
+    Reasons are passed straight through to the PR description and not
+    persisted in the DB. A reason field is always coupled to its dep:
+    if the dep SHA is None, the parser forces the reason to None too.
+    """
+    plan_dependency: Optional[str]
+    plan_dependency_reason: Optional[str]
+    implementation_dependency: Optional[str]
+    implementation_dependency_reason: Optional[str]
+
+
+def _normalize_reason(value: object) -> Optional[str]:
+    """Coerce a raw JSON reason value to a clean string or None.
+
+    Lenient: missing keys, JSON null, non-string values, and
+    whitespace-only strings all collapse to None so the renderer can
+    skip the sub-bullet.
+    """
+    if not isinstance(value, str):
+        return None
+    stripped = value.strip()
+    return stripped or None
+
+
+def parse_dep_eval_json(stdout: str) -> Optional[DepEvalResult]:
     """Extract the dep-eval JSON answer from a (potentially noisy) stdout.
 
-    Returns (plan_dependency, implementation_dependency) on success; None
-    if no parseable JSON object with the right keys is found. Either
-    dependency may be None inside the tuple (meaning "no dep").
+    Returns a DepEvalResult on success; None if no parseable JSON object
+    with the two required SHA keys is found. Reason fields are optional
+    and tolerated when missing or malformed.
     """
     matches = list(_JSON_OBJ_RE.finditer(stdout))
     if not matches:
@@ -346,5 +377,14 @@ def parse_dep_eval_json(
             plan = None
         if impl is not None and not isinstance(impl, str):
             impl = None
-        return plan, impl
+        plan_reason = _normalize_reason(obj.get("plan_dependency_reason"))
+        impl_reason = _normalize_reason(
+            obj.get("implementation_dependency_reason")
+        )
+        # Coupling: a null dep can never carry a reason.
+        if plan is None:
+            plan_reason = None
+        if impl is None:
+            impl_reason = None
+        return DepEvalResult(plan, plan_reason, impl, impl_reason)
     return None

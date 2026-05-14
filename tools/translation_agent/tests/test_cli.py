@@ -1869,7 +1869,10 @@ def test_pr_cascade_dep_eval_writes_label_and_dep_section(
     )
     _insert_pr_at_status(db_path, 200, "ak_b", db.STATUS_NO_PLAN)
     json_b = (
-        '{"plan_dependency": "ak_a", "implementation_dependency": "ak_a"}'
+        '{"plan_dependency": "ak_a",'
+        ' "plan_dependency_reason": "ak_a introduces the helper ak_b plans against.",'
+        ' "implementation_dependency": "ak_a",'
+        ' "implementation_dependency_reason": "ak_b imports the type ak_a defines."}'
     )
     with patch("translation_agent.cli.git_ops.commits_between",
                return_value=["ak_a", "ak_b"]), \
@@ -1901,7 +1904,8 @@ def test_pr_cascade_dep_eval_writes_label_and_dep_section(
     assert prompts.LABEL_PLAN_CREATED in added
     removed = [c.args[2] for c in mrem.call_args_list]
     assert prompts.LABEL_DEPENDENCIES_EVALUATED in removed
-    # PR 200's body got the dep section update referencing PR #100.
+    # PR 200's body got the dep section update referencing PR #100,
+    # including the reason sub-bullets sourced from the dep-eval JSON.
     body_writes_for_200 = [
         c for c in mupd.call_args_list if c.args[1] == 200
     ]
@@ -1910,6 +1914,14 @@ def test_pr_cascade_dep_eval_writes_label_and_dep_section(
     assert "**Dependencies:**" in new_body
     assert "- Plan: #100" in new_body
     assert "- Implementation: #100" in new_body
+    assert (
+        "  - Reason: ak_a introduces the helper ak_b plans against."
+        in new_body
+    )
+    assert (
+        "  - Reason: ak_b imports the type ak_a defines."
+        in new_body
+    )
 
 
 def test_pr_cascade_plan_step_swaps_deps_eval_label_for_plan_created_label(

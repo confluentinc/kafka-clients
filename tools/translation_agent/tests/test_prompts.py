@@ -24,6 +24,21 @@ def test_dep_eval_template_substitutes():
     assert "- d" in p
 
 
+def test_dep_eval_template_asks_for_reason_fields():
+    """The prompt must ask r2 to emit `_reason` fields alongside each
+    dep SHA, and explain the null-dep-implies-null-reason coupling.
+    Without this the parser would always see missing reasons and the
+    PR description would never get the new sub-bullets."""
+    p = prompts.DEPENDENCY_EVAL_PROMPT_TEMPLATE.format(
+        ak_commit="abc", ak_repo_path="/x", batch_listing="- d",
+    )
+    assert "plan_dependency_reason" in p
+    assert "implementation_dependency_reason" in p
+    # The wording around the coupling rule must be present so r2 doesn't
+    # emit a stray reason for a null dep.
+    assert "null" in p.lower()
+
+
 def test_pr_description_template_substitutes_and_forbids_remote_writes():
     """The PR-description prompt must (a) interpolate phase / pr_number
     / branch / base / ak_commit, (b) tell claude to write to ./pr_body.md,
@@ -120,7 +135,9 @@ def test_plan_and_impl_prompts_forbid_git_push():
 
 def test_parse_clean_json():
     out = '{"plan_dependency": "abc", "implementation_dependency": "def"}'
-    assert prompts.parse_dep_eval_json(out) == ("abc", "def")
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "abc", None, "def", None,
+    )
 
 
 def test_parse_with_log_noise_around_json():
@@ -130,7 +147,9 @@ def test_parse_with_log_noise_around_json():
         '{"plan_dependency": "abc", "implementation_dependency": null}\n'
         "Done.\n"
     )
-    assert prompts.parse_dep_eval_json(out) == ("abc", None)
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "abc", None, None, None,
+    )
 
 
 def test_parse_picks_last_json_when_multiple():
@@ -139,12 +158,16 @@ def test_parse_picks_last_json_when_multiple():
         "Wait, recomputing...\n"
         '{"plan_dependency": "final", "implementation_dependency": "final2"}\n'
     )
-    assert prompts.parse_dep_eval_json(out) == ("final", "final2")
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "final", None, "final2", None,
+    )
 
 
 def test_parse_both_null():
     out = '{"plan_dependency": null, "implementation_dependency": null}'
-    assert prompts.parse_dep_eval_json(out) == (None, None)
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        None, None, None, None,
+    )
 
 
 def test_parse_no_json_returns_none():
@@ -160,9 +183,81 @@ def test_parse_missing_one_key_skips():
     out = '{"plan_dependency": "abc"}\n{"plan_dependency": "x", "implementation_dependency": "y"}'
     # The first object is missing the impl key; the parser walks back from
     # the last match, which has both keys.
-    assert prompts.parse_dep_eval_json(out) == ("x", "y")
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "x", None, "y", None,
+    )
 
 
 def test_parse_non_string_dep_normalized_to_none():
     out = '{"plan_dependency": 42, "implementation_dependency": "ok"}'
-    assert prompts.parse_dep_eval_json(out) == (None, "ok")
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        None, None, "ok", None,
+    )
+
+
+def test_parse_reasons_present_carried_through():
+    """Reason fields, when present and string-valued, flow through to
+    the result alongside their corresponding dep SHAs."""
+    out = (
+        '{"plan_dependency": "abc",'
+        ' "plan_dependency_reason": "Y added the request builder X uses.",'
+        ' "implementation_dependency": "def",'
+        ' "implementation_dependency_reason": "X depends on Y\'s impl."}'
+    )
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "abc", "Y added the request builder X uses.",
+        "def", "X depends on Y's impl.",
+    )
+
+
+def test_parse_reason_non_string_coerced_to_none():
+    """A reason value of a non-string JSON type (int, list, etc.) is
+    treated as missing rather than rendered literally."""
+    out = (
+        '{"plan_dependency": "abc",'
+        ' "plan_dependency_reason": 42,'
+        ' "implementation_dependency": "def",'
+        ' "implementation_dependency_reason": ["bad"]}'
+    )
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "abc", None, "def", None,
+    )
+
+
+def test_parse_reason_whitespace_only_coerced_to_none():
+    """Whitespace-only reasons collapse to None so the renderer can skip
+    the sub-bullet rather than emit '  - Reason:   '."""
+    out = (
+        '{"plan_dependency": "abc",'
+        ' "plan_dependency_reason": "   ",'
+        ' "implementation_dependency": "def",'
+        ' "implementation_dependency_reason": "\\t\\n"}'
+    )
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        "abc", None, "def", None,
+    )
+
+
+def test_parse_null_dep_forces_null_reason():
+    """The coupling rule: even if r2 returns a stray reason for a null
+    dep, the parser drops it. Prevents 'Reason: ...' lines for deps
+    that were never set or were dropped during candidate-range checks."""
+    out = (
+        '{"plan_dependency": null,'
+        ' "plan_dependency_reason": "stale leftover text",'
+        ' "implementation_dependency": null,'
+        ' "implementation_dependency_reason": "also stale"}'
+    )
+    assert prompts.parse_dep_eval_json(out) == prompts.DepEvalResult(
+        None, None, None, None,
+    )
+
+
+def test_parse_reason_missing_treated_as_none():
+    """Lenient backward-compat: r2 outputs that predate the reason fields
+    still parse cleanly, with reasons set to None."""
+    out = '{"plan_dependency": "abc", "implementation_dependency": "def"}'
+    result = prompts.parse_dep_eval_json(out)
+    assert result is not None
+    assert result.plan_dependency_reason is None
+    assert result.implementation_dependency_reason is None

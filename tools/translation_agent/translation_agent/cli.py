@@ -953,7 +953,7 @@ def _do_dep_eval_step(args, pr):
             pr_number,
         )
 
-    plan_dep, impl_dep, err_msg = _dep_eval_one(args, pr, candidate_aks)
+    result, err_msg = _dep_eval_one(args, pr, candidate_aks)
     if err_msg:
         log.error("PR #%d: %s", pr_number, err_msg)
         if not args.dry_run:
@@ -961,8 +961,14 @@ def _do_dep_eval_step(args, pr):
                 db.set_last_error(conn, pr_number, err_msg)
         return err_msg
 
+    plan_dep = result.plan_dependency
+    impl_dep = result.implementation_dependency
+    plan_dep_reason = result.plan_dependency_reason
+    impl_dep_reason = result.implementation_dependency_reason
+
     # Out-of-candidate-range deps treated as None (per spec: a dep must
-    # be a still-in-flight commit between the cursor and this PR).
+    # be a still-in-flight commit between the cursor and this PR). Reason
+    # is dropped along with its dep -- see the parser's coupling rule.
     valid_aks = set(candidate_aks)
     if plan_dep and plan_dep not in valid_aks:
         log.warning(
@@ -970,12 +976,14 @@ def _do_dep_eval_step(args, pr):
             pr_number, plan_dep[:12],
         )
         plan_dep = None
+        plan_dep_reason = None
     if impl_dep and impl_dep not in valid_aks:
         log.warning(
             "PR #%d impl_dep %s not in candidates -- treating as None",
             pr_number, impl_dep[:12],
         )
         impl_dep = None
+        impl_dep_reason = None
 
     with _db_session(args, write=True) as conn:
         db.update_dependencies(conn, pr_number, plan_dep, impl_dep)
@@ -988,7 +996,10 @@ def _do_dep_eval_step(args, pr):
 
     plan_dep_pr = _lookup_dep_pr_number(args, pr["rust_branch"], plan_dep)
     impl_dep_pr = _lookup_dep_pr_number(args, pr["rust_branch"], impl_dep)
-    _update_pr_dep_section(args, pr_number, plan_dep_pr, impl_dep_pr)
+    _update_pr_dep_section(
+        args, pr_number, plan_dep_pr, impl_dep_pr,
+        plan_dep_reason, impl_dep_reason,
+    )
     _apply_label_transition(
         args, pr_number, add=(prompts.LABEL_DEPENDENCIES_EVALUATED,),
     )
@@ -1273,6 +1284,9 @@ def _run_sweep(args: argparse.Namespace) -> int:
     return 0
 
 
+_EMPTY_DEP_RESULT = prompts.DepEvalResult(None, None, None, None)
+
+
 def _dep_eval_one(args, row, candidate_aks):
     """Run r2 sandbox claude for dep-eval on one commit.
 
@@ -1283,9 +1297,10 @@ def _dep_eval_one(args, row, candidate_aks):
     every still-in-flight commit on the same Rust branch that's an
     ancestor of this PR's commit.
 
-    Returns `(plan_dep, impl_dep, err)`. On success err is None and the
-    deps may each be a SHA string or None. On failure plan_dep and
-    impl_dep are both None and err is a non-empty error message.
+    Returns `(DepEvalResult, err)`. On success err is None and the
+    result holds the two dep SHAs (each may be None) plus their
+    optional reasons. On failure the result is empty (all four fields
+    None) and err is a non-empty error message.
     """
     pr_number = row["pr_number"]
     ak_commit = row["ak_commit"]
@@ -1305,15 +1320,18 @@ def _dep_eval_one(args, row, candidate_aks):
             pr_number=pr_number,
         )
     except FileNotFoundError as e:
-        return None, None, f"r2 not on PATH: {e}"
+        return _EMPTY_DEP_RESULT, f"r2 not on PATH: {e}"
     except Exception as e:
-        return None, None, f"r2 invocation crashed: {e}"
+        return _EMPTY_DEP_RESULT, f"r2 invocation crashed: {e}"
     if rc != 0:
-        return None, None, f"r2 dep-eval failed (rc={rc})"
+        return _EMPTY_DEP_RESULT, f"r2 dep-eval failed (rc={rc})"
     parsed = prompts.parse_dep_eval_json(captured)
     if parsed is None:
-        return None, None, "could not parse dep-eval JSON from r2 output"
-    return parsed[0], parsed[1], None
+        return (
+            _EMPTY_DEP_RESULT,
+            "could not parse dep-eval JSON from r2 output",
+        )
+    return parsed, None
 
 
 def _lookup_dep_pr_number(
@@ -1385,6 +1403,8 @@ def _update_pr_dep_section(
     pr_number: int,
     plan_dep_pr_number: Optional[int],
     impl_dep_pr_number: Optional[int],
+    plan_dep_reason: Optional[str] = None,
+    impl_dep_reason: Optional[str] = None,
 ) -> None:
     """Read PR `pr_number`'s body, replace the orchestrator-managed
     dependency section in place, and write the result back.
@@ -1403,6 +1423,7 @@ def _update_pr_dep_section(
         return
     section = github.format_dep_section(
         plan_dep_pr_number, impl_dep_pr_number,
+        plan_dep_reason, impl_dep_reason,
     )
     try:
         body = github.get_pr_body(args.rust_repo_path, pr_number)

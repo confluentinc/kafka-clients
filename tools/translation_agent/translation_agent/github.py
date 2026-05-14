@@ -326,21 +326,29 @@ _DEP_SECTION_RE = re.compile(
 def format_dep_section(
     plan_dep_pr_number: Optional[int] = None,
     impl_dep_pr_number: Optional[int] = None,
+    plan_dep_reason: Optional[str] = None,
+    impl_dep_reason: Optional[str] = None,
 ) -> str:
     """Build the markdown dep-section body (without the start/end
     markers). Returns "" when both deps are None so callers can short-
     circuit and just strip any existing block.
 
     PR numbers are rendered as bare `#N` references; GitHub auto-links
-    these to the corresponding PR within the same repo.
+    these to the corresponding PR within the same repo. When a reason
+    string is present, it renders as a nested sub-bullet under its dep
+    line. Empty / None reasons are skipped silently.
     """
     if plan_dep_pr_number is None and impl_dep_pr_number is None:
         return ""
     lines = ["**Dependencies:**"]
     if plan_dep_pr_number is not None:
         lines.append(f"- Plan: #{plan_dep_pr_number}")
+        if plan_dep_reason:
+            lines.append(f"  - Reason: {plan_dep_reason}")
     if impl_dep_pr_number is not None:
         lines.append(f"- Implementation: #{impl_dep_pr_number}")
+        if impl_dep_reason:
+            lines.append(f"  - Reason: {impl_dep_reason}")
     return "\n".join(lines)
 
 
