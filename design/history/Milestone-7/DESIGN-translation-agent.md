@@ -161,6 +161,13 @@ The implementation reads the new commit SHA from the LOCAL ref
 — since the orchestrator just performed the push, no round-trip
 through the remote is needed.
 
+The orchestrator's published push is `--force` for the
+`kafka-translate/<sha>` branches it owns. Those branches have a single
+writer (the orchestrator) and the local worktree tip is authoritative,
+so an unconditional overwrite is correct on every retry — see
+"[Force-push on orchestrator-owned branches](#force-push-on-orchestrator-owned-branches)"
+below for the call sites and rationale.
+
 ### PR description refresh on each transition
 
 The PR description is regenerated to reflect the latest progress at
@@ -314,9 +321,29 @@ that could conflict.
 
 The `branch_commit` table's primary key is `rust_branch` alone (one
 cursor row per Rust branch — there is no scenario where a single
-Rust branch tracks multiple AK branches simultaneously). The schema
-also auto-migrates from an earlier multi-column-PK shape, so DBs
-seeded before this change are upgraded in place.
+Rust branch tracks multiple AK branches simultaneously). Current
+shape:
+
+```
+CREATE TABLE branch_commit (
+    rust_branch  TEXT NOT NULL PRIMARY KEY,
+    ak_branch    TEXT NOT NULL,
+    ak_commit    TEXT NOT NULL
+)
+```
+
+The Rust SHA is **not** stored here — `branch_commit` is a sweep
+cursor over the AK history, and the orchestrator never needs to
+recover a "current Rust SHA per branch" out-of-band (it can read
+`HEAD` of the local rust repo). Per-merge AK→Rust correspondence
+lives in `pr_commit_history.rust_commit` instead, which survives
+the live `pr_commit` row's deletion. The earlier `rust_commit`
+column on `branch_commit` was vestigial and has been dropped.
+
+`db._migrate_branch_commit` auto-rebuilds the table from older
+shapes (multi-column-PK, or single-column-PK with the vestigial
+`rust_commit`) on connect — idempotent on the current schema. DBs
+seeded before any of these changes are upgraded in place.
 
 When step 8 succeeds for a PR, the orchestrator updates the
 `branch_commit` row for `rust_branch` via `INSERT OR REPLACE` to
@@ -351,18 +378,21 @@ new project. The Task exposes `AK_BRANCH`, `AK_COMMIT`, `RUST_BRANCH`,
 via `${VAR:-default}` rather than via task-level `env_vars` (the
 latter would shadow Task-parameter values supplied at trigger time).
 
-### CLI shape (single binary, four invocation modes)
+### CLI shape (single binary, six invocation modes)
 
 | Mode | Command shape | Triggers |
 |---|---|---|
-| Sweep | `translation-agent --ak-repo-path <> --rust-branch <>` | Steps 1–6, 8, 10 (the AK branch is read from the `branch_commit` cursor row, not from a CLI flag) |
-| Per-PR status | `translation-agent --pr <N>` | Read-only check (step 7). Returns 0 (not 1) when the PR row is missing — most PRs in this repo aren't translation PRs and Semaphore auto-runs this on every PR build. |
-| Per-PR approve | `translation-agent --pr <N> --plan-approve` | Step 7 + cascade into step 8 for that PR. Returns 1 on missing PR row (deliberate manual promotion is an operator error if the PR isn't tracked). |
-| Seed | `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch <> [--force] [--cleanup-prs]` | Bootstrap `branch_commit` |
+| Sweep | `translation-agent --ak-repo-path <> --rust-branch <>` | Narrowed to closure check + cursor advance + create up to N draft PRs at status 0. Dep-eval / plan / impl now run **per-PR** in the cascade — see "[Per-PR cascade + sweep narrowing](#per-pr-cascade--sweep-narrowing)" below. |
+| Per-PR cascade | `translation-agent --ak-repo-path <> --pr <N>` | Reads the row's status and runs the next applicable transition (0→1 dep-eval; 1→2 plan, then stops at the human gate; 3→4 impl). Returns 0 when the PR row is missing — most PRs in this repo aren't translation PRs and Semaphore auto-runs this on every PR build. |
+| Per-PR approve | `translation-agent --ak-repo-path <> --pr <N> --plan-approve` | Flips status 2→3 and immediately runs impl (3→4). Returns 1 on missing PR row (deliberate manual promotion is an operator error if the PR isn't tracked). |
+| Per-PR ask | `translation-agent --ak-repo-path <> --pr <N> --ask "<text>"` | Side-channel for human-driven follow-ups. Read-only to the state machine; depending on status, may post a PR comment and/or force-push fixup commits. Mutually exclusive with `--plan-approve`. |
+| Seed | `translation-agent --seed --ak-branch <> --ak-commit <> --rust-branch <> [--force] [--cleanup-prs] [--allow-missing-artifact]` | Bootstrap `branch_commit`. |
+| Delete PRs | `translation-agent --delete-prs --rust-branch <> --pr-numbers <a,b,c>` | Operational task: closes PRs (via remote-branch deletion) and drops their `pr_commit` rows. Pre-flight verifies all PRs match `--rust-branch`. |
 
 Cross-cutting flags: `--db-path`, `--max-parallel` (default 4),
 `--no-artifact-push`, `--dry-run`, `--verbose`, `--artifact-name`,
-`--rust-repo-path`.
+`--rust-repo-path`, `--allow-missing-artifact` (only valid with
+`--seed` — see "[Strict-default DB pull](#--allow-missing-artifact-and-the-strict-default-db-pull)").
 
 ### Failure handling: `last_error` column
 
@@ -418,32 +448,45 @@ end-to-end on a developer workstation without the real Semaphore
 
 ### Semaphore CI configuration
 
-Three pipeline files under `.semaphore/`:
+Five pipeline files under `.semaphore/`:
 
 | File | Trigger | What it runs |
 |---|---|---|
-| `semaphore.yml` | every push / PR | Four-cell dispatch (truth table below) |
+| `semaphore.yml` | every push / PR | Four-cell dispatch (truth table below) + always-on `make verify` |
 | `plan-approve.yml` | manual promotion from a PR build | `translation-agent --pr <N> --plan-approve` |
 | `seed.yml` | manual Task | `translation-agent --seed ...` |
+| `ask.yml` | manual promotion from a PR build | `translation-agent --pr <N> --ask "<USER_COMMAND>"` (see "[--ask side-channel](#--ask-side-channel-for-human-driven-follow-ups)") |
+| `delete-prs.yml` | manual Task | `translation-agent --delete-prs --rust-branch <> --pr-numbers <>` (see "[Delete-PRs operational task](#delete-prs-operational-task)") |
 
 Each pipeline pulls the artifact at start (`artifact pull project ...`)
 and lets the orchestrator handle `artifact push` itself.
 
-**`semaphore.yml` dispatch truth table** (PR-on-main is the
-most-specific case and must be tested first to avoid the sweep
-clause swallowing it):
+**`semaphore.yml` dispatch truth table.** The dispatch checks the PR
+**head** branch (`SEMAPHORE_GIT_PR_BRANCH`) for the "skip" rule and
+the build's branch (`SEMAPHORE_GIT_BRANCH`) for the sweep rule. The
+PR-with-main-as-HEAD case must be tested first so the per-PR cascade
+clause doesn't swallow it.
 
-| `SEMAPHORE_GIT_BRANCH` | `SEMAPHORE_GIT_PR_NUMBER` | Action |
-|---|---|---|
-| = MAIN_BRANCH | set | **skip both** (PR review against main; we don't want sweep to publish new translation PRs mid-review, and the PR isn't a translation PR managed by the orchestrator) |
-| = MAIN_BRANCH | empty | run sweep |
-| ≠ MAIN_BRANCH | set | run `translation-agent --pr <N>` (status check) |
-| ≠ MAIN_BRANCH | empty | skip |
+| `SEMAPHORE_GIT_PR_BRANCH` | `SEMAPHORE_GIT_BRANCH` | `SEMAPHORE_GIT_PR_NUMBER` | Action |
+|---|---|---|---|
+| = MAIN_BRANCH | (any) | set | **skip both** (a PR whose HEAD is the main branch — typically a backmerge or cross-branch PR, never a translation PR managed by the orchestrator) |
+| (any) | = MAIN_BRANCH | empty | run sweep (closure check + cursor advance + create up to N draft PRs) |
+| (any) | (any) | set | run `translation-agent --pr <N>` cascade |
+| (any) | (any) | empty | skip |
 
-Note Semaphore reports `SEMAPHORE_GIT_BRANCH` as the **target**
-branch on PR builds (not the head), so a PR opened against main
-shows `branch == MAIN_BRANCH` AND a PR number — exactly the case the
-PR-on-main skip rule catches.
+`SEMAPHORE_GIT_PR_BRANCH` is the PR's **head** branch and
+`SEMAPHORE_GIT_BRANCH` is the **target** branch on PR builds (Semaphore
+exposes both). Earlier versions of the dispatch keyed off
+`SEMAPHORE_GIT_BRANCH` for the skip rule, but that conflated "PR
+opened against main" (where the orchestrator must run the per-PR
+cascade because translation PRs themselves target main) with
+"PR whose HEAD is main" (the case we actually want to skip). Switching
+to the head-branch check separates them cleanly.
+
+Regardless of dispatch outcome, the job tail unconditionally runs
+`make verify` so translated-code regressions are caught on every PR
+build, even when the cascade path is a no-op (e.g. PR already at
+status 4 = implementation_done).
 
 The prologue also handles `SEMAPHORE_GIT_BRANCH_CHECKOUT` (set when
 a Task is triggered manually with a "Run on branch" override): if
@@ -471,4 +514,346 @@ worktree base resolution for re-runs over existing PR branches,
 SEMAPHORE_GIT_BRANCH_CHECKOUT support, PR description refresh on each
 transition, and per-PR sweep log enrichment.
 
+A second wave of iterations (driven by multi-runner concurrency and
+human-review feedback) added the items in the sections **below**:
+distributed DB lock + per-op artifact pull/push, per-PR cascade with
+the sweep narrowed to cursor administration, strict-default DB pull
+(`--allow-missing-artifact`), per-state PR labels, dependency section
+in PR body, force-push for orchestrator-owned branches, the `--ask`
+side-channel, the `--delete-prs` operational task, and the always-Opus
+model pin.
+
 170 unit + integration tests at `tools/translation_agent/tests/`.
+
+---
+
+## Implementation details (second wave: concurrency + per-PR cascade)
+
+### Distributed DB lock + per-op artifact pull/push
+
+Multiple Semaphore jobs (sweep on a push to main, plus per-PR cascades
+on PR builds, plus a manual `--ask` or `--delete-prs` Task) can fire
+concurrently. They all read and write the same sqlite state DB, which
+is materialized as a Semaphore project artifact (`translation_agent.db`).
+Without coordination, two runners would pull different snapshots, make
+disjoint updates, and the slower runner's push would silently overwrite
+the faster one. `locked_db.session` is the mutual-exclusion + per-op
+sync that prevents this:
+
+**Lock primitive.** A separate artifact `translation_agent.db.lock`,
+pushed via `artifact push project ... ` **without `--force`**.
+Semaphore's artifact server rejects the push with a CalledProcessError
+if the artifact already exists — that's the atomic-create mutex. Release
+is `artifact yank project translation_agent.db.lock`. There is no
+filesystem lock, no SQLite WAL trick — the artifact server is the
+coordination point, which is the only thing all runners can see.
+
+**Holder payload.** The lock artifact's body is a JSON object with the
+acquirer's `SEMAPHORE_JOB_ID`, an ISO-8601 UTC `acquired_at`, and the
+process `pid`. An operator inspecting a stuck lock can yank it via the
+Semaphore UI after cross-checking the job ID against the runner list.
+Stale-lock recovery is deliberately manual; an automatic TTL would
+race against legitimately-slow LLM calls.
+
+**Retry budget.** `acquire_lock` retries 10 × 60 s = 10-minute
+production timeout, raising `LockTimeoutError`. Tunable per call site so
+unit tests can inject `retries=3, retry_delay_s=0` and exercise both
+the happy path and the timeout path in milliseconds.
+
+**`session(db_path, *, write, dry_run, allow_missing)` lifecycle**
+(context manager in `tools/translation_agent/translation_agent/locked_db.py`):
+
+1. `acquire_lock()` — block until the mutex is held (or
+   `LockTimeoutError`).
+2. `pull_db(db_path, allow_missing=...)` — fetch the latest artifact.
+3. `db.connect()` + `db.migrate()` — open a **fresh** sqlite
+   connection (no caller can hold one across lock boundaries) and
+   idempotently run schema migrations.
+4. Yield to the caller.
+5. On clean exit + `write=True`: `conn.commit()` + `push_db(db_path)`,
+   in that order. On any exception inside the block: connection is
+   closed without committing AND **`push_db` is skipped** so partial
+   state is never published.
+6. `release_lock()` runs in a `finally`, even on exception.
+
+`dry_run=True` short-circuits all subprocess calls — opens the local
+DB, yields, closes — matching the existing dry-run convention used
+elsewhere.
+
+**CLI integration.** `cli.py::_db_session` is a thin per-args wrapper
+around `locked_db.session` that maps `--dry-run` / `--no-artifact-push`
+into the `dry_run` argument and passes `allow_missing=args.allow_missing_artifact`
+through. Every DB-touching code path — `_run_sweep`, `_run_pr_mode`
+(for both reads and writes during a cascade), `_run_seed`,
+`_run_delete_prs`, the closure-check helper — wraps its work in
+`with _db_session(args, write=...) as conn:` so the lock is held only
+for the read or write op, never across an LLM call.
+
+### `--allow-missing-artifact` and the strict-default DB pull
+
+`pull_db` is **strict by default**. Any failure of `artifact pull
+project translation_agent.db` raises — the CLI's exit code does not
+distinguish "artifact not found" from "transient infra error" (server
+down, network blip, expired credentials), so we treat them as the
+same failure. Operating against stale local state and then push-
+overwriting the canonical artifact with our outdated view is the
+worst-case outcome and the one strict-default eliminates.
+
+`--allow-missing-artifact` is the **single** legitimate exception. It
+is only valid with `--seed` (the CLI rejects it otherwise) and only
+tolerates a pull failure when there is no local file at `db_path`.
+The reasoning:
+
+- **No local file + pull fails** → unambiguously first-run bootstrap.
+  `pull_db` returns silently; `_db_session` proceeds to create a fresh
+  local DB and on commit will push the first artifact.
+- **Local file exists + pull fails** → ambiguous. The local file could
+  be stale state from a crashed prior run, OR the artifact could exist
+  on the server (and the failure was transient). Proceeding would risk
+  overwriting the canonical state with our outdated view. The operator
+  must `rm` the local file to signal explicit intent to bootstrap
+  fresh.
+
+The Semaphore prologue runs `artifact pull project translation_agent.db
+|| true` before invoking the orchestrator on first-run-friendly
+branches; `_db_session` then re-pulls under the lock for every
+operation so the in-prologue best-effort pull doesn't expose the
+process to a stale-DB window.
+
+### Per-PR cascade + sweep narrowing
+
+The sweep used to dispatch dep-eval, plan, and impl in addition to
+managing the `branch_commit` cursor. As CI runtime ballooned and the
+LLM steps started competing for the lock, the work was split:
+
+- **Sweep is now narrow.** It runs only on a push to `MAIN_BRANCH`
+  (no PR number) and does just three things: closure check + cursor
+  advance + create up to N draft `pr_commit` rows + draft GitHub PRs
+  at status 0. Cheap, fast, predictable.
+- **Per-PR cascade** is the new flow for status transitions. Each PR
+  build runs `translation-agent --pr <N>` (semaphore.yml dispatches
+  to it). `_run_pr_mode` reads the row's status and runs the next
+  applicable transition:
+  - `0 → 1` (dep-eval): `_do_dep_eval_step`, then **continue** the
+    cascade.
+  - `1 → 2` (plan): `_do_plan_step`, then **return** at the human
+    gate (status 2 = plan_created).
+  - `2 → 3` (plan_approved): never auto; only via the manual
+    `--plan-approve` promotion.
+  - `3 → 4` (impl): `_do_impl_step`, then return.
+  - `4`: no-op log message.
+- **Cascade loop bound: 5 iterations** (`for _ in range(5)`). The
+  status enum naturally bounds it at two transitions per invocation
+  (`0 → 1 → 2` stops at the gate, or `3 → 4` is a single step), but 5
+  is a defensive cap against any future status-machine bug. Re-reads
+  the row at the top of every iteration so concurrent activity by
+  another runner is visible.
+
+This split distributes work across CI builds: the sweep stays cheap
+and fast on every push to main, expensive LLM/git work only happens
+on the PR build that's already running for that translation, and a
+single PR's full state machine (0 → 4 minus the human gate) can ride
+through the cascade across at most three CI builds (dep-eval+plan,
+plan-approve, impl).
+
+### `--ak-repo-path` required in PR-mode (cascade dep-eval guard)
+
+With dep-eval moved into the per-PR cascade, every PR-mode
+invocation needs access to the AK repo to call
+`git_ops.commits_between(...)`. `semaphore.yml` and `plan-approve.yml`
+both pass `--ak-repo-path "./kafka"` defensively. `ask.yml` passes
+it too even though `--ask` doesn't currently call dep-eval — keeps the
+invocation shape uniform and forward-compatible if a future refactor
+falls through into a dep-eval path.
+
+`_do_dep_eval_step` guards on `args.ak_repo_path` at function entry:
+on missing, writes an actionable message ("`--ak-repo-path is required
+for dep-eval ...`") to `pr_commit.last_error` and returns rc=1. The
+guard exists because dropping the path would otherwise surface as a
+generic `TypeError: expected str, bytes or os.PathLike object, not
+NoneType` deep inside `git_ops` — invisible in CI logs without code
+diving.
+
+### Per-state PR labels
+
+GitHub-side state visibility, so a reviewer scanning the PR list can
+see which translation PRs are blocked on what without opening each
+one. Labels are defined in
+`tools/translation_agent/translation_agent/prompts.py`:
+
+- `dependencies-evaluated` (`LABEL_DEPENDENCIES_EVALUATED`)
+- `plan-created` (`LABEL_PLAN_CREATED`)
+- `implementation-needed` (`LABEL_IMPLEMENTATION_NEEDED`)
+- `implementation-done` (`LABEL_IMPLEMENTATION_DONE`)
+
+**Transition table:**
+
+| Transition | Labels added | Labels removed |
+|---|---|---|
+| `0 → 1` (dep-eval done) | `dependencies-evaluated` | — |
+| `1 → 2` (plan created, default) | `plan-created`, `implementation-needed` | `dependencies-evaluated` |
+| `1 → 2` (plan body has no-op marker) | `plan-created` | `dependencies-evaluated`, `implementation-needed` (defensive) |
+| `3 → 4` (impl done) | `implementation-done` | `dependencies-evaluated`, `plan-created`, `implementation-needed` |
+
+**No-op-plan exception.** `prompts.py` defines two markers the plan
+body may contain:
+
+- `IMPLEMENTATION_NEEDED_MARKER = "Next steps: **Implementation needed**"`
+- `NO_IMPLEMENTATION_NEEDED_MARKER = "Next steps: **No implementation needed**"`
+
+When the plan body contains the no-op marker (e.g. a Java commit that
+translates to no Rust changes — comment-only Java edits, doc-only
+changes), the orchestrator proactively *removes* `implementation-needed`
+even though the default `1 → 2` adds it. The removal is defensive
+cleanup for re-plans where a previously-non-noop plan had the label
+applied. If both markers somehow appear in the same plan body, the
+no-op branch wins.
+
+Label add/remove flows through `github.add_pr_label` /
+`github.remove_pr_label` (single `gh pr edit --add-label/--remove-label`
+calls per label).
+
+### Dependency section in PR body
+
+When a PR's `pr_commit.plan_dependency` or `implementation_dependency`
+columns are populated (set by dep-eval), the orchestrator inserts a
+dependency block into the PR body so the reviewer can see what the PR
+is waiting on without querying the DB. The block is delimited by HTML
+comment markers so users see only the rendered list:
+
+```
+<!-- deps:start -->
+**Dependencies:**
+- Plan: #123
+- Implementation: #456
+<!-- deps:end -->
+```
+
+Built by `github.format_dep_section(plan_dep_pr_number,
+impl_dep_pr_number)` (returns empty string when both deps are None).
+`github.replace_dep_section(body, dep_section)` does an idempotent
+read-modify-write: strip any existing `<!-- deps:start --> ... <!--
+deps:end -->` block, then prepend the new one. The marker pair is the
+boundary, so re-running the dep update doesn't drift the body across
+runs.
+
+### Force-push on orchestrator-owned branches
+
+`git_ops.push_branch` accepts a `force=True` parameter. Used at three
+call sites in `cli.py`:
+
+- **Plan publish** (after `_do_plan_step`).
+- **Impl publish** (after `_do_impl_step`).
+- **Ask-fixup publish** (after `--ask` produces commits — see below).
+
+The `kafka-translate/<sha>` branches are exclusively orchestrator-
+owned (no human ever pushes to them; the per-PR cascade is the sole
+writer). The local worktree tip is therefore always authoritative. If
+origin diverged — a rebase across a sweep, a prior run that crashed
+mid-push and left a stale tip, an `--ask`-driven amend that rewrote a
+fixup commit — unconditional overwrite is correct.
+
+This is a relaxation of git's default safety check that's safe
+*because* of the single-writer invariant. Sandbox push denial (see
+"[Sandbox contract](#sandbox-contract-agent-commits-orchestrator-publishes)")
+holds: it's still the orchestrator that does the force-push, never
+claude.
+
+### Delete-PRs operational task
+
+A clean-slate operational lever for when the queue contains PRs that
+should be abandoned (failed translations, dry-run leftovers escaped
+to the live queue, deliberate retraction). Triggered via
+`.semaphore/delete-prs.yml` Task (parameters `RUST_BRANCH`,
+`PR_NUMBERS`, optional `DRY_RUN`) which runs:
+
+```
+translation-agent --delete-prs --rust-branch <> --pr-numbers <a,b,c>
+```
+
+`cli.py::_run_delete_prs` flow:
+
+1. **Pre-flight validation.** Every `pr_number` must exist in
+   `pr_commit` *and* match the scoping `--rust-branch`. This is the
+   safety belt: an operator can't accidentally nuke PRs from another
+   translation queue (e.g. a different rust branch's pipeline) by
+   typo. Validation failure aborts before any side effect.
+2. **Per-PR: delete remote branch first.** `github.delete_remote_branch`
+   runs `gh api -X DELETE` on the branch ref, which closes the PR
+   implicitly (GitHub auto-closes PRs whose head branch is gone).
+3. **Soft-error on `GhBranchAlreadyGone`.** A distinct exception type
+   in `github.py` raised when `gh` reports the ref doesn't exist.
+   Logged and the loop continues to step 4 — branches already deleted
+   on the remote (often by the same operator from a different angle)
+   should not block DB cleanup. Real `gh` errors (auth, network, 5xx)
+   propagate and fail-fast.
+4. **Delete the `pr_commit` row** under a `_db_session(write=True)`
+   block.
+
+`pr_commit_history` is **not** updated — these are abandonments, not
+merges, so there's no AK→Rust correspondence to record.
+
+### `--ask` side-channel for human-driven follow-ups
+
+A reviewer-driven escape hatch that lets a human steer claude on a
+specific PR without manipulating the state machine. Invoked via the
+`.semaphore/ask.yml` manual promotion, which carries `USER_COMMAND`
+as a Semaphore parameter and runs:
+
+```
+translation-agent --ak-repo-path "./kafka" --pr <N> --ask "<USER_COMMAND>"
+```
+
+`--ask` is mutually exclusive with `--plan-approve` and requires
+`--pr <N>`. The CLI rejects both misuse cases with rc=2.
+
+**Status-aware effect** (`cli.py::_run_pr_ask`):
+
+| Status | Behavior |
+|---|---|
+| 1 (dependencies_evaluated) | Comment-only. Sandboxed claude runs in a per-PR worktree, writes its answer to `./ask_answer.md`, orchestrator posts it via `gh pr comment`. Any commits the agent makes are discarded (worktree is hard-reset). |
+| 2 / 3 (plan_created / plan_approved) | Comment + plan-fixup commits. Agent may amend `plan.md`; orchestrator force-pushes the resulting commits. |
+| 4 (implementation_done) | Comment + plan-or-impl-fixup commits. Agent may amend either the plan or implementation files; orchestrator force-pushes. |
+
+**Status never advances.** `--ask` is read-only with respect to the
+state machine — it doesn't change `pr_commit.status`, doesn't set
+`last_error`, doesn't write `pr_commit_history`. The whole side-
+channel is contained: the worst it can do is post a wrong comment or
+push a regrettable fixup that the operator can revert.
+
+The sandbox contract holds: claude commits, orchestrator pushes
+(force, since the branch is orchestrator-owned). `gh pr comment` runs
+from the orchestrator side as well — the agent only writes to the
+`./ask_answer.md` file, and the orchestrator publishes it.
+
+### Always Opus
+
+Pinned at module level in
+`tools/translation_agent/translation_agent/r2.py`:
+
+```python
+R2_CLAUDE_CMD_PREFIX = [R2_BINARY, "sandbox", "claude", "--model", "opus"]
+```
+
+All call sites (`run_r2_claude`) extend this prefix with
+`-p "<prompt>"`, so dep-eval, plan, impl, body-regeneration, and
+`--ask` invocations are uniformly on Opus. Pinning the model in the
+shared prefix (rather than per-call) eliminates the drift risk of one
+phase silently downgrading to Sonnet because a developer forgot to
+pass `--model opus` at a new call site.
+
+### Pre-commit hook
+
+Repo developers (not the orchestrator) install a pre-commit hook via
+`make init-hooks`, which sets `git config core.hooksPath .githooks`
+and makes `.githooks/pre-commit` executable. The hook runs `make
+verify-sandbox` — a lightweight variant of `make verify` that omits
+`test-python` (since the Python suite needs C bindings rebuilt and
+that's slow for a pre-commit gate). Semaphore CI runs the full
+`make verify` itself, so coverage isn't lost.
+
+The hook installation is **deliberately not** triggered from inside
+the r2 sandbox (which forbids `git config core.hooksPath` writes).
+The translation-agent's worktree bootstrap (`make` in the per-PR
+worktree) intentionally doesn't invoke `make init-hooks`; the hook
+lives in operator-developed repos only.
