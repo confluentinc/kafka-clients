@@ -178,7 +178,7 @@ mod tests {
     #[test]
     fn test_version_validation() {
         // Test that invalid versions are rejected
-        let request = produce_request_data::ProduceRequestData::new();
+        let mut request = produce_request_data::ProduceRequestData::new();
 
         // Try to write with an invalid version (assuming version 0 is valid)
         let mut write_buffer = ByteBufferAccessor::new(1024);
