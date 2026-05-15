@@ -76,16 +76,23 @@ These were tagged "Phase 8" in `COMMENTS.DONE.7.md`:
 1. `cargo build --features integration-tests` clean.
 2. `cargo test --features integration-tests producer_smoke` green **3
    consecutive runs**.
-3. Each sub-phase test asserts:
-   - **Ack count:** exactly N `RecordMetadata` returned, no `Err` on
-     any send future.
-   - **Partition consistency:** the partition the partitioner picked
-     at `send()` time equals the partition in the returned
-     `RecordMetadata`.
-   - **Per-partition monotonic offsets:** offsets within a partition
-     are strictly increasing.
-   - **End-to-end byte fidelity:** the consumer sees the same key /
-     value bytes the test produced (8c onward).
+3. Sub-phase tests **add** the following asserts incrementally
+   (each sub-phase retains the asserts added in earlier sub-phases;
+   tagging matches the sub-phase table above, not a per-sub-phase
+   repeat of the full list):
+   - **8a onward — Ack count:** exactly N `RecordMetadata` returned,
+     no `Err` on any send future.
+   - **8a onward — `RecordMetadata` shape:** topic match, partition
+     ∈ `[0, num_partitions)`, non-negative offset, non-`-1`
+     timestamp.
+   - **8b onward — Partition consistency:** the partition the
+     partitioner picked at `send()` time equals the partition in the
+     returned `RecordMetadata`. Requires a partitioner-result
+     accessor (test seam or public API); resolve in 8b.
+   - **8b onward — Per-partition monotonic offsets:** offsets within
+     a partition are strictly increasing.
+   - **8c onward — End-to-end byte fidelity:** the consumer sees the
+     same key / value bytes the test produced.
 4. No new `String` clone, no `Box<dyn Future>` per send, no
    per-message `tokio::spawn` introduced in production code by this
    phase (`grep` audit before closing).

@@ -260,3 +260,42 @@ TEST_DURATION_SECONDS=5 cargo test --features integration-tests
 performance_test --release`): 1000 messages sent / 1000 completed /
 0 errors / 997.68 msg/s throughput / 0.98 MiB/s / `producer.send()`
 median <5 us / metrics file written. Test runs to completion.
+
+---
+
+## Phase 8a Round 1 — accept-with-followups (closed by Manager)
+
+Review window: commits `6d722af..c2347b2` on branch `fresh-impl` (32 commits, spanning sub-phases 8a → 8a.0 → 8a.1 → 8a.2 + housekeeping).
+
+Round 1 Critic verdict: **0 Blocking, 2 Suggestion, 1 Nit. accept-with-followups.** Full Round 1 review remains at `COMMENTS.8.md:466-549` as the audit trail for this archive entry.
+
+### Suggestion 1 — RESOLVED in NOTES.md
+
+NOTES.md DoD #3 amended by Manager to make the per-sub-phase incremental schedule explicit, matching the sub-phase table:
+- **8a onward**: Ack count + `RecordMetadata` shape (topic, partition range, non-negative offset, non-`-1` timestamp).
+- **8b onward**: Partition consistency (requires partitioner-result accessor) + per-partition monotonic offsets.
+- **8c onward**: End-to-end byte fidelity.
+
+Resolution rationale: the sub-phase table already reads "8b: partition consistency + monotonic-offset"; the DoD #3 list was the source of truth ambiguity. Amending DoD #3 to qualify each item with its sub-phase scope removes the conflict without changing the actual incremental plan. Disposition: NOTES.md commit (housekeeping + clarification rollup, see commit below).
+
+### Suggestion 2 — DEFERRED to Phase 8b
+
+`close_flushes_pending_inflight` (`producer_smoke_test.rs:480-496`) currently asserts only `offset >= 0`. Phase 8b expands the test set with per-partition monotonic-offset and partition-consistency asserts; the same expansion will bring test 2 to parity with test 1's full shape check (topic match, partition range, non-`-1` timestamp). Tracked as a sub-task of Phase 8b's test expansion; no separate fixup commit.
+
+### Nit 1 — DEFERRED to Phase 8b
+
+Rustdoc on `close_flushes_pending_inflight` (`producer_smoke_test.rs:441-447`) still reads "close drains in microseconds — milliseconds at worst". Observed wall-clock is 2.5–3.2 ms. The Phase-8a.0 Round-2 archive already corrected the framing in the rustdoc preamble; the integration test's local comment didn't propagate. Bundled with Suggestion 2's test-tightening edit in Phase 8b.
+
+### Verifications retained from Round 1
+
+- `cargo build --features integration-tests` clean (~22 s).
+- `cargo xtask format-check` green.
+- `cargo xtask lint` green, no warnings.
+- `cargo test --features integration-tests producer_smoke -- --nocapture`: 2/2 green, 8.06 s.
+- Lib tests 1220 → 1233 (+13). Integration tests +2.
+- CLAUDE.md §11 hot-path audit: no new `String` clones / `Box<dyn Future>` per send / `tokio::spawn` per message in production code.
+- CLAUDE.md §12 zero-copy: 8a.2's `Arc<AtomicBool>` `SendCompletion` does not copy buffer bytes; payload remains in a single owned `Bytes` chain.
+- CLAUDE.md §9 concurrency: no new `MutexGuard` held across `.await`.
+- `#[doc(hidden)]` cordon: `DefaultMetadataUpdater`, `SupportsDefaultSerializer`, `KafkaProducer::from_config` all marked + rustdoc-explained + not `pub use`-re-exported.
+
+Phase 8a Round 1 closes. Manager advances to Phase 8b plan.
