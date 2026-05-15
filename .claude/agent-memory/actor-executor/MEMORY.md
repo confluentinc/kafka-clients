@@ -68,3 +68,4 @@
 - [Phase 8a.0 first-broker wire debug](phase8a0_wire_debug.md) — wire bytes were correct; bug was Selector::poll missing OP_READ arm + has_send() check — and the debug recipe
 - [Phase 8a.0 Round 2 Notify wakeup](phase8a0_round2_notify_wakeup.md) — `tokio::sync::Notify` replaces no-op `sender_wakeup`; Selector owns the Notify, producer extracts handle pre-spawn
 - [Phase 7g two-phase send](phase7g_two_phase_send.md) — `Result<KafkaFuture<RecordMetadata>, _>` restores Java parity; `Arc<dyn KafkaFutureOps>` wrapper, one alloc/send
+- [Phase 8a.1 perf test re-enable](phase8a1_perf_test_reenable.md) — third `pub + #[doc(hidden)]` (`from_config`); `ProducerConfig::new` validator demands FQCN placeholders for required serializer keys; smoke-run gate ≠ compile gate
