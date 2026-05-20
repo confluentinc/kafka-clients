@@ -193,6 +193,152 @@ fn create_topic(container_id: &str, topic: &str, partitions: i32) {
     );
 }
 
+/// Consume records from a topic via `docker exec kafka-console-consumer`.
+///
+/// Reads from `--from-beginning` up to `max_messages` records (or until
+/// `timeout_ms` elapses) and returns `(partition, key, value)` tuples
+/// in the order the consumer printed them — which is **per-partition
+/// offset order** (one consumer thread reads each partition
+/// sequentially), but the order **across** partitions is unspecified
+/// (the console consumer interleaves whichever partition has data
+/// ready). Callers asserting per-partition order must group by
+/// partition first.
+///
+/// # Byte-fidelity caveat (Phase 8c scope)
+///
+/// `kafka-console-consumer` defaults to the **string** key/value
+/// deserializers, which lossily decode bytes as UTF-8 (invalid
+/// sequences become U+FFFD). Phase 8c's test fixtures use only ASCII
+/// keys and values (`format!("k{i:04}")`, `format!("v{i:04}")` —
+/// digits + ASCII letters), so the lossy decode is the identity
+/// function and the bytes-out bytes-in comparison is exact.
+///
+/// **If a future test uses non-ASCII bytes** (binary keys, protobuf,
+/// random fuzz, etc.), this helper must be extended to pass
+/// `--property key.deserializer=org.apache.kafka.common.serialization
+/// .ByteArrayDeserializer` (and `value.deserializer`) AND a wire
+/// format that survives binary output (the default
+/// `LineMessageFormatter` writes the bytes raw, so the unit-separator
+/// delimiter remains the right approach — but `--property
+/// print.partition=true` then prepends a string anyway, so the
+/// parsing below would still work as long as the separator
+/// (`\x1F`, ASCII unit separator) does not collide with any byte in
+/// the payload). Document the choice when extending.
+///
+/// # Format conventions
+///
+/// - `--property key.separator=$'\x1F'` (ASCII unit separator, 0x1F)
+///   — chosen because it cannot appear in printable ASCII payloads
+///   and is the documented "field separator" control character.
+/// - `--property print.partition=true` — prepends `Partition:<n>\t`
+///   to each line so the helper can return the partition without
+///   parsing protobuf-style record headers.
+/// - Final per-line format: `Partition:<n>\t<key>\x1F<value>\n`.
+///
+/// # Timeout
+///
+/// `timeout_ms` is the maximum wall-clock the consumer waits between
+/// messages before exiting. The helper itself adds a small buffer
+/// (`timeout_ms + 5000`) to its own `Command::output` deadline so
+/// the underlying process cleanup is not racing the
+/// `kafka-console-consumer --timeout-ms` flag.
+///
+/// # Synchronous by design
+///
+/// Mirrors [`create_topic`]: blocks on `Command::output`. Async tests
+/// should call this via [`tokio::task::spawn_blocking`] to avoid
+/// stalling the runtime — `kafka-console-consumer` can take up to
+/// `timeout_ms` real time to terminate.
+// `#[allow(dead_code)]` is removed in the next commit when the
+// byte-fidelity test (the first caller) lands.
+#[allow(dead_code)]
+fn consume_records(
+    container_id: &str,
+    topic: &str,
+    max_messages: usize,
+    timeout_ms: u32,
+) -> Vec<(i32, Vec<u8>, Vec<u8>)> {
+    // ASCII unit separator (0x1F). `kafka-console-consumer` reads
+    // this via `--property key.separator=<literal char>`; we pass
+    // the single 0x1F byte by writing it directly into the argv
+    // string (Rust string literals support `\u{1F}`).
+    const SEP: &str = "\u{1F}";
+
+    let output = Command::new("docker")
+        .args([
+            "exec",
+            container_id,
+            "/opt/kafka/bin/kafka-console-consumer.sh",
+            "--bootstrap-server",
+            "localhost:9093",
+            "--topic",
+            topic,
+            "--from-beginning",
+            "--timeout-ms",
+            &timeout_ms.to_string(),
+            "--max-messages",
+            &max_messages.to_string(),
+            "--property",
+            "print.key=true",
+            "--property",
+            "print.partition=true",
+            "--property",
+            &format!("key.separator={SEP}"),
+        ])
+        .output()
+        .expect("failed to invoke `docker exec kafka-console-consumer.sh` — is Docker on PATH?");
+
+    // `kafka-console-consumer` exits with code 1 when `--timeout-ms`
+    // elapses, even after a successful read of `--max-messages`. We
+    // therefore do NOT assert on `status.success()`; instead we
+    // require the parsed record count to equal `max_messages`
+    // below — that is the contract a caller cares about.
+    let stdout = String::from_utf8(output.stdout)
+        .expect("kafka-console-consumer stdout was not UTF-8 — non-ASCII payload? See helper rustdoc");
+
+    let mut records: Vec<(i32, Vec<u8>, Vec<u8>)> = Vec::with_capacity(max_messages);
+    for (line_no, line) in stdout.lines().enumerate() {
+        if line.is_empty() {
+            continue;
+        }
+        // Expected line shape: `Partition:<n>\t<key>\x1F<value>`.
+        // `splitn(2, '\t')` peels the partition prefix.
+        let (partition_part, payload) = line.split_once('\t').unwrap_or_else(|| {
+            panic!(
+                "consume line #{line_no} missing tab between partition prefix and payload: {line:?}\n\
+                 full stderr: {}",
+                String::from_utf8_lossy(&output.stderr),
+            )
+        });
+        let partition_str = partition_part.strip_prefix("Partition:").unwrap_or_else(|| {
+            panic!("consume line #{line_no} missing `Partition:` prefix: {partition_part:?} (full line: {line:?})",)
+        });
+        let partition: i32 = partition_str
+            .parse()
+            .unwrap_or_else(|e| panic!("consume line #{line_no}: bad partition {partition_str:?}: {e}"));
+
+        let (key, value) = payload.split_once(SEP).unwrap_or_else(|| {
+            panic!(
+                "consume line #{line_no} missing `\\x1F` separator between key and value: {payload:?}\n\
+                 if a non-ASCII fixture is being used, see the helper rustdoc",
+            )
+        });
+        records.push((partition, key.as_bytes().to_vec(), value.as_bytes().to_vec()));
+    }
+
+    assert_eq!(
+        records.len(),
+        max_messages,
+        "kafka-console-consumer returned {} records, expected {max_messages} \
+         (status: {:?}, timeout_ms: {timeout_ms}, stderr: {})",
+        records.len(),
+        output.status,
+        String::from_utf8_lossy(&output.stderr),
+    );
+
+    records
+}
+
 /// Build the standard PLAINTEXT producer config used by both tests.
 ///
 /// Mirrors the Phase 8a brief verbatim:
