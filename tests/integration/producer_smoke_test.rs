@@ -12,17 +12,36 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Phase 8a — PLAINTEXT producer-side smoke test.
+//! Phase 8a/8b — PLAINTEXT producer-side smoke test.
 //!
 //! Spins up a single-broker KRaft Kafka cluster via Testcontainers
 //! (shared across tests through `cluster_pool`), pre-creates a topic
 //! with 3 partitions via `docker exec kafka-topics`, then drives
 //! [`KafkaProducer`] end-to-end:
 //!
-//! - `producer_smoke_plaintext_1000_records` — 1000 distinct keyed
-//!   records, asserts every send future resolves with `RecordMetadata`
-//!   and the partitioner covered ≥2 of the 3 partitions. Producer-side
-//!   only — end-to-end consume fidelity is Phase 8c.
+//! - `producer_smoke_plaintext_1000_records` — 1000 records with
+//!   **explicit** partition assignment (record `i` → partition `i %
+//!   TOPIC_PARTITIONS`). Asserts every send future resolves with
+//!   `RecordMetadata`, the ack partition equals the explicit partition
+//!   (KafkaProducer::partition's "explicit-partition honored" branch,
+//!   Java `KafkaProducer.java:1014-1024`), per-partition offsets are
+//!   strictly monotonic in send order, and all 3 partitions see
+//!   traffic. Producer-side only — end-to-end consume fidelity is
+//!   Phase 8c.
+//! - `producer_smoke_plaintext_auto_partition` — 1000 records with no
+//!   partition and no key. Asserts the partition the producer's
+//!   partitioner selects at `send()` time equals the partition the
+//!   broker echoes back in the [`RecordMetadata`] ack — i.e. no
+//!   mangling between `do_send_inner` and ProduceRequest. Uses the
+//!   `set_partition_observer` test seam (see `KafkaProducer::
+//!   set_partition_observer` rustdoc for design).
+//! - `flush_drains_50_records_through_public_api` — Phase-7f
+//!   carry-over: 50 records sent via `producer.send(...).await`, then
+//!   `producer.flush().await`. Pins the public-API flush path's
+//!   fidelity through `Producer::flush` (NOT the accumulator-direct
+//!   shortcut Phase 7e was forced into). Asserts all 50 acks land,
+//!   each ack carries the full `RecordMetadata` shape, and per-
+//!   partition offsets are monotonic.
 //! - `close_flushes_pending_inflight` — 50 records, immediate
 //!   `close_with_timeout`, asserts all 50 send futures resolve after
 //!   close returns (the Phase-7 carry-over: graceful-close drains
@@ -233,21 +252,31 @@ macro_rules! build_producer {
 }
 
 // ---------------------------------------------------------------------------
-// Test 1: 1000-record happy path
+// Test 1: 1000-record happy path — EXPLICIT-PARTITION path (Phase 8b)
 // ---------------------------------------------------------------------------
 
 /// Drives 1000 distinct keyed records through a real broker over
-/// PLAINTEXT. Asserts every send resolves with a `RecordMetadata` whose
-/// shape (topic / partition in `[0, 3)` / non-negative offset / non
-/// `-1` timestamp) matches what Java's `KafkaProducer.send().get()`
-/// surfaces.
+/// PLAINTEXT with **explicit** partition assignment: record `i` is
+/// sent with `partition = i % TOPIC_PARTITIONS`. Asserts:
 ///
-/// **Partition-coverage tolerance**: the default sticky partitioner is
-/// not required to hit all 3 partitions during a single linger window
-/// — it sticks to one partition until the batch fills or the linger
-/// elapses, so a fast sender may close out before all 3 partitions
-/// see traffic. The brief codifies this as "≥2 of the 3 partitions",
-/// which is the tightest assertion we can make without flakiness.
+/// 1. **Ack count** (8a) — every send resolves with `RecordMetadata`.
+/// 2. **`RecordMetadata` shape** (8a) — topic match, partition in
+///    `[0, 3)`, non-negative offset, non-`-1` timestamp.
+/// 3. **Partition consistency, explicit path** (8b) — for record `i`,
+///    `m.partition() == i % TOPIC_PARTITIONS`. Exercises Java
+///    `KafkaProducer.partition()`'s "explicit-partition honored"
+///    branch at `KafkaProducer.java:1014-1024` (Rust equivalent at
+///    `kafka_producer.rs::partition()`, "explicit partition wins"
+///    early-return).
+/// 4. **Per-partition monotonic offsets** (8b) — within each
+///    partition, the broker assigns offsets in strict send order. The
+///    explicit-partition path makes the per-partition send order
+///    deterministic at the test side, so the assertion is exact:
+///    offsets are strictly increasing as `i` increases through the
+///    records that landed on a given partition.
+/// 5. **Multi-partition coverage** (8b) — all 3 partitions see
+///    roughly equal traffic (each partition gets `HAPPY_PATH_RECORDS
+///    / 3` records by construction).
 #[tokio::test(flavor = "multi_thread")]
 async fn producer_smoke_plaintext_1000_records() {
     init_logger();
@@ -262,42 +291,57 @@ async fn producer_smoke_plaintext_1000_records() {
 
     let producer = Arc::new(build_producer!(&bootstrap_servers));
 
-    // Fan out 1000 sends through `tokio::spawn` so the linger window
-    // can batch them. Per the brief: spawn happens in the test
-    // harness, NOT inside `KafkaProducer::send` — CLAUDE.md rule 11
-    // forbids per-message spawn in production code.
+    // Issue 1000 `send()` calls sequentially on the test task. This
+    // is intentional — `send()` returns immediately after the
+    // accumulator append, so the loop body is non-blocking (the
+    // broker ack is awaited later via the returned `KafkaFuture`).
+    // Sequential enqueue is required to make the per-partition send
+    // order deterministic for the monotonic-offset assertion below:
+    // the producer appends to its per-partition buffer in call order,
+    // and the broker assigns offsets in append order. A `tokio::
+    // spawn`-per-record fan-out would let the Tokio runtime reorder
+    // the `send()` calls, breaking the per-partition send-order
+    // invariant. Java's `KafkaProducerTest` follows the same pattern.
+    //
+    // We collect the returned `KafkaFuture`s and await their broker
+    // acks concurrently afterward (`futures::future::join_all`).
     let topic_arc: Arc<str> = Arc::from(topic.as_str());
-    let mut handles: Vec<tokio::task::JoinHandle<Result<RecordMetadata, KafkaError>>> =
-        Vec::with_capacity(HAPPY_PATH_RECORDS);
+    let mut futures = Vec::with_capacity(HAPPY_PATH_RECORDS);
     for i in 0..HAPPY_PATH_RECORDS {
-        let producer = producer.clone();
         let topic = topic_arc.clone();
         let key = format!("k{i:04}").into_bytes();
         let value = format!("v{i:04}").into_bytes();
-        handles.push(tokio::spawn(async move {
-            let record = ProducerRecord::with_key(topic, Some(key), Some(value)).expect("ProducerRecord::with_key");
-            // Phase 7g (Java parity): send() returns
-            // Result<KafkaFuture<RecordMetadata>, KafkaError>. The
-            // outer Result is the sync-throw enqueue; the inner
-            // KafkaFuture is the broker-ack future. Java's
-            // `producer.send(...).get()` corresponds to
-            // `send(...).await?.get().await`.
-            producer.send(record).await?.get().await
-        }));
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        // Explicit-partition constructor — `ProducerRecord::
+        // with_partition` sets the partition Java honors at
+        // `KafkaProducer.partition()`'s early-return.
+        let record = ProducerRecord::with_partition(topic, Some(expected_partition), Some(key), Some(value))
+            .expect("ProducerRecord::with_partition");
+        // Phase 7g (Java parity): send() returns
+        // Result<KafkaFuture<RecordMetadata>, KafkaError>. The outer
+        // Result is the sync-throw enqueue (we await it here so the
+        // accumulator append happens in loop order); the inner
+        // KafkaFuture is the broker-ack future (awaited concurrently
+        // below).
+        let fut = producer
+            .send(record)
+            .await
+            .unwrap_or_else(|e| panic!("send #{i} enqueue failed: {e:?}"));
+        futures.push(fut);
     }
 
-    // Collect every result. We assert per-record so a single failure
-    // produces a precise error message instead of a misleading aggregate.
+    // Collect every broker ack. `join_all` is fine — `KafkaFuture` is
+    // `Send`, and we want concurrent ack resolution.
+    let results = futures_util::future::join_all(futures.into_iter().map(|f| async move { f.get().await })).await;
     let mut metadatas: Vec<RecordMetadata> = Vec::with_capacity(HAPPY_PATH_RECORDS);
-    for (i, handle) in handles.into_iter().enumerate() {
-        let result = handle.await.expect("tokio join failed");
-        let meta = result.unwrap_or_else(|e| panic!("send #{i} failed: {e:?}"));
+    for (i, r) in results.into_iter().enumerate() {
+        let meta = r.unwrap_or_else(|e| panic!("send #{i} broker ack failed: {e:?}"));
         metadatas.push(meta);
     }
 
     // --- Assertions ---
 
-    // Ack count: exactly 1000.
+    // (1) Ack count: exactly 1000.
     assert_eq!(
         metadatas.len(),
         HAPPY_PATH_RECORDS,
@@ -305,10 +349,19 @@ async fn producer_smoke_plaintext_1000_records() {
         metadatas.len(),
     );
 
-    // RecordMetadata shape: topic matches, partition in [0, 3),
+    // (2) RecordMetadata shape: topic matches, partition in [0, 3),
     // non-negative offset, non `-1` timestamp.
+    // (3) Partition consistency, explicit path: `m.partition() == i %
+    // TOPIC_PARTITIONS`.
     for (i, m) in metadatas.iter().enumerate() {
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
         assert_eq!(m.topic(), topic.as_str(), "record #{i}: topic mismatch");
+        assert_eq!(
+            m.partition(),
+            expected_partition,
+            "record #{i}: partition mismatch — expected {expected_partition} (explicit), got {}",
+            m.partition(),
+        );
         assert!(
             (0..TOPIC_PARTITIONS).contains(&m.partition()),
             "record #{i}: partition {} not in [0, {})",
@@ -319,14 +372,38 @@ async fn producer_smoke_plaintext_1000_records() {
         assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
     }
 
-    // Partition coverage: ≥2 of 3 partitions saw traffic. See the
-    // function rustdoc for why we don't assert ==3.
+    // (4) Per-partition monotonic offsets: within each partition, the
+    // broker assigns offsets strictly increasing in send order. With
+    // explicit-partition assignment the send order at the test side
+    // is `0..HAPPY_PATH_RECORDS`, so iterating `metadatas` in index
+    // order and grouping by partition preserves the per-partition
+    // send order. Adjacent offsets must satisfy `prev < curr`.
+    let mut by_partition: HashMap<i32, Vec<i64>> = HashMap::new();
+    for m in &metadatas {
+        by_partition.entry(m.partition()).or_default().push(m.offset());
+    }
+    for (partition, offsets) in &by_partition {
+        for w in offsets.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "partition {partition}: offsets not strictly monotonic — prev={} curr={} (full: {offsets:?})",
+                w[0],
+                w[1],
+            );
+        }
+    }
+
+    // (5) Multi-partition coverage: all 3 partitions saw traffic. The
+    // explicit-partition path makes this exact — every partition in
+    // [0, TOPIC_PARTITIONS) is populated by construction
+    // (`HAPPY_PATH_RECORDS = 1000`, `TOPIC_PARTITIONS = 3`, so each
+    // partition holds ~333 records).
     let partitions: HashSet<i32> = metadatas.iter().map(RecordMetadata::partition).collect();
-    assert!(
-        partitions.len() >= 2,
-        "expected ≥2 partitions to see traffic, got {} (partitions: {:?})",
+    assert_eq!(
         partitions.len(),
-        partitions,
+        TOPIC_PARTITIONS as usize,
+        "expected all {TOPIC_PARTITIONS} partitions to see traffic, got {} (partitions: {partitions:?})",
+        partitions.len(),
     );
 
     // Graceful close — drains pending in-flight, joins Sender task.

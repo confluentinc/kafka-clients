@@ -136,6 +136,13 @@ pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
 /// [`Sender`] task.
 ///
 /// [`Producer`]: crate::producer::Producer
+///
+/// `PartitionObserverFn` is the test-seam type used by
+/// [`KafkaProducer::set_partition_observer`] (Phase 8b). Factored out
+/// to satisfy `clippy::type_complexity`.
+#[cfg(any(test, feature = "integration-tests"))]
+type PartitionObserverFn = Arc<dyn Fn(&str, i32) + Send + Sync>;
+
 pub struct KafkaProducer<K, V, C: KafkaClient> {
     // ---- Identifiers / time / context ----
     /// Java: `private final String clientId`. Hot-path identifier kept as
@@ -263,6 +270,33 @@ pub struct KafkaProducer<K, V, C: KafkaClient> {
     /// this to a single atomic check.
     closed: Arc<AtomicBool>,
 
+    // ---- Test seam: partition observer ----
+    /// Test-only callback fired immediately after the accumulator has
+    /// resolved the effective partition (i.e. after `set_partition` has
+    /// been invoked on the [`AppendCallbacks`] by the accumulator) and
+    /// BEFORE the record is handed off to the network round-trip.
+    ///
+    /// Used by Phase 8b's auto-partition-path integration test to
+    /// observe the partitioner's selection independently of the
+    /// broker's ack — proving that the partition the partitioner
+    /// picked at `send()` time equals the partition in the returned
+    /// [`RecordMetadata`].
+    ///
+    /// Java has no equivalent — the test contract there is observed
+    /// through `ProducerInterceptor.onAcknowledgement`, which sees the
+    /// resolved partition in its `RecordMetadata` argument. Rust's
+    /// `on_send` runs before the partitioner (parity with Java
+    /// `interceptors.onSend(record)` at `KafkaProducer.java:950`,
+    /// which also runs before partitioning), so an interceptor cannot
+    /// observe the auto-selected partition pre-network. This seam is
+    /// the minimal Rust-only addition that closes the gap.
+    ///
+    /// Gated on `cfg(any(test, feature = "integration-tests"))` so the
+    /// production hot path is unaffected — the field does not exist at
+    /// all in release builds without the feature.
+    #[cfg(any(test, feature = "integration-tests"))]
+    partition_observer: std::sync::Mutex<Option<PartitionObserverFn>>,
+
     // ---- Phantom for the C parameter on the inherent skeleton ----
     /// `C` only appears in the [`Sender<C>`] type parameter, which is
     /// owned by [`Self::sender_task`]. After spawn the producer no longer
@@ -281,6 +315,40 @@ impl<K, V, C: KafkaClient> KafkaProducer<K, V, C> {
     /// Java's `getClientId()` accessor (visible-for-testing).
     pub fn client_id(&self) -> &str {
         &self.client_id
+    }
+
+    /// Test-only: register a callback fired with `(topic, partition)`
+    /// immediately after the accumulator resolves the effective
+    /// partition for each record (i.e. after `AppendCallbacks::
+    /// set_partition` returns) and BEFORE the network round-trip.
+    ///
+    /// **No Java equivalent.** This is a Rust-only test seam used by
+    /// Phase 8b's auto-partition-path integration test to verify that
+    /// the partition selected by the producer's partitioner equals the
+    /// partition the broker echoes back in the
+    /// [`RecordMetadata`] ack — i.e. that no mangling occurred between
+    /// `do_send_inner`'s partition computation and the ProduceRequest
+    /// payload. Java's equivalent test uses an interceptor's
+    /// `onAcknowledgement` to inspect the resolved partition, but
+    /// Rust's `ProducerInterceptor::on_send` (mirroring Java) runs
+    /// BEFORE the partitioner and `on_acknowledgement` runs AFTER the
+    /// network round-trip — leaving no pre-network observation point
+    /// for the auto-partition path. This seam fills that gap.
+    ///
+    /// `#[doc(hidden)]` keeps the method off docs.rs; gated on
+    /// `cfg(any(test, feature = "integration-tests"))` so the
+    /// production binary never includes it.
+    ///
+    /// Idempotent — calling more than once replaces the prior
+    /// observer.
+    #[cfg(any(test, feature = "integration-tests"))]
+    #[doc(hidden)]
+    pub fn set_partition_observer<F>(&self, observer: F)
+    where
+        F: Fn(&str, i32) + Send + Sync + 'static,
+    {
+        let mut guard = self.partition_observer.lock().expect("partition_observer mutex poisoned");
+        *guard = Some(Arc::new(observer));
     }
 }
 
@@ -919,6 +987,8 @@ where
             sender_wakeup_notify,
             sender_task: std::sync::Mutex::new(Some(sender_task)),
             closed: Arc::new(AtomicBool::new(false)),
+            #[cfg(any(test, feature = "integration-tests"))]
+            partition_observer: std::sync::Mutex::new(None),
             _client_marker: std::marker::PhantomData,
         })
     }
@@ -1397,6 +1467,23 @@ where
         // observable on the callback. `debug_assert` so release builds
         // are unaffected.
         debug_assert_ne!(append_cb.get_partition(), RecordMetadata::UNKNOWN_PARTITION);
+
+        // Test seam: fire the partition observer (if registered) with
+        // the partition the producer's partitioner / accumulator just
+        // resolved. Gated on `cfg(any(test, feature =
+        // "integration-tests"))` so the production hot path is
+        // unaffected. See `KafkaProducer::set_partition_observer`
+        // rustdoc for the design rationale.
+        #[cfg(any(test, feature = "integration-tests"))]
+        {
+            let observer = {
+                let guard = self.partition_observer.lock().expect("partition_observer mutex poisoned");
+                guard.as_ref().map(Arc::clone)
+            };
+            if let Some(observer) = observer {
+                observer(record.topic(), append_cb.get_partition());
+            }
+        }
 
         // Java line 1044-1046: transactionManager.maybeAddPartition. The
         // Milestone-1 plug-in contract pins `transaction_manager` to
