@@ -195,3 +195,76 @@ surface is unchanged outside the cfg-gated test seam),
 1000-record auto-partition, 50-record flush, 50-record close-
 flush).
 
+## Phase 8c — closed (Round 1)
+
+**Closed pending Critic 8 Round 2.** Four commits land the DoD #3
+"8c onward" end-to-end byte fidelity assertion and clear the last
+deferred Phase-8b Round-1 followup (Nit 1).
+
+- `82f3254` — **Phase 8c (1/N): docker-exec kafka-console-consumer
+  test harness helper.** Adds `consume_records(container_id,
+  topic, max_messages, timeout_ms) -> Vec<(i32, Vec<u8>, Vec<u8>)>`
+  invoking `/opt/kafka/bin/kafka-console-consumer.sh` inside the
+  broker container via `docker exec`. Returns
+  `(partition, key, value)` parsed from per-line output. Conventions
+  (final): `--formatter-property print.partition=true`,
+  `--formatter-property print.key=true`,
+  `--formatter-property key.separator=\x1F` (ASCII unit separator
+  — cannot appear in printable ASCII payloads). Final per-line
+  shape: `Partition:<n>\x1F<key>\x1F<value>\n`. Byte-fidelity
+  caveat documented in the helper rustdoc: kafka-console-consumer
+  defaults to string deserializers, lossy on non-UTF-8; Phase 8c
+  fixtures are pure ASCII so the lossy decode is identity. Helper
+  is synchronous (mirrors `create_topic`); async callers wrap in
+  `tokio::task::spawn_blocking`.
+- `e0430fa` — **Phase 8c (2/N): end-to-end byte fidelity via
+  kafka-console-consumer.** Adds the
+  `producer_smoke_plaintext_byte_fidelity` integration test. Sends
+  100 explicit-partition records (`k{i:04}` / `v{i:04}`) through a
+  real broker, awaits all acks, closes gracefully, then consumes
+  back via the (1/N) helper. Groups both produced and consumed
+  records by partition and byte-compares the sequences in offset
+  order. Closes the producer-side zero-copy guarantee (CLAUDE.md
+  §12) at the broker boundary. Two helper-format fixes folded in:
+  `--formatter-property` replaces `--property` (suppresses
+  deprecation-warning stdout pollution); the line parser switched
+  from `Partition:<n>\t<key>\x1F<value>` to
+  `Partition:<n>\x1F<key>\x1F<value>` after observing that
+  `DefaultMessageFormatter` joins printed fields with the
+  configured `key.separator`, not tab. Wall-clock: ~10 s for the
+  100-record assertion (5-test integration suite: 14.83 s end-to-
+  end against localhost Docker).
+- `bc0508d` — **Phase 8c (3/N): doc-comment grouping at
+  kafka_producer.rs:125-144 (8b Round 1 Nit 1).** Resolves the
+  last deferred Phase-8b followup. Moves the cfg-gated
+  `PartitionObserverFn` test-seam type alias from above
+  `KafkaProducer` to below it. Investigation revealed this was
+  not just readability polish — clippy's
+  `empty_line_after_doc_comments` lint identified that the
+  `KafkaProducer` struct's rustdoc was actually attached to
+  `PartitionObserverFn`, silently truncating the struct's
+  rendered docs. Adds a `// ---- Test seam type aliases ----`
+  banner above the relocated alias. No behavioral change.
+- HEAD (this commit) — **Phase 8c (4/N): Phase 8c close stanza
+  in NOTES.md.**
+
+**Deferred (in scope for 8d+):**
+- **Compression matrix** (8d) — rerun the byte-fidelity test
+  with `compression.type ∈ {gzip, snappy, lz4, zstd}`. The
+  console-consumer harness is codec-agnostic (the broker
+  decompresses before serving fetches), so the consume side
+  needs no changes — only the producer config sweep.
+- **TLS happy path** (8e).
+- **Flakiness gate + 3-consecutive-run requirement** (8f).
+  Phase 8c's 5-test suite wall-clock is **14.83 s** on
+  localhost Docker — well inside any reasonable per-run budget
+  for the 3-run gate.
+
+**Status at close:** `cargo build --features integration-tests`
+OK, `cargo xtask format-check` OK, `cargo xtask lint` OK,
+`cargo test --lib` 1233 passed (no count change — production
+diff is comment/whitespace + a type-alias relocation, no behaviour
+change), `cargo test --features integration-tests producer_smoke`
+**5 tests passed** against a real broker (the four Phase-8b tests
+plus the new `producer_smoke_plaintext_byte_fidelity`).
+
