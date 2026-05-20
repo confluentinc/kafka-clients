@@ -51,3 +51,4 @@
 - [Phase-8a.0 Round-2 patterns](phase8a0_round2_patterns.md) — verified-good fix shapes: Arc<Notify> handle-extraction pre-spawn, biased select!, wake-primitive vs end-to-end drain timing distinction, watchdog ceiling sizing
 - [Phase-7g review patterns](phase7g_review_patterns.md) — KafkaFuture<T> revert of Phase-7b collapse; master-constraint smell-check, object-safe trait + send-path allocation audit, two-axis parity-pin (type + behavior)
 - [Phase-8a Round-1 patterns](phase8a_round1_patterns.md) — smoke-test scaffold review; NOTES.md sub-phase-table-vs-DoD-checklist conflict trap; Arc<AtomicBool> as cheaper alternative to Arc<NetworkSend>; #[doc(hidden)] cordon audit; gating-bug invalidates downstream tests
+- [Phase-8b review patterns](phase8b_review_patterns.md) — cfg-gated test seam audit checklist; exactly-once observer-callback verification; flush-vs-close regression-pin via post-flush send; sticky-partitioner coverage caveat
