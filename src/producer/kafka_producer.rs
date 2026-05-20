@@ -136,13 +136,6 @@ pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
 /// [`Sender`] task.
 ///
 /// [`Producer`]: crate::producer::Producer
-///
-/// `PartitionObserverFn` is the test-seam type used by
-/// [`KafkaProducer::set_partition_observer`] (Phase 8b). Factored out
-/// to satisfy `clippy::type_complexity`.
-#[cfg(any(test, feature = "integration-tests"))]
-type PartitionObserverFn = Arc<dyn Fn(&str, i32) + Send + Sync>;
-
 pub struct KafkaProducer<K, V, C: KafkaClient> {
     // ---- Identifiers / time / context ----
     /// Java: `private final String clientId`. Hot-path identifier kept as
@@ -306,6 +299,14 @@ pub struct KafkaProducer<K, V, C: KafkaClient> {
     /// requires.
     _client_marker: std::marker::PhantomData<fn() -> C>,
 }
+
+// ---- Test seam type aliases (cfg-gated; not part of KafkaProducer) ----
+
+/// `PartitionObserverFn` is the test-seam type used by
+/// [`KafkaProducer::set_partition_observer`] (Phase 8b). Factored out
+/// to satisfy `clippy::type_complexity`.
+#[cfg(any(test, feature = "integration-tests"))]
+type PartitionObserverFn = Arc<dyn Fn(&str, i32) + Send + Sync>;
 
 // =====================================================================
 // Public API
