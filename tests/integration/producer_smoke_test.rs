@@ -55,7 +55,7 @@
 
 use std::collections::{HashMap, HashSet};
 use std::process::Command;
-use std::sync::{Arc, Once};
+use std::sync::{Arc, Mutex, Once};
 use std::time::{Duration, Instant};
 
 use log::{Level, LevelFilter, Metadata as LogMetadata, Record};
@@ -419,7 +419,195 @@ async fn producer_smoke_plaintext_1000_records() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 2: close-flushes-pending-in-flight (Phase 7 carry-over)
+// Test 2: 1000-record auto-partition consistency (Phase 8b)
+// ---------------------------------------------------------------------------
+
+/// Drives 1000 records through a real broker over PLAINTEXT with
+/// **no** explicit partition and **no** key (every record built via
+/// `ProducerRecord::new(topic, value)`). Asserts that the partition
+/// the producer's partitioner selects at `send()` time — observed
+/// pre-network through the [`KafkaProducer::set_partition_observer`]
+/// test seam — equals the partition the broker echoes back in the
+/// [`RecordMetadata`] ack. Pins partitioner-vs-broker agreement on
+/// the auto-partition path.
+///
+/// **Why a test seam and not coverage assertions**: with no key and
+/// no explicit partition, partition selection is delegated to the
+/// configured partitioner (the default sticky partitioner during
+/// Milestone-1). The sticky partitioner intentionally batches into
+/// **one** partition until the in-flight batch fills or the linger
+/// window elapses, so a 1000-record burst in a single linger window
+/// may land entirely on a single partition. We therefore cannot
+/// assert 3-partition coverage here — test 1 (explicit-partition
+/// path) is what asserts coverage. What we **can** assert is that
+/// whatever partition the partitioner picked equals the partition
+/// in the ack, which is the partitioner-vs-broker contract.
+///
+/// **Observer correlation**: with sequential `send().await` the
+/// observer fires synchronously during each `send().await` — see
+/// `KafkaProducer::do_send_inner`'s observation point, which runs
+/// after `accumulator.append().await` and before the function
+/// returns. So pushing into a `Vec<i32>` from inside the observer
+/// produces a vector indexed by send order (== record index), and
+/// the i-th element correlates with the i-th ack. No `AtomicUsize`
+/// counter is needed — the sequential structure already pins the
+/// ordering. The observer fires exactly once per `do_send` (Sender-
+/// driven retries do not re-enter `do_send_inner`), which is the
+/// CLAUDE.md rule 9.5 callback-obligation contract.
+///
+/// **Java parity**: Java's `KafkaProducerTest` observes the
+/// auto-partition selection through an interceptor's
+/// `onAcknowledgement` callback, which sees the resolved partition
+/// in its `RecordMetadata` argument — but that interceptor fires
+/// AFTER the broker round-trip, so it cannot independently witness
+/// the pre-network selection. To independently prove that the
+/// pre-network partition equals the post-network partition we need
+/// to observe both ends; Java does so implicitly via the
+/// `Partitioner.partition()` return value, which is observable
+/// inside the partitioner's own mock. Rust's
+/// `set_partition_observer` plays the same role: it captures the
+/// partition the producer chose at the same code path point the
+/// Java partitioner would publish it from.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_smoke_plaintext_auto_partition() {
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_auto_partition");
+    let bootstrap_servers = ctx.bootstrap_servers().to_string();
+
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    let producer = Arc::new(build_producer!(&bootstrap_servers));
+
+    // Register the partition observer BEFORE any `send()` calls.
+    // The observer pushes `(topic, partition)` into a shared `Vec`;
+    // the test thread reads it after all sends resolve. Using a
+    // `Mutex<Vec<...>>` (not `Arc<Mutex<...>>` for the closure side
+    // — the closure captures the `Arc` and clones it into the
+    // closure body via the `move` keyword below) keeps the
+    // single-Mutex pattern from the `set_partition_observer`
+    // rustdoc: the closure does NOT hold the lock across any
+    // `.await`, because the closure has no `.await` — it is a sync
+    // `Fn`.
+    let observed: Arc<Mutex<Vec<(String, i32)>>> = Arc::new(Mutex::new(Vec::with_capacity(HAPPY_PATH_RECORDS)));
+    {
+        let observed = observed.clone();
+        producer.set_partition_observer(move |topic, partition| {
+            // Lock-acquire is local to this sync closure body. No
+            // `.await` here means the guard cannot straddle a yield
+            // point (CLAUDE.md rule 9.6).
+            observed
+                .lock()
+                .expect("observed mutex poisoned")
+                .push((topic.to_string(), partition));
+        });
+    }
+
+    // Issue 1000 `send()` calls sequentially. Same rationale as
+    // test 1: sequential enqueue keeps observation order aligned
+    // with record index. The records carry NO key (so the
+    // partitioner cannot hash-route them) and NO explicit
+    // partition (so the partitioner is consulted).
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+    let mut futures = Vec::with_capacity(HAPPY_PATH_RECORDS);
+    for i in 0..HAPPY_PATH_RECORDS {
+        let topic = topic_arc.clone();
+        let value = format!("v{i:04}").into_bytes();
+        // No key, no partition — auto-partition path. `Producer
+        // Record::new(topic, value)` is the no-key, no-partition
+        // constructor.
+        let record = ProducerRecord::new(topic, Some(value)).expect("ProducerRecord::new");
+        let fut = producer
+            .send(record)
+            .await
+            .unwrap_or_else(|e| panic!("send #{i} enqueue failed: {e:?}"));
+        futures.push(fut);
+    }
+
+    // Collect every broker ack concurrently.
+    let results = futures_util::future::join_all(futures.into_iter().map(|f| async move { f.get().await })).await;
+    let mut metadatas: Vec<RecordMetadata> = Vec::with_capacity(HAPPY_PATH_RECORDS);
+    for (i, r) in results.into_iter().enumerate() {
+        let meta = r.unwrap_or_else(|e| panic!("send #{i} broker ack failed: {e:?}"));
+        metadatas.push(meta);
+    }
+
+    // --- Assertions ---
+
+    // (1) Ack count.
+    assert_eq!(
+        metadatas.len(),
+        HAPPY_PATH_RECORDS,
+        "expected {HAPPY_PATH_RECORDS} acks, got {}",
+        metadatas.len(),
+    );
+
+    // (2) Observer fired exactly once per record. If the observer
+    // double-fired (e.g. on Sender-driven retry), `observed.len()`
+    // would exceed `HAPPY_PATH_RECORDS`; if it under-fired (e.g.
+    // some send path bypassed `do_send_inner`'s observation
+    // point), it would be short. Either is a test failure — the
+    // observer is part of the CLAUDE.md rule 9.5 callback contract.
+    let observed = observed.lock().expect("observed mutex poisoned");
+    assert_eq!(
+        observed.len(),
+        HAPPY_PATH_RECORDS,
+        "expected observer to fire exactly {HAPPY_PATH_RECORDS} times, got {} (callback-obligation contract \
+         broken — see do_send_inner observation point)",
+        observed.len(),
+    );
+
+    // (3) `RecordMetadata` shape: topic match, partition in [0,
+    // TOPIC_PARTITIONS), non-negative offset, non-`-1` timestamp.
+    for (i, m) in metadatas.iter().enumerate() {
+        assert_eq!(m.topic(), topic.as_str(), "record #{i}: topic mismatch");
+        assert!(
+            (0..TOPIC_PARTITIONS).contains(&m.partition()),
+            "record #{i}: partition {} not in [0, {})",
+            m.partition(),
+            TOPIC_PARTITIONS,
+        );
+        assert!(m.offset() >= 0, "record #{i}: negative offset {}", m.offset());
+        assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
+    }
+
+    // (4) Partitioner-vs-broker agreement: for each record, the
+    // partition observed pre-network equals the partition in the
+    // ack. This is the auto-partition consistency contract — it
+    // says nothing about *which* partition was chosen (the sticky
+    // partitioner's choice can be all-on-one), only that whatever
+    // was chosen pre-network is what the broker acked.
+    for (i, m) in metadatas.iter().enumerate() {
+        let (obs_topic, obs_partition) = &observed[i];
+        assert_eq!(
+            obs_topic.as_str(),
+            topic.as_str(),
+            "record #{i}: observer saw topic {obs_topic}, ack saw topic {}",
+            m.topic(),
+        );
+        assert_eq!(
+            *obs_partition,
+            m.partition(),
+            "record #{i}: observer saw partition {obs_partition}, ack saw partition {} (partitioner-vs-broker \
+             disagreement)",
+            m.partition(),
+        );
+    }
+    drop(observed);
+
+    // Graceful close.
+    let producer = Arc::try_unwrap(producer)
+        .map_err(|_| ())
+        .expect("producer Arc had outstanding refs at close");
+    producer
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 3: close-flushes-pending-in-flight (Phase 7 carry-over)
 // ---------------------------------------------------------------------------
 
 /// Pins the graceful-close-flushes-in-flight contract. The Phase-7
