@@ -299,3 +299,85 @@ Rustdoc on `close_flushes_pending_inflight` (`producer_smoke_test.rs:441-447`) s
 - `#[doc(hidden)]` cordon: `DefaultMetadataUpdater`, `SupportsDefaultSerializer`, `KafkaProducer::from_config` all marked + rustdoc-explained + not `pub use`-re-exported.
 
 Phase 8a Round 1 closes. Manager advances to Phase 8b plan.
+## Phase 8b Round 1 — Critic review
+
+Review window: commits `7d9f892..275eb3b` on branch `fresh-impl` (4 commits, all by Actor 8 on 2026-05-20).
+
+Java references consulted:
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java:950` — `interceptors.onSend(record)` runs **before** partitioning at line 1024.
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java:1014-1024` — explicit-partition honored branch in `KafkaProducer.partition()`.
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java:1036-1051` — `accumulator.append` → `assert appendCallbacks.getPartition() != UNKNOWN_PARTITION` → wake-up. The Rust observation point at `kafka_producer.rs:1471-1486` sits exactly between the assertion (line 1038 Java) and the transaction-manager branch (line 1044 Java) — Java-faithful lifecycle placement.
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java:1600` — `interceptors.onAcknowledgement` runs post-broker-ack; cannot observe pre-network partition. Confirms the actor's "no pre-network interceptor observation point" rationale.
+
+Verdict: **0 Blocking, 0 Suggestion, 1 Nit.**
+
+---
+
+### Per-area verifications
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Build (`cargo build --features integration-tests`) | OK | Clean, 12.10 s. |
+| Format-check (`cargo xtask format-check`) | OK | Green. |
+| Lint (`cargo xtask lint`) | OK | Green, no warnings. |
+| Lib tests (`cargo test --lib`) | OK | 1233 passed, no count change vs. 8a close (production surface unchanged outside cfg-gated seam). |
+| Integration tests (`cargo test --features integration-tests producer_smoke`) | OK | 4/4 green against real broker in 9.01 s (Testcontainers run from this review session, not Actor's reported figure). |
+| Observation-point Java parity | OK | Site in `kafka_producer.rs:1471-1486` sits between Java line 1038 (post-`append`, post-assert) and Java line 1044 (transaction-manager). Fires **exactly once per `do_send`** — confirmed by `grep`: only one call site for `do_send_inner` (`kafka_producer.rs:1321`), one for `do_send` (`kafka_producer.rs:1930`). Sender retries operate on already-batched records and never re-enter `do_send_inner`. CLAUDE.md rule 9.5 (callback-obligation) satisfied. |
+| Observer fires only on success path | OK | Located **after** `accumulator.append().await?` — propagated errors short-circuit before the observer. Matches the test's `observed.len() == HAPPY_PATH_RECORDS` invariant (records that error out before reaching `append` also error their futures, so the test's `unwrap_or_else(panic)` catches them too — no silent skew). |
+| `partition_observer` cfg-gating | OK | All 6 references (`grep -n partition_observer src/producer/kafka_producer.rs`) are inside `#[cfg(any(test, feature = "integration-tests"))]` blocks: type alias (144), field decl (298), `set_partition_observer` impl (344-352), constructor initializer (990-991), observation site (1477-1486). Field literally does not exist in release builds without the feature. |
+| Lock-across-`.await` (CLAUDE.md 9.6) | OK | Observer is `Fn(&str, i32) + Send + Sync` (sync). At the observation site (1479-1486) the actor extracts `Option<Arc<...>>` from the guard, drops the guard via inner-scope, then invokes the closure. `set_partition_observer` itself does not `.await`. |
+| Hot-path allocation audit (DoD #10) | OK | `git diff 40beb4a..275eb3b -- src/` shows zero new String clones, no `Box<dyn Future>` per send, no per-message `tokio::spawn` in production code. The only `Arc::new` in production diff is inside `set_partition_observer` (test-only, called at most once per test). |
+| Test 1 (explicit-partition) — coverage assertion | OK | Tightened from `>=2` to exact `3` partitions seen. Explicit-partition path makes this deterministic by construction. |
+| Test 1 — per-partition monotonic offsets | OK | `windows(2)` strict-monotonic check over per-partition offset vectors. Sequential `send().await` keeps per-partition send order deterministic. |
+| Test 2 (auto-partition) — observer-vs-broker agreement | OK | `observed[i] == metadatas[i].partition()` per record. The invariant holds because (a) `send().await` returns *after* `do_send_inner` returns *after* the observer fires, so `observed` accumulates in send order; (b) `join_all` preserves input ordering, so `metadatas[i]` is the i-th sent record's metadata regardless of broker ack order across partitions. |
+| Test 2 — exactly-once observer assertion | OK | `observed.len() == HAPPY_PATH_RECORDS` (line 553-559) pins the CLAUDE.md rule 9.5 callback contract: double-fire on a Sender retry would exceed, under-fire from a bypassed path would fall short. |
+| Test 2 — sticky-partitioner caveat | OK | Rustdoc lines 435-444 explicitly explain why 3-partition coverage is **not** asserted here (sticky partitioner can collapse a 1000-record burst into one partition in a single linger window) and points the reader to test 1 for the coverage contract. Honest framing. |
+| Test 3 (`flush_drains_50_records_through_public_api`) | OK | Routes through `Producer::flush().await` (line 698) — the public-API path, not the accumulator-direct shortcut Phase 7e was forced into. Captured-future-then-flush-then-await pattern correctly exercises flush's drain contract. |
+| Test 3 — post-flush usability | OK | Lines 773-786 send + ack one additional record after `flush()`. Catches the close-vs-flush regression (a regression that turned `flush()` into a `close()` would pass assertions 1-3 — captured futures would still resolve — but the post-flush send would fail with `IllegalState`). |
+| Test 3 — Phase-7 carry-over #2 retired | OK | NOTES.md "Phase-7 carry-overs retired here" #2 reads "50-record `flush()` fidelity — 8b's per-partition multi-record drain exercises `flush` through `producer.send()`, not the accumulator-direct shortcut Phase 7e was forced into". Test 3 matches this brief verbatim. |
+| Test 4 (`close_flushes_pending_inflight`) — 8a Suggestion 2 followup | OK | Per-record shape loop at lines 959-969 now applies topic match, partition range `[0, 3)`, `offset >= 0`, and `has_timestamp()`. Matches test 1's contract. Catches synthetic-`RecordMetadata` regression in graceful-close path. |
+| Test 4 — 8a Nit 1 followup (rustdoc accuracy) | OK | Lines 892-903 separate the wake primitive (`Notify::notify_one()` CAS, microseconds) from end-to-end close-drain (low-millisecond range, broker-ack-RTT-dominated, observed 2-4 ms). Matches the Round-2 archive framing at `COMMENTS.8.md:446-450`. |
+| NOTES.md Phase 8b stanza | OK | Appended at `NOTES.md:126-196`. Documents the 4 commits, the landed assertions (8b "onward" partition consistency + per-partition monotonic offsets, Phase-7 carry-over #2, 8a Suggestion-2 / Nit-1), what's deferred to 8c+ (byte fidelity, compression matrix, TLS, 3-consecutive-run gate). Accurate against the diff. |
+| NOTES.md DoD #3 — partition consistency (8b) | OK | Explicit path: test 1 (line 359-364) — `m.partition() == i % TOPIC_PARTITIONS` per record. Auto path: test 2 (line 581-596) — observer-vs-broker agreement per record. **Both** sides of "partition consistency" pinned, which is stronger than the bare DoD requirement. |
+| NOTES.md DoD #3 — per-partition monotonic offsets (8b) | OK | Tests 1 and 3 both apply `windows(2)` strict-monotonic over per-partition offset vectors. |
+| NOTES.md DoD #4 — no new String clone / Box<dyn Future> / per-message spawn | OK | Confirmed by `git diff 40beb4a..275eb3b -- src/`: zero matches for `String::|to_string|to_owned|Box<dyn Future|tokio::spawn` in production diff outside the cfg-gated test seam. |
+| `kafka` submodule status (`modified: kafka (untracked content)`) | OK | Untracked `bin/` build artifacts inside the Java source tree, not in review window. |
+
+---
+
+### Nit 1: `KafkaProducer` struct rustdoc visually trails into the `PartitionObserverFn` type-alias rustdoc
+
+- **File**: `src/producer/kafka_producer.rs:125-144`
+- **Severity**: Nit
+- **Description**: Lines 125-138 are the `KafkaProducer` struct's rustdoc; line 139 is blank; lines 140-142 are three `///` lines that document `PartitionObserverFn` (the cfg-gated type alias at 143-144). Rust's doc-comment grouping correctly attaches lines 140-142 to the type alias (because of the blank line separator at 139). Functionally fine. But a reader skimming the file sees four consecutive doc-comment blocks under one heading-like `[`Producer`]: ...` reference link, which suggests the `PartitionObserverFn` text belongs to `KafkaProducer`. A `//` (non-doc) separator comment or a blank-line + the existing `#[cfg]` form on its own visual block would make the grouping obvious.
+- **Expected**: Either move the `PartitionObserverFn` rustdoc to sit immediately above its own `type` decl with no preceding `[`Producer`]:` link, or insert a short `// ---- Test seam type aliases ----` separator comment between line 138 and line 140 to break up the visual block. Doc-comment text could also state explicitly "This is a top-level type alias, not a field of `KafkaProducer`."
+- **Recommendation**: Nit. Documentation readability only; the compiler and rustdoc generator both group correctly. Optional polish; can be deferred indefinitely or bundled with the next touch on the file.
+
+---
+
+### Round 1 verdict: **0 Blocking, 0 Suggestion, 1 Nit. accept-with-followups for close.**
+
+The four commits land Phase 8b's DoD #3 "8b onward" assertions cleanly and retire both the Phase-7 carry-over #2 (50-record `flush()` fidelity) and the two 8a Round 1 follow-ups (Suggestion 2, Nit 1) flagged earlier in this file. Every gate is green: build, format-check, lint, 1233 lib tests, 4/4 integration smoke tests against a real Testcontainers broker.
+
+The `partition_observer` test seam is well-designed:
+- Cfg-gated so the production hot path is unaffected (release builds without `integration-tests` feature do not include the field at all).
+- Lifecycle placement is Java-faithful (between `accumulator.append` return and the transaction-manager branch — matches Java lines 1038-1044).
+- Callback fires exactly once per `do_send` (CLAUDE.md rule 9.5).
+- Lock acquire is sync, guard is dropped before the closure body runs (no lock-across-`.await` per CLAUDE.md 9.6).
+- The Rust-only addition is justified — Java's `onSend` (parity with Rust's `on_send`) runs before partitioning, and Java's `onAcknowledgement` runs after the broker RTT, so neither interceptor end can independently witness the pre-network partition. The actor verified this against `KafkaProducer.java:950` and `KafkaProducer.java:1600`.
+
+Test 2's exactly-once observer assertion is a strong addition — it doubles as a callback-contract pin (Sender-driven retries do not re-enter `do_send_inner`). The sticky-partitioner caveat (test 2 deliberately does not assert 3-partition coverage) is correctly documented and the coverage contract is upheld by test 1's explicit-partition path.
+
+Test 3's post-flush-usability assertion (lines 773-786) is exactly the right pin for distinguishing `flush()` from `close()` — a regression that turned `flush()` into a `close()` would have passed assertions 1-3 but failed the post-flush send. This is the kind of regression-catching assertion that DoD #3 should encourage.
+
+**No production-code defects observed.** The only finding is a Nit on doc-comment grouping at `kafka_producer.rs:125-144` — a purely visual concern that does not affect generated rustdoc or compiler behavior.
+
+### Next steps for Manager
+
+- **Phase 8b can close as accept-with-followups (or as a straight accept).** Zero Blocking, zero Suggestion. The Nit is documentation polish that does not block close.
+- The NOTES.md Phase 8b stanza is accurate and complete; no Manager amendment needed.
+- Phase 8c (end-to-end byte fidelity) can begin without prerequisite cleanup from 8b.
+
+
+
+Phase 8b Round 1 closes. Manager advances to Phase 8c (end-to-end byte fidelity) plan.
