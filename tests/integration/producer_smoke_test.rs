@@ -607,7 +607,196 @@ async fn producer_smoke_plaintext_auto_partition() {
 }
 
 // ---------------------------------------------------------------------------
-// Test 3: close-flushes-pending-in-flight (Phase 7 carry-over)
+// Test 3: flush() drains 50 records through the public Producer API
+//   (Phase 7f carry-over, retired in Phase 8b)
+// ---------------------------------------------------------------------------
+
+/// Pins the public-API flush path's fidelity. Phase 7f shipped
+/// `flush()` but its end-to-end coverage was deferred — Phase 7's
+/// `metadata.close()` lift point flagged "50-record `flush()`
+/// fidelity" as a Phase-8 carry-over (`NOTES.md` "Phase-7 carry-overs
+/// retired here" #2).
+///
+/// Shape: send 50 records via the public `Producer::send(...).await`
+/// path with **explicit-partition** assignment (record `i` →
+/// partition `i % TOPIC_PARTITIONS`), capturing each returned
+/// `KafkaFuture<RecordMetadata>` WITHOUT awaiting its broker ack.
+/// Then call `producer.flush().await` and finally await each
+/// captured future. The producer must remain usable afterward
+/// (the Sender task is alive — `flush` does NOT tear it down,
+/// unlike `close_with_timeout`).
+///
+/// Why explicit-partition: keeps the per-partition send order
+/// deterministic at the test side, the same pattern test 1 uses.
+/// The sticky partitioner would otherwise let a single partition
+/// hold all 50 records in one linger window, leaving the
+/// monotonic-offset assertion meaningful only over a single
+/// partition — explicit-partition fans the records across all 3,
+/// so the assertion exercises every partition.
+///
+/// Why this test exists alongside `close_flushes_pending_inflight`:
+/// `flush()` and `close()` flush pending sends through different
+/// code paths in the `Sender` loop:
+/// - `close_with_timeout` calls `close_with_timeout_inner`, which
+///   sets `force_close` / `running = false` and tells the Sender
+///   to drain-then-exit. The Sender task is **torn down**
+///   afterward.
+/// - `flush()` calls `accumulator.begin_flush()` +
+///   `await_flush_completion`, which marks every batch as
+///   flushable and waits for them to be ack'd, but does NOT
+///   touch `running`. The Sender task continues processing
+///   subsequent sends.
+///
+/// Both paths must drain in-flight before returning; both deserve
+/// their own integration coverage. This test pins the second
+/// path; `close_flushes_pending_inflight` pins the first.
+#[tokio::test(flavor = "multi_thread")]
+async fn flush_drains_50_records_through_public_api() {
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_flush_50");
+    let bootstrap_servers = ctx.bootstrap_servers().to_string();
+
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    let producer = Arc::new(build_producer!(&bootstrap_servers));
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+
+    // Send 50 records sequentially without awaiting their broker
+    // acks. The accumulator append (inside `do_send`) completes
+    // synchronously per `send().await`, so the loop returns 50
+    // pending `KafkaFuture<RecordMetadata>`s with records sitting
+    // in per-partition buffers waiting for the Sender to drain.
+    let mut futures = Vec::with_capacity(CLOSE_FLUSH_RECORDS);
+    for i in 0..CLOSE_FLUSH_RECORDS {
+        let topic = topic_arc.clone();
+        let key = format!("fk{i:02}").into_bytes();
+        let value = format!("fv{i:02}").into_bytes();
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        let record = ProducerRecord::with_partition(topic, Some(expected_partition), Some(key), Some(value))
+            .expect("ProducerRecord::with_partition");
+        let fut = producer
+            .send(record)
+            .await
+            .unwrap_or_else(|e| panic!("send #{i} enqueue failed: {e:?}"));
+        futures.push(fut);
+    }
+
+    // Call the public `flush()` — the test contract under
+    // scrutiny. Java's `KafkaProducer::flush()` blocks until every
+    // record currently in the accumulator is ack'd; Rust's mirror
+    // is the `Producer::flush` async fn (parity: `flush().await`
+    // == Java `flush()`).
+    //
+    // 30s timeout backstop via wall-clock measurement — if flush
+    // exceeds 30s for 50 small records on localhost something is
+    // wrong (sender-wakeup miss or accumulator never seeing the
+    // flushable mark). The actual flush is typically under 100 ms.
+    const FLUSH_TIMEOUT: Duration = Duration::from_secs(30);
+    let flush_start = Instant::now();
+    producer.flush().await.expect("flush failed");
+    let flush_elapsed = flush_start.elapsed();
+    assert!(
+        flush_elapsed < FLUSH_TIMEOUT,
+        "flush did not drain before 30s: elapsed={flush_elapsed:?}",
+    );
+
+    // After `flush()` returns, every captured future MUST resolve
+    // immediately with `Ok(RecordMetadata)` — the flush contract
+    // says the broker has already ack'd every pending record by
+    // the time `flush()` returns. So the inner `.get().await`s
+    // are nominally synchronous.
+    let results = futures_util::future::join_all(futures.into_iter().map(|f| async move { f.get().await })).await;
+    let mut metas: Vec<RecordMetadata> = Vec::with_capacity(CLOSE_FLUSH_RECORDS);
+    for (i, r) in results.into_iter().enumerate() {
+        let meta = r.unwrap_or_else(|e| panic!("send #{i} broker ack failed (post-flush): {e:?}"));
+        metas.push(meta);
+    }
+
+    // --- Assertions ---
+
+    // (1) All 50 acks landed.
+    assert_eq!(
+        metas.len(),
+        CLOSE_FLUSH_RECORDS,
+        "expected {CLOSE_FLUSH_RECORDS} acks post-flush, got {}",
+        metas.len(),
+    );
+
+    // (2) `RecordMetadata` shape: topic / partition / offset /
+    // timestamp (the full 8a shape contract, same as test 1).
+    for (i, m) in metas.iter().enumerate() {
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        assert_eq!(m.topic(), topic.as_str(), "record #{i}: topic mismatch");
+        assert_eq!(
+            m.partition(),
+            expected_partition,
+            "record #{i}: partition mismatch — expected {expected_partition} (explicit), got {}",
+            m.partition(),
+        );
+        assert!(
+            (0..TOPIC_PARTITIONS).contains(&m.partition()),
+            "record #{i}: partition {} not in [0, {})",
+            m.partition(),
+            TOPIC_PARTITIONS,
+        );
+        assert!(m.offset() >= 0, "record #{i}: negative offset {}", m.offset());
+        assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
+    }
+
+    // (3) Per-partition strict-monotonic offsets — explicit
+    // assignment means the per-partition send order is the same
+    // index order, so adjacent offsets within a partition must
+    // satisfy `prev < curr`.
+    let mut by_partition: HashMap<i32, Vec<i64>> = HashMap::new();
+    for m in &metas {
+        by_partition.entry(m.partition()).or_default().push(m.offset());
+    }
+    for (partition, offsets) in &by_partition {
+        for w in offsets.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "partition {partition}: offsets not strictly monotonic — prev={} curr={} (full: {offsets:?})",
+                w[0],
+                w[1],
+            );
+        }
+    }
+
+    // (4) Producer is still usable post-flush. Send + ack one
+    // more record through the same producer to prove `flush()`
+    // did NOT tear the Sender down. Without this assertion a
+    // regression that turned `flush()` into a `close()` would
+    // pass tests 1-3 silently — the captured futures would
+    // resolve fine, but subsequent sends would fail.
+    {
+        let key = b"post_flush_k".to_vec();
+        let value = b"post_flush_v".to_vec();
+        let record =
+            ProducerRecord::with_key(topic_arc.clone(), Some(key), Some(value)).expect("ProducerRecord::with_key");
+        let meta = producer
+            .send(record)
+            .await
+            .expect("post-flush send enqueue failed (flush appears to have torn the Sender down)")
+            .get()
+            .await
+            .expect("post-flush broker ack failed");
+        assert_eq!(meta.topic(), topic.as_str(), "post-flush record: topic mismatch");
+    }
+
+    // Graceful close.
+    let producer = Arc::try_unwrap(producer)
+        .map_err(|_| ())
+        .expect("producer Arc had outstanding refs at close");
+    producer
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 4: close-flushes-pending-in-flight (Phase 7 carry-over)
 // ---------------------------------------------------------------------------
 
 /// Pins the graceful-close-flushes-in-flight contract. The Phase-7
