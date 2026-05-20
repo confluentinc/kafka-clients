@@ -26,8 +26,8 @@
 //!   (KafkaProducer::partition's "explicit-partition honored" branch,
 //!   Java `KafkaProducer.java:1014-1024`), per-partition offsets are
 //!   strictly monotonic in send order, and all 3 partitions see
-//!   traffic. Producer-side only — end-to-end consume fidelity is
-//!   Phase 8c.
+//!   traffic. Producer-side only — end-to-end byte fidelity is
+//!   asserted separately in `producer_smoke_plaintext_byte_fidelity`.
 //! - `producer_smoke_plaintext_auto_partition` — 1000 records with no
 //!   partition and no key. Asserts the partition the producer's
 //!   partitioner selects at `send()` time equals the partition the
@@ -46,6 +46,13 @@
 //!   `close_with_timeout`, asserts all 50 send futures resolve after
 //!   close returns (the Phase-7 carry-over: graceful-close drains
 //!   in-flight before tearing the Sender down).
+//! - `producer_smoke_plaintext_byte_fidelity` — Phase 8c: end-to-end
+//!   byte-fidelity. Sends 100 explicit-partition records and consumes
+//!   them back via `docker exec kafka-console-consumer`. Asserts the
+//!   (key, value) byte sequence produced into each partition equals
+//!   the sequence the consumer reads back from the broker — closing
+//!   the producer-side zero-copy guarantee (CLAUDE.md §12) at the
+//!   broker boundary.
 //!
 //! Requires Docker on `$PATH`. Run with:
 //!
@@ -111,6 +118,11 @@ const HAPPY_PATH_RECORDS: usize = 1_000;
 const TOPIC_PARTITIONS: i32 = 3;
 /// Number of records the close-flush test pushes.
 const CLOSE_FLUSH_RECORDS: usize = 50;
+/// Number of records the byte-fidelity test pushes per run. Smaller
+/// than `HAPPY_PATH_RECORDS` because the assertion (consume + per-
+/// partition byte compare) is the cost driver here, not the
+/// producer-side enqueue rate.
+const BYTE_FIDELITY_RECORDS: usize = 100;
 
 /// Pre-creates a topic on the live broker via `docker exec kafka-topics`.
 ///
@@ -215,11 +227,11 @@ fn create_topic(container_id: &str, topic: &str, partitions: i32) {
 ///
 /// **If a future test uses non-ASCII bytes** (binary keys, protobuf,
 /// random fuzz, etc.), this helper must be extended to pass
-/// `--property key.deserializer=org.apache.kafka.common.serialization
-/// .ByteArrayDeserializer` (and `value.deserializer`) AND a wire
-/// format that survives binary output (the default
+/// `--formatter-property key.deserializer=org.apache.kafka.common
+/// .serialization.ByteArrayDeserializer` (and `value.deserializer`)
+/// AND a wire format that survives binary output (the default
 /// `LineMessageFormatter` writes the bytes raw, so the unit-separator
-/// delimiter remains the right approach — but `--property
+/// delimiter remains the right approach — but `--formatter-property
 /// print.partition=true` then prepends a string anyway, so the
 /// parsing below would still work as long as the separator
 /// (`\x1F`, ASCII unit separator) does not collide with any byte in
@@ -227,21 +239,29 @@ fn create_topic(container_id: &str, topic: &str, partitions: i32) {
 ///
 /// # Format conventions
 ///
-/// - `--property key.separator=$'\x1F'` (ASCII unit separator, 0x1F)
-///   — chosen because it cannot appear in printable ASCII payloads
-///   and is the documented "field separator" control character.
-/// - `--property print.partition=true` — prepends `Partition:<n>\t`
-///   to each line so the helper can return the partition without
-///   parsing protobuf-style record headers.
-/// - Final per-line format: `Partition:<n>\t<key>\x1F<value>\n`.
+/// - `--formatter-property key.separator=\x1F` (ASCII unit separator,
+///   0x1F) — chosen because it cannot appear in printable ASCII
+///   payloads and is the documented "field separator" control
+///   character.
+/// - `--formatter-property print.partition=true` — prepends
+///   `Partition:<n><key.separator>` to each line so the helper can
+///   return the partition without parsing protobuf-style record
+///   headers.
+/// - Final per-line format: `Partition:<n>\x1F<key>\x1F<value>\n`
+///   (the `DefaultMessageFormatter` joins every printed field with
+///   the configured `key.separator`).
+///
+/// We pass `--formatter-property` rather than the older `--property`
+/// because recent Kafka releases print a deprecation warning on
+/// `--property` (which lands on the same stdout the test parses).
 ///
 /// # Timeout
 ///
-/// `timeout_ms` is the maximum wall-clock the consumer waits between
-/// messages before exiting. The helper itself adds a small buffer
-/// (`timeout_ms + 5000`) to its own `Command::output` deadline so
-/// the underlying process cleanup is not racing the
-/// `kafka-console-consumer --timeout-ms` flag.
+/// `timeout_ms` is the wall-clock the consumer waits without
+/// receiving a message before exiting. The helper does not impose
+/// any additional deadline — `Command::output` blocks until
+/// `kafka-console-consumer` terminates, which it always does once
+/// either `--max-messages` is reached or `--timeout-ms` elapses.
 ///
 /// # Synchronous by design
 ///
@@ -249,9 +269,6 @@ fn create_topic(container_id: &str, topic: &str, partitions: i32) {
 /// should call this via [`tokio::task::spawn_blocking`] to avoid
 /// stalling the runtime — `kafka-console-consumer` can take up to
 /// `timeout_ms` real time to terminate.
-// `#[allow(dead_code)]` is removed in the next commit when the
-// byte-fidelity test (the first caller) lands.
-#[allow(dead_code)]
 fn consume_records(
     container_id: &str,
     topic: &str,
@@ -259,9 +276,9 @@ fn consume_records(
     timeout_ms: u32,
 ) -> Vec<(i32, Vec<u8>, Vec<u8>)> {
     // ASCII unit separator (0x1F). `kafka-console-consumer` reads
-    // this via `--property key.separator=<literal char>`; we pass
-    // the single 0x1F byte by writing it directly into the argv
-    // string (Rust string literals support `\u{1F}`).
+    // this via `--formatter-property key.separator=<literal char>`;
+    // we pass the single 0x1F byte by writing it directly into the
+    // argv string (Rust string literals support `\u{1F}`).
     const SEP: &str = "\u{1F}";
 
     let output = Command::new("docker")
@@ -278,11 +295,11 @@ fn consume_records(
             &timeout_ms.to_string(),
             "--max-messages",
             &max_messages.to_string(),
-            "--property",
+            "--formatter-property",
             "print.key=true",
-            "--property",
+            "--formatter-property",
             "print.partition=true",
-            "--property",
+            "--formatter-property",
             &format!("key.separator={SEP}"),
         ])
         .output()
@@ -301,15 +318,32 @@ fn consume_records(
         if line.is_empty() {
             continue;
         }
-        // Expected line shape: `Partition:<n>\t<key>\x1F<value>`.
-        // `splitn(2, '\t')` peels the partition prefix.
-        let (partition_part, payload) = line.split_once('\t').unwrap_or_else(|| {
+        // `kafka-console-consumer`'s `DefaultMessageFormatter` joins
+        // `Partition`, `key`, and `value` with the configured
+        // `key.separator` — they are NOT separated by tab. Observed
+        // per-line shape: `Partition:<n><SEP><key><SEP><value>`.
+        let mut parts = line.splitn(3, SEP);
+        let partition_part = parts.next().unwrap_or_else(|| {
             panic!(
-                "consume line #{line_no} missing tab between partition prefix and payload: {line:?}\n\
+                "consume line #{line_no} empty after split: {line:?}\nfull stderr: {}",
+                String::from_utf8_lossy(&output.stderr),
+            )
+        });
+        let key = parts.next().unwrap_or_else(|| {
+            panic!(
+                "consume line #{line_no} missing key field (first `\\x1F` separator not found): {line:?}\n\
                  full stderr: {}",
                 String::from_utf8_lossy(&output.stderr),
             )
         });
+        let value = parts.next().unwrap_or_else(|| {
+            panic!(
+                "consume line #{line_no} missing value field (second `\\x1F` separator not found): {line:?}\n\
+                 full stderr: {}",
+                String::from_utf8_lossy(&output.stderr),
+            )
+        });
+
         let partition_str = partition_part.strip_prefix("Partition:").unwrap_or_else(|| {
             panic!("consume line #{line_no} missing `Partition:` prefix: {partition_part:?} (full line: {line:?})",)
         });
@@ -317,12 +351,6 @@ fn consume_records(
             .parse()
             .unwrap_or_else(|e| panic!("consume line #{line_no}: bad partition {partition_str:?}: {e}"));
 
-        let (key, value) = payload.split_once(SEP).unwrap_or_else(|| {
-            panic!(
-                "consume line #{line_no} missing `\\x1F` separator between key and value: {payload:?}\n\
-                 if a non-ASCII fixture is being used, see the helper rustdoc",
-            )
-        });
         records.push((partition, key.as_bytes().to_vec(), value.as_bytes().to_vec()));
     }
 
@@ -1112,5 +1140,234 @@ async fn close_flushes_pending_inflight() {
         );
         assert!(m.offset() >= 0, "record #{i}: negative offset {}", m.offset());
         assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Test 5: end-to-end byte fidelity via kafka-console-consumer (Phase 8c)
+// ---------------------------------------------------------------------------
+
+/// Closes the producer-side zero-copy guarantee at the broker
+/// boundary: drives `BYTE_FIDELITY_RECORDS` records through a real
+/// broker over PLAINTEXT, then reads them back via `docker exec
+/// kafka-console-consumer` and asserts the (key, value) byte sequence
+/// observed on the consume side equals the sequence produced — per
+/// partition.
+///
+/// **Contract under test**: CLAUDE.md §12 demands the bytes the user
+/// hands to `ProducerRecord` reach the wire unmodified ("no
+/// intermediate copy buffers, no batch-finalization copies, no
+/// `IoSlice` framing-header / payload mixing"). Production-side
+/// audits in Phases 6b/6d/7g checked that the bytes flow through the
+/// accumulator and the network send path without being touched. This
+/// test audits the **end-to-end** assertion: the bytes the broker
+/// writes to its log are identical to the bytes the producer
+/// serialized. We do not assert anything about the wire bytes
+/// themselves (that is Phase 2d/3e's fixture coverage); we assert
+/// the broker's log content matches.
+///
+/// # Design
+///
+/// 1. **Explicit-partition send**, record `i` → partition
+///    `i % TOPIC_PARTITIONS`. This is identical to test 1 — keeps
+///    the per-partition send order deterministic at the test side.
+///    Auto-partition would route the sticky partitioner's choice,
+///    leaving the per-partition byte sequence dependent on which
+///    partition got the sticky burst.
+/// 2. **Await all acks** via `KafkaFuture::get()`, then **close
+///    gracefully** so any remaining batches drain to the broker
+///    before we consume.
+/// 3. **Consume `BYTE_FIDELITY_RECORDS` records** via the
+///    `consume_records` helper. Returns `(partition, key, value)`
+///    in console-consumer output order. Group by partition.
+/// 4. **Group expected records by partition** using the partition
+///    reported in each `RecordMetadata` ack — NOT the
+///    explicit-partition input. The ack's partition is what the
+///    broker recorded; the explicit partition is what the producer
+///    asked for. In practice they match because Java's
+///    `KafkaProducer.partition()` honours explicit partitions and
+///    the broker writes to that exact partition, but using the ack
+///    partition as the grouping key is the only correct choice if
+///    those ever diverged (it is a per-partition byte-fidelity
+///    claim, not a partition-routing claim).
+/// 5. **Compare**: for each partition, the consume-side
+///    (key, value) sequence in offset order must equal the
+///    produce-side (key, value) sequence in the order the producer
+///    enqueued records into that partition.
+///
+/// # `kafka-console-consumer` ordering note
+///
+/// The console consumer reads each partition with a single thread
+/// in offset order, but it interleaves across partitions in
+/// whatever order data arrives at the consumer's poll. We therefore
+/// **cannot** rely on the top-level output order — only on
+/// per-partition order. The helper preserves the printed order;
+/// grouping by partition recovers per-partition offset order.
+///
+/// # Java parity
+///
+/// Java's `KafkaProducerTest` does not include an exact analog —
+/// most of its end-to-end coverage runs through embedded test
+/// brokers and asserts producer behaviour rather than byte
+/// fidelity. The closest parallel is
+/// `ProducerSendWhileDeletionTest` / `TransactionsTest`, which
+/// roundtrip records and assert content equality without going
+/// through the wire format explicitly. This test fills that gap on
+/// the Rust side: it pins the zero-copy contract that the Java
+/// codebase enforces by construction (JIT-friendly heap layout
+/// that hides identifier clones, JVM GC that absorbs intermediate
+/// buffers) but Rust makes explicit by code review.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_smoke_plaintext_byte_fidelity() {
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_byte_fidelity");
+    let bootstrap_servers = ctx.bootstrap_servers().to_string();
+
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    let producer = Arc::new(build_producer!(&bootstrap_servers));
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+
+    // Build the input set: record `i` → partition `i %
+    // TOPIC_PARTITIONS`, key `k{i:04}`, value `v{i:04}` (pure
+    // ASCII — see `consume_records` rustdoc on the ASCII-only
+    // constraint of the kafka-console-consumer string-deserializer
+    // path used here).
+    let mut input: Vec<(i32, Vec<u8>, Vec<u8>)> = Vec::with_capacity(BYTE_FIDELITY_RECORDS);
+    for i in 0..BYTE_FIDELITY_RECORDS {
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        let key = format!("k{i:04}").into_bytes();
+        let value = format!("v{i:04}").into_bytes();
+        input.push((expected_partition, key, value));
+    }
+
+    // Send sequentially — keeps per-partition enqueue order
+    // deterministic (same rationale as test 1's loop).
+    let mut futures = Vec::with_capacity(BYTE_FIDELITY_RECORDS);
+    for (i, (partition, key, value)) in input.iter().enumerate() {
+        let topic = topic_arc.clone();
+        let record = ProducerRecord::with_partition(topic, Some(*partition), Some(key.clone()), Some(value.clone()))
+            .expect("ProducerRecord::with_partition");
+        let fut = producer
+            .send(record)
+            .await
+            .unwrap_or_else(|e| panic!("send #{i} enqueue failed: {e:?}"));
+        futures.push(fut);
+    }
+
+    // Await every broker ack.
+    let results = futures_util::future::join_all(futures.into_iter().map(|f| async move { f.get().await })).await;
+    let mut metadatas: Vec<RecordMetadata> = Vec::with_capacity(BYTE_FIDELITY_RECORDS);
+    for (i, r) in results.into_iter().enumerate() {
+        let meta = r.unwrap_or_else(|e| panic!("send #{i} broker ack failed: {e:?}"));
+        metadatas.push(meta);
+    }
+    assert_eq!(
+        metadatas.len(),
+        BYTE_FIDELITY_RECORDS,
+        "expected {BYTE_FIDELITY_RECORDS} acks, got {}",
+        metadatas.len(),
+    );
+
+    // Close gracefully so any straggler batches drain to the broker
+    // before we invoke the consumer. This is belt-and-braces — we
+    // already awaited every ack, so the broker has every record
+    // committed before this line; but a future regression that
+    // returned acks early (e.g. acks=1 with linger after the ack)
+    // would be caught here.
+    let producer_for_close = producer.clone();
+    drop(producer);
+    let producer_for_close = Arc::try_unwrap(producer_for_close)
+        .map_err(|_| ())
+        .expect("producer Arc had outstanding refs at close");
+    producer_for_close
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+
+    // Now consume the records back. Run inside `spawn_blocking`
+    // because `consume_records` blocks on `docker exec` which can
+    // take up to `timeout_ms`. 30s is the consume-side timeout —
+    // generous, since 100 records on localhost finish in well under
+    // a second. The container id is moved into the closure to keep
+    // the await point clean of cross-thread borrow obligations.
+    let container_id = cluster.container_ids()[0].clone();
+    let consume_topic = topic.clone();
+    let consumed: Vec<(i32, Vec<u8>, Vec<u8>)> = tokio::task::spawn_blocking(move || {
+        consume_records(&container_id, &consume_topic, BYTE_FIDELITY_RECORDS, 30_000)
+    })
+    .await
+    .expect("spawn_blocking(consume_records) panicked");
+    assert_eq!(
+        consumed.len(),
+        BYTE_FIDELITY_RECORDS,
+        "expected {BYTE_FIDELITY_RECORDS} consumed records, got {}",
+        consumed.len(),
+    );
+
+    // Group expected records by the partition the broker
+    // acknowledged. Within each partition the enqueue order at the
+    // test side equals the offset order at the broker (test 1
+    // proves per-partition strict-monotonic offsets), so iterating
+    // `metadatas` in index order and grouping yields the
+    // produce-side (key, value) sequence per partition.
+    let mut expected_by_partition: HashMap<i32, Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+    for (i, m) in metadatas.iter().enumerate() {
+        let (_input_partition, key, value) = &input[i];
+        expected_by_partition
+            .entry(m.partition())
+            .or_default()
+            .push((key.clone(), value.clone()));
+    }
+
+    // Group consumed records by partition. The console consumer
+    // already prints per-partition in offset order, so the per-
+    // partition `Vec` preserves the broker's stored order.
+    let mut consumed_by_partition: HashMap<i32, Vec<(Vec<u8>, Vec<u8>)>> = HashMap::new();
+    for (partition, key, value) in consumed {
+        consumed_by_partition.entry(partition).or_default().push((key, value));
+    }
+
+    // Both grouping maps must cover the same partition set.
+    let expected_partitions: HashSet<i32> = expected_by_partition.keys().copied().collect();
+    let consumed_partitions: HashSet<i32> = consumed_by_partition.keys().copied().collect();
+    assert_eq!(
+        expected_partitions, consumed_partitions,
+        "partition sets diverge — expected: {expected_partitions:?}, consumed: {consumed_partitions:?}",
+    );
+
+    // Per-partition byte-by-byte equality. Asserts the producer-
+    // side zero-copy guarantee at the broker boundary: the bytes
+    // the broker stored in its log equal the bytes the producer
+    // serialized. Any divergence here points at:
+    //   - serialization (unlikely — `ByteArrayOwnedSerializer` is
+    //     identity; tested in unit suite)
+    //   - accumulator copy (Phase 6d/6b)
+    //   - wire framing (Phase 2d, fixture-tested)
+    //   - broker-side decoding (out of scope — would be a Kafka
+    //     broker bug)
+    for (partition, expected) in &expected_by_partition {
+        let consumed = consumed_by_partition
+            .get(partition)
+            .unwrap_or_else(|| panic!("partition {partition} missing from consumed"));
+        assert_eq!(
+            consumed.len(),
+            expected.len(),
+            "partition {partition}: record-count mismatch — expected {} produced records, got {} consumed",
+            expected.len(),
+            consumed.len(),
+        );
+        for (i, ((exp_key, exp_value), (act_key, act_value))) in expected.iter().zip(consumed.iter()).enumerate() {
+            assert_eq!(
+                act_key, exp_key,
+                "partition {partition} record #{i}: key bytes diverge (expected {exp_key:?}, got {act_key:?})",
+            );
+            assert_eq!(
+                act_value, exp_value,
+                "partition {partition} record #{i}: value bytes diverge (expected {exp_value:?}, got {act_value:?})",
+            );
+        }
     }
 }
