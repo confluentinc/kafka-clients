@@ -122,3 +122,76 @@ These were tagged "Phase 8" in `COMMENTS.DONE.7.md`:
    comment files are resolved.
 
 Agent number for this phase: **N = 8**.
+
+## Phase 8b — closed (Round 1)
+
+**Closed pending Critic 8 Round 2.** Four commits land the DoD #3
+"8b onward" assertions and retire Phase-7 carry-over #2.
+
+- `7d9f892` — **Phase 8b (1/N): partition_observer seam +
+  explicit-partition assertion in test 1.** Adds the
+  `#[cfg(any(test, feature = "integration-tests"))]`-gated
+  `set_partition_observer` test seam on `KafkaProducer` (with
+  `PartitionObserverFn` type alias), with the observation point
+  in `do_send_inner` immediately after the accumulator's
+  `AppendCallbacks::set_partition` resolves. Rewrites
+  `producer_smoke_plaintext_1000_records` to the explicit-partition
+  path (record `i` → partition `i % TOPIC_PARTITIONS`) so the
+  partition-consistency assertion is checkable through Java's
+  "explicit-partition honored" early-return branch
+  (`KafkaProducer.java:1014-1024`). Tightens partition coverage
+  from ">=2" to "all 3" and adds per-partition strict-monotonic
+  offset checks.
+- `3194afd` — **Phase 8b (2/N): auto-partition consistency test
+  via partition_observer seam.** New integration test
+  `producer_smoke_plaintext_auto_partition`: 1000 records with
+  no key and no explicit partition (auto-partition path via the
+  default sticky partitioner). Uses the seam from commit 1 to
+  capture the pre-network partition selection and asserts
+  partitioner-vs-broker agreement (observed partition == ack
+  partition) per record. Also asserts the observer fires exactly
+  once per record (CLAUDE.md rule 9.5 callback obligation —
+  retries do not re-enter `do_send_inner`). Does NOT assert
+  3-partition coverage (sticky partitioner can batch a 1000-record
+  burst into one partition in a single linger window — test 1's
+  explicit path is what asserts coverage).
+- `292af18` — **Phase 8b (3/N): flush() drains 50 records through
+  public Producer API.** Retires Phase-7 carry-over #2 ("50-record
+  `flush()` fidelity"). 50 records sent via
+  `Producer::send().await` capturing pending
+  `KafkaFuture<RecordMetadata>`, then `producer.flush().await`,
+  then await each ack. Asserts full `RecordMetadata` shape,
+  per-partition strict-monotonic offsets, **and** that the
+  producer is still usable post-flush (one additional `send`
+  succeeds — catches a regression where `flush()` was silently
+  turned into a `close()`). Pins the public-API flush path
+  separately from `close_flushes_pending_inflight` because the
+  two share the drain contract but diverge on Sender lifecycle.
+- HEAD (this commit) — **Phase 8b (4/N):
+  `close_flushes_pending_inflight` shape parity + rustdoc
+  accuracy (8a Round 1 followups).** Applies test 1's full
+  per-record shape check (topic match, partition `[0, 3)`,
+  `has_timestamp()`) inside `close_flushes_pending_inflight`'s
+  loop (Suggestion 2). Fixes the "microseconds — milliseconds at
+  worst" rustdoc on the close-drain measurement to separate the
+  wake primitive (Notify CAS, microseconds) from the end-to-end
+  close-drain (broker-ack-RTT, low milliseconds) — Nit 1.
+
+**Deferred (in scope for 8c+):**
+- **End-to-end byte fidelity** (8c) — consume produced batch
+  via `kafka-console-consumer` and assert key/value bytes match
+  per partition.
+- **Compression matrix** (8d) — rerun with `compression.type
+  ∈ {gzip, snappy, lz4, zstd}`.
+- **TLS happy path** (8e).
+- **Flakiness gate + 3-consecutive-run requirement** (8f).
+
+**Status at close:** `cargo build --features integration-tests`
+OK, `cargo xtask format-check` OK, `cargo xtask lint` OK,
+`cargo test --lib` 1233 passed (no count change — production
+surface is unchanged outside the cfg-gated test seam),
+`cargo test --features integration-tests producer_smoke`
+4 tests passed against a real broker (1000-record explicit,
+1000-record auto-partition, 50-record flush, 50-record close-
+flush).
+

@@ -891,14 +891,16 @@ async fn close_flushes_pending_inflight() {
     // polls each branch of `join!` at least once before suspending).
     // Close-timeout sizing: 5s is a tight watchdog. With Phase 8a.0
     // Round 2 Suggestion 1's `tokio::sync::Notify`-backed
-    // `sender_wakeup` (commit `397dc09`), close drains in
-    // microseconds — milliseconds at worst — for 50 small records on
-    // localhost. Pre-Suggestion-1, this used to sit at 90s to
-    // accommodate the 30s `default.request.timeout.ms` backstop tick
-    // (the no-op `sender_wakeup` left close-drain bounded only by
-    // that cap). With the real wake mechanism, 5s is ~1000x the
-    // expected drain time and still catches any future
-    // missed-wake regression.
+    // `sender_wakeup` (commit `397dc09`), the wake primitive fires
+    // in microseconds (a `Notify::notify_one()` CAS); close-drain
+    // end-to-end is in the low-millisecond range, dominated by the
+    // broker-ack RTT for 50 small records on localhost (observed:
+    // 2-4 ms per run-cycle). Pre-Suggestion-1, this used to sit at
+    // 90s to accommodate the 30s `default.request.timeout.ms`
+    // backstop tick (the no-op `sender_wakeup` left close-drain
+    // bounded only by that cap). With the real wake mechanism, 5s
+    // is ~1000x the expected drain time and still catches any
+    // future missed-wake regression.
     //
     // Contract pinned: graceful close MUST flush all pending sends
     // before its deadline. We assert that by measuring elapsed wall-
@@ -945,7 +947,24 @@ async fn close_flushes_pending_inflight() {
         "expected {CLOSE_FLUSH_RECORDS} acked records after close, got {}",
         metas.len(),
     );
+
+    // Full `RecordMetadata` shape check — same contract as test 1's
+    // per-record loop. Phase 8a Round 1 Suggestion 2: tightens the
+    // graceful-close contract from "offset ≥ 0" to "the entire
+    // RecordMetadata shape is intact post-flush". Catches a
+    // regression where the graceful-close path could resolve a
+    // future with a synthetic `RecordMetadata` (wrong topic,
+    // `UNKNOWN_PARTITION`, or `NO_TIMESTAMP`) and still pass the
+    // bare offset check.
     for (i, m) in metas.iter().enumerate() {
+        assert_eq!(m.topic(), topic.as_str(), "record #{i}: topic mismatch");
+        assert!(
+            (0..TOPIC_PARTITIONS).contains(&m.partition()),
+            "record #{i}: partition {} not in [0, {})",
+            m.partition(),
+            TOPIC_PARTITIONS,
+        );
         assert!(m.offset() >= 0, "record #{i}: negative offset {}", m.offset());
+        assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
     }
 }
