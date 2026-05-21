@@ -651,15 +651,16 @@ fn build_production_network_client(
     let security_protocol = SecurityProtocol::for_name(security_protocol_str)
         .ok_or_else(|| KafkaError::Config(format!("Invalid security.protocol: {security_protocol_str}")))?;
 
-    // Phase 9b: PLAINTEXT and SASL_PLAINTEXT are wired. SSL and SASL_SSL
-    // still need the producer-side SSL-config plumbing that's deferred to
-    // a future milestone — surface them with `UnsupportedOperation`.
-    if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
-        return Err(KafkaError::UnsupportedOperation(format!(
-            "KafkaProducer::new: security.protocol={security_protocol_str} requires SSL plumbing not yet \
-             wired in this milestone. PLAINTEXT and SASL_PLAINTEXT are supported."
-        )));
-    }
+    // Build the rustls ClientConfig when the security protocol uses
+    // TLS (SSL or SASL_SSL). Phase 9c.1 added the producer-side
+    // plumbing; here is the producer-side gate lift that finally
+    // dispatches it. Mirrors Java's
+    // `SslChannelBuilder.configure(channelBuilderConfigs)` flow.
+    let ssl_config = if security_protocol.uses_ssl() {
+        Some(crate::common::security::ssl::build_client_config_from_producer_config(config)?)
+    } else {
+        None
+    };
 
     // Build the SASL config if needed. Phase 9b accepts BOTH
     // `sasl.jaas.config` AND the fresh-impl `sasl.username` /
@@ -676,7 +677,7 @@ fn build_production_network_client(
         None
     };
 
-    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, None, sasl_config)
+    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, ssl_config, sasl_config)
         .map_err(|e| KafkaError::Config(format!("Failed to construct channel builder: {e}")))?;
 
     let connections_max_idle_ms = config.get_long(producer_config::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
@@ -2565,20 +2566,88 @@ mod tests {
         drop(producer);
     }
 
-    /// SSL plumbing on the producer side is deferred. Phase 9b
-    /// lifted the gate to allow `SASL_PLAINTEXT`, but `SSL` and
-    /// `SASL_SSL` still require SSL config plumbing not yet present.
+    /// Phase 9c.3: write a self-signed PEM cert to a tempfile for use
+    /// as a producer-side truststore. Returns the [`NamedTempFile`]
+    /// (must outlive the props lookup) and the path string.
+    fn write_self_signed_truststore() -> (tempfile::NamedTempFile, String) {
+        use std::io::Write;
+        let mut params = rcgen::CertificateParams::default();
+        params.distinguished_name.push(rcgen::DnType::CommonName, "Test CA");
+        let key = rcgen::KeyPair::generate().expect("keypair");
+        let cert = params.self_signed(&key).expect("self-sign");
+        let mut f = tempfile::NamedTempFile::new().expect("temp file");
+        f.write_all(cert.pem().as_bytes()).expect("write pem");
+        f.flush().expect("flush pem");
+        let path = f.path().to_str().expect("utf-8 path").to_owned();
+        (f, path)
+    }
+
+    /// Phase 9c.3 gate lift: `KafkaProducer::new` with
+    /// `security.protocol=SSL` + a valid PEM truststore succeeds.
+    /// Connection failures against an unreachable bootstrap surface at
+    /// first send/poll (lazy connect), not at construction.
+    #[tokio::test]
+    async fn public_new_accepts_ssl_with_truststore_location() {
+        let (_truststore_file, path) = write_self_signed_truststore();
+        let mut props = minimal_props();
+        props.insert("security.protocol".to_owned(), "SSL".to_owned());
+        props.insert(
+            crate::common::config::ssl_configs::SSL_TRUSTSTORE_LOCATION_CONFIG.to_owned(),
+            path,
+        );
+        // Schema default for `ssl.truststore.type` is `JKS`; rustls
+        // only handles `PEM` (Phase 9c.1 module rustdoc). Override.
+        props.insert(
+            crate::common::config::ssl_configs::SSL_TRUSTSTORE_TYPE_CONFIG.to_owned(),
+            "PEM".to_owned(),
+        );
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props)
+            .expect("Phase 9c.3: SSL + truststore must construct successfully");
+        drop(producer);
+    }
+
+    /// Phase 9c.3: `KafkaProducer::new` with `security.protocol=SASL_SSL`
+    /// + truststore + PLAIN JAAS credentials succeeds.
+    #[tokio::test]
+    async fn public_new_accepts_sasl_ssl_with_truststore_and_jaas() {
+        let (_truststore_file, path) = write_self_signed_truststore();
+        let mut props = minimal_props();
+        props.insert("security.protocol".to_owned(), "SASL_SSL".to_owned());
+        props.insert(
+            crate::common::config::ssl_configs::SSL_TRUSTSTORE_LOCATION_CONFIG.to_owned(),
+            path,
+        );
+        props.insert(
+            crate::common::config::ssl_configs::SSL_TRUSTSTORE_TYPE_CONFIG.to_owned(),
+            "PEM".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "PLAIN".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_JAAS_CONFIG.to_owned(),
+            r#"org.apache.kafka.common.security.plain.PlainLoginModule required username="alice" password="supersecret";"#.to_owned(),
+        );
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props)
+            .expect("Phase 9c.3: SASL_SSL + truststore + PLAIN JAAS must construct successfully");
+        drop(producer);
+    }
+
+    /// Phase 9c.3: `security.protocol=SSL` WITHOUT
+    /// `ssl.truststore.location` must fail with a clear error message
+    /// naming the missing key.
     #[test]
-    fn public_new_rejects_ssl_security_protocol_in_milestone_1() {
+    fn public_new_rejects_ssl_without_truststore_location() {
         let mut props = minimal_props();
         props.insert("security.protocol".to_owned(), "SSL".to_owned());
         let Err(err) = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props) else {
-            panic!("expected Err for SSL in Milestone-1");
+            panic!("expected Err for SSL without truststore location");
         };
-        assert!(matches!(err, KafkaError::UnsupportedOperation(_)));
+        assert!(matches!(err, KafkaError::Config(_)));
         assert!(
-            err.message().contains("SSL plumbing"),
-            "expected SSL plumbing in error, got: {}",
+            err.message().contains("ssl.truststore.location"),
+            "expected ssl.truststore.location in error, got: {}",
             err.message(),
         );
     }

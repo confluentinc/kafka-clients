@@ -73,11 +73,6 @@
 //! Server-side: not translated (server keystore loading is out of
 //! client scope).
 
-// Wired into the producer-side gate in sub-phase 9c.3. The intermediate
-// 9c.1 commit lands the module and its tests; the producer-side call
-// site appears in the next commit.
-#![allow(dead_code)]
-
 use std::fs;
 use std::io::BufReader;
 use std::sync::Arc;
