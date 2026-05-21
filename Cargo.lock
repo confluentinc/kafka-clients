@@ -447,6 +447,7 @@ dependencies = [
  "serde",
  "serde_json",
  "snap",
+ "tempfile",
  "testcontainers",
  "testcontainers-modules",
  "tokio",
