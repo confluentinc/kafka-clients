@@ -774,9 +774,7 @@ async fn producer_smoke_ssl_1000_records() {
         partitions.len(),
     );
 
-    let producer = Arc::try_unwrap(producer)
-        .map_err(|_| ())
-        .expect("producer Arc had outstanding refs at close");
+    let producer = Arc::into_inner(producer).expect("producer Arc had outstanding refs at close");
     producer
         .close_with_timeout(Duration::from_secs(30))
         .await

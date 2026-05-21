@@ -2641,6 +2641,15 @@ mod tests {
     /// Phase 9c.3: `security.protocol=SSL` WITHOUT
     /// `ssl.truststore.location` must fail with a clear error message
     /// naming the missing key.
+    ///
+    /// Substring assertion (mirrors the symmetric SASL test
+    /// `public_new_rejects_sasl_plaintext_without_credentials` below).
+    /// Full error message is `"ssl.truststore.location is required when
+    /// security.protocol uses SSL"`. Substring is sufficient because
+    /// the missing-key name is the load-bearing diagnostic — and is
+    /// resilient to harmless suffix additions (e.g. a remediation
+    /// hint). If a refactor changes the key name itself, this test
+    /// will surface it.
     #[test]
     fn public_new_rejects_ssl_without_truststore_location() {
         let mut props = minimal_props();

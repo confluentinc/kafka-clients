@@ -875,3 +875,58 @@ minus 1 SSL-rejection test removed). `cargo test --features
 integration-tests` not exercised in this environment (Docker
 unavailable) — gated on build-pass per the brief; live run will
 be exercised in CI or by the next Actor with Docker access.
+
+## Sub-phase 9c — Round 1 fixup pass
+
+Critic 9 raised 4 Suggestions + 3 Nits against the Phase 9c Round 1
+commit ladder (`2a3dc83..03a507c`). All seven items resolved by
+Actor 9 across four fixup commits:
+
+- `bc731e2` — **S1 + N3.** Raw-IP SNI doc accuracy. The actual code
+  was already correct (`rustls::ServerName::try_from("127.0.0.1")`
+  returns `Ok(ServerName::IpAddress)`, and the SSL builder accepts
+  it — handshake omits SNI per RFC 6066 §3 and verifies via IP-SAN
+  match). The docs in 4 source-tree locations + the NOTES.md 9c.2
+  close-stanza claim were wrong. Rewrote `build_and_register_channel`
+  body comment, the test rustdoc, the Case-2 inline comment, the
+  assertion-adjacent comment, and the 9c.2 close-stanza to describe
+  rustls' actual three-way `try_from` outcomes. Also rewrote the
+  integration test cert-SAN comment (N3) to name the IP-SAN match
+  path explicitly. Code unchanged.
+- `09f7699` — **S2.** Added two unit tests against
+  `NoHostnameVerifier::verify_server_cert` directly:
+  `no_hostname_verifier_rejects_untrusted_ca_chain` (chain
+  validation runs even with hostname check disabled) +
+  `no_hostname_verifier_accepts_chain_with_san_mismatch` (the
+  `NotValidForName` / `NotValidForNameContext` translation works).
+  Both build real cert chains via `rcgen`. Test count: 1339 → 1341.
+- `ed3192c` — **S3.** Added
+  `sasl_authenticator_principal_returns_configured_username`
+  regression test pinning both `USER_TYPE` and the literal
+  username `alice`. Reworded the in-line comment to drop the
+  misleading "Java parity" claim — Java's behaviour for PLAIN is a
+  latent NPE on `requireNonNull(name)` because
+  `clientPrincipalName` is `null` for non-GSSAPI mechanisms. The
+  Rust impl is a documented deviation, not parity. Test count:
+  1341 → 1342.
+- HEAD (this commit) — **S4 + N1 + N2.** Added a substring-policy
+  comment on `public_new_rejects_ssl_without_truststore_location`
+  documenting the full error message inline and pinning the
+  rationale (load-bearing missing-key name; resilient to harmless
+  suffix additions); symmetric SASL test left as substring for
+  balance per Critic guidance. Replaced the 3-candidate dev-notes
+  block in `NoHostnameVerifier::verify_server_cert` with a
+  single-paragraph description of the final implementation.
+  Replaced the `Arc::try_unwrap(...).map_err(|_| ())` ceremony in
+  `producer_smoke_ssl_1000_records` with `Arc::into_inner(...)`
+  to match the byte-fidelity test in the same file.
+
+**Status at close:** `cargo build` OK, `cargo build --features
+integration-tests` OK, `cargo xtask format-check` OK,
+`cargo xtask lint` OK, `cargo test --lib` 1342 passed (+3 versus
+Phase 9c Round 1 close baseline of 1339: 2 NoHostnameVerifier
+tests + 1 SASL principal regression test). Three older pre-existing
+`Arc::try_unwrap` sites in `producer_smoke_test.rs` (lines 609,
+968, 1157) left untouched — out of Round 1 scope.
+
+Phase 9c Round 1 fixup pass closes.

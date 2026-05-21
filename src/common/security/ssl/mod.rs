@@ -351,20 +351,13 @@ impl ServerCertVerifier for NoHostnameVerifier {
         ocsp_response: &[u8],
         now: UnixTime,
     ) -> Result<ServerCertVerified, rustls::Error> {
-        // Pass an arbitrary placeholder name to the inner verifier; we
-        // are explicitly disabling the SAN match. The inner verifier
-        // still checks chain-of-trust against the root store.
-        // We use a literal "_" which always fails to parse as a hostname
-        // but the inner verifier will be called for chain validation
-        // through a side door: we manually re-implement the bits that
-        // do NOT touch the SAN. Easier path: just call `verify_server_cert`
-        // with a parsed dummy server name and ignore the result if it's
-        // only a name-mismatch error.
-        //
-        // Cleanest approach: ask the inner verifier to do its chain work
-        // and translate "name mismatch" into success. Rustls returns
-        // `Error::InvalidCertificate(CertificateError::NotValidForName)`
-        // for that case, which we can match on.
+        // Delegate chain validation to `WebPkiServerVerifier` with a
+        // static placeholder hostname (`invalid.example`), then
+        // translate the two name-mismatch error variants
+        // (`NotValidForName` + `NotValidForNameContext`) into success
+        // while propagating every other error unchanged. Chain-of-trust
+        // against the root store still runs because the inner verifier
+        // performs cert-chain work independently of the SAN check.
         let dummy = ServerName::try_from("invalid.example").expect("static valid hostname");
         match self
             .inner
