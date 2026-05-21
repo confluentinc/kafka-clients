@@ -458,3 +458,29 @@ The findings are all Suggestion / Nit severity — none of them block 9b from cl
 3. Spawn Actor 9 for sub-phase 9c (Integration test 1: SSL connection + producer-side `Arc<ClientConfig>` plumbing). The 9b deferrals (SASL_SSL gate, SSL config plumbing) all collapse into 9c's scope.
 
 Phase 9b Round 1 closes. Manager advances to Phase 9c (Integration test 1: SSL connection + producer-side rustls ClientConfig plumbing — folded-in Phase 8e).
+
+---
+
+# Phase 9c Round 1 — Phase 9b R1 + Phase 8c R1 followups resolved
+
+Resolutions for the 7 Phase 9b Round 1 followups + 2 Phase 8c R1
+followups that were carried into Phase 9c. All seven 9b followups
+bundled into commit `0dfee58`; the two 8c followups bundled with the
+SSL integration test into commit `ee3ea59`.
+
+## Phase 9b Round 1 — resolved in Phase 9c
+
+- **S1 — `SaslClientAuthenticator::principal()` returned `KafkaPrincipal::anonymous()`.** **Resolved (`0dfee58`)**: returns `KafkaPrincipal::new(USER_TYPE, &self.credentials.username)` per Java parity. Field accessor `username` is `pub(crate)` (same module) so direct access is preferred over the `.username()` getter.
+- **S2 — Schema-coverage test in `sasl_configs.rs` did not iterate `SASL_USERNAME` / `SASL_PASSWORD`.** **Resolved (`0dfee58`)**: the test now iterates them alongside the canonical SASL keys.
+- **S3 — Broken intra-doc link `post_validate_sasl_mechanism_config_with_milestone_narrowing`.** **Resolved (`0dfee58`)**: corrected to `reject_milestone_1_unsupported_sasl_mechanism` (actual method name).
+- **S4 — Stale "Phase 9a scope" references in `sasl_channel_builder.rs`.** **Resolved (`0dfee58`)**: five references reworded to "Milestone-1 scope" or phase-neutral language.
+- **N1 — Tagged-field test name implied parser-preservation but only asserted encoder output.** **Resolved (`0dfee58`)**: extended with a standalone re-parse step via `ResponseHeader::parse` + `SaslAuthenticateResponseData::read`, asserting `unknown_tagged_fields` survives with the correct tag id and payload.
+- **N2 — `PlainCredentials::password()` rustdoc referenced private `build_plain_token`.** **Resolved (`0dfee58`)**: reworded to "internal callers ... build it inside the SASL authenticator's RFC 4616 token assembler (not exposed as a public API)".
+- **N3 — `resolve_plain_credentials` match-arm pattern hard to read.** **Resolved (`0dfee58`)**: empty-string normalized to `None` upfront via `.filter(|s| !s.is_empty())`, leaving a flat 4-arm match on `(Option<&str>, Option<&str>)`.
+
+## Phase 8c Round 1 — resolved in Phase 9c (touch point: producer-smoke test file)
+
+- **Phase 8c R1 Suggestion 1 — `Arc::try_unwrap` clone-drop dance.** **Resolved (`ee3ea59`)**: replaced with `Arc::into_inner` returning `Some(T)` since the test holds the sole strong ref. One line, no `map_err` discard.
+- **Phase 8c R1 Nit 1 — `consume_records` rustdoc missing `\n` collision discussion.** **Resolved (`ee3ea59`)**: extended the rustdoc to enumerate both `\x1F` (within-line) and `\n` (across-line) collision risks for non-ASCII payloads + suggested extension paths.
+
+Phase 9c Round 1 closes pending Critic 9 review.

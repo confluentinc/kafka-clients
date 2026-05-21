@@ -639,3 +639,236 @@ minus 1 obsoleted Phase 9a deferral pinning test).
 `cargo test --features integration-tests` not required for 9b
 (no integration tests added; integration begins at 9c per the
 brief).
+
+## Sub-phase 9c — closed (Round 1)
+
+**Closed pending Critic 9 Round 1.** Six commits land the
+SSL / SASL_SSL producer-side enablement: rustls ClientConfig
+plumbing from ProducerConfig keys, SNI propagation through the
+Selectable→ChannelBuilder pipeline, producer-side gate lift,
+end-to-end SSL integration test, and the seven open Phase 9b
+followups carried into 9c.
+
+- `2a3dc83` — **Phase 9c (1/N): producer-side SSL config plumbing.**
+  New module `src/common/security/ssl/mod.rs` exposes
+  `pub(crate) fn build_client_config_from_producer_config(&ProducerConfig)
+  -> Result<Arc<rustls::ClientConfig>, KafkaError>`. Mirrors Java's
+  `SslFactory.configure(Map<String, ?>)` →
+  `DefaultSslEngineFactory.createClientSslEngine` for the producer
+  side. Reads `ssl.truststore.location` (required PEM file path),
+  `ssl.truststore.type` (PEM only — JKS / PKCS12 rejected with a
+  Java-typed `KafkaError::Config`), `ssl.endpoint.identification
+  .algorithm` ("https" default, "" disables via a
+  `NoHostnameVerifier` that wraps a `WebPkiServerVerifier` so chain
+  validation still runs), and the optional mTLS keystore trio
+  (location | (key + chain) inline). 9 unit tests via the `rcgen` +
+  `tempfile` test scaffold. `#![allow(dead_code)]` retained until
+  9c.3 since the function has no call site yet at this commit.
+  Test count: 1327 → 1336 (+9).
+- `a4ad1d9` — **Phase 9c (2/N): SNI plumbing.** Three coupled
+  changes:
+  1. `ChannelBuilder` trait grows
+     `build_channel_with_server_name(server_name: Option<ServerName>)`
+     with a default that ignores the param and falls back to
+     `build_channel`. SSL builder overrides to require
+     `Some(server_name)`; SASL builder dispatches by inner protocol
+     (SASL_PLAINTEXT → `build_channel`; SASL_SSL →
+     `build_sasl_ssl_channel`).
+  2. `Selectable::connect` grows a `host: &str` parameter. Selector
+     stashes the host in a `HashMap<ConnectionId, String>`
+     (`connection_hosts`) cleaned up on every disposal path
+     (build success, build failure, connect failure,
+     close_connection, close). On successful connect,
+     `build_and_register_channel` feeds the host through
+     `ServerName::try_from` — DNS hosts yield `Some(DnsName)`, raw
+     IPs yield `Some(IpAddress)`, unparseable yield `None` (which
+     SSL builders reject loudly).
+  3. `NetworkClient::initiate_connect` passes `node.host()`; mock
+     `MockSelectorView::connect` and 8 selector test call sites
+     updated to `"localhost"`. New test
+     `build_channel_with_server_name_receives_resolved_host` mocks
+     a `CapturingBuilder` that records the `Option<ServerName>`
+     received and asserts the DNS / IP-literal cases.
+  Test count: 1336 → 1337 (+1).
+- `866502a` — **Phase 9c (3/N): producer-side gate lift.** Removes
+  the `UnsupportedOperation` rejection of `SSL` and `SASL_SSL` in
+  `KafkaProducer::build_production_network_client`. When
+  `security_protocol.uses_ssl()` is true, builds an
+  `Arc<rustls::ClientConfig>` via the 9c.1 helper and passes it as
+  the `ssl_config` to `channel_builders::client_channel_builder`.
+  Replaces the now-obsolete
+  `public_new_rejects_ssl_security_protocol_in_milestone_1` test
+  with three positive acceptance tests:
+  `public_new_accepts_ssl_with_truststore_location`,
+  `public_new_accepts_sasl_ssl_with_truststore_and_jaas`, and a
+  negative `public_new_rejects_ssl_without_truststore_location`.
+  Lifted `#![allow(dead_code)]` from `src/common/security/ssl/mod.rs`.
+  Test count: 1337 → 1339 (+2 net = -1 rejection +3 acceptance).
+- `ee3ea59` — **Phase 9c (4/N): producer-smoke SSL integration test
+  + Phase 8c R1 S1/N1 followups.** Three deliverables in one
+  commit (all touch `tests/integration/producer_smoke_test.rs`):
+  1. New integration test `producer_smoke_ssl_1000_records` —
+     1000-record explicit-partition smoke flow over the broker's
+     SSL listener. Truststore PEM written from
+     `ctx.ca_cert_pem()` into a `tempfile::NamedTempFile` kept
+     alive for the entire test scope. Same assertions as the
+     PLAINTEXT 1000-records test: ack count, RecordMetadata shape,
+     per-partition monotonic offsets, multi-partition coverage.
+     Folds in Phase 8e's deferred TLS happy-path coverage (PLAN.md
+     :91-93).
+  2. Phase 8c R1 S1 — replaced the `Arc::try_unwrap` clone/drop/
+     try_unwrap ceremony at the byte-fidelity test's close site
+     with `Arc::into_inner` (one line, no `map_err` discard).
+  3. Phase 8c R1 N1 — extended the `consume_records` helper
+     rustdoc to document the `\n` (0x0A) collision risk alongside
+     the `\x1F` (unit separator) risk already discussed. Two
+     extension paths suggested (length-prefixed records, or
+     JSON-with-base64 consumer formatter) for binary-payload
+     future tests.
+  Docker constraint: gate was `cargo build --features integration-tests`
+  green — the live `cargo test --features integration-tests` run
+  was not exercised in this environment (Docker not available).
+  Test count: 1339 (unchanged — integration test is not a lib test).
+- `0dfee58` — **Phase 9c (5/N): bundle 9c carryover followups
+  (9b R1 S1/S2/S3/S4/N1/N2/N3).** Seven Phase 9b Round 1
+  followups in one commit:
+  1. S1: `SaslClientAuthenticator::principal()` returned
+     anonymous; fixed to `KafkaPrincipal::new(USER_TYPE, username)`.
+  2. S2: `add_client_sasl_support_registers_core_keys` now also
+     iterates `SASL_USERNAME` / `SASL_PASSWORD`.
+  3. S3: broken intra-doc link
+     `post_validate_sasl_mechanism_config_with_milestone_narrowing`
+     → `reject_milestone_1_unsupported_sasl_mechanism`.
+  4. S4: five "Phase 9a scope" references in
+     `sasl_channel_builder.rs` reworded to "Milestone-1 scope"
+     or phase-neutral language (the channel-side wiring landed in
+     9b).
+  5. N1: `tagged_field_round_trip_on_authenticate_v2_response`
+     extended with a standalone re-parse step asserting
+     `unknown_tagged_fields` survival — the original test only
+     asserted encoder output, mismatching the test name's parser-
+     preservation claim.
+  6. N2: `PlainCredentials::password()` rustdoc reworded to drop
+     the dead-from-outside reference to the private
+     `build_plain_token`.
+  7. N3: `resolve_plain_credentials` match-arm
+     `(Some(u), None) | (Some(u), Some(_)) if !u.is_empty()`
+     rewritten as `.filter(|s| !s.is_empty())` normalization
+     upfront + flat 4-arm match.
+  Test count: 1339 (unchanged — N1 extends an existing test).
+- HEAD (this commit) — **Phase 9c (final/N): sub-phase 9c close
+  stanza in NOTES.md.**
+
+**Decisions made by Actor 9 inside the brief:**
+1. **`NoHostnameVerifier` design call (9c.1).** Java's
+   `ssl.endpoint.identification.algorithm=""` disables hostname
+   matching but keeps chain validation. The rustls equivalent
+   wraps a `WebPkiServerVerifier` and intercepts only the two
+   specific name-mismatch error variants
+   (`NotValidForName` + `NotValidForNameContext`), translating
+   them into success while propagating every other chain-validation
+   error. Chain-of-trust against the truststore still runs because
+   the inner verifier always performs cert-chain work before the
+   SAN check. The placeholder hostname `"invalid.example"` is
+   chosen as a static valid DNS name so `ServerName::try_from`
+   always succeeds — its actual value never reaches the wire (this
+   verifier is only consulted at handshake time, after the SNI
+   hostname has already been sent in the ClientHello).
+2. **Trait-method-default vs typed-entry-point (9c.2).** The brief
+   asked for `build_channel_with_server_name` as a new method on
+   `ChannelBuilder` with a default impl. The alternative was a
+   separate `SniChannelBuilder` sub-trait; the default-impl shape
+   was preferred because (a) it doesn't churn the
+   `Box<dyn ChannelBuilder>` storage type in the Selector, (b)
+   the plaintext / SASL_PLAINTEXT builders genuinely don't need
+   the param and the default impl carries zero overhead, (c) the
+   SSL / SASL_SSL builders' override is the natural place to
+   reject `None`. The pre-existing typed entry points
+   (`build_ssl_channel`, `build_sasl_ssl_channel`) are kept as
+   the direct path for callers that always have a
+   `ServerName<'static>` in hand; the trait-method override
+   delegates to them.
+3. **SNI host stash lifecycle (9c.2).** The host string is stored
+   in a separate `HashMap` (`connection_hosts`) rather than as a
+   field on `ConnectTask`, because (a) the host is needed after
+   the connect task completes (at `build_and_register_channel`
+   time, when the task has already been removed), and (b) keeping
+   it parallel avoids reshape risk on the task struct. Cleanup
+   is performed on every disposal path including build failure;
+   any leaked entries would be a Selector bug, not a memory
+   safety issue (the host is `String`, not a resource handle).
+4. **SSL test placement (9c.4).** The brief asked to extend
+   `producer_smoke_test.rs` rather than create a new file —
+   honored. The SSL test sits between the PLAINTEXT 1000-records
+   test and the auto-partition test for proximity (Test 1b in
+   the file ordering), and reuses every helper (`init_logger`,
+   `create_topic`, `cluster_pool::get_or_create`, the
+   `HAPPY_PATH_RECORDS` / `TOPIC_PARTITIONS` constants) verbatim.
+   `build_props` is PLAINTEXT-only so the SSL props are built
+   inline — a future refactor could split `build_props` into a
+   protocol-tagged variant.
+5. **N1 parser-preservation test approach (9c.5).** The brief
+   offered "rename or extend" — extension chosen because the
+   parser-preservation claim is the more valuable invariant to
+   pin (and the original test name correctly describes that
+   invariant). Standalone re-parse via `ResponseHeader::parse` +
+   `SaslAuthenticateResponseData::read` is the cleanest way to
+   observe the parsed `unknown_tagged_fields`; the in-band
+   authenticator flow can't easily expose its internal parsed
+   response without reshaping the public API.
+
+**Phase 9c deferrals (carried into 9d+):**
+- SASL_PLAINTEXT integration test — Phase 9d. The 9b construction-
+  side tests pin everything *to* the wire; 9d proves real-broker
+  interop.
+- SASL_SSL integration test — Phase 9e. The 9c.3 construction-side
+  tests pin SSL+SASL config plumbing; 9e proves combined-transport
+  interop.
+- Auth-failure integration test — Phase 9f.
+- Unsupported-mechanism integration test — Phase 9g.
+- Flakiness gate (3-run loop over the full matrix) — Phase 9h.
+- CCloud env-var-gated smoke test — Phase 9i (optional).
+- Java-runtime hex-fixture cross-verification for SASL wire types
+  — still 9d/9e (when a real SASL listener is in play).
+- Re-authentication — out of Milestone 1 (PLAN.md:367).
+
+**Java tests intentionally not translated** (DoD #3):
+- `SslFactoryTest.java`, `DefaultSslEngineFactoryTest.java` —
+  Java's full SslFactory test suite covers JKS / PKCS12 / PEM /
+  password-protected stores, reload, listener reconfiguration.
+  Milestone 1 narrows to PEM-only client-side, so the relevant
+  paths (PEM truststore success, JKS rejection, missing/
+  malformed file rejection, mTLS inline acceptance,
+  keystore-key-without-chain rejection, endpoint-identification
+  flag handling) are pinned in
+  `src/common/security/ssl/mod.rs`'s 9 unit tests. JKS reload /
+  listener reconfiguration are server-side concerns.
+- `SslTransportLayerTest.java` — Java's full
+  `SslTransportLayer` test suite (handshake retries, partial
+  writes, renegotiation). Already partially covered by Phase 5b-2
+  `ssl_transport_layer.rs` tests; the producer-smoke SSL
+  integration test (9c.4) covers the end-to-end happy path. The
+  failure paths are exercised by Phase 5b-2's existing unit tests
+  against the rustls state machine.
+- `SslSelectorTest.java` — selector-level SSL tests. The new
+  `build_channel_with_server_name_receives_resolved_host` test
+  pins the new SNI propagation path; rustls itself handles the
+  TLS-layer state machine that Java's `SslSelectorTest` exercises.
+- `SaslChannelBuilderTest.java` — Java's full
+  `SaslChannelBuilder` test suite covers re-authentication,
+  multi-mechanism dispatch, JAAS-context lookup. PLAIN-only
+  Milestone 1 narrows to the 8 existing tests in
+  `src/common/network/sasl_channel_builder.rs` (Phase 9a/9b/9c
+  cumulative).
+- `JaasConfigTest.java` already excluded in 9b's close stanza —
+  no change.
+
+**Status at close:** `cargo build` OK, `cargo build --features
+integration-tests` OK, `cargo xtask format-check` OK,
+`cargo xtask lint` OK, `cargo test --lib` 1339 passed (+12 versus
+the Phase 9b close baseline of 1327: 9 SSL config tests + 1 SNI
+propagation test + 3 KafkaProducer::new SSL acceptance tests
+minus 1 SSL-rejection test removed). `cargo test --features
+integration-tests` not exercised in this environment (Docker
+unavailable) — gated on build-pass per the brief; live run will
+be exercised in CI or by the next Actor with Docker access.
