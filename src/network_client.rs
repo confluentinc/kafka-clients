@@ -878,9 +878,9 @@ where
         };
         debug!("Initiating connection to node {} using address {}", node, address);
         let socket_addr = SocketAddr::new(address, node.port() as u16);
-        if let Err(e) = self
-            .selector
-            .connect(node_id, socket_addr, self.socket_send_buffer, self.socket_receive_buffer)
+        if let Err(e) =
+            self.selector
+                .connect(node_id, &host, socket_addr, self.socket_send_buffer, self.socket_receive_buffer)
         {
             warn!("Error connecting to node {}: {}", node, e);
             self.connection_states.disconnected(node_id, now);
@@ -1727,6 +1727,7 @@ mod tests {
         fn connect(
             &mut self,
             id: i32,
+            _host: &str,
             _address: SocketAddr,
             _send_buffer_size: i32,
             _receive_buffer_size: i32,

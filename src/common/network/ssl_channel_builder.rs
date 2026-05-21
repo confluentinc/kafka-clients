@@ -139,12 +139,36 @@ impl ChannelBuilder for SslChannelBuilder {
         // The trait method does not carry a `server_name` parameter
         // because the Java `ChannelBuilder.buildChannel` signature is
         // identical for plaintext/SSL/SASL. SSL callers must use
-        // [`Self::build_ssl_channel`] to supply the SNI server name —
-        // we surface a clear error here so a misuse is obvious rather
-        // than silently picking a default.
+        // [`ChannelBuilder::build_channel_with_server_name`] (or the
+        // direct [`Self::build_ssl_channel`]) to supply the SNI server
+        // name — we surface a clear error here so a misuse is obvious
+        // rather than silently picking a default.
         Err(KafkaError::IllegalState(
-            "SslChannelBuilder requires a server name; call build_ssl_channel(...) instead".to_owned(),
+            "SslChannelBuilder requires a server name; call build_channel_with_server_name(...) instead".to_owned(),
         ))
+    }
+
+    /// Dispatches to [`Self::build_ssl_channel`] when `server_name` is
+    /// `Some`. Returns `IllegalState` when `None` — the connecting code
+    /// must always supply the hostname for an SSL channel (peers
+    /// connected by raw IP address with no hostname cannot be
+    /// SNI-verified).
+    fn build_channel_with_server_name(
+        &self,
+        id: Arc<str>,
+        stream: TcpStream,
+        server_name: Option<ServerName<'static>>,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        let server_name = server_name.ok_or_else(|| {
+            KafkaError::IllegalState(
+                "SslChannelBuilder requires a server name; \
+                 build_channel_with_server_name called with None"
+                    .to_owned(),
+            )
+        })?;
+        self.build_ssl_channel(id, stream, server_name, max_receive_size, metadata_registry)
     }
 
     fn close(&mut self) {

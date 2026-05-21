@@ -16,6 +16,7 @@
 
 use std::sync::Arc;
 
+use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 
 use crate::common::errors::KafkaError;
@@ -62,6 +63,35 @@ pub trait ChannelBuilder: std::marker::Send {
         max_receive_size: i32,
         metadata_registry: BoxedMetadataRegistry,
     ) -> Result<KafkaChannel, KafkaError>;
+
+    /// SNI-aware variant of [`Self::build_channel`]. The default
+    /// implementation discards `server_name` and delegates to
+    /// [`Self::build_channel`] — the plaintext / SASL_PLAINTEXT builders
+    /// don't need it. The SSL / SASL_SSL builders override to require
+    /// `Some(server_name)` and call their typed
+    /// `build_ssl_channel(...)` / `build_sasl_ssl_channel(...)` entry
+    /// points (which the trait method itself cannot reach because it has
+    /// no `server_name` parameter).
+    ///
+    /// **Java parity note.** Java's `SslTransportLayer` derives the SNI
+    /// hostname from `SocketChannel.socket().getInetAddress()` (reverse-
+    /// DNS lookup on the resolved peer). The Rust translation passes the
+    /// original hostname explicitly because the connecting code already
+    /// knows it from the unresolved bootstrap entry — this avoids a
+    /// reverse-DNS roundtrip that could disagree with the cert's SAN
+    /// (the design rationale is also recorded in
+    /// [`crate::common::network::SslChannelBuilder::build_ssl_channel`]).
+    fn build_channel_with_server_name(
+        &self,
+        id: Arc<str>,
+        stream: TcpStream,
+        server_name: Option<ServerName<'static>>,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        let _ = server_name;
+        self.build_channel(id, stream, max_receive_size, metadata_registry)
+    }
 
     /// Releases any resources held by the builder. Mirrors Java's
     /// `close()` (the `AutoCloseable` impl). Default no-op — only the

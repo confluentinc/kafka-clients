@@ -235,13 +235,44 @@ impl ChannelBuilder for SaslChannelBuilder {
             },
             SecurityProtocol::SaslSsl => Err(KafkaError::IllegalState(
                 "SaslChannelBuilder requires a server name for SASL_SSL; \
-                     call build_sasl_ssl_channel(...) instead"
+                     call build_channel_with_server_name(...) instead"
                     .to_owned(),
             )),
             // Phase 9b: construction-time validation ensures the
             // builder is only created with a SASL protocol, so this
             // arm is unreachable — but defensive code keeps the
             // exhaustive match honest.
+            other => Err(KafkaError::IllegalState(format!(
+                "SaslChannelBuilder constructed with non-SASL protocol {other:?} — should not happen"
+            ))),
+        }
+    }
+
+    /// SNI-aware variant. Dispatches by inner security protocol:
+    /// * `SaslPlaintext` ignores `server_name` and delegates to
+    ///   [`Self::build_channel`].
+    /// * `SaslSsl` requires `Some(server_name)` and calls
+    ///   [`Self::build_sasl_ssl_channel`].
+    fn build_channel_with_server_name(
+        &self,
+        id: Arc<str>,
+        stream: TcpStream,
+        server_name: Option<ServerName<'static>>,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        match self.security_protocol {
+            SecurityProtocol::SaslPlaintext => self.build_channel(id, stream, max_receive_size, metadata_registry),
+            SecurityProtocol::SaslSsl => {
+                let server_name = server_name.ok_or_else(|| {
+                    KafkaError::IllegalState(
+                        "SaslChannelBuilder for SASL_SSL requires a server name; \
+                         build_channel_with_server_name called with None"
+                            .to_owned(),
+                    )
+                })?;
+                self.build_sasl_ssl_channel(id, stream, server_name, max_receive_size, metadata_registry)
+            },
             other => Err(KafkaError::IllegalState(format!(
                 "SaslChannelBuilder constructed with non-SASL protocol {other:?} — should not happen"
             ))),
@@ -416,7 +447,7 @@ mod tests {
             .build_channel(Arc::from("0"), stream, 1024, Box::new(DefaultChannelMetadataRegistry::new()))
             .expect_err("SASL_SSL must reject build_channel without server name");
         assert!(matches!(err, KafkaError::IllegalState(_)));
-        assert!(err.message().contains("build_sasl_ssl_channel"));
+        assert!(err.message().contains("build_channel_with_server_name"));
     }
 
     /// `build_sasl_ssl_channel` on a `SaslPlaintext` builder must

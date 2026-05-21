@@ -58,16 +58,27 @@ pub trait Selectable: Send {
     /// Begin establishing a socket connection to the given address.
     ///
     /// * `id` — the connection id (broker node id).
+    /// * `host` — the unresolved hostname (used for SNI on SSL / SASL_SSL
+    ///   channels; ignored by plaintext channels).
     /// * `address` — the resolved peer address.
     /// * `send_buffer_size` — SO_SNDBUF (use [`USE_DEFAULT_BUFFER_SIZE`]).
     /// * `receive_buffer_size` — SO_RCVBUF (use [`USE_DEFAULT_BUFFER_SIZE`]).
     ///
     /// Mirrors `Selectable.connect(String, InetSocketAddress, int, int)`.
+    /// Java derives the SNI hostname from
+    /// `SocketChannel.socket().getInetAddress()` (reverse-DNS lookup on
+    /// the resolved peer); the Rust translation passes the unresolved
+    /// hostname explicitly because the producer's connect path already
+    /// knows it from the original bootstrap entry — this avoids a
+    /// reverse-DNS roundtrip that could disagree with the cert's SAN
+    /// (see [`crate::common::network::SslChannelBuilder::build_ssl_channel`]).
+    ///
     /// Java throws `IOException`; we surface failures as
     /// [`KafkaError::Network`] (retriable).
     fn connect(
         &mut self,
         id: i32,
+        host: &str,
         address: SocketAddr,
         send_buffer_size: i32,
         receive_buffer_size: i32,

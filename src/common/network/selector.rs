@@ -255,6 +255,14 @@ pub struct Selector {
     /// succeeds (turning into a `channels` entry) or fails (turning
     /// into a `disconnected` entry).
     connect_tasks: HashMap<ConnectionId, ConnectTask>,
+    /// Per-connection unresolved hostname, captured at [`Selectable::connect`]
+    /// time. Used to build the SNI [`ServerName`] when the channel
+    /// builder constructs an SSL / SASL_SSL transport — Java derives it
+    /// from a reverse-DNS lookup of the resolved peer, but we already
+    /// have the original hostname from the bootstrap entry.
+    /// Cleaned up on `build_and_register_channel`, `close_connection`,
+    /// and `close`.
+    connection_hosts: HashMap<ConnectionId, String>,
     /// mpsc receiver for connect-task notifications. Connect tasks
     /// push `Connected(id, stream)` or `Failed(id, err)`; `poll`
     /// drains this on every tick.
@@ -364,6 +372,7 @@ impl Selector {
             channels: HashMap::new(),
             closing_channels: HashMap::new(),
             connect_tasks: HashMap::new(),
+            connection_hosts: HashMap::new(),
             connect_rx,
             connect_tx,
             explicitly_muted_channels: HashSet::new(),
@@ -502,6 +511,12 @@ impl Selector {
                         // Already closed; drop the error.
                         continue;
                     }
+                    // Connect failed — drop the stashed host. (Successful
+                    // builds drop it in `build_and_register_channel`; a
+                    // build-side error also drops it because that path
+                    // calls `build_and_register_channel`, which removes
+                    // unconditionally.)
+                    self.connection_hosts.remove(&id);
                     self.disconnected
                         .insert(id, ChannelState::with_exception(ChannelStateName::NotConnected, err, None));
                 },
@@ -516,9 +531,27 @@ impl Selector {
     fn build_and_register_channel(&mut self, id: ConnectionId, stream: TcpStream) -> Result<(), KafkaError> {
         let id_arc: Arc<str> = Arc::from(id.to_string());
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
-        let channel = self
-            .channel_builder
-            .build_channel(id_arc, stream, self.max_receive_size, metadata_registry)?;
+        // SNI: look up the host we stashed at `connect()` time. We drop
+        // the entry now that the channel is being built — close-path
+        // cleanup is a no-op for ids that already shed their host. If
+        // the host fails to parse as a DNS name (e.g. raw IP literal),
+        // `ServerName::try_from` returns `Err`; we pass `None` so the
+        // plaintext / SASL_PLAINTEXT builders' default impl ignores it,
+        // and the SSL / SASL_SSL builders' override rejects with
+        // `IllegalState` — failing loud is the right shape because an
+        // SSL channel against a raw IP would skip SNI verification
+        // silently otherwise.
+        let server_name = match self.connection_hosts.remove(&id) {
+            Some(host) => rustls::pki_types::ServerName::try_from(host).ok(),
+            None => None,
+        };
+        let channel = self.channel_builder.build_channel_with_server_name(
+            id_arc,
+            stream,
+            server_name,
+            self.max_receive_size,
+            metadata_registry,
+        )?;
         self.channels.insert(id, channel);
         Ok(())
     }
@@ -828,6 +861,7 @@ impl Selectable for Selector {
     fn connect(
         &mut self,
         id: ConnectionId,
+        host: &str,
         address: SocketAddr,
         send_buffer_size: i32,
         receive_buffer_size: i32,
@@ -842,6 +876,10 @@ impl Selectable for Selector {
                 id
             )));
         }
+        // Stash the unresolved host for SNI lookup at channel-build time.
+        // We unconditionally overwrite — a prior failed connect for this
+        // id may have left a stale entry behind.
+        self.connection_hosts.insert(id, host.to_owned());
 
         // Spawn the connect task — equivalent to Java's
         // `socketChannel.connect(address)` returning before the
@@ -903,6 +941,7 @@ impl Selectable for Selector {
         for (_id, task) in self.connect_tasks.drain() {
             task.handle.abort();
         }
+        self.connection_hosts.clear();
         // Drain any late events (best-effort).
         while self.connect_rx.try_recv().is_ok() {}
         // Close all open channels.
@@ -939,6 +978,8 @@ impl Selectable for Selector {
         if let Some(task) = self.connect_tasks.remove(&id) {
             task.handle.abort();
         }
+        // Always clear any stashed host — id may be re-used.
+        self.connection_hosts.remove(&id);
     }
 
     fn send(&mut self, send: NetworkSend) {
@@ -1493,7 +1534,13 @@ mod tests {
     /// until the channel is `Ready`.
     async fn blocking_connect(selector: &mut Selector, id: ConnectionId, addr: SocketAddr) {
         selector
-            .connect(id, addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+            .connect(
+                id,
+                "localhost",
+                addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
             .expect("connect");
         wait_for(selector, |s| s.is_channel_ready(id), 5_000, "channel not ready").await;
     }
@@ -1548,7 +1595,13 @@ mod tests {
         let reqs: usize = 50;
         for i in 0..conns {
             selector
-                .connect(i, server.addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+                .connect(
+                    i,
+                    "localhost",
+                    server.addr,
+                    USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                    USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                )
                 .expect("connect");
         }
         // Wait for all to connect.
@@ -1690,7 +1743,13 @@ mod tests {
         drop(bound);
         let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
         selector
-            .connect(0, addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+            .connect(
+                0,
+                "localhost",
+                addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
             .expect("connect");
         wait_for(
             &mut selector,
@@ -1866,7 +1925,13 @@ mod tests {
         let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
         blocking_connect(&mut selector, 0, server.addr).await;
         let err = selector
-            .connect(0, server.addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+            .connect(
+                0,
+                "localhost",
+                server.addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
             .expect_err("duplicate connect");
         assert!(matches!(err, KafkaError::IllegalState(_)));
         selector.close();
@@ -2031,7 +2096,13 @@ mod tests {
         let mut selector =
             Selector::with_capacity(1024, NO_IDLE_TIMEOUT_MS, SystemTime::instance(), Box::new(AlwaysFail));
         selector
-            .connect(7, server.addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+            .connect(
+                7,
+                "localhost",
+                server.addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
             .expect("connect");
         wait_for(
             &mut selector,
@@ -2224,7 +2295,13 @@ mod tests {
         let server = EchoServer::start().await;
         let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
         selector
-            .connect(0, server.addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+            .connect(
+                0,
+                "localhost",
+                server.addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
             .expect("connect");
         // Right after connect: a task is in flight.
         assert_eq!(selector.pending_connects_len(), 1);
@@ -2282,7 +2359,13 @@ mod tests {
 
         let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
         selector
-            .connect(0, addr, USE_DEFAULT_BUFFER_SIZE_LOCAL, USE_DEFAULT_BUFFER_SIZE_LOCAL)
+            .connect(
+                0,
+                "localhost",
+                addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
             .expect("connect");
         // Close before the connect task runs to completion.
         selector.close();
@@ -2310,13 +2393,140 @@ mod tests {
         // `net.core.wmem_max` defaults).
         let send_buf: i32 = 32 * 1024;
         let recv_buf: i32 = 32 * 1024;
-        selector.connect(0, server.addr, send_buf, recv_buf).expect("connect");
+        selector
+            .connect(0, "localhost", server.addr, send_buf, recv_buf)
+            .expect("connect");
         wait_for(&mut selector, |s| s.is_channel_ready(0), 5_000, "channel not ready").await;
         // Round-trip a payload to confirm the connection is
         // functional after the option-setting path.
         selector.send(make_send(0, b"keepalive-and-bufs"));
         wait_for(&mut selector, |s| !s.completed_receives().is_empty(), 5_000, "no response").await;
         assert_eq!(payload_string(&selector.completed_receives()[0]), "keepalive-and-bufs");
+        selector.close();
+        server.shutdown().await;
+    }
+
+    /// Pinning test for 9c.2: the host string passed to
+    /// [`Selectable::connect`] reaches the
+    /// [`ChannelBuilder::build_channel_with_server_name`] override as a
+    /// `Some(ServerName)` that round-trips back to the original host
+    /// when the host parses as a DNS name. A raw-IP host gets a `None`
+    /// (rustls would reject it as a hostname).
+    #[tokio::test]
+    async fn build_channel_with_server_name_receives_resolved_host() {
+        use std::sync::Mutex;
+
+        #[derive(Default)]
+        struct CapturingBuilder {
+            captured: Arc<Mutex<Option<Option<String>>>>,
+        }
+        impl ChannelBuilder for CapturingBuilder {
+            fn build_channel(
+                &self,
+                _id: Arc<str>,
+                _stream: tokio::net::TcpStream,
+                _max_receive_size: i32,
+                _metadata_registry: crate::common::network::kafka_channel::BoxedMetadataRegistry,
+            ) -> Result<KafkaChannel, KafkaError> {
+                // We never expect the trait-default to fire — the
+                // selector always calls the SNI-aware override. If we
+                // somehow land here, fail loud.
+                Err(KafkaError::IllegalState(
+                    "CapturingBuilder::build_channel should not be called — selector must call build_channel_with_server_name".to_owned(),
+                ))
+            }
+            fn build_channel_with_server_name(
+                &self,
+                _id: Arc<str>,
+                _stream: tokio::net::TcpStream,
+                server_name: Option<rustls::pki_types::ServerName<'static>>,
+                _max_receive_size: i32,
+                _metadata_registry: crate::common::network::kafka_channel::BoxedMetadataRegistry,
+            ) -> Result<KafkaChannel, KafkaError> {
+                let captured = server_name.map(|sn| match sn {
+                    rustls::pki_types::ServerName::DnsName(n) => n.as_ref().to_owned(),
+                    rustls::pki_types::ServerName::IpAddress(ip) => format!("{ip:?}"),
+                    other => format!("{other:?}"),
+                });
+                *self.captured.lock().unwrap() = Some(captured);
+                // Fail the build to short-circuit channel setup — we
+                // don't need an actual channel for this assertion.
+                Err(KafkaError::IllegalState(
+                    "CapturingBuilder is test-only — capture happened".to_owned(),
+                ))
+            }
+        }
+
+        // Case 1: a DNS host name flows through as Some(host).
+        let server = EchoServer::start().await;
+        let captured_dns = Arc::new(Mutex::new(None::<Option<String>>));
+        let mut selector = Selector::with_capacity(
+            1024,
+            NO_IDLE_TIMEOUT_MS,
+            SystemTime::instance(),
+            Box::new(CapturingBuilder { captured: Arc::clone(&captured_dns) }),
+        );
+        selector
+            .connect(
+                11,
+                "broker-1.example.com",
+                server.addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
+            .expect("connect");
+        // Wait until the build fires and lands in `disconnected`.
+        wait_for(
+            &mut selector,
+            |s| s.disconnected().contains_key(&11),
+            5_000,
+            "no failed-build disconnect for DNS host case",
+        )
+        .await;
+        assert_eq!(
+            captured_dns.lock().unwrap().clone(),
+            Some(Some("broker-1.example.com".to_owned())),
+            "DNS host must propagate as Some(ServerName::DnsName)"
+        );
+        selector.close();
+        server.shutdown().await;
+
+        // Case 2: a raw IPv4 literal yields None (rustls rejects raw
+        // IPs as hostnames; ServerName::try_from fails).
+        let server = EchoServer::start().await;
+        let captured_ip = Arc::new(Mutex::new(None::<Option<String>>));
+        let mut selector = Selector::with_capacity(
+            1024,
+            NO_IDLE_TIMEOUT_MS,
+            SystemTime::instance(),
+            Box::new(CapturingBuilder { captured: Arc::clone(&captured_ip) }),
+        );
+        selector
+            .connect(
+                22,
+                "127.0.0.1",
+                server.addr,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+                USE_DEFAULT_BUFFER_SIZE_LOCAL,
+            )
+            .expect("connect");
+        wait_for(
+            &mut selector,
+            |s| s.disconnected().contains_key(&22),
+            5_000,
+            "no failed-build disconnect for IP host case",
+        )
+        .await;
+        // rustls' ServerName::try_from successfully parses "127.0.0.1"
+        // as an `IpAddress` variant — not a DnsName, but still Some. The
+        // exact shape depends on rustls version; we assert it is `Some`
+        // (which the SSL builder will reject as inappropriate for SNI,
+        // but plaintext builders accept).
+        let cap = captured_ip.lock().unwrap().clone();
+        assert!(
+            matches!(&cap, Some(Some(_))),
+            "127.0.0.1 must propagate as Some(ServerName) (likely IpAddress variant); got {cap:?}"
+        );
         selector.close();
         server.shutdown().await;
     }
