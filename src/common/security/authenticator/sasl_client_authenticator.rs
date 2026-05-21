@@ -358,6 +358,35 @@ impl SaslClientAuthenticator {
     /// poll loop; the Rust translation expects the same pattern (call
     /// after each `transport.read()` cycle).
     pub fn authenticate(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
+        // Phase 9b Suggestion S2 (Critic 9): a peer that closes the
+        // socket mid-handshake (EOF / ConnectionReset) must transition
+        // the state machine to `Failed` so a subsequent retry-layer
+        // re-invocation surfaces a deterministic error rather than
+        // wedging at an in-progress receive state.
+        //
+        // Java relies on the JVM exception propagating through the
+        // upper layer (Selector) which then closes the channel; Rust's
+        // `io::Result` plumbing doesn't enforce that ordering by
+        // itself. We capture the EOF here, mark the state Failed +
+        // record the captured failure, and propagate the original
+        // `io::Error`.
+        let result = self.authenticate_inner(transport);
+        if let Err(ref e) = result
+            && self.state != SaslState::Failed
+            && matches!(e.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset)
+        {
+            let kafka_err = KafkaError::Authentication("EOF during SASL handshake".to_owned());
+            self.state = SaslState::Failed;
+            self.failure = Some(kafka_err);
+        }
+        result
+    }
+
+    /// Internal driver — separated from `authenticate()` so the outer
+    /// wrapper can post-process EOF/ConnectionReset into the `Failed`
+    /// state (Phase 9b Suggestion S2 from Critic 9). Maintains the
+    /// same shape as Java's `authenticate()` body.
+    fn authenticate_inner(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
         // Java's `authenticate()` opens with:
         //   if (netOutBuffer != null && !flushNetOutBufferAndUpdateInterestOps())
         //       return;
@@ -783,8 +812,11 @@ mod tests {
     ///
     /// Behaviour mirrors Java's non-blocking NIO contract:
     /// - `write_vectored` returns the number of bytes accepted into the
-    ///   `outbound` queue (always the full amount in the mock — no
-    ///   partial-write simulation in Phase 9a; cover that case in 9b/9c).
+    ///   `outbound` queue. By default the mock accepts everything in
+    ///   one call. The Phase 9b S3 partial-write regression test sets
+    ///   `max_write_per_call = Some(N)` to cap the accepted bytes at
+    ///   N, forcing the state machine to call `write_vectored` again
+    ///   with the remaining bytes.
     /// - `read` returns `Ok(n)` for `n > 0`, `Ok(0)` for WouldBlock when
     ///   the queue is empty, and `Err(UnexpectedEof)` when the test
     ///   explicitly sets `eof_after_drain`.
@@ -794,6 +826,9 @@ mod tests {
         interest_ops: i32,
         connected: bool,
         eof_after_drain: bool,
+        /// `Some(N)`: accept at most N bytes per `write_vectored` call.
+        /// `None`: accept everything in one call (default).
+        max_write_per_call: Option<usize>,
     }
 
     impl MockTransport {
@@ -804,6 +839,7 @@ mod tests {
                 interest_ops: OP_READ,
                 connected: true,
                 eof_after_drain: false,
+                max_write_per_call: None,
             }
         }
 
@@ -824,13 +860,28 @@ mod tests {
 
     impl TransferableChannel for MockTransport {
         fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
-            let mut total = 0;
+            let cap = self.max_write_per_call;
+            let mut accepted = 0;
             let mut out = self.outbound.borrow_mut();
             for s in bufs {
-                out.extend_from_slice(s);
-                total += s.len();
+                if let Some(max) = cap {
+                    let remaining = max.saturating_sub(accepted);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let take = remaining.min(s.len());
+                    out.extend_from_slice(&s[..take]);
+                    accepted += take;
+                    if take < s.len() {
+                        // Cap hit mid-slice.
+                        break;
+                    }
+                } else {
+                    out.extend_from_slice(s);
+                    accepted += s.len();
+                }
             }
-            Ok(total)
+            Ok(accepted)
         }
 
         fn has_pending_writes(&self) -> bool {
@@ -1131,8 +1182,8 @@ mod tests {
         assert_eq!(auth.state(), SaslState::Failed);
     }
 
-    /// EOF mid-handshake surfaces as `UnexpectedEof` (the upper layer
-    /// translates this into a channel-disconnected event).
+    /// EOF mid-handshake surfaces as `UnexpectedEof` AND transitions
+    /// the state machine to `Failed` (Phase 9b Suggestion S2).
     ///
     /// Note: the state-machine loop sends `ApiVersionsRequest` then
     /// falls through to receive on the same `authenticate()` call.
@@ -1142,6 +1193,11 @@ mod tests {
     /// send the bootstrap is indistinguishable from a slow peer that
     /// then closes — both surface as `EOFException` from
     /// `channel.read() == -1`.
+    ///
+    /// Phase 9b: the outer wrapper post-processes EOF into the
+    /// `Failed` state + records the captured `KafkaError::Authentication`
+    /// so a buggy retry-layer re-invocation surfaces a deterministic
+    /// error instead of wedging at an in-progress state.
     #[test]
     fn eof_mid_handshake_surfaces_as_unexpected_eof() {
         let mut transport = MockTransport::new();
@@ -1155,11 +1211,130 @@ mod tests {
         .expect("authenticator");
         let err = auth.authenticate(&mut transport).expect_err("expected EOF");
         assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
-        // State advanced past Send to Receive — request was sent, then
-        // we attempted to read and hit EOF. Upper layer disconnects.
-        assert_eq!(auth.state(), SaslState::ReceiveApiVersionsResponse);
-        // The outbound side definitely has the framed ApiVersionsRequest.
+        // Phase 9b S2 fix: state transitioned to Failed, not stuck at
+        // ReceiveApiVersionsResponse. The outbound side definitely has
+        // the framed ApiVersionsRequest.
+        assert_eq!(auth.state(), SaslState::Failed);
+        assert!(matches!(
+            auth.failure(),
+            Some(KafkaError::Authentication(m)) if m == "EOF during SASL handshake"
+        ));
         assert!(!transport.outbound_bytes().is_empty(), "request was sent before EOF");
+
+        // Re-invocation on a Failed authenticator must return the
+        // captured error, not wedge or panic. Java throws
+        // `IllegalStateException` here; we wrap the captured
+        // `KafkaError::Authentication` for consistent surfacing.
+        let err2 = auth.authenticate(&mut transport).expect_err("re-invocation must error");
+        let inner = err2.into_inner().expect("inner");
+        let kafka_err = inner.downcast_ref::<KafkaError>().expect("KafkaError");
+        assert!(matches!(kafka_err, KafkaError::Authentication(m) if m == "EOF during SASL handshake"));
+        assert_eq!(auth.state(), SaslState::Failed);
+    }
+
+    /// Partial-write regression test (Phase 9b Suggestion S3). Caps
+    /// the mock transport's `write_vectored` at 4 bytes per call so
+    /// the state machine has to call back multiple times to finish
+    /// sending each request. Verifies the state machine resumes
+    /// correctly across the partial writes and ultimately drives the
+    /// PLAIN handshake to `Complete`.
+    ///
+    /// The eager state transition in [`SaslClientAuthenticator::queue
+    /// _request`] advances the state immediately after kicking off
+    /// the send; the receive-state's `receive_response` then waits
+    /// for a response. Across partial writes, repeated `authenticate()`
+    /// calls hit the loop's top-guard
+    /// `if self.pending_send.is_some() && !flush_pending_send(...)`
+    /// — that branch keeps flushing the same request without
+    /// re-entering the state branch. This test pins the contract.
+    #[test]
+    fn partial_writes_resume_correctly_to_complete() {
+        let mut transport = MockTransport::new();
+        // Cap each write at 4 bytes — most SASL frames are 10+ bytes,
+        // so this forces at least one partial-write resume per send.
+        transport.max_write_per_call = Some(4);
+        let mut auth = SaslClientAuthenticator::new(
+            "node-0",
+            "test-client",
+            "PLAIN",
+            PlainCredentials::new("alice", "supersecret"),
+        )
+        .expect("authenticator");
+
+        // Drive the state machine until ApiVersionsRequest is fully
+        // sent. With the 4-byte cap, this needs multiple authenticate()
+        // calls; loop until pending_send is fully drained.
+        let mut iterations = 0;
+        while auth.pending_send.is_some()
+            || matches!(
+                auth.state(),
+                SaslState::SendApiVersionsRequest | SaslState::SendHandshakeRequest
+            )
+        {
+            auth.authenticate(&mut transport)
+                .expect("partial-write iteration must not error");
+            iterations += 1;
+            assert!(iterations < 50, "state machine wedged on partial-write resume");
+            if matches!(auth.state(), SaslState::ReceiveApiVersionsResponse) && auth.pending_send.is_none() {
+                break;
+            }
+        }
+        assert_eq!(auth.state(), SaslState::ReceiveApiVersionsResponse);
+        assert!(
+            auth.pending_send.is_none(),
+            "ApiVersionsRequest fully sent across partial writes"
+        );
+
+        // Push a response and drive forward.
+        transport.push_framed(&serialize_api_versions_response(MIN_RESERVED_CORRELATION_ID));
+        // Now drive ApiVersionsResponse → SendHandshake; the handshake
+        // request will again hit partial writes.
+        let mut iterations = 0;
+        while !matches!(auth.state(), SaslState::ReceiveHandshakeResponse) || auth.pending_send.is_some() {
+            auth.authenticate(&mut transport).expect("handshake partial-write iteration");
+            iterations += 1;
+            assert!(iterations < 50, "handshake send wedged");
+            if matches!(auth.state(), SaslState::ReceiveHandshakeResponse) && auth.pending_send.is_none() {
+                break;
+            }
+        }
+        assert_eq!(auth.state(), SaslState::ReceiveHandshakeResponse);
+
+        // Push handshake response.
+        transport.push_framed(&serialize_sasl_handshake_response(
+            MIN_RESERVED_CORRELATION_ID + 1,
+            Errors::None,
+            vec!["PLAIN".to_owned()],
+            1,
+        ));
+
+        // Drive ReceiveHandshake → SendInitialToken (the PLAIN token)
+        // → ReceiveAuthenticateResponse. Partial writes apply here
+        // too — the PLAIN token frame is ~20 bytes.
+        let mut iterations = 0;
+        while !matches!(auth.state(), SaslState::ReceiveAuthenticateResponse) || auth.pending_send.is_some() {
+            auth.authenticate(&mut transport).expect("token partial-write iteration");
+            iterations += 1;
+            assert!(iterations < 50, "PLAIN token send wedged");
+            if matches!(auth.state(), SaslState::ReceiveAuthenticateResponse) && auth.pending_send.is_none() {
+                break;
+            }
+        }
+        assert_eq!(auth.state(), SaslState::ReceiveAuthenticateResponse);
+
+        // PLAIN token must have made it through despite partial writes.
+        assert!(transport.outbound_bytes().windows(7).any(|w| w == b"\0alice\0"));
+
+        // Push success response and finish.
+        transport.push_framed(&serialize_sasl_authenticate_response(
+            MIN_RESERVED_CORRELATION_ID + 2,
+            Errors::None,
+            None,
+            2,
+        ));
+        auth.authenticate(&mut transport).expect("final step");
+        assert_eq!(auth.state(), SaslState::Complete);
+        assert!(auth.complete());
     }
 
     /// Reject construction for unsupported mechanisms — Phase 9b config
