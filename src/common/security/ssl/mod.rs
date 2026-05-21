@@ -580,6 +580,123 @@ mod tests {
         assert!(Arc::strong_count(&result) >= 1);
     }
 
+    /// Phase 9c R1 S2: regression test for `NoHostnameVerifier`'s
+    /// chain-of-trust path. A cert signed by a CA that is NOT in the
+    /// truststore must be rejected — confirming that disabling hostname
+    /// verification (Java's `ssl.endpoint.identification.algorithm=""`)
+    /// does NOT also disable chain validation.
+    ///
+    /// This pins the assumption that
+    /// `WebPkiServerVerifier::verify_server_cert` runs chain validation
+    /// independently of the name check, so an untrusted-CA error
+    /// surfaces as something other than the two name-mismatch error
+    /// variants our wrapper translates into success.
+    #[test]
+    fn no_hostname_verifier_rejects_untrusted_ca_chain() {
+        // Trusted CA: lands in the root store.
+        let mut trusted_ca_params = CertificateParams::default();
+        trusted_ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        trusted_ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Trusted CA");
+        let trusted_ca_key = KeyPair::generate().expect("trusted ca key");
+        let trusted_ca_cert = trusted_ca_params.self_signed(&trusted_ca_key).expect("trusted ca sign");
+
+        // Untrusted CA: NOT in the root store.
+        let mut untrusted_ca_params = CertificateParams::default();
+        untrusted_ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        untrusted_ca_params
+            .distinguished_name
+            .push(rcgen::DnType::CommonName, "Untrusted CA");
+        let untrusted_ca_key = KeyPair::generate().expect("untrusted ca key");
+        let untrusted_ca_cert = untrusted_ca_params.self_signed(&untrusted_ca_key).expect("untrusted ca sign");
+
+        // End-entity cert signed by the UNTRUSTED CA, but with a
+        // hostname SAN — so name-mismatch is not the failure mode.
+        let mut leaf_params = CertificateParams::new(vec!["test.local".to_owned()]).expect("leaf params");
+        leaf_params.distinguished_name.push(rcgen::DnType::CommonName, "test.local");
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf_cert = leaf_params
+            .signed_by(&leaf_key, &untrusted_ca_cert, &untrusted_ca_key)
+            .expect("sign leaf");
+
+        // Root store contains only the trusted CA.
+        let mut root_store = RootCertStore::empty();
+        root_store
+            .add(CertificateDer::from(trusted_ca_cert.der().to_vec()))
+            .expect("add trusted CA");
+
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(root_store), provider)
+            .build()
+            .expect("WebPkiServerVerifier builds");
+        let verifier = NoHostnameVerifier { inner };
+
+        let end_entity = CertificateDer::from(leaf_cert.der().to_vec());
+        // Pass a placeholder server name (the wrapper substitutes its
+        // own internal one; the outer caller's name is ignored).
+        let server_name = ServerName::try_from("ignored.example").expect("static valid");
+        let now = UnixTime::now();
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(
+            result.is_err(),
+            "NoHostnameVerifier MUST reject a cert chain rooted at an untrusted CA, got Ok"
+        );
+    }
+
+    /// Phase 9c R1 S2: positive companion to the above — a cert chain
+    /// rooted at the trusted CA but with a CN/SAN that does NOT match
+    /// the placeholder name the wrapper passes to the inner verifier
+    /// must still be accepted (chain valid, SAN mismatch suppressed).
+    ///
+    /// This pins the assumption that
+    /// `rustls::CertificateError::NotValidForName` (and the newer
+    /// `NotValidForNameContext` variant) are the ONLY name-mismatch
+    /// error shapes — any future rustls release that adds a third
+    /// variant would silently start failing this test, and the
+    /// translation logic in `verify_server_cert` would need updating.
+    #[test]
+    fn no_hostname_verifier_accepts_chain_with_san_mismatch() {
+        let mut ca_params = CertificateParams::default();
+        ca_params.is_ca = rcgen::IsCa::Ca(rcgen::BasicConstraints::Unconstrained);
+        ca_params.distinguished_name.push(rcgen::DnType::CommonName, "Trusted CA");
+        let ca_key = KeyPair::generate().expect("ca key");
+        let ca_cert = ca_params.self_signed(&ca_key).expect("ca sign");
+
+        // End-entity cert signed by the trusted CA with a SAN of
+        // `other.example`. The wrapper's inner-verifier call uses the
+        // placeholder `invalid.example`, which deliberately does not
+        // match — so the inner returns a name-mismatch error that the
+        // wrapper translates into success.
+        let mut leaf_params = CertificateParams::new(vec!["other.example".to_owned()]).expect("leaf params");
+        leaf_params.distinguished_name.push(rcgen::DnType::CommonName, "other.example");
+        let leaf_key = KeyPair::generate().expect("leaf key");
+        let leaf_cert = leaf_params.signed_by(&leaf_key, &ca_cert, &ca_key).expect("sign leaf");
+
+        let mut root_store = RootCertStore::empty();
+        root_store
+            .add(CertificateDer::from(ca_cert.der().to_vec()))
+            .expect("add trusted CA");
+
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let inner = WebPkiServerVerifier::builder_with_provider(Arc::new(root_store), provider)
+            .build()
+            .expect("WebPkiServerVerifier builds");
+        let verifier = NoHostnameVerifier { inner };
+
+        let end_entity = CertificateDer::from(leaf_cert.der().to_vec());
+        // Pass a placeholder server name (the wrapper substitutes its
+        // own internal one; the outer caller's name is ignored).
+        let server_name = ServerName::try_from("ignored.example").expect("static valid");
+        let now = UnixTime::now();
+        let result = verifier.verify_server_cert(&end_entity, &[], &server_name, &[], now);
+        assert!(
+            result.is_ok(),
+            "NoHostnameVerifier MUST accept a chain-valid cert with SAN mismatch, got Err({:?})",
+            result.err()
+        );
+    }
+
     #[test]
     fn build_client_config_rejects_keystore_key_without_chain() {
         let pem = self_signed_pem();
