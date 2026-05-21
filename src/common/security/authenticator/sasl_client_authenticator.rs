@@ -754,14 +754,21 @@ impl crate::common::network::authenticator::SaslAuthenticator for SaslClientAuth
     }
 
     fn principal(&self, _transport: &dyn TransportLayer) -> crate::common::security::auth::KafkaPrincipal {
-        // Java parity: SaslClientAuthenticator.principal() returns
-        // `new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username)` —
-        // the configured SASL username carried as a `User:<name>`
-        // principal. Milestone-1 is client-only (no broker-side ACL
-        // enforcement consumes this), but log / metric surfaces
-        // would render `User:ANONYMOUS` if we returned anonymous,
-        // which is misleading when SASL credentials were actually
-        // supplied.
+        // Returns `User:<configured-username>` for log identity.
+        //
+        // Documented deviation from Java: Java's
+        // `SaslClientAuthenticator.principal()` for non-GSSAPI
+        // mechanisms (including PLAIN) reads from `clientPrincipalName`,
+        // which is set to `null` on construction (`SaslClientAuthenticator.java:200-206`).
+        // `principal()` then calls `new KafkaPrincipal(USER_TYPE, clientPrincipalName)`
+        // (`SaslClientAuthenticator.java:487-489`), and `KafkaPrincipal`'s
+        // ctor calls `requireNonNull(name)` (`KafkaPrincipal.java:51-58`)
+        // — so on the JVM client side, `principal()` for PLAIN throws
+        // NPE if ever invoked. The Rust translation returns the
+        // configured SASL username instead because principals are only
+        // consumed for log/metric surfaces on the client side, and
+        // `User:ANONYMOUS` would be misleading when credentials were
+        // actually supplied. This is documented deviation, not parity.
         crate::common::security::auth::KafkaPrincipal::new(
             crate::common::security::auth::kafka_principal::USER_TYPE,
             &self.credentials.username,
@@ -1498,6 +1505,39 @@ mod tests {
             parsed.unknown_tagged_fields[0].data(),
             &[0xAB, 0xCD],
             "tag payload mismatch on round-trip"
+        );
+    }
+
+    /// Phase 9c R1 S3: regression test for the
+    /// [`SaslAuthenticator::principal`] return shape. The Rust impl
+    /// deviates from Java (Java's behaviour for PLAIN is a latent NPE
+    /// on `requireNonNull(clientPrincipalName)`) and instead returns
+    /// `User:<configured-username>` so log / metric surfaces don't
+    /// render `ANONYMOUS` when credentials were actually supplied.
+    ///
+    /// Pins both the `USER_TYPE` tag and the literal username — an
+    /// inadvertent revert to `KafkaPrincipal::anonymous()` (the Phase
+    /// 9a placeholder) would compile and silently regress production
+    /// log identity.
+    #[test]
+    fn sasl_authenticator_principal_returns_configured_username() {
+        use crate::common::network::authenticator::SaslAuthenticator;
+        use crate::common::security::auth::kafka_principal::USER_TYPE;
+
+        let auth = SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("alice", "p"))
+            .expect("PLAIN constructs");
+        let transport = MockTransport::new();
+        let principal = <SaslClientAuthenticator as SaslAuthenticator>::principal(&auth, &transport);
+        assert_eq!(
+            principal.principal_type(),
+            USER_TYPE,
+            "principal type must be USER_TYPE ({USER_TYPE:?}); SASL surfaces are never ANONYMOUS post-9c.5",
+        );
+        assert_eq!(
+            principal.name(),
+            "alice",
+            "principal name must be the configured SASL username; got {:?}",
+            principal.name(),
         );
     }
 
