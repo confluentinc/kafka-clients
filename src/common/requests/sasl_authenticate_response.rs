@@ -123,3 +123,138 @@ impl fmt::Debug for SaslAuthenticateResponse {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Round-trip at v0 (pre-flexible): error_message uses `int16` length
+    /// prefix, auth_bytes uses `int32` length prefix; no session_lifetime_ms
+    /// (v1+), no tagged-field trailer.
+    #[test]
+    fn round_trip_v0_pre_flexible() {
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            // Java's RequestResponseTest fixture uses `null` for the
+            // error_message on a non-error response.
+            error_message: None,
+            auth_bytes: Vec::new(),
+            // v0 has no session_lifetime_ms field — default 0 should not
+            // be written nor re-read.
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 0).expect("serialize");
+        let parsed = SaslAuthenticateResponse::parse(&mut serialized, 0).expect("parse");
+        assert_eq!(parsed.error(), Errors::None);
+        assert_eq!(parsed.error_message(), None);
+        assert!(parsed.sasl_auth_bytes().is_empty());
+        // v0 has no session_lifetime_ms field — should remain at default.
+        assert_eq!(parsed.session_lifetime_ms(), 0);
+    }
+
+    /// Round-trip at v1: adds `session_lifetime_ms` (i64). Mirrors Java's
+    /// `createSaslAuthenticateResponse()` fixture (uses `Long.MAX_VALUE`).
+    #[test]
+    fn round_trip_v1_with_session_lifetime() {
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: i64::MAX,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 1).expect("serialize");
+        let parsed = SaslAuthenticateResponse::parse(&mut serialized, 1).expect("parse");
+        assert_eq!(parsed.error(), Errors::None);
+        assert_eq!(parsed.session_lifetime_ms(), i64::MAX);
+    }
+
+    /// Round-trip at v2 (flex boundary +1): error_message uses compact-
+    /// nullable-string, auth_bytes uses compact-bytes, plus a varint
+    /// tagged-field trailer.
+    #[test]
+    fn round_trip_v2_flexible_with_error_message() {
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::SaslAuthenticationFailed.code(),
+            error_message: Some("Authentication failed: Invalid username or password".to_owned()),
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 2).expect("serialize");
+        let parsed = SaslAuthenticateResponse::parse(&mut serialized, 2).expect("parse");
+        assert_eq!(parsed.error(), Errors::SaslAuthenticationFailed);
+        assert_eq!(
+            parsed.error_message(),
+            Some("Authentication failed: Invalid username or password")
+        );
+    }
+
+    /// Round-trip at v2 with auth_bytes (server challenge from a real
+    /// SASL exchange). Verifies compact-bytes encoding survives the
+    /// trip.
+    #[test]
+    fn round_trip_v2_with_server_challenge() {
+        let challenge = b"server-challenge-bytes-12345";
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: challenge.to_vec(),
+            session_lifetime_ms: 3_600_000, // 1 hour
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 2).expect("serialize");
+        let parsed = SaslAuthenticateResponse::parse(&mut serialized, 2).expect("parse");
+        assert_eq!(parsed.sasl_auth_bytes(), challenge);
+        assert_eq!(parsed.session_lifetime_ms(), 3_600_000);
+    }
+
+    /// Throttle-time getter is the constant `DEFAULT_THROTTLE_TIME` (0)
+    /// because the response schema has no throttle_time field.
+    #[test]
+    fn throttle_time_is_default() {
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData::new());
+        assert_eq!(resp.throttle_time_ms(), 0);
+    }
+
+    /// `maybeSetThrottleTimeMs` is a no-op (Java parity).
+    #[test]
+    fn maybe_set_throttle_time_ms_no_op() {
+        let mut resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData::new());
+        resp.maybe_set_throttle_time_ms(42);
+        assert_eq!(resp.throttle_time_ms(), 0);
+    }
+
+    /// Translation of Java
+    /// `testSaslAuthenticateRequestResponseToStringMasksSensitiveData` for
+    /// the response side. Debug output must not leak `authBytes`.
+    #[test]
+    fn debug_masks_auth_bytes() {
+        let sensitive = b"sensitive-auth-token-123";
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: 0,
+            error_message: None,
+            auth_bytes: sensitive.to_vec(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let dbg = format!("{resp:?}");
+        assert!(!dbg.contains("sensitive"), "Debug output leaked secret: {dbg}");
+        assert!(dbg.contains("<redacted>"), "expected redaction marker: {dbg}");
+    }
+
+    /// Error code mapping: SASL_AUTHENTICATION_FAILED (58) is the
+    /// canonical "wrong credentials" error.
+    #[test]
+    fn sasl_authentication_failed_error_counts() {
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::SaslAuthenticationFailed.code(),
+            error_message: Some("Authentication failed".to_owned()),
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        assert_eq!(resp.error_counts().get(&Errors::SaslAuthenticationFailed), Some(&1));
+    }
+}

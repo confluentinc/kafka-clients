@@ -142,3 +142,130 @@ impl fmt::Debug for SaslAuthenticateRequest {
             .finish()
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::protocol::RawTaggedField;
+
+    /// Round-trip at v0 (flex boundary -1): non-flexible encoding —
+    /// auth_bytes uses an `int32` length prefix, no tagged-field trailer.
+    #[test]
+    fn round_trip_v0_pre_flexible() {
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"\x00user\x00pass".to_vec(), unknown_tagged_fields: Vec::new() },
+            0,
+        );
+        let mut serialized = AbstractRequest::serialize(&req).expect("serialize v0");
+        let parsed = SaslAuthenticateRequest::parse(&mut serialized, 0).expect("parse v0");
+        assert_eq!(parsed.version(), 0);
+        assert_eq!(parsed.auth_bytes(), b"\x00user\x00pass");
+    }
+
+    /// Round-trip at v1: same wire shape as v0 (spec: "Version 1 is the
+    /// same as version 0").
+    #[test]
+    fn round_trip_v1_pre_flexible() {
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData {
+                auth_bytes: b"\x00admin\x00admin-secret".to_vec(),
+                unknown_tagged_fields: Vec::new(),
+            },
+            1,
+        );
+        let mut serialized = AbstractRequest::serialize(&req).expect("serialize v1");
+        let parsed = SaslAuthenticateRequest::parse(&mut serialized, 1).expect("parse v1");
+        assert_eq!(parsed.version(), 1);
+        assert_eq!(parsed.auth_bytes(), b"\x00admin\x00admin-secret");
+    }
+
+    /// Round-trip at v2 (flex boundary +1): flexible encoding — auth_bytes
+    /// uses compact-bytes (varint length + 1), plus a varint tagged-field
+    /// trailer at the end of the body.
+    #[test]
+    fn round_trip_v2_flexible() {
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"\x00user\x00pass".to_vec(), unknown_tagged_fields: Vec::new() },
+            2,
+        );
+        let mut serialized = AbstractRequest::serialize(&req).expect("serialize v2");
+        let parsed = SaslAuthenticateRequest::parse(&mut serialized, 2).expect("parse v2");
+        assert_eq!(parsed.version(), 2);
+        assert_eq!(parsed.auth_bytes(), b"\x00user\x00pass");
+    }
+
+    /// Empty auth_bytes — mirrors Java's `createSaslAuthenticateRequest`
+    /// fixture which uses `new byte[0]`.
+    #[test]
+    fn round_trip_empty_auth_bytes_all_versions() {
+        for v in 0..=2 {
+            let req = SaslAuthenticateRequest::new(SaslAuthenticateRequestData::new(), v);
+            let mut serialized = AbstractRequest::serialize(&req).expect("serialize");
+            let parsed = SaslAuthenticateRequest::parse(&mut serialized, v).expect("parse");
+            assert!(parsed.auth_bytes().is_empty(), "v{v} empty auth_bytes");
+        }
+    }
+
+    /// Translation of Java
+    /// `testValidTaggedFieldsWithSaslAuthenticateRequest`. Tagged fields
+    /// are emitted at v2+ in the trailer. Set one and confirm it round-trips.
+    #[test]
+    fn tagged_fields_round_trip_v2() {
+        let tag = RawTaggedField::new(1, vec![0x1, 0x2, 0x3]);
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"test".to_vec(), unknown_tagged_fields: vec![tag.clone()] },
+            2,
+        );
+        let mut serialized = AbstractRequest::serialize(&req).expect("serialize");
+        let parsed = SaslAuthenticateRequest::parse(&mut serialized, 2).expect("parse");
+        assert_eq!(parsed.auth_bytes(), b"test");
+        assert_eq!(parsed.request_data().unknown_tagged_fields.len(), 1);
+        assert_eq!(parsed.request_data().unknown_tagged_fields[0], tag);
+    }
+
+    /// Tagged fields rejected on non-flexible versions. Java returns an
+    /// error at write time; we mirror that behaviour.
+    #[test]
+    fn tagged_fields_rejected_pre_flexible() {
+        let tag = RawTaggedField::new(1, vec![0x1, 0x2, 0x3]);
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"test".to_vec(), unknown_tagged_fields: vec![tag] },
+            1,
+        );
+        let result = AbstractRequest::serialize(&req);
+        let err = match result {
+            Ok(_) => panic!("v1 should reject tagged fields"),
+            Err(e) => e,
+        };
+        let msg = err.message();
+        assert!(
+            msg.contains("Tagged fields were set"),
+            "expected the tagged-fields error, got: {msg}"
+        );
+    }
+
+    /// Builder convenience: oldest/latest allowed version come from the
+    /// `ApiKey` registry (here `0..=2`).
+    #[test]
+    fn builder_oldest_latest_match_registry() {
+        let builder = SaslAuthenticateRequestBuilder::new(SaslAuthenticateRequestData::new());
+        assert_eq!(builder.oldest_allowed_version(), 0);
+        assert_eq!(builder.latest_allowed_version(), 2);
+        let built = builder.build(2).expect("build");
+        assert_eq!(built.version(), 2);
+    }
+
+    /// Debug output redacts auth_bytes — translation of Java
+    /// `testSaslAuthenticateRequestResponseToStringMasksSensitiveData`.
+    #[test]
+    fn debug_masks_auth_bytes() {
+        let sensitive = b"sensitive-auth-token-123";
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: sensitive.to_vec(), unknown_tagged_fields: Vec::new() },
+            2,
+        );
+        let dbg = format!("{req:?}");
+        assert!(!dbg.contains("sensitive"), "Debug output leaked secret: {dbg}");
+        assert!(dbg.contains("<redacted>"), "expected redaction marker: {dbg}");
+    }
+}
