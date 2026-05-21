@@ -4,17 +4,17 @@
 
 **Plan reference:** `design/history/Milestone-1/PLAN.md:353-393`.
 
-**Primary code reference:** `master` branch — has a working implementation of exactly this scope. Read it via `git show master:<path>` and copy patterns where Java parity allows. **Do not git-checkout master files wholesale** — `fresh-impl` has diverged in architecture (309 commits ahead), so a literal copy will compile-fail.
+**Code reference policy (user directive, 2026-05-21):** translate **fresh, from Java source only**. **Do NOT reference the `master` branch's prior implementation.** This explicitly overrides PLAN.md:357's "use master as primary reference alongside Java source" — user wants Java-parity issues caught fresh without inheriting master's potential bugs.
 
-**Master files to reference (most useful):**
-- `tests/integration/ssl_sasl_test.rs` — the 5-case test suite
-- `src/common/network/sasl_channel_builder.rs`
-- `src/common/security/authenticator/sasl_client_authenticator.rs`
-- `src/common/requests/sasl_{handshake,authenticate}_{request,response}.rs`
-- `generator/messages/Sasl{Handshake,Authenticate}{Request,Response}.json`
-- `.claude/agent-memory/actor-executor/sasl_plain_auth_flow.md`
-- `.claude/agent-memory/kafka-critic/review_sasl_authenticator_patterns.md`
-- `design/history/Milestone-3/SSL_SASL_PLAN.md`
+Allowed reading scope for Actor 9 and Critic 9:
+- Java source in `kafka/` (Apache Kafka 4.2, read-only)
+- The current `fresh-impl` tree (existing translated classes, generator infrastructure, channel builder registry, etc.)
+- JSON message specs in `generator/messages/` on this branch
+
+Forbidden:
+- `git show master:…`, `git log master`, `git diff master…fresh-impl`, browsing master files in any tool
+- Master-branch agent memory files (`.claude/agent-memory/*/sasl_*.md` if any were ever ported in — must not be consulted)
+- Any "this is how master does it" hint in this NOTES.md (none present — see directive above)
 
 ## Java classes to translate
 
@@ -42,7 +42,7 @@ Per PLAN.md:364-367:
 
 | # | Scope | Test entry point |
 |---|---|---|
-| 9.0 | **Generator + wire-protocol prerequisite.** Generate `SaslHandshake{Request,Response}` and `SaslAuthenticate{Request,Response}` from `generator/messages/*.json`. Verify per-field `flexibleVersions` handling against `master`'s generated output and Java client byte fixtures (CLAUDE.md "wire-protocol byte-vector divergence" risk #1). | lib-level round-trip + Java hex fixture |
+| 9.0 | **Generator + wire-protocol prerequisite.** Generate `SaslHandshake{Request,Response}` and `SaslAuthenticate{Request,Response}` from `generator/messages/*.json`. Verify per-field `flexibleVersions` handling against Java client byte fixtures captured from running the Java client (CLAUDE.md "wire-protocol byte-vector divergence" risk #1). | lib-level round-trip + Java hex fixture |
 | 9a | **`SaslChannelBuilder` + `SaslClientAuthenticator` PLAIN state machine** (Java parity, no integration test yet). Plug into existing `channel_builders.rs` registry alongside `PlaintextChannelBuilder` and `SslChannelBuilder`. Unit tests for the state machine using mocked transport. | lib tests |
 | 9b | **Config: accept `SASL_PLAINTEXT` / `SASL_SSL` in `SecurityProtocol`**, parse `sasl.mechanism` / `sasl.jaas.config` / `sasl.username` / `sasl.password`. Reject SCRAM / OAUTHBEARER / Kerberos at config-validation time with the same error message Java emits. | unit tests for `ProducerConfig` validation |
 | 9c | **Integration test 1: SSL connection (TLS-only, self-signed cert via `rcgen`).** This is the deferred Phase 8e work. Same producer-smoke flow as PLAINTEXT, but over the broker's 9096 SSL listener. Uses `tests/common/test_certs.rs`. | `tests/integration/ssl_sasl_test.rs` (or extend `producer_smoke_test.rs` — pick one consistently) |
@@ -75,8 +75,8 @@ cargo xtask lint
 1. **Skip Phase 8d standalone** — compression matrix deferred. Lib-level codec tests in Phase 3 are sole coverage.
 2. **Fold Phase 8e into 9c** — TLS happy path produced as part of Phase 9's case 1 instead of standalone.
 3. **Fold Phase 8f into 9h** — flakiness gate runs the full matrix (PLAINTEXT + SSL + SASL_PLAINTEXT + SASL_SSL + failure cases) instead of just PLAINTEXT + SSL.
-4. **Master-branch reference is primary** alongside Java source — see "Primary code reference" above. `fresh-impl` divergence rules out wholesale checkout; copy patterns where they fit.
-5. **Test container topology:** assume a single broker exposing 4 listeners (PLAINTEXT 9092, SSL 9096, SASL_PLAINTEXT 9094, SASL_SSL 9095). Confirm against `tests/common/kafka_cluster.rs` / `cluster_config.rs` before 9c. If the existing scaffolding doesn't support multi-listener, extending it is in-scope for 9c — see master's `kafka_cluster.rs` for the pattern.
+4. **Java-only translation, no master-branch reuse** — see "Code reference policy" above. Overrides PLAN.md:357.
+5. **Test container topology:** assume a single broker exposing 4 listeners (PLAINTEXT 9092, SSL 9096, SASL_PLAINTEXT 9094, SASL_SSL 9095). Confirm against `tests/common/kafka_cluster.rs` / `cluster_config.rs` before 9c. If the existing scaffolding on this branch doesn't support multi-listener, extending it is in-scope for 9c — translate the listener-config pattern from `kafka/core/src/test/scala/integration/kafka/server/IntegrationTestHarness.scala` and `kafka/clients/src/test/java/org/apache/kafka/common/network/NetworkTestUtils.java` (Java sources only).
 
 ## Skip list (rejected or deferred)
 
@@ -120,8 +120,8 @@ Agent number for this phase: **N = 9**.
 | Risk | Mitigation |
 |---|---|
 | Wire-protocol byte-vector divergence in SASL frames (PLAN.md risk #1) | Capture hex fixtures from Java client for `SaslHandshakeRequest/Response` and `SaslAuthenticateRequest/Response`. Assert bytes literally in 9.0. Do not rely on round-trip alone. |
-| RFC 4616 token format off-by-one | `\0username\0password` is one literal NUL byte before username, one between, no trailing NUL. Master has the working pattern — verify against it. |
-| Multi-listener Testcontainer setup brittleness | Reuse master's `kafka_cluster.rs` listener config if `fresh-impl`'s current scaffolding doesn't support it. Add a cluster-pool variant for SASL-enabled brokers rather than mutating the PLAINTEXT pool (which Phase 8 tests rely on). |
+| RFC 4616 token format off-by-one | `\0username\0password` is one literal NUL byte before username, one between, no trailing NUL. Verify against RFC 4616 directly + Java `PlainSaslClient.evaluateChallenge()` source. |
+| Multi-listener Testcontainer setup brittleness | If `fresh-impl`'s current scaffolding doesn't support multi-listener, extend it by translating Java's `IntegrationTestHarness.scala` / `NetworkTestUtils.java` listener-config pattern. Add a cluster-pool variant for SASL-enabled brokers rather than mutating the PLAINTEXT pool (which Phase 8 tests rely on). |
 | Auth-failure error message divergence | Pin the exact Java error string in a test assertion. PLAN.md DoD #1. |
-| SSL_SSL handshake ordering: TLS handshake must complete *before* SASL handshake begins | Java's `SslTransportLayer.handshake()` → then `SaslClientAuthenticator.authenticate()`. Order matters; verify via wireshark or master's flow. |
+| SSL_SSL handshake ordering: TLS handshake must complete *before* SASL handshake begins | Java's `SslTransportLayer.handshake()` → then `SaslClientAuthenticator.authenticate()`. Order matters; verify via wireshark capture against a running Java client + reading the Java source flow. |
 | `sasl.jaas.config` parsing edge cases (semicolons, escaped quotes) | Use a constrained parser — username/password key=value pairs only. Reject malformed JAAS configs at validation time rather than at authenticate time. |
