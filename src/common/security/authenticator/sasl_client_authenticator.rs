@@ -691,6 +691,51 @@ impl SaslClientAuthenticator {
     }
 }
 
+/// Bridge to the network-layer
+/// [`crate::common::network::authenticator::SaslAuthenticator`] trait so
+/// the [`crate::common::network::KafkaChannel`] can host a SASL
+/// authenticator alongside Plaintext and SSL ones via the
+/// [`crate::common::network::authenticator::ChannelAuthenticator`] enum.
+///
+/// Mirrors Java's `Authenticator` interface contract where
+/// `SaslClientAuthenticator` is a concrete implementation. The Rust
+/// translation splits the interface in two ([`Authenticator`] and
+/// [`crate::common::network::authenticator::SaslAuthenticator`]) so that
+/// the non-SASL [`crate::common::network::authenticator::PlaintextAuthenticator`]
+/// / [`crate::common::network::authenticator::SslAuthenticator`] impls
+/// do not have to plumb a `&mut dyn TransportLayer` through
+/// `authenticate()`.
+impl crate::common::network::authenticator::SaslAuthenticator for SaslClientAuthenticator {
+    fn authenticate(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
+        // Delegate to the inherent method that carries the full state
+        // machine.
+        SaslClientAuthenticator::authenticate(self, transport)
+    }
+
+    fn principal(&self, _transport: &dyn TransportLayer) -> crate::common::security::auth::KafkaPrincipal {
+        // Phase 9b returns anonymous. Java's
+        // `SaslClientAuthenticator.principal()` returns the authenticated
+        // SASL principal (username for PLAIN), but the principal is only
+        // consumed on the broker side for ACL enforcement (Milestone-1
+        // is client-only). Returning the username here would be a
+        // mismatch with how `PlaintextAuthenticator::principal()` also
+        // returns anonymous on the client; principals carry no semantic
+        // value on the client side outside of logging / metrics.
+        crate::common::security::auth::KafkaPrincipal::anonymous()
+    }
+
+    fn complete(&self) -> bool {
+        SaslClientAuthenticator::complete(self)
+    }
+
+    fn close(&mut self) -> io::Result<()> {
+        // No long-lived resources to release in PLAIN. Java's
+        // `Closeable.close()` is `saslClient.dispose()` which is a no-op
+        // for `PlainSaslClient`.
+        Ok(())
+    }
+}
+
 /// Wrapper that adapts `&mut dyn TransportLayer` to `&mut dyn io::Read`
 /// so [`NetworkReceive::read_from`] can drive it. The `io::Read` trait
 /// is intentionally not a supertrait of `TransportLayer` (Java's

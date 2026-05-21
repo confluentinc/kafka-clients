@@ -21,7 +21,7 @@ use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 
 use crate::common::errors::KafkaError;
-use crate::common::network::authenticator::SslAuthenticator;
+use crate::common::network::authenticator::{ChannelAuthenticator, SslAuthenticator};
 use crate::common::network::channel_builder::ChannelBuilder;
 use crate::common::network::connection_mode::ConnectionMode;
 use crate::common::network::kafka_channel::BoxedMetadataRegistry;
@@ -117,11 +117,11 @@ impl SslChannelBuilder {
         // This is intentional: at construction time the TLS handshake
         // has not run yet, so an eager fetch would freeze the
         // pre-handshake anonymous principal forever.
-        let authenticator = SslAuthenticator::new();
+        let authenticator = ChannelAuthenticator::network(SslAuthenticator::new());
         Ok(KafkaChannel::new(
             id,
             Box::new(transport),
-            Box::new(authenticator),
+            authenticator,
             max_receive_size,
             metadata_registry,
         ))

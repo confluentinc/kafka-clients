@@ -45,7 +45,7 @@ use std::net::{IpAddr, SocketAddr};
 use std::sync::Arc;
 
 use crate::common::errors::KafkaError;
-use crate::common::network::authenticator::Authenticator;
+use crate::common::network::authenticator::ChannelAuthenticator;
 use crate::common::network::transport_layer::{OP_READ, OP_WRITE};
 use crate::common::network::{
     ChannelMetadataRegistry, ChannelState, ChannelStateName, NetworkReceive, NetworkSend, Receive, Send as KafkaSend,
@@ -125,8 +125,15 @@ impl ChannelMuteState {
 /// explicit at the type-alias level.
 pub type BoxedTransport = Box<dyn TransportLayer + std::marker::Send + std::marker::Sync>;
 
-/// Owned trait object alias for the channel's authenticator.
-pub type BoxedAuthenticator = Box<dyn Authenticator>;
+/// The channel's authenticator. Phase 9b introduced a
+/// [`ChannelAuthenticator`] enum that wraps either a non-SASL
+/// [`crate::common::network::authenticator::Authenticator`] (Plaintext
+/// / SSL) or a SASL
+/// [`crate::common::network::authenticator::SaslAuthenticator`]. The
+/// alias is kept (instead of using the enum name directly throughout)
+/// to minimise churn at the call sites that already use
+/// `BoxedAuthenticator`.
+pub type BoxedAuthenticator = ChannelAuthenticator;
 
 /// Owned trait object alias for the metadata registry. `Send` so the
 /// channel can move tasks; the registry mutates on the same task that
@@ -249,13 +256,18 @@ impl KafkaChannel {
     /// handshake or authentication fails.
     pub fn prepare(&mut self) -> Result<(), KafkaError> {
         let mut authenticating = false;
+        // Borrow-checker note: the closure can't borrow `self` for the
+        // transport AND `self.authenticator` simultaneously. We split
+        // the field borrows manually.
+        let transport = self.transport_layer.as_mut();
+        let authenticator = &mut self.authenticator;
         let result: io::Result<()> = (|| {
-            if !self.transport_layer.ready() {
-                self.transport_layer.handshake()?;
+            if !transport.ready() {
+                transport.handshake()?;
             }
-            if self.transport_layer.ready() && !self.authenticator.complete() {
+            if transport.ready() && !authenticator.complete() {
                 authenticating = true;
-                self.authenticator.authenticate()?;
+                authenticator.authenticate(transport)?;
             }
             Ok(())
         })();
@@ -922,12 +934,12 @@ mod tests {
     }
 
     fn build_channel() -> (KafkaChannel, Arc<std::sync::Mutex<MockState>>) {
-        use crate::common::network::authenticator::PlaintextAuthenticator;
+        use crate::common::network::authenticator::{ChannelAuthenticator, PlaintextAuthenticator};
         let (transport, state) = MockTransport::new();
         let channel = KafkaChannel::new(
             Arc::from("0"),
             Box::new(transport),
-            Box::new(PlaintextAuthenticator::new()),
+            ChannelAuthenticator::network(PlaintextAuthenticator::new()),
             1024,
             Box::new(DefaultChannelMetadataRegistry::new()),
         );
@@ -1151,7 +1163,7 @@ mod tests {
 
     #[test]
     fn finish_connect_captures_remote_address_and_advances_state() {
-        use crate::common::network::authenticator::PlaintextAuthenticator;
+        use crate::common::network::authenticator::{ChannelAuthenticator, PlaintextAuthenticator};
         let (transport, state) = MockTransport::new();
         // Force the connect-pending pattern: pre-set `connected = false`,
         // then call finish_connect through the channel.
@@ -1163,7 +1175,7 @@ mod tests {
         let mut channel = KafkaChannel::new(
             Arc::from("0"),
             Box::new(transport),
-            Box::new(PlaintextAuthenticator::new()),
+            ChannelAuthenticator::network(PlaintextAuthenticator::new()),
             1024,
             Box::new(DefaultChannelMetadataRegistry::new()),
         );

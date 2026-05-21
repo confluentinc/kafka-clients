@@ -19,7 +19,7 @@ use std::sync::Arc;
 use tokio::net::TcpStream;
 
 use crate::common::errors::KafkaError;
-use crate::common::network::authenticator::PlaintextAuthenticator;
+use crate::common::network::authenticator::{ChannelAuthenticator, PlaintextAuthenticator};
 use crate::common::network::channel_builder::ChannelBuilder;
 use crate::common::network::kafka_channel::BoxedMetadataRegistry;
 use crate::common::network::{KafkaChannel, ListenerName, PlaintextTransportLayer};
@@ -63,11 +63,11 @@ impl ChannelBuilder for PlaintextChannelBuilder {
         // construction via `rustls::ClientConnection::new`) reads the
         // same way.
         let transport = PlaintextTransportLayer::new(stream);
-        let authenticator = PlaintextAuthenticator::new();
+        let authenticator = ChannelAuthenticator::network(PlaintextAuthenticator::new());
         Ok(KafkaChannel::new(
             id,
             Box::new(transport),
-            Box::new(authenticator),
+            authenticator,
             max_receive_size,
             metadata_registry,
         ))

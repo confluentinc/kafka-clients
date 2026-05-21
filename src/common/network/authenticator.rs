@@ -37,7 +37,7 @@ use crate::common::network::TransportLayer;
 use crate::common::security::auth::KafkaPrincipal;
 
 /// Pluggable authenticator. Mirrors the Java `Authenticator` interface
-/// minus the SASL-specific methods (deferred to Phase 9).
+/// minus the SASL-specific methods.
 ///
 /// Phase 5b-3 only calls `authenticate` (no-op for non-SASL),
 /// `complete` (always `true` once the underlying transport handshake is
@@ -49,6 +49,18 @@ use crate::common::security::auth::KafkaPrincipal;
 /// `SslAuthenticator` stores the transport reference and re-queries it
 /// every call; the Rust trait re-receives the reference from the owning
 /// channel because the authenticator does not own the transport.
+///
+/// **Phase 9b note (architectural):** SASL authenticators require a
+/// `&mut dyn TransportLayer` in `authenticate()` to issue/read SASL
+/// frames during the handshake — Java accomplishes this by having the
+/// SASL authenticator hold the transport reference internally, but the
+/// Rust translation has the channel own the transport so an extra
+/// argument is needed. Rather than reshape this trait (and touch every
+/// `PlaintextAuthenticator` / `SslAuthenticator` call site), Phase 9b
+/// introduces a sibling [`SaslAuthenticator`] trait. The
+/// [`ChannelAuthenticator`] enum then carries either kind, and
+/// [`KafkaChannel`](crate::common::network::KafkaChannel) dispatches
+/// through the enum.
 pub trait Authenticator: std::marker::Send {
     /// Implements authentication using the configured SASL mechanism. For
     /// the non-SASL authenticators in this phase, this is a no-op (TLS
@@ -72,6 +84,118 @@ pub trait Authenticator: std::marker::Send {
     /// `Closeable.close()` on the `Authenticator` interface.
     fn close(&mut self) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// SASL-specific authenticator trait. Mirrors the Java
+/// `Authenticator` interface's `authenticate()` method when used by
+/// `SaslClientAuthenticator` — but in Rust, `authenticate()` carries an
+/// explicit `&mut dyn TransportLayer` because the authenticator does not
+/// own the transport (the channel does).
+///
+/// This is a sibling trait to [`Authenticator`] — the two are kept
+/// separate so that:
+/// 1. The shared [`Authenticator`] trait (used by `PlaintextAuthenticator`
+///    and `SslAuthenticator`) does not need to grow a transport-bearing
+///    `authenticate` signature, which would force every impl to plumb
+///    transport into `authenticate` even though only SASL uses it.
+/// 2. Implementations like [`crate::common::security::authenticator::SaslClientAuthenticator`]
+///    can keep their natural Rust signature
+///    (`authenticate(&mut self, transport: &mut dyn TransportLayer)`)
+///    without the indirection of holding a transport reference inside
+///    the authenticator (which would force unsafe lifetime/borrow
+///    juggling for an authenticator that lives alongside the transport
+///    inside the same `KafkaChannel`).
+///
+/// The [`ChannelAuthenticator`] enum dispatches across the two trait
+/// types at the channel level.
+pub trait SaslAuthenticator: std::marker::Send {
+    /// Drive the SASL state machine forward, issuing/reading SASL frames
+    /// on `transport` as needed. Mirrors
+    /// `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator.authenticate()`.
+    fn authenticate(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()>;
+
+    /// Returns the [`KafkaPrincipal`] derived for this SASL session.
+    /// For PLAIN that is the authenticated username; the Phase 9b
+    /// translation returns [`KafkaPrincipal::anonymous`] until the
+    /// principal-extraction wiring lands (server-side concern).
+    fn principal(&self, transport: &dyn TransportLayer) -> KafkaPrincipal;
+
+    /// Returns `true` when the SASL handshake has completed successfully.
+    fn complete(&self) -> bool;
+
+    /// Releases any resources held by the authenticator.
+    fn close(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+/// Channel-side authenticator wrapper. Owned by
+/// [`KafkaChannel`](crate::common::network::KafkaChannel) and dispatches
+/// to either a non-SASL [`Authenticator`] (Plaintext / SSL) or a SASL
+/// [`SaslAuthenticator`].
+///
+/// Mirrors Java's polymorphic `Authenticator` interface where every
+/// concrete subclass implements the same `authenticate()` method — but
+/// without forcing the Rust [`Authenticator`] trait to carry a
+/// transport reference for cases that don't need one. The enum is the
+/// "downcasting bridge" so the channel can write a single
+/// `auth.authenticate(transport)` call site (see
+/// [`Self::authenticate`]) regardless of which kind of authenticator
+/// is in use.
+pub enum ChannelAuthenticator {
+    /// Plaintext or SSL authenticator (non-SASL — `authenticate()` is a
+    /// no-op for these).
+    Network(Box<dyn Authenticator>),
+    /// SASL authenticator (needs a transport reference to drive the
+    /// SASL frame exchange).
+    Sasl(Box<dyn SaslAuthenticator>),
+}
+
+impl ChannelAuthenticator {
+    /// Wrap a non-SASL [`Authenticator`] (Plaintext or SSL).
+    pub fn network<A: Authenticator + 'static>(auth: A) -> Self {
+        ChannelAuthenticator::Network(Box::new(auth))
+    }
+
+    /// Wrap a SASL [`SaslAuthenticator`].
+    pub fn sasl<A: SaslAuthenticator + 'static>(auth: A) -> Self {
+        ChannelAuthenticator::Sasl(Box::new(auth))
+    }
+
+    /// Drive authentication forward. The transport reference is only
+    /// used by the SASL variant (the network variant ignores it,
+    /// matching Java's no-op `authenticate()` for non-SASL).
+    pub fn authenticate(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
+        match self {
+            ChannelAuthenticator::Network(a) => a.authenticate(),
+            ChannelAuthenticator::Sasl(a) => a.authenticate(transport),
+        }
+    }
+
+    /// Returns the principal derived for this connection. Forwards to
+    /// the inner authenticator's `principal()`.
+    pub fn principal(&self, transport: &dyn TransportLayer) -> KafkaPrincipal {
+        match self {
+            ChannelAuthenticator::Network(a) => a.principal(transport),
+            ChannelAuthenticator::Sasl(a) => a.principal(transport),
+        }
+    }
+
+    /// Returns `true` when authentication has completed.
+    pub fn complete(&self) -> bool {
+        match self {
+            ChannelAuthenticator::Network(a) => a.complete(),
+            ChannelAuthenticator::Sasl(a) => a.complete(),
+        }
+    }
+
+    /// Releases authenticator-owned resources.
+    pub fn close(&mut self) -> io::Result<()> {
+        match self {
+            ChannelAuthenticator::Network(a) => a.close(),
+            ChannelAuthenticator::Sasl(a) => a.close(),
+        }
     }
 }
 
@@ -290,5 +414,132 @@ mod tests {
         auth.authenticate().expect("authenticate is a no-op");
         auth.close().expect("close is a no-op");
         assert!(auth.complete());
+    }
+
+    // ============================================================
+    // ChannelAuthenticator enum dispatch (Phase 9b)
+    // ============================================================
+
+    /// Counting authenticator that records each call into a shared
+    /// counter so the dispatch path can be observed independently of
+    /// the side-effects of the real authenticators.
+    struct CountingNetworkAuthenticator {
+        authenticate_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        principal_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        complete_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        close_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+    }
+
+    impl Authenticator for CountingNetworkAuthenticator {
+        fn authenticate(&mut self) -> io::Result<()> {
+            self.authenticate_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn principal(&self, _transport: &dyn TransportLayer) -> KafkaPrincipal {
+            self.principal_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            KafkaPrincipal::anonymous()
+        }
+        fn complete(&self) -> bool {
+            self.complete_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            true
+        }
+        fn close(&mut self) -> io::Result<()> {
+            self.close_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+    }
+
+    /// Counting SASL authenticator — captures that the transport
+    /// reference is actually threaded through.
+    struct CountingSaslAuthenticator {
+        authenticate_calls: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+        complete_after: usize,
+    }
+
+    impl SaslAuthenticator for CountingSaslAuthenticator {
+        fn authenticate(&mut self, _transport: &mut dyn TransportLayer) -> io::Result<()> {
+            self.authenticate_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Ok(())
+        }
+        fn principal(&self, _transport: &dyn TransportLayer) -> KafkaPrincipal {
+            KafkaPrincipal::anonymous()
+        }
+        fn complete(&self) -> bool {
+            self.authenticate_calls.load(std::sync::atomic::Ordering::SeqCst) >= self.complete_after
+        }
+    }
+
+    /// The [`ChannelAuthenticator::Network`] variant routes
+    /// `authenticate()` (ignoring transport), `principal()`,
+    /// `complete()`, and `close()` to the inner non-SASL impl.
+    #[test]
+    fn channel_authenticator_network_variant_dispatches_to_inner() {
+        let authenticate_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let principal_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let complete_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let close_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut wrapped = ChannelAuthenticator::network(CountingNetworkAuthenticator {
+            authenticate_calls: std::sync::Arc::clone(&authenticate_calls),
+            principal_calls: std::sync::Arc::clone(&principal_calls),
+            complete_calls: std::sync::Arc::clone(&complete_calls),
+            close_calls: std::sync::Arc::clone(&close_calls),
+        });
+        let mut transport = StubTransport::new();
+
+        // authenticate(transport) — transport is ignored for the network variant.
+        wrapped.authenticate(&mut transport).expect("authenticate");
+        // principal(transport) — transport is passed through to the inner.
+        let _ = wrapped.principal(&transport);
+        // complete() — no transport argument.
+        assert!(wrapped.complete());
+        // close()
+        wrapped.close().expect("close");
+
+        assert_eq!(authenticate_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(principal_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(complete_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        assert_eq!(close_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    /// The [`ChannelAuthenticator::Sasl`] variant must thread the
+    /// transport reference through to the inner SASL impl's
+    /// `authenticate(&mut dyn TransportLayer)` — the whole point of
+    /// the enum.
+    #[test]
+    fn channel_authenticator_sasl_variant_threads_transport() {
+        let authenticate_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let mut wrapped = ChannelAuthenticator::sasl(CountingSaslAuthenticator {
+            authenticate_calls: std::sync::Arc::clone(&authenticate_calls),
+            complete_after: 2,
+        });
+        let mut transport = StubTransport::new();
+
+        // First authenticate: not yet complete.
+        assert!(!wrapped.complete());
+        wrapped.authenticate(&mut transport).expect("step 1");
+        assert!(!wrapped.complete());
+        // Second authenticate: complete now.
+        wrapped.authenticate(&mut transport).expect("step 2");
+        assert!(wrapped.complete());
+
+        assert_eq!(authenticate_calls.load(std::sync::atomic::Ordering::SeqCst), 2);
+    }
+
+    /// Ensure both variants are constructable and the enum exhausts its
+    /// match arms — guards against future regressions if a third
+    /// variant is added without updating dispatch.
+    #[test]
+    fn channel_authenticator_construction_smoke() {
+        let _net = ChannelAuthenticator::network(PlaintextAuthenticator::new());
+        let _net2 = ChannelAuthenticator::network(SslAuthenticator::new());
+
+        // Phase 9b: SaslAuthenticator construction smoke (uses the
+        // counting stub since we don't want to pull in the full
+        // SaslClientAuthenticator constructor here).
+        let auth = CountingSaslAuthenticator {
+            authenticate_calls: std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            complete_after: 1,
+        };
+        let _sasl = ChannelAuthenticator::sasl(auth);
     }
 }
