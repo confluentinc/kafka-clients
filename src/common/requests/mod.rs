@@ -33,6 +33,10 @@ pub mod produce_response;
 pub mod request_header;
 pub mod request_utils;
 pub mod response_header;
+pub mod sasl_authenticate_request;
+pub mod sasl_authenticate_response;
+pub mod sasl_handshake_request;
+pub mod sasl_handshake_response;
 
 pub use abstract_request::AbstractRequest;
 pub use abstract_request_builder::AbstractRequestBuilder;
@@ -50,6 +54,12 @@ pub use produce_request::ProduceRequest;
 pub use produce_response::ProduceResponse;
 pub use request_header::RequestHeader;
 pub use response_header::ResponseHeader;
+pub use sasl_authenticate_request::SaslAuthenticateRequest;
+pub use sasl_authenticate_request::SaslAuthenticateRequestBuilder;
+pub use sasl_authenticate_response::SaslAuthenticateResponse;
+pub use sasl_handshake_request::SaslHandshakeRequest;
+pub use sasl_handshake_request::SaslHandshakeRequestBuilder;
+pub use sasl_handshake_response::SaslHandshakeResponse;
 
 #[cfg(test)]
 mod tests;

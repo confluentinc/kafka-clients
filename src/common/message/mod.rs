@@ -85,5 +85,33 @@ pub mod produce_response_data {
     include!(concat!(env!("OUT_DIR"), "/generated/produce_response_data.rs"));
 }
 
+/// `SaslHandshakeRequestData`, generated from `SaslHandshakeRequest.json`.
+/// Mirrors Java's generated
+/// `org.apache.kafka.common.message.SaslHandshakeRequestData`.
+pub mod sasl_handshake_request_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/sasl_handshake_request_data.rs"));
+}
+
+/// `SaslHandshakeResponseData`, generated from `SaslHandshakeResponse.json`.
+/// Mirrors Java's generated
+/// `org.apache.kafka.common.message.SaslHandshakeResponseData`.
+pub mod sasl_handshake_response_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/sasl_handshake_response_data.rs"));
+}
+
+/// `SaslAuthenticateRequestData`, generated from `SaslAuthenticateRequest.json`.
+/// Mirrors Java's generated
+/// `org.apache.kafka.common.message.SaslAuthenticateRequestData`.
+pub mod sasl_authenticate_request_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/sasl_authenticate_request_data.rs"));
+}
+
+/// `SaslAuthenticateResponseData`, generated from `SaslAuthenticateResponse.json`.
+/// Mirrors Java's generated
+/// `org.apache.kafka.common.message.SaslAuthenticateResponseData`.
+pub mod sasl_authenticate_response_data {
+    include!(concat!(env!("OUT_DIR"), "/generated/sasl_authenticate_response_data.rs"));
+}
+
 #[cfg(test)]
 mod tests;

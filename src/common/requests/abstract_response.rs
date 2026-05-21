@@ -125,16 +125,22 @@ pub fn parse_response_body(
     accessor: &mut ByteBufferAccessor,
     api_version: i16,
 ) -> Result<Box<dyn AbstractResponse>, KafkaError> {
-    use crate::common::requests::{ApiVersionsResponse, MetadataResponse, ProduceResponse};
+    use crate::common::requests::{
+        ApiVersionsResponse, MetadataResponse, ProduceResponse, SaslAuthenticateResponse, SaslHandshakeResponse,
+    };
     match api_key.id {
         // PRODUCE = 0
         0 => Ok(Box::new(ProduceResponse::parse(accessor, api_version)?)),
         // METADATA = 3
         3 => Ok(Box::new(MetadataResponse::parse(accessor, api_version)?)),
+        // SASL_HANDSHAKE = 17
+        17 => Ok(Box::new(SaslHandshakeResponse::parse(accessor, api_version)?)),
         // API_VERSIONS = 18
         18 => Ok(Box::new(ApiVersionsResponse::parse(accessor, api_version)?)),
+        // SASL_AUTHENTICATE = 36
+        36 => Ok(Box::new(SaslAuthenticateResponse::parse(accessor, api_version)?)),
         _ => Err(KafkaError::UnsupportedVersion(format!(
-            "ApiKey {} ({}) is not currently handled in `parse_response`. Phase 2e wires only Produce, Metadata, and ApiVersions.",
+            "ApiKey {} ({}) is not currently handled in `parse_response`. Phase 2e wires only Produce, Metadata, ApiVersions, and (since Phase 9.0) SaslHandshake + SaslAuthenticate.",
             api_key.id, api_key.name,
         ))),
     }
