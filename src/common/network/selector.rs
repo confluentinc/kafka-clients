@@ -533,14 +533,16 @@ impl Selector {
         let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
         // SNI: look up the host we stashed at `connect()` time. We drop
         // the entry now that the channel is being built — close-path
-        // cleanup is a no-op for ids that already shed their host. If
-        // the host fails to parse as a DNS name (e.g. raw IP literal),
-        // `ServerName::try_from` returns `Err`; we pass `None` so the
-        // plaintext / SASL_PLAINTEXT builders' default impl ignores it,
-        // and the SSL / SASL_SSL builders' override rejects with
-        // `IllegalState` — failing loud is the right shape because an
-        // SSL channel against a raw IP would skip SNI verification
-        // silently otherwise.
+        // cleanup is a no-op for ids that already shed their host.
+        // `ServerName::try_from` accepts DNS names (`Ok(DnsName)`),
+        // IPv4 / IPv6 literals (`Ok(IpAddress)`), and rejects only
+        // unparseable strings (`Err`). We pass the parsed form (or
+        // `None` on parse failure) to `build_channel_with_server_name`;
+        // the SSL / SASL_SSL builders reject only the `None` case,
+        // which is genuinely unsafe (an SSL channel with no peer
+        // identity to verify against). IP-literal hosts use rustls'
+        // IP-SAN match path during handshake — SNI itself is omitted
+        // per RFC 6066 §3.
         let server_name = match self.connection_hosts.remove(&id) {
             Some(host) => rustls::pki_types::ServerName::try_from(host).ok(),
             None => None,
@@ -2410,8 +2412,9 @@ mod tests {
     /// [`Selectable::connect`] reaches the
     /// [`ChannelBuilder::build_channel_with_server_name`] override as a
     /// `Some(ServerName)` that round-trips back to the original host
-    /// when the host parses as a DNS name. A raw-IP host gets a `None`
-    /// (rustls would reject it as a hostname).
+    /// when the host parses as a DNS name. A raw-IP host gets a
+    /// `Some(ServerName::IpAddress)` — rustls accepts both DNS names
+    /// and IPv4 / IPv6 literals via `ServerName::try_from`.
     #[tokio::test]
     async fn build_channel_with_server_name_receives_resolved_host() {
         use std::sync::Mutex;
@@ -2491,8 +2494,9 @@ mod tests {
         selector.close();
         server.shutdown().await;
 
-        // Case 2: a raw IPv4 literal yields None (rustls rejects raw
-        // IPs as hostnames; ServerName::try_from fails).
+        // Case 2: a raw IPv4 literal yields Some(ServerName::IpAddress)
+        // — rustls' ServerName::try_from accepts IP literals as the
+        // IpAddress variant (not DnsName, but still Some).
         let server = EchoServer::start().await;
         let captured_ip = Arc::new(Mutex::new(None::<Option<String>>));
         let mut selector = Selector::with_capacity(
@@ -2518,14 +2522,14 @@ mod tests {
         )
         .await;
         // rustls' ServerName::try_from successfully parses "127.0.0.1"
-        // as an `IpAddress` variant — not a DnsName, but still Some. The
-        // exact shape depends on rustls version; we assert it is `Some`
-        // (which the SSL builder will reject as inappropriate for SNI,
-        // but plaintext builders accept).
+        // as an `IpAddress` variant — not a DnsName, but still Some.
+        // SSL builders accept it: the handshake will omit SNI per
+        // RFC 6066 §3 (which forbids IP literals in SNI) and instead
+        // verify the peer cert via IP-SAN match.
         let cap = captured_ip.lock().unwrap().clone();
         assert!(
             matches!(&cap, Some(Some(_))),
-            "127.0.0.1 must propagate as Some(ServerName) (likely IpAddress variant); got {cap:?}"
+            "127.0.0.1 must propagate as Some(ServerName::IpAddress); got {cap:?}"
         );
         selector.close();
         server.shutdown().await;

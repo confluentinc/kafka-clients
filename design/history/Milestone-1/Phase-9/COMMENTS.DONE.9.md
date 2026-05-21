@@ -484,3 +484,15 @@ SSL integration test into commit `ee3ea59`.
 - **Phase 8c R1 Nit 1 — `consume_records` rustdoc missing `\n` collision discussion.** **Resolved (`ee3ea59`)**: extended the rustdoc to enumerate both `\x1F` (within-line) and `\n` (across-line) collision risks for non-ASCII payloads + suggested extension paths.
 
 Phase 9c Round 1 closes pending Critic 9 review.
+
+---
+
+# Phase 9c Round 1 — Critic 9 followups resolved
+
+Resolutions for the 4 Suggestions + 3 Nits raised by Critic 9 against
+the Phase 9c Round 1 commit ladder (`2a3dc83..03a507c`).
+
+## Phase 9c Round 1 — resolved
+
+- **S1 — Raw-IPv4 SNI behaviour doc was wrong in 4 source-tree locations + NOTES.md.** **Resolved**: rewrote (a) `build_and_register_channel` body comment to describe rustls' actual three-way `try_from` outcomes (DNS / IP literal / parse failure), (b) test rustdoc + Case-2 inline comment to drop the "rustls rejects raw IPs as hostnames" claim, (c) the assertion-adjacent comment to note that SSL builders accept IP literals and that the handshake omits SNI per RFC 6066 §3 while verifying via IP-SAN match, and (d) the 9c.2 close-stanza in NOTES.md to clarify that only the `None` (unparseable) case is rejected loudly. The actual code is unchanged because it was already correct.
+- **N3 — Integration test cert-SAN comment misleading.** **Resolved**: rewrote `tests/integration/producer_smoke_test.rs:683-685` to note that the cert carries SANs for `localhost`, the container hostname, AND IP `127.0.0.1`, and that since `ssl_bootstrap_servers` is `127.0.0.1:<port>` the verification path is IP-SAN match (not hostname-SAN match against `localhost`).

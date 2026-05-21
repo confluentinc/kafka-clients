@@ -680,8 +680,12 @@ async fn producer_smoke_ssl_1000_records() {
         ("ssl.truststore.location".to_string(), truststore_path),
         ("ssl.truststore.type".to_string(), "PEM".to_string()),
     ]);
-    // The test broker's cert SAN is `localhost`, which matches the
-    // `ssl_bootstrap_servers` hostname; default `https` endpoint-id
+    // The test broker's cert carries SANs for `localhost`, the
+    // container hostname, AND IP `127.0.0.1`
+    // (`tests/common/test_certs.rs:60-65`). `ssl_bootstrap_servers`
+    // is `127.0.0.1:<port>`, so the SNI host is the IP literal and
+    // rustls performs an IP-SAN match (SNI itself is omitted per
+    // RFC 6066 §3 for IP literals). Default `https` endpoint-id
     // works. Keep it explicit for documentation.
     props.insert("ssl.endpoint.identification.algorithm".to_string(), "https".to_string());
 

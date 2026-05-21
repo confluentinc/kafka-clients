@@ -681,8 +681,11 @@ followups carried into 9c.
      close_connection, close). On successful connect,
      `build_and_register_channel` feeds the host through
      `ServerName::try_from` — DNS hosts yield `Some(DnsName)`, raw
-     IPs yield `Some(IpAddress)`, unparseable yield `None` (which
-     SSL builders reject loudly).
+     IPs yield `Some(IpAddress)` (rustls handles them via IP-SAN
+     match per RFC 6066 §3), and unparseable strings yield `None`
+     (the only case the SSL / SASL_SSL builders reject loudly,
+     because an SSL channel with no peer identity to verify
+     against is genuinely unsafe).
   3. `NetworkClient::initiate_connect` passes `node.host()`; mock
      `MockSelectorView::connect` and 8 selector test call sites
      updated to `"localhost"`. New test
