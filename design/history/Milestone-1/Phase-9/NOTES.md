@@ -125,3 +125,103 @@ Agent number for this phase: **N = 9**.
 | Auth-failure error message divergence | Pin the exact Java error string in a test assertion. PLAN.md DoD #1. |
 | SSL_SSL handshake ordering: TLS handshake must complete *before* SASL handshake begins | Java's `SslTransportLayer.handshake()` → then `SaslClientAuthenticator.authenticate()`. Order matters; verify via wireshark capture against a running Java client + reading the Java source flow. |
 | `sasl.jaas.config` parsing edge cases (semicolons, escaped quotes) | Use a constrained parser — username/password key=value pairs only. Reject malformed JAAS configs at validation time rather than at authenticate time. |
+
+## Sub-phase 9.0 — closed (Round 1)
+
+**Closed pending Critic 9 Round 1.** Four commits land the
+generator + wire-protocol prerequisite from the sub-phase ladder
+above. The generator was already producing the 4 SASL `*_data.rs`
+files from `generator/messages/*.json` via `build.rs`; the Actor
+discovered no generator changes were needed — only hand-written
+wrappers + tests.
+
+- `9bcf845` — **Phase 9.0 (1/N):
+  `SaslHandshake/SaslAuthenticate` request+response wrappers.**
+  Adds 4 wrapper files in `src/common/requests/` patterned after
+  the existing `ApiVersionsRequest/Response` wrappers:
+  `AbstractRequest` / `AbstractResponse` trait impls,
+  `OnceLock<&'static ApiKey>`-cached `api_key()`,
+  `AbstractRequestBuilder` impls (`Handshake`, `Authenticate`),
+  convenience accessors (`mechanism()`, `auth_bytes()`,
+  `error()`, etc.), and Debug masking for the credential-carrying
+  `SaslAuthenticateRequest/Response` types (translation of Java's
+  `toString()` override). Also wires the 4 generated `*_data`
+  modules into `common::message::mod.rs` and extends
+  `abstract_response::parse_response_body()` to dispatch api keys
+  17 and 36 so future NetworkClient SASL traffic decodes through
+  the existing path.
+- `73d9ff4` — **Phase 9.0 (2/N): SASL wire-type round-trip lib
+  tests.** Adds 28 lib-level round-trip tests across the 4 SASL
+  wrappers covering each supported wire version plus structural
+  invariants (every version 0/1/2, flex-boundary on both sides,
+  empty payloads, tagged-field round-trip at v2, tagged-field
+  rejection at v0/v1, Debug-masking parity from Java
+  `testSaslAuthenticateRequestResponseToStringMasksSensitiveData`,
+  multi-mechanism response arrays). Test count: 1233 → 1261.
+- `884c8c1` — **Phase 9.0 (3/N): SASL wire-type Java hex-fixture
+  byte-vector tests.** Adds 14 literal-byte fixtures covering each
+  version of all 4 SASL wrappers — pins CLAUDE.md Risk #1
+  (wire-protocol byte-vector divergence). Per-fixture rustdoc
+  carries a byte-by-byte layout breakdown. Flex-boundary fixtures
+  (v2 on both `SaslAuthenticate{Request,Response}`) are the
+  strongest defense against silent generator drift at the
+  per-field `flexibleVersions: "2+"` override. Test count:
+  1261 → 1275.
+- HEAD (this commit) — **Phase 9.0 (4/N): sub-phase 9.0 close
+  stanza in NOTES.md.**
+
+**Fixture provenance note (for Critic 9 review).** All 14 hex
+fixtures in commit 3 are **hand-derived** from the JSON specs
+against the documented Kafka wire-protocol encoding rules (i16/i32
+length-prefix at non-flex; varint compact-bytes + varint
+tagged-field trailer at flex). The rustdoc on each fixture
+includes an `awaiting Java-runtime byte capture` note — once a
+real Java 4.2 client is wired (likely 9c, when Testcontainers is
+up with a SASL listener), the fixtures should be cross-verified
+by tcpdump/wireshark capture or by piping a `KafkaProducer`
+configured for SASL through a recording proxy. The hand-derived
+encodings did successfully round-trip through the generator's
+read+write paths and matched the generator's `serialize()` output
+byte-for-byte, which validates the generator-vs-spec alignment at
+minimum; the residual risk is that *both* the generator and the
+hand-derivation share a common misinterpretation of the spec.
+Mitigation: cross-verify in 9c (PLAN.md Risk #1 carry-over).
+
+**Decisions made by Actor 9 inside the brief:**
+1. Did **not** introduce a `KafkaError::UnsupportedSaslMechanism`
+   variant (suggested by the brief). Per CLAUDE.md rule 10.3, the
+   existing `KafkaError::Authentication(String)` already maps to
+   wire code 58 (`SASL_AUTHENTICATION_FAILED`) and is the broader
+   Java-`AuthenticationException`-equivalent which covers the
+   mechanism-rejection error path (broker returns code 33,
+   `UNSUPPORTED_SASL_MECHANISM`, but the client surfaces it as
+   `AuthenticationException` to user callbacks). Keeping the
+   error mapping at wire-code precision (`Errors::Unsupported
+   SaslMechanism = 33` in `protocol/errors.rs`) without a
+   dedicated `KafkaError` variant is consistent with how other
+   broker-side error codes (e.g. `IllegalSaslState = 34`) are
+   handled. If 9b's `ProducerConfig` validator needs a more
+   specific variant, that can be added then.
+2. Extended `parse_response_body()` for api keys 17 and 36 in this
+   sub-phase (not deferred to 9a) — the change is mechanical and
+   keeps 9a focused on `SaslChannelBuilder` / state machine work.
+3. Added a `SaslHandshakeRequestBuilder` and a
+   `SaslAuthenticateRequestBuilder` as Java parity (Java has both
+   `public static class Builder`). Both implement
+   `AbstractRequestBuilder` with `oldest_allowed_version` /
+   `latest_allowed_version` from the `ApiKey` registry.
+
+**Deferred (in scope for 9a+):**
+- `SaslChannelBuilder` + `SaslClientAuthenticator` PLAIN state
+  machine (sub-phase 9a).
+- Java-runtime hex-fixture cross-verification (carry-over to 9c
+  when Testcontainers is up with SASL listeners).
+- `KafkaError::UnsupportedSaslMechanism` variant if 9b config
+  validation requires it.
+
+**Status at close:** `cargo build` OK, `cargo xtask format-check`
+OK, `cargo xtask lint` OK, `cargo test --lib` 1275 passed (+42
+versus the Phase 8 close baseline of 1233:
+28 round-trip + 14 hex-fixture).
+`cargo test --features integration-tests` not required for 9.0
+(no integration tests added; per the brief).
