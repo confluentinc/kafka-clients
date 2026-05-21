@@ -244,3 +244,166 @@ versus the Phase 8 close baseline of 1233:
 28 round-trip + 14 hex-fixture).
 `cargo test --features integration-tests` not required for 9.0
 (no integration tests added; per the brief).
+
+## Sub-phase 9a — closed (Round 1)
+
+**Closed pending Critic 9 Round 1.** Four commits land
+`SaslChannelBuilder` + `SaslClientAuthenticator` PLAIN state machine
+plus the four Phase 9.0 Round-1 followups.
+
+- `a8bd3f8` — **Phase 9a (1/N): pre-impl gate — redact credential
+  bytes in generator-level Debug/Display.** Resolves the lead-priority
+  Phase 9.0 Round 1 Suggestion 1 (generator-level credential-leak
+  vector). Adds `is_credential_field_name`, `has_credential_field`,
+  `generate_redacted_debug_impl` to the generator: when a struct has
+  any field named `AuthBytes` / `auth_bytes`, the generator skips
+  `Debug` from the derive list and emits a hand-written `impl Debug`
+  that renders the field as `<redacted>` instead of the raw bytes.
+  `Display` continues to delegate to `Debug` and inherits the
+  redaction. 4 new generator unit tests pin the behaviour; 2 new lib
+  tests in `src/common/requests/sasl_authenticate_*.rs` exercise the
+  data-class formatting end-to-end. Suggestion 2 bundled: the
+  `debug_masks_auth_bytes` test panic messages no longer echo the
+  full Debug output on failure. Test count: 1275 → 1277.
+- `73efc50` — **Phase 9a (2/N): bundle 9.0 round-1 followups
+  (Suggestions 3, 4 + Nits 1, 2).** Suggestion 3:
+  `success_response_error_counts_includes_none` on both
+  `SaslHandshakeResponse` and `SaslAuthenticateResponse` test
+  modules (translation of Java's
+  `testErrorCountsIncludesNone`). Nit 1: tighten the SaslHandshake
+  `error_counts_via_get_error_response_v1` from `>= 1` to `== 1` plus
+  the explicit `SaslAuthenticationFailed` value check. Suggestion 4:
+  rewrite `parse_response_body` error string at `abstract_response.rs`
+  as a static list of supported API keys, no phase-number references.
+  Nit 2: enumerate the 3 intentionally skipped Java tests
+  (`testInvalid*SaslHandshakeRequest`, `testInvalid*SaslAuthenticateRequest`,
+  `testInvalidTaggedFieldsWithSaslAuthenticateRequest` from
+  `RequestResponseTest.java:3898-3984`) in the Phase 9.0 close stanza
+  above. Test count: 1277 → 1279.
+- `a596c36` — **Phase 9a (3/N): SaslClientAuthenticator PLAIN state
+  machine** (Java parity, unit tests with mocked transport). Core
+  deliverable. New module `src/common/security/authenticator/` —
+  mirrors Java's
+  `org.apache.kafka.common.security.authenticator`. The
+  `SaslClientAuthenticator` is a sync, non-blocking state machine
+  (CLAUDE.md rule 9.1) driven by repeated `authenticate()` calls
+  from the upper layer's poll loop, matching Java's pattern. States:
+  `SendApiVersionsRequest → ReceiveApiVersionsResponse →
+  SendHandshakeRequest → ReceiveHandshakeResponse → SendInitialToken
+  → ReceiveAuthenticateResponse → Complete | Failed`. Re-authentication
+  states from Java are deferred to a future milestone (PLAN.md:367).
+  `PlainCredentials` struct replaces Java's `Subject` + JAAS
+  indirection. `MIN/MAX_RESERVED_CORRELATION_ID` + `is_reserved()`
+  translated verbatim. Legacy `DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER`
+  branch preserved for pre-1.0 brokers. Authentication failures
+  surface as `KafkaError::Authentication` (fatal, non-retriable —
+  matches Java semantics). Hand-emitted Debug on both
+  `PlainCredentials` and `SaslClientAuthenticator` masks the
+  password and the in-flight send buffer. 10 unit tests covering:
+  full PLAIN happy path, unsupported mechanism / auth-failure error
+  paths with Java-parity error strings, EOF mid-handshake,
+  construction-time mechanism rejection, correlation-id reserved
+  range, RFC 4616 byte shape, tagged-field v2 round-trip, credential
+  Debug redaction. Test count: 1279 → 1289.
+- `aff279a` — **Phase 9a (4/N): SaslChannelBuilder +
+  SecurityProtocol::SaslPlaintext/SaslSsl variants.** Plugs the
+  SASL channel builder into `channel_builders.rs` dispatch
+  alongside `PlaintextChannelBuilder` and `SslChannelBuilder`.
+  Extends `SecurityProtocol` with the SASL variants (id 2 / 3) +
+  `is_sasl()` / `uses_ssl()` predicates. New
+  `src/common/network/sasl_channel_builder.rs` validates
+  construction (must be SASL protocol, must be PLAIN mechanism,
+  `ssl_config` required for `SaslSsl`). `build_channel()` currently
+  returns `KafkaError::UnsupportedOperation` — the Phase 5b-3
+  `Authenticator` trait does not thread a transport reference
+  through `authenticate()`, and reshaping it to host the SASL
+  authenticator is intentionally deferred to Phase 9b. Per
+  CLAUDE.md rule 5: fail with `KafkaError`, not silent skip. 4 new
+  channel-builders dispatch tests + 5 new SaslChannelBuilder
+  construction tests. The producer-side gate at
+  `kafka_producer.rs:660` still rejects non-PLAINTEXT — user-visible
+  behaviour for `KafkaProducer::new` is unchanged. Test count:
+  1289 → 1299.
+
+**Phase 9a deferrals (carried into 9b+):**
+- **Channel-side SASL wiring.** `SaslChannelBuilder::build_channel`
+  returns `UnsupportedOperation`. Phase 9b must extend the Phase
+  5b-3 `Authenticator` trait (or introduce a SASL-specific
+  authenticator wrapper) to thread the transport reference
+  through `authenticate()`. The `SaslClientAuthenticator` state
+  machine itself is complete + unit-tested.
+- **`ProducerConfig` acceptance of `SASL_PLAINTEXT` / `SASL_SSL`
+  strings + `sasl.mechanism` / `sasl.username` / `sasl.password`
+  parsing.** Phase 9b. Currently `kafka_producer.rs:660` still
+  rejects non-PLAINTEXT via the existing
+  `KafkaError::UnsupportedOperation` gate.
+- **JAAS config parsing.** Phase 9b. The current
+  `PlainCredentials::new(username, password)` accepts the typed
+  fields directly; the typed `ProducerConfig`-to-`PlainCredentials`
+  bridge lands in 9b.
+- **Re-authentication.** Out of Milestone 1 (PLAN.md:367). The
+  `Authenticator` trait keeps the no-op `reauthenticate` method
+  from Phase 5b-3.
+- **Java-runtime hex-fixture cross-verification.** Still 9c
+  (when Testcontainers is up with SASL listeners).
+
+**Java tests intentionally not translated** (DoD #3):
+- `SaslAuthenticatorTest.*` — Java's full server+client integration
+  suite. Out of scope for 9a (which mocks transport at the
+  read/write boundary). The Phase 9c-g integration tests
+  cover real broker exchange.
+- `SaslAuthenticatorFailure{Delay,PositiveDelay,NoDelay}Test.java`
+  — broker-side timed-failure delay tests. Server-side concern;
+  client cannot observe the timing semantics directly.
+- `ClientAuthenticationFailureTest.java` — server-side test
+  fixture wrapping `NetworkClient`. The 9a unit tests for
+  `authenticate_failure_preserves_broker_message` cover the
+  client-side surface.
+- `LoginManagerTest.java`, `TestJaasConfig.java`,
+  `TestDigestLoginModule.java` — JAAS / DIGEST-MD5 plumbing,
+  out of Phase 9a scope (PLAIN only).
+- `SaslServerAuthenticatorTest.java` — server-side,
+  out of Milestone 1 client scope.
+
+**Decisions made by Actor 9 inside the brief:**
+1. Implemented option (a) from Suggestion 1 — generator-level
+   redaction. Not invasive: 3 new helpers totalling ~80 lines in
+   `generator/src/lib.rs`, 3 single-line wirings into the existing
+   struct-emit call sites, and a small change to the existing
+   `generate_struct_derives_and_impls` to conditionally drop
+   `Debug` from the derive list. Cleanest separation of concerns
+   — the generator owns both the wire format and the safe
+   Debug/Display.
+2. Implemented the state machine as a sync (non-blocking) loop
+   matching Java's structure, rather than rewriting to async.
+   Rationale: the upper layer (`KafkaChannel::prepare`) drives
+   `Authenticator::authenticate()` from a sync trait already; an
+   async-fn in the trait would touch every call site. The Phase
+   5b transport's `read()` returns `Ok(0)` on `WouldBlock`, so
+   the sync state machine composes correctly with the existing
+   poll-loop pattern.
+3. Did **not** introduce `KafkaError::UnsupportedSaslMechanism` —
+   continued to use `KafkaError::Authentication` per the Phase
+   9.0 decision (memory `phase9_0_sasl_wire_types.md`).
+   `KafkaError::Config` covers the construction-time validation
+   path (different surface from runtime auth failure).
+4. `SaslChannelBuilder::build_channel` returns
+   `UnsupportedOperation` rather than partially wiring through
+   a fake authenticator. The `SaslClientAuthenticator` is fully
+   testable directly via `SaslClientAuthenticator::new` (the unit
+   tests do exactly that). Phase 9b will finish the channel-side
+   integration once the `Authenticator` trait is reshaped.
+5. Added `is_sasl()` and `uses_ssl()` predicates on
+   `SecurityProtocol` — they mirror Java's idiom
+   (`securityProtocol == SASL_PLAINTEXT || == SASL_SSL`) used
+   in multiple call sites in Java. Anticipates 9b/9c usage.
+
+**Status at close:** `cargo build` OK, `cargo xtask format-check`
+OK, `cargo xtask lint` OK, `cargo test --lib` 1299 passed (+24
+versus the Phase 9.0 close baseline of 1275: 2 generator-level
+redaction lib tests + 2 followup test assertions + 10 SASL
+authenticator state-machine tests + 6 SecurityProtocol expansion
+tests + 4 channel-builders dispatch tests).
+`cargo test --features integration-tests` not required for 9a
+(no integration tests added; integration begins at 9c per the
+brief).
