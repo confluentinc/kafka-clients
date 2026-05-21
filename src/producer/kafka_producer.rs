@@ -663,7 +663,7 @@ fn build_production_network_client(
              got '{security_protocol_str}'. SSL/SASL lands in Phase 8e/9."
         )));
     }
-    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, None)
+    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, None, None)
         .map_err(|e| KafkaError::Config(format!("Failed to construct channel builder: {e}")))?;
 
     let connections_max_idle_ms = config.get_long(producer_config::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;

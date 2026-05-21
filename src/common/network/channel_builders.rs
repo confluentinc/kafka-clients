@@ -39,34 +39,49 @@ use crate::common::network::ListenerName;
 use crate::common::network::channel_builder::ChannelBuilder;
 use crate::common::network::connection_mode::ConnectionMode;
 use crate::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
+use crate::common::network::sasl_channel_builder::SaslChannelBuilder;
 use crate::common::network::ssl_channel_builder::SslChannelBuilder;
 use crate::common::security::auth::SecurityProtocol;
+use crate::common::security::authenticator::PlainCredentials;
 
 /// Owned trait object alias for the channel builder. `Send` so the
 /// builder can be moved between Tokio tasks.
 pub type BoxedChannelBuilder = Box<dyn ChannelBuilder>;
 
+/// SASL credentials for `SaslPlaintext` / `SaslSsl` security protocols.
+/// Bundled into one struct so the [`client_channel_builder`] signature
+/// stays compact while Phase 9b grows the public config plumbing.
+pub struct SaslChannelConfig {
+    /// SASL mechanism — PLAIN-only in Phase 9.
+    pub mechanism: String,
+    /// Client id (also surfaces as the network-level `client.id`).
+    pub client_id: String,
+    /// PLAIN credentials.
+    pub credentials: PlainCredentials,
+}
+
 /// Construct the appropriate client-side [`ChannelBuilder`] for the
 /// given [`SecurityProtocol`]. Mirrors Java's
 /// `ChannelBuilders.clientChannelBuilder(...)`.
 ///
-/// SASL_PLAINTEXT and SASL_SSL are deferred to Phase 9; passing them
-/// returns [`KafkaError::Config`].
-///
 /// **Java→Rust signature differences:**
 ///
 /// 1. The Java method takes a `JaasContext.Type contextType` and
-///    `String clientSaslMechanism` for SASL routing. Both are deferred.
+///    `String clientSaslMechanism` for SASL routing. The Rust
+///    translation bundles the SASL parameters into [`SaslChannelConfig`]
+///    — required for `SaslPlaintext` / `SaslSsl`, ignored otherwise.
 /// 2. The Java method takes an `AbstractConfig config` from which it
 ///    derives the configs map; the Rust signature accepts the SSL
 ///    config directly as an `Option<Arc<ClientConfig>>` (required for
-///    [`SecurityProtocol::Ssl`], ignored otherwise).
+///    [`SecurityProtocol::Ssl`] and [`SecurityProtocol::SaslSsl`],
+///    ignored otherwise).
 /// 3. The Java method takes `Time` and `LogContext` for SASL token
-///    refresh and structured logging. Both are deferred.
+///    refresh and structured logging. Both are deferred to Phase 9b+.
 pub fn client_channel_builder(
     security_protocol: SecurityProtocol,
     listener_name: Option<ListenerName>,
     ssl_config: Option<Arc<ClientConfig>>,
+    sasl_config: Option<SaslChannelConfig>,
 ) -> Result<BoxedChannelBuilder, KafkaError> {
     match security_protocol {
         SecurityProtocol::Plaintext => Ok(Box::new(PlaintextChannelBuilder::new(listener_name))),
@@ -80,30 +95,23 @@ pub fn client_channel_builder(
                 config,
             )))
         },
+        SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl => {
+            let sasl = sasl_config.ok_or_else(|| {
+                KafkaError::Config(format!(
+                    "sasl_config is required when security.protocol = {}",
+                    security_protocol.name()
+                ))
+            })?;
+            Ok(Box::new(SaslChannelBuilder::new(
+                security_protocol,
+                listener_name,
+                sasl.mechanism,
+                sasl.client_id,
+                sasl.credentials,
+                ssl_config,
+            )?))
+        },
     }
-}
-
-/// Reject SASL security protocols at the configuration boundary.
-///
-/// Mirrors Java's eager `IllegalArgumentException` paths in
-/// `clientChannelBuilder` for SASL_* protocols, but signalled as a
-/// typed [`KafkaError::Config`] (CLAUDE.md rule 10.3 + Phase-9 deferral
-/// note in `Phase-5/NOTES.md`).
-///
-/// Phase 5b-3 callers do not invoke this directly — the
-/// [`SecurityProtocol`] enum already excludes SASL variants. The
-/// helper is kept so the producer-side config validator (Phase 5d)
-/// can produce a uniform error message regardless of whether the
-/// SASL value came from the public enum or a stringly-typed config
-/// path.
-pub fn reject_sasl_until_phase_9(value: &str) -> Result<(), KafkaError> {
-    let upper = value.to_ascii_uppercase();
-    if upper == "SASL_PLAINTEXT" || upper == "SASL_SSL" {
-        return Err(KafkaError::Config(format!(
-            "security.protocol={value} is not yet supported (Phase 9). Supported values: PLAINTEXT, SSL"
-        )));
-    }
-    Ok(())
 }
 
 /// Reproduce Java's `channelBuilderConfigs(AbstractConfig, ListenerName)`
@@ -311,7 +319,7 @@ mod tests {
         // Cannot use `expect` because `BoxedChannelBuilder` is
         // `Box<dyn ChannelBuilder>` which is not `Debug`. Match on
         // the result instead.
-        match client_channel_builder(SecurityProtocol::Plaintext, None, None) {
+        match client_channel_builder(SecurityProtocol::Plaintext, None, None, None) {
             Ok(_) => {},
             Err(e) => panic!("plaintext builder construction failed: {e:?}"),
         }
@@ -319,7 +327,7 @@ mod tests {
 
     #[test]
     fn client_channel_builder_for_ssl_requires_config() {
-        let err = match client_channel_builder(SecurityProtocol::Ssl, None, None) {
+        let err = match client_channel_builder(SecurityProtocol::Ssl, None, None, None) {
             Ok(_) => panic!("expected Config error"),
             Err(e) => e,
         };
@@ -334,17 +342,80 @@ mod tests {
             .expect("client versions")
             .with_root_certificates(rustls::RootCertStore::empty())
             .with_no_client_auth();
-        match client_channel_builder(SecurityProtocol::Ssl, None, Some(Arc::new(cfg))) {
+        match client_channel_builder(SecurityProtocol::Ssl, None, Some(Arc::new(cfg)), None) {
             Ok(_) => {},
             Err(e) => panic!("ssl builder construction failed: {e:?}"),
         }
     }
 
+    /// Phase 9a addition: SASL_PLAINTEXT requires a `sasl_config`; the
+    /// builder returns `KafkaError::Config` when it's missing.
     #[test]
-    fn reject_sasl_protocols() {
-        assert!(reject_sasl_until_phase_9("SASL_PLAINTEXT").is_err());
-        assert!(reject_sasl_until_phase_9("sasl_ssl").is_err());
-        assert!(reject_sasl_until_phase_9("PLAINTEXT").is_ok());
-        assert!(reject_sasl_until_phase_9("SSL").is_ok());
+    fn client_channel_builder_for_sasl_plaintext_requires_sasl_config() {
+        let err = match client_channel_builder(SecurityProtocol::SaslPlaintext, None, None, None) {
+            Ok(_) => panic!("expected Config error"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("sasl_config is required"));
+    }
+
+    /// Phase 9a addition: SASL_PLAINTEXT + PLAIN + valid credentials
+    /// constructs a `SaslChannelBuilder` (dispatch returns Ok). Channel
+    /// wiring itself is deferred to Phase 9b.
+    #[test]
+    fn client_channel_builder_for_sasl_plaintext_constructs_sasl_builder() {
+        use crate::common::security::authenticator::PlainCredentials;
+        let sasl = SaslChannelConfig {
+            mechanism: "PLAIN".to_owned(),
+            client_id: "test-client".to_owned(),
+            credentials: PlainCredentials::new("alice", "supersecret"),
+        };
+        match client_channel_builder(SecurityProtocol::SaslPlaintext, None, None, Some(sasl)) {
+            Ok(_) => {},
+            Err(e) => panic!("SASL_PLAINTEXT + PLAIN builder construction failed: {e:?}"),
+        }
+    }
+
+    /// Phase 9a addition: SASL_SSL requires both an `ssl_config` and a
+    /// `sasl_config`.
+    #[test]
+    fn client_channel_builder_for_sasl_ssl_requires_both_configs() {
+        use crate::common::security::authenticator::PlainCredentials;
+        let sasl = SaslChannelConfig {
+            mechanism: "PLAIN".to_owned(),
+            client_id: "test-client".to_owned(),
+            credentials: PlainCredentials::new("alice", "supersecret"),
+        };
+        // sasl_config present but ssl_config missing — fails inside
+        // SaslChannelBuilder::new.
+        let err = match client_channel_builder(SecurityProtocol::SaslSsl, None, None, Some(sasl)) {
+            Ok(_) => panic!("expected Config error"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("ssl_config is required"));
+    }
+
+    /// Phase 9a addition: SASL_SSL + PLAIN + valid credentials +
+    /// ssl_config constructs a `SaslChannelBuilder`.
+    #[test]
+    fn client_channel_builder_for_sasl_ssl_constructs_sasl_builder() {
+        use crate::common::security::authenticator::PlainCredentials;
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let cfg = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client versions")
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let sasl = SaslChannelConfig {
+            mechanism: "PLAIN".to_owned(),
+            client_id: "test-client".to_owned(),
+            credentials: PlainCredentials::new("alice", "supersecret"),
+        };
+        match client_channel_builder(SecurityProtocol::SaslSsl, None, Some(Arc::new(cfg)), Some(sasl)) {
+            Ok(_) => {},
+            Err(e) => panic!("SASL_SSL + PLAIN builder construction failed: {e:?}"),
+        }
     }
 }
