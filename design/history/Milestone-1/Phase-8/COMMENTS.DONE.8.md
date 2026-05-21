@@ -381,3 +381,110 @@ Test 3's post-flush-usability assertion (lines 773-786) is exactly the right pin
 
 
 Phase 8b Round 1 closes. Manager advances to Phase 8c (end-to-end byte fidelity) plan.
+## Phase 8c Round 1 — Critic review
+
+Review window: commits `82f3254..07a207d` on branch `fresh-impl` (4 commits — harness helper, end-to-end byte-fidelity test, doc-grouping fix, NOTES.md close stanza). Manager-housekeeping commit `4802cdb` is agent-memory archive only and excluded.
+
+Java references consulted:
+- `kafka/clients/src/main/java/org/apache/kafka/clients/producer/KafkaProducer.java:1330-1390` — `close(Duration)` contract that the test's graceful-close-before-consume mirrors.
+
+Verdict: **0 Blocking, 1 Suggestion, 2 Nit.**
+
+---
+
+### Per-area verifications
+
+| Area | Status | Notes |
+|------|--------|-------|
+| Production diff scope | OK | `git diff 81a2607..07a207d -- src/` is **only** the doc-grouping fix at `src/producer/kafka_producer.rs:125-144`. No other production change. |
+| Doc-grouping fix is a real bug fix (not just nit) | OK — **8b Round 1 review was wrong** | See "Resolution of the 8b Round 1 doc-grouping claim" below. Re-verified by rustdoc generation: pre-fix `struct.KafkaProducer.html` contains **none** of the doc text; post-fix it does. |
+| Test seam (`PartitionObserverFn`) still compiles + still wires the test seam | OK | `cargo test --features integration-tests producer_smoke -- --test-threads=1` passes all 5 tests; the type alias is referenced in test code unchanged. |
+| Format-check | OK | `cargo xtask format-check` green. |
+| Lint | OK | `cargo xtask lint` green, no warnings. |
+| Lib-test count regression | OK | `cargo test --lib`: **1233 passed** (no count change — production diff is comment/whitespace + a type-alias relocation, exactly as the close stanza claims). |
+| Integration suite | OK | `cargo test --features integration-tests --test integration producer_smoke -- --test-threads=1`: **5/5 green**, 21.70 s wall-clock end-to-end. (Actor's quoted 14.83 s likely measures a warm-Docker re-run; my 21.70 s is a cold-Docker first invocation. Either way well inside any reasonable per-run budget for the 8f 3-consecutive-run gate.) |
+| New test pins the right invariant | OK | `producer_smoke_plaintext_byte_fidelity` asserts the consume-side `(key, value)` byte sequence equals the produce-side sequence **per partition** (`producer_smoke_test.rs:1351-1372`). Bytes — not strings (the lossy UTF-8 decode is identity for the ASCII fixtures, and the asserted comparison is on `Vec<u8>`). Per-partition grouping uses the **ack** partition (`m.partition()`), matching the brief's request that grouping survive an explicit-vs-ack-partition divergence. |
+| Per-partition coverage | OK | 100 records × explicit partition `i % 3` → 33-34 records per partition. All 3 partitions exercised deterministically. |
+| Helper parser robustness | OK | `splitn(3, "\u{1F}")` produces exactly 3 parts; `Partition:` prefix stripping with explicit `unwrap_or_else(|| panic!(..))` on every parse boundary. Failure mode of an unexpected stdout line (deprecation warning, broker banner) is a loud panic with full stderr captured — not a silent miscompare. |
+| `--formatter-property` rationale | OK — verified | Switching from `--property` to `--formatter-property` is a real Kafka 3.7+ deprecation. The bundled broker is recent enough that `--property` would print a deprecation warning to stdout, which `lines()` would parse as a record and panic on "missing `Partition:` prefix" — the switch is necessary, not stylistic. |
+| Format string verification | OK | `Partition:<n>\x1F<key>\x1F<value>\n` matches `DefaultMessageFormatter`'s actual print path (`Partition:` field joined to the rest by `key.separator`, then key and value joined by `key.separator`). The Actor's note that the brief's `\t` assumption was wrong is correct. |
+| Byte-fidelity caveat documented | OK | `producer_smoke_test.rs:219-238` rustdoc explicitly states: "kafka-console-consumer defaults to the **string** key/value deserializers, which lossily decode bytes as UTF-8 (invalid sequences become U+FFFD). Phase 8c's test fixtures use only ASCII keys and values … so the lossy decode is the identity function". Future non-ASCII fixtures route is documented (`--formatter-property key.deserializer=ByteArrayDeserializer`). |
+| Async-context discipline | OK | `consume_records` is sync (mirrors `create_topic`); the async test wraps it in `tokio::task::spawn_blocking` (`producer_smoke_test.rs:1298-1302`) so the `docker exec` call cannot stall the runtime. |
+| Graceful close before consume | OK | Pattern: await all acks → close gracefully → then consume. Close-before-consume is belt-and-braces (acks already guarantee broker commit), but it correctly hardens against a future regression that returned acks early (e.g. `acks=1` with a post-ack linger window). |
+| NOTES.md sub-phase 8c row consistency | OK | `NOTES.md:20` ("End-to-end byte fidelity: consume produced batch via `kafka-console-consumer` (`docker exec`) and assert key/value bytes match per partition") matches what landed. |
+| NOTES.md close stanza accuracy | OK | The four-commit summary matches the actual commits; the "0 lib-test count change" claim is verified; the "5-test integration suite green" claim is verified. |
+| Deferred-followup tracking | Manager housekeeping | The "Deferred followups carried into Phase 8c" section (`COMMENTS.8.md:553-555`) is now obsolete and additionally misclaims "no compiler/rustdoc effect" — verifiably wrong (see Resolution below). Manager to clean up; not Actor's job. |
+| DoD #3 "8c onward — End-to-end byte fidelity" | OK | The DoD line at `NOTES.md:94-95` is satisfied by `producer_smoke_plaintext_byte_fidelity`. |
+| DoD #4 hot-path allocation audit | OK | Production diff is exclusively a doc-comment / type-alias relocation. No new `String` clone, no `Box<dyn Future>` per send, no per-message `tokio::spawn` introduced. |
+
+---
+
+### Resolution of the 8b Round 1 doc-grouping claim
+
+**My Phase 8b Round 1 review (`COMMENTS.8.md:603`, archived at `COMMENTS.DONE.8.md` post-archive) was wrong.** I wrote: "Rust's doc-comment grouping correctly attaches lines 140-142 to the type alias (because of the blank line separator at 139). Functionally fine." Both the mechanism and the inferred consequence were incorrect.
+
+Empirical re-verification (with the pre-fix source at `git show 275eb3b:src/producer/kafka_producer.rs`):
+
+1. **Mechanism**: there was no blank-line separator. Lines `/// A Kafka client...` (123) through `/// to satisfy clippy::type_complexity.` (142) form a contiguous `///` block (line 139 is `/// [`Producer`]: crate::producer::Producer`, a doc line, not blank). In Rust, contiguous `///` plus any `#[cfg(...)]` attribute that follows all attach to the **next syntactic item** — here, `type PartitionObserverFn`. There is no blank-line-separator rule that re-targets doc comments to a later item.
+
+2. **Consequence (verified by rustdoc generation on a minimal repro at `/tmp/doctest/`)**:
+   - With `--features integration-tests`: `type.PartitionObserverFn.html` contained the entire 22-line `KafkaProducer` doc block. `struct.KafkaProducer.html` had **zero rustdoc** (no `top-doc` section).
+   - Without the feature: the cfg-gated type alias was excluded from the doc build entirely, so the docs vanished completely — `struct.KafkaProducer.html` still had no rustdoc.
+
+   The struct's documentation on docs.rs was silently empty in both feature configurations.
+
+3. The Actor's claim that clippy's `empty_line_after_doc_comments` lint flags this layout did **not** reproduce in my local runs (`cargo xtask lint` green on pre-fix state). The lint requires a blank line between the `///` block and the next attribute/item, which this case lacked. So clippy did not catch it — but rustdoc's silent re-attachment did do the damage the Actor describes. The fix is correct regardless of whether clippy fired.
+
+The Actor's commit message slightly overstates clippy's role (the lint did not fire on the original layout), but the bug-fix substance is verified real.
+
+---
+
+### Findings
+
+#### Suggestion 1 — `Arc::try_unwrap` ceremony in the test's close path is unnecessary
+
+- **File**: `tests/integration/producer_smoke_test.rs:1280-1288`
+- **Severity**: Suggestion
+- **Description**: `KafkaProducer::close_with_timeout` is declared `async fn close_with_timeout(&self, timeout: Duration) -> Result<…>` (`src/producer/kafka_producer.rs:2020`). It takes `&self`, not `self`, so owned access is not required. The test does:
+
+  ```rust
+  let producer_for_close = producer.clone();   // Arc::strong_count = 2
+  drop(producer);                                // strong_count = 1
+  let producer_for_close = Arc::try_unwrap(producer_for_close)
+      .map_err(|_| ())
+      .expect("producer Arc had outstanding refs at close");
+  producer_for_close.close_with_timeout(Duration::from_secs(30)).await…
+  ```
+
+  The `clone` → `drop` → `try_unwrap` triplet adds a panic surface (`try_unwrap` panics if any Arc leak exists — currently none, but a future background task that captures `Arc<KafkaProducer>` would silently break this test rather than the production path it audits). The simpler `producer.close_with_timeout(…).await` on the `Arc<KafkaProducer>` directly is equivalent and panic-free.
+- **Verified safe**: I grepped `src/producer/kafka_producer.rs` for `Arc<Self>` / `Arc<KafkaProducer>` / `self: Arc<` and found no matches. No background task holds an `Arc<KafkaProducer>` today, so `try_unwrap` does succeed — but the protection it provides is illusory (the test's invariant is "close + then consume", not "no Arc leaks", and the latter is not part of the Phase 8c contract).
+- **Expected**: Replace the three lines with `producer.close_with_timeout(Duration::from_secs(30)).await…` and remove the manual `drop` (the `Arc` will drop naturally at end-of-scope). Net: one line, no panic surface.
+
+#### Nit 1 — Helper rustdoc claim "the parsing below would still work as long as the separator (`\x1F`) does not collide with any byte in the payload" is one bit stronger than the parser actually guarantees
+
+- **File**: `tests/integration/producer_smoke_test.rs:233-238`
+- **Severity**: Nit
+- **Description**: The rustdoc says the parser would still work for binary payloads "as long as the separator (`\x1F`, ASCII unit separator) does not collide with any byte in the payload". That is necessary but not sufficient: the parser also calls `stdout.lines()` (line 317), which splits on `\n` (0x0A). A binary payload containing `0x0A` (newline) would split a single record across two output lines and the per-line parser would panic on "missing `Partition:` prefix" on the orphan second line. The current ASCII fixtures avoid this trivially, so it's a no-op for Phase 8c — but a future caller reading this rustdoc as guidance for binary payload work would also need to address newline collisions, not only `\x1F` collisions.
+- **Expected**: When extending the helper for binary payloads, also document the `\n` collision: callers must either guarantee `\n` is absent from payloads, or switch to a length-prefixed framing (e.g. `--formatter-property line.separator=…`) — separator-byte management is the dominant correctness axis, not the only one.
+
+#### Nit 2 — Commit `bc0508d` message overstates clippy's role in surfacing the bug
+
+- **File**: commit `bc0508d` message body (not in source)
+- **Severity**: Nit
+- **Description**: The commit message says "clippy's `empty_line_after_doc_comments` lint explicitly notes 'the comment documents this type alias'". I could not reproduce a clippy warning on the pre-fix source (`cargo xtask lint` green; `cargo clippy --features integration-tests --lib -- -W clippy::empty_line_after_doc_comments` silent). The lint's documented behavior requires a *blank line* between the `///` block and the next item, which the pre-fix code did not have. The bug-fix substance is real (rustdoc generation pins it; see Resolution above), but clippy did not actually catch it in this codebase configuration.
+- **Expected**: No source-code change. If the Actor consults their captured clippy output and confirms a different lint name fired, that's fine — but the message as written attributes credit to a lint that does not fire on this input pattern.
+
+---
+
+### Round 1 verdict: **accepted**
+
+Phase 8c closes Round 1. The four commits land exactly the brief's mandate: a working `kafka-console-consumer` test-harness helper, an end-to-end byte-fidelity test that pins the CLAUDE.md §12 zero-copy guarantee at the broker boundary, the resolution of a real (not nit) rustdoc bug deferred from Phase 8b, and an accurate NOTES.md close stanza. Zero Blocking findings; one Suggestion (unnecessary Arc ceremony in the test close path); two Nits (test-helper rustdoc precision and commit-message attribution accuracy). All five integration tests pass against a live broker; lib-test count unchanged at 1233; format + lint clean.
+
+### Next steps for Manager
+
+- Phase 8c **closes as accept-with-followups**: Suggestion 1 and the two Nits are non-blocking and can be folded into Phase 8d (the next touch on `tests/integration/producer_smoke_test.rs` and the helper rustdoc).
+- **Housekeeping (Manager-side, not Actor's job)**: the "Deferred followups carried into Phase 8c" section (`COMMENTS.8.md:553-555`) is now obsolete (the only entry has been resolved) AND it misclaims the doc-grouping fix was "Documentation polish only — no compiler/rustdoc effect". Re-verification proved it had a real rustdoc effect. Recommend either deleting the section or archiving it with a one-line "resolved in `bc0508d` — proved to have real rustdoc impact, see Phase 8c Round 1 review" note.
+- **Memory note (Critic-side)**: I am updating `.claude/agent-memory/kafka-critic/` with a false-negative lesson — doc-comment grouping claims about which item rustdoc attaches to require verification via actual rustdoc HTML output (or the relevant clippy lint **with confirmation it actually fires**), not assumption-from-source-reading. The pre-fix code looked benign on the page, but the rustdoc consequence was severe.
+- Phase 8d can begin; the console-consumer harness is codec-agnostic so 8d's consume side reuses the helper unchanged (the broker decompresses before serving fetches).
+
+Phase 8c Round 1 closes. Manager advances to Phase 8d (compression matrix) plan.
