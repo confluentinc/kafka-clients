@@ -56,18 +56,17 @@ submodule commit `a18251bae0b825c69794a50dffd4c3100cf5ca5b`.
 | # | Phase | Java sources (LOC) | Rust output | Depends on |
 |---|---|---|---|---|
 | 1 | **Public foundation types** | `ConsumerConfig` (815), `ConsumerRecord` (274), `ConsumerRecords` (147), `OffsetAndMetadata` (127), `OffsetAndTimestamp` (85), `OffsetResetStrategy` (33), `AutoOffsetResetStrategy` (182), `GroupProtocol` (43), `ConsumerGroupMetadata` (100), `CloseOptions` (113), `SubscriptionPattern` (59), 6 exception classes (~285). Tests: `ConsumerConfigTest` (295), `ConsumerRecordTest` (101), `ConsumerRecordsTest` (220), `OffsetAndMetadataTest` (83), `ConsumerGroupMetadataTest` (89), `CloseOptionsTest` (51), `AutoOffsetResetStrategyTest` (121). | `src/consumer/{consumer_config, consumer_record, consumer_records, offset_and_metadata, offset_and_timestamp, offset_reset_strategy, group_protocol, consumer_group_metadata, close_options, subscription_pattern, errors}.rs` + `src/consumer/internals/auto_offset_reset_strategy.rs` + matching `tests/consumer/` files. | — |
-| 2 | **Public traits & deserializers** | `Consumer<K,V>` (interface), `ConsumerRebalanceListener`, `OffsetCommitCallback`, `Deserializer<T>`, `ConsumerInterceptor<K,V>`, `Deserializers`, `ConsumerInterceptors` | `src/consumer/mod.rs` (`Consumer` trait + factory), `consumer_rebalance_listener.rs`, `offset_commit_callback.rs`, `deserializer.rs`, `interceptor.rs`, `internals/{deserializers, consumer_interceptors}.rs` | Phase 1 |
+| 2 | **Public traits & deserializers** | `Consumer<K,V>` (interface), `ConsumerRebalanceListener`, `OffsetCommitCallback`, `Deserializer<T>`, `ConsumerInterceptor<K,V>`, `Deserializers`, `ConsumerInterceptors`. Tests: `ConsumerInterceptorsTest`, any `DeserializersTest` if present. | `src/consumer/mod.rs` (`Consumer` trait + factory), `consumer_rebalance_listener.rs`, `offset_commit_callback.rs`, `deserializer.rs`, `interceptor.rs`, `internals/{deserializers, consumer_interceptors}.rs` + matching tests | Phase 1 |
 | 3 | **`MockConsumer`** | `MockConsumer.java` + `MockConsumerTest.java` (192) | `src/consumer/mock_consumer.rs` + `tests/consumer/mock_consumer_test.rs` | Phase 1–2 |
 | 4 | **`SubscriptionState` + `ConsumerMetadata`** | `SubscriptionState` (1323) + `SubscriptionStateTest` (970), `ConsumerMetadata` (99) + `ConsumerMetadataTest` | `src/consumer/internals/{subscription_state, consumer_metadata}.rs` + tests | Phase 1 |
-| 5 | **Event channels, wakeup, reaper** | All `consumer/internals/events/` (~25 files), `WakeupTrigger`, `CompletableEventReaper` | `src/consumer/internals/events/` (`ApplicationEvent`/`BackgroundEvent` enums, `ApplicationEventHandler`, `BackgroundEventHandler`), `internals/{wakeup_trigger, completable_event_reaper}.rs`. Tests: `WakeupTriggerTest`, `CompletableEventReaperTest` | Phase 1, 4 |
-| 6 | **`NetworkClientDelegate` + `RequestManager` + `CoordinatorRequestManager`** | `NetworkClientDelegate` (408), `RequestManager`, `RequestState`, `TimedRequestState`, `CoordinatorRequestManager`, `RequestManagers` | `src/consumer/internals/{network_client_delegate, request_manager, request_state, timed_request_state, coordinator_request_manager, request_managers}.rs` + tests | Phase 1, 5 |
-| 7 | **Fetch path** | `AbstractFetch` (497), `FetchConfig`, `FetchBuffer` (277), `CompletedFetch` (390), `FetchCollector` (393), `Fetcher` (210), `FetchRequestManager` (121), `OffsetFetcher`, `OffsetFetcherUtils`, `TopicMetadataFetcher`, `OffsetsRequestManager`, `OffsetsForLeaderEpochClient`, `TopicMetadataRequestManager`, `FetchMetricsAggregator/Manager/Registry`, `SensorBuilder` (subset for fetch) | `src/consumer/internals/{fetch_config, fetch_buffer, completed_fetch, fetcher, fetch_collector, fetch_request_manager, offset_fetcher, offsets_request_manager, offsets_for_leader_epoch_client, topic_metadata_fetcher, topic_metadata_request_manager}.rs` + tests. Includes the per-record allocation-budget test required by `consumer-threading.md` §27. | Phase 4, 5, 6 |
-| 8 | **Membership & heartbeat (KIP-848)** | `MembershipManager` interface + `MembershipManagerImpl` (1511), `MemberState`, `MemberStateListener`, `Heartbeat`, `HeartbeatRequestState`, `HeartbeatRequestManager` (629), `AbstractHeartbeatRequestManager`, `ConsumerHeartbeatRequestManager` | `src/consumer/internals/{membership_manager, member_state, heartbeat, heartbeat_request_manager, consumer_heartbeat_request_manager}.rs` + tests | Phase 4, 5, 6 |
-| 9 | **Commit** | `CommitRequestManager` (1282), `OffsetCommitCallbackInvoker` | `src/consumer/internals/{commit_request_manager, offset_commit_callback_invoker}.rs` + tests | Phase 4, 5, 6 |
-| 10 | **Background task & event processor** | `ConsumerNetworkThread` (321), `ApplicationEventProcessor` | `src/consumer/internals/{consumer_network_thread, application_event_processor}.rs`. Single `tokio::spawn` per consumer (§10) with `runOnce()` phase ordering; `select!` over shutdown/wakeup/network-poll. Tests: `ConsumerNetworkThreadTest` | Phase 5–9 |
-| 11 | **`AsyncKafkaConsumer` public impl** | `AsyncKafkaConsumer.java` (2368), `ConsumerRebalanceListenerInvoker`, `ConsumerUtils` | `src/consumer/async_kafka_consumer.rs` implementing `Consumer<K,V>`; `process_background_events` invocation in every blocking-style API (§31) | Phase 2, 3, 5, 7, 8, 9, 10 |
-| 12 | **Tests** | `AsyncKafkaConsumerTest` (~2K), `FetcherTest` (~4K), `FetchBufferTest`, `FetchCollectorTest`, `CompletedFetchTest`, `MembershipManagerImplTest`, `CommitRequestManagerTest`, `HeartbeatRequestManagerTest`, `NetworkClientDelegateTest`, `CoordinatorRequestManagerTest`, `OffsetsRequestManagerTest`, `RequestStateTest`, `TimedRequestStateTest`, `ConsumerInterceptorsTest`, `RequestManagersTest`, all event tests, plus the two `ConsumerRebalanceListener` regression tests from §31 | Each translated test in matching Rust file. | All prior |
-| 13 | **Integration test** | analog of producer Phase 6 integration | `tests/integration_consumer_test.rs`: subscribe → produce N records via existing producer → poll → assert, against Kafka 4.2.0 via testcontainers | Phase 11 |
+| 5 | **Event channels, wakeup, reaper** | All `consumer/internals/events/` (~25 files), `WakeupTrigger`, `CompletableEventReaper`. Tests: `WakeupTriggerTest`, `CompletableEventReaperTest`, event-type tests. | `src/consumer/internals/events/` (`ApplicationEvent`/`BackgroundEvent` enums, `ApplicationEventHandler`, `BackgroundEventHandler`), `internals/{wakeup_trigger, completable_event_reaper}.rs` + tests | Phase 1, 4 |
+| 6 | **`NetworkClientDelegate` + `RequestManager` + `CoordinatorRequestManager`** | `NetworkClientDelegate` (408), `RequestManager`, `RequestState`, `TimedRequestState`, `CoordinatorRequestManager`, `RequestManagers`. Tests: `NetworkClientDelegateTest`, `RequestStateTest`, `TimedRequestStateTest`, `CoordinatorRequestManagerTest`, `RequestManagersTest`. | `src/consumer/internals/{network_client_delegate, request_manager, request_state, timed_request_state, coordinator_request_manager, request_managers}.rs` + tests | Phase 1, 5 |
+| 7 | **Fetch path** | `AbstractFetch` (497), `FetchConfig`, `FetchBuffer` (277), `CompletedFetch` (390), `FetchCollector` (393), `Fetcher` (210), `FetchRequestManager` (121), `OffsetFetcher`, `OffsetFetcherUtils`, `TopicMetadataFetcher`, `OffsetsRequestManager`, `OffsetsForLeaderEpochClient`, `TopicMetadataRequestManager`, `FetchMetricsAggregator/Manager/Registry`, `SensorBuilder` (subset for fetch). Tests: `FetcherTest` (~4K), `FetchBufferTest`, `FetchCollectorTest`, `CompletedFetchTest`, `FetchRequestManagerTest`, `OffsetsRequestManagerTest`, `TopicMetadataRequestManagerTest`, `OffsetFetcherTest`, `TopicMetadataFetcherTest`, plus the per-record allocation-budget test required by `consumer-threading.md` §27. | `src/consumer/internals/{fetch_config, fetch_buffer, completed_fetch, fetcher, fetch_collector, fetch_request_manager, offset_fetcher, offsets_request_manager, offsets_for_leader_epoch_client, topic_metadata_fetcher, topic_metadata_request_manager}.rs` + tests | Phase 4, 5, 6 |
+| 8 | **Membership & heartbeat (KIP-848)** | `MembershipManager` interface + `MembershipManagerImpl` (1511), `MemberState`, `MemberStateListener`, `Heartbeat`, `HeartbeatRequestState`, `HeartbeatRequestManager` (629), `AbstractHeartbeatRequestManager`, `ConsumerHeartbeatRequestManager`. Tests: `MembershipManagerImplTest`, `HeartbeatRequestManagerTest`, `HeartbeatTest`. | `src/consumer/internals/{membership_manager, member_state, heartbeat, heartbeat_request_manager, consumer_heartbeat_request_manager}.rs` + tests | Phase 4, 5, 6 |
+| 9 | **Commit** | `CommitRequestManager` (1282), `OffsetCommitCallbackInvoker`. Tests: `CommitRequestManagerTest`. | `src/consumer/internals/{commit_request_manager, offset_commit_callback_invoker}.rs` + tests | Phase 4, 5, 6 |
+| 10 | **Background task & event processor** | `ConsumerNetworkThread` (321), `ApplicationEventProcessor`. Tests: `ConsumerNetworkThreadTest`, `ApplicationEventProcessorTest`. | `src/consumer/internals/{consumer_network_thread, application_event_processor}.rs`. Single `tokio::spawn` per consumer (§10) with `runOnce()` phase ordering; `select!` over shutdown/wakeup/network-poll. | Phase 5–9 |
+| 11 | **`AsyncKafkaConsumer` public impl** | `AsyncKafkaConsumer.java` (2368), `ConsumerRebalanceListenerInvoker`, `ConsumerUtils`. Tests: `AsyncKafkaConsumerTest` (~2K) plus the two `ConsumerRebalanceListener` regression tests required by `consumer-threading.md` §31. | `src/consumer/async_kafka_consumer.rs` implementing `Consumer<K,V>`; `process_background_events` invocation in every blocking-style API (§31) | Phase 2, 3, 5, 7, 8, 9, 10 |
+| 12 | **Integration test** | analog of producer Phase 6 integration | `tests/integration_consumer_test.rs`: subscribe → produce N records via existing producer → poll → assert, against Kafka 4.2.0 via testcontainers | Phase 11 |
 
 ## Module structure
 
@@ -146,20 +145,24 @@ are moved to `COMMENTS.DONE.<critic-id>.md`. All work lands on the
 Beyond `definition-of-done.md`:
 
 - `cargo build`, `cargo test`, `cargo xtask format-check`, `cargo xtask lint` clean.
-- Every Java test for the phase's classes either translated or explicitly
-  justified as not relevant (per DoD §3).
+- **Unit tests for every class translated in the phase ship in the same
+  phase** — Java test files listed in the phase row are translated and
+  committed before the phase closes. Each skipped Java test method must
+  carry a one-line rationale per DoD §3.
 - Consumer trait surface check (DoD §11) verified on phases that touch the
   public trait (2, 3, 11).
-- Receive-path zero-copy / per-record allocation-budget test (§27) for Phase 7.
+- Receive-path zero-copy / per-record allocation-budget test (§27) lives
+  with Phase 7.
 - The two `ConsumerRebalanceListener` regression tests required by §31 live
   with Phase 11.
 
 ## Parallelism plan
 
-Dependency graph allows real concurrency in three windows:
+Dependency graph allows real concurrency in two windows:
 
 1. After Phase 1 lands: Phase 4 and Phase 5 can run in parallel (2 actors).
-2. After Phase 6 lands: Phases 7, 8, 9 can run in parallel (3 actors).
-3. Phase 12 test translation can be sharded per-class (4+ actors).
+2. After Phase 6 lands: Phases 7, 8, 9 can run in parallel (3 actors). This
+   is the biggest compression — these three carry the largest test loads
+   (`FetcherTest` ~4K, `MembershipManagerImplTest`, `CommitRequestManagerTest`).
 
-Phases 10, 11, 13 are serial bottlenecks.
+Phases 10, 11, 12 are serial bottlenecks.
