@@ -268,3 +268,40 @@ change), `cargo test --features integration-tests producer_smoke`
 **5 tests passed** against a real broker (the four Phase-8b tests
 plus the new `producer_smoke_plaintext_byte_fidelity`).
 
+
+---
+
+## Phase 8 — closed (Manager scope decision, 2026-05-21)
+
+**Sub-phases 8d, 8e, 8f deferred / folded into Phase 9** per user
+direction.
+
+**Rationale:**
+
+- **8d (compression matrix)** — deferred to a future milestone. Lib-
+  level codec tests in Phase 3 (`Lz4BlockInputStream`/`OutputStream`,
+  gzip, snappy, zstd round-trip + Java hex-fixture parity) are the
+  only end-to-end coverage for now. The console-consumer harness
+  added in 8c is codec-agnostic (broker decompresses before serving
+  fetches), so 8d can be added later as a parameterized sweep of the
+  existing byte-fidelity test without any harness changes.
+
+- **8e (TLS happy path)** — folded into Phase 9. Phase 9's integration
+  test brief (`PLAN.md:378-385`) case 1 is "SSL connection (TLS-only,
+  self-signed cert via `rcgen`)" — the same test 8e was going to add,
+  using the same `tests/common/test_certs.rs` infrastructure. Doing
+  both separately would write the test twice.
+
+- **8f (flakiness gate + perf-test compile gate)** — folded into a
+  Phase-9-close flakiness gate. At Phase 9 close the test matrix is
+  bigger (PLAINTEXT + SSL + SASL_PLAINTEXT + SASL_SSL + auth-failure +
+  unsupported-mechanism) so a single 3-consecutive-run gate at that
+  point is strictly more rigorous than 8f's PLAINTEXT+SSL gate.
+  `performance_test.rs` was already re-enabled in 8a.1 (commit
+  `eb0f890`), so the "compile-only gate" portion of 8f is already
+  resolved.
+
+**Status at Phase 8 close:** 8a ✅ 8b ✅ 8c ✅ — 8d deferred, 8e/8f
+folded forward. All deferred work is tracked in PLAN.md or this
+NOTES.md and reachable from `MEMORY.md` (`project_phase_status.md`).
+Manager proceeds to Phase 9.
