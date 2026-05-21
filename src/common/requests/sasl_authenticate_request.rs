@@ -257,16 +257,66 @@ mod tests {
 
     /// Debug output redacts auth_bytes — translation of Java
     /// `testSaslAuthenticateRequestResponseToStringMasksSensitiveData`.
+    ///
+    /// **Test-only leak hygiene** (Critic 9 Suggestion 2): on assertion
+    /// failure, do NOT echo the full Debug string (which by definition
+    /// contains the secret we're guarding against). Reference a sentinel
+    /// substring only.
     #[test]
     fn debug_masks_auth_bytes() {
-        let sensitive = b"sensitive-auth-token-123";
+        const SENTINEL: &str = "sensitive-auth-token-123";
         let req = SaslAuthenticateRequest::new(
-            SaslAuthenticateRequestData { auth_bytes: sensitive.to_vec(), unknown_tagged_fields: Vec::new() },
+            SaslAuthenticateRequestData { auth_bytes: SENTINEL.as_bytes().to_vec(), unknown_tagged_fields: Vec::new() },
             2,
         );
         let dbg = format!("{req:?}");
-        assert!(!dbg.contains("sensitive"), "Debug output leaked secret: {dbg}");
-        assert!(dbg.contains("<redacted>"), "expected redaction marker: {dbg}");
+        assert!(
+            !dbg.contains(SENTINEL),
+            "Debug output contained the sentinel — credentials leaked! dbg.len()={}",
+            dbg.len()
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker not present (dbg.len()={})",
+            dbg.len()
+        );
+    }
+
+    /// Generator-level redaction (Critic 9 Suggestion 1): direct Debug/
+    /// Display on the data class must NOT leak `auth_bytes` either.
+    /// Before Phase 9a, the wrapper-level Debug masked `auth_bytes` but
+    /// the generated `*Data` struct's derived Debug + Display delegate
+    /// would still print the raw bytes — defeating the redaction at the
+    /// first `tracing::debug!("data = {}", req.request_data())` callsite.
+    #[test]
+    fn data_class_debug_and_display_redact_auth_bytes() {
+        const SENTINEL: &str = "sensitive-auth-token-123";
+        let data =
+            SaslAuthenticateRequestData { auth_bytes: SENTINEL.as_bytes().to_vec(), unknown_tagged_fields: Vec::new() };
+        // {:?} delegates to the hand-emitted Debug impl which redacts.
+        let dbg = format!("{data:?}");
+        assert!(
+            !dbg.contains(SENTINEL),
+            "data class Debug leaked sentinel! dbg.len()={}",
+            dbg.len()
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker in data class Debug (dbg.len()={})",
+            dbg.len()
+        );
+        // {} goes through Display which delegates to Debug.
+        let disp = format!("{data}");
+        assert!(
+            !disp.contains(SENTINEL),
+            "data class Display leaked sentinel! disp.len()={}",
+            disp.len()
+        );
+        assert!(
+            disp.contains("<redacted>"),
+            "expected redaction marker in data class Display (disp.len()={})",
+            disp.len()
+        );
     }
 
     /// Hex fixture: SaslAuthenticateRequest v0 body — non-flexible

@@ -710,6 +710,11 @@ fn generate_message_struct(file: &mut fs::File, spec: &MessageSpec) -> Result<()
     writeln!(file, "}}")?;
     writeln!(file)?;
 
+    // Generate redacted Debug impl for structs with credential fields
+    // (e.g. `auth_bytes`). This MUST be emitted before
+    // `generate_display_impl` because `Display` delegates to `Debug`.
+    generate_redacted_debug_impl(file, &data_class_name, struct_spec.fields())?;
+
     // Generate Display impl
     generate_display_impl(file, &data_class_name)?;
 
@@ -829,6 +834,9 @@ fn generate_nested_struct(
     // Generate impl Message
     generate_message_impl(file, &struct_name, &struct_spec, flexible_versions)?;
 
+    // Generate redacted Debug impl when needed (credential-bearing fields).
+    generate_redacted_debug_impl(file, &struct_name, field.fields())?;
+
     // Generate Display impl
     generate_display_impl(file, &struct_name)?;
 
@@ -928,6 +936,9 @@ fn generate_common_struct(
     // Generate impl Message
     generate_message_impl(file, struct_name, struct_spec, flexible_versions)?;
 
+    // Generate redacted Debug impl when needed (credential-bearing fields).
+    generate_redacted_debug_impl(file, struct_name, struct_spec.fields())?;
+
     // Generate Display impl
     generate_display_impl(file, struct_name)?;
 
@@ -951,17 +962,98 @@ fn contains_float64(field_type: &FieldType) -> bool {
     }
 }
 
+/// Detect whether a field name (in either Java PascalCase from the JSON
+/// spec or Rust snake_case after translation) is a known credential-bearing
+/// field. Used to suppress its value from generator-emitted `Debug`/`Display`
+/// output so a stray `tracing::debug!("{:?}", req.request_data())` does not
+/// silently log SASL tokens. The list is intentionally small and explicit:
+/// only the SASL Authenticate payload field is currently in scope.
+fn is_credential_field_name(field_name: &str) -> bool {
+    // Java JSON spec name is `AuthBytes`; Rust translation is `auth_bytes`.
+    // Match both so callers can pre-translate or pass the raw JSON name.
+    matches!(field_name, "AuthBytes" | "auth_bytes")
+}
+
+/// Returns `true` if any field on the struct is a known credential-bearing
+/// field. When `true`, the generator emits a custom `Debug` impl that masks
+/// the credential field instead of deriving `Debug`.
+fn has_credential_field(fields: &[FieldSpec]) -> bool {
+    fields.iter().any(|f| is_credential_field_name(f.name()))
+}
+
 /// Generate the derive macro and optional manual Hash/Eq impls for a struct.
+///
+/// For structs containing credential-bearing fields (e.g. `auth_bytes` on
+/// `SaslAuthenticateRequestData`/`SaslAuthenticateResponseData`), `Debug`
+/// is omitted from the derive list and a hand-emitted [`generate_redacted_debug_impl`]
+/// is used instead. This prevents the wrapper-level redaction in
+/// `src/common/requests/sasl_authenticate_*.rs` from being silently bypassed
+/// when a caller logs the data class directly.
 fn generate_struct_derives_and_impls(
     file: &mut fs::File,
-    _struct_name: &str,
+    struct_name: &str,
     fields: &[FieldSpec],
 ) -> Result<(), Box<dyn std::error::Error>> {
+    let has_credential = has_credential_field(fields);
     if has_float64_field(fields) {
-        writeln!(file, "#[derive(Debug, Clone, PartialEq)]")?;
+        if has_credential {
+            writeln!(file, "#[derive(Clone, PartialEq)]")?;
+        } else {
+            writeln!(file, "#[derive(Debug, Clone, PartialEq)]")?;
+        }
+    } else if has_credential {
+        writeln!(file, "#[derive(Clone, PartialEq, Eq, Hash)]")?;
     } else {
         writeln!(file, "#[derive(Debug, Clone, PartialEq, Eq, Hash)]")?;
     }
+    if has_credential {
+        // The Debug impl is emitted later (after the struct body) by
+        // `generate_redacted_debug_impl` because field information is
+        // needed there. Record nothing here.
+        let _ = struct_name;
+    }
+    Ok(())
+}
+
+/// Generate a hand-emitted `Debug` impl that mirrors the derived shape but
+/// redacts known credential-bearing fields. Emitted only when
+/// [`has_credential_field`] returns `true` for `fields`.
+///
+/// The output uses `f.debug_struct(...).field(...).finish()` and replaces the
+/// value of each credential field with the string literal `"<redacted>"`,
+/// matching the wrapper-level redaction pattern at
+/// `src/common/requests/sasl_authenticate_request.rs` /
+/// `sasl_authenticate_response.rs`.
+fn generate_redacted_debug_impl(
+    file: &mut fs::File,
+    struct_name: &str,
+    fields: &[FieldSpec],
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !has_credential_field(fields) {
+        return Ok(());
+    }
+    writeln!(file, "impl fmt::Debug for {} {{", struct_name)?;
+    writeln!(file, "    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {{")?;
+    writeln!(file, "        f.debug_struct(\"{}\")", struct_name)?;
+    for field in fields {
+        let raw_name = field.name();
+        let field_name = to_snake_case(raw_name);
+        let field_name = escape_rust_keyword(&field_name);
+        if is_credential_field_name(raw_name) {
+            // Credential field — emit redaction marker, not the value.
+            writeln!(file, "            .field(\"{}\", &\"<redacted>\")", field_name)?;
+        } else {
+            writeln!(file, "            .field(\"{}\", &self.{})", field_name, field_name)?;
+        }
+    }
+    writeln!(
+        file,
+        "            .field(\"unknown_tagged_fields\", &self.unknown_tagged_fields)"
+    )?;
+    writeln!(file, "            .finish()")?;
+    writeln!(file, "    }}")?;
+    writeln!(file, "}}")?;
+    writeln!(file)?;
     Ok(())
 }
 
@@ -5377,6 +5469,187 @@ mod tests {
         assert!(
             !body.contains("if version >= 9 { Type::CompactBytes } else { Type::Bytes }"),
             "topic_data must not collapse to Bytes/CompactBytes placeholder; body was:\n{body}",
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    // ----------------------------------------------------------------------
+    // G-credential: credential-bearing fields (`auth_bytes`) must NOT be
+    // emitted via the derived Debug — the generator emits a custom Debug
+    // impl that prints "<redacted>" instead of the raw bytes. This pins
+    // Phase 9.0 Critic 9 Suggestion 1: any future logging callsite that
+    // does `tracing::debug!("{:?}", req.request_data())` must not leak the
+    // SASL token through the data class's Debug/Display.
+    // ----------------------------------------------------------------------
+
+    /// `is_credential_field_name` accepts both the Java JSON name (PascalCase)
+    /// and the Rust snake_case form. Keeps the helper safe to call before or
+    /// after name translation.
+    #[test]
+    fn credential_field_name_matches_both_cases() {
+        assert!(is_credential_field_name("AuthBytes"));
+        assert!(is_credential_field_name("auth_bytes"));
+        assert!(!is_credential_field_name("authBytes"));
+        assert!(!is_credential_field_name("topic_name"));
+        assert!(!is_credential_field_name("data"));
+    }
+
+    /// End-to-end: generate `SaslAuthenticateRequest.json` and assert the
+    /// emitted code does NOT derive Debug, instead emits a hand-written
+    /// `impl fmt::Debug` that renders `auth_bytes` as `<redacted>`.
+    #[test]
+    fn credential_redaction_in_sasl_authenticate_request_data() {
+        use std::path::Path;
+        let tmp = std::env::temp_dir().join(format!("phase9a-credential-req-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let input = Path::new("messages");
+        let isolated = tmp.join("input");
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::copy(
+            input.join("SaslAuthenticateRequest.json"),
+            isolated.join("SaslAuthenticateRequest.json"),
+        )
+        .unwrap();
+        let output = tmp.join("output");
+        generate_messages(&isolated, &output).expect("codegen succeeds for SaslAuthenticateRequest");
+        let generated = std::fs::read_to_string(output.join("sasl_authenticate_request_data.rs"))
+            .expect("sasl_authenticate_request_data.rs written");
+
+        // The struct must NOT derive Debug — credential-bearing structs get
+        // a hand-emitted Debug impl below.
+        let derive_line_start = generated
+            .find("pub struct SaslAuthenticateRequestData")
+            .expect("struct emitted");
+        let preamble = &generated[..derive_line_start];
+        // Find the last #[derive(...)] block before the struct.
+        let derive_idx = preamble.rfind("#[derive(").expect("derive line precedes struct");
+        let derive_line_end = preamble[derive_idx..].find(']').expect("derive line closes");
+        let derive_line = &preamble[derive_idx..derive_idx + derive_line_end + 1];
+        assert!(
+            !derive_line.contains("Debug"),
+            "credential-bearing struct must NOT derive Debug; derive line was: {derive_line}",
+        );
+
+        // A hand-written `impl fmt::Debug for SaslAuthenticateRequestData`
+        // must be emitted, and it must render auth_bytes as the redaction
+        // marker rather than the raw value.
+        assert!(
+            generated.contains("impl fmt::Debug for SaslAuthenticateRequestData"),
+            "redacted Debug impl missing"
+        );
+        // Pin the exact redaction shape: `.field("auth_bytes", &"<redacted>")`.
+        assert!(
+            generated.contains(".field(\"auth_bytes\", &\"<redacted>\")"),
+            "auth_bytes must be redacted in the emitted Debug impl"
+        );
+        // And the field MUST NOT be referenced as a live `&self.auth_bytes`
+        // anywhere inside that Debug impl — that's what we're guarding
+        // against.
+        let debug_start = generated
+            .find("impl fmt::Debug for SaslAuthenticateRequestData")
+            .expect("debug impl present");
+        let debug_after = &generated[debug_start..];
+        let debug_end = debug_after.find("\n}\n").expect("debug impl closes");
+        let debug_body = &debug_after[..debug_end];
+        assert!(
+            !debug_body.contains("&self.auth_bytes"),
+            "Debug impl must not include &self.auth_bytes — it would leak credentials; body was:\n{debug_body}",
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Mirror of the request test for `SaslAuthenticateResponse`.
+    #[test]
+    fn credential_redaction_in_sasl_authenticate_response_data() {
+        use std::path::Path;
+        let tmp = std::env::temp_dir().join(format!("phase9a-credential-resp-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let input = Path::new("messages");
+        let isolated = tmp.join("input");
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::copy(
+            input.join("SaslAuthenticateResponse.json"),
+            isolated.join("SaslAuthenticateResponse.json"),
+        )
+        .unwrap();
+        let output = tmp.join("output");
+        generate_messages(&isolated, &output).expect("codegen succeeds for SaslAuthenticateResponse");
+        let generated = std::fs::read_to_string(output.join("sasl_authenticate_response_data.rs"))
+            .expect("sasl_authenticate_response_data.rs written");
+
+        let derive_line_start = generated
+            .find("pub struct SaslAuthenticateResponseData")
+            .expect("struct emitted");
+        let preamble = &generated[..derive_line_start];
+        let derive_idx = preamble.rfind("#[derive(").expect("derive line precedes struct");
+        let derive_line_end = preamble[derive_idx..].find(']').expect("derive line closes");
+        let derive_line = &preamble[derive_idx..derive_idx + derive_line_end + 1];
+        assert!(
+            !derive_line.contains("Debug"),
+            "credential-bearing struct must NOT derive Debug; derive line was: {derive_line}",
+        );
+
+        assert!(
+            generated.contains("impl fmt::Debug for SaslAuthenticateResponseData"),
+            "redacted Debug impl missing"
+        );
+        assert!(
+            generated.contains(".field(\"auth_bytes\", &\"<redacted>\")"),
+            "auth_bytes must be redacted in the emitted Debug impl"
+        );
+
+        let debug_start = generated
+            .find("impl fmt::Debug for SaslAuthenticateResponseData")
+            .expect("debug impl present");
+        let debug_after = &generated[debug_start..];
+        let debug_end = debug_after.find("\n}\n").expect("debug impl closes");
+        let debug_body = &debug_after[..debug_end];
+        assert!(
+            !debug_body.contains("&self.auth_bytes"),
+            "Debug impl must not include &self.auth_bytes; body was:\n{debug_body}",
+        );
+
+        // Cleanup
+        let _ = std::fs::remove_dir_all(&tmp);
+    }
+
+    /// Non-credential structs (e.g. SaslHandshakeRequest) must continue to
+    /// derive Debug — the redaction is opt-in based on field name. Locks
+    /// against an over-broad future change.
+    #[test]
+    fn non_credential_struct_still_derives_debug() {
+        use std::path::Path;
+        let tmp = std::env::temp_dir().join(format!("phase9a-no-credential-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp).unwrap();
+        let input = Path::new("messages");
+        let isolated = tmp.join("input");
+        std::fs::create_dir_all(&isolated).unwrap();
+        std::fs::copy(
+            input.join("SaslHandshakeRequest.json"),
+            isolated.join("SaslHandshakeRequest.json"),
+        )
+        .unwrap();
+        let output = tmp.join("output");
+        generate_messages(&isolated, &output).expect("codegen succeeds for SaslHandshakeRequest");
+        let generated = std::fs::read_to_string(output.join("sasl_handshake_request_data.rs"))
+            .expect("sasl_handshake_request_data.rs written");
+
+        let derive_line_start = generated.find("pub struct SaslHandshakeRequestData").expect("struct emitted");
+        let preamble = &generated[..derive_line_start];
+        let derive_idx = preamble.rfind("#[derive(").expect("derive line precedes struct");
+        let derive_line_end = preamble[derive_idx..].find(']').expect("derive line closes");
+        let derive_line = &preamble[derive_idx..derive_idx + derive_line_end + 1];
+        assert!(
+            derive_line.contains("Debug"),
+            "non-credential struct must still derive Debug; derive line was: {derive_line}",
+        );
+        assert!(
+            !generated.contains("impl fmt::Debug for SaslHandshakeRequestData"),
+            "non-credential struct must NOT emit hand-written Debug",
         );
 
         // Cleanup

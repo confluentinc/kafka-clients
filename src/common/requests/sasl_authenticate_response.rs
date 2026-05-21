@@ -229,19 +229,69 @@ mod tests {
     /// Translation of Java
     /// `testSaslAuthenticateRequestResponseToStringMasksSensitiveData` for
     /// the response side. Debug output must not leak `authBytes`.
+    ///
+    /// **Test-only leak hygiene** (Critic 9 Suggestion 2): on assertion
+    /// failure, do NOT echo the full Debug string. Reference a sentinel
+    /// substring only.
     #[test]
     fn debug_masks_auth_bytes() {
-        let sensitive = b"sensitive-auth-token-123";
+        const SENTINEL: &str = "sensitive-auth-token-123";
         let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
             error_code: 0,
             error_message: None,
-            auth_bytes: sensitive.to_vec(),
+            auth_bytes: SENTINEL.as_bytes().to_vec(),
             session_lifetime_ms: 0,
             unknown_tagged_fields: Vec::new(),
         });
         let dbg = format!("{resp:?}");
-        assert!(!dbg.contains("sensitive"), "Debug output leaked secret: {dbg}");
-        assert!(dbg.contains("<redacted>"), "expected redaction marker: {dbg}");
+        assert!(
+            !dbg.contains(SENTINEL),
+            "Debug output contained the sentinel — credentials leaked! dbg.len()={}",
+            dbg.len()
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker not present (dbg.len()={})",
+            dbg.len()
+        );
+    }
+
+    /// Generator-level redaction (Critic 9 Suggestion 1): direct Debug/
+    /// Display on the data class must NOT leak `auth_bytes` either. See
+    /// the analogous test in `sasl_authenticate_request.rs` for the full
+    /// rationale.
+    #[test]
+    fn data_class_debug_and_display_redact_auth_bytes() {
+        const SENTINEL: &str = "sensitive-auth-token-123";
+        let data = SaslAuthenticateResponseData {
+            error_code: 0,
+            error_message: None,
+            auth_bytes: SENTINEL.as_bytes().to_vec(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let dbg = format!("{data:?}");
+        assert!(
+            !dbg.contains(SENTINEL),
+            "data class Debug leaked sentinel! dbg.len()={}",
+            dbg.len()
+        );
+        assert!(
+            dbg.contains("<redacted>"),
+            "expected redaction marker in data class Debug (dbg.len()={})",
+            dbg.len()
+        );
+        let disp = format!("{data}");
+        assert!(
+            !disp.contains(SENTINEL),
+            "data class Display leaked sentinel! disp.len()={}",
+            disp.len()
+        );
+        assert!(
+            disp.contains("<redacted>"),
+            "expected redaction marker in data class Display (disp.len()={})",
+            disp.len()
+        );
     }
 
     /// Error code mapping: SASL_AUTHENTICATION_FAILED (58) is the
