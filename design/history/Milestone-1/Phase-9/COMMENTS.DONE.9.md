@@ -324,3 +324,137 @@ All Phase 9.0 Round 1 followups (Suggestions 1-4 + Nits 1-2) are resolved. The P
 4. Proceed to 9b once Actor 9 (or Critic 9 ack) acknowledges S1.
 
 Phase 9a Round 1 closes. Manager advances to Phase 9b (config: SecurityProtocol::SaslPlaintext/SaslSsl, sasl.mechanism / sasl.jaas.config parsing, validator rejections).
+
+---
+
+## Phase 9b Round 1 — Critic review
+
+Review window: commits `731072a..fafd523` on branch `fresh-impl` (8 Actor commits + 1 Manager housekeeping `e6b6491`).
+
+Java references consulted (all `kafka/clients/src/main/java/org/apache/kafka/`):
+- `clients/CommonClientConfigs.java:297-306` (`postValidateSaslMechanismConfig`)
+- `common/network/SaslChannelBuilder.java:215-272` (`buildChannel`, `buildTransportLayer`)
+- `common/security/authenticator/SaslClientAuthenticator.java:485-489` (`principal()`)
+- `common/security/authenticator/SaslClientAuthenticator.java:603-616` (error format strings)
+
+Master-branch consultation: **none**, per the user's 2026-05-21 Java-only directive.
+
+Gate status (verified, not from Actor report):
+- `cargo build` — clean
+- `cargo test --lib` — **1327 passed, 0 failed** (matches Actor's claim 1299 → 1327, delta +28)
+- `cargo xtask format-check` — clean
+- `cargo xtask lint` — clean
+- `cargo test --package generator --lib` — 78 passed
+
+Verdict: **0 Blocking, 4 Suggestion, 3 Nit.**
+
+## Per-area verifications
+
+| Area | Result | Notes |
+|---|---|---|
+| **S1: Java `List<String>.toString()` parity** | OK | Format swapped from `{:?}` to `[{}]/join(", ")`. Test now uses exact `assert_eq!` against full Java string. Grep audit confirmed no other `format!("{:?}", Vec<String>)` in user-facing error paths. |
+| **S2: EOF→Failed transition** | OK | `authenticate()` now wraps `authenticate_inner()` and on `UnexpectedEof`/`ConnectionReset` sets `state = Failed` + `failure = Some(KafkaError::Authentication("EOF during SASL handshake"))`. Re-invocation surfaces the captured error rather than wedging. Test pins all 4 properties. |
+| **S3: partial-write resumption** | OK | New `partial_writes_resume_correctly_to_complete` test caps `write_vectored` at 4 bytes/call, drives the full PLAIN handshake. Walkthrough below confirms resumption path. No refactor needed. |
+| **N1: tagged-field test pinning** | Partial | Test now asserts encoder emits the trailer bytes `01 07 02 AB CD` — catches encoder regression. Does NOT assert parser preserves `unknown_tagged_fields` in the parsed struct (response is dropped inside the state machine). Improvement over the previous "Complete-only" assertion but still doesn't match the Nit's literal phrasing. See N4 below. |
+| **N2: correlation-id comment** | OK | Rewritten as "exercise full range + 6 additional calls past wrap"; iteration math labelled `range_size = MAX - MIN + 1 = 8`. |
+| **Architectural: SaslAuthenticator trait + ChannelAuthenticator enum** | OK (justified) | See "Architectural decision audit" in findings. The dual shape is the right shape for Rust here — alternative collapse-to-one-trait would force every `PlaintextAuthenticator`/`SslAuthenticator` call site to plumb a useless `&mut dyn TransportLayer`. |
+| **PlaintextAuthenticator/SslAuthenticator untouched** | OK | Confirmed via `git diff 58fc7ec..6f426eb`: only doc text changed; impl blocks unchanged. |
+| **`build_channel()` Java parity** | Acceptable deviation | Java's single `buildChannel(id, key, maxReceiveSize, ...)` handles both via the `SelectionKey`'s SocketChannel. Rust splits into `build_channel(stream, ...)` + `build_sasl_ssl_channel(stream, server_name, ...)` because the trait method can't carry SNI hostname. Documented. The 9a deferral-pinning test was removed; 3 new tests cover the post-deferral surface. |
+| **JAAS parser PLAIN-only choice** | OK | Option (b) — ~270 LOC + 15 unit tests. Module rustdoc clearly states rationale. Rejection messages name the offending LoginModule. |
+| **`sasl.username`/`sasl.password` shortcut** | OK (with caveat) | Documented as fresh-impl extension in module doc + per-const rustdoc. JAAS-wins precedence matches Java's canonical-source semantics. See S2 below for a minor schema-test gap. |
+| **Validator error messages** | Acceptable | Java's `postValidateSaslMechanismConfig` only checks null/empty; Rust adds a **new** Milestone-1 narrowing layer that names the offending mechanism. Not a Java parity claim — clearly labelled `reject_milestone_1_unsupported_sasl_mechanism`. Acceptable for the narrowing layer's purpose. |
+| **Producer-side gate lift** | OK | `security.protocol = SSL` / `SASL_SSL` still rejected with a clearer "SSL plumbing not yet wired" message. `SASL_PLAINTEXT` reaches `build_production_network_client`. 3 new construction tests. |
+| **SASL_SSL deferral scope** | OK | The gate at `kafka_producer.rs:657` is correct in scope: there's no `ssl.ca.location`/`ssl.truststore.location` → `rustls::ClientConfig` bridge through `ProducerConfig` yet. `SslTransportLayer`/`SslChannelBuilder` exist from Phase 5b-3, but the producer-config-to-`Arc<ClientConfig>` plumbing is a Phase 9c (folded-in 8e) task. The `build_sasl_ssl_channel(...)` typed entry point is implemented but unreachable from `KafkaProducer::new` until that plumbing lands — correct deferral shape. |
+| **Test count delta** | OK | 1299 + 15 JAAS + 4 producer-config SASL + 3 ChannelAuthenticator dispatch + 3 SaslChannelBuilder build_channel + 1 partial-write + 3 KafkaProducer SASL − 1 obsoleted = 1327. Matches verified count. |
+| **Skipped Java tests** | Acceptable | `SaslConfigsTest`, `JaasConfigTest`, `JaasContextTest`, `SaslAuthenticatorTest.testCorrelationId` rationales documented in NOTES.md close stanza. JAAS parser's own 15 tests cover the equivalent narrow surface. |
+| **NOTES.md close stanza** | OK | Accurate. Lists 8 commits, captures the architectural decision, JAAS choice, S2 outcome, deferrals, skipped tests, 5 Actor decisions, final test count. |
+
+## S2 partial-write walkthrough (verified, not from Actor report)
+
+I traced the resumption path the Actor claims works without refactor. Walkthrough:
+
+1. **First `authenticate()` call.** `pending_send == None`, top-guard skipped. Enters loop, hits `SendApiVersionsRequest` arm → calls `queue_request()`.
+2. **Inside `queue_request()`.** Encodes the request into a `ByteBufferSend`, sets `pending_send = Some(PendingSend { inner, correlation_header: Some(header) })`. Then calls `flush_pending_send()`.
+3. **Inside `flush_pending_send()` (first iteration).** `pending.inner.write_to(transport)` — partial write returns `Ok(4)` (4 bytes), `pending.inner.completed()` is `false`. Returns `Ok(false)`. **Critically: `current_request_header` is NOT set yet (it's only set inside the `if pending.inner.completed()` branch).** `pending_send` remains `Some`.
+4. **Back in `queue_request()`.** `let _ = self.flush_pending_send(...)` — return value ignored. Returns `Ok(())`.
+5. **Back in the state-machine loop.** `self.state = SaslState::ReceiveApiVersionsResponse` (eager transition). `started_state` was `SendApiVersionsRequest`, current state is `ReceiveApiVersionsResponse` → state changed → continue loop.
+6. **Next iteration: state == `ReceiveApiVersionsResponse`.** Hits `receive_response()`. Inside `receive_response()`, `self.current_request_header.take()` returns `None` → would error with "received SASL response with no pending request header".
+
+**Wait — this looks like a real bug.** Let me re-read more carefully…
+
+Re-reading `authenticate_inner()` top: `if self.pending_send.is_some() && !self.flush_pending_send(transport)? { return Ok(()) }`. So **after** `queue_request` completes and the loop iterates, when we enter `receive_response()` on the *next* call to `authenticate()`, the top-guard fires first.
+
+But within the **same** `authenticate()` call, after `queue_request` returns successfully, we immediately advance state and the loop tries to `receive_response()` in the same iteration. **However**, before `receive_response` parses anything, it calls `receive_raw_token(transport)?` first, which returns `Ok(None)` when no bytes are buffered (test's `MockTransport.read()` returns `Ok(0)` on empty queue). `None` → `receive_response` returns `Ok(None)` → state-machine arm returns `Ok(())` from `authenticate_inner`. **The `current_request_header.take()` line is never reached during this round-trip** because the early return on `Ok(None)` from `receive_raw_token` short-circuits.
+
+7. **Next `authenticate()` call.** Top guard: `pending_send.is_some()` (true), enter `flush_pending_send`. This time the kernel accepts the remaining bytes; `pending.inner.completed()` → true. Inside the `if completed()` branch, `current_request_header = Some(header)` is set, OP_WRITE removed. Returns `Ok(true)`. The `!` makes it `false` so we proceed past the guard.
+8. **Loop iteration. state == `ReceiveApiVersionsResponse`.** `receive_response()` → if the response is now on the wire (test pushes it after the partial-write loop completes), it parses successfully. If not, returns `Ok(None)`.
+
+**OK, the path is correct.** The early return on `receive_raw_token == None` is what saves us — it ensures we don't reach `current_request_header.take()` until after the flush completes (which sets the header). Actor 9's claim that no refactor is needed holds up.
+
+The subtle invariant: `receive_raw_token` must always return `Ok(None)` first when no payload is buffered, before `current_request_header.take()` is reached. The current `receive_raw_token` implementation honors this by trying to read the 4-byte length prefix first; a `read == 0` returns `Ok(None)`. Good.
+
+## Findings
+
+### Suggestion 1 — `SaslClientAuthenticator::principal()` returns anonymous, Java returns username
+
+- **File**: `src/common/security/authenticator/sasl_client_authenticator.rs:755-765`
+- **Severity**: Suggestion
+- **Java Reference**: `kafka/clients/.../SaslClientAuthenticator.java:487-489`
+- **Description**: Java's `SaslClientAuthenticator.principal()` returns `new KafkaPrincipal(KafkaPrincipal.USER_TYPE, clientPrincipalName)` — the SASL-authenticated username. The Rust impl returns `KafkaPrincipal::anonymous()` with the rustdoc noting "principals carry no semantic value on the client side outside of logging / metrics". This is a documented divergence and a reasonable Milestone-1 deferral (the client-only producer never uses the principal for ACL), but it **does** affect log lines that include the principal name. Phase 9c integration tests against a real broker may surface this as a diagnostic gap (you'd see `User:ANONYMOUS` in log lines for an authenticated SASL session). Consider returning `KafkaPrincipal::new("User", &self.credentials.username)` instead — it's a one-line change and preserves the Java surface for the one thing principals are used for on the client (log identity).
+
+### Suggestion 2 — JAAS-only schema test does not include the new SASL_USERNAME / SASL_PASSWORD keys
+
+- **File**: `src/common/config/sasl_configs.rs:642-657`
+- **Severity**: Suggestion
+- **Java Reference**: N/A (fresh-impl extension)
+- **Description**: The `add_client_sasl_support_registers_core_keys` test in `sasl_configs.rs` checks that `SASL_MECHANISM`, `SASL_JAAS_CONFIG`, etc. are registered, but does NOT include the new `SASL_USERNAME` / `SASL_PASSWORD` keys that Commit 5 added in the same `add_client_sasl_support()` body. The schema coverage at `producer_config.rs:1483-1484` (`schema_includes_sasl_keys`) does check them, so the keys are tested *somewhere* — but the per-module test that's specifically named "registers_core_keys" should mention the keys the module registers. Add `SASL_USERNAME` and `SASL_PASSWORD` to the iteration list in the `sasl_configs.rs` test for symmetry.
+
+### Suggestion 3 — Stale doc reference to a non-existent method name in `producer_config.rs`
+
+- **File**: `src/producer/producer_config.rs:415`
+- **Severity**: Nit (cosmetic — wait, calling it Suggestion because broken intra-doc link affects rustdoc generation)
+- **Description**: The comment near the security-protocol validator references `[`Self::post_validate_sasl_mechanism_config_with_milestone_narrowing`]` — but the actual method name added in Commit 5 is `reject_milestone_1_unsupported_sasl_mechanism`. Broken intra-doc link. Will produce a rustdoc warning on next `cargo doc` run.
+
+### Suggestion 4 — Stale "Phase 9a scope" rustdoc in `sasl_channel_builder.rs`
+
+- **File**: `src/common/network/sasl_channel_builder.rs:34, 47, 49, 96, 132`
+- **Severity**: Nit (doc-only)
+- **Description**: Several rustdoc comments still say "Phase 9a scope" / "out-of-scope for Phase 9a:" / "(Phase 9a scope)" — these were accurate when the builder was first introduced in Phase 9a but the deferred items (JAAS parsing, `PlainCredentials` resolution, `build_channel` body) are now landed in Phase 9b. Reword to "Phase 9b scope" or remove the phase tag entirely; the rustdoc inaccurately says these are still deferred.
+
+### Nit 1 — N1's tagged-field test pins the encoder, not the parser
+
+- **File**: `src/common/security/authenticator/sasl_client_authenticator.rs:1411-1465` (`tagged_field_round_trip_on_authenticate_v2_response`)
+- **Severity**: Nit (test-name vs assertion mismatch)
+- **Description**: The original Nit N1 wording was "Does NOT assert that `unknown_tagged_fields` survived parsing." The fix adds an assertion that the literal trailer bytes appear in the framed bytes pushed to the mock transport — i.e., it proves the *encoder* writes the trailer. It does NOT prove the *parser* preserves `unknown_tagged_fields` in the parsed struct (the response is consumed inside `handle_sasl_authenticate_response`, where the field is unused). The Phase 9.0 hex fixtures + `Readable::read_tagged_field` cover the parser surface separately, so the gap is theoretical — but the test name "round_trip_on_authenticate_v2_response" implies a parser preservation claim it doesn't make. Either rename to `..._encodes_tagged_trailer` or extend to capture the response from the authenticator and assert `parsed.unknown_tagged_fields == vec![RawTaggedField::new(7, vec![0xAB, 0xCD])]`.
+
+### Nit 2 — `password()` accessor's rustdoc references `build_plain_token` as a hint, but it's a private method
+
+- **File**: `src/common/security/authenticator/sasl_client_authenticator.rs:121-130`
+- **Severity**: Nit (doc-only)
+- **Description**: The rustdoc on `PlainCredentials::password()` says "Callers that need the actual token use `SaslClientAuthenticator::build_plain_token` internally". `build_plain_token` is a private method (no `pub`), so external callers cannot use it. The intent is clear (the SASL state machine internally builds the token), but the cross-reference is dead. Reword as "internal: see private `SaslClientAuthenticator::build_plain_token`" or drop the hint.
+
+### Nit 3 — `resolve_plain_credentials` match arm has a redundant pattern
+
+- **File**: `src/producer/kafka_producer.rs:764`
+- **Severity**: Nit
+- **Description**: The second arm `(Some(u), None) | (Some(u), Some(_)) if !u.is_empty() => ...` matches when username is non-empty and either password is None OR present. Combined with the first arm's `(Some(u), Some(p)) if !u.is_empty() && !p.is_empty()`, the second arm with `Some(_)` only fires when password is `Some("")`. The error message says "missing or empty" — accurate. The pattern is technically correct but mildly hard to read; could be split into two arms (one for None, one for Some-but-empty) or replaced with a guard `match` on cleaner branches. Not a behavioral issue.
+
+## Round 1 verdict
+
+**Accept with followups.**
+
+All Phase 9b mandate items landed correctly: S1/S2/S3 followups from 9a all resolved, JAAS parser + config plumbing implemented, producer-side SASL_PLAINTEXT gate lift verified, architectural decision (trait + enum) is justified. SASL_SSL deferral scope is correctly waiting on Phase 9c's SSL config plumbing. Gates green.
+
+The findings are all Suggestion / Nit severity — none of them block 9b from closing. Suggestions 1 (anonymous principal) and 2 (schema test symmetry) are worth bundling into 9c when next touching those files. Suggestions 3-4 (stale doc references) are 1-line fixes. Nits 1-3 are quality improvements that can wait.
+
+## Next steps for Manager
+
+1. Close 9b as accept-with-followups; archive this section to `COMMENTS.DONE.9.md`.
+2. Carry these followups into 9c work:
+   - **S1** (principal returns anonymous) — fits naturally with the integration-test round when a real broker is talking SASL, so wire log identity to the SASL username then.
+   - **S2** (schema test symmetry) — bundle when next touching `sasl_configs.rs`.
+   - **S3** (stale doc reference) and **S4** (stale "Phase 9a scope") — 1-line fixes; opportunistic.
+   - **N1-N3** — test/doc polish; bundle opportunistically.
+3. Spawn Actor 9 for sub-phase 9c (Integration test 1: SSL connection + producer-side `Arc<ClientConfig>` plumbing). The 9b deferrals (SASL_SSL gate, SSL config plumbing) all collapse into 9c's scope.
+
+Phase 9b Round 1 closes. Manager advances to Phase 9c (Integration test 1: SSL connection + producer-side rustls ClientConfig plumbing — folded-in Phase 8e).
