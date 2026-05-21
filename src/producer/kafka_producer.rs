@@ -758,17 +758,21 @@ fn resolve_plain_credentials(
             _ => None,
         })
         .map(str::to_owned);
-    match (username.as_deref(), password.as_deref()) {
-        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
-            Ok(crate::common::security::authenticator::PlainCredentials::new(u, p))
-        },
-        (Some(u), None) | (Some(u), Some(_)) if !u.is_empty() => Err(KafkaError::Config(
+    // Empty-string treats the same as unset (Java's
+    // `ConfigDef` also coerces `""` to "missing" for credentials).
+    // Normalize both sides upfront so the match shape carries no
+    // intra-branch `!is_empty()` guards.
+    let username = username.as_deref().filter(|u| !u.is_empty());
+    let password = password.as_deref().filter(|p| !p.is_empty());
+    match (username, password) {
+        (Some(u), Some(p)) => Ok(crate::common::security::authenticator::PlainCredentials::new(u, p)),
+        (Some(_), None) => Err(KafkaError::Config(
             "PLAIN credentials incomplete: sasl.username is set but sasl.password is missing or empty".to_owned(),
         )),
-        (_, Some(_)) => Err(KafkaError::Config(
+        (None, Some(_)) => Err(KafkaError::Config(
             "PLAIN credentials incomplete: sasl.password is set but sasl.username is missing or empty".to_owned(),
         )),
-        _ => Err(KafkaError::Config(
+        (None, None) => Err(KafkaError::Config(
             "PLAIN credentials required: set either sasl.jaas.config OR both sasl.username and sasl.password \
              when security.protocol is SASL_PLAINTEXT or SASL_SSL"
                 .to_owned(),

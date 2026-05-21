@@ -412,7 +412,7 @@ fn build_config_def() -> ConfigDef {
     // Phase 9b: accept `SASL_PLAINTEXT` and `SASL_SSL` in addition to
     // `PLAINTEXT` / `SSL`. The SASL mechanism narrowing (PLAIN only in
     // Milestone 1) lives downstream in
-    // [`Self::post_validate_sasl_mechanism_config_with_milestone_narrowing`].
+    // [`reject_milestone_1_unsupported_sasl_mechanism`].
     let security_protocol_validator: Arc<dyn Validator> = Arc::new(CaseInsensitiveValidString::in_set([
         "PLAINTEXT",
         "SSL",

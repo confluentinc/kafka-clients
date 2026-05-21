@@ -31,10 +31,10 @@ use crate::common::security::authenticator::{PlainCredentials, SaslClientAuthent
 /// Builds [`KafkaChannel`]s wrapping a SASL-authenticated transport.
 /// Mirrors Java's `SaslChannelBuilder`.
 ///
-/// **Phase 9a scope.** PLAIN mechanism only. The `SaslClientAuthenticator`
+/// **Milestone-1 scope.** PLAIN mechanism only. The `SaslClientAuthenticator`
 /// created here drives the SASL exchange after the underlying transport
 /// is ready. SCRAM, OAUTHBEARER, Kerberos/GSSAPI are rejected at the
-/// config validation boundary (Phase 9b).
+/// config validation boundary in `ProducerConfig`.
 ///
 /// **Java→Rust signature differences:**
 ///
@@ -44,9 +44,10 @@ use crate::common::security::authenticator::{PlainCredentials, SaslClientAuthent
 ///    DelegationTokenCache, String sslClientAuthOverride, Time,
 ///    LogContext, Function<Short, ApiVersionsResponse>)`. All of those
 ///    except `SecurityProtocol`, `listenerName`, `clientSaslMechanism`,
-///    and the credentials are out-of-scope for Phase 9a:
-///    - `Map<String, JaasContext>` — JAAS parsing deferred (Phase 9b).
-///      Phase 9a takes an explicit [`PlainCredentials`] instead.
+///    and the credentials are out-of-scope for Milestone 1:
+///    - `Map<String, JaasContext>` — replaced by explicit
+///      [`PlainCredentials`] from JAAS parsing in
+///      [`crate::common::security::jaas_config`].
 ///    - `CredentialCache`, `DelegationTokenCache` — server-side.
 ///    - `Time`, `LogContext` — re-authentication / structured logging.
 ///    - `apiVersionSupplier` — server-side.
@@ -93,7 +94,7 @@ impl SaslChannelBuilder {
     /// `JaasContext` / `LoginManager` indirection collapsed.
     ///
     /// Returns `KafkaError::Config` for any mechanism other than PLAIN
-    /// (Phase 9a scope) and for SASL_SSL without an `ssl_config`.
+    /// (Milestone-1 scope) and for SASL_SSL without an `ssl_config`.
     pub fn new(
         security_protocol: SecurityProtocol,
         listener_name: Option<ListenerName>,
@@ -129,7 +130,7 @@ impl SaslChannelBuilder {
         })
     }
 
-    /// Configured SASL mechanism (PLAIN-only in Phase 9a).
+    /// Configured SASL mechanism (PLAIN-only in Milestone 1).
     pub fn client_sasl_mechanism(&self) -> &str {
         &self.client_sasl_mechanism
     }

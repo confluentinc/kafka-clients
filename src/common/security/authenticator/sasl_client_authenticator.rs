@@ -121,9 +121,10 @@ impl PlainCredentials {
     /// Borrow the password. `pub(crate)` so it never reaches a public
     /// downstream consumer (the only legitimate use is the JAAS parser
     /// test asserting it produced the right `PlainCredentials`).
-    /// Callers that need the actual token use
-    /// [`SaslClientAuthenticator::build_plain_token`] internally; this
-    /// accessor does NOT redact, so do not call it from logging code.
+    /// Internal callers that need the actual token build it inside the
+    /// SASL authenticator's RFC 4616 token assembler (not exposed as a
+    /// public API). This accessor does NOT redact, so do not call it
+    /// from logging code.
     #[allow(dead_code)]
     pub(crate) fn password(&self) -> &str {
         &self.password
@@ -753,15 +754,18 @@ impl crate::common::network::authenticator::SaslAuthenticator for SaslClientAuth
     }
 
     fn principal(&self, _transport: &dyn TransportLayer) -> crate::common::security::auth::KafkaPrincipal {
-        // Phase 9b returns anonymous. Java's
-        // `SaslClientAuthenticator.principal()` returns the authenticated
-        // SASL principal (username for PLAIN), but the principal is only
-        // consumed on the broker side for ACL enforcement (Milestone-1
-        // is client-only). Returning the username here would be a
-        // mismatch with how `PlaintextAuthenticator::principal()` also
-        // returns anonymous on the client; principals carry no semantic
-        // value on the client side outside of logging / metrics.
-        crate::common::security::auth::KafkaPrincipal::anonymous()
+        // Java parity: SaslClientAuthenticator.principal() returns
+        // `new KafkaPrincipal(KafkaPrincipal.USER_TYPE, username)` —
+        // the configured SASL username carried as a `User:<name>`
+        // principal. Milestone-1 is client-only (no broker-side ACL
+        // enforcement consumes this), but log / metric surfaces
+        // would render `User:ANONYMOUS` if we returned anonymous,
+        // which is misleading when SASL credentials were actually
+        // supplied.
+        crate::common::security::auth::KafkaPrincipal::new(
+            crate::common::security::auth::kafka_principal::USER_TYPE,
+            &self.credentials.username,
+        )
     }
 
     fn complete(&self) -> bool {
@@ -1412,16 +1416,19 @@ mod tests {
     /// authenticator — the response data includes a tagged trailer
     /// that the parser must accept and discard.
     ///
-    /// Phase 9b Nit N1: also assert that the literal tagged-field bytes
-    /// (`07 02 AB CD` = tag-id 7, length 2, payload AB CD) appear in
-    /// the framed wire bytes that get pushed to the mock transport.
-    /// The Phase 9.0 hex fixtures already cover byte-level parity at
-    /// the message-type layer, but pinning the tagged-trailer bytes
-    /// here closes the loop: the parser does not silently strip the
-    /// trailer (which the previous `state() == Complete` assertion
-    /// would not have detected).
+    /// Phase 9b R1 N1: this test originally only asserted that the
+    /// encoder produces a tagged trailer with bytes `01 07 02 AB CD`
+    /// in the framed wire form and that the state machine reached
+    /// `Complete`. Critic 9 noted the test name implied a
+    /// parser-preservation claim that wasn't actually checked — so
+    /// after the in-band authenticate flow we additionally feed the
+    /// same framed bytes into a standalone parse and assert that
+    /// `unknown_tagged_fields` round-tripped (tag id, payload bytes,
+    /// and that exactly one tagged field was parsed). This closes the
+    /// loop the original test only half-walked.
     #[test]
     fn tagged_field_round_trip_on_authenticate_v2_response() {
+        use crate::common::protocol::ByteBufferAccessor;
         use crate::common::protocol::RawTaggedField;
         let mut transport = MockTransport::new();
         let mut auth = SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("alice", "p"))
@@ -1447,21 +1454,51 @@ mod tests {
             unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0xAB, 0xCD])],
         });
         let framed_bytes = wrap_with_header(response.api_key(), 2, MIN_RESERVED_CORRELATION_ID + 2, &response, 2);
-        // Pin the tagged-field bytes: tag-id 7 (`0x07`), uvarint
-        // length 2 (`0x02`), then the 2-byte payload `AB CD`.
-        // The varint count of tagged fields itself is `0x01` (1
-        // tagged field); the trailing sequence `01 07 02 AB CD`
+        // (a) Encoding side: pin the tagged-field bytes — tag-id 7
+        // (`0x07`), uvarint length 2 (`0x02`), then the 2-byte payload
+        // `AB CD`. The varint count of tagged fields itself is `0x01`
+        // (1 tagged field); the trailing sequence `01 07 02 AB CD`
         // must appear contiguously in the framed body.
         let tagged_bytes: &[u8] = &[0x01, 0x07, 0x02, 0xAB, 0xCD];
         assert!(
             framed_bytes.windows(tagged_bytes.len()).any(|w| w == tagged_bytes),
             "tagged-field trailer bytes (01 07 02 AB CD) not present in framed response — \
-             parser would silently drop the tagged field"
+             encoder silently dropped the tagged field"
         );
         transport.push_framed(&framed_bytes);
 
         auth.authenticate(&mut transport).expect("step 4");
         assert_eq!(auth.state(), SaslState::Complete);
+
+        // (b) Parser side: re-parse the framed bytes standalone and
+        // assert `unknown_tagged_fields` round-tripped. The original
+        // test ran the bytes through the authenticator's internal
+        // parse but had no observation channel into the parsed
+        // response — so a parser that silently dropped the tagged
+        // field would still have left `state() == Complete`. This
+        // half closes the parser-preservation claim the test name
+        // makes.
+        // `wrap_with_header` returns `header || body` directly (no 4-byte
+        // length prefix — the prefix is added at transport time by
+        // `push_framed`). So we feed it straight into the accessor.
+        use crate::common::requests::ResponseHeader;
+        let mut accessor = ByteBufferAccessor::wrap(framed_bytes.clone());
+        // Response header for SaslAuthenticate v2 is at flex header
+        // version 1 (the API key has `responseHeaderVersion(2) == 1`).
+        let _header = ResponseHeader::parse(&mut accessor, 1).expect("parse response header");
+        let parsed = SaslAuthenticateResponseData::read(&mut accessor, 2).expect("parse v2 response");
+        assert_eq!(
+            parsed.unknown_tagged_fields.len(),
+            1,
+            "parser must preserve exactly one unknown tagged field; got {:?}",
+            parsed.unknown_tagged_fields,
+        );
+        assert_eq!(parsed.unknown_tagged_fields[0].tag(), 7, "tag id mismatch on round-trip");
+        assert_eq!(
+            parsed.unknown_tagged_fields[0].data(),
+            &[0xAB, 0xCD],
+            "tag payload mismatch on round-trip"
+        );
     }
 
     /// `PlainCredentials::Debug` masks the password.

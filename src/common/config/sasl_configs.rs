@@ -651,6 +651,13 @@ mod tests {
             SASL_OAUTHBEARER_JWT_VALIDATOR_CLASS,
             SASL_OAUTHBEARER_TOKEN_ENDPOINT_URL,
             SASL_OAUTHBEARER_HEADER_URLENCODE,
+            // Fresh-impl extension keys (not present in Java's
+            // ProducerConfig schema). The producer-config schema test
+            // covers them at the producer level too, but per-module
+            // symmetry: anything `add_client_sasl_support` registers
+            // should appear here.
+            SASL_USERNAME,
+            SASL_PASSWORD,
         ] {
             assert!(def.config_key(key).is_some(), "missing SASL key: {key}");
         }
