@@ -73,3 +73,5 @@
 - [Phase 9.0 SASL wire types](phase9_0_sasl_wire_types.md) — generator works out-of-box for SASL; flex-boundary fixture process; KafkaError::Authentication covers UnsupportedSaslMechanism; parse_response_body extended for keys 17+36; Debug-masking pattern
 - [Phase 9a SASL client state machine](phase9a_sasl_client_state_machine.md) — sync state-loop design, generator-level credential redaction (option a), channel-wiring deferred to 9b
 - [Phase 9b SASL channel wiring](phase9b_sasl_channel_wiring.md) — SaslAuthenticator trait + ChannelAuthenticator enum (BOTH, not one); PLAIN-only JAAS parser; sasl.username/password as fresh-impl extension; producer gate lift for SASL_PLAINTEXT
+- [Phase 9c SSL plumbing](phase9c_ssl_plumbing.md) — rustls ClientConfig from ProducerConfig; SNI via Selectable::connect(host); ChannelBuilder::build_channel_with_server_name trait-method-default; producer gate lift for SSL/SASL_SSL
+- [Phase 9c Round 1 patterns](phase9c_round1_patterns.md) — security-verifier direct unit tests via rcgen, "Java parity" vs documented-deviation framing, rustdoc rot in security code, substring vs assert_eq! policy
