@@ -71,3 +71,4 @@
 - [Phase 8a.1 perf test re-enable](phase8a1_perf_test_reenable.md) — third `pub + #[doc(hidden)]` (`from_config`); `ProducerConfig::new` validator demands FQCN placeholders for required serializer keys; smoke-run gate ≠ compile gate
 - [Phase 8c byte fidelity](phase8c_byte_fidelity.md) — kafka-console-consumer harness gotchas (--formatter-property, key.separator not tab, exit=1 on timeout); clippy struct-rustdoc attachment trap
 - [Phase 9.0 SASL wire types](phase9_0_sasl_wire_types.md) — generator works out-of-box for SASL; flex-boundary fixture process; KafkaError::Authentication covers UnsupportedSaslMechanism; parse_response_body extended for keys 17+36; Debug-masking pattern
+- [Phase 9a SASL client state machine](phase9a_sasl_client_state_machine.md) — sync state-loop design, generator-level credential redaction (option a), channel-wiring deferred to 9b
