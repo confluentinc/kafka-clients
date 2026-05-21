@@ -409,13 +409,16 @@ fn build_config_def() -> ConfigDef {
     let interceptor_validator: Arc<dyn Validator> = Arc::new(ValidList::any_non_duplicate_values(true, false));
     let config_providers_validator: Arc<dyn Validator> = Arc::new(ValidList::any_non_duplicate_values(true, false));
 
-    // Milestone-1 deviation: only `PLAINTEXT` and `SSL` are accepted. Java
-    // also accepts `SASL_PLAINTEXT` and `SASL_SSL`. The brief constrains
-    // this validator to the two values so a `SASL_*` `security.protocol`
-    // surfaces a `ConfigException` whose message contains the literal
-    // `security.protocol` (per testInvalidSecurityProtocol).
-    let security_protocol_validator: Arc<dyn Validator> =
-        Arc::new(CaseInsensitiveValidString::in_set(["PLAINTEXT", "SSL"]));
+    // Phase 9b: accept `SASL_PLAINTEXT` and `SASL_SSL` in addition to
+    // `PLAINTEXT` / `SSL`. The SASL mechanism narrowing (PLAIN only in
+    // Milestone 1) lives downstream in
+    // [`Self::post_validate_sasl_mechanism_config_with_milestone_narrowing`].
+    let security_protocol_validator: Arc<dyn Validator> = Arc::new(CaseInsensitiveValidString::in_set([
+        "PLAINTEXT",
+        "SSL",
+        "SASL_PLAINTEXT",
+        "SASL_SSL",
+    ]));
 
     let metadata_recovery_validator: Arc<dyn Validator> = Arc::new(CaseInsensitiveValidString::in_set([
         MetadataRecoveryStrategy::None.name(),
@@ -1143,9 +1146,12 @@ impl ProducerConfig {
 
     fn post_process_parsed_config(&mut self) -> Result<(), KafkaError> {
         // Step 1 — validate SASL mechanism iff security.protocol is
-        // SASL-bearing. With Milestone-1 the validator on
-        // `security.protocol` rejects SASL_PLAINTEXT/SASL_SSL before we
-        // reach this point. The call is preserved for parity.
+        // SASL-bearing.
+        //
+        // Phase 9b (Milestone-1): security.protocol accepts SASL_PLAINTEXT
+        // / SASL_SSL but only `sasl.mechanism = PLAIN` is supported.
+        // SCRAM-SHA-256/512, OAUTHBEARER, GSSAPI etc. are rejected here
+        // with a Java-parity ConfigException.
         let security_protocol = self
             .inner
             .get_string(common_client_configs::SECURITY_PROTOCOL_CONFIG)?
@@ -1157,6 +1163,8 @@ impl ProducerConfig {
             .and_then(ConfigValue::as_str)
             .map(str::to_owned);
         common_client_configs::post_validate_sasl_mechanism_config(&security_protocol, sasl_mech.as_deref())?;
+        // Milestone-1 narrowing: PLAIN only.
+        Self::reject_milestone_1_unsupported_sasl_mechanism(&security_protocol, sasl_mech.as_deref())?;
 
         // Step 2 — log a warning when retry / connection-setup backoff
         // base > max.
@@ -1227,6 +1235,39 @@ impl ProducerConfig {
                  Milestone-1/PLAN.md."
                     .to_owned(),
             ));
+        }
+        Ok(())
+    }
+
+    /// Milestone-1 hard rejection for SASL mechanisms other than PLAIN.
+    /// Phase 9b accepts `security.protocol = SASL_PLAINTEXT / SASL_SSL`
+    /// but only `sasl.mechanism = PLAIN` is supported. SCRAM-SHA-256/512,
+    /// OAUTHBEARER, GSSAPI etc. are out of Milestone-1 scope (PLAN.md:365).
+    ///
+    /// Returns a `KafkaError::Config` with an error message that names
+    /// the offending mechanism — matches Java's
+    /// `UnsupportedSaslMechanismException` shape (broker-side wire code
+    /// 33). Surfaces at config-validation time so the producer can't be
+    /// constructed in the first place.
+    fn reject_milestone_1_unsupported_sasl_mechanism(
+        security_protocol: &str,
+        sasl_mechanism: Option<&str>,
+    ) -> Result<(), KafkaError> {
+        let is_sasl = security_protocol == "SASL_PLAINTEXT" || security_protocol == "SASL_SSL";
+        if !is_sasl {
+            return Ok(());
+        }
+        // post_validate_sasl_mechanism_config above already rejected
+        // empty/null mechanisms; here we only narrow the supported set
+        // for Milestone-1.
+        if let Some(mech) = sasl_mechanism
+            && !mech.is_empty()
+            && mech != "PLAIN"
+        {
+            return Err(KafkaError::Config(format!(
+                "Unsupported SASL mechanism: {mech}. Milestone-1 supports only PLAIN. \
+                 See Milestone-1/PLAN.md:365."
+            )));
         }
         Ok(())
     }
@@ -1437,6 +1478,10 @@ mod tests {
     fn schema_includes_sasl_keys() {
         let def = ProducerConfig::config_def();
         assert!(def.config_key(crate::common::config::sasl_configs::SASL_MECHANISM).is_some());
+        assert!(def.config_key(crate::common::config::sasl_configs::SASL_JAAS_CONFIG).is_some());
+        // Phase 9b: fresh-impl convenience keys.
+        assert!(def.config_key(crate::common::config::sasl_configs::SASL_USERNAME).is_some());
+        assert!(def.config_key(crate::common::config::sasl_configs::SASL_PASSWORD).is_some());
     }
 
     #[test]
@@ -1810,11 +1855,14 @@ mod tests {
     }
 
     /// Sets `security.protocol=SASL_SSL`; the validator on the
-    /// `security.protocol` key (restricted to `{PLAINTEXT, SSL}` in
-    /// Milestone-1) must reject with a message that contains the literal
-    /// `security.protocol`.
+    /// Phase 9b: `security.protocol=SASL_SSL` is now accepted by the
+    /// validator on the key itself (PLAIN-only narrowing lives
+    /// downstream). The default `sasl.mechanism` is `GSSAPI` (Java
+    /// default), so a bare `SASL_SSL` without an explicit PLAIN
+    /// mechanism falls into the Milestone-1 narrowing and surfaces a
+    /// "Unsupported SASL mechanism: GSSAPI" config error.
     #[test]
-    fn test_sasl_ssl_rejected_in_milestone_1() {
+    fn test_sasl_ssl_default_mechanism_rejected_in_milestone_1() {
         let mut props = minimal_props();
         props.insert(
             common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
@@ -1822,7 +1870,107 @@ mod tests {
         );
         let err = ProducerConfig::new(props).unwrap_err();
         assert!(matches!(err, KafkaError::Config(_)));
-        assert!(err.message().contains(common_client_configs::SECURITY_PROTOCOL_CONFIG));
+        assert!(
+            err.message().contains("Unsupported SASL mechanism: GSSAPI"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    /// Phase 9b: `security.protocol=SASL_PLAINTEXT` + explicit
+    /// `sasl.mechanism=PLAIN` is accepted. The remaining
+    /// `sasl.jaas.config` plumbing for actual credentials happens
+    /// at producer-construction time (Phase 9b commit 6).
+    #[test]
+    fn test_sasl_plaintext_plain_mechanism_accepted() {
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            "SASL_PLAINTEXT".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "PLAIN".to_owned(),
+        );
+        let config = ProducerConfig::new(props).expect("SASL_PLAINTEXT + PLAIN must be accepted");
+        assert_eq!(
+            config
+                .inner
+                .get_string(common_client_configs::SECURITY_PROTOCOL_CONFIG)
+                .unwrap(),
+            "SASL_PLAINTEXT"
+        );
+        assert_eq!(
+            config
+                .inner
+                .get_string(crate::common::config::sasl_configs::SASL_MECHANISM)
+                .unwrap(),
+            "PLAIN"
+        );
+    }
+
+    /// Phase 9b: `sasl.mechanism = SCRAM-SHA-512` is rejected (PLAN.md:365)
+    /// with a Milestone-1-specific error message naming the offending
+    /// mechanism.
+    #[test]
+    fn test_sasl_scram_mechanism_rejected() {
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            "SASL_PLAINTEXT".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "SCRAM-SHA-512".to_owned(),
+        );
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(
+            err.message().contains("Unsupported SASL mechanism: SCRAM-SHA-512"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    /// Phase 9b: `sasl.mechanism = OAUTHBEARER` is rejected (PLAN.md:365).
+    #[test]
+    fn test_sasl_oauthbearer_mechanism_rejected() {
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            "SASL_SSL".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "OAUTHBEARER".to_owned(),
+        );
+        let err = ProducerConfig::new(props).unwrap_err();
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(
+            err.message().contains("Unsupported SASL mechanism: OAUTHBEARER"),
+            "got: {}",
+            err.message()
+        );
+    }
+
+    /// Phase 9b: when `security.protocol = PLAINTEXT / SSL`,
+    /// `sasl.mechanism` is irrelevant — the validator must not surface
+    /// the SASL-mechanism rejection for non-SASL protocols (PLAN.md
+    /// post_validate_sasl_mechanism_config semantics).
+    #[test]
+    fn test_non_sasl_protocol_ignores_sasl_mechanism() {
+        let mut props = minimal_props();
+        props.insert(
+            common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
+            "PLAINTEXT".to_owned(),
+        );
+        // Even though SCRAM is in the props, the validator should not
+        // care because security.protocol is not SASL-bearing.
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "SCRAM-SHA-256".to_owned(),
+        );
+        let _config = ProducerConfig::new(props).expect("PLAINTEXT must not validate SASL mechanism");
     }
 
     // ----- Auxiliary tests for parseAcks (Java parseAcks line 653) -----

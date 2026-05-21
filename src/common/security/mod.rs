@@ -16,3 +16,4 @@
 
 pub mod auth;
 pub mod authenticator;
+pub mod jaas_config;

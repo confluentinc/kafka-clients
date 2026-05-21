@@ -117,6 +117,17 @@ impl PlainCredentials {
     pub fn username(&self) -> &str {
         &self.username
     }
+
+    /// Borrow the password. `pub(crate)` so it never reaches a public
+    /// downstream consumer (the only legitimate use is the JAAS parser
+    /// test asserting it produced the right `PlainCredentials`).
+    /// Callers that need the actual token use
+    /// [`SaslClientAuthenticator::build_plain_token`] internally; this
+    /// accessor does NOT redact, so do not call it from logging code.
+    #[allow(dead_code)]
+    pub(crate) fn password(&self) -> &str {
+        &self.password
+    }
 }
 
 /// Hand-emitted `Debug` impl that masks the password (CLAUDE.md credential

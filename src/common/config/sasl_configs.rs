@@ -26,6 +26,36 @@ pub const DEFAULT_SASL_MECHANISM: &str = GSSAPI_MECHANISM;
 
 pub const SASL_JAAS_CONFIG: &str = "sasl.jaas.config";
 
+// ----- Phase 9b fresh-impl extension: typed PLAIN credentials -----
+//
+// Java's ProducerConfig does NOT have `sasl.username` / `sasl.password`
+// keys — Java users must always go through `sasl.jaas.config`. The
+// Rust translation accepts both forms because the JAAS string format
+// is awkward for a PLAIN-only client (Milestone 1) and copy-pasting
+// passwords through JAAS-escape rules is error-prone.
+//
+// When BOTH `sasl.jaas.config` and `sasl.username`/`sasl.password` are
+// set, the JAAS config wins (matches Java's precedence — JAAS is the
+// canonical source). When NEITHER is set on a SASL-bearing protocol,
+// producer construction fails with a clear "credentials required"
+// message at `KafkaProducer::new` time (Phase 9b commit 6).
+
+/// Fresh-impl convenience: PLAIN-mechanism username. Used as an
+/// alternative to `sasl.jaas.config`. Not present in Java's
+/// `ProducerConfig` schema.
+pub const SASL_USERNAME: &str = "sasl.username";
+
+/// Fresh-impl convenience: PLAIN-mechanism password (treated as a
+/// `Type::Password` so it is masked in `Debug`). Not present in
+/// Java's `ProducerConfig` schema.
+pub const SASL_PASSWORD: &str = "sasl.password";
+
+/// Doc for [`SASL_USERNAME`].
+pub const SASL_USERNAME_DOC: &str = "PLAIN-mechanism username. Fresh-impl convenience that bypasses sasl.jaas.config — set this together with sasl.password instead of constructing a full JAAS config string. Only honoured when security.protocol is SASL_PLAINTEXT or SASL_SSL and sasl.mechanism is PLAIN. Not present in the Apache Kafka Java client.";
+
+/// Doc for [`SASL_PASSWORD`].
+pub const SASL_PASSWORD_DOC: &str = "PLAIN-mechanism password. Fresh-impl convenience that bypasses sasl.jaas.config — set this together with sasl.username instead of constructing a full JAAS config string. Only honoured when security.protocol is SASL_PLAINTEXT or SASL_SSL and sasl.mechanism is PLAIN. Not present in the Apache Kafka Java client.";
+
 pub const SASL_CLIENT_CALLBACK_HANDLER_CLASS: &str = "sasl.client.callback.handler.class";
 pub const SASL_LOGIN_CALLBACK_HANDLER_CLASS: &str = "sasl.login.callback.handler.class";
 pub const SASL_LOGIN_CLASS: &str = "sasl.login.class";
@@ -580,6 +610,26 @@ pub fn add_client_sasl_support(def: &mut ConfigDef) -> Result<(), KafkaError> {
         None,
         Importance::Low,
         SASL_OAUTHBEARER_HEADER_URLENCODE_DOC,
+    )?
+    // Phase 9b fresh-impl extension: typed PLAIN credentials. See
+    // module doc for rationale. Both keys default to null; producer
+    // construction enforces non-null *only* when security.protocol
+    // is SASL_PLAINTEXT/SASL_SSL AND sasl.jaas.config is also unset.
+    .define(
+        SASL_USERNAME,
+        Type::String,
+        Some(ConfigValue::Null),
+        None,
+        Importance::Medium,
+        SASL_USERNAME_DOC,
+    )?
+    .define(
+        SASL_PASSWORD,
+        Type::Password,
+        Some(ConfigValue::Null),
+        None,
+        Importance::Medium,
+        SASL_PASSWORD_DOC,
     )?;
     Ok(())
 }
