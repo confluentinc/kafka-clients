@@ -17,16 +17,16 @@
 use std::sync::Arc;
 
 use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 
 use crate::common::errors::KafkaError;
-use crate::common::network::authenticator::PlaintextAuthenticator;
+use crate::common::network::authenticator::ChannelAuthenticator;
 use crate::common::network::channel_builder::ChannelBuilder;
-use crate::common::network::connection_mode::ConnectionMode;
 use crate::common::network::kafka_channel::BoxedMetadataRegistry;
 use crate::common::network::{KafkaChannel, ListenerName, PlaintextTransportLayer, SslTransportLayer};
 use crate::common::security::auth::SecurityProtocol;
-use crate::common::security::authenticator::PlainCredentials;
+use crate::common::security::authenticator::{PlainCredentials, SaslClientAuthenticator};
 
 /// Builds [`KafkaChannel`]s wrapping a SASL-authenticated transport.
 /// Mirrors Java's `SaslChannelBuilder`.
@@ -60,21 +60,15 @@ pub struct SaslChannelBuilder {
     listener_name: Option<ListenerName>,
     /// Configured SASL mechanism. PLAIN-only at this milestone.
     client_sasl_mechanism: String,
-    /// Configured client id (also used as Authenticator's `client_id`).
-    /// Used inside `build_channel` once Phase 9b lands the wiring; the
-    /// field is kept on the builder so construction can validate it now.
-    #[allow(dead_code)]
+    /// Configured client id, threaded into each
+    /// [`SaslClientAuthenticator`] for correlation-id labeling.
     client_id: String,
-    /// PLAIN credentials. Phase 9b will route through a typed
-    /// `SaslConfigs` struct sourced from `ProducerConfig`. Used by
-    /// `build_channel` once Phase 9b lands the wiring.
-    #[allow(dead_code)]
+    /// PLAIN credentials, cloned into each `SaslClientAuthenticator`
+    /// for the lifetime of the channel.
     credentials: PlainCredentials,
     /// Pre-built rustls config. Required when
     /// `security_protocol == SaslSsl`, ignored otherwise. Owned via `Arc`
-    /// so multiple channels can share the same trust roots. Used by
-    /// `build_channel` once Phase 9b lands the wiring.
-    #[allow(dead_code)]
+    /// so multiple channels can share the same trust roots.
     ssl_config: Option<Arc<ClientConfig>>,
 }
 
@@ -149,81 +143,117 @@ impl SaslChannelBuilder {
     pub fn security_protocol(&self) -> SecurityProtocol {
         self.security_protocol
     }
+
+    /// Borrow the configured client id.
+    pub fn client_id(&self) -> &str {
+        &self.client_id
+    }
+
+    /// Build a SASL_SSL channel against a specific `server_name` (used
+    /// for SNI and certificate verification). Mirrors
+    /// [`crate::common::network::SslChannelBuilder::build_ssl_channel`]
+    /// in shape — the trait's [`ChannelBuilder::build_channel`] cannot
+    /// take a `server_name` (the producer's `Selector` knows it from the
+    /// resolved bootstrap address), so SASL_SSL callers must use this
+    /// typed entry point.
+    ///
+    /// Returns `KafkaError::IllegalState` if invoked on a
+    /// `SaslPlaintext` builder (which has no SSL config); use
+    /// [`ChannelBuilder::build_channel`] for that case.
+    pub fn build_sasl_ssl_channel(
+        &self,
+        id: Arc<str>,
+        stream: TcpStream,
+        server_name: ServerName<'static>,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        if self.security_protocol != SecurityProtocol::SaslSsl {
+            return Err(KafkaError::IllegalState(format!(
+                "build_sasl_ssl_channel called on a {} builder; use build_channel instead",
+                self.security_protocol.name()
+            )));
+        }
+        let ssl_config = self.ssl_config.as_ref().ok_or_else(|| {
+            // Construction validated this — reaching here would be a bug.
+            KafkaError::IllegalState("SaslSsl builder must have an ssl_config".to_owned())
+        })?;
+        let transport = SslTransportLayer::new(id.as_ref(), stream, Arc::clone(ssl_config), server_name)
+            .map_err(|e| KafkaError::Network(e.to_string()))?;
+        let authenticator = self.build_sasl_authenticator(id.as_ref())?;
+        Ok(KafkaChannel::new(
+            id,
+            Box::new(transport),
+            ChannelAuthenticator::sasl(authenticator),
+            max_receive_size,
+            metadata_registry,
+        ))
+    }
+
+    /// Construct a fresh [`SaslClientAuthenticator`] using this
+    /// builder's mechanism + credentials + client id. The `node` value
+    /// is the channel's connection id (used by the authenticator only
+    /// for logging).
+    fn build_sasl_authenticator(&self, node: &str) -> Result<SaslClientAuthenticator, KafkaError> {
+        SaslClientAuthenticator::new(node, &self.client_id, &self.client_sasl_mechanism, self.credentials.clone())
+    }
 }
 
 impl ChannelBuilder for SaslChannelBuilder {
-    /// Construct a [`KafkaChannel`] with the appropriate transport
-    /// (`PlaintextTransportLayer` for `SaslPlaintext`, `SslTransportLayer`
-    /// for `SaslSsl`) and a `PlaintextAuthenticator` *placeholder*.
+    /// Construct a [`KafkaChannel`] wrapping a SASL-authenticated
+    /// transport. Mirrors Java's `SaslChannelBuilder.buildChannel()`:
     ///
-    /// **Phase 9a deviation from Java:** the
-    /// [`crate::common::security::authenticator::SaslClientAuthenticator`]
-    /// state machine is implemented and unit-tested, but the Phase 5b-3
-    /// `KafkaChannel` carries a single `Authenticator` trait object that
-    /// must implement the network-layer trait (sync `authenticate()` +
-    /// `principal()` + `complete()` + `close()`). Wiring the SASL
-    /// authenticator through the channel's trait requires either (a)
-    /// extending the trait to thread the transport through `authenticate()`
-    /// or (b) using interior mutability + a transport reference held
-    /// by the authenticator. Both are intrusive; Phase 9a keeps the
-    /// authenticator standalone (with its full state machine + tests),
-    /// and Phase 9b will land the channel-side wiring once the
-    /// `Authenticator` trait surface is finalised. **For now this method
-    /// returns a `KafkaError::UnsupportedOperation` if invoked; instantiate
-    /// the SASL authenticator directly via
-    /// [`crate::common::security::authenticator::SaslClientAuthenticator::new`]
-    /// for unit tests.**
-    ///
-    /// The intent of landing the builder + dispatch in Phase 9a is to
-    /// keep the registry in `channel_builders.rs` symmetric across all
-    /// four security protocols; Phase 9b finishes the integration.
+    /// - For `SaslPlaintext`: wraps a [`PlaintextTransportLayer`] over
+    ///   the TCP stream + a fresh [`SaslClientAuthenticator`].
+    /// - For `SaslSsl`: the trait method cannot carry an SNI server
+    ///   name (the [`ChannelBuilder`] trait is shared with the
+    ///   plaintext/SSL builders which have the same signature shape),
+    ///   so this returns
+    ///   `KafkaError::IllegalState("...use build_sasl_ssl_channel
+    ///   instead")` — callers must use
+    ///   [`Self::build_sasl_ssl_channel`] which takes the
+    ///   `ServerName`. This mirrors the same shape used by
+    ///   [`crate::common::network::SslChannelBuilder::build_ssl_channel`].
     fn build_channel(
         &self,
-        _id: Arc<str>,
-        _stream: TcpStream,
-        _max_receive_size: i32,
-        _metadata_registry: BoxedMetadataRegistry,
+        id: Arc<str>,
+        stream: TcpStream,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
     ) -> Result<KafkaChannel, KafkaError> {
-        // Phase 9b will replace this with the actual wiring:
-        //   let transport = match self.security_protocol {
-        //       SaslPlaintext => Box::new(PlaintextTransportLayer::new(stream)),
-        //       SaslSsl       => Box::new(SslTransportLayer::new_client(...)),
-        //   };
-        //   let authenticator = SaslClientAuthenticator::new(...);
-        //   KafkaChannel::new(..., Box::new(SaslChannelAuthenticator::wrap(authenticator, transport_ref)), ...)
-        //
-        // The blocker is that `Authenticator::authenticate(&mut self)` does
-        // not take a transport reference — it expects the impl to own
-        // (or hold a ref to) the transport. Reshaping the trait is out
-        // of Phase 9a scope because doing so would also touch the
-        // Phase 5b PLAINTEXT and SSL authenticators which currently
-        // share the trait.
-        Err(KafkaError::UnsupportedOperation(
-            "SaslChannelBuilder::build_channel: SASL-over-channel wiring lands in Phase 9b. \
-             The Phase 9a SaslClientAuthenticator is fully implemented and unit-tested, \
-             but the Phase 5b-3 Authenticator trait surface requires extension before the \
-             channel can host it. Instantiate SaslClientAuthenticator directly for unit \
-             tests."
-                .to_owned(),
-        ))
+        match self.security_protocol {
+            SecurityProtocol::SaslPlaintext => {
+                let transport = PlaintextTransportLayer::new(stream);
+                let authenticator = self.build_sasl_authenticator(id.as_ref())?;
+                Ok(KafkaChannel::new(
+                    id,
+                    Box::new(transport),
+                    ChannelAuthenticator::sasl(authenticator),
+                    max_receive_size,
+                    metadata_registry,
+                ))
+            },
+            SecurityProtocol::SaslSsl => Err(KafkaError::IllegalState(
+                "SaslChannelBuilder requires a server name for SASL_SSL; \
+                     call build_sasl_ssl_channel(...) instead"
+                    .to_owned(),
+            )),
+            // Phase 9b: construction-time validation ensures the
+            // builder is only created with a SASL protocol, so this
+            // arm is unreachable — but defensive code keeps the
+            // exhaustive match honest.
+            other => Err(KafkaError::IllegalState(format!(
+                "SaslChannelBuilder constructed with non-SASL protocol {other:?} — should not happen"
+            ))),
+        }
     }
 
     fn close(&mut self) {
         // No long-lived resource on the builder side. Java's
         // `LoginManager.release()` / `AuthenticateCallbackHandler.close()` /
-        // `SslFactory.close()` are Phase 9b concerns.
+        // `SslFactory.close()` are server-side / re-auth concerns
+        // beyond Milestone-1 scope.
     }
-}
-
-// Silence "unused" warnings for fields/types that are used only
-// in code paths Phase 9b will wire up. `cargo build` would warn
-// otherwise; this annotation keeps the impl block honest about
-// the deferral.
-#[allow(dead_code)]
-fn _phase_9b_compile_assertion() {
-    let _ = std::marker::PhantomData::<(PlaintextTransportLayer, SslTransportLayer)>;
-    let _ = ConnectionMode::Client;
-    let _ = PlaintextAuthenticator::new();
 }
 
 #[cfg(test)]
@@ -318,12 +348,83 @@ mod tests {
         );
     }
 
-    /// `build_channel` returns `KafkaError::UnsupportedOperation` —
-    /// Phase 9b wires the channel-side hookup. Pin the deferral so
-    /// future contributors don't silently break the contract.
+    /// `build_channel` on a `SaslPlaintext` builder yields a working
+    /// channel: connection id matches, channel is *not* yet ready
+    /// (SASL authenticator is still in `SendApiVersionsRequest` state),
+    /// principal lookup works.
     #[tokio::test]
-    async fn build_channel_returns_unsupported_operation_in_phase_9a() {
+    async fn build_channel_constructs_sasl_plaintext_channel() {
         use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let connect = TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, _accepted) = tokio::join!(connect, accept);
+        let stream = client.expect("connect");
+
+        let builder = SaslChannelBuilder::new(
+            SecurityProtocol::SaslPlaintext,
+            None,
+            "PLAIN",
+            "test-client",
+            PlainCredentials::new("alice", "supersecret"),
+            None,
+        )
+        .expect("builder construction");
+
+        let channel = builder
+            .build_channel(Arc::from("0"), stream, 1024, Box::new(DefaultChannelMetadataRegistry::new()))
+            .expect("Phase 9b: build_channel must succeed for SASL_PLAINTEXT");
+        assert_eq!(channel.id(), "0");
+        // SASL authenticator starts at SendApiVersionsRequest — until
+        // it drives through, the channel is NOT ready. Mirrors Java's
+        // `channel.ready() == false` until `prepare()` advances.
+        assert!(!channel.ready(), "channel must not be ready before SASL handshake completes");
+        // Principal lookup defers to authenticator; SASL returns
+        // anonymous on the client side (matches PlaintextAuthenticator).
+        let _ = channel.principal();
+    }
+
+    /// `build_channel` on a `SaslSsl` builder must reject — callers
+    /// must use the typed `build_sasl_ssl_channel(server_name, ...)`
+    /// entry point that carries the SNI hostname.
+    #[tokio::test]
+    async fn build_channel_rejects_sasl_ssl_without_server_name() {
+        use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+        use tokio::net::{TcpListener, TcpStream};
+
+        let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
+        let addr = listener.local_addr().expect("local_addr");
+        let connect = TcpStream::connect(addr);
+        let accept = listener.accept();
+        let (client, _accepted) = tokio::join!(connect, accept);
+        let stream = client.expect("connect");
+
+        let builder = SaslChannelBuilder::new(
+            SecurityProtocol::SaslSsl,
+            None,
+            "PLAIN",
+            "test-client",
+            PlainCredentials::new("alice", "p"),
+            Some(sample_ssl_config()),
+        )
+        .expect("builder construction");
+
+        let err = builder
+            .build_channel(Arc::from("0"), stream, 1024, Box::new(DefaultChannelMetadataRegistry::new()))
+            .expect_err("SASL_SSL must reject build_channel without server name");
+        assert!(matches!(err, KafkaError::IllegalState(_)));
+        assert!(err.message().contains("build_sasl_ssl_channel"));
+    }
+
+    /// `build_sasl_ssl_channel` on a `SaslPlaintext` builder must
+    /// reject — the typed entry point is exclusively for `SaslSsl`.
+    #[tokio::test]
+    async fn build_sasl_ssl_channel_rejects_sasl_plaintext() {
+        use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+        use rustls::pki_types::ServerName;
         use tokio::net::{TcpListener, TcpStream};
 
         let listener = TcpListener::bind("127.0.0.1:0").await.expect("bind");
@@ -343,10 +444,16 @@ mod tests {
         )
         .expect("builder construction");
 
+        let server_name = ServerName::try_from("localhost").expect("server name");
         let err = builder
-            .build_channel(Arc::from("0"), stream, 1024, Box::new(DefaultChannelMetadataRegistry::new()))
-            .expect_err("Phase 9a defers channel wiring to 9b");
-        assert!(matches!(err, KafkaError::UnsupportedOperation(_)));
-        assert!(err.message().contains("Phase 9b"));
+            .build_sasl_ssl_channel(
+                Arc::from("0"),
+                stream,
+                server_name,
+                1024,
+                Box::new(DefaultChannelMetadataRegistry::new()),
+            )
+            .expect_err("SASL_PLAINTEXT must reject build_sasl_ssl_channel");
+        assert!(matches!(err, KafkaError::IllegalState(_)));
     }
 }
