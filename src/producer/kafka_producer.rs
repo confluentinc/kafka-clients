@@ -650,20 +650,33 @@ fn build_production_network_client(
     let security_protocol_str = config.get_string(crate::common_client_configs::SECURITY_PROTOCOL_CONFIG)?;
     let security_protocol = SecurityProtocol::for_name(security_protocol_str)
         .ok_or_else(|| KafkaError::Config(format!("Invalid security.protocol: {security_protocol_str}")))?;
-    // Milestone-1 supports only PLAINTEXT through `new` / `with_serializers`.
-    // SSL/SASL config plumbing lands in Phase 8e / Phase 9 — the
-    // ChannelBuilders factory still constructs SslChannelBuilder for
-    // SSL, but the producer-side config-to-SslConfig translation
-    // isn't wired here yet (the network_client.rs SSL tests build the
-    // SslConfig directly). Until then surface SSL with an explicit
-    // `KafkaError::UnsupportedOperation` rather than a half-wired path.
-    if !matches!(security_protocol, SecurityProtocol::Plaintext) {
+
+    // Phase 9b: PLAINTEXT and SASL_PLAINTEXT are wired. SSL and SASL_SSL
+    // still need the producer-side SSL-config plumbing that's deferred to
+    // a future milestone — surface them with `UnsupportedOperation`.
+    if matches!(security_protocol, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl) {
         return Err(KafkaError::UnsupportedOperation(format!(
-            "KafkaProducer::new only supports security.protocol=PLAINTEXT in Milestone-1; \
-             got '{security_protocol_str}'. SSL/SASL lands in Phase 8e/9."
+            "KafkaProducer::new: security.protocol={security_protocol_str} requires SSL plumbing not yet \
+             wired in this milestone. PLAINTEXT and SASL_PLAINTEXT are supported."
         )));
     }
-    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, None, None)
+
+    // Build the SASL config if needed. Phase 9b accepts BOTH
+    // `sasl.jaas.config` AND the fresh-impl `sasl.username` /
+    // `sasl.password` shortcut keys. JAAS takes precedence when both
+    // are set (Java's canonical-source semantics).
+    let sasl_config = if security_protocol.is_sasl() {
+        let mechanism = config
+            .get_string(crate::common::config::sasl_configs::SASL_MECHANISM)?
+            .to_owned();
+        // Resolve credentials: JAAS first, then sasl.username/sasl.password.
+        let credentials = resolve_plain_credentials(config)?;
+        Some(channel_builders::SaslChannelConfig { mechanism, client_id: client_id.as_ref().to_owned(), credentials })
+    } else {
+        None
+    };
+
+    let channel_builder = channel_builders::client_channel_builder(security_protocol, None, None, sasl_config)
         .map_err(|e| KafkaError::Config(format!("Failed to construct channel builder: {e}")))?;
 
     let connections_max_idle_ms = config.get_long(producer_config::CONNECTIONS_MAX_IDLE_MS_CONFIG)?;
@@ -703,6 +716,63 @@ fn build_production_network_client(
         metadata_recovery_strategy,
     )?;
     Ok((network_client, wakeup_notify))
+}
+
+/// Resolve PLAIN credentials from the producer config. JAAS first, then
+/// the fresh-impl `sasl.username` / `sasl.password` shortcut keys.
+/// Returns a `KafkaError::Config` if neither is set, or only one of
+/// (username, password) is set.
+///
+/// Phase 9b: only used when `security.protocol.is_sasl()`.
+fn resolve_plain_credentials(
+    config: &ProducerConfig,
+) -> Result<crate::common::security::authenticator::PlainCredentials, KafkaError> {
+    use crate::common::config::config_def::ConfigValue;
+    use crate::common::config::sasl_configs::{SASL_JAAS_CONFIG, SASL_PASSWORD, SASL_USERNAME};
+    use crate::common::security::jaas_config::parse_plain_jaas_config;
+
+    // Read via inner().values() so we tolerate Null vs Password vs String shape.
+    let values = config.inner().values();
+    let jaas_str = values
+        .get(SASL_JAAS_CONFIG)
+        .and_then(|v| match v {
+            ConfigValue::Password(p) => Some(p.value()),
+            ConfigValue::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .filter(|s| !s.is_empty());
+    if let Some(jaas) = jaas_str {
+        // JAAS wins. Java's PLAIN client likewise reads credentials from
+        // JAAS first; the username/password shortcut is a fresh-impl
+        // extension only consulted when JAAS is unset.
+        return parse_plain_jaas_config(jaas);
+    }
+    // Fall back to sasl.username / sasl.password.
+    let username = values.get(SASL_USERNAME).and_then(ConfigValue::as_str).map(str::to_owned);
+    let password = values
+        .get(SASL_PASSWORD)
+        .and_then(|v| match v {
+            ConfigValue::Password(p) => Some(p.value()),
+            ConfigValue::String(s) => Some(s.as_str()),
+            _ => None,
+        })
+        .map(str::to_owned);
+    match (username.as_deref(), password.as_deref()) {
+        (Some(u), Some(p)) if !u.is_empty() && !p.is_empty() => {
+            Ok(crate::common::security::authenticator::PlainCredentials::new(u, p))
+        },
+        (Some(u), None) | (Some(u), Some(_)) if !u.is_empty() => Err(KafkaError::Config(
+            "PLAIN credentials incomplete: sasl.username is set but sasl.password is missing or empty".to_owned(),
+        )),
+        (_, Some(_)) => Err(KafkaError::Config(
+            "PLAIN credentials incomplete: sasl.password is set but sasl.username is missing or empty".to_owned(),
+        )),
+        _ => Err(KafkaError::Config(
+            "PLAIN credentials required: set either sasl.jaas.config OR both sasl.username and sasl.password \
+             when security.protocol is SASL_PLAINTEXT or SASL_SSL"
+                .to_owned(),
+        )),
+    }
 }
 
 // =====================================================================
@@ -2441,10 +2511,13 @@ mod tests {
         );
     }
 
-    /// Translation of the SASL rejection at the security.protocol
-    /// validator (Milestone-1 Phase 9 prereq).
+    /// Phase 9b: a SASL `security.protocol` with the default Java
+    /// mechanism (`GSSAPI`) now reaches the Milestone-1 mechanism
+    /// narrowing — the rejection is `KafkaError::Config(
+    /// "Unsupported SASL mechanism: GSSAPI...")`, not the old
+    /// `security.protocol` validator rejection.
     #[test]
-    fn rejects_sasl_security_protocol() {
+    fn rejects_sasl_security_protocol_due_to_default_mechanism() {
         let mut props = minimal_props();
         props.insert(
             crate::common_client_configs::SECURITY_PROTOCOL_CONFIG.to_owned(),
@@ -2452,6 +2525,11 @@ mod tests {
         );
         let err = ProducerConfig::new(props).unwrap_err();
         assert!(matches!(err, KafkaError::Config(_)), "expected Config error, got {err:?}");
+        assert!(
+            err.message().contains("Unsupported SASL mechanism: GSSAPI"),
+            "got: {}",
+            err.message()
+        );
     }
 
     /// Phase 8.0: the public `new(props)` constructor wires a
@@ -2487,11 +2565,9 @@ mod tests {
         drop(producer);
     }
 
-    /// SSL/SASL plumbing is deferred to Phase 8e / Phase 9. The
-    /// Milestone-1 public constructor rejects non-PLAINTEXT
-    /// `security.protocol` with an explicit
-    /// `KafkaError::UnsupportedOperation` (not the old blanket
-    /// "DefaultMetadataUpdater not translated" message).
+    /// SSL plumbing on the producer side is deferred. Phase 9b
+    /// lifted the gate to allow `SASL_PLAINTEXT`, but `SSL` and
+    /// `SASL_SSL` still require SSL config plumbing not yet present.
     #[test]
     fn public_new_rejects_ssl_security_protocol_in_milestone_1() {
         let mut props = minimal_props();
@@ -2501,10 +2577,72 @@ mod tests {
         };
         assert!(matches!(err, KafkaError::UnsupportedOperation(_)));
         assert!(
-            err.message().contains("PLAINTEXT") || err.message().contains("Phase 8e"),
-            "expected PLAINTEXT / Phase 8e in error, got: {}",
+            err.message().contains("SSL plumbing"),
+            "expected SSL plumbing in error, got: {}",
             err.message(),
         );
+    }
+
+    /// Phase 9b: `KafkaProducer::new` with `security.protocol=SASL_PLAINTEXT`
+    /// + `sasl.mechanism=PLAIN` + JAAS credentials succeeds. Connection
+    /// failures against an unreachable bootstrap surface at first
+    /// send/poll (lazy connect), not at construction.
+    #[tokio::test]
+    async fn public_new_accepts_sasl_plaintext_with_jaas_config() {
+        let mut props = minimal_props();
+        props.insert("security.protocol".to_owned(), "SASL_PLAINTEXT".to_owned());
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "PLAIN".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_JAAS_CONFIG.to_owned(),
+            r#"org.apache.kafka.common.security.plain.PlainLoginModule required username="alice" password="supersecret";"#.to_owned(),
+        );
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props)
+            .expect("Phase 9b: SASL_PLAINTEXT + PLAIN + JAAS must construct successfully");
+        drop(producer);
+    }
+
+    /// Phase 9b: `KafkaProducer::new` with the fresh-impl
+    /// `sasl.username` / `sasl.password` shortcut also succeeds.
+    #[tokio::test]
+    async fn public_new_accepts_sasl_plaintext_with_username_password_shortcut() {
+        let mut props = minimal_props();
+        props.insert("security.protocol".to_owned(), "SASL_PLAINTEXT".to_owned());
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "PLAIN".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_USERNAME.to_owned(),
+            "alice".to_owned(),
+        );
+        props.insert(
+            crate::common::config::sasl_configs::SASL_PASSWORD.to_owned(),
+            "supersecret".to_owned(),
+        );
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props)
+            .expect("Phase 9b: SASL_PLAINTEXT + PLAIN + username/password must construct successfully");
+        drop(producer);
+    }
+
+    /// Phase 9b: SASL_PLAINTEXT + PLAIN with NEITHER JAAS NOR
+    /// username/password set must fail with a clear "credentials
+    /// required" error at construction time.
+    #[test]
+    fn public_new_rejects_sasl_plaintext_without_credentials() {
+        let mut props = minimal_props();
+        props.insert("security.protocol".to_owned(), "SASL_PLAINTEXT".to_owned());
+        props.insert(
+            crate::common::config::sasl_configs::SASL_MECHANISM.to_owned(),
+            "PLAIN".to_owned(),
+        );
+        let Err(err) = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props) else {
+            panic!("expected Err when SASL_PLAINTEXT has no credentials");
+        };
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("PLAIN credentials required"), "got: {}", err.message(),);
     }
 
     /// Verify that dropping the producer aborts the spawned Sender task.
