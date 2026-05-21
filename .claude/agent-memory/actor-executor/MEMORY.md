@@ -70,3 +70,4 @@
 - [Phase 7g two-phase send](phase7g_two_phase_send.md) — `Result<KafkaFuture<RecordMetadata>, _>` restores Java parity; `Arc<dyn KafkaFutureOps>` wrapper, one alloc/send
 - [Phase 8a.1 perf test re-enable](phase8a1_perf_test_reenable.md) — third `pub + #[doc(hidden)]` (`from_config`); `ProducerConfig::new` validator demands FQCN placeholders for required serializer keys; smoke-run gate ≠ compile gate
 - [Phase 8c byte fidelity](phase8c_byte_fidelity.md) — kafka-console-consumer harness gotchas (--formatter-property, key.separator not tab, exit=1 on timeout); clippy struct-rustdoc attachment trap
+- [Phase 9.0 SASL wire types](phase9_0_sasl_wire_types.md) — generator works out-of-box for SASL; flex-boundary fixture process; KafkaError::Authentication covers UnsupportedSaslMechanism; parse_response_body extended for keys 17+36; Debug-masking pattern
