@@ -548,9 +548,12 @@ impl SaslClientAuthenticator {
         }
         let mechanism = self.mechanism.clone();
         // Render the enabled-mechanisms list in the same shape as Java's
-        // `List<String>.toString()` — `[m1, m2]` — to keep test
-        // assertions parity with Java error strings.
-        let enabled = format!("{:?}", response.response_data().mechanisms);
+        // `List<String>.toString()` — `[m1, m2]` (no quotes around items,
+        // comma-space separated) — to keep parity with Java error strings.
+        // Rust's `{:?}` on `Vec<String>` would emit `["m1", "m2"]` which
+        // diverges from Java's reference text (DoD #1: "error message
+        // content is asserted").
+        let enabled = format!("[{}]", response.enabled_mechanisms().join(", "));
         let err = match error {
             Errors::UnsupportedSaslMechanism => KafkaError::Authentication(format!(
                 "Client SASL mechanism '{mechanism}' not enabled in the server, enabled mechanisms are {enabled}"
@@ -1029,9 +1032,16 @@ mod tests {
         assert!(kafka_err.is_fatal(), "auth failures are fatal");
         assert!(!kafka_err.is_retriable(), "auth failures are non-retriable");
         let msg = kafka_err.message();
-        assert!(msg.contains("Client SASL mechanism 'PLAIN'"));
-        assert!(msg.contains("not enabled in the server"));
-        assert!(msg.contains("SCRAM-SHA-512"));
+        // DoD #1: assert the EXACT Java error string format, not just
+        // substring containment. Java emits:
+        //   "Client SASL mechanism 'PLAIN' not enabled in the server,
+        //    enabled mechanisms are [SCRAM-SHA-512]"
+        // The brackets+items must use Java `List<String>.toString()`
+        // shape: `[SCRAM-SHA-512]`, NOT Rust's `["SCRAM-SHA-512"]`.
+        assert_eq!(
+            msg,
+            "Client SASL mechanism 'PLAIN' not enabled in the server, enabled mechanisms are [SCRAM-SHA-512]"
+        );
         assert_eq!(auth.state(), SaslState::Failed);
     }
 
