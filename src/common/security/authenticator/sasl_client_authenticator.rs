@@ -1362,24 +1362,28 @@ mod tests {
     /// Translation of Java `SaslAuthenticatorTest.testCorrelationId`:
     /// IDs must be unique within the reserved range, must all be
     /// `>= MIN_RESERVED`, and `is_reserved` returns true for each.
+    ///
+    /// Iteration math: the reserved range spans `[MIN_RESERVED..=MAX_RESERVED]`
+    /// = 8 distinct ids (MAX - MIN + 1). We exercise `(MAX - MIN) * 2 = 14`
+    /// calls, which guarantees the counter wraps back through MIN at
+    /// least once. After the loop, the `seen` HashSet must contain
+    /// exactly 8 distinct ids (the full range).
     #[test]
     fn next_correlation_id_stays_in_reserved_range() {
         let mut auth = SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("a", "b"))
             .expect("authenticator");
-        // Java: `(MAX - MIN) * 2` iterations to exhaust + wrap.
-        let count = (MAX_RESERVED_CORRELATION_ID as i64 - MIN_RESERVED_CORRELATION_ID as i64) * 2;
+        let range_size = (MAX_RESERVED_CORRELATION_ID - MIN_RESERVED_CORRELATION_ID + 1) as usize;
+        // Exercise full range + 6 additional calls past wrap to prove
+        // reset to MIN; expected distinct ids = MAX-MIN+1 = 8.
+        let iterations = 2 * (MAX_RESERVED_CORRELATION_ID - MIN_RESERVED_CORRELATION_ID) as usize;
         let mut seen = std::collections::HashSet::new();
-        for _ in 0..count {
+        for _ in 0..iterations {
             let id = auth.next_correlation_id();
             assert!(id >= MIN_RESERVED_CORRELATION_ID, "id {id} below MIN_RESERVED");
             assert!(is_reserved(id), "id {id} not reserved");
             seen.insert(id);
         }
-        // The set of distinct IDs must equal the range size.
-        assert_eq!(
-            seen.len(),
-            (MAX_RESERVED_CORRELATION_ID - MIN_RESERVED_CORRELATION_ID + 1) as usize
-        );
+        assert_eq!(seen.len(), range_size);
     }
 
     /// `is_reserved` boundary check.
@@ -1407,6 +1411,15 @@ mod tests {
     /// Tagged-field response at v2 round-trips through the
     /// authenticator — the response data includes a tagged trailer
     /// that the parser must accept and discard.
+    ///
+    /// Phase 9b Nit N1: also assert that the literal tagged-field bytes
+    /// (`07 02 AB CD` = tag-id 7, length 2, payload AB CD) appear in
+    /// the framed wire bytes that get pushed to the mock transport.
+    /// The Phase 9.0 hex fixtures already cover byte-level parity at
+    /// the message-type layer, but pinning the tagged-trailer bytes
+    /// here closes the loop: the parser does not silently strip the
+    /// trailer (which the previous `state() == Complete` assertion
+    /// would not have detected).
     #[test]
     fn tagged_field_round_trip_on_authenticate_v2_response() {
         use crate::common::protocol::RawTaggedField;
@@ -1433,13 +1446,19 @@ mod tests {
             session_lifetime_ms: 0,
             unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0xAB, 0xCD])],
         });
-        transport.push_framed(&wrap_with_header(
-            response.api_key(),
-            2,
-            MIN_RESERVED_CORRELATION_ID + 2,
-            &response,
-            2,
-        ));
+        let framed_bytes = wrap_with_header(response.api_key(), 2, MIN_RESERVED_CORRELATION_ID + 2, &response, 2);
+        // Pin the tagged-field bytes: tag-id 7 (`0x07`), uvarint
+        // length 2 (`0x02`), then the 2-byte payload `AB CD`.
+        // The varint count of tagged fields itself is `0x01` (1
+        // tagged field); the trailing sequence `01 07 02 AB CD`
+        // must appear contiguously in the framed body.
+        let tagged_bytes: &[u8] = &[0x01, 0x07, 0x02, 0xAB, 0xCD];
+        assert!(
+            framed_bytes.windows(tagged_bytes.len()).any(|w| w == tagged_bytes),
+            "tagged-field trailer bytes (01 07 02 AB CD) not present in framed response — \
+             parser would silently drop the tagged field"
+        );
+        transport.push_framed(&framed_bytes);
 
         auth.authenticate(&mut transport).expect("step 4");
         assert_eq!(auth.state(), SaslState::Complete);
