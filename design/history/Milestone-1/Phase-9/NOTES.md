@@ -407,3 +407,235 @@ tests + 4 channel-builders dispatch tests).
 `cargo test --features integration-tests` not required for 9a
 (no integration tests added; integration begins at 9c per the
 brief).
+
+## Sub-phase 9b — closed (Round 1)
+
+**Closed pending Critic 9 Round 1.** Eight commits land the full
+Phase 9b mandate: config plumbing for SASL_PLAINTEXT / SASL_SSL +
+the `Authenticator` trait reshape that finally unblocks
+`SaslChannelBuilder::build_channel()` + S1/S2/S3/N1/N2 Phase 9a
+followups.
+
+- `731072a` — **Phase 9b (1/N): S1 fix — Java
+  `List<String>.toString()` error-message parity in SASL handshake
+  error path.** `handle_sasl_handshake_response` previously rendered
+  the enabled-mechanisms list with `format!("{:?}", ...)` which
+  emits Rust's `["m1", "m2"]` (items quoted). Java's
+  `List<String>.toString()` emits `[m1, m2]` (no quotes). Swapped
+  to `format!("[{}]", response.enabled_mechanisms().join(", "))`.
+  Tightened `handshake_unsupported_mechanism_fails_with_java_message`
+  from substring assertion to literal `assert_eq!` against the full
+  Java-format string (DoD #1).
+- `6f426eb` — **Phase 9b (2/N): SaslAuthenticator trait +
+  KafkaChannel wiring (Critic 9 architectural hint).** Introduces
+  a sibling `SaslAuthenticator` trait carrying the transport
+  reference in `authenticate()`, plus a `ChannelAuthenticator`
+  enum wrapping either the existing `Authenticator` (Plaintext /
+  SSL) or the new `SaslAuthenticator`. `KafkaChannel`'s
+  `BoxedAuthenticator` alias now points at the enum.
+  `KafkaChannel::prepare()` splits its borrow of `self` so it can
+  pass `&mut self.transport_layer` into the enum dispatch.
+  Cleanest design call: it avoids reshaping the shared
+  `Authenticator` trait (which would touch every existing
+  Plaintext/SSL call site) and isolates the SASL-specific
+  transport-reference requirement to its own trait. Critic 9
+  explicitly recommended this shape. 3 new tests pin the dispatch
+  (`channel_authenticator_network_variant_dispatches_to_inner`,
+  `channel_authenticator_sasl_variant_threads_transport`,
+  `channel_authenticator_construction_smoke`).
+- `bf2f023` — **Phase 9b (3/N): SaslChannelBuilder::build_channel()
+  — TransportLayer + SaslClientAuthenticator assembly.** With the
+  trait reshape in place, the deferred `UnsupportedOperation`
+  surface from Phase 9a finally lands as working code.
+  `SASL_PLAINTEXT` constructs a `PlaintextTransportLayer` +
+  `SaslClientAuthenticator` and wraps in
+  `ChannelAuthenticator::sasl(...)`. `SASL_SSL` cannot fit the
+  `ChannelBuilder::build_channel` signature (it needs an
+  SNI server name), so the trait method rejects with
+  `IllegalState("...use build_sasl_ssl_channel(...) instead")` and
+  a typed `build_sasl_ssl_channel(id, stream, server_name, ...)`
+  method handles the SSL case. Removed the now-obsolete 9a
+  deferral pinning test; added 3 actually-exercising tests.
+- `4c5586f` — **Phase 9b (4/N): S2+S3 channel-wiring followups —
+  EOF→Failed transition + partial-write regression test.** S2 wraps
+  `SaslClientAuthenticator::authenticate()` in an outer
+  post-processor that transitions the state machine to `Failed` +
+  captures `KafkaError::Authentication("EOF during SASL handshake")`
+  on `UnexpectedEof` / `ConnectionReset`. S3 adds a partial-write
+  regression test with `MockTransport::max_write_per_call =
+  Some(4)`, driving the full handshake across multiple partial
+  writes. **The existing eager-state-transition design works
+  correctly under partial-write** — the `flush_pending_send` top-
+  guard in `authenticate_inner` re-attempts the in-flight send
+  before re-entering the state branch. No refactor to defer state
+  transition (matching Java's `pendingSaslState`) was necessary.
+- `055f1a9` — **Phase 9b (5/N): sasl.jaas.config (PLAIN-only) +
+  sasl.username / sasl.password keys + mechanism validator.**
+  Three pieces of config plumbing:
+  (1) `src/common/security/jaas_config.rs` — PLAIN-only JAAS
+  parser. Recognises only the canonical
+  `org.apache.kafka.common.security.plain.PlainLoginModule
+  required username="..." password="...";` shape and rejects
+  anything else (different LoginModule, unknown PLAIN option,
+  malformed token) with a clear error. **Option (b) chosen
+  over option (a) (full JAAS grammar)** because the full grammar
+  is a tar pit that wouldn't pay off in Milestone 1 — non-PLAIN
+  configs are out of scope and the constrained parser is far
+  smaller / easier to verify. 15 unit tests cover happy paths +
+  every documented rejection.
+  (2) Fresh-impl `sasl.username` / `sasl.password` config keys —
+  not present in Java's `ProducerConfig` schema, added as a
+  shortcut for Rust users who prefer to skip the JAAS string
+  ceremony. Documented in the module doc + per-constant rustdoc.
+  (3) Producer-config validator: lifted the
+  `security.protocol` validator to accept `SASL_PLAINTEXT` /
+  `SASL_SSL`. Added `reject_milestone_1_unsupported_sasl_mechanism`
+  post-process step that rejects any `sasl.mechanism` other
+  than PLAIN with a Java-parity error string naming the offending
+  mechanism.
+- `7136180` — **Phase 9b (6/N): producer-side gate lift — accept
+  SASL_PLAINTEXT / SASL_SSL in KafkaProducer::new.**
+  `build_production_network_client` previously rejected anything
+  other than `PLAINTEXT`. Now: `SSL` / `SASL_SSL` remain gated
+  (SSL plumbing carry-over to a future milestone); `SASL_PLAINTEXT`
+  works end-to-end. A new `resolve_plain_credentials` helper reads
+  credentials in two-tier priority order: `sasl.jaas.config` wins
+  (canonical Java source), then `sasl.username` / `sasl.password`
+  shortcut. Returns clear errors for partial credentials or no
+  credentials. 3 new tests:
+  `public_new_accepts_sasl_plaintext_with_jaas_config`,
+  `public_new_accepts_sasl_plaintext_with_username_password_shortcut`,
+  `public_new_rejects_sasl_plaintext_without_credentials`.
+- `1067f2e` — **Phase 9b (7/N): tagged-field test pinning +
+  correlation-id test comment (9a Round 1 Nits).** N1: the
+  tagged-field round-trip test now also asserts the literal
+  trailer bytes `01 07 02 AB CD` appear in the framed wire bytes.
+  N2: rewrote the opaque `(MAX - MIN) * 2 iterations` comment as
+  "exercise full range + 6 additional calls past wrap to prove
+  reset to MIN; expected distinct ids = MAX-MIN+1 = 8". Cosmetic.
+- HEAD (this commit) — **Phase 9b (final/N): sub-phase 9b close
+  stanza in NOTES.md.**
+
+**Architectural decision (the biggest call in 9b — for Critic 9
+review).** Critic 9 in the 9a review recommended either (a) a
+separate `SaslAuthenticator` trait OR (b) a `ChannelAuthenticator`
+wrapper. Phase 9b implemented BOTH: the `SaslAuthenticator` trait
+solves the transport-reference plumbing problem at the trait
+level (clean separation from the shared `Authenticator` trait used
+by Plaintext / SSL), and the `ChannelAuthenticator` enum is the
+"downcasting bridge" so `KafkaChannel` writes a single
+`auth.authenticate(transport)` call site regardless of which kind
+of authenticator is in use. This double-pronged approach was
+strictly necessary because:
+1. The Plaintext / SSL `Authenticator::authenticate(&mut self)`
+   does not need a transport reference (TLS authenticates in
+   `handshake()`, plaintext is a no-op).
+2. The SASL `authenticate(&mut self, transport: &mut dyn
+   TransportLayer)` does need the transport (it drives the SASL
+   frame exchange).
+3. Forcing both into one trait would either (a) plumb a useless
+   transport-arg through every existing Plaintext / SSL call site,
+   or (b) require dynamic-dispatch tricks to thread the transport
+   ref via interior mutability. Either option is intrusive.
+
+The split-trait + enum-bridge has no runtime cost (the enum's
+match dispatch compiles to a single tag check) and isolates the
+SASL-specific shape from the broader `Authenticator` trait
+surface. This is the deviation-from-Java where the Rust translation
+*improves* on the Java shape — Java's `Authenticator` interface
+forces all subclasses (Plaintext / SSL / SaslClient) to share
+`authenticate()` even though only one of them actually uses
+network I/O at that call.
+
+**JAAS parser choice: option (b) — PLAIN-only.** Reasoning in
+the rustdoc of `src/common/security/jaas_config.rs` (module doc
+section "Why PLAIN-only?"). The full JAAS grammar (escaped
+quotes, multi-module contexts, arbitrary keys) is a tar pit. The
+constrained parser is ~270 LOC including 15 unit tests, vs an
+estimated 700+ LOC for a full grammar. Non-PLAIN configs (SCRAM,
+OAUTHBEARER, GSSAPI) are explicitly out of Milestone 1 scope
+(PLAN.md:365); rejecting them at the parser boundary with a clear
+"this client supports PLAIN mechanism only — see sasl.username /
+sasl.password as an alternative" message is the right shape.
+
+**S2 partial-write outcome: state machine resumed correctly
+without refactor.** The new partial-write regression test
+`partial_writes_resume_correctly_to_complete` caps mock writes at
+4 bytes/call and drives the full PLAIN exchange. Result: the
+existing `flush_pending_send` top-guard in `authenticate_inner`
+correctly resumes the in-flight send before re-entering the
+state branch. No refactor to defer state transition (matching
+Java's `pendingSaslState`) was needed — the contract was already
+honoured by the pending_send hand-off.
+
+**Producer-side gate verification.** `public_new_accepts_sasl
+_plaintext_with_jaas_config` and `..._username_password_shortcut`
+verify `KafkaProducer::new` succeeds at construction time for both
+credential-source paths. Connection failures against an
+unreachable bootstrap surface at first send/poll (lazy connect) —
+that's 9c.
+
+**Phase 9b deferrals (carried into 9c+):**
+- `SaslChannelBuilder::build_sasl_ssl_channel` is implemented but
+  unreachable until the producer-side SSL config plumbing lands
+  (Phase 8e / future milestone). The `SaslSsl` security protocol
+  is still rejected by `KafkaProducer::new` with
+  `UnsupportedOperation("SSL plumbing not yet wired in this
+  milestone")`.
+- Integration testing — Phase 9c onward. The 9b unit tests confirm
+  every layer (state machine, channel builder, config plumbing,
+  producer construction) is byte-exact RFC-4616 / Java-parity
+  conformant; 9c proves it interoperates with a real broker.
+- Java-runtime hex-fixture cross-verification for SASL wire
+  types — still 9c carry-over from Phase 9.0.
+- Re-authentication. Out of Milestone 1 (PLAN.md:367).
+
+**Java tests intentionally not translated** (DoD #3):
+- `SaslConfigsTest.java` — Java's full `ConfigDef.validate()`
+  coverage for SASL configs. Phase 9b's narrower mechanism
+  validator + JAAS-PLAIN parser already pin the relevant
+  behaviour (PLAIN-only narrowing + non-PLAIN LoginModule
+  rejection) in `src/common/security/jaas_config.rs` and
+  `src/producer/producer_config.rs`.
+- `JaasConfigTest.java` — full-grammar JAAS parsing tests.
+  Phase 9b's PLAIN-only parser explicitly rejects what those
+  tests exercise; the rejection paths are pinned in the JAAS
+  parser's own 15 tests.
+- `JaasContextTest.java` — multi-context JAAS lookup. Server-side
+  + out of scope for the producer (PLAIN-only client never has
+  more than one login context).
+- `SaslAuthenticatorTest.testCorrelationId` — already translated
+  in Phase 9a (`next_correlation_id_stays_in_reserved_range`).
+
+**Decisions made by Actor 9 inside the brief:**
+1. **Both** SaslAuthenticator trait AND ChannelAuthenticator
+   wrapper, not one or the other. See "Architectural decision"
+   above.
+2. JAAS parser option (b) — PLAIN-only constrained parser.
+3. SASL_SSL deferred to a future milestone — not actively
+   blocking SASL_SSL plumbing in 9b's scope. The
+   `build_sasl_ssl_channel` typed entry point exists and is
+   unit-tested for the construction-side; the producer-side gate
+   keeps it unreachable from `KafkaProducer::new` until SSL
+   config plumbing lands.
+4. `sasl.username` / `sasl.password` registered as fresh-impl
+   extension keys with explicit rustdoc that they are not in
+   Java's `ProducerConfig` schema. JAAS wins precedence when both
+   are set (matches Java's canonical-source semantics).
+5. The `password()` accessor on `PlainCredentials` is `pub(crate)`
+   with `#[allow(dead_code)]` — the only legitimate use is the
+   JAAS parser's assertion that it produced the right
+   `PlainCredentials`. Marked dead_code because the JAAS parser
+   does not use `password()` itself (it uses the constructor
+   instead).
+
+**Status at close:** `cargo build` OK, `cargo xtask format-check`
+OK, `cargo xtask lint` OK, `cargo test --lib` 1327 passed (+28
+versus the Phase 9a close baseline of 1299: 15 JAAS parser tests +
+4 producer-config SASL mechanism tests + 3 ChannelAuthenticator
+dispatch tests + 3 SaslChannelBuilder build_channel tests +
+1 partial-write regression test + 3 KafkaProducer::new SASL tests,
+minus 1 obsoleted Phase 9a deferral pinning test).
+`cargo test --features integration-tests` not required for 9b
+(no integration tests added; integration begins at 9c per the
+brief).
