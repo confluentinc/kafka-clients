@@ -194,7 +194,12 @@ mod tests {
 
     /// Java `createSaslHandshakeRequest(version)` in
     /// `RequestResponseTest.java` constructs with `"PLAIN"`. Mirror the
-    /// fixture across both versions: error_counts surfaces NONE.
+    /// fixture across both versions: error_counts produces a
+    /// single-entry map (count = 1) — Java's `SaslHandshakeResponse.errorCounts()`
+    /// is `errorCounts(Errors.forCode(data.errorCode()))`, exactly one
+    /// entry per code. Critic 9 Nit 1: the previous `>= 1` lets a
+    /// duplicate-entry regression pass; tightened to `== 1` + explicit
+    /// `SaslAuthenticationFailed` value.
     #[test]
     fn error_counts_via_get_error_response_v1() {
         let req = SaslHandshakeRequest::new(
@@ -205,8 +210,12 @@ mod tests {
             .get_error_response(0, &KafkaError::Authentication("bad mechanism".to_owned()))
             .expect("response");
         let counts = err_resp.error_counts();
-        let total: i32 = counts.values().sum();
-        assert!(total >= 1);
+        assert_eq!(
+            counts.values().sum::<i32>(),
+            1,
+            "exactly one error entry expected; got {counts:?}"
+        );
+        assert_eq!(counts.get(&Errors::SaslAuthenticationFailed), Some(&1));
     }
 
     /// Builder convenience: oldest/latest allowed version come from the

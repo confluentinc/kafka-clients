@@ -140,7 +140,7 @@ pub fn parse_response_body(
         // SASL_AUTHENTICATE = 36
         36 => Ok(Box::new(SaslAuthenticateResponse::parse(accessor, api_version)?)),
         _ => Err(KafkaError::UnsupportedVersion(format!(
-            "ApiKey {} ({}) is not currently handled in `parse_response`. Phase 2e wires only Produce, Metadata, ApiVersions, and (since Phase 9.0) SaslHandshake + SaslAuthenticate.",
+            "ApiKey {} ({}) is not currently handled in `parse_response`. Supported API keys: Produce(0), Metadata(3), SaslHandshake(17), ApiVersions(18), SaslAuthenticate(36).",
             api_key.id, api_key.name,
         ))),
     }

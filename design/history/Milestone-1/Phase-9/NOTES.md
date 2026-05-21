@@ -219,6 +219,25 @@ Mitigation: cross-verify in 9c (PLAN.md Risk #1 carry-over).
 - `KafkaError::UnsupportedSaslMechanism` variant if 9b config
   validation requires it.
 
+**Java tests intentionally not translated** (DoD #3 — Critic 9
+Nit 2):
+- `RequestResponseTest.testInvalidSaslHandShakeRequest`
+  (`RequestResponseTest.java:3898-3908`)
+- `RequestResponseTest.testInvalidSaslAuthenticateRequest`
+  (`RequestResponseTest.java:3911-3930`)
+- `RequestResponseTest.testInvalidTaggedFieldsWithSaslAuthenticateRequest`
+  (`RequestResponseTest.java:3961-3984`)
+
+All three exercise the underlying `Readable`/`ByteBufferAccessor`
+corruption-error path, *using* SaslHandshake/SaslAuthenticate
+purely as transport. Equivalent Rust coverage exists at the
+codec level in `src/common/protocol/byte_buffer_accessor.rs:380-410`
+(short-read, malformed varint, truncated payload) and
+`src/common/protocol/types/type.rs:433-525` (per-type read
+boundary checks). Re-doing this test through the SASL types
+would not exercise any SASL-specific code path beyond what the
+existing round-trip and hex-fixture tests already cover.
+
 **Status at close:** `cargo build` OK, `cargo xtask format-check`
 OK, `cargo xtask lint` OK, `cargo test --lib` 1275 passed (+42
 versus the Phase 8 close baseline of 1233:

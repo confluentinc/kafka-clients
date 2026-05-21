@@ -308,6 +308,26 @@ mod tests {
         assert_eq!(resp.error_counts().get(&Errors::SaslAuthenticationFailed), Some(&1));
     }
 
+    /// Translation of Java `RequestResponseTest.testErrorCountsIncludesNone`
+    /// (`RequestResponseTest.java:976-977`):
+    /// `assertEquals(1, createSaslAuthenticateResponse().errorCounts().get(Errors.NONE));`
+    /// Pins the success-path branch of `error_counts()`: a success
+    /// response surfaces a single `Errors::None` entry with count 1.
+    /// Critic 9 Phase 9.0 Suggestion 3.
+    #[test]
+    fn success_response_error_counts_includes_none() {
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let counts = resp.error_counts();
+        assert_eq!(counts.get(&Errors::None), Some(&1));
+        assert_eq!(counts.values().sum::<i32>(), 1, "success response surfaces exactly one entry");
+    }
+
     /// Hex fixture: SaslAuthenticateResponse v0 body — non-flexible
     /// encoding, no session_lifetime_ms field.
     ///

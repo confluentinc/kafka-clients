@@ -166,6 +166,24 @@ mod tests {
         assert_eq!(parsed.error_counts().get(&Errors::UnsupportedSaslMechanism), Some(&1));
     }
 
+    /// Translation of Java `RequestResponseTest.testErrorCountsIncludesNone`
+    /// (`RequestResponseTest.java:976-977`):
+    /// `assertEquals(1, createSaslHandshakeResponse().errorCounts().get(Errors.NONE));`
+    /// Pins the success-path branch of `error_counts()`: a success
+    /// response surfaces a single `Errors::None` entry with count 1.
+    /// Critic 9 Phase 9.0 Suggestion 3.
+    #[test]
+    fn success_response_error_counts_includes_none() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["PLAIN".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let counts = resp.error_counts();
+        assert_eq!(counts.get(&Errors::None), Some(&1));
+        assert_eq!(counts.values().sum::<i32>(), 1, "success response surfaces exactly one entry");
+    }
+
     /// Throttle-time getter is the constant `DEFAULT_THROTTLE_TIME` (0)
     /// because the response schema has no throttle_time field.
     #[test]
