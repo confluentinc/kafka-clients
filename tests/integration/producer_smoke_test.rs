@@ -251,6 +251,29 @@ fn create_topic(container_id: &str, topic: &str, partitions: i32) {
 ///   (the `DefaultMessageFormatter` joins every printed field with
 ///   the configured `key.separator`).
 ///
+/// # Two byte-collision risks for non-ASCII payloads
+///
+/// 1. **`\x1F` (ASCII 0x1F, unit separator)** — used as the in-line
+///    field separator. A binary payload containing 0x1F will be
+///    mis-split. The parsing logic below uses `splitn(3, '\x1F')`, so
+///    a key (the first segment after `Partition:<n>`) containing 0x1F
+///    splits the value across the wrong boundary; a value containing
+///    0x1F means the helper's tuple receives a truncated value.
+/// 2. **`\n` (ASCII 0x0A, line-feed)** — used by
+///    `DefaultMessageFormatter` as the inter-record terminator and is
+///    not configurable through `--formatter-property` in the same
+///    way as `key.separator`. A binary payload containing 0x0A will
+///    be split across multiple lines, with the second line missing
+///    the `Partition:<n>\x1F<key>\x1F` prefix entirely — the parser
+///    below would either drop or panic on the malformed line. The
+///    Phase 8c byte-fidelity test (`producer_smoke_plaintext_byte
+///    _fidelity`) avoids both collisions by using only ASCII letters
+///    + digits in keys and values; future tests with binary payloads
+///    must either (a) length-prefix the record (so the helper can
+///    seek past raw bytes deterministically) or (b) switch to a
+///    consumer that emits a structured format like JSON-with-base64,
+///    not `DefaultMessageFormatter`.
+///
 /// We pass `--formatter-property` rather than the older `--property`
 /// because recent Kafka releases print a deprecation warning on
 /// `--property` (which lands on the same stdout the test parses).
@@ -590,6 +613,173 @@ async fn producer_smoke_plaintext_1000_records() {
         .close_with_timeout(Duration::from_secs(30))
         .await
         .expect("graceful close failed");
+}
+
+// ---------------------------------------------------------------------------
+// Test 1b: 1000 records over SSL (Phase 9c.4 / folded-in Phase 8e)
+// ---------------------------------------------------------------------------
+
+/// Same flow as [`producer_smoke_plaintext_1000_records`] but over the
+/// broker's SSL listener. Sends 1000 explicit-partition records and
+/// asserts the same ack/shape/per-partition-monotonic-offset/multi-
+/// partition-coverage contract — proving SSL plumbing on the producer
+/// side wires through end-to-end at the same level of confidence as
+/// the PLAINTEXT path.
+///
+/// **TLS configuration.** Uses the test cluster's self-signed CA cert
+/// (`ctx.ca_cert_pem()`) written to a [`tempfile::NamedTempFile`]
+/// kept alive for the entire test scope (Drop closes the file —
+/// dropping the binding mid-test would invalidate the truststore
+/// path). The broker hostname in `ssl_bootstrap_servers` is the same
+/// localhost-loopback address the test container is bound to, so
+/// `ssl.endpoint.identification.algorithm` stays at its default
+/// `"https"` (Phase 9c.1 supports both `"https"` and `""`).
+///
+/// **Folds in Phase 8e**: PLAN.md:91-93 deferred standalone TLS
+/// happy-path coverage to this phase. The PLAINTEXT path was Phase 8a,
+/// SSL path is here. SASL_PLAINTEXT / SASL_SSL coverage follows in 9d
+/// / 9e.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_smoke_ssl_1000_records() {
+    use std::io::Write;
+
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_1000_ssl");
+    let bootstrap_servers = ctx.ssl_bootstrap_servers().to_string();
+
+    // Write the test cluster's CA cert to a tempfile. Keep the
+    // `NamedTempFile` binding alive for the whole test — dropping it
+    // closes (and on Unix, deletes) the file, after which the
+    // producer's truststore lookup at first connect would fail.
+    let mut truststore_file = tempfile::NamedTempFile::new().expect("temp file");
+    truststore_file.write_all(ctx.ca_cert_pem().as_bytes()).expect("write ca pem");
+    truststore_file.flush().expect("flush ca pem");
+    let truststore_path = truststore_file.path().to_str().expect("utf-8 path").to_owned();
+
+    // Topic pre-creation via `docker exec kafka-topics`.
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    // Build props inline — `build_props` is PLAINTEXT-only.
+    let mut props: HashMap<String, String> = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers),
+        ("acks".to_string(), "all".to_string()),
+        ("linger.ms".to_string(), "10".to_string()),
+        ("compression.type".to_string(), "none".to_string()),
+        ("client.id".to_string(), "producer-smoke-test-ssl".to_string()),
+        (
+            "key.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        (
+            "value.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        ("security.protocol".to_string(), "SSL".to_string()),
+        ("ssl.truststore.location".to_string(), truststore_path),
+        ("ssl.truststore.type".to_string(), "PEM".to_string()),
+    ]);
+    // The test broker's cert SAN is `localhost`, which matches the
+    // `ssl_bootstrap_servers` hostname; default `https` endpoint-id
+    // works. Keep it explicit for documentation.
+    props.insert("ssl.endpoint.identification.algorithm".to_string(), "https".to_string());
+
+    let key_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let value_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let producer = Arc::new(
+        KafkaProducer::with_serializers(props, key_ser, value_ser).expect("KafkaProducer::with_serializers failed"),
+    );
+
+    // Identical send loop + assertions as the PLAINTEXT test above.
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+    let mut futures = Vec::with_capacity(HAPPY_PATH_RECORDS);
+    for i in 0..HAPPY_PATH_RECORDS {
+        let topic = topic_arc.clone();
+        let key = format!("k{i:04}").into_bytes();
+        let value = format!("v{i:04}").into_bytes();
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        let record = ProducerRecord::with_partition(topic, Some(expected_partition), Some(key), Some(value))
+            .expect("ProducerRecord::with_partition");
+        let fut = producer
+            .send(record)
+            .await
+            .unwrap_or_else(|e| panic!("send #{i} enqueue failed: {e:?}"));
+        futures.push(fut);
+    }
+
+    let results = futures_util::future::join_all(futures.into_iter().map(|f| async move { f.get().await })).await;
+    let mut metadatas: Vec<RecordMetadata> = Vec::with_capacity(HAPPY_PATH_RECORDS);
+    for (i, r) in results.into_iter().enumerate() {
+        let meta = r.unwrap_or_else(|e| panic!("send #{i} broker ack failed: {e:?}"));
+        metadatas.push(meta);
+    }
+
+    // (1) Ack count.
+    assert_eq!(
+        metadatas.len(),
+        HAPPY_PATH_RECORDS,
+        "expected {HAPPY_PATH_RECORDS} acked records, got {}",
+        metadatas.len(),
+    );
+
+    // (2) + (3) RecordMetadata shape + partition consistency.
+    for (i, m) in metadatas.iter().enumerate() {
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        assert_eq!(m.topic(), topic.as_str(), "record #{i}: topic mismatch");
+        assert_eq!(
+            m.partition(),
+            expected_partition,
+            "record #{i}: partition mismatch — expected {expected_partition} (explicit), got {}",
+            m.partition(),
+        );
+        assert!(
+            (0..TOPIC_PARTITIONS).contains(&m.partition()),
+            "record #{i}: partition {} not in [0, {})",
+            m.partition(),
+            TOPIC_PARTITIONS,
+        );
+        assert!(m.offset() >= 0, "record #{i}: negative offset {}", m.offset());
+        assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
+    }
+
+    // (4) Per-partition monotonic offsets.
+    let mut by_partition: HashMap<i32, Vec<i64>> = HashMap::new();
+    for m in &metadatas {
+        by_partition.entry(m.partition()).or_default().push(m.offset());
+    }
+    for (partition, offsets) in &by_partition {
+        for w in offsets.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "partition {partition}: offsets not strictly monotonic — prev={} curr={} (full: {offsets:?})",
+                w[0],
+                w[1],
+            );
+        }
+    }
+
+    // (5) Multi-partition coverage.
+    let partitions: HashSet<i32> = metadatas.iter().map(RecordMetadata::partition).collect();
+    assert_eq!(
+        partitions.len(),
+        TOPIC_PARTITIONS as usize,
+        "expected all {TOPIC_PARTITIONS} partitions to see traffic, got {} (partitions: {partitions:?})",
+        partitions.len(),
+    );
+
+    let producer = Arc::try_unwrap(producer)
+        .map_err(|_| ())
+        .expect("producer Arc had outstanding refs at close");
+    producer
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+
+    // Keep the truststore alive until after close — dropped here.
+    drop(truststore_file);
 }
 
 // ---------------------------------------------------------------------------
@@ -1277,12 +1467,13 @@ async fn producer_smoke_plaintext_byte_fidelity() {
     // committed before this line; but a future regression that
     // returned acks early (e.g. acks=1 with linger after the ack)
     // would be caught here.
-    let producer_for_close = producer.clone();
-    drop(producer);
-    let producer_for_close = Arc::try_unwrap(producer_for_close)
-        .map_err(|_| ())
-        .expect("producer Arc had outstanding refs at close");
-    producer_for_close
+    //
+    // `Arc::into_inner` returns `Some(T)` iff `self` is the **last**
+    // outstanding strong reference (which it is — `producer` is the
+    // sole binding in this scope; no other clones were made). No
+    // clone-then-drop dance is needed.
+    let producer = Arc::into_inner(producer).expect("producer Arc had outstanding refs at close");
+    producer
         .close_with_timeout(Duration::from_secs(30))
         .await
         .expect("graceful close failed");
