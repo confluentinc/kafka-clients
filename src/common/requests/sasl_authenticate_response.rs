@@ -257,4 +257,150 @@ mod tests {
         });
         assert_eq!(resp.error_counts().get(&Errors::SaslAuthenticationFailed), Some(&1));
     }
+
+    /// Hex fixture: SaslAuthenticateResponse v0 body — non-flexible
+    /// encoding, no session_lifetime_ms field.
+    ///
+    /// **Fixture provenance**: hand-derived from
+    /// `SaslAuthenticateResponse.json` (apiKey 36, `flexibleVersions:
+    /// "2+"`, `session_lifetime_ms` field starts at v1+) — at v0 the
+    /// body has only error_code + nullable error_message + auth_bytes.
+    /// Awaiting Java-runtime byte capture from the Apache Kafka 4.2
+    /// broker.
+    ///
+    /// Wire layout (8 bytes total):
+    /// - `00 00` — i16 error_code = 0
+    /// - `FF FF` — i16 error_message length = -1 (null)
+    /// - `00 00 00 00` — i32 auth_bytes length = 0
+    #[test]
+    fn hex_fixture_v0_success_null_message() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0xFF, 0xFF, // error_message length = -1 (null)
+            0x00, 0x00, 0x00, 0x00, // auth_bytes length = 0
+        ];
+
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0, // Should NOT be written at v0
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 0).expect("serialize v0");
+        assert_eq!(
+            serialized.buffer(),
+            EXPECTED,
+            "SaslAuthenticateResponse v0 (success, null msg) bytes diverged from the hex fixture"
+        );
+    }
+
+    /// Hex fixture: SaslAuthenticateResponse v1 body — adds an i64
+    /// session_lifetime_ms tail. Mirrors Java's
+    /// `createSaslAuthenticateResponse()` fixture (`Long.MAX_VALUE`).
+    ///
+    /// **Fixture provenance**: hand-derived.
+    ///
+    /// Wire layout (16 bytes total):
+    /// - `00 00` — error_code = 0
+    /// - `FF FF` — error_message = null
+    /// - `00 00 00 00` — auth_bytes length = 0
+    /// - `7F FF FF FF FF FF FF FF` — i64 session_lifetime_ms =
+    ///   i64::MAX (Java `Long.MAX_VALUE`)
+    #[test]
+    fn hex_fixture_v1_success_long_max_session() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0xFF, 0xFF, // error_message = null
+            0x00, 0x00, 0x00, 0x00, // auth_bytes length = 0
+            0x7F, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, // session_lifetime_ms = i64::MAX
+        ];
+
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: i64::MAX,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 1).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
+
+    /// Hex fixture: SaslAuthenticateResponse v2 body — flexible
+    /// encoding. The flex boundary (v1→v2) is the highest-priority byte
+    /// fidelity test per CLAUDE.md "wire-protocol byte-vector
+    /// divergence" risk #1.
+    ///
+    /// **Fixture provenance**: hand-derived from
+    /// `SaslAuthenticateResponse.json` (`flexibleVersions: "2+"`) —
+    /// at v2 error_message uses compact-nullable-string (uvarint(0) for
+    /// null), auth_bytes uses compact-bytes, and a zero-length
+    /// tagged-field trailer follows.
+    ///
+    /// Wire layout (13 bytes total):
+    /// - `00 00` — error_code = 0
+    /// - `00` — varint(0) = error_message is null
+    /// - `01` — varint(1) = auth_bytes length+1 for empty payload
+    /// - `00 00 00 00 00 00 00 00` — session_lifetime_ms = 0
+    /// - `00` — varint(0) = zero tagged fields
+    #[test]
+    fn hex_fixture_v2_success_null_message_empty_auth() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0x00, // error_message: varint(0) = null
+            0x01, // auth_bytes: varint(1) = empty bytes
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // session_lifetime_ms = 0
+            0x00, // tagged-field count = 0
+        ];
+
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 2).expect("serialize v2");
+        assert_eq!(
+            serialized.buffer(),
+            EXPECTED,
+            "SaslAuthenticateResponse v2 (flex boundary, success) bytes diverged from the hex fixture"
+        );
+    }
+
+    /// Hex fixture: SaslAuthenticateResponse v2 body for an authentication
+    /// failure — error_code 58 plus a non-empty `errorMessage`. Exercises
+    /// the compact-nullable-string non-null branch.
+    ///
+    /// **Fixture provenance**: hand-derived.
+    ///
+    /// Wire layout:
+    /// - `00 3A` — error_code = 58 (SASL_AUTHENTICATION_FAILED)
+    /// - `05` — varint(5) = error_message length+1 for 4-byte payload
+    /// - 4 bytes — "fail"
+    /// - `01` — auth_bytes length+1 = 1 → empty
+    /// - 8 bytes — session_lifetime_ms = 0
+    /// - `00` — tagged-field count = 0
+    #[test]
+    fn hex_fixture_v2_auth_failed_with_message() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x3A, // error_code = 58
+            0x05, // varint(5) = error_message length+1
+            b'f', b'a', b'i', b'l', // "fail"
+            0x01, // varint(1) = empty auth_bytes
+            0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, // session_lifetime_ms = 0
+            0x00, // tagged-field count = 0
+        ];
+
+        let resp = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::SaslAuthenticationFailed.code(),
+            error_message: Some("fail".to_owned()),
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 2).expect("serialize v2");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
 }

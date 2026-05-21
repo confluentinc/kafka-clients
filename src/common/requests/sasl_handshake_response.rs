@@ -181,4 +181,99 @@ mod tests {
         resp.maybe_set_throttle_time_ms(42);
         assert_eq!(resp.throttle_time_ms(), 0);
     }
+
+    /// Hex fixture: SaslHandshakeResponse v0 body — `errorCode=NONE`,
+    /// `mechanisms=["GSSAPI"]`. Mirrors the
+    /// `createSaslHandshakeResponse()` fixture in Java's
+    /// `RequestResponseTest.java`.
+    ///
+    /// **Fixture provenance**: hand-derived from `SaslHandshakeResponse.json`
+    /// (apiKey 17, `flexibleVersions: "none"`) — awaiting Java-runtime
+    /// byte capture from the Apache Kafka 4.2 broker/test fixture.
+    /// Verified by inspection against the non-flexible encoding rules
+    /// for `int16` and `[]string`.
+    ///
+    /// Wire layout:
+    /// - `00 00` — error_code (i16) = 0
+    /// - `00 00 00 01` — array length (i32) = 1
+    /// - `00 06` — mechanism string length (i16) = 6
+    /// - 6 bytes — "GSSAPI"
+    ///
+    /// Total: 14 bytes.
+    #[test]
+    fn hex_fixture_v0_gssapi_only() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0x00, 0x00, 0x00, 0x01, // array length = 1
+            0x00, 0x06, // mechanism length = 6
+            b'G', b'S', b'S', b'A', b'P', b'I', // "GSSAPI"
+        ];
+
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["GSSAPI".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 0).expect("serialize v0");
+        assert_eq!(
+            serialized.buffer(),
+            EXPECTED,
+            "SaslHandshakeResponse v0 (mechanisms=[GSSAPI]) bytes diverged from the hex fixture"
+        );
+    }
+
+    /// Hex fixture: SaslHandshakeResponse v1 body — same shape as v0
+    /// (spec annotates v1 as identical to v0). Mechanism list is
+    /// `["PLAIN"]` here for variety.
+    ///
+    /// **Fixture provenance**: hand-derived.
+    ///
+    /// Wire layout:
+    /// - `00 00` — error_code = 0
+    /// - `00 00 00 01` — array length = 1
+    /// - `00 05` — mechanism length = 5
+    /// - 5 bytes — "PLAIN"
+    #[test]
+    fn hex_fixture_v1_plain_only() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0x00, 0x00, 0x00, 0x01, // array length = 1
+            0x00, 0x05, // mechanism length = 5
+            b'P', b'L', b'A', b'I', b'N',
+        ];
+
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["PLAIN".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 1).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
+
+    /// Hex fixture: SaslHandshakeResponse v1 body for an error case —
+    /// `errorCode=UNSUPPORTED_SASL_MECHANISM (33)`, `mechanisms=[]`
+    /// (broker rejected, no mechanisms enabled — atypical, but used to
+    /// pin the i32(0) empty-array encoding).
+    ///
+    /// **Fixture provenance**: hand-derived.
+    ///
+    /// Wire layout:
+    /// - `00 21` — error_code = 33 (UNSUPPORTED_SASL_MECHANISM)
+    /// - `00 00 00 00` — array length = 0
+    #[test]
+    fn hex_fixture_v1_error_empty_mechanisms() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x21, // error_code = 33
+            0x00, 0x00, 0x00, 0x00, // array length = 0
+        ];
+
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::UnsupportedSaslMechanism.code(),
+            mechanisms: Vec::new(),
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 1).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
 }

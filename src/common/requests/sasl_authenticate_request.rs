@@ -268,4 +268,114 @@ mod tests {
         assert!(!dbg.contains("sensitive"), "Debug output leaked secret: {dbg}");
         assert!(dbg.contains("<redacted>"), "expected redaction marker: {dbg}");
     }
+
+    /// Hex fixture: SaslAuthenticateRequest v0 body — non-flexible
+    /// encoding for an RFC 4616 PLAIN authentication token
+    /// `\0username\0password` (here using "user"/"pass" for brevity,
+    /// 10 bytes total).
+    ///
+    /// **Fixture provenance**: hand-derived from
+    /// `SaslAuthenticateRequest.json` (apiKey 36, `flexibleVersions:
+    /// "2+"`) — at v0 the body uses `int32` length-prefixed bytes per
+    /// the non-flexible encoding rules. Awaiting Java-runtime byte
+    /// capture from the Apache Kafka 4.2 client. Independently
+    /// cross-checked against the `testInvalidSaslAuthenticateRequest`
+    /// Java test which asserts an `int32` length lives at the start of
+    /// the body for the chosen v1 (same shape as v0).
+    ///
+    /// Wire layout:
+    /// - `00 00 00 0A` — i32 byte-array length = 10
+    /// - 10 bytes — `\0user\0pass`
+    ///
+    /// Total: 14 bytes.
+    #[test]
+    fn hex_fixture_v0_plain_token() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, 0x00, 0x0A, // i32 length = 10
+            0x00, b'u', b's', b'e', b'r', // \0user
+            0x00, b'p', b'a', b's', b's', // \0pass
+        ];
+
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"\x00user\x00pass".to_vec(), unknown_tagged_fields: Vec::new() },
+            0,
+        );
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v0");
+        assert_eq!(
+            serialized.buffer(),
+            EXPECTED,
+            "SaslAuthenticateRequest v0 (PLAIN token) bytes diverged from the hex fixture"
+        );
+    }
+
+    /// Hex fixture: SaslAuthenticateRequest v1 body — same shape as v0
+    /// (spec: "Version 1 is the same as version 0").
+    ///
+    /// **Fixture provenance**: hand-derived.
+    #[test]
+    fn hex_fixture_v1_plain_token() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, 0x00, 0x0A, // i32 length = 10
+            0x00, b'u', b's', b'e', b'r', 0x00, b'p', b'a', b's', b's',
+        ];
+
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"\x00user\x00pass".to_vec(), unknown_tagged_fields: Vec::new() },
+            1,
+        );
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
+
+    /// Hex fixture: SaslAuthenticateRequest v2 body — flexible
+    /// encoding. The flex boundary (v1→v2) is the highest-priority byte
+    /// fidelity test per CLAUDE.md "wire-protocol byte-vector
+    /// divergence" risk #1.
+    ///
+    /// **Fixture provenance**: hand-derived from
+    /// `SaslAuthenticateRequest.json` (`flexibleVersions: "2+"`) —
+    /// at v2 the body uses compact-bytes (`unsignedVarint(len+1)`) and
+    /// a zero-length tagged-field trailer.
+    ///
+    /// Wire layout (12 bytes total):
+    /// - `0B` — unsigned-varint(11) = compact-bytes length+1 for a
+    ///   10-byte payload
+    /// - 10 bytes — `\0user\0pass`
+    /// - `00` — unsigned-varint(0) = zero tagged fields
+    #[test]
+    fn hex_fixture_v2_plain_token() {
+        const EXPECTED: &[u8] = &[
+            0x0B, // varint(11) = compact-bytes length+1
+            0x00, b'u', b's', b'e', b'r', 0x00, b'p', b'a', b's', b's', // payload (10 bytes)
+            0x00, // varint(0) = zero tagged fields
+        ];
+
+        let req = SaslAuthenticateRequest::new(
+            SaslAuthenticateRequestData { auth_bytes: b"\x00user\x00pass".to_vec(), unknown_tagged_fields: Vec::new() },
+            2,
+        );
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v2");
+        assert_eq!(
+            serialized.buffer(),
+            EXPECTED,
+            "SaslAuthenticateRequest v2 (flex boundary) bytes diverged from the hex fixture"
+        );
+    }
+
+    /// Hex fixture: SaslAuthenticateRequest v2 with empty auth_bytes —
+    /// pins the `varint(1) + varint(0)` encoding for an empty payload
+    /// at the flex boundary.
+    ///
+    /// **Fixture provenance**: hand-derived.
+    #[test]
+    fn hex_fixture_v2_empty_auth_bytes() {
+        const EXPECTED: &[u8] = &[
+            0x01, // varint(1) = compact-bytes length+1 for 0-byte payload
+            0x00, // varint(0) = zero tagged fields
+        ];
+
+        let req = SaslAuthenticateRequest::new(SaslAuthenticateRequestData::new(), 2);
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v2 empty");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
 }

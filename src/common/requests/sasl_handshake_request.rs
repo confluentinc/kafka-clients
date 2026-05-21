@@ -222,4 +222,81 @@ mod tests {
         let built = builder.build(1).expect("build");
         assert_eq!(built.version(), 1);
     }
+
+    /// Hex fixture: SaslHandshakeRequest v0 body for mechanism "PLAIN".
+    ///
+    /// **Fixture provenance**: hand-derived from `SaslHandshakeRequest.json`
+    /// (apiKey 17, `flexibleVersions: "none"`) — awaiting Java-runtime
+    /// byte capture from the Apache Kafka 4.2 client. Independently
+    /// verified against RFC 4422 / Kafka protocol guide for the
+    /// `string` type at non-flexible versions.
+    ///
+    /// Wire layout (no compact-string, no tagged-field trailer because
+    /// of `flexibleVersions: "none"`):
+    /// - `00 05` — i16 mechanism length = 5
+    /// - 5 bytes — "PLAIN"
+    ///
+    /// Total: 7 bytes.
+    #[test]
+    fn hex_fixture_v0_mechanism_plain() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x05, // i16 length = 5
+            b'P', b'L', b'A', b'I', b'N', // "PLAIN"
+        ];
+
+        let req = SaslHandshakeRequest::new(
+            SaslHandshakeRequestData { mechanism: "PLAIN".to_owned(), unknown_tagged_fields: Vec::new() },
+            0,
+        );
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v0");
+        let bytes = serialized.buffer();
+        assert_eq!(
+            bytes, EXPECTED,
+            "SaslHandshakeRequest v0 (mechanism=PLAIN) bytes diverged from the hex fixture"
+        );
+    }
+
+    /// Hex fixture: SaslHandshakeRequest v1 body for mechanism "PLAIN".
+    /// The JSON spec annotates v1 as the same shape as v0 — these bytes
+    /// should be byte-identical to the v0 fixture.
+    ///
+    /// **Fixture provenance**: hand-derived (see v0 fixture rustdoc).
+    #[test]
+    fn hex_fixture_v1_mechanism_plain() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x05, // i16 length = 5
+            b'P', b'L', b'A', b'I', b'N', // "PLAIN"
+        ];
+
+        let req = SaslHandshakeRequest::new(
+            SaslHandshakeRequestData { mechanism: "PLAIN".to_owned(), unknown_tagged_fields: Vec::new() },
+            1,
+        );
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v1");
+        assert_eq!(
+            serialized.buffer(),
+            EXPECTED,
+            "SaslHandshakeRequest v1 (mechanism=PLAIN) bytes diverged from the hex fixture; v1 must equal v0 (flexibleVersions=none)"
+        );
+    }
+
+    /// Hex fixture: SaslHandshakeRequest v1 body for mechanism
+    /// "SCRAM-SHA-512" — exercises a longer mechanism name to lock down
+    /// the length-prefix encoding more rigorously.
+    ///
+    /// **Fixture provenance**: hand-derived.
+    #[test]
+    fn hex_fixture_v1_mechanism_scram_sha_512() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x0D, // i16 length = 13
+            b'S', b'C', b'R', b'A', b'M', b'-', b'S', b'H', b'A', b'-', b'5', b'1', b'2',
+        ];
+
+        let req = SaslHandshakeRequest::new(
+            SaslHandshakeRequestData { mechanism: "SCRAM-SHA-512".to_owned(), unknown_tagged_fields: Vec::new() },
+            1,
+        );
+        let serialized = AbstractRequest::serialize(&req).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
 }
