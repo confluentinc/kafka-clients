@@ -1201,3 +1201,60 @@ producer_smoke_sasl_plaintext_1000_records` **PASSED** live
 against Apache Kafka 4.2 Docker in 8.35 s, retiring the Round 1
 regression.
 
+## Sub-phase 9d — Round 3 fixup pass
+
+Critic 9 reviewed Rounds 1+2 (commit ladder `111dcad..d7a4bf4`,
+2026-05-22) and raised 1 Suggestion + 2 Nits — all NOT BLOCKING,
+recommending accept-with-followups. Round 3 resolves S1 + N2 in-phase
+(per project precedent: 9a/9b/9c all closed with zero open comments)
+and acknowledges N1 as historical-no-action.
+
+- **S1 (resolved, `1806ad0`)** — Response-fixture rustdoc overclaim
+  on `sasl_handshake_response.rs:208-218` and
+  `sasl_authenticate_response.rs:334-348`. The Round 1 wording
+  ("empirically validates the hand-derived encoding") implied that
+  both encode and decode paths were pinned to Java's encoder output;
+  in reality the response **encoder** is never exercised in
+  production (the broker is the encoder; Rust is the decoder on the
+  response side). Tightened the provenance status to acknowledge
+  that the integration test validates response **decoding** against
+  Java's wire output, while the response **encoder**-side bytes
+  asserted by the fixtures remain hand-derived against spec rules
+  and pinned by decoder round-trip. Request-side fixtures
+  (`sasl_handshake_request.rs:238`, `sasl_authenticate_request.rs:
+  330`) left UNCHANGED — Critic explicitly approved them as
+  "genuinely empirically validated." Also tightened the parallel
+  Round 1 commit-summary narrative in this NOTES.md (the
+  `111dcad` test rustdoc description, Decision 2, and the `2073c26`
+  retire-pass scope) to call out the same request/response
+  asymmetry.
+- **N1 (no action — historical artifact)** — Commit-message
+  inconsistency between `111dcad` ("Live integration run not
+  exercised in this environment") and `89f90c1`'s Decision 3 ("ran
+  live with Docker available but FAILED"). The git history is
+  immutable. Critic 9 explicitly recommended no action for Phase
+  9d ("archived as historical artifact"). Process improvement for
+  future phases: when a commit-N status line goes stale between
+  commit-N and commit-N+M, a one-line correction note in
+  commit-N+M's body preempts reader-stumbles.
+- **N2 (resolved, `1806ad0`)** — Test-seam visibility marker.
+  Added single-line separator comments wrapping the two
+  `#[cfg(test)]` test seams (`debug_readable_watch_transport_ids`
+  and `debug_insert_channel`) on `impl Selector` to make their
+  test-only status visually obvious to readers skimming the
+  Selector API. The seams were NOT moved to the test module
+  because they need to be on `impl Selector` to access private
+  state (`self.channels`); the `#[cfg(test)]` attribute plus
+  separator is the right shape.
+
+**Status at close:** `cargo build` OK, `cargo build --features
+integration-tests` OK, `cargo xtask format-check` OK,
+`cargo xtask lint` OK, `cargo test --lib` **1343 passed**
+(unchanged — Round 3 is rustdoc + comment edits only, no test
+code touched). The live SASL_PLAINTEXT integration run was NOT
+re-executed in Round 3 (no code path changed; Round 2 verified
+it against the real broker in 8.35 s and the verification cannot
+regress from rustdoc edits).
+
+Phase 9d Rounds 1+2+3 closes; ready for final manager close.
+
