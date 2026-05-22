@@ -450,6 +450,32 @@ impl Selector {
         self.connect_tasks.len()
     }
 
+    /// Test-only: return the connection ids that the poll loop's
+    /// `wait_any_transport_readable` arm would register a waker on,
+    /// computed using the exact filter the production select arm uses.
+    /// Pins the Phase 9d Round 2 fix
+    /// (`wait_any_transport_readable_includes_mid_handshake_channels`).
+    #[cfg(test)]
+    fn debug_readable_watch_transport_ids(&self) -> Vec<ConnectionId> {
+        let mut ids: Vec<ConnectionId> = self
+            .channels
+            .iter()
+            .filter(|(_, c)| c.transport_layer_ref().is_open() && !c.is_muted())
+            .map(|(id, _)| *id)
+            .collect();
+        ids.sort_unstable();
+        ids
+    }
+
+    /// Test-only: insert a pre-built `KafkaChannel` directly into the
+    /// `channels` map. Used by tests that need to exercise filter
+    /// behaviour against synthetic mid-handshake channels without
+    /// driving the full connect path.
+    #[cfg(test)]
+    fn debug_insert_channel(&mut self, id: ConnectionId, channel: KafkaChannel) {
+        self.channels.insert(id, channel);
+    }
+
     /// Common helper: ensure no channel is registered under `id`.
     /// Mirrors Java's private `ensureNotRegistered(String)`.
     fn ensure_not_registered(&self, id: ConnectionId) -> Result<(), KafkaError> {
@@ -1121,12 +1147,33 @@ impl Selectable for Selector {
             // socket-readable event. Calling
             // `Selector::wakeup_notify_handle().notify_one()` from
             // any task now short-circuits the sleep.
+            //
+            // **Readability-watch filter (Phase 9d Round 2 fix)**: we
+            // watch every TCP-connected, non-muted channel — including
+            // ones whose authenticator has not yet completed. Java sets
+            // `OP_READ` at `finishConnect()` time
+            // (`PlaintextTransportLayer.java:51`,
+            // `SslTransportLayer.java:139-144`) *before* `channel.prepare()`
+            // drives the handshake/auth (`Selector.java:529-548`), and
+            // only `mute()` ever removes `OP_READ` from a connected
+            // channel (`KafkaChannel.java:254-267`). An earlier filter
+            // that required `c.ready()` excluded mid-SASL channels:
+            // their plaintext transport is open but the authenticator
+            // is incomplete. Without a waker registered on the SASL-
+            // handshake-in-progress socket, the only way the poll loop
+            // observes the broker's SASL response is the timeout
+            // backstop — adding ~`connection.setup.timeout.ms` of
+            // latency per SASL round-trip and blowing the setup budget
+            // (the Phase 9d Round 1 regression that
+            // `producer_smoke_sasl_plaintext_1000_records` surfaced; see
+            // also [`wait_any_transport_readable_includes_mid_handshake_channels`]
+            // below).
             let connect_rx = &mut self.connect_rx;
             let channels = &self.channels;
             let wakeup_notify = self.wakeup_notify.as_ref();
             let transports: Vec<&(dyn TransportLayer + Sync)> = channels
                 .values()
-                .filter(|c| c.ready() && c.transport_layer_ref().is_open())
+                .filter(|c| c.transport_layer_ref().is_open() && !c.is_muted())
                 .map(|c| c.transport_layer_sync_ref())
                 .collect();
             let mut connect_event_opt: Option<Option<ConnectEvent>> = None;
@@ -2533,5 +2580,238 @@ mod tests {
         );
         selector.close();
         server.shutdown().await;
+    }
+
+    /// Phase 9d Round 2 regression pin: a mid-handshake channel
+    /// (transport socket open, authenticator not yet complete) MUST
+    /// be included in the [`wait_any_transport_readable`] watch set,
+    /// or the poll loop will sleep through the broker's SASL response
+    /// (the Phase 9d Round 1 regression that
+    /// `producer_smoke_sasl_plaintext_1000_records` surfaced live).
+    ///
+    /// Java parity: `OP_READ` is set at `finishConnect()` time and
+    /// removed only by explicit `mute()` — `PlaintextTransportLayer.java:51`,
+    /// `KafkaChannel.java:254-267`, `Selector.java:529-548`.
+    ///
+    /// The test asserts three states against the same filter the
+    /// production `select!` arm uses (exposed via
+    /// [`Selector::debug_readable_watch_transport_ids`]):
+    ///
+    /// 1. Mid-handshake channel (`is_open()==true`, `ready()==false`):
+    ///    INCLUDED (regression case — was excluded under the old
+    ///    `c.ready() && is_open()` filter).
+    /// 2. Closed transport (`is_open()==false`): EXCLUDED — the socket
+    ///    is dead, no reads will arrive.
+    /// 3. Muted channel: EXCLUDED — Java parity for `OP_READ` removal
+    ///    on `mute()`.
+    #[tokio::test]
+    async fn wait_any_transport_readable_includes_mid_handshake_channels() {
+        use std::sync::Mutex;
+
+        use crate::common::network::authenticator::{Authenticator, ChannelAuthenticator, SaslAuthenticator};
+        use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+        use crate::common::network::transport_layer::OP_READ;
+        use crate::common::network::{TransferableChannel, TransportLayer};
+        use crate::common::security::auth::KafkaPrincipal;
+
+        /// Mock state shared between the test and the mock transport
+        /// so the test can flip `is_open` after construction (mirroring
+        /// Mockito's `when(transport.isOpen()).thenReturn(...)`).
+        struct MockState {
+            is_open: bool,
+            interest_ops: i32,
+        }
+
+        /// Minimal `TransportLayer` mock. Reports the configurable
+        /// `is_open()` flag from `MockState`; every other method has
+        /// the smallest sensible default for a non-driven channel.
+        struct MockTransport {
+            state: Arc<Mutex<MockState>>,
+        }
+
+        impl TransferableChannel for MockTransport {
+            fn write_vectored(&mut self, _bufs: &[std::io::IoSlice<'_>]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn has_pending_writes(&self) -> bool {
+                false
+            }
+        }
+
+        impl TransportLayer for MockTransport {
+            fn ready(&self) -> bool {
+                // Plaintext transport is always "ready" once the socket
+                // is established — the Java
+                // `PlaintextTransportLayer.ready()` always returns
+                // true. This is the case that exposed the bug: the
+                // transport is ready but the authenticator is not.
+                true
+            }
+            fn finish_connect(&mut self) -> std::io::Result<bool> {
+                Ok(true)
+            }
+            fn disconnect(&mut self) {}
+            fn is_connected(&self) -> bool {
+                self.state.lock().unwrap().is_open
+            }
+            fn is_open(&self) -> bool {
+                self.state.lock().unwrap().is_open
+            }
+            fn close(&mut self) -> std::io::Result<()> {
+                self.state.lock().unwrap().is_open = false;
+                Ok(())
+            }
+            fn read(&mut self, _dst: &mut [u8]) -> std::io::Result<usize> {
+                Ok(0)
+            }
+            fn handshake(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn peer_principal(&self) -> std::io::Result<KafkaPrincipal> {
+                Ok(KafkaPrincipal::anonymous())
+            }
+            fn add_interest_ops(&mut self, ops: i32) {
+                self.state.lock().unwrap().interest_ops |= ops;
+            }
+            fn remove_interest_ops(&mut self, ops: i32) {
+                self.state.lock().unwrap().interest_ops &= !ops;
+            }
+            fn interest_ops(&self) -> i32 {
+                self.state.lock().unwrap().interest_ops
+            }
+            fn is_mute(&self) -> bool {
+                let s = self.state.lock().unwrap();
+                s.is_open && (s.interest_ops & OP_READ) == 0
+            }
+            fn has_bytes_buffered(&self) -> bool {
+                false
+            }
+            fn local_addr(&self) -> std::io::Result<SocketAddr> {
+                Ok(SocketAddr::from(([127, 0, 0, 1], 0)))
+            }
+            fn peer_addr(&self) -> std::io::Result<SocketAddr> {
+                Ok(SocketAddr::from(([127, 0, 0, 1], 9092)))
+            }
+        }
+
+        /// Stub SASL authenticator: `complete()` is configurable so
+        /// the test can model "mid-handshake" (`false`) vs "auth done"
+        /// (`true`). `authenticate` and `principal` are unused by the
+        /// filter under test.
+        struct StubSaslAuthenticator {
+            complete: bool,
+        }
+
+        impl SaslAuthenticator for StubSaslAuthenticator {
+            fn authenticate(&mut self, _transport: &mut dyn TransportLayer) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn principal(&self, _transport: &dyn TransportLayer) -> KafkaPrincipal {
+                KafkaPrincipal::anonymous()
+            }
+            fn complete(&self) -> bool {
+                self.complete
+            }
+        }
+
+        /// Plaintext-always-complete authenticator — the "auth done"
+        /// reference case. Mirrors `PlaintextAuthenticator` but kept
+        /// local so the test doesn't drag in unrelated module state.
+        struct AlwaysCompletePlaintext;
+
+        impl Authenticator for AlwaysCompletePlaintext {
+            fn authenticate(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+            fn principal(&self, _transport: &dyn TransportLayer) -> KafkaPrincipal {
+                KafkaPrincipal::anonymous()
+            }
+            fn complete(&self) -> bool {
+                true
+            }
+        }
+
+        // Helper: build a KafkaChannel with the given is_open / auth
+        // states, ready to be inserted directly into the selector via
+        // `debug_insert_channel`.
+        fn build_channel(
+            id: ConnectionId,
+            is_open: bool,
+            sasl_complete: bool,
+        ) -> (KafkaChannel, Arc<Mutex<MockState>>) {
+            let state = Arc::new(Mutex::new(MockState { is_open, interest_ops: OP_READ }));
+            let transport = MockTransport { state: Arc::clone(&state) };
+            let auth = ChannelAuthenticator::sasl(StubSaslAuthenticator { complete: sasl_complete });
+            let channel = KafkaChannel::new(
+                Arc::from(id.to_string()),
+                Box::new(transport),
+                auth,
+                1024,
+                Box::new(DefaultChannelMetadataRegistry::new()),
+            );
+            (channel, state)
+        }
+
+        let mut selector = make_selector(NO_IDLE_TIMEOUT_MS, SystemTime::instance());
+
+        // Case A: mid-handshake channel — transport is_open + SASL
+        // not yet complete. Under the old filter (`c.ready() &&
+        // is_open()`), this channel was EXCLUDED — the Phase 9d Round 1
+        // regression. The fix includes it.
+        let (mid_handshake, _state_a) = build_channel(1, /*is_open=*/ true, /*sasl=*/ false);
+        assert!(
+            !mid_handshake.ready(),
+            "test precondition: channel must NOT be ready (auth incomplete)"
+        );
+        assert!(
+            mid_handshake.transport_layer_ref().is_open(),
+            "test precondition: transport must be open"
+        );
+        assert!(!mid_handshake.is_muted(), "test precondition: channel must not be muted");
+        selector.debug_insert_channel(1, mid_handshake);
+
+        // Case B: closed transport — must be EXCLUDED regardless of
+        // auth state. (No socket to read from.)
+        let (closed_chan, _state_b) = build_channel(2, /*is_open=*/ false, /*sasl=*/ false);
+        selector.debug_insert_channel(2, closed_chan);
+
+        // Case C: muted, fully-ready channel — must be EXCLUDED.
+        // Java parity: `mute()` clears `OP_READ`; readability watch
+        // must respect that.
+        let (mut muted_ready, _state_c) = build_channel(3, /*is_open=*/ true, /*sasl=*/ true);
+        // The plaintext-always-complete authenticator pin: replace the
+        // SASL stub with the always-complete one so `ready()` is true,
+        // then mute. (We reuse the SASL-with-complete=true stub which
+        // is operationally equivalent for `ready()`.)
+        muted_ready.mute();
+        assert!(muted_ready.is_muted(), "test precondition: channel C must be muted");
+        selector.debug_insert_channel(3, muted_ready);
+
+        // Case D: a "fully ready, not muted" baseline — must be
+        // INCLUDED so the test pins the positive case too.
+        let state_d = Arc::new(Mutex::new(MockState { is_open: true, interest_ops: OP_READ }));
+        let transport_d = MockTransport { state: Arc::clone(&state_d) };
+        let auth_d = ChannelAuthenticator::network(AlwaysCompletePlaintext);
+        let ready_chan = KafkaChannel::new(
+            Arc::from("4"),
+            Box::new(transport_d),
+            auth_d,
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        assert!(ready_chan.ready(), "test precondition: channel D must be ready");
+        selector.debug_insert_channel(4, ready_chan);
+
+        // Run the filter via the test accessor and assert exactly
+        // channels 1 (mid-handshake) and 4 (fully ready) are watched.
+        let watched = selector.debug_readable_watch_transport_ids();
+        assert_eq!(
+            watched,
+            vec![1, 4],
+            "Phase 9d Round 2 filter must include mid-handshake (id 1) and ready (id 4) channels; \
+             must exclude closed (id 2) and muted (id 3). Got {watched:?}"
+        );
+
+        selector.close();
     }
 }
