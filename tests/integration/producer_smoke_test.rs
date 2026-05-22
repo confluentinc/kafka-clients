@@ -843,6 +843,10 @@ async fn producer_smoke_sasl_plaintext_1000_records() {
     // Shape (exactly as `parse_plain_jaas_config` recognises):
     //   `<PLAIN_LOGIN_MODULE> required username="<u>" password="<p>";`
     // Imported from the SASL-side JAAS parser to guarantee parity.
+    //
+    // Phase 9d Round 2: exercised live against Apache Kafka 4.2 after
+    // the `Selector::poll` readability-filter fix landed; see commit
+    // `Phase 9d Round 2 fixup — selector readability filter Java parity`.
     let jaas_config = format!(
         r#"{module} required username="{user}" password="{pass}";"#,
         module = confluent_kafka::common::security::jaas_config::PLAIN_LOGIN_MODULE,
