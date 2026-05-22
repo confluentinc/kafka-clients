@@ -242,6 +242,18 @@ impl From<ConsumerError> for KafkaError {
     /// is retriable (`RequestTimedOut`), so `KafkaError::is_retriable()` returns
     /// `true` for it. All other variants flow through `IllegalState` (matching
     /// Java's classification of these as non-retriable `KafkaException`s).
+    ///
+    /// NOTE (Phase 1 design choice, per Critic comment #3): this mapping
+    /// flattens `OffsetOutOfRange`, `NoOffsetForPartition`, `LogTruncation`,
+    /// and `InvalidOffset` into `KafkaError::IllegalState`. The underlying
+    /// classification (e.g. `Errors::OffsetOutOfRange`) is preserved on
+    /// the `ConsumerError` itself but lost after the `?`-conversion.
+    /// Callers needing structured classification (e.g. matching on
+    /// `Errors::OffsetOutOfRange`) should pattern-match on `ConsumerError`
+    /// directly before propagating with `?`, or use the dedicated accessors
+    /// (`offset_out_of_range_partitions`, `divergent_offsets`, `partitions`).
+    /// This is by design for Phase 1; a future phase may revisit and route
+    /// these variants through their concrete `Errors::*` codes.
     fn from(e: ConsumerError) -> Self {
         match &e {
             ConsumerError::RetriableCommitFailed { .. } => {

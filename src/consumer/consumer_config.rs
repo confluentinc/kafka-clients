@@ -548,6 +548,31 @@ impl ConsumerConfig {
     /// Returns [`KafkaError::IllegalArgument`] if a value cannot be parsed
     /// for its expected type, or fails its validator.
     pub fn from_properties(props: &HashMap<String, String>) -> Result<Self, KafkaError> {
+        // NOTE: 16 of Java's per-field `atLeast(..)` numeric validators
+        // (ConsumerConfig.java lines 415-710) are intentionally deferred to
+        // Phase 11, when `post_process_parsed_config` is translated. Until
+        // that lands, negative / out-of-range values are silently accepted
+        // for the following keys (Java line numbers in parentheses):
+        //   - `max.poll.interval.ms`                          atLeast(1)  (632)
+        //   - `metadata.max.age.ms`                           atLeast(0)  (455)
+        //   - `auto.commit.interval.ms`                       atLeast(0)  (466)
+        //   - `max.partition.fetch.bytes`                     atLeast(0)  (482)
+        //   - `send.buffer.bytes`         atLeast(SEND_BUFFER_LOWER_BOUND) (488)
+        //   - `receive.buffer.bytes`   atLeast(RECEIVE_BUFFER_LOWER_BOUND) (494)
+        //   - `fetch.min.bytes`                               atLeast(0)  (500)
+        //   - `fetch.max.bytes`                               atLeast(0)  (506)
+        //   - `fetch.max.wait.ms`                             atLeast(0)  (512)
+        //   - `reconnect.backoff.ms`                          atLeast(0L) (518)
+        //   - `reconnect.backoff.max.ms`                      atLeast(0L) (524)
+        //   - `retry.backoff.ms`                              atLeast(0L) (530)
+        //   - `retry.backoff.max.ms`                          atLeast(0L) (536)
+        //   - `request.timeout.ms`                            atLeast(0)  (590)
+        //   - `default.api.timeout.ms`                        atLeast(0)  (596)
+        //   - `metrics.sample.window.ms`                      atLeast(0)  (558)
+        //   - `metrics.num.samples`                           atLeast(1)  (564)
+        //   - `metadata.recovery.rebootstrap.trigger.ms`      atLeast(0)  (689)
+        // The currently-translated validators are `max.poll.records >= 1`
+        // and the string-enum keys.
         let mut config = Self::default();
 
         for (key, value) in props {
