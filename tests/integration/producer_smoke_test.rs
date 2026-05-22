@@ -785,6 +785,185 @@ async fn producer_smoke_ssl_1000_records() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1c: 1000 records over SASL_PLAINTEXT + PLAIN credentials (Phase 9d)
+// ---------------------------------------------------------------------------
+
+/// Same flow as [`producer_smoke_plaintext_1000_records`] but over the
+/// broker's `SASL_PLAINTEXT` listener with the PLAIN mechanism and a
+/// canonical `sasl.jaas.config` string. Sends 1000 explicit-partition
+/// records and asserts the same ack/shape/per-partition-monotonic-
+/// offset/multi-partition-coverage contract — proving the SASL handshake
+/// + PLAIN credential exchange wired through Phase 9a (state machine) +
+/// Phase 9b (channel + config plumbing) interoperate with the real
+/// Apache Kafka 4.2 broker end-to-end.
+///
+/// **Java-runtime cross-verification of the SASL hex fixtures.** A
+/// successful PLAIN handshake against the real Java 4.2 broker
+/// empirically validates the 14 hand-derived hex fixtures captured in
+/// `src/common/requests/sasl_*.rs` — the broker rejects malformed
+/// SASL frames at the wire level, so byte-level divergence in any of
+/// `SaslHandshake{Request,Response}` or `SaslAuthenticate{Request,
+/// Response}` would surface as an authentication failure or connection
+/// drop. Reaching ack #1000 means every byte the producer put on the
+/// wire matched what the Java broker expected. This retires the Phase
+/// 9.0 / 9b / 9c "awaiting Java-runtime byte capture" carry-over
+/// (NOTES.md `Sub-phase 9.0 — closed`, `Fixture provenance note`).
+///
+/// **Listener port.** The test cluster's `SASL_PLAINTEXT` listener
+/// binds container port `9095` (per `tests/common/kafka_cluster.rs:
+/// SASL_PLAINTEXT_PORT`). PLAN.md and the original sub-phase ladder
+/// referenced `9094` as a hypothetical port; the repo scaffolding is
+/// the source of truth and the listener is on 9095. The
+/// `ctx.sasl_plaintext_bootstrap_servers()` accessor returns the host-
+/// mapped port automatically.
+///
+/// **Credentials.** Uses `SASL_USERNAME` + `SASL_PASSWORD` from
+/// `tests/common/kafka_cluster.rs` (canonical broker-side credentials
+/// configured in the test JAAS file). The `sasl.jaas.config` string is
+/// composed inline using `PLAIN_LOGIN_MODULE`, mirroring the exact
+/// shape `src/common/security/jaas_config.rs` parses (the canonical
+/// Java source path — the `sasl.username` / `sasl.password` shortcut
+/// is intentionally unit-pinned in Phase 9b, not retested here).
+///
+/// **References:** PLAN.md:381 (Phase 9d), `NOTES.md:49` (sub-phase
+/// ladder), `NOTES.md:78` (multi-listener topology), CLAUDE.md "wire-
+/// protocol byte-vector divergence" risk #1.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_smoke_sasl_plaintext_1000_records() {
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_1000_sasl_plaintext");
+    let bootstrap_servers = ctx.sasl_plaintext_bootstrap_servers().to_string();
+
+    // Topic pre-creation via `docker exec kafka-topics`.
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    // Compose the canonical Java `sasl.jaas.config` string for PLAIN.
+    // Shape (exactly as `parse_plain_jaas_config` recognises):
+    //   `<PLAIN_LOGIN_MODULE> required username="<u>" password="<p>";`
+    // Imported from the SASL-side JAAS parser to guarantee parity.
+    let jaas_config = format!(
+        r#"{module} required username="{user}" password="{pass}";"#,
+        module = confluent_kafka::common::security::jaas_config::PLAIN_LOGIN_MODULE,
+        user = crate::common::kafka_cluster::SASL_USERNAME,
+        pass = crate::common::kafka_cluster::SASL_PASSWORD,
+    );
+
+    // Build props inline — `build_props` is PLAINTEXT-only; no
+    // truststore plumbing (plaintext transport under SASL framing).
+    let props: HashMap<String, String> = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers),
+        ("acks".to_string(), "all".to_string()),
+        ("linger.ms".to_string(), "10".to_string()),
+        ("compression.type".to_string(), "none".to_string()),
+        ("client.id".to_string(), "producer-smoke-test-sasl-plaintext".to_string()),
+        (
+            "key.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        (
+            "value.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        ("security.protocol".to_string(), "SASL_PLAINTEXT".to_string()),
+        ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+        ("sasl.jaas.config".to_string(), jaas_config),
+    ]);
+
+    let key_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let value_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let producer = Arc::new(
+        KafkaProducer::with_serializers(props, key_ser, value_ser).expect("KafkaProducer::with_serializers failed"),
+    );
+
+    // Identical send loop + assertions as the PLAINTEXT/SSL tests above.
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+    let mut futures = Vec::with_capacity(HAPPY_PATH_RECORDS);
+    for i in 0..HAPPY_PATH_RECORDS {
+        let topic = topic_arc.clone();
+        let key = format!("k{i:04}").into_bytes();
+        let value = format!("v{i:04}").into_bytes();
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        let record = ProducerRecord::with_partition(topic, Some(expected_partition), Some(key), Some(value))
+            .expect("ProducerRecord::with_partition");
+        let fut = producer
+            .send(record)
+            .await
+            .unwrap_or_else(|e| panic!("send #{i} enqueue failed: {e:?}"));
+        futures.push(fut);
+    }
+
+    let results = futures_util::future::join_all(futures.into_iter().map(|f| async move { f.get().await })).await;
+    let mut metadatas: Vec<RecordMetadata> = Vec::with_capacity(HAPPY_PATH_RECORDS);
+    for (i, r) in results.into_iter().enumerate() {
+        let meta = r.unwrap_or_else(|e| panic!("send #{i} broker ack failed: {e:?}"));
+        metadatas.push(meta);
+    }
+
+    // (1) Ack count.
+    assert_eq!(
+        metadatas.len(),
+        HAPPY_PATH_RECORDS,
+        "expected {HAPPY_PATH_RECORDS} acked records, got {}",
+        metadatas.len(),
+    );
+
+    // (2) + (3) RecordMetadata shape + partition consistency.
+    for (i, m) in metadatas.iter().enumerate() {
+        let expected_partition = (i as i32) % TOPIC_PARTITIONS;
+        assert_eq!(m.topic(), topic.as_str(), "record #{i}: topic mismatch");
+        assert_eq!(
+            m.partition(),
+            expected_partition,
+            "record #{i}: partition mismatch — expected {expected_partition} (explicit), got {}",
+            m.partition(),
+        );
+        assert!(
+            (0..TOPIC_PARTITIONS).contains(&m.partition()),
+            "record #{i}: partition {} not in [0, {})",
+            m.partition(),
+            TOPIC_PARTITIONS,
+        );
+        assert!(m.offset() >= 0, "record #{i}: negative offset {}", m.offset());
+        assert!(m.has_timestamp(), "record #{i}: timestamp is -1 (NO_TIMESTAMP)");
+    }
+
+    // (4) Per-partition monotonic offsets.
+    let mut by_partition: HashMap<i32, Vec<i64>> = HashMap::new();
+    for m in &metadatas {
+        by_partition.entry(m.partition()).or_default().push(m.offset());
+    }
+    for (partition, offsets) in &by_partition {
+        for w in offsets.windows(2) {
+            assert!(
+                w[0] < w[1],
+                "partition {partition}: offsets not strictly monotonic — prev={} curr={} (full: {offsets:?})",
+                w[0],
+                w[1],
+            );
+        }
+    }
+
+    // (5) Multi-partition coverage.
+    let partitions: HashSet<i32> = metadatas.iter().map(RecordMetadata::partition).collect();
+    assert_eq!(
+        partitions.len(),
+        TOPIC_PARTITIONS as usize,
+        "expected all {TOPIC_PARTITIONS} partitions to see traffic, got {} (partitions: {partitions:?})",
+        partitions.len(),
+    );
+
+    let producer = Arc::into_inner(producer).expect("producer Arc had outstanding refs at close");
+    producer
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: 1000-record auto-partition consistency (Phase 8b)
 // ---------------------------------------------------------------------------
 
