@@ -1042,16 +1042,6 @@ SASL hex fixtures empirically validated by the new test.
 
 **Phase 9d deferrals (carried into 9e+):**
 
-- **SASL_PLAINTEXT live-run regression** — surfaced by the 9d
-  integration test. The first SASL_PLAINTEXT connection
-  succeeds; subsequent connections time out at `socket
-  .connection.setup.timeout.ms`. Producer-side bug not
-  attributable to the 9d test code itself; investigation +
-  fix belongs in a 9d Round 2 fixup pass (per Critic 9
-  review) or as a Phase 9e blocker. The fix may live in
-  Selector connection management, NetworkClient connection
-  re-use, or the SASL channel builder's interaction with the
-  Phase 9c.2 SNI host-stash flow.
 - **SASL_SSL integration test** — Phase 9e. Producer-side
   gate currently rejects SASL_SSL? No — Phase 9c.3 lifted the
   gate. Integration test still needed.
@@ -1096,4 +1086,93 @@ Decision 3 above). The regression is filed as a Phase 9d
 deferral; the next Round / Phase 9e Actor should investigate and
 fix the producer-side SASL_PLAINTEXT connection-reuse path
 before relying on 9d as a green gate.
+
+## Sub-phase 9d — Round 2 fixup pass
+
+Round 1 surfaced a producer-side regression (Decision 3 above):
+the first SASL_PLAINTEXT connection succeeded but the second
+connection (post-metadata, to node 1) timed out at
+`connection.setup.timeout.ms`, looping through bootstrap retries
+until batches expired at 120 s. PLAINTEXT and SSL integration
+tests passed. Round 2 isolates and fixes the root cause.
+
+**Root cause.** `Selector::poll`'s `wait_any_transport_readable`
+arm — the Tokio equivalent of Java's `nio.Selector.select(timeout)`
+on per-channel `OP_READ` — filtered channels by
+`c.ready() && transport.is_open()`. `KafkaChannel::ready()` is
+`transport.ready() && authenticator.complete()`. A mid-SASL channel
+has `transport.ready() == true` (plaintext) but
+`authenticator.complete() == false`, so the channel was
+**excluded** from the readability watch. When the broker's SASL
+response bytes arrived, no Tokio waker fired for the SASL
+channel's socket — the poll loop only woke via the
+`tokio::time::sleep(timeout_ms)` backstop. Each of the three SASL
+round-trips therefore waited a full sleep period, blowing the
+8.5 s connection-setup budget. TLS handshake worked under the
+same filter because rustls's `process_new_packets` consumes
+batched TLS records in one `drive_channel_io` call (TLS
+effectively completes in one or two round-trips with a single
+timeout wait).
+
+**Java parity** (file references against Apache Kafka 4.2):
+
+- `PlaintextTransportLayer.finishConnect()`
+  (`PlaintextTransportLayer.java:48-53`) sets `OP_READ`
+  immediately on TCP connect completion, BEFORE any
+  handshake/auth.
+- `SslTransportLayer.finishConnect()`
+  (`SslTransportLayer.java:139-144`) does the same.
+- `Selector.pollSelectionKeys()` (`Selector.java:525-548`) calls
+  `finishConnect()` (sets `OP_READ` as side effect) BEFORE
+  `channel.prepare()` drives handshake/auth.
+- `KafkaChannel.mute()/maybeUnmute()`
+  (`KafkaChannel.java:252-269`) remove/restore `OP_READ`. Mute
+  is the ONLY way `OP_READ` is removed from a connected channel.
+- `PlaintextTransportLayer.isMute()`
+  (`PlaintextTransportLayer.java:202-205`) ≡
+  `(key.interestOps() & OP_READ) == 0`.
+
+Java's rule: `OP_READ` is set continuously from `finishConnect()`
+onward, removed only on explicit `mute()`. The Rust translation
+now matches: the filter is
+`c.transport_layer_ref().is_open() && !c.is_muted()`.
+
+**Commits:**
+
+- `440e1bb` — **Phase 9d Round 2 fixup — selector readability
+  filter Java parity (fixup! 111dcad).** Replaces the
+  `wait_any_transport_readable` filter and adds a unit test
+  `wait_any_transport_readable_includes_mid_handshake_channels`
+  that pins the new behaviour against four synthetic channels
+  (mid-handshake, closed, muted, fully-ready). The test was
+  verified to FAIL with the old filter (captured ids
+  `[3 (muted), 4 (ready)]` instead of the required
+  `[1 (mid_handshake), 4 (ready)]`) and PASS with the new
+  filter, proving both the regression case (mid-handshake
+  inclusion) and the Java mute parity (muted exclusion) are
+  pinned. Test accessors `debug_readable_watch_transport_ids`
+  and `debug_insert_channel` added under `#[cfg(test)]` so the
+  test exercises the exact production filter without driving a
+  real socket through a SASL handshake.
+- `2ad2760` — **Phase 9d Round 2 — live verification:
+  producer_smoke_sasl_plaintext_1000_records passes against
+  real broker.** Documents the live cargo-test run against
+  Apache Kafka 4.2 Docker: exit 0, 8.35 s, cluster ID
+  `5L6g3nShT-eMCtK--X86sw` (within the 60 s budget and
+  comparable to the 10 s PLAINTEXT and 15 s SSL runs). Adds a
+  one-line rustdoc note near the JAAS config block in
+  `tests/integration/producer_smoke_test.rs`. No behavioural
+  changes.
+- HEAD (this commit) — **Phase 9d Round 2 close — selector
+  readability filter fix verified live.**
+
+**Status at close:** `cargo build` OK, `cargo build --features
+integration-tests` OK, `cargo xtask format-check` OK,
+`cargo xtask lint` OK, `cargo test --lib` **1343 passed** (+1
+versus the Round 1 close baseline of 1342 — the new
+`wait_any_transport_readable_includes_mid_handshake_channels`
+unit test). `cargo test --features integration-tests
+producer_smoke_sasl_plaintext_1000_records` **PASSED** live
+against Apache Kafka 4.2 Docker in 8.35 s, retiring the Round 1
+regression.
 
