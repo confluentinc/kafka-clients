@@ -61,10 +61,12 @@ impl CloseOptions {
 
     /// Static method to create a `CloseOptions` with a custom timeout.
     ///
-    /// A `None` timeout means the default timeout will be used.
-    ///
-    /// Corresponds to Java's static `CloseOptions.timeout(Duration)`.
-    pub fn timeout(timeout: Option<Duration>) -> Self {
+    /// Corresponds to Java's static `CloseOptions.timeout(Duration)`. Java
+    /// accepts a nullable `Duration` here and internally wraps it via
+    /// `Optional.ofNullable`; Rust's type system makes `Duration` non-null,
+    /// so for "no timeout, use default" callers should use
+    /// [`CloseOptions::default`] (or omit the call to `timeout`).
+    pub fn timeout(timeout: Duration) -> Self {
         Self::empty().with_timeout(timeout)
     }
 
@@ -79,9 +81,14 @@ impl CloseOptions {
 
     /// Fluent setter for the close timeout.
     ///
-    /// A `None` timeout means the default timeout will be used.
-    pub fn with_timeout(mut self, timeout: Option<Duration>) -> Self {
-        self.timeout = timeout;
+    /// Corresponds to Java's `CloseOptions.withTimeout(Duration)` which
+    /// accepts a nullable `Duration`. In Rust, `Duration` is non-null; the
+    /// internal `Option<Duration>` field always becomes `Some(timeout)`
+    /// after this call. Callers wanting "no timeout, use default" should
+    /// leave the field at its default by skipping this setter (or via
+    /// [`CloseOptions::default`]).
+    pub fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = Some(timeout);
         self
     }
 
@@ -127,7 +134,7 @@ mod tests {
 
     #[test]
     fn test_timeout_constructor() {
-        let opts = CloseOptions::timeout(Some(Duration::from_secs(1)));
+        let opts = CloseOptions::timeout(Duration::from_secs(1));
         assert_eq!(opts.timeout_value(), Some(Duration::from_secs(1)));
         assert_eq!(opts.group_membership_operation_value(), GroupMembershipOperation::Default);
     }

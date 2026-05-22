@@ -27,16 +27,20 @@ use confluent_kafka::consumer::{CloseOptions, GroupMembershipOperation};
 /// Translated from `CloseOptionsTest.operationShouldHaveDefaultValue`.
 #[test]
 fn operation_should_have_default_value() {
-    let opts = CloseOptions::timeout(Some(Duration::ZERO));
+    let opts = CloseOptions::timeout(Duration::ZERO);
     assert_eq!(opts.group_membership_operation_value(), GroupMembershipOperation::Default);
 }
 
 /// Translated from `CloseOptionsTest.timeoutCouldBeNull`.
+///
+/// Java passes `null` for the `Duration` to verify the field stays
+/// `Optional.empty()`. Rust's `Duration` is non-null; the equivalent
+/// "no timeout set" path is the no-arg [`CloseOptions::default`]
+/// constructor, which leaves the internal `Option<Duration>` field as
+/// `None`.
 #[test]
 fn timeout_could_be_null() {
-    // Java passes `null` for the duration; in Rust the API explicitly uses
-    // `Option<Duration>`, so we pass `None`.
-    let close_options = CloseOptions::timeout(None);
+    let close_options = CloseOptions::default();
     assert_eq!(close_options.timeout_value(), None);
 }
 
