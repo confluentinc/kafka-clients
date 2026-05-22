@@ -52,7 +52,7 @@ impl ConsumerGroupMetadata {
     /// Corresponds to Java's `new ConsumerGroupMetadata(String)`. Java marks
     /// the constructor `@Deprecated(since = "4.2", forRemoval = true)`.
     #[deprecated(
-        since = "4.2",
+        since = "4.2.0",
         note = "Use Consumer::group_metadata() instead. This struct will become a trait in a future release."
     )]
     pub fn new(group_id: impl Into<String>) -> Self {
@@ -65,7 +65,7 @@ impl ConsumerGroupMetadata {
     /// Corresponds to Java's 4-arg constructor. Java marks this constructor
     /// `@Deprecated(since = "4.2", forRemoval = true)`.
     #[deprecated(
-        since = "4.2",
+        since = "4.2.0",
         note = "Use Consumer::group_metadata() instead. This struct will become a trait in a future release."
     )]
     pub fn with_details(
