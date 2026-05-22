@@ -1258,3 +1258,121 @@ regress from rustdoc edits).
 
 Phase 9d Rounds 1+2+3 closes; ready for final manager close.
 
+## Sub-phase 9e — closed (Round 1)
+
+Sub-phase 9e adds the SASL_SSL + PLAIN credentials producer-side
+integration test — the combined-transport leg of the Phase-9
+integration ladder. The 9d Round 2 selector readability-filter fix
+covers the combined TLS-then-SASL handshake by parity; 9e empirically
+validates that parity end-to-end against the real Apache Kafka 4.2
+broker. No wiring changes were required — the test is a pure
+test-add phase.
+
+**Commit ladder (2 commits):**
+
+- `a2de19d` — **Phase 9e (1/N): producer-smoke SASL_SSL integration
+  test — TLS + PLAIN combined transport.** Adds
+  `producer_smoke_sasl_ssl_1000_records` to
+  `tests/integration/producer_smoke_test.rs` between
+  `producer_smoke_sasl_plaintext_1000_records` (Phase 9d) and the
+  Test 2 auto-partition block (Phase 8b). Combines the truststore +
+  IP-SAN endpoint-identification shape from
+  `producer_smoke_ssl_1000_records` (Phase 9c) with the canonical
+  `sasl.jaas.config` JAAS-config credential shape from
+  `producer_smoke_sasl_plaintext_1000_records` (Phase 9d). Sends
+  1000 explicit-partition records over the broker's SASL_SSL
+  listener (container port 9097, host-mapped via
+  `ctx.sasl_ssl_bootstrap_servers()`), asserts the same five
+  contracts as the sibling tests, and exercises
+  `SaslChannelBuilder::build_sasl_ssl_channel`
+  (`src/common/network/sasl_channel_builder.rs:164`) end-to-end. Live
+  run: **PASS** in **7.84 s** against Apache Kafka 4.2 Docker,
+  cluster ID `5L6g3nShT-eMCtK--X86sw` (warm `cluster_pool` reuse
+  from 9d's verification — comparable to the 4–15 s SSL /
+  SASL_PLAINTEXT runtimes).
+- HEAD (this commit) — **Phase 9e (final/N): sub-phase 9e close
+  stanza in NOTES.md.**
+
+**Decisions made inside the 9e brief:**
+
+1. **Single TLS hostname-check variant: `https` only.**
+   `endpoint.identification.algorithm=https` (consistent with 9c —
+   broker cert carries `127.0.0.1` IP-SAN, so rustls performs an
+   IP-SAN match against the IP-literal bootstrap address; SNI itself
+   is omitted per RFC 6066 §3 for IP literals). The
+   disabled-hostname-check variant is intentionally not retested at
+   9e because (a) 9c's `NoHostnameVerifier` unit tests already pin
+   chain validation under that mode, and (b) running a second
+   integration test would duplicate cluster-startup cost without
+   producing new wire-level evidence.
+2. **Single credential path: canonical `sasl.jaas.config`.**
+   Consistent with 9d's same decision — composed inline from
+   `PLAIN_LOGIN_MODULE` + the broker-side `SASL_USERNAME` /
+   `SASL_PASSWORD` constants. The `sasl.username` / `sasl.password`
+   shortcut is unit-pinned in Phase 9b and not retested here.
+3. **No wiring defect encountered in `build_sasl_ssl_channel` or
+   downstream.** Manager 9's prediction held: the post-9d-Round-2
+   `Selector::poll` readability filter (`c.transport_layer_ref().
+   is_open() && !c.is_muted()` — Java's
+   `OP_READ`-from-finishConnect-until-mute rule from
+   `Selector.java:525-548` and `KafkaChannel.java:252-269`) covers
+   BOTH the rustls TLS handshake phase and the SASL handshake phase
+   on a single channel, in sequence, without modification. The
+   1000-record live run completed first try, no retries, no
+   timeouts. This is the empirical evidence that the parity
+   argument Round 2 made about a single SASL phase generalises to
+   two sequential mid-channel phases on the same channel.
+
+**Phase 9e deferrals (carried into 9f+):**
+
+- **9f — auth-failure path.** Bad credentials, expired credentials,
+  malformed JAAS string. Pins `SaslAuthenticationException` /
+  `KafkaError::Authentication` propagation through the producer's
+  `KafkaFuture<RecordMetadata>` to the `.send().get().await`
+  caller. Will exercise both SASL_PLAINTEXT and SASL_SSL
+  listeners.
+- **9g — unsupported-mechanism path.** Client requests a mechanism
+  the broker has not enabled (e.g. `SCRAM-SHA-256` when only
+  `PLAIN` is configured server-side). Pins
+  `UnsupportedSaslMechanism` error surfacing through the producer
+  API. The `KafkaError::Authentication` variant already covers
+  this per Phase 9.0's design; 9g is the integration-test pin.
+- **9h — flakiness gate.** Repeated-run stability check for all
+  four security protocols. Either a `loop { producer_smoke_*
+  }` xtask or a CI matrix entry. The single-run 9e/9d/9c results
+  are not statistically meaningful for flakiness.
+- **9i — optional CCloud env-var-gated test.** Pull SASL_SSL
+  credentials from `$CCLOUD_*` env vars when set; skip when unset.
+  Validates the same code path against a managed broker rather
+  than the local 4.2 container. Marked optional in PLAN.md.
+
+**Java tests intentionally not translated:**
+
+- `SaslAuthenticatorTest.test*Ssl*` broker-roundtrip paths — the
+  Java client suite covers these by spinning up an in-process
+  embedded Kafka broker. Rust covers the same wire contract by
+  running against the real Apache Kafka 4.2 Docker container in
+  `producer_smoke_sasl_ssl_1000_records` — end-to-end against the
+  authoritative broker is stronger evidence than against a
+  Java-side test broker.
+- `SslSelectorTest.test*Sasl*` paths — same rationale (cover the
+  Selector readability-filter contract by running it live, not by
+  unit-testing a synthetic state machine). 9d Round 2's
+  `wait_any_transport_readable_includes_mid_handshake_channels`
+  unit test already pins the filter semantics against four
+  synthetic channels.
+- All authentication-failure variants — deferred to 9f, not
+  skipped.
+
+**Status at close:** `cargo build` OK,
+`cargo build --features integration-tests` OK (15.37 s),
+`cargo xtask format-check` OK, `cargo xtask lint` OK,
+`cargo test --lib` **1343 passed** (unchanged from 9d Round 2/3
+close baseline — integration test is not a lib test). Live
+integration run: `cargo test --features integration-tests
+--test integration producer_smoke_sasl_ssl_1000_records --
+--nocapture --test-threads=1` **PASSED** in 7.84 s against Apache
+Kafka 4.2 Docker, cluster ID `5L6g3nShT-eMCtK--X86sw`.
+
+Phase 9e closes; ready for Critic 9 review of 9e.
+
