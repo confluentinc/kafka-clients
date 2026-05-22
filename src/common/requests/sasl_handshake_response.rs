@@ -209,10 +209,14 @@ mod tests {
     /// (apiKey 17, `flexibleVersions: "none"`); cross-verified by
     /// Phase 9d integration test (`producer_smoke_sasl_plaintext_1000
     /// _records` in `tests/integration/producer_smoke_test.rs`) — a
-    /// successful PLAIN handshake against the real Java 4.2 broker
-    /// empirically validates the hand-derived encoding. Verified by
-    /// inspection against the non-flexible encoding rules for `int16`
-    /// and `[]string`.
+    /// successful PLAIN handshake confirms that Rust **decodes** the
+    /// broker's `SaslHandshakeResponse` byte stream correctly (the
+    /// broker is the encoder, Rust is the decoder, on the response
+    /// side). The encoder-side bytes asserted by this fixture remain
+    /// hand-derived against the spec's non-flexible encoding rules for
+    /// `int16` and `[]string` and pinned by round-trip with the
+    /// decoder — production code never encodes `SaslHandshakeResponse`,
+    /// so the integration test does not exercise this encoder path.
     ///
     /// Wire layout:
     /// - `00 00` — error_code (i16) = 0

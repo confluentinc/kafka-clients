@@ -956,10 +956,15 @@ SASL hex fixtures empirically validated by the new test.
   `Arc::into_inner` + `close_with_timeout(30s)` shutdown pattern.
   Rustdoc on the test explicitly cites the Java-runtime cross-
   verification narrative (a successful PLAIN handshake against
-  the real Java 4.2 broker proves the 14 hand-derived hex
-  fixtures in `src/common/requests/sasl_*.rs` are byte-exact
-  against Java's encoding, since the broker rejects malformed
-  SASL frames at the wire level).
+  the real Java 4.2 broker proves the **request**-side hex
+  fixtures in `src/common/requests/sasl_*_request.rs` are
+  byte-exact against Java's expected wire input — the broker
+  rejects malformed SASL requests at the wire level — and that
+  the **response**-side decoder in `src/common/requests/
+  sasl_*_response.rs` correctly parses Java's actual wire
+  output; the response fixtures' encoded bytes remain anchored
+  to spec rules + decoder round-trip, since production code
+  never encodes responses).
 - `2073c26` — **Phase 9d (2/N): retire "awaiting Java-runtime"
   rustdoc on SASL hex fixtures — 9d satisfies the deferred
   cross-verification.** Updates the provenance-status sentence
@@ -967,7 +972,17 @@ SASL hex fixtures empirically validated by the new test.
   `SaslHandshakeResponse:209`, `SaslAuthenticateRequest:330`,
   `SaslAuthenticateResponse:338`) to reflect that Phase 9d
   empirically retires the Phase 9.0 / 9b / 9c "awaiting Java-
-  runtime byte capture" carry-over. Surrounding rustdoc context
+  runtime byte capture" carry-over. **Scope precision (per
+  Critic 9 Round 3 S1):** the request-side retirement is
+  empirically anchored to broker behaviour (the broker decodes
+  Rust's request bytes and would reject malformed frames at
+  the wire level), while the response-side retirement is
+  anchored to Rust's decoder behaviour against Java's actual
+  wire output plus encoder round-trip self-consistency
+  (production code never encodes `SaslHandshakeResponse` /
+  `SaslAuthenticateResponse`, so the response fixtures'
+  encoded byte-strings remain spec-derived rather than
+  empirically Java-anchored). Surrounding rustdoc context
   (Java-side reference test, encoding rules, byte layout) is
   preserved; only the provenance-status sentence is reworded.
   Other "Fixture provenance" rustdoc that did not mention
@@ -994,14 +1009,24 @@ SASL hex fixtures empirically validated by the new test.
 2. **Hex-fixture cross-verification approach.** The 14 fixtures
    stay hand-derived (no Java-runtime byte capture happens in
    9d). Instead, the integration test's structural success
-   provides the empirical validation: any byte-level divergence
-   in `SaslHandshake{Request,Response}` /
-   `SaslAuthenticate{Request,Response}` would cause the real
-   Java 4.2 broker to reject the SASL frame at the protocol
-   level, resulting in authentication failure or connection
-   drop. Reaching 1000 acks confirms the bytes are correct.
-   This is structurally equivalent to a wireshark capture but
-   does not require external tooling.
+   provides the empirical validation, **with a request/response
+   asymmetry called out by Critic 9 Round 3 S1**: any byte-level
+   divergence in `SaslHandshake{Request}` /
+   `SaslAuthenticate{Request}` would cause the real Java 4.2
+   broker to reject the SASL frame at the protocol level
+   (broker decodes request bytes), and any divergence in
+   `SaslHandshake{Response}` / `SaslAuthenticate{Response}`'s
+   **decoder** would surface as a Rust-side parse failure
+   (Rust decodes the broker's response bytes). Reaching 1000
+   acks confirms (a) request encoder bytes match Java's expected
+   wire input, and (b) response decoder correctly parses Java's
+   wire output. The response-side **encoder** byte-strings
+   asserted by the `hex_fixture_*` tests are NOT exercised by
+   the integration test (production never encodes responses);
+   they remain anchored to spec rules + decoder round-trip
+   self-consistency. This is structurally equivalent to a
+   wireshark capture for the request + response-decode paths,
+   but the response-encode path retains spec-only provenance.
 3. **Live integration run — REGRESSION SURFACED.** The
    `cargo test --features integration-tests
    producer_smoke_sasl_plaintext_1000_records` run executed

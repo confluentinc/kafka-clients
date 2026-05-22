@@ -450,6 +450,8 @@ impl Selector {
         self.connect_tasks.len()
     }
 
+    // --- Phase 9d Round 2: test-only seams below (#[cfg(test)] gated; absent in published crate) ---
+
     /// Test-only: return the connection ids that the poll loop's
     /// `wait_any_transport_readable` arm would register a waker on,
     /// computed using the exact filter the production select arm uses.
@@ -475,6 +477,8 @@ impl Selector {
     fn debug_insert_channel(&mut self, id: ConnectionId, channel: KafkaChannel) {
         self.channels.insert(id, channel);
     }
+
+    // --- end Phase 9d Round 2 test-only seams ---
 
     /// Common helper: ensure no channel is registered under `id`.
     /// Mirrors Java's private `ensureNotRegistered(String)`.
