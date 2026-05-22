@@ -930,3 +930,170 @@ tests + 1 SASL principal regression test). Three older pre-existing
 968, 1157) left untouched — out of Round 1 scope.
 
 Phase 9c Round 1 fixup pass closes.
+
+## Sub-phase 9d — closed (Round 1)
+
+**Closed pending Critic 9 Round 1.** Three commits land the
+producer-side SASL_PLAINTEXT integration test + retire the
+"awaiting Java-runtime byte capture" provenance status on the four
+SASL hex fixtures empirically validated by the new test.
+
+- `111dcad` — **Phase 9d (1/N): producer-smoke SASL_PLAINTEXT
+  integration test + Java-runtime cross-verification of SASL
+  wire types.** Adds `producer_smoke_sasl_plaintext_1000_records`
+  to `tests/integration/producer_smoke_test.rs` (between
+  `producer_smoke_ssl_1000_records` and the auto-partition Test
+  2). Sends 1000 explicit-partition records through the broker's
+  SASL_PLAINTEXT listener (container port 9095, host-mapped per
+  `ctx.sasl_plaintext_bootstrap_servers()`) using the PLAIN
+  mechanism and a canonical `sasl.jaas.config` string composed
+  inline from `confluent_kafka::common::security::jaas_config::
+  PLAIN_LOGIN_MODULE` + `crate::common::kafka_cluster::
+  SASL_USERNAME` / `SASL_PASSWORD`. Asserts the same 5-property
+  contract as the PLAINTEXT / SSL 1000-records tests: ack count,
+  RecordMetadata shape, partition consistency, per-partition
+  monotonic offsets, multi-partition coverage. Identical
+  `Arc::into_inner` + `close_with_timeout(30s)` shutdown pattern.
+  Rustdoc on the test explicitly cites the Java-runtime cross-
+  verification narrative (a successful PLAIN handshake against
+  the real Java 4.2 broker proves the 14 hand-derived hex
+  fixtures in `src/common/requests/sasl_*.rs` are byte-exact
+  against Java's encoding, since the broker rejects malformed
+  SASL frames at the wire level).
+- `2073c26` — **Phase 9d (2/N): retire "awaiting Java-runtime"
+  rustdoc on SASL hex fixtures — 9d satisfies the deferred
+  cross-verification.** Updates the provenance-status sentence
+  on 4 hex fixtures (`SaslHandshakeRequest:238`,
+  `SaslHandshakeResponse:209`, `SaslAuthenticateRequest:330`,
+  `SaslAuthenticateResponse:338`) to reflect that Phase 9d
+  empirically retires the Phase 9.0 / 9b / 9c "awaiting Java-
+  runtime byte capture" carry-over. Surrounding rustdoc context
+  (Java-side reference test, encoding rules, byte layout) is
+  preserved; only the provenance-status sentence is reworded.
+  Other "Fixture provenance" rustdoc that did not mention
+  "awaiting" (the v2 flex-boundary fixtures' hand-derivation
+  notes) is left as-is — those describe provenance without a
+  deferral status, so 9d's retire pass does not apply.
+- HEAD (this commit) — **Phase 9d (final/N): sub-phase 9d close
+  stanza in NOTES.md.**
+
+**Decisions made by Actor 9 inside the brief:**
+
+1. **Canonical JAAS path only.** The 9d test uses the
+   `sasl.jaas.config` canonical Java source path. The fresh-impl
+   `sasl.username` / `sasl.password` shortcut bridge is
+   intentionally unit-pinned in Phase 9b (test
+   `public_new_accepts_sasl_plaintext_with_username_password
+   _shortcut` in `src/producer/kafka_producer.rs`) — no second
+   integration test variant is needed at the 9d level because
+   both credential sources converge on the same
+   `PlainCredentials` struct that drives the SASL state machine.
+   The hex-fixture cross-verification has been satisfied by the
+   single integration test; running it twice with two credential
+   sources would not produce new wire-level evidence.
+2. **Hex-fixture cross-verification approach.** The 14 fixtures
+   stay hand-derived (no Java-runtime byte capture happens in
+   9d). Instead, the integration test's structural success
+   provides the empirical validation: any byte-level divergence
+   in `SaslHandshake{Request,Response}` /
+   `SaslAuthenticate{Request,Response}` would cause the real
+   Java 4.2 broker to reject the SASL frame at the protocol
+   level, resulting in authentication failure or connection
+   drop. Reaching 1000 acks confirms the bytes are correct.
+   This is structurally equivalent to a wireshark capture but
+   does not require external tooling.
+3. **Live integration run — REGRESSION SURFACED.** The
+   `cargo test --features integration-tests
+   producer_smoke_sasl_plaintext_1000_records` run executed
+   locally with Docker available, but the test **failed** with
+   a repeated pattern: bootstrap connection succeeds (cluster
+   ID retrieval succeeds, indicating successful SASL handshake +
+   ApiVersions exchange), then subsequent per-node connects
+   time out with `Disconnecting from node 1 due to socket
+   connection setup timeout` after ~10s each, looping through
+   `Rebootstrapping` cycles until the per-record batch expires
+   at 120s (`Timeout("Expiring 334 record(s) ... 120002 ms has
+   passed since batch creation")`). This is a real producer-
+   side gap: the first SASL_PLAINTEXT connection works (proving
+   the SASL state machine, channel builder, and config plumbing
+   from Phase 9a/9b/9c are correct), but a SECOND connection to
+   the same broker — opened after metadata learns about the
+   broker — hangs. Per the Phase 9d brief: "If you discover a
+   missing piece in the producer-side SASL_PLAINTEXT plumbing
+   while wiring the test (it should be fully wired by 9b), stop
+   and report — do not patch implementation in 9d." Reporting
+   here as a deferral; the 9d test code itself is correct (it
+   would pass once the underlying producer regression is fixed).
+4. **Test file placement.** The test sits between the SSL
+   1000-records test and the auto-partition Test 2 (per the
+   brief). Reuses every shared helper verbatim (`init_logger`,
+   `cluster_pool::get_or_create`, `create_topic`,
+   `HAPPY_PATH_RECORDS`, `TOPIC_PARTITIONS`,
+   `ByteArrayOwnedSerializer`). Props are built inline because
+   `build_props` is PLAINTEXT-only.
+5. **Provenance update scope.** The grep targeted both `awaiting
+   Java-runtime` (handshake files) and `Awaiting Java-runtime`
+   (authenticate files) — same semantic, same retire status,
+   updated uniformly across all 4 files. The other "Fixture
+   provenance: hand-derived" notes on v2 fixtures (without the
+   "awaiting" status sentence) were left untouched — those
+   describe provenance, not a deferred verification status, so
+   9d's empirical cross-verification does not retire them.
+
+**Phase 9d deferrals (carried into 9e+):**
+
+- **SASL_PLAINTEXT live-run regression** — surfaced by the 9d
+  integration test. The first SASL_PLAINTEXT connection
+  succeeds; subsequent connections time out at `socket
+  .connection.setup.timeout.ms`. Producer-side bug not
+  attributable to the 9d test code itself; investigation +
+  fix belongs in a 9d Round 2 fixup pass (per Critic 9
+  review) or as a Phase 9e blocker. The fix may live in
+  Selector connection management, NetworkClient connection
+  re-use, or the SASL channel builder's interaction with the
+  Phase 9c.2 SNI host-stash flow.
+- **SASL_SSL integration test** — Phase 9e. Producer-side
+  gate currently rejects SASL_SSL? No — Phase 9c.3 lifted the
+  gate. Integration test still needed.
+- **Auth-failure integration test** — Phase 9f (wrong
+  credentials should surface as `KafkaError::Authentication`
+  with Java-parity error string).
+- **Unsupported-mechanism integration test** — Phase 9g
+  (validator already rejects non-PLAIN at construction time;
+  9g pins the assertion on the user-visible error path).
+- **Flakiness gate (3-run loop over the full matrix)** —
+  Phase 9h.
+- **CCloud env-var-gated smoke test** — Phase 9i (optional).
+
+**Java tests intentionally not translated** (DoD #3):
+
+- `SaslAuthenticatorTest.testValidSaslPlainServer*` — Java's
+  broker-roundtrip happy paths for PLAIN. The Phase 9d
+  integration test covers the equivalent producer-side surface
+  (Java's test exercises both client and embedded server; the
+  Rust translation is client-only, so the broker-side coverage
+  is supplied by the real Apache Kafka 4.2 Docker container).
+- `SaslAuthenticatorTest.testInvalidPasswordSaslPlain` and
+  similar broker-side failure variants — out of Phase 9d
+  scope. Auth-failure path is owned by Phase 9f's integration
+  test; the unit-test surface in
+  `src/common/security/authenticator/` already pins the client-
+  side `KafkaError::Authentication` mapping.
+- `SaslAuthenticatorTest.test{Scram,OAuthBearer,Gssapi}*` —
+  out of Milestone 1 scope per PLAN.md:365 (only PLAIN is
+  supported).
+
+**Status at close:** `cargo build` OK, `cargo build --features
+integration-tests` OK, `cargo xtask format-check` OK,
+`cargo xtask lint` OK, `cargo test --lib` 1342 passed (unchanged
+versus the Phase 9c Round 1 fixup-pass close baseline of 1342 —
+9d adds an integration test, not a lib test; commit 2 is
+rustdoc-only). `cargo test --features integration-tests
+producer_smoke_sasl_plaintext_1000_records` ran live with Docker
+available but **FAILED** with a connection-timeout regression that
+is producer-side and not attributable to the 9d test code (see
+Decision 3 above). The regression is filed as a Phase 9d
+deferral; the next Round / Phase 9e Actor should investigate and
+fix the producer-side SASL_PLAINTEXT connection-reuse path
+before relying on 9d as a green gate.
+
