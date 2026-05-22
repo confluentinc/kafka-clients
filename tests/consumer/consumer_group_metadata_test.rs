@@ -22,6 +22,12 @@
 //!   system) and `Option<String>` for the instance ID (`None` is the
 //!   "absent" sentinel). There is no equivalent runtime check to test.
 
+// `ConsumerGroupMetadata::new` and `with_details` are marked
+// `#[deprecated]` in Rust to mirror Java's
+// `@Deprecated(since = "4.2", forRemoval = true)`. These tests exercise
+// those public constructors directly and must suppress the warnings.
+#![allow(deprecated)]
+
 use confluent_kafka::consumer::ConsumerGroupMetadata;
 
 const GROUP_ID: &str = "group";
