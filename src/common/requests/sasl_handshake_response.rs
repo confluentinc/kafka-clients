@@ -206,10 +206,13 @@ mod tests {
     /// `RequestResponseTest.java`.
     ///
     /// **Fixture provenance**: hand-derived from `SaslHandshakeResponse.json`
-    /// (apiKey 17, `flexibleVersions: "none"`) — awaiting Java-runtime
-    /// byte capture from the Apache Kafka 4.2 broker/test fixture.
-    /// Verified by inspection against the non-flexible encoding rules
-    /// for `int16` and `[]string`.
+    /// (apiKey 17, `flexibleVersions: "none"`); cross-verified by
+    /// Phase 9d integration test (`producer_smoke_sasl_plaintext_1000
+    /// _records` in `tests/integration/producer_smoke_test.rs`) — a
+    /// successful PLAIN handshake against the real Java 4.2 broker
+    /// empirically validates the hand-derived encoding. Verified by
+    /// inspection against the non-flexible encoding rules for `int16`
+    /// and `[]string`.
     ///
     /// Wire layout:
     /// - `00 00` — error_code (i16) = 0

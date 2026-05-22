@@ -335,8 +335,11 @@ mod tests {
     /// `SaslAuthenticateResponse.json` (apiKey 36, `flexibleVersions:
     /// "2+"`, `session_lifetime_ms` field starts at v1+) — at v0 the
     /// body has only error_code + nullable error_message + auth_bytes.
-    /// Awaiting Java-runtime byte capture from the Apache Kafka 4.2
-    /// broker.
+    /// Cross-verified by Phase 9d integration test
+    /// (`producer_smoke_sasl_plaintext_1000_records` in
+    /// `tests/integration/producer_smoke_test.rs`) — a successful PLAIN
+    /// handshake against the real Java 4.2 broker empirically validates
+    /// the hand-derived encoding.
     ///
     /// Wire layout (8 bytes total):
     /// - `00 00` — i16 error_code = 0

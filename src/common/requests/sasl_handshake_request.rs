@@ -235,8 +235,11 @@ mod tests {
     /// Hex fixture: SaslHandshakeRequest v0 body for mechanism "PLAIN".
     ///
     /// **Fixture provenance**: hand-derived from `SaslHandshakeRequest.json`
-    /// (apiKey 17, `flexibleVersions: "none"`) — awaiting Java-runtime
-    /// byte capture from the Apache Kafka 4.2 client. Independently
+    /// (apiKey 17, `flexibleVersions: "none"`); cross-verified by
+    /// Phase 9d integration test (`producer_smoke_sasl_plaintext_1000
+    /// _records` in `tests/integration/producer_smoke_test.rs`) — a
+    /// successful PLAIN handshake against the real Java 4.2 broker
+    /// empirically validates the hand-derived encoding. Independently
     /// verified against RFC 4422 / Kafka protocol guide for the
     /// `string` type at non-flexible versions.
     ///

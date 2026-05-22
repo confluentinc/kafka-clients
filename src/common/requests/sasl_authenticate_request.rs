@@ -327,8 +327,11 @@ mod tests {
     /// **Fixture provenance**: hand-derived from
     /// `SaslAuthenticateRequest.json` (apiKey 36, `flexibleVersions:
     /// "2+"`) — at v0 the body uses `int32` length-prefixed bytes per
-    /// the non-flexible encoding rules. Awaiting Java-runtime byte
-    /// capture from the Apache Kafka 4.2 client. Independently
+    /// the non-flexible encoding rules. Cross-verified by Phase 9d
+    /// integration test (`producer_smoke_sasl_plaintext_1000_records`
+    /// in `tests/integration/producer_smoke_test.rs`) — a successful
+    /// PLAIN handshake against the real Java 4.2 broker empirically
+    /// validates the hand-derived encoding. Independently
     /// cross-checked against the `testInvalidSaslAuthenticateRequest`
     /// Java test which asserts an `int32` length lives at the start of
     /// the body for the chosen v1 (same shape as v0).
