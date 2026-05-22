@@ -18,6 +18,8 @@
 //! package segment is intentionally dropped per CLAUDE.md §2.
 
 pub mod close_options;
+pub mod consumer_record;
+pub mod consumer_records;
 pub mod group_protocol;
 pub mod offset_and_metadata;
 pub mod offset_and_timestamp;
@@ -25,6 +27,8 @@ pub mod offset_reset_strategy;
 pub mod subscription_pattern;
 
 pub use close_options::{CloseOptions, GroupMembershipOperation};
+pub use consumer_record::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
+pub use consumer_records::ConsumerRecords;
 pub use group_protocol::GroupProtocol;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
