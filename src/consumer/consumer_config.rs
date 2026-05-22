@@ -484,6 +484,10 @@ impl ConsumerConfig {
     pub fn metadata_recovery_strategy(&self) -> &str {
         &self.metadata_recovery_strategy
     }
+    /// `internal.throw.on.fetch.stable.offset.unsupported`.
+    pub fn throw_on_fetch_stable_offset_unsupported(&self) -> bool {
+        self.throw_on_fetch_stable_offset_unsupported
+    }
 
     // -------- Fluent setters --------
 

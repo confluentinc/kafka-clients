@@ -133,8 +133,8 @@ impl AutoOffsetResetStrategy {
 
     /// Return the timestamp to be used for a `ListOffsetsRequest`.
     ///
-    /// - [`StrategyType::Earliest`] → [`EARLIEST_TIMESTAMP`]
-    /// - [`StrategyType::Latest`] → [`LATEST_TIMESTAMP`]
+    /// - [`StrategyType::Earliest`] → `EARLIEST_TIMESTAMP` (`-2`)
+    /// - [`StrategyType::Latest`] → `LATEST_TIMESTAMP` (`-1`)
     /// - [`StrategyType::ByDuration`] → `now - duration` in milliseconds
     /// - [`StrategyType::None_`] → `None`
     pub fn timestamp(&self) -> Option<i64> {
