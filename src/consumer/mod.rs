@@ -28,12 +28,15 @@ pub mod offset_and_timestamp;
 pub mod offset_reset_strategy;
 pub mod subscription_pattern;
 
+pub(crate) mod internals;
+
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_group_metadata::ConsumerGroupMetadata;
 pub use consumer_record::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
 pub use consumer_records::ConsumerRecords;
 pub use errors::ConsumerError;
 pub use group_protocol::GroupProtocol;
+pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 #[allow(deprecated)]
