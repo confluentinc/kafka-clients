@@ -530,3 +530,35 @@ Critic 9 confirmed: (a) `selector.rs:1176` (production) and `selector.rs:463` (d
 - **N2 — `debug_insert_channel` and `debug_readable_watch_transport_ids` are `#[cfg(test)]` but warrant a one-line "test seam only" comment block** (Nit, NOT BLOCKING). **Resolved (`1806ad0`)**: added single-line separator comments wrapping the two `#[cfg(test)]` test seams at `src/common/network/selector.rs:453-481`: `// --- Phase 9d Round 2: test-only seams below (#[cfg(test)] gated; absent in published crate) ---` above and `// --- end Phase 9d Round 2 test-only seams ---` below. The seams were NOT moved to the test module because they need to be on `impl Selector` to access private state (`self.channels`); the `#[cfg(test)]` attribute plus separator is the right shape for "sibling-of-production-helpers but absent at runtime."
 
 Phase 9d Round 3 closes; Phase 9d ready for final manager close.
+
+---
+
+## Critic 9 — Phase 9e Round 1 review (2026-05-23) — zero findings
+
+Critic 9 review of the Phase 9e commit ladder (`a2de19d..607dc68`) returned **0 Suggestions + 0 Nits**.
+
+### Commits reviewed
+
+| Commit | Subject |
+|---|---|
+| `a2de19d` | Phase 9e (1/N): producer-smoke SASL_SSL integration test — TLS + PLAIN combined transport |
+| `607dc68` | Phase 9e (final/N): sub-phase 9e close stanza in NOTES.md |
+
+### Verification performed (per Critic 9 review entry)
+
+- **Side-by-side diff with siblings** (SSL `producer_smoke_ssl_1000_records` and SASL_PLAINTEXT `producer_smoke_sasl_plaintext_1000_records`). The new `producer_smoke_sasl_ssl_1000_records` is the structural union of the two with the expected delta: combined truststore + JAAS plumbing, `security.protocol = "SASL_SSL"`, `ctx.sasl_ssl_bootstrap_servers()` bootstrap, distinct `client.id`. The five assertions (ack count, RecordMetadata shape + partition consistency, monotonic offsets, multi-partition coverage) are byte-for-byte identical to the SSL/SASL_PLAINTEXT siblings; assertion comment markers `(1)..(5)` match.
+- **Truststore lifecycle.** `truststore_file` binding kept alive to the explicit `drop(truststore_file)` after `close_with_timeout` — matches the SSL test shape. No premature-unlink risk.
+- **`Arc::into_inner` consistency.** Matches the SSL test (line 777) and SASL_PLAINTEXT test (line 963) — the two immediate sibling 1000-record tests.
+- **Production path exercised.** Reaching ack #1000 over `security.protocol = SASL_SSL` requires `SaslChannelBuilder::build_sasl_ssl_channel` (`src/common/network/sasl_channel_builder.rs:164`), `KafkaChannel::prepare` (`src/common/network/kafka_channel.rs:257-273` enforces `transport.handshake()` FIRST then `authenticator.authenticate(transport)`, matching Java parity at `Selector.java:529-548`), and the post-9d-Round-2 readability filter (`src/common/network/selector.rs:1180`: `c.transport_layer_ref().is_open() && !c.is_muted()`). A one-leg-only test would either fail TLS (wrong listener) or fail SASL (no creds) — the test does exercise the combined transport.
+- **Rustdoc accuracy.** All claims (combined TLS+SASL, references to 9c/9d, post-9d-Round-2 readability filter, IP-SAN matching, `sasl.jaas.config` parity, Phase 9b unit-pinning of the username/password shortcut) cross-verified against the codebase.
+- **Close-stanza completeness.** Both commits listed; decisions documented (single hostname-check variant, single credential path, no wiring changes); deferrals (9f auth-failure, 9g unsupported-mechanism, 9h flakiness, 9i CCloud) carried from 9d's `9e+` list with only 9e removed — clean carryover, no silent drops; Java tests intentionally not translated documented (`SaslAuthenticatorTest.test*Ssl*`, `SslSelectorTest.test*Sasl*`); status reported (1343 lib tests; integration test passed in 7.84 s; cluster `5L6g3nShT-eMCtK--X86sw`).
+- **Local re-verification by Critic.** `cargo build --tests --features integration-tests` OK. `cargo xtask format-check` OK. `cargo xtask lint` clean. `cargo test --lib` 1343 passed. `cargo test --lib producer::internals::buffer_pool` — all 14 passed on Critic's run; Actor's reported transient flake not reproducible, and would not be a 9e bug regardless (no production code changes).
+- **Java parity edge cases.** `KafkaChannel::prepare` enforces `transport.ready() → authenticator.complete()` ordering exactly as Java's `Selector.poll → channel.prepare()` does. Selector readability filter watches mid-SASL-over-TLS channels (covered by parity per 9d Round 2; empirically confirmed by 9e's first-try pass).
+
+### Phase 9e — no findings
+
+The phase is correct, internally consistent, conservatively scoped (single hostname variant, single credential path — well-justified), and integration-test verified end-to-end against Apache Kafka 4.2. The first-try pass against a real broker is strong evidence that the parity argument from 9d Round 2 generalises to two sequential mid-channel handshake phases.
+
+**Recommendation: close 9e immediately — accept-with-no-followups. No Round 2 needed.**
+
+Phase 9e closes.
