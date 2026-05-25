@@ -45,7 +45,7 @@ pub use errors::ConsumerError;
 pub use group_protocol::GroupProtocol;
 pub use interceptor::ConsumerInterceptor;
 pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
-pub use mock_consumer::{MockConsumer, PollTask};
+pub use mock_consumer::MockConsumer;
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
 pub use offset_commit_callback::OffsetCommitCallback;
