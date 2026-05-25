@@ -1376,3 +1376,205 @@ Kafka 4.2 Docker, cluster ID `5L6g3nShT-eMCtK--X86sw`.
 
 Phase 9e closes; ready for Critic 9 review of 9e.
 
+## Sub-phase 9f — closed (Round 1)
+
+Sub-phase 9f adds the SASL **auth-failure** integration tests —
+the failure-branch counterpart to 9d/9e's happy-path coverage.
+Two new tests, `producer_smoke_sasl_plaintext_auth_failure` and
+`producer_smoke_sasl_ssl_auth_failure`, pin the
+`KafkaError::Authentication` propagation contract end-to-end on
+both SASL listeners. No production code changes — pure test-add
+phase.
+
+**Commit ladder (2 commits):**
+
+- `e4fd8ec` — **Phase 9f (1/N): producer-smoke SASL auth-failure
+  integration tests.** Adds the two listener-variant tests to
+  `tests/integration/producer_smoke_test.rs` between
+  `producer_smoke_sasl_ssl_1000_records` (Phase 9e) and the
+  Test 2 auto-partition block (Phase 8b). Each test composes a
+  `sasl.jaas.config` with the canonical `SASL_USERNAME` paired
+  with a deliberately wrong `"wrong-password"`, sends a single
+  record, and asserts:
+  1. `send().await` returns `Err(KafkaError::Authentication(_))`.
+  2. The error message contains the broker's authoritative
+     substring `"Authentication failed: Invalid username or
+     password"` (Java parity:
+     `clients/src/main/java/org/apache/kafka/common/security/
+     plain/internals/PlainSaslServer.java:106`, mirroring
+     `SaslAuthenticatorTest.testInvalidPasswordSaslPlain`
+     line 278).
+  3. The failure surfaces well under 30 s — `max.block.ms=15000`
+     ms is set on the test producer + a liveness backstop
+     asserts the elapsed wall time, proving the metadata
+     fatal-error notify path
+     (`NetworkClient::process_disconnection` →
+     `DefaultMetadataUpdater::handle_server_disconnect` →
+     `metadata.fatal_error` → `ProducerMetadata::await_update`'s
+     `Notify::notify_waiters`) is wired correctly.
+
+  Live runs against Apache Kafka 4.2 Docker (cluster_pool warm
+  reuse, cluster ID `5L6g3nShT-eMCtK--X86sw` — same cluster as
+  Phase 9e):
+  - SASL_PLAINTEXT alone: **PASS** in 5.13 s, auth surfaced in
+    ~313 ms.
+  - SASL_SSL alone:       **PASS** in 4.99 s, auth surfaced in
+    ~388 ms.
+  - Both together:        **PASS** in 7.46 s.
+
+- HEAD (this commit) — **Phase 9f (final/N): sub-phase 9f close
+  stanza in NOTES.md.**
+
+**Decisions made inside the 9f brief:**
+
+1. **Coverage breadth: wrong-password only, on both listeners.**
+   Two tests — one for SASL_PLAINTEXT, one for SASL_SSL.
+   *Malformed JAAS* is config-validation level and is
+   comprehensively covered by Phase 9b's
+   `parse_plain_jaas_config` unit tests (`src/common/security/
+   jaas_config.rs:267-381`) — 8 explicit malformed cases
+   (missing flag, bogus flag, missing username, missing password,
+   unknown opt, malformed, missing semicolon, empty), plus 5
+   positive cases. An integration retest would duplicate
+   cluster-startup cost without producing new wire-level
+   evidence (same rationale Phase 9e applied to "single TLS
+   hostname-check variant"). *Expired credentials* are a
+   SCRAM/OAuth concern — the PLAIN mechanism has no expiry
+   semantics — so deferred to a future SCRAM-translation phase.
+   Java's `PlainSaslServer.java:105-106` collapses
+   wrong-password and unknown-user onto the **same** message
+   (`"Authentication failed: Invalid username or password"`),
+   so one wrong-credentials variant per listener is sufficient
+   to pin both Java assertions
+   (`testInvalidPasswordSaslPlain` line 278 +
+   `testInvalidUsernameSaslPlain` line 295) at integration
+   level.
+
+2. **Error-message contract: broker-substring match preserved
+   verbatim through the propagation path, asserted via
+   `.contains(...)`.** Java emits
+   `"Authentication failed: Invalid username or password"` from
+   `PlainSaslServer.java:106` and propagates it via
+   `SaslAuthenticateResponse.errorMessage`
+   (`SaslServerAuthenticator.java:476-479`). The Rust client
+   surfaces it through `KafkaError::Authentication(msg)` where
+   `msg` carries the broker text **plus** an
+   `"AuthenticationException: "` prefix added at
+   `src/common/network/kafka_channel.rs:291` (the
+   `KafkaChannel::prepare` error path wraps the
+   `io::Error::other(KafkaError)` via `e.to_string()`, which
+   renders the inner `KafkaError`'s `Display` impl as
+   `"<java_class_name>: <message>"`). The broker substring is
+   preserved verbatim and the test asserts substring containment.
+   This satisfies Phase 9 NOTES.md DoD addition #1 ("message
+   matching Java's error string") — substring containment is
+   the canonical wire-level parity claim. The
+   `"AuthenticationException: "` prefix could be stripped by
+   extracting the inner `KafkaError::Authentication` payload
+   directly at `kafka_channel.rs:291` instead of going through
+   `e.to_string()` — that is a documented production-code
+   cleanup opportunity, **out of 9f scope** (test-only phase per
+   the brief).
+
+3. **Test shape: structural cousin to 9d/9e happy-path tests.**
+   Same helper reuse (`TestContext`, `cluster_pool::
+   get_or_create`, `create_topic`, `PLAIN_LOGIN_MODULE` +
+   `SASL_USERNAME` constants from `tests/common/kafka_cluster.
+   rs`), same `Arc::into_inner` cleanup shape, same in-line
+   `HashMap<String, String>` props composition. Tests sit
+   physically adjacent to their happy-path siblings in
+   `tests/integration/producer_smoke_test.rs` (right after
+   `producer_smoke_sasl_ssl_1000_records`, before Test 2).
+   Single send per test — `wait_on_metadata` propagates the
+   fatal Authentication error before any record-future is
+   constructed, so the `send().await` itself returns
+   `Err(KafkaError::Authentication(...))`; there is no need to
+   also call `.get().await` on a future.
+
+4. **Failure-path liveness: producer surfaces the auth error via
+   the metadata fatal-error notify path; no infinite retry loop
+   observed.** With default `max.block.ms=60s` the failure
+   would in principle take up to 60s, but in practice live runs
+   show ~300-400 ms — the broker rejects the bad PLAIN token
+   immediately, the channel's auth-failure state propagates
+   through `process_disconnection` → `handle_server_disconnect`
+   → `metadata.fatal_error` → `notify_waiters()`, and
+   `await_update`'s `Notify` wakes promptly. The test caps
+   `max.block.ms=15s` and asserts `elapsed < 30s` as a defensive
+   backstop — if this trips it indicates a regression in the
+   notify-wakeup path.
+
+**Phase 9f deferrals (carried into 9g+):**
+
+- **Cleanup follow-up — `KafkaError::Authentication` message
+  cleanliness.** Optional production-code refinement at
+  `src/common/network/kafka_channel.rs:291` to extract the inner
+  `KafkaError::Authentication` payload directly when the
+  `io::Error::other(KafkaError)` carries one, instead of going
+  through `e.to_string()` (which adds the
+  `"AuthenticationException: "` prefix from `KafkaError`'s
+  `Display` impl). Result: the message field would carry the
+  bare Java broker text (`"Authentication failed: Invalid
+  username or password"`) without the Rust-side prefix. Phase
+  9f's substring-containment assertion is already correct under
+  either rendering, so this is an ergonomic refinement, not a
+  defect. Out of 9f test-only scope; appropriate as a tightening
+  follow-up if a Critic flags it or in a future
+  refactor / Milestone-2 polish pass.
+- **9g — unsupported-mechanism path.** Carry-over from 9e close
+  stanza; unchanged scope. Client requests a mechanism the
+  broker has not enabled (e.g. `SCRAM-SHA-256` when only `PLAIN`
+  is configured server-side). Pins `UnsupportedSaslMechanism`
+  error surfacing through the producer API.
+- **9h — flakiness gate.** Carry-over from 9e close stanza;
+  unchanged scope. Now extended to include the two new 9f tests
+  in the multi-run gate.
+- **9i — optional CCloud env-var-gated test.** Carry-over from
+  9e close stanza; unchanged scope.
+
+**Java tests intentionally not translated:**
+
+- `SaslAuthenticatorTest.testInvalidUsernameSaslPlain`
+  (line 286-298) — Java emits the **identical** broker message
+  for both invalid-password and invalid-username (see
+  `PlainSaslServer.java:105-106`), so the contract is fully
+  pinned by 9f's wrong-password tests. A second test would
+  duplicate the assertion text without producing new
+  wire-level evidence.
+- `SaslAuthenticatorTest.testMissingUsernameSaslPlain` (line
+  304+) — Java's missing-username path raises a
+  `LoginException` client-side at JAAS-config-validation time,
+  before any handshake. That contract belongs to Phase 9b's
+  `parse_plain_jaas_config` unit tests (the
+  `missing_username_must_reject` test at `jaas_config.rs:336`),
+  not at integration level.
+- `SaslAuthenticatorTest.testInvalidPasswordSaslScram` /
+  `testUnknownUserSaslScram` (lines 523, 543) — SCRAM
+  mechanism, out of Milestone-1 PLAIN scope.
+- `SaslAuthenticatorTest.testReauthentication*` paths —
+  re-authentication is permanently skipped per `PLAN.md:367`
+  (no-op `Authenticator` design).
+
+**Status at close:** `cargo build` OK,
+`cargo build --features integration-tests` OK,
+`cargo xtask format-check` OK, `cargo xtask lint` OK,
+`cargo test --lib` **1343 passed** (unchanged from
+9d Round 2/3 / 9e close baseline — integration tests are not
+lib tests). Live integration runs:
+- `cargo test --features integration-tests --test integration
+  producer_smoke_sasl_plaintext_auth_failure -- --nocapture
+  --test-threads=1` **PASSED** in 5.13 s, auth surfaced in
+  ~313 ms.
+- `cargo test --features integration-tests --test integration
+  producer_smoke_sasl_ssl_auth_failure -- --nocapture
+  --test-threads=1` **PASSED** in 4.99 s, auth surfaced in
+  ~388 ms.
+- Both together (`auth_failure` filter): **PASSED**, 2/2 in
+  7.46 s.
+
+All against Apache Kafka 4.2 Docker, cluster ID
+`5L6g3nShT-eMCtK--X86sw` (cluster_pool warm reuse — same
+cluster as the Phase 9e live verification).
+
+Phase 9f closes; ready for Critic 9 review of 9f.
+
