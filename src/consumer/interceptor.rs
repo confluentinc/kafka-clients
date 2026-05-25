@@ -58,18 +58,40 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Called just before records are returned by
     /// [`Consumer::poll`](crate::consumer::Consumer::poll).
     ///
-    /// This method is allowed to modify the consumer records, in which case
-    /// the new records will be returned. There is no limitation on the
-    /// number of records that could be returned from this method; the
-    /// interceptor can filter records or generate new ones.
+    /// This method is allowed to modify the consumer records in place.
+    /// There is no limitation on the number of records that could be left
+    /// in `records` when the method returns; the interceptor can filter
+    /// records, generate new ones, or replace the batch entirely.
     ///
     /// Corresponds to Java's
     /// `ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records)`.
     ///
-    /// Takes ownership of the batch and returns a (possibly modified) batch
-    /// — matching Java's semantics where the chain can replace the batch
-    /// entirely.
-    fn on_consume(&self, records: ConsumerRecords<K, V>) -> ConsumerRecords<K, V>;
+    /// # Replacing the batch
+    ///
+    /// Java's `onConsume` returns a (possibly different) `ConsumerRecords`
+    /// reference, which lets interceptors swap the batch wholesale. The
+    /// Rust translation expresses the same operation via in-place
+    /// reassignment: `*records = new_batch;`.
+    ///
+    /// The `&mut` form (rather than ownership transfer) avoids a
+    /// `K: Clone, V: Clone` bound that would otherwise propagate through
+    /// `ConsumerInterceptors::on_consume` and into the public
+    /// `Consumer<K, V>` trait — Java imposes no `Cloneable` constraint on
+    /// keys/values.
+    ///
+    /// # Panic safety
+    ///
+    /// If this method panics, [`ConsumerInterceptors::on_consume`] catches
+    /// the panic, logs at WARN, and continues calling the next interceptor
+    /// with whatever value `*records` currently holds. To match Java's
+    /// "next interceptor receives the previous-good batch" guarantee,
+    /// implementors that need to construct a replacement batch should do
+    /// so off to the side and only write back to `*records` once the
+    /// replacement is fully constructed — partial writes followed by a
+    /// panic leave `*records` in whatever intermediate state the
+    /// interceptor produced. Java has the same caveat ("behavior is
+    /// undefined if onConsume throws mid-modification").
+    fn on_consume(&self, records: &mut ConsumerRecords<K, V>);
 
     /// Called when offsets get committed.
     ///

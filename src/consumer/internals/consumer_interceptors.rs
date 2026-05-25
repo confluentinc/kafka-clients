@@ -61,6 +61,14 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 ///    interceptor are undefined-by-the-framework. Java's analog is
 ///    "behavior is undefined if onConsume throws mid-modification" — same
 ///    guarantee, different mechanism.
+/// 3. **Partial mutation through `&mut`.** [`Self::on_consume`] passes the
+///    records to each interceptor via `&mut`. If an interceptor panics
+///    after partially writing to `*records`, the partial write is
+///    observable to the next interceptor in the chain — matching Java's
+///    "undefined behavior on mid-modification panic" caveat above.
+///    Well-behaved interceptors construct their replacement batch
+///    off-stack and only write back to `*records` once the replacement
+///    is fully constructed.
 pub(crate) struct ConsumerInterceptors<K: 'static, V: 'static> {
     interceptors: Vec<Box<dyn ConsumerInterceptor<K, V>>>,
 }
@@ -90,52 +98,52 @@ where
 
     /// This is called when the records are about to be returned to the user.
     ///
-    /// Calls [`ConsumerInterceptor::on_consume`] for each interceptor.
-    /// Records returned from each interceptor are passed to `on_consume` of
-    /// the next interceptor in the chain.
+    /// Calls [`ConsumerInterceptor::on_consume`] for each interceptor in
+    /// turn, passing the same `&mut ConsumerRecords` through the chain.
+    /// Each interceptor may mutate `records` in place (Java's `FilterConsumerInterceptor`
+    /// pattern: build a fresh batch, then `*records = new_batch;`).
     ///
-    /// This method does not propagate panics. If any of the interceptors
-    /// panics, the panic is caught and logged at WARN, and the next
-    /// interceptor is called with the `records` value returned by the
-    /// previous successful `on_consume` call (matching Java's contract).
+    /// This method does not propagate panics. If an interceptor panics,
+    /// the panic is caught and logged at WARN, and the next interceptor
+    /// is invoked with the current value of `*records` — which, for a
+    /// well-behaved interceptor, is the last successful interceptor's
+    /// output (Java's "previous-good batch" contract). `catch_unwind`
+    /// preserves this property because the only place this function
+    /// writes to `*records` is *inside* the call to `on_consume`; if the
+    /// closure panics before completing its write, `*records` retains
+    /// whatever value it had at entry.
     ///
-    /// To preserve this "pass last good value along" semantics across a
-    /// panic, the loop clones the current records *before* each call
-    /// (`K: Clone, V: Clone`) — the moved-in value is consumed by the
-    /// closure, but the previous-good clone is kept in `intercept_records`
-    /// and reused if `catch_unwind` returns `Err`. Java achieves the same
-    /// effect via JVM-managed shared references.
+    /// [`AssertUnwindSafe`] is required because the `&mut` borrow of
+    /// `records` is not auto-`UnwindSafe` (Rust assumes that a panic
+    /// could leave the borrowed value in an inconsistent state). For
+    /// this chain that risk is real but explicit: Java has the same
+    /// caveat — "behavior is undefined if onConsume throws
+    /// mid-modification" — so we accept it and document it via the
+    /// `AssertUnwindSafe` wrapper.
+    ///
+    /// Note: no `K: Clone, V: Clone` bound. The chain never clones the
+    /// batch; the `&mut` form lets each interceptor observe / replace the
+    /// batch without any defensive copies, matching Java's reference
+    /// semantics.
     ///
     /// Translates Java's
     /// `ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records)`.
-    pub(crate) fn on_consume(&self, records: ConsumerRecords<K, V>) -> ConsumerRecords<K, V>
-    where
-        K: Clone,
-        V: Clone,
-    {
-        let mut intercept_records = records;
+    pub(crate) fn on_consume(&self, records: &mut ConsumerRecords<K, V>) {
         for interceptor in &self.interceptors {
-            // Pass a clone to the interceptor. If it panics, the moved-in
-            // clone is lost, but `intercept_records` (the previous-good
-            // value) is still owned by this stack frame and reused on the
-            // next iteration. `AssertUnwindSafe` is required because trait
-            // objects are not auto-`RefUnwindSafe`.
-            let input = intercept_records.clone();
-            let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_consume(input)));
-            match result {
-                Ok(new_records) => {
-                    intercept_records = new_records;
-                },
-                Err(_panic_payload) => {
-                    // Matches Java's
-                    //   log.warn("Error executing interceptor onConsume callback", e);
-                    // Next interceptor is called with the previous good
-                    // value (already in `intercept_records`).
-                    log::warn!("Error executing interceptor onConsume callback");
-                },
+            // Wrap the `&mut` call in `AssertUnwindSafe`: `&mut T` is not
+            // auto-`UnwindSafe`, but the partial-mutation risk is matched
+            // by Java's "undefined behavior on mid-modification panic"
+            // caveat, so we assert it explicitly.
+            let result = catch_unwind(AssertUnwindSafe(|| interceptor.on_consume(records)));
+            if result.is_err() {
+                // Matches Java's
+                //   log.warn("Error executing interceptor onConsume callback", e);
+                // The next interceptor is called with the current value
+                // of `*records` (unchanged if the panic happened before
+                // the interceptor wrote, partially mutated otherwise).
+                log::warn!("Error executing interceptor onConsume callback");
             }
         }
-        intercept_records
     }
 
     /// This is called when commit request returns successfully from the
@@ -266,27 +274,37 @@ mod tests {
     }
 
     impl ConsumerInterceptor<i32, i32> for FilterConsumerInterceptor {
-        fn on_consume(&self, records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+        fn on_consume(&self, records: &mut ConsumerRecords<i32, i32>) {
             self.state.on_consume_count.fetch_add(1, Ordering::SeqCst);
             if self.state.throw_on_consume.load(Ordering::SeqCst) {
                 panic!("Injected exception in FilterConsumerInterceptor.on_consume.");
             }
 
-            // Java filters out the topic/partition matching `filterPartition`.
-            // We rebuild a ConsumerRecords keeping only partitions whose
-            // partition id is not equal to `self.state.filter_partition`.
+            // Java filters out the topic/partition matching
+            // `filterPartition` by constructing a fresh map keyed on the
+            // surviving partitions and storing the SAME `List` references
+            // from the input (ConsumerInterceptorsTest.java line 81:
+            // `recordMap.put(tp, records.records(tp));`). To translate
+            // that zero-copy reference-sharing into Rust, take ownership
+            // of the previous batch via `mem::take` (after the panic
+            // check, so the `injectOnConsumeError` path leaves `*records`
+            // untouched — matching Java) and move the surviving Vecs
+            // across into a fresh map — no `Clone` of record bytes,
+            // mirroring Java's reference semantics.
+            let owned = std::mem::take(records);
+            let (in_records, in_next_offsets) = owned.into_parts();
+
             let mut new_records: IndexMap<TopicPartition, Vec<ConsumerRecord<i32, i32>>> = IndexMap::new();
             let mut new_next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
-            for tp in records.partitions() {
+            for (tp, recs) in in_records {
                 if tp.partition() != self.state.filter_partition {
-                    let recs: Vec<ConsumerRecord<i32, i32>> = records.records_for_partition(tp).to_vec();
-                    new_records.insert(tp.clone(), recs);
-                    if let Some(oam) = records.next_offsets().get(tp) {
+                    if let Some(oam) = in_next_offsets.get(&tp) {
                         new_next_offsets.insert(tp.clone(), oam.clone());
                     }
+                    new_records.insert(tp, recs);
                 }
             }
-            ConsumerRecords::new(new_records, new_next_offsets)
+            *records = ConsumerRecords::new(new_records, new_next_offsets);
         }
 
         fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
@@ -343,30 +361,20 @@ mod tests {
         }
     }
 
-    /// Translates `ConsumerInterceptorsTest.testOnConsumeChain`.
-    #[test]
-    fn test_on_consume_chain() {
-        let filter_partition1 = 5;
-        let filter_partition2 = 6;
-        let topic = "test";
-        let partition = 1;
-        let tp = TopicPartition::new(topic.to_string(), partition);
-        let filter_topic_part1 = TopicPartition::new("test5".to_string(), filter_partition1);
-        let filter_topic_part2 = TopicPartition::new("test6".to_string(), filter_partition2);
-
-        let state1 = FilterState::new(filter_partition1);
-        let state2 = FilterState::new(filter_partition2);
-        let interceptor1 = Box::new(FilterConsumerInterceptor::new(state1.clone()));
-        let interceptor2 = Box::new(FilterConsumerInterceptor::new(state2.clone()));
-        let interceptors: ConsumerInterceptors<i32, i32> = ConsumerInterceptors::new(vec![interceptor1, interceptor2]);
-        let i1 = &state1;
-        let i2 = &state2;
-
-        // Build the input ConsumerRecords with 3 partitions, 1 record each.
+    /// Build the 3-partition input `ConsumerRecords` used by
+    /// `test_on_consume_chain`. Helper rather than a single shared value
+    /// because [`ConsumerRecords`] is no longer `Clone` (Phase 2 fixup) —
+    /// each test invocation needs a fresh batch since the chain mutates
+    /// the value in place.
+    fn build_three_partition_input(
+        tp: &TopicPartition,
+        filter_topic_part1: &TopicPartition,
+        filter_topic_part2: &TopicPartition,
+    ) -> ConsumerRecords<i32, i32> {
         let mut records: IndexMap<TopicPartition, Vec<ConsumerRecord<i32, i32>>> = IndexMap::new();
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
 
-        records.insert(tp.clone(), vec![make_consumer_record(topic, partition)]);
+        records.insert(tp.clone(), vec![make_consumer_record(tp.topic(), tp.partition())]);
         next_offsets.insert(tp.clone(), make_offset_and_metadata(1));
 
         records.insert(
@@ -387,10 +395,31 @@ mod tests {
         );
         next_offsets.insert(filter_topic_part2.clone(), make_offset_and_metadata(1));
 
-        let consumer_records = ConsumerRecords::new(records, next_offsets);
+        ConsumerRecords::new(records, next_offsets)
+    }
 
-        // verify that onConsume modifies ConsumerRecords
-        let intercepted = interceptors.on_consume(consumer_records.clone());
+    /// Translates `ConsumerInterceptorsTest.testOnConsumeChain`.
+    #[test]
+    fn test_on_consume_chain() {
+        let filter_partition1 = 5;
+        let filter_partition2 = 6;
+        let topic = "test";
+        let partition = 1;
+        let tp = TopicPartition::new(topic.to_string(), partition);
+        let filter_topic_part1 = TopicPartition::new("test5".to_string(), filter_partition1);
+        let filter_topic_part2 = TopicPartition::new("test6".to_string(), filter_partition2);
+
+        let state1 = FilterState::new(filter_partition1);
+        let state2 = FilterState::new(filter_partition2);
+        let interceptor1 = Box::new(FilterConsumerInterceptor::new(state1.clone()));
+        let interceptor2 = Box::new(FilterConsumerInterceptor::new(state2.clone()));
+        let interceptors: ConsumerInterceptors<i32, i32> = ConsumerInterceptors::new(vec![interceptor1, interceptor2]);
+        let i1 = &state1;
+        let i2 = &state2;
+
+        // verify that on_consume modifies ConsumerRecords in place.
+        let mut intercepted = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
+        interceptors.on_consume(&mut intercepted);
         assert_eq!(intercepted.count(), 1);
         let parts: Vec<TopicPartition> = intercepted.partitions().cloned().collect();
         assert!(parts.contains(&tp));
@@ -402,9 +431,10 @@ mod tests {
         // verify that even if one of the intermediate interceptors panics,
         // all interceptors' on_consume are called and the next interceptor
         // sees the previous-good batch (the input in this case, since
-        // interceptor1 panicked).
+        // interceptor1 panicked before writing `*records`).
         i1.inject_on_consume_error(true);
-        let part_intercepted = interceptors.on_consume(consumer_records.clone());
+        let mut part_intercepted = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
+        interceptors.on_consume(&mut part_intercepted);
         assert_eq!(part_intercepted.count(), 2);
         let parts: Vec<TopicPartition> = part_intercepted.partitions().cloned().collect();
         assert!(parts.contains(&filter_topic_part1)); // interceptor1 panicked
@@ -420,13 +450,15 @@ mod tests {
 
         // if all interceptors panic, records should be unmodified.
         i2.inject_on_consume_error(true);
-        let none_intercepted = interceptors.on_consume(consumer_records.clone());
+        let mut none_intercepted = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
+        let baseline = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
+        interceptors.on_consume(&mut none_intercepted);
         // Match Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
         // by comparing per-partition record counts (ConsumerRecords does
         // not implement PartialEq directly; the Java assertion holds
         // because no interceptor mutated the batch).
         assert_eq!(none_intercepted.count(), 3);
-        let parts_in: Vec<TopicPartition> = consumer_records.partitions().cloned().collect();
+        let parts_in: Vec<TopicPartition> = baseline.partitions().cloned().collect();
         let parts_out: Vec<TopicPartition> = none_intercepted.partitions().cloned().collect();
         assert_eq!(parts_in, parts_out);
         assert_eq!(i1.on_consume_count() + i2.on_consume_count(), 6);
@@ -482,7 +514,7 @@ mod tests {
     fn test_on_consume_panic_does_not_poison_chain() {
         struct PanickyInterceptor;
         impl ConsumerInterceptor<i32, i32> for PanickyInterceptor {
-            fn on_consume(&self, _records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+            fn on_consume(&self, _records: &mut ConsumerRecords<i32, i32>) {
                 panic!("boom");
             }
             fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
@@ -498,9 +530,8 @@ mod tests {
             state: std::sync::Arc<CountingState>,
         }
         impl ConsumerInterceptor<i32, i32> for Counting {
-            fn on_consume(&self, records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+            fn on_consume(&self, _records: &mut ConsumerRecords<i32, i32>) {
                 self.state.consume_count.fetch_add(1, Ordering::SeqCst);
-                records
             }
             fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
                 self.state.commit_count.fetch_add(1, Ordering::SeqCst);
@@ -523,11 +554,11 @@ mod tests {
         records.insert(tp.clone(), vec![make_consumer_record("t", 0)]);
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
         next_offsets.insert(tp, make_offset_and_metadata(1));
-        let input = ConsumerRecords::new(records, next_offsets);
+        let mut input = ConsumerRecords::new(records, next_offsets);
 
         // No panic should escape `on_consume`. All three interceptors are
         // called; the middle (Counting) interceptor records once.
-        let _ = interceptors.on_consume(input);
+        interceptors.on_consume(&mut input);
         assert_eq!(counting.consume_count.load(Ordering::SeqCst), 1);
 
         let empty_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
@@ -544,9 +575,7 @@ mod tests {
             closed: std::sync::Arc<Mutex<bool>>,
         }
         impl ConsumerInterceptor<i32, i32> for PanicOnClose {
-            fn on_consume(&self, records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
-                records
-            }
+            fn on_consume(&self, _records: &mut ConsumerRecords<i32, i32>) {}
             fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {}
             fn close(&mut self) {
                 panic!("boom on close");
