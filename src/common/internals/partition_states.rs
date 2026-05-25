@@ -119,6 +119,18 @@ impl<S> PartitionStates<S> {
         self.map.shift_remove(tp);
     }
 
+    /// Remove the entry for `tp` and return its state, if any.
+    ///
+    /// Convenience for callers (e.g. `SubscriptionState::assign_from_user`)
+    /// that need to move per-partition state out of the container and
+    /// re-insert it into a fresh map — mirroring Java's
+    /// `assignment.stateValue(partition)` followed by
+    /// `assignment.set(...)` pattern where the same `TopicPartitionState`
+    /// object is preserved across the call.
+    pub(crate) fn remove_and_take(&mut self, tp: &TopicPartition) -> Option<S> {
+        self.map.shift_remove(tp)
+    }
+
     /// Remove all entries.
     pub(crate) fn clear(&mut self) {
         self.map.clear();
