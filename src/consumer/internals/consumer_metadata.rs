@@ -142,9 +142,8 @@ impl ConsumerMetadata {
             }
             let inner_guard = builder_inner.lock().unwrap();
             if sub_guard.has_re2j_pattern_subscription() && inner_guard.transient_topics.is_empty() {
-                let assigned_ids: HashSet<crate::common::Uuid> =
-                    sub_guard.assigned_topic_ids().iter().copied().collect();
-                return MetadataRequestBuilder::for_topic_ids(&assigned_ids);
+                // Use BTreeSet to preserve Java's `TreeSet<Uuid>` ordering on the wire.
+                return MetadataRequestBuilder::for_topic_ids(sub_guard.assigned_topic_ids());
             }
             // Explicit topic names + transient topics.
             let mut topics: HashSet<String> = sub_guard.metadata_topics();

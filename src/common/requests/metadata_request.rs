@@ -16,7 +16,7 @@
 //!
 //! Corresponds to `org.apache.kafka.common.requests.MetadataRequest`.
 
-use std::collections::HashSet;
+use std::collections::BTreeSet;
 use std::io;
 
 use crate::common::Uuid;
@@ -236,7 +236,7 @@ impl MetadataRequestBuilder {
         data
     }
 
-    fn request_topic_ids(topic_ids: &HashSet<Uuid>) -> MetadataRequestData {
+    fn request_topic_ids(topic_ids: &BTreeSet<Uuid>) -> MetadataRequestData {
         let mut data = MetadataRequestData::new();
         let topics: Vec<MetadataRequestTopic> = topic_ids
             .iter()
@@ -269,7 +269,13 @@ impl MetadataRequestBuilder {
     }
 
     /// Creates a builder for metadata request using topic IDs.
-    pub fn for_topic_ids(topic_ids: &HashSet<Uuid>) -> Self {
+    ///
+    /// Takes a `BTreeSet<Uuid>` so the wire-order of topic IDs is
+    /// deterministic (sorted by Uuid). Java's `forTopicIds` accepts a
+    /// `Set<Uuid>` and rewraps it in a `HashSet`, losing iteration order;
+    /// the Rust port is stricter for reproducibility and easier wire-byte
+    /// comparison against Java when input is a `TreeSet<Uuid>`.
+    pub fn for_topic_ids(topic_ids: &BTreeSet<Uuid>) -> Self {
         Self::from_data(Self::request_topic_ids(topic_ids))
     }
 
@@ -441,6 +447,29 @@ mod tests {
                 assert!(result.is_err(), "Expected error for version {version} with topic {:?}", topic);
             }
         }
+    }
+
+    /// Asserts that `for_topic_ids` preserves the `BTreeSet<Uuid>` sorted
+    /// iteration order on the wire — guarantees deterministic encoding for
+    /// reproducibility (see COMMENTS.1.md #4).
+    #[test]
+    fn test_for_topic_ids_preserves_btreeset_order() {
+        // Three Uuids in a deliberately unsorted insertion order.
+        let id_b = Uuid::new(0x1111_1111_1111_1111, 0x2222_2222_2222_2222);
+        let id_a = Uuid::new(0x0000_0000_0000_0001, 0x0000_0000_0000_0000);
+        let id_c = Uuid::new(0x7FFF_FFFF_FFFF_FFFF, 0x0000_0000_0000_0000);
+        let mut ids = BTreeSet::new();
+        ids.insert(id_b);
+        ids.insert(id_a);
+        ids.insert(id_c);
+
+        let builder = MetadataRequestBuilder::for_topic_ids(&ids);
+        let topic_ids = builder.topic_ids();
+
+        // BTreeSet sorted order — should match the sorted Uuid order.
+        let mut expected: Vec<Uuid> = vec![id_a, id_b, id_c];
+        expected.sort();
+        assert_eq!(topic_ids, expected);
     }
 
     /// Translated from `MetadataRequestTest.testTopicIdWithZeroUuid`.
