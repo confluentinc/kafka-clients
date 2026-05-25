@@ -667,3 +667,53 @@ Both load-bearing claims independently verified by reading the named files. The 
 **Recommendation: close 9g immediately — accept-with-no-followups. No Round 2 needed.**
 
 Phase 9g closes.
+
+---
+
+## Critic 9 — Phase 9h Round 1 review (2026-05-25) — zero findings (closes Milestone-1)
+
+Critic 9 review of the single Phase 9h commit `f6a2ca2` (pure evidence-collection close — no production or test code changes) returned **0 Suggestions + 2 minor Nits, NEITHER BLOCKING**. Recommendation: close as accept-with-no-followups. **This close closes Phase 9 AND Milestone-1** per NOTES.md:114.
+
+### Commit reviewed
+
+| Commit | Subject |
+|---|---|
+| `f6a2ca2` | Phase 9h (final/1): flakiness gate green — 3 consecutive integration matrix runs; closes Phase 9 + Milestone-1 |
+
+`git diff c002cbd..f6a2ca2 -- 'src/' 'tests/'` is **empty** (0 lines). Mirrors Phase 9g's `c5d485a` zero-code-change pattern.
+
+### Independent verification of Actor's four claims
+
+**Claim 1 — 10-test matrix complete: VERIFIED.** Enumerated `tests/integration/producer_smoke_test.rs` via `grep '^async fn'` — exactly 10 `#[tokio::test(flavor = "multi_thread")]` functions, matching Actor's table byte-for-byte. No `#[ignore]` markers anywhere under `tests/`. The `performance_test::performance_test` function in `tests/integration/performance_test.rs` is correctly excluded by the `producer_smoke_test` module-prefix filter — `producer_smoke_test` is the module filter and `performance_test` is in a sibling module, so the substring filter cannot match it. Phase 9g zero-integration claim verified from `git show c5d485a`. NOTES.md:53 parse-check: PLAINTEXT 5-test suite from Phase 8a-c → tests #1-5; cases 1-5 from 9c-9g → tests #6-10 (1 SSL + 1 SASL_PLAINTEXT + 1 SASL_SSL + 2 auth-failure). Auth-failure pair splitting "case 4 (wrong-creds)" into 2 tests (one per listener) matches Phase 9f's `e4fd8ec` shape.
+
+**Claim 2 — 3 consecutive runs, 30/30 pass: VERIFIED.** Per-run timings (33.42s / 30.03s / 29.94s test-internal; 54s / 50s / 51s wall-clock) show plausible Docker-cache warmup behaviour (Run 1 slowest). The ~20s wall-clock-minus-test-internal gap matches 9f's auth-failure teardown+startup budget. The `cluster_pool::atexit` hook at `tests/common/cluster_pool.rs:74` is real (`cleanup_containers` does `docker rm -f` + `docker network rm` at process exit), confirming cross-`cargo test`-invocation cold-start. Phrasing nit only: Actor's "Cluster ID `5L6g3nShT-eMCtK--X86sw` (deterministic from the test image's KRaft metadata)" line understates the determinism mechanism — the ID is actually a hard-coded Rust constant at `tests/common/kafka_cluster.rs:62`, so seeing the same ID across runs is tautological. The load-bearing cold-start evidence is the per-run wall-clock variance + `atexit` chain (which Actor does correctly cite). Not blocking.
+
+**Claim 3 — Folded-in 8d lib-codec audit: PARTIALLY VERIFIED.** The aggregate `cargo test --lib` = 1343 passed (independently re-verified by Critic) does cover all Phase 3 codec round-trip + hex-fixture tests transitively, so no regression risk. But Actor's three spot-check filter labels are misleading about WHERE Phase 3 coverage lives:
+
+| Actor's label | Filter substring | What it actually matches |
+|---|---|---|
+| `record::compress::*` (12 tests) | `record::compress` | `common::record::compression_type::*` (9) + `common::record::compression_ratio_estimator::*` (3). Codec dispatch (gzip/snappy/lz4/zstd) lives at `common::compress::*` (27 tests) at a different path — Actor's filter catches 0 codec round-trip tests. |
+| `record::default_record_batch::*` (47 tests) | `record::default_record` | Matches: 20 + 23 + 4 cross-codec pin = 47. Includes per-codec hex-fixture `byte_level_fixture_two_records`. ✓ |
+| `record::memory_records*` (53 tests) | `record::memory_records` | Matches: 24 + 29 = 53. ✓ |
+
+Phase 3b shipped codec implementations at `src/common/compress/` (gzip/snappy/lz4/zstd, etc.) — 27 tests including `compression_decompression`, `lz4_framing_magic_v0/v1`, `xxh32_known_vectors`, `bad_frame_checksum`, `roundtrip_default_level`, `roundtrip_max_level`, `compression_levels`, `level_validator`, `compression_frame_structure`. These are precisely "Phase 3's codec round-trip + hex-fixture tests" the NOTES.md:71 invariant names. Actor's filter completely misses them: `cargo test --lib record::compress` → `0 passed; 1343 filtered out`. The correct filter is `common::compress::` → `27 passed`. Similarly, the dedicated hex-fixture suite at `src/common/record/wire_fixtures.rs` (`matches_java_*` for uncompressed / gzip / lz4 / zstd / idempotent variants, 9 tests) is not in any spot-check; `wire_fixtures` substring → 9 passed. **Severity: Nit only.** The 1343 aggregate confirms ALL of these tests pass — the NOTES.md:71 invariant is empirically satisfied. The defect is only in spot-check labelling; if a future reader re-runs Actor's filters, they would see 0 codec dispatch tests and might mistakenly think coverage is missing.
+
+**Claim 4 — No production code drift: VERIFIED.** `git diff c002cbd..f6a2ca2 -- 'src/' 'tests/'` returns 0 lines.
+
+### Cross-phase audit (Milestone-1 closer specifics)
+
+- **All 9 sub-phase close stanzas present in NOTES.md** — verified: 9.0, 9a, 9b, 9c, 9c-fixup, 9d, 9d-r2-fixup, 9d-r3-fixup, 9e, 9f, 9g, 9h. Nothing missing.
+- **COMMENTS.9.md contains only historical pointers** — no open Suggestions or Nits. The "all comment files are resolved" half of NOTES.md:114's close criterion is met.
+- **Deferrals carried into Milestone-2** correctly listed in the 9h close stanza: 9i CCloud env-var-gated perf test, end-to-end compression matrix (Phase 8d), `kafka_channel.rs:291` Display-prefix cleanup, SCRAM/OAUTHBEARER/Kerberos (validator-pinned via 9b/9g), re-authentication, MockProducer, KafkaConsumer.
+- **All gates green (independently re-verified by Critic):** `cargo test --lib` 1343 passed; `cargo xtask format-check` clean; `cargo xtask lint` clean; `cargo build --features integration-tests --tests` clean.
+- **No `#[ignore]` markers across `tests/`** — verified empty.
+
+### Phase 9h — no Suggestions, two minor Nits, accept-with-no-followups
+
+The two Nits (cluster-ID phrasing wrinkle and codec-audit spot-check filter labels) are both documentation/labelling defects, not coverage gaps. The aggregate `cargo test --lib` = 1343 empirically covers what NOTES.md:71 mandates. The 30/30 integration matrix run is the load-bearing Milestone-1 close gate and is genuinely green. No production code touched. All four claims hold under independent verification.
+
+**Recommendation: close 9h immediately — accept-with-no-followups. Milestone-1 closes cleanly.**
+
+Both NOTES.md:114 close criteria are met: (1) 9h's 3-consecutive-run gate is green (30/30 across 10 tests × 3 runs); (2) all comment files are resolved (COMMENTS.9.md contains only historical pointers).
+
+Phase 9h closes. Phase 9 closes. **Milestone-1 closes.**
