@@ -707,8 +707,12 @@ where
     }
 
     async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), KafkaError> {
-        // Java line 372-375.
-        self.ensure_not_closed()?;
+        // Java line 372-375 calls `ensureNotClosed()` BEFORE `allConsumed()`.
+        // The Rust equivalent is to check `ensure_not_closed()` here; we
+        // instead rely on `commit_async_impl`'s check at the cost of a wasted
+        // `all_consumed()` traversal when closed — same trade-off as
+        // `commit_sync()`. Keeping the check only in `commit_async_impl`
+        // removes the redundant double-check the previous code had.
         let offsets = self.subscriptions.all_consumed();
         self.commit_async_impl(offsets, Some(callback)).await
     }
