@@ -20,3 +20,4 @@
 pub(crate) mod auto_offset_reset_strategy;
 pub(crate) mod consumer_interceptors;
 pub(crate) mod deserializers;
+pub(crate) mod subscription_state;
