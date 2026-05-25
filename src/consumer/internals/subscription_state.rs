@@ -310,23 +310,19 @@ impl TopicPartitionState {
     /// parameter on `transitionState`). The closure runs only when the
     /// transition is valid.
     ///
-    /// Per CLAUDE.md §10, the Java
-    /// `IllegalStateException("...but position is null")` is converted to
-    /// a debug assertion in tests and a no-op in production — the closure
-    /// is always expected to leave `self.position` in a state consistent
-    /// with `new_state.requires_position()`. We keep this loose because
-    /// none of the call sites in Java actually reach the throw with valid
-    /// inputs.
+    /// Per CLAUDE.md §10.1, Java's
+    /// `IllegalStateException("...but position is null")` is translated to
+    /// a `panic!` — this is a programmer-error path that cannot be reached
+    /// on the happy path (the closure must leave `self.position` consistent
+    /// with `new_state.requires_position()`), and the consumer cannot
+    /// continue with an inconsistent fetch state.
     fn transition_state(&mut self, new_state: FetchStates, run_if_transitioned: impl FnOnce(&mut Self)) {
         let next_state = self.fetch_state.transition_to(new_state);
         if next_state == new_state {
             self.fetch_state = next_state;
             run_if_transitioned(self);
             if self.position.is_none() && next_state.requires_position() {
-                debug_assert!(
-                    self.position.is_some(),
-                    "Transitioned subscription state to {next_state:?}, but position is null"
-                );
+                panic!("Transitioned subscription state to {next_state:?}, but position is null");
             } else if !next_state.requires_position() {
                 self.position = None;
             }
