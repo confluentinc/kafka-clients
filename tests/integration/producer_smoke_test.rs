@@ -1199,6 +1199,325 @@ async fn producer_smoke_sasl_ssl_1000_records() {
 }
 
 // ---------------------------------------------------------------------------
+// Test 1e/1f: SASL auth-failure paths (Phase 9f)
+// ---------------------------------------------------------------------------
+
+/// SASL_PLAINTEXT + PLAIN with a **wrong password** must surface as
+/// [`KafkaError::Authentication`] from `producer.send(...).await` —
+/// preserving the broker's authoritative error string
+/// `"Authentication failed: Invalid username or password"`
+/// (`PlainSaslServer.java:106`) as a substring of the propagated
+/// [`KafkaError`] message.
+///
+/// **Java parity reference.** `SaslAuthenticatorTest.
+/// testInvalidPasswordSaslPlain` (Apache Kafka 4.2 client suite,
+/// `clients/src/test/java/org/apache/kafka/common/security/
+/// authenticator/SaslAuthenticatorTest.java:270-281`) and the
+/// `testInvalidUsernameSaslPlain` sibling (lines 286-298) both
+/// assert the **same** broker-side error text — Java emits a single
+/// generic message for both "wrong password" and "unknown user" by
+/// design (`PlainSaslServer.java:105-106`), so we only need one
+/// integration variant per listener to pin the contract end-to-end.
+///
+/// **Wire-level propagation path:**
+/// 1. The broker's `PlainSaslServer` throws
+///    `SaslAuthenticationException("Authentication failed: Invalid
+///    username or password")`.
+/// 2. `SaslServerAuthenticator.java:476-479` packs the message into
+///    `SaslAuthenticateResponse.errorMessage` (the error code is
+///    `SASL_AUTHENTICATION_FAILED = 58`).
+/// 3. The client's `SaslClientAuthenticator::handle_sasl_authenticate
+///    _response` (`src/common/security/authenticator/sasl_client_
+///    authenticator.rs:617-632`) extracts the broker message verbatim
+///    and stores `KafkaError::Authentication(broker_msg)` on the
+///    authenticator's `Failed` state.
+/// 4. `KafkaChannel::prepare` (`src/common/network/kafka_channel.rs:
+///    257-301`) sees the `io::Error::other(KafkaError::
+///    Authentication(...))`, captures `e.to_string()` (which renders
+///    as `"AuthenticationException: <broker_msg>"` per `KafkaError`'s
+///    `Display` impl), and returns
+///    `KafkaError::Authentication("AuthenticationException:
+///    Authentication failed: Invalid username or password")`.
+/// 5. `NetworkClient::process_disconnection` (`src/network_client.rs:
+///    472-504`) pulls the captured exception off the channel state and
+///    forwards it to `DefaultMetadataUpdater::handle_server_disconnect`
+///    (`src/default_metadata_updater.rs:308-336`), which calls
+///    `metadata.fatal_error(err)`.
+/// 6. `metadata.fatal_error` wakes any `await_update` waiters via
+///    `notify_waiters()`. `KafkaProducer::wait_on_metadata`'s
+///    `await_update` returns the captured error.
+/// 7. `KafkaProducer::do_send_inner` propagates that error to
+///    `do_send`, which returns it from
+///    `Producer::send(...).await` (per `KafkaProducer::send`,
+///    `src/producer/kafka_producer.rs:1987`).
+///
+/// **Why `.contains()` not `assert_eq!`.** Step 4 above wraps the
+/// broker message with a `"AuthenticationException: "` prefix from
+/// `KafkaError`'s `Display` impl. The broker's string survives
+/// untouched as a substring, which satisfies the Phase-9 DoD (NOTES
+/// .md:67 — "message matching Java's error string") on substring
+/// semantics. A cleanup follow-up could extract the inner
+/// `KafkaError::Authentication` payload directly to drop the prefix,
+/// but that is a production-code change outside Phase 9f scope.
+///
+/// **Fast-fail design.** `max.block.ms` is shortened from the
+/// 60 000 ms default to 15 000 ms so that this test caps its wall-
+/// clock cost at 15 s if the metadata fatal-error notify path ever
+/// regresses. In practice the SASL handshake-reject round trip
+/// completes in sub-second time and the fatal-error notify wakes
+/// `await_update` immediately, so the typical runtime is dominated
+/// by cluster startup + the initial bootstrap connect, not the
+/// failure detection itself. The tokio test runtime additionally
+/// gives us its default per-test 60 s budget as a backstop.
+///
+/// **Why we do not patch the producer's retry-on-auth-failure
+/// behaviour here.** Phase 9f is explicitly test-only (see
+/// `design/history/Milestone-1/Phase-9/NOTES.md:1326-1333` — the
+/// 9e close stanza scope). If the producer hangs longer than
+/// `max.block.ms`, that is a wiring defect to file as a 9g+
+/// deferral, not a defect to patch in 9f.
+///
+/// **References:** `design/history/Milestone-1/Phase-9/NOTES.md:51`
+/// (sub-phase ladder), `NOTES.md:67` (DoD addition #1),
+/// CLAUDE.md "definition-of-done.md" rule 3 ("error message content
+/// is asserted, not just `is_err()`").
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_smoke_sasl_plaintext_auth_failure() {
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_sasl_plaintext_auth_failure");
+    let bootstrap_servers = ctx.sasl_plaintext_bootstrap_servers().to_string();
+
+    // Topic pre-creation via `docker exec kafka-topics`. Even though
+    // the producer never gets past auth and so will never reach this
+    // topic on the wire, the topic still needs to exist for parity
+    // with the happy-path SASL_PLAINTEXT test (`cluster_pool` reuse
+    // — same warm cluster, same partition layout).
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    // Compose a JAAS config that pairs the real username with an
+    // **invalid** password. Same shape as the happy-path test, only
+    // the password literal is swapped for `wrong-password`.
+    let jaas_config = format!(
+        r#"{module} required username="{user}" password="wrong-password";"#,
+        module = confluent_kafka::common::security::jaas_config::PLAIN_LOGIN_MODULE,
+        user = crate::common::kafka_cluster::SASL_USERNAME,
+    );
+
+    let props: HashMap<String, String> = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers),
+        ("acks".to_string(), "all".to_string()),
+        ("linger.ms".to_string(), "10".to_string()),
+        ("compression.type".to_string(), "none".to_string()),
+        (
+            "client.id".to_string(),
+            "producer-smoke-test-sasl-plaintext-authfail".to_string(),
+        ),
+        (
+            "key.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        (
+            "value.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        ("security.protocol".to_string(), "SASL_PLAINTEXT".to_string()),
+        ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+        ("sasl.jaas.config".to_string(), jaas_config),
+        // Short `max.block.ms` so we fail fast if the metadata
+        // fatal-error notify path regresses — see rustdoc above.
+        ("max.block.ms".to_string(), "15000".to_string()),
+    ]);
+
+    let key_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let value_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let producer = Arc::new(
+        KafkaProducer::with_serializers(props, key_ser, value_ser).expect("KafkaProducer::with_serializers failed"),
+    );
+
+    // Single send — the failure must surface from `send().await`
+    // itself (no need to also `.get().await` the returned future).
+    // `wait_on_metadata` propagates the fatal Authentication error
+    // before any record metadata future is ever created.
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+    let key = b"k0".to_vec();
+    let value = b"v0".to_vec();
+    let record = ProducerRecord::with_partition(topic_arc, Some(0), Some(key), Some(value))
+        .expect("ProducerRecord::with_partition");
+
+    let started = Instant::now();
+    let result = producer.send(record).await;
+    let elapsed = started.elapsed();
+    log::info!("auth-failure send returned in {elapsed:?}: {result:?}");
+
+    // (1) The send call must error out — not hang, not succeed.
+    let err = result.expect_err("send() must fail with bad credentials");
+
+    // (2) The error must be `KafkaError::Authentication(_)` —
+    // Phase 9 NOTES.md DoD addition #1: "Auth failure surfaces as
+    // `KafkaError::Authentication` …".
+    let msg = match &err {
+        KafkaError::Authentication(m) => m.clone(),
+        other => panic!("expected KafkaError::Authentication, got {other:?}"),
+    };
+
+    // (3) The error message must contain the broker's authoritative
+    // error string — Phase 9 NOTES.md DoD addition #1: "… with a
+    // message matching Java's error string." Java's `Sasl
+    // AuthenticatorTest.testInvalidPasswordSaslPlain` asserts the
+    // **same** literal (`SaslAuthenticatorTest.java:278`).
+    const EXPECTED_BROKER_MSG: &str = "Authentication failed: Invalid username or password";
+    assert!(
+        msg.contains(EXPECTED_BROKER_MSG),
+        "auth-failure error message must contain broker text\n  expected substring: {EXPECTED_BROKER_MSG:?}\n  actual: {msg:?}",
+    );
+
+    // (4) Liveness assertion — failed within `max.block.ms` + headroom.
+    // The 30 s ceiling here is `max.block.ms (15 s)` + cluster-startup
+    // residual + a generous tokio scheduling slack. If this trips
+    // it indicates the failure path is hung, not slow.
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "auth-failure surfaced too slowly ({elapsed:?}); max.block.ms=15s + headroom should bound this well under 30 s — possible regression in metadata fatal-error notify path",
+    );
+
+    // Graceful close — the producer is in a fatal state but
+    // `close_with_timeout` must still succeed (no panic, no hang).
+    let producer = Arc::into_inner(producer).expect("producer Arc had outstanding refs at close");
+    producer
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+}
+
+/// SASL_SSL + PLAIN with a **wrong password** — same contract as
+/// [`producer_smoke_sasl_plaintext_auth_failure`] but over the
+/// SASL_SSL listener: TLS handshake completes first, then the SASL
+/// PLAIN exchange runs over the encrypted channel, then **the SASL
+/// handshake fails with the wrong password**. Asserts the
+/// `KafkaError::Authentication` propagation path is identical to
+/// the SASL_PLAINTEXT variant — the broker's authoritative error
+/// string still arrives at the caller as a substring of the
+/// `KafkaError::Authentication` message.
+///
+/// **Why this variant is needed in addition to the SASL_PLAINTEXT
+/// variant.** The Phase 9d Round 2 selector readability filter fix
+/// (`src/common/network/selector.rs` `wait_any_transport_readable`
+/// — see Phase 9d Round 2 memory note) makes mid-handshake auth
+/// rejections surface promptly. Phase 9e proved the filter holds
+/// for the happy-path SASL_SSL handshake (TLS then SASL, both
+/// complete). This test exercises the **failure** branch of the
+/// same composed transport — TLS handshake completes, SASL
+/// handshake fails. Without re-testing this combination, the auth-
+/// failure contract for SASL_SSL would rest on the parity argument
+/// alone; this is the empirical pin.
+///
+/// **Java parity reference.** `SaslAuthenticatorTest.
+/// testInvalidPasswordSaslPlain` actually uses
+/// `SecurityProtocol.SASL_SSL` (line 272) — Java's own canonical
+/// test for the wrong-password contract is the SASL_SSL variant.
+/// We have both PLAINTEXT and SSL listener tests so the producer-
+/// side wire path is empirically pinned on both legs.
+#[tokio::test(flavor = "multi_thread")]
+async fn producer_smoke_sasl_ssl_auth_failure() {
+    use std::io::Write;
+
+    init_logger();
+    let mut ctx = TestContext::new(ClusterConfig::default()).await;
+    let topic = ctx.topic("smoke_sasl_ssl_auth_failure");
+    let bootstrap_servers = ctx.sasl_ssl_bootstrap_servers().to_string();
+
+    // Truststore tempfile (same shape as the happy-path SASL_SSL test).
+    let mut truststore_file = tempfile::NamedTempFile::new().expect("temp file");
+    truststore_file.write_all(ctx.ca_cert_pem().as_bytes()).expect("write ca pem");
+    truststore_file.flush().expect("flush ca pem");
+    let truststore_path = truststore_file.path().to_str().expect("utf-8 path").to_owned();
+
+    // Topic pre-creation via `docker exec kafka-topics` (parity with
+    // the SASL_PLAINTEXT auth-failure test).
+    let cluster = cluster_pool::get_or_create(&ClusterConfig::default()).await;
+    create_topic(&cluster.container_ids()[0], &topic, TOPIC_PARTITIONS);
+
+    // JAAS config with the wrong password — same shape as the
+    // SASL_PLAINTEXT auth-failure test.
+    let jaas_config = format!(
+        r#"{module} required username="{user}" password="wrong-password";"#,
+        module = confluent_kafka::common::security::jaas_config::PLAIN_LOGIN_MODULE,
+        user = crate::common::kafka_cluster::SASL_USERNAME,
+    );
+
+    let mut props: HashMap<String, String> = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap_servers),
+        ("acks".to_string(), "all".to_string()),
+        ("linger.ms".to_string(), "10".to_string()),
+        ("compression.type".to_string(), "none".to_string()),
+        ("client.id".to_string(), "producer-smoke-test-sasl-ssl-authfail".to_string()),
+        (
+            "key.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        (
+            "value.serializer".to_string(),
+            "org.apache.kafka.common.serialization.ByteArraySerializer".to_string(),
+        ),
+        ("security.protocol".to_string(), "SASL_SSL".to_string()),
+        ("ssl.truststore.location".to_string(), truststore_path),
+        ("ssl.truststore.type".to_string(), "PEM".to_string()),
+        ("sasl.mechanism".to_string(), "PLAIN".to_string()),
+        ("sasl.jaas.config".to_string(), jaas_config),
+        ("max.block.ms".to_string(), "15000".to_string()),
+    ]);
+    // IP-SAN match (same as the happy-path SASL_SSL test).
+    props.insert("ssl.endpoint.identification.algorithm".to_string(), "https".to_string());
+
+    let key_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let value_ser: Box<dyn confluent_kafka::common::serialization::Serializer<Vec<u8>>> =
+        Box::new(ByteArrayOwnedSerializer);
+    let producer = Arc::new(
+        KafkaProducer::with_serializers(props, key_ser, value_ser).expect("KafkaProducer::with_serializers failed"),
+    );
+
+    let topic_arc: Arc<str> = Arc::from(topic.as_str());
+    let key = b"k0".to_vec();
+    let value = b"v0".to_vec();
+    let record = ProducerRecord::with_partition(topic_arc, Some(0), Some(key), Some(value))
+        .expect("ProducerRecord::with_partition");
+
+    let started = Instant::now();
+    let result = producer.send(record).await;
+    let elapsed = started.elapsed();
+    log::info!("auth-failure send (SASL_SSL) returned in {elapsed:?}: {result:?}");
+
+    let err = result.expect_err("send() must fail with bad credentials");
+    let msg = match &err {
+        KafkaError::Authentication(m) => m.clone(),
+        other => panic!("expected KafkaError::Authentication, got {other:?}"),
+    };
+    const EXPECTED_BROKER_MSG: &str = "Authentication failed: Invalid username or password";
+    assert!(
+        msg.contains(EXPECTED_BROKER_MSG),
+        "auth-failure error message must contain broker text\n  expected substring: {EXPECTED_BROKER_MSG:?}\n  actual: {msg:?}",
+    );
+    assert!(
+        elapsed < Duration::from_secs(30),
+        "auth-failure surfaced too slowly ({elapsed:?}); max.block.ms=15s + headroom should bound this well under 30 s — possible regression in metadata fatal-error notify path",
+    );
+
+    let producer = Arc::into_inner(producer).expect("producer Arc had outstanding refs at close");
+    producer
+        .close_with_timeout(Duration::from_secs(30))
+        .await
+        .expect("graceful close failed");
+
+    // Keep the truststore alive until after close — dropped here.
+    drop(truststore_file);
+}
+
+// ---------------------------------------------------------------------------
 // Test 2: 1000-record auto-partition consistency (Phase 8b)
 // ---------------------------------------------------------------------------
 
