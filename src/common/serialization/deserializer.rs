@@ -19,7 +19,7 @@
 use std::collections::HashMap;
 
 use crate::common::KafkaError;
-use crate::common::header::internals::RecordHeaders;
+use crate::common::header::Headers;
 
 /// An interface for converting bytes to objects.
 ///
@@ -82,7 +82,12 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Override this method in custom deserializer implementations that need
     /// to inspect headers during deserialization (for example, schema
     /// registry integration).
-    fn deserialize_with_headers(&self, topic: &str, _headers: &RecordHeaders, data: &[u8]) -> Result<T, KafkaError> {
+    ///
+    /// Takes `&dyn Headers` (the trait, not the concrete `RecordHeaders`
+    /// struct) to mirror Java's signature exactly — Java's parameter type
+    /// is the `Headers` interface, which lets test doubles and alternative
+    /// `Headers` implementations interoperate with custom deserializers.
+    fn deserialize_with_headers(&self, topic: &str, _headers: &dyn Headers, data: &[u8]) -> Result<T, KafkaError> {
         self.deserialize(topic, data)
     }
 
