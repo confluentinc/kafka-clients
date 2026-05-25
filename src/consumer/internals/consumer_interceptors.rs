@@ -453,14 +453,12 @@ mod tests {
         let mut none_intercepted = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
         let baseline = build_three_partition_input(&tp, &filter_topic_part1, &filter_topic_part2);
         interceptors.on_consume(&mut none_intercepted);
-        // Match Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
-        // by comparing per-partition record counts (ConsumerRecords does
-        // not implement PartialEq directly; the Java assertion holds
-        // because no interceptor mutated the batch).
-        assert_eq!(none_intercepted.count(), 3);
-        let parts_in: Vec<TopicPartition> = baseline.partitions().cloned().collect();
-        let parts_out: Vec<TopicPartition> = none_intercepted.partitions().cloned().collect();
-        assert_eq!(parts_in, parts_out);
+        // Matches Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
+        // (ConsumerInterceptorsTest.java:162-166): full structural equality
+        // over the entire batch — per-partition record lists AND the
+        // `next_offsets` map — guards against any future regression that
+        // would mutate downstream state on the all-panic path.
+        assert_eq!(none_intercepted, baseline);
         assert_eq!(i1.on_consume_count() + i2.on_consume_count(), 6);
         validate_next_offsets(
             none_intercepted.next_offsets(),

@@ -36,6 +36,15 @@ use crate::consumer::OffsetAndMetadata;
 /// (Java's `ConsumerRecords` is documented as iterating per the underlying
 /// map's iteration order; the test suite assumes ordering matches insertion
 /// when a `LinkedHashMap` is supplied).
+///
+/// # Equality
+///
+/// `PartialEq` / `Eq` are derived (gated on `K: PartialEq, V: PartialEq` /
+/// `K: Eq, V: Eq`) so that tests can `assert_eq!(actual, expected)`
+/// against an entire batch. Mirrors Java's `ConsumerRecordsTest` which
+/// uses `assertEquals` on whole-batch values. The bounds are gated; users
+/// with non-`PartialEq` keys/values are unaffected.
+#[derive(Debug, PartialEq, Eq)]
 pub struct ConsumerRecords<K, V> {
     records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
