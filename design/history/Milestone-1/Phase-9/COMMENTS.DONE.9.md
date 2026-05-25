@@ -599,3 +599,71 @@ The fatal-error wakeup path in `process_disconnection` → `handle_server_discon
 **Recommendation: close 9f immediately — accept-with-no-followups. No Round 2 needed.**
 
 Phase 9f closes.
+
+---
+
+## Critic 9 — Phase 9g Round 1 review (2026-05-25) — zero findings
+
+Critic 9 review of the single Phase 9g commit `c5d485a` (zero-code-change scope-resolved close) returned **0 Suggestions + 0 Nits**.
+
+### Commit reviewed
+
+| Commit | Subject |
+|---|---|
+| `c5d485a` | Phase 9g: scope-resolved to Option A (zero-code-change); sub-phase 9g close stanza in NOTES.md |
+
+`git diff 85e137c..c5d485a -- 'src/'` is empty — pure NOTES.md + memory-file commit, no production code drift.
+
+### Scope-ambiguity resolution
+
+The Phase 9 ladder line 52 read 9g as a client-side validator unit test; the Phase 9e/9f close stanzas reframed it as a broker-handshake integration pin. Actor 9 was given three options (A: zero-code-change if both scopes already pinned; B: scenario-1 unit-test gap; C: scenario-2 integration-test gap) and chose **A** with citations. Critic verified both load-bearing claims independently.
+
+### Claim 1 verification — Scenario (1) client-side validator rejection, pinned by Phase 9b
+
+Read each cited test in `src/producer/producer_config.rs`:
+
+- `test_sasl_scram_mechanism_rejected` (line 1916) — exists, asserts `matches!(err, KafkaError::Config(_))` + `.contains("Unsupported SASL mechanism: SCRAM-SHA-512")`. Exact mechanism named in ladder line 52.
+- `test_sasl_oauthbearer_mechanism_rejected` (line 1937) — exists, identical shape, `.contains("Unsupported SASL mechanism: OAUTHBEARER")`. Covers the "(or similar)" of ladder line 52.
+- `test_sasl_ssl_default_mechanism_rejected_in_milestone_1` (line 1865) — exists, `.contains("Unsupported SASL mechanism: GSSAPI")`. Covers the GSSAPI/Kerberos axis.
+- `test_sasl_plaintext_plain_mechanism_accepted` (line 1885) — positive control, `PLAIN` accepted.
+- `test_non_sasl_protocol_ignores_sasl_mechanism` (line 1961) — negative control, `PLAINTEXT` + `SCRAM-SHA-256` accepted (security-protocol gating).
+
+All five tests use `KafkaError::Config(_)` variant matching AND specific substring assertions — **DoD #3 met on every rejection test**. The validator path at `producer_config.rs:1252-1272` (`reject_milestone_1_unsupported_sasl_mechanism`) is invoked from `post_process_parsed_config:1167` synchronously inside `ProducerConfig::new(...)` before any network IO — "at construction time" verified at the call-graph level. Mechanism-set audit: skip list (`NOTES.md:83`: SCRAM, OAUTHBEARER, Kerberos/GSSAPI) is fully covered.
+
+### Claim 2 verification — Scenario (2) broker-handshake rejection, pinned by Phase 9a unit test
+
+Read `src/common/security/authenticator/sasl_client_authenticator.rs:1122-1164` — `handshake_unsupported_mechanism_fails_with_java_message` exists. Drives the handshake state machine past `ApiVersions` via `MockTransport`, broker responds with `Errors::UnsupportedSaslMechanism` (wire code 33) + `enabled_mechanisms = ["SCRAM-SHA-512"]`. Asserts `matches!(kafka_err, KafkaError::Authentication(_))` + `is_fatal()` + `!is_retriable()` + `state == SaslState::Failed` + **`assert_eq!`** (not `.contains()`) on:
+
+```
+"Client SASL mechanism 'PLAIN' not enabled in the server, enabled mechanisms are [SCRAM-SHA-512]"
+```
+
+**Java fixture cross-check** — Read `kafka/clients/src/main/java/org/apache/kafka/common/security/authenticator/SaslClientAuthenticator.java:609-610`:
+
+```java
+throw new UnsupportedSaslMechanismException(String.format(
+    "Client SASL mechanism '%s' not enabled in the server, enabled mechanisms are %s",
+    mechanism, response.enabledMechanisms()));
+```
+
+Where `response.enabledMechanisms()` returns `List<String>` whose `toString()` is `[item1, item2]` (no inner quotes). Substituting `mechanism="PLAIN"` and `enabledMechanisms()=["SCRAM-SHA-512"]` yields a byte-exact match with the Rust test fixture. The `assert_eq!` against a verified fixture is **strictly stronger** than what an integration test could pin (which would degrade to `.contains(...)` because the broker may add contextual text). Actor's strength claim holds.
+
+### Side claim — Test broker hard-coded to PLAIN
+
+`tests/common/kafka_cluster.rs:202` is `env_vars.insert("KAFKA_SASL_ENABLED_MECHANISMS".into(), "PLAIN".into());`. No override path exists. Adding scenario-(2) live coverage would require a second cluster image or runtime broker reconfig + SCRAM/OAUTHBEARER server-side credential plumbing — out of Milestone-1 scope per `PLAN.md:365`. Actor's "ruling out cheap scenario-(2) live testing" justification is sound.
+
+### Other checks
+
+- `cargo test --lib` count = **1343** (unchanged from 9d/9e/9f baseline).
+- No new structs / traits (NOTES.md + memory files only).
+- Close-stanza format consistent with 9e/9f: explicit option-and-justification, commit ladder, scope-resolution evidence (Scenario 1 + Scenario 2 sub-sections), why-not-Options-B/C exhaustive argument, Java parity check (`SaslAuthenticatorTest.testInvalidMechanism` documented as Java-SPI-lookup contract-parity-not-string-parity), 3 numbered decisions, deferrals carried forward (9h flakiness gate, 9i CCloud env-var test, `kafka_channel.rs:291` Display-prefix cleanup), Java tests intentionally not translated with rationale, all-gates-green status.
+- No CLAUDE.md / agent-roles.md rule mandates a new test for 9g. The DoD's rule 3 is met by virtue of the 9b/9a tests already pinning the contracts. Actor is not papering over.
+- Secondary citations spot-checked: `KafkaError::Authentication(String)` at `errors.rs:157`, `is_fatal()` true at `errors.rs:300`, non-retriable at `errors.rs:242`, `UnsupportedSaslMechanism` wire code 33 at `errors.rs:75`.
+
+### Phase 9g — no findings
+
+Both load-bearing claims independently verified by reading the named files. The Option A close is defensible: ladder-line-52 scope is fully pinned by 5 Phase 9b unit tests with `KafkaError::Config(_)` variant matching + substring message assertions; the 9e/9f-reframed scope-2 is pinned by a Phase 9a unit test with `assert_eq!` against a fixture byte-verified against Java's `String.format` output at `SaslClientAuthenticator.java:609`. The 1343 lib-test baseline is preserved. Zero risk to the codebase.
+
+**Recommendation: close 9g immediately — accept-with-no-followups. No Round 2 needed.**
+
+Phase 9g closes.
