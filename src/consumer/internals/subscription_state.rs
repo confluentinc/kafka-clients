@@ -1428,8 +1428,11 @@ impl SubscriptionState {
                 None => "Subscribe(<none>)".to_string(),
             },
             SubscriptionType::UserAssigned => {
+                // Matches Java: `"Assign(" + assignedPartitions() + " , id=" + ... + ")"`.
+                // Java's `HashSet<TopicPartition>.toString()` produces `[topic-0, topic-1]`
+                // (no quotes, comma + space).
                 let parts: Vec<String> = self.assignment.partition_set().map(|tp| tp.to_string()).collect();
-                format!("Assign({:?} , id={})", parts, self.assignment_id)
+                format!("Assign([{}] , id={})", parts.join(", "), self.assignment_id)
             },
             SubscriptionType::AutoTopicsShare => {
                 format!(
@@ -1456,13 +1459,18 @@ impl SubscriptionState {
                 .unwrap_or_else(|| "null".to_string()),
             _ => "null".to_string(),
         };
+        // Matches Java: `"assignment=" + assignment.partitionStateValues() + " (id=" + ... + ")"`.
+        // Java's `Collection.toString()` produces `[elem0, elem1]` (no quotes, comma + space).
+        // We print partition names instead of `TopicPartitionState`'s default `Class@hash`
+        // toString — more useful for logs and still surrounded by `[...]` like Java.
+        let assignment_str: Vec<String> = self.assignment.partition_set().map(|tp| tp.to_string()).collect();
         format!(
-            "SubscriptionState{{type={}, subscribedPattern={pattern_in_use}, subscription={}, groupSubscription={}, defaultResetStrategy={}, assignment={:?} (id={})}}",
+            "SubscriptionState{{type={}, subscribedPattern={pattern_in_use}, subscription={}, groupSubscription={}, defaultResetStrategy={}, assignment=[{}] (id={})}}",
             self.subscription_type,
             self.subscription.iter().cloned().collect::<Vec<_>>().join(","),
             self.group_subscription.iter().cloned().collect::<Vec<_>>().join(","),
             self.default_reset_strategy,
-            self.assignment.partition_set().map(|tp| tp.to_string()).collect::<Vec<_>>(),
+            assignment_str.join(", "),
             self.assignment_id,
         )
     }
