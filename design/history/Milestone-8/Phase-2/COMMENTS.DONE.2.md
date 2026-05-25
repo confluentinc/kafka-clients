@@ -38,3 +38,80 @@ The Rust translation now:
 ### Resolution
 
 Resolved in the same commit (`71aa270`) as #1 — the mutate-in-place design eliminates the per-iteration clone entirely. The chain now passes `&mut ConsumerRecords` through each interceptor without any defensive copies, matching Java's reference semantics exactly.
+
+## 3. `Consumer.assertEquals(noneInterceptedRecs, consumerRecords)` assertion weakened — RESOLVED
+
+- **File**: `src/consumer/internals/consumer_interceptors.rs:421-431` (pre-fixup line numbers)
+- **Severity**: `[MINOR]`
+- **Java reference**: `ConsumerInterceptorsTest.java:162-166`
+- **What's wrong**: The Java test asserts `assertEquals(noneInterceptedRecs, consumerRecords)` — full structural equality of all per-partition record lists and their `next_offsets`. The Rust translation explicitly weakened this to "count is 3" plus "partition keys match" (because `ConsumerRecords` did not implement `PartialEq`).
+
+### Resolution
+
+Commit `f96980d` adds `#[derive(Debug, PartialEq, Eq)]` to `ConsumerRecord` and `ConsumerRecords`. The derive bounds are gated, so users with non-`PartialEq` `K`/`V` are unaffected. All field types already support `PartialEq`/`Eq`: `Arc<str>`, `i32`/`i64`/`i16`, `TimestampType`, `RecordHeaders`, `Option<K>`/`Option<V>`, `OffsetAndMetadata`, `IndexMap`, `HashMap`. The weakened block in the all-panic test case is replaced with `assert_eq!(none_intercepted, baseline)` — matching Java's `assertEquals(...)` exactly.
+
+## 4. `Deserializer<T>` not re-exported at `crate::consumer::Deserializer` — RESOLVED
+
+- **File**: `src/consumer/mod.rs`
+- **Severity**: `[MINOR]`
+
+### Resolution
+
+Commit `e143571` adds `pub use crate::common::serialization::Deserializer;` to `src/consumer/mod.rs`. The trait stays in `crate::common::serialization` per CLAUDE.md §2 (shared by producer + consumer), and consumer-side users now have a convenience re-export at `crate::consumer::Deserializer` matching the existing pattern for `ConsumerInterceptor`, `ConsumerRebalanceListener`, and `OffsetCommitCallback`.
+
+## 5. `Deserializer::deserialize_with_headers` took concrete `&RecordHeaders` instead of `&dyn Headers` — RESOLVED
+
+- **File**: `src/common/serialization/deserializer.rs:85`
+- **Severity**: `[MINOR]`
+
+### Resolution
+
+Commit `348042f` changes the parameter from `&RecordHeaders` to `&dyn Headers` (the trait), matching Java's `Deserializer.deserialize(String, Headers, byte[])` which takes the `Headers` interface. The `Headers` trait in `src/common/header/mod.rs` is object-safe — all methods use `&self` / `&mut self` receivers with concrete return types, no generics, no `Self` returns. The default method has no in-tree callers, so the change is mechanical: only the trait signature and its `use` import changed.
+
+## 6. New dependency `async-trait` added without the "pause and ask" required by PLAN — RESOLVED (process-only)
+
+- **File**: `Cargo.toml:38`
+- **Severity**: `[NIT]`
+
+### Resolution
+
+Process note: `async-trait` was added in commit `5be0bfa` (Phase 2 (5/6)) without an explicit "pause and ask" step prior to introduction. PLAN.md required this gate; in this case the dependency is effectively mandatory for the `#[async_trait]` requirement so the outcome is benign, but the gate should be honored explicitly in future phases. The dependency is approved going forward. No code change is required for this finding.
+
+## 7. Empty `tests/consumer/internals/` directory left over — RESOLVED
+
+- **Path**: `tests/consumer/internals/`
+- **Severity**: `[NIT]`
+
+### Resolution
+
+Local directory removed via `rmdir tests/consumer/internals` (the dir was never tracked in git — `git log --all --diff-filter=A -- tests/consumer/internals` returns nothing). Inline tests inside `src/consumer/internals/consumer_interceptors.rs` (already documented at the top of that file's `tests` module) remain the canonical location for interceptors-test coverage given `ConsumerInterceptors` is `pub(crate)`.
+
+## 8. `ConsumerRecords::into_parts` was `pub(crate) + #[allow(dead_code)]` — RESOLVED
+
+- **File**: `src/consumer/consumer_records.rs:130-138` (pre-fixup)
+- **Severity**: `[MINOR]`
+- **What's wrong vs CLAUDE.md / DoD**: `into_parts` had no Java equivalent (DoD §7) and the "will be used by Phase 11's fetcher path" rationale was a deferred-completion marker (CLAUDE.md §5). The only caller was the in-repo test fixture's `mem::take(records).into_parts()` pattern.
+
+### Resolution
+
+Commit `f2c1903` removes `ConsumerRecords::into_parts` entirely. With the test fixture rewritten to not use `mem::take` (see #9), no caller in the repo needs `into_parts`. When Phase 11's fetcher path actually requires deconstruction, it can add a method with a real production-side justification. The `#[cfg(test)]`-gated alternative was considered but the cleaner Option B (eliminate `into_parts`) was preferred because it resolves the underlying anti-pattern in the test fixture too.
+
+## 9. `on_consume` panic-safety docs overstated the "previous-good batch" guarantee; test fixture used `mem::take` anti-pattern — RESOLVED
+
+- **Files**: `src/consumer/interceptor.rs:82-93`, `src/consumer/internals/consumer_interceptors.rs:103-122` (panic-safety docs); `src/consumer/internals/consumer_interceptors.rs:277-308` (test fixture using `mem::take`)
+- **Severity**: `[MINOR]`
+- **What's wrong vs Java**: Java's `ConsumerRecords` is structurally immutable (`private final`, `Map.copyOf`, `Collections.unmodifiableList` — see `ConsumerRecords.java:37-50`); a throwing interceptor cannot corrupt the input batch. The Rust `&mut` form weakens that to an interceptor-side discipline. The in-repo test fixture used `std::mem::take(records)` early then performed fallible work — a panic between the `take` and the final assignment would leave the next interceptor seeing an empty batch (not the previous-good batch).
+
+### Resolution
+
+Adopted Option B (rewrite the test fixture) in commit `f2c1903`:
+
+- `FilterConsumerInterceptor::on_consume` now builds the replacement batch off to the side from a borrowed view of `*records`, then commits with a single non-fallible `*records = ConsumerRecords::new(new_records, new_next_offsets);` at the end. No `mem::take`. A panic anywhere in the construction loop leaves `*records` unchanged — the structural Rust analog of Java's immutable input.
+- Panic-safety docs in `consumer/interceptor.rs::on_consume` and `consumer/internals/consumer_interceptors.rs::on_consume` are rewritten to:
+  - Lead with Java's structural immutability and contrast with Rust's `&mut` form.
+  - Document the recommended pattern (build off to the side, commit at the end) with a code sketch.
+  - Explicitly call out `std::mem::take(records)` as an anti-pattern with an example.
+  - Note that the in-repo `FilterConsumerInterceptor` follows the recommended pattern as the reference example.
+- The `into_parts` helper that supported the previous `mem::take`-based fixture is removed (see #8). Eliminating it from the codebase prevents future contributors from re-introducing the anti-pattern by reaching for the deconstruction API.
+
+The four existing tests still pass (`test_on_consume_chain`, `test_on_commit_chain`, `test_on_consume_panic_does_not_poison_chain`, `test_drop_close_panic_does_not_block_remaining_closes`) including the case-1(b) regression where the first interceptor panics and the second still observes the previous-good batch.
