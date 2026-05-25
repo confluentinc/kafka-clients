@@ -1264,16 +1264,18 @@ impl SubscriptionState {
 
     /// Translates Java's package-private `partitionLead(TopicPartition)`.
     /// Visible only for tests that read it via lag computations.
+    ///
+    /// Matches Java's
+    /// `logStartOffset == null ? null : position.offset - logStartOffset`.
+    /// If `log_start_offset` is set but `position` is `None`, Java NPEs;
+    /// Rust panics. This combination is unreachable on the happy path (the
+    /// state machine guarantees `position.is_some()` whenever
+    /// `log_start_offset` is updated via a fetch response).
     pub(crate) fn partition_lead(&self, tp: &TopicPartition) -> Result<Option<i64>, KafkaError> {
         let state = self.assigned_state(tp)?;
-        // Java: `logStartOffset == null ? null : position.offset - logStartOffset`.
-        // If position is also null this NPEs; the test doesn't exercise that
-        // path. Match Java by unwrapping `position` only when log start is
-        // present.
-        match (state.log_start_offset, state.position.as_ref()) {
-            (Some(lso), Some(pos)) => Ok(Some(pos.offset - lso)),
-            _ => Ok(None),
-        }
+        Ok(state
+            .log_start_offset
+            .map(|lso| state.position.as_ref().expect("position is null but logStartOffset is set").offset - lso))
     }
 
     /// Translates Java's `updateHighWatermark(TopicPartition, long)`.
