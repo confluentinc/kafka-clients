@@ -116,3 +116,69 @@ because it appears in the parameter type of `pub fn schedule_poll_task`,
 but it is no longer re-exported at the consumer module root.
 
 Reviewed at SHA `eff6200`.
+
+---
+
+# Re-review at SHA `7340f58` — RESOLVED items
+
+## Issue 7: `commit_sync` inline comment traces the wrong Java call chain
+
+- **File**: `src/consumer/mock_consumer.rs:669-672`
+- **Severity**: Behavior Mismatch (documentation) — minor, comment contradicts the actual Java behavior the fix is justified against
+- **Java Reference**: `MockConsumer.java:378-380` (`commitSync()` →
+  `commitSync(allConsumed())` → line 362-364 →
+  `commitAsync(offsets, null)` line 353-358)
+
+**Description**: The inline comment introduced by `1912761` traced
+the `commitAsync()` (no-args) chain, not the `commitSync()` chain.
+Java's `commitSync()` actually reads `allConsumed()` BEFORE the
+closed check (which only happens deep inside `commitAsync(offsets,
+null)` at `MockConsumer.java:353-358`). The Rust code deliberately
+tightens by checking closed first. The commit message for `1912761`
+correctly acknowledged the tightening, but the inline comment claimed
+the opposite — Java already checks closed first via the wrong call
+chain. A future reader trusting the comment would believe Rust matches
+Java exactly when in fact Rust is a deliberate behavior tightening.
+
+**Resolution**: Rewrote the inline comment on `commit_sync` to match
+the resolution-commit language: explicitly states Java reads
+`allConsumed()` BEFORE the closed check, traces the correct chain
+(`378-380 → 362-364 → 353-358`), and notes end behavior is identical
+(both error when closed) but Rust skips the wasted subscription-map
+traversal. Fixup commit `a452926` targets `1912761`.
+
+---
+
+## Issue 8: `commit_async_with_callback` comment references stale "same trade-off as `commit_sync()`"
+
+- **File**: `src/consumer/mock_consumer.rs:710-715`
+- **Severity**: Cosmetic (doc accuracy) — comment cross-reference became stale after fix #3
+- **Java Reference**: `MockConsumer.java:372-375`
+
+**Description**: The inline comment introduced by `4ebaa92` said "same
+trade-off as `commit_sync()`", but fix #3 (`1912761`) added an
+`ensure_not_closed()?` check at the top of `commit_sync()`. After fix
+#3, `commit_sync()` no longer has the "wasted `all_consumed()`
+traversal when closed" trade-off; only `commit_async_with_callback` (and
+the other `*_offsets` / callback variants) does. The cross-reference
+became misleading.
+
+**Resolution**: Picked approach (a) — comment-only fix. Approach (b)
+(also pre-checking `ensure_not_closed` here) would still leave
+`commit_sync_offsets` and `commit_async_offsets_with_callback` relying
+on `commit_async_impl`'s check, so adding a pre-check only on
+`commit_async_with_callback` would introduce new asymmetry rather
+than removing it. The no-args pre-checks on `commit_sync` /
+`commit_async` exist as a targeted optimization (skip the
+subscription-map traversal when closed); the `*_offsets` / callback
+variants don't benefit from it because the caller already supplies
+the offsets map.
+
+The rewritten comment is now specific to `commit_async_with_callback`,
+notes the asymmetry with `commit_sync` / `commit_async` explicitly,
+and stops claiming parity that no longer exists. Fixup commit
+`ca5d6cf` targets `4ebaa92`.
+
+---
+
+Re-reviewed at SHA `7340f58`. Both follow-up findings resolved.
