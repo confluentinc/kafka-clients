@@ -666,7 +666,11 @@ where
     // ── Commit ─────────────────────────────────────────────────────────
 
     async fn commit_sync(&mut self) -> Result<(), KafkaError> {
-        // Java line 378-380.
+        // Java line 378-380 → `commitAsync()` → line 367-369 → line 372-375
+        // which `ensureNotClosed()`s BEFORE reading `allConsumed()`. Check
+        // closed first so we don't traverse the subscription map for nothing
+        // when the consumer is already closed.
+        self.ensure_not_closed()?;
         let offsets = self.subscriptions.all_consumed();
         self.commit_async_impl(offsets, None).await
     }
@@ -694,7 +698,10 @@ where
     }
 
     async fn commit_async(&mut self) -> Result<(), KafkaError> {
-        // Java line 367-369.
+        // Java line 367-369 → line 372-375 which `ensureNotClosed()`s BEFORE
+        // reading `allConsumed()`. Mirror that ordering so a closed consumer
+        // errors out without traversing the subscription map.
+        self.ensure_not_closed()?;
         let offsets = self.subscriptions.all_consumed();
         self.commit_async_impl(offsets, None).await
     }
