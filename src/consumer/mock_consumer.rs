@@ -411,23 +411,46 @@ where
         MOCK_CLIENT_ID
     }
 
+    /// Translates Java's
+    /// `OptionalLong currentLag(TopicPartition)`
+    /// (`MockConsumer.java:681-688`).
+    ///
+    /// Behavior summary:
+    /// - Returns `None` if the partition is **not assigned** to this
+    ///   consumer. (Java throws `IllegalArgumentException` from the inner
+    ///   `position(tp)` call in that case; Rust's `&self` API can't throw,
+    ///   so `None` is the closest analog and lets the caller distinguish
+    ///   "unassigned" from a real lag of `0`.)
+    /// - Returns `Some(0)` if assigned but no end offset is known (Java's
+    ///   "caught up" model — `endOffsets` has no entry for the partition).
+    /// - Returns `Some(0)` if assigned with end offset known but no
+    ///   position has been set yet. Java's `position(tp)` would call
+    ///   `updateFetchPosition` to seed a position; the Rust `&self` API
+    ///   cannot mutate, so `Some(0)` is the least-surprising fallback for
+    ///   the caught-up model.
+    /// - Returns `Some(end - position)` otherwise.
+    ///
+    /// Divergence from Java: Java throws on unassigned partitions; Rust
+    /// returns `None`. Callers needing the strict Java behavior must
+    /// pre-check `assignment().contains(tp)` themselves.
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64> {
-        // Java line 681-688:
-        // - if endOffsets[tp] is set: return endOffsets[tp] - position(tp)
-        // - else: return 0 (model "caught up")
+        // Unassigned → None (diverges from Java, which throws). See rustdoc.
+        if !self.subscriptions.is_assigned(topic_partition) {
+            return None;
+        }
         match self.end_offsets.get(topic_partition).copied() {
-            Some(end) => {
-                // Read position WITHOUT triggering update_fetch_position (which
-                // requires &mut self and is not available here). Java's
-                // currentLag calls `position(tp)` which DOES trigger the
-                // fetch-position update; we deviate because the trait
-                // `current_lag(&self)` is `&self` per the Phase 2 design.
-                // If the subscription has no valid position, fall back to
-                // "caught up" (Java's else branch).
-                let pos = self.subscriptions.position_or_null(topic_partition).map(|p| p.offset);
-                Some(end - pos.unwrap_or(end))
-            },
+            // No end offset known: Java's "caught up" model.
             None => Some(0),
+            Some(end) => {
+                // Read position WITHOUT triggering update_fetch_position
+                // (which requires &mut self and is not available here).
+                // If the partition has no valid position yet, fall back to
+                // the caught-up model.
+                match self.subscriptions.position_or_null(topic_partition) {
+                    Some(p) => Some(end - p.offset),
+                    None => Some(0),
+                }
+            },
         }
     }
 
