@@ -1829,3 +1829,214 @@ broker-side multi-mechanism configurations using `DIGEST-MD5` /
 
 Phase 9g closes; ready for Critic 9 review of 9g.
 
+---
+
+## Phase 9h close (2026-05-25) — **closes Phase 9 AND Milestone-1**
+
+**Chosen shape: pure evidence-collection close.** No code changes
+required. The full integration matrix passed 3 consecutive times
+on first attempt with no flakes surfaced. Mirrors Phase 9g's
+zero-code-change close pattern (commit `c5d485a`), but with
+live-run evidence instead of scope-resolution evidence.
+
+### Commit ladder
+
+Single combined commit, per the "evidence-only" guidance in the
+Actor 9 brief and the Phase 9g precedent:
+
+- `Phase 9h (final/1): flakiness gate green — 3 consecutive
+  integration matrix runs; closes Phase 9 + Milestone-1`
+
+### Scope resolution: the integration matrix actually run
+
+Per NOTES.md:53 the 9h gate scope is "PLAINTEXT 5-test suite from
+Phase 8a-c + cases 1-5 from 9c-9g". Cross-checked against
+`tests/integration/producer_smoke_test.rs` (`grep -n
+"^async fn"`), the **10-test matrix** is:
+
+| # | Test name | Origin phase |
+|---|---|---|
+| 1 | `producer_smoke_plaintext_1000_records` | 8a |
+| 2 | `producer_smoke_plaintext_auto_partition` | 8b |
+| 3 | `producer_smoke_plaintext_byte_fidelity` | 8c |
+| 4 | `flush_drains_50_records_through_public_api` | 8a/8b/8c |
+| 5 | `close_flushes_pending_inflight` | 8a/8b/8c |
+| 6 | `producer_smoke_ssl_1000_records` | 9c |
+| 7 | `producer_smoke_sasl_plaintext_1000_records` | 9d |
+| 8 | `producer_smoke_sasl_ssl_1000_records` | 9e |
+| 9 | `producer_smoke_sasl_plaintext_auth_failure` | 9f |
+| 10 | `producer_smoke_sasl_ssl_auth_failure` | 9f |
+
+Phase 9g contributed **zero** integration tests by design (Option
+A close, scope-resolved at unit level; see 9g close stanza
+above). Per NOTES.md:54, `performance_test` is the optional Phase
+9i scope and is **not** part of the 9h gate — filtered out via
+the `producer_smoke_test` test-name prefix.
+
+Run command:
+```
+cargo test --features integration-tests --test integration \
+  producer_smoke_test -- --test-threads=1
+```
+
+### Per-run evidence
+
+All 3 runs were back-to-back without manual intervention. The
+`cluster_pool` `LazyLock` lives for the lifetime of the test
+process — within a single `cargo test` invocation all 10 tests
+share one cluster; across invocations the `atexit` hook tears
+the container(s) down and a fresh cluster comes up. So each
+run had its own cold-start sequence; tests 6-10 (SSL/SASL/
+auth-failure) hit warm-cluster post-tests-1-5 state per run.
+
+**Run 1** (started 2026-05-25 15:05:31):
+
+| Test | Result |
+|---|---|
+| close_flushes_pending_inflight | ok |
+| flush_drains_50_records_through_public_api | ok |
+| producer_smoke_plaintext_1000_records | ok |
+| producer_smoke_plaintext_auto_partition | ok |
+| producer_smoke_plaintext_byte_fidelity | ok |
+| producer_smoke_sasl_plaintext_1000_records | ok |
+| producer_smoke_sasl_plaintext_auth_failure | ok |
+| producer_smoke_sasl_ssl_1000_records | ok |
+| producer_smoke_sasl_ssl_auth_failure | ok |
+| producer_smoke_ssl_1000_records | ok |
+
+`10 passed; 0 failed; finished in 33.42s` — wall-clock 54s
+(includes container startup + Docker pull cache hit).
+
+**Run 2** (started 2026-05-25 15:06:37):
+
+All 10 pass. Cluster ID: `5L6g3nShT-eMCtK--X86sw` (assigned by the
+broker image; same value seen across 9d/9e/9f). `10 passed;
+0 failed; finished in 30.03s` — wall-clock 50s.
+
+**Run 3** (started 2026-05-25 15:07:34):
+
+All 10 pass. Cluster ID: `5L6g3nShT-eMCtK--X86sw`. `10 passed;
+0 failed; finished in 29.94s` — wall-clock 51s.
+
+**Aggregate: 30/30 test executions pass. Zero flakes. Per-run
+test-runtime variance 33.42s → 30.03s → 29.94s (warmup-bound;
+2nd and 3rd runs benefit from Docker image cache).**
+
+### Decisions made
+
+1. **Integration-test binary scope: `producer_smoke_test` only.**
+   The compiled `integration` binary also contains
+   `performance_test::performance_test` (the optional Phase 9i
+   benchmark, runs 70+ seconds by default). NOTES.md:54
+   designates 9i as "env-var-gated; non-blocking for Milestone-1
+   close" — including it in the 9h gate would add ~210s/run
+   without adding wire-protocol coverage that the smoke suite
+   doesn't already exercise. Filtered out via the
+   `producer_smoke_test` filter prefix. The "1 filtered out" line
+   in the run output confirms the exclusion.
+
+2. **`--test-threads=1` retained.** Per Phase 8a's serialization
+   decision (a single cluster pool inside a single process).
+   Parallel tests would attempt to share the same cluster's
+   topic namespace and produce flake-class races. Single-thread
+   matches every prior Phase 8/9 sub-phase's run shape.
+
+3. **Three back-to-back invocations, no manual teardown between
+   runs.** The `atexit` hook in `tests/common/cluster_pool.rs:74`
+   provides the only teardown. This means each run sees a clean
+   container come up, which is more conservative than re-using a
+   long-running cluster across invocations — slow leader-election
+   and cold-start latency are stressed each round, matching the
+   NOTES.md:53 risk list ("cold-start, slow leader-election,
+   cert-load latency").
+
+4. **No flake-remediation commits needed.** The 30 test
+   executions all passed first try. The Phase 9d Round 2
+   selector readability filter fix (`is_open() && !is_muted()`,
+   commit `440e1bb`) is the load-bearing change that earlier
+   live-validated the SSL/SASL/SASL_SSL channels; 9h confirms
+   that fix is stable under repeated cold-start cycles.
+
+### Folded-in 8d audit (lib-level only) — NOTES.md:71
+
+`cargo test --lib` baseline: **1343 passed** — unchanged from
+9d/9e/9f/9g. Phase 3 codec tests spot-checked:
+
+- `record::compress::*` (compression dispatch + ratio estimator):
+  12 passed
+- `record::default_record::*` + `default_record_batch::*`:
+  47 passed (includes `streaming_iterator_consistency_per_codec`
+  cross-codec test pin)
+- `record::memory_records::*` + `memory_records_builder::*`:
+  53 passed (includes `write_transactional_record_set_v2` + the
+  V0/V1/V2 builder round-trips)
+
+No codec regression. The end-to-end compression matrix remains
+deferred to a future milestone per the explicit NOTES.md:71
+carry-forward.
+
+### Deferrals carried into Milestone-2 (or later)
+
+These are all already known and were carried by 9d through 9g.
+9h does not surface new deferrals:
+
+- **9i CCloud env-var-gated performance test** — non-blocking
+  for Milestone-1 close; runs only when `SASL_USERNAME` set,
+  which is the EC2/CCloud staging setup. Wired but not
+  exercised in 9h (NOTES.md:54).
+- **End-to-end compression matrix integration test** — Phase
+  8d carry-forward. Lib-level codec round-trip + hex-fixture
+  tests in Phase 3 remain sole coverage (NOTES.md:71).
+- **`kafka_channel.rs:291` `e.to_string()` Display-prefix
+  cleanup** — surfaced in 9f close stanza; cosmetic, not
+  blocking.
+- **SCRAM, OAUTHBEARER, Kerberos/GSSAPI** — Phase 9 explicit
+  skip list (NOTES.md:83). Validator rejects at construction
+  time (9b unit tests pin the contract; 9g Option A close
+  resolves).
+- **Re-authentication (`Authenticator::reauthenticate` etc.)**
+  — Phase 9 explicit skip; trait methods retained as no-ops.
+- **`MockProducer`, `KafkaConsumer`** — out of Milestone-1
+  scope entirely.
+
+### Java tests intentionally not translated for 9h
+
+Phase 9h is an evidence-collection phase against the existing
+matrix; there is no Java test class that maps directly. The
+matrix it runs has been Java-parity-cross-verified per phase
+already (see 9c/9d/9e/9f close stanzas above).
+
+### All gates green
+
+- `cargo build --features integration-tests --tests` OK
+- `cargo test --lib` **1343 passed** (unchanged from
+  9d/9e/9f/9g baseline)
+- `cargo test --features integration-tests --test integration
+  producer_smoke_test -- --test-threads=1` 10/10 passed × 3
+  consecutive runs (see per-run evidence tables above)
+- `cargo xtask format-check` OK
+- `cargo xtask lint` clean (no warnings)
+- Cluster ID across all 30 test executions:
+  `5L6g3nShT-eMCtK--X86sw` (warm-image deterministic assignment;
+  matches 9d/9e/9f historical ID).
+- Zero TODO/FIXME introduced (zero code touched).
+- DoD #10 (hot-path allocation audit) N/A — no code change.
+
+### What this closes
+
+- **Phase 9h** — flakiness gate per NOTES.md:53 (3 consecutive
+  full-matrix runs green).
+- **Phase 9** — all sub-phases (9.0, 9a, 9b, 9c, 9d, 9e, 9f, 9g,
+  9h) closed. The two Milestone-1 DoD additions from NOTES.md:69-72
+  (3-run gate + lib-codec audit) are both satisfied above.
+- **Milestone-1** — per NOTES.md:114 ("Phase 9 closes (=
+  Milestone-1 closes) when 9h's 3-consecutive-run gate is green
+  and all comment files are resolved"). Both conditions met:
+  3-run gate green; `COMMENTS.9.md` contains only historical
+  close-stanza summaries (no open findings).
+
+**Recommendation: Phase 9h ready to close; Milestone-1 closes
+with this phase.**
+
+Phase 9 / Milestone-1 closes; ready for Critic 9 final review.
+
