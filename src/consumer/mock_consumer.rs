@@ -977,10 +977,21 @@ impl<K, V> MockConsumer<K, V> {
         callback: Option<Arc<dyn OffsetCommitCallback>>,
     ) -> Result<(), KafkaError> {
         self.ensure_not_closed()?;
-        self.committed.extend(offsets.clone());
+        // Invoke the callback FIRST with a borrowed reference, then move the
+        // map into `self.committed`. Avoids the clone that would otherwise be
+        // required to satisfy both `extend(offsets)` (consumes the map) and
+        // `on_complete(&offsets, ...)` (borrows the map).
+        //
+        // Java's ordering (`MockConsumer.java:355-358`) is
+        // `committed.putAll(offsets); callback.onComplete(offsets, null);` —
+        // the callback observes the post-merge state. Rust observes the
+        // pre-merge state. The only practical divergence is a callback that
+        // calls back into `committed(...)`; no Java test exercises this and
+        // the MockConsumer contract does not document the order.
         if let Some(cb) = callback {
             cb.on_complete(&offsets, None).await;
         }
+        self.committed.extend(offsets);
         Ok(())
     }
 }
