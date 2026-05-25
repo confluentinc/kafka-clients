@@ -36,6 +36,12 @@ use crate::consumer::OffsetAndMetadata;
 /// (Java's `ConsumerRecords` is documented as iterating per the underlying
 /// map's iteration order; the test suite assumes ordering matches insertion
 /// when a `LinkedHashMap` is supplied).
+///
+/// `ConsumerRecords` implements [`Clone`] when both `K` and `V` are
+/// [`Clone`]. Java's `ConsumerRecords` is not `Cloneable`; the Rust-side
+/// `Clone` is needed by `ConsumerInterceptors::on_consume` to preserve
+/// the previous-good batch on a panicking interceptor.
+#[derive(Clone)]
 pub struct ConsumerRecords<K, V> {
     records: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
     next_offsets: HashMap<TopicPartition, OffsetAndMetadata>,

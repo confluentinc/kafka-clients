@@ -48,6 +48,17 @@ pub const NULL_SIZE: i32 = -1;
 /// Mirrors Java's behavior: this struct is not designed for concurrent
 /// mutation; `Headers` are mutable. Concurrent reads are safe by Rust's
 /// borrow rules.
+///
+/// # Clone
+///
+/// `ConsumerRecord` implements [`Clone`] when both `K` and `V` are
+/// [`Clone`]. This is a Rust-side addition (Java's `ConsumerRecord` is
+/// not `Cloneable`) needed by the consumer-interceptor chain to recover
+/// the previous-good batch on a panicking interceptor (see
+/// `ConsumerInterceptors::on_consume`). Cloning preserves all fields
+/// including the `Arc<str>` topic (cheap clone) and the owned headers
+/// (deep clone).
+#[derive(Clone)]
 pub struct ConsumerRecord<K, V> {
     topic: Arc<str>,
     partition: i32,
