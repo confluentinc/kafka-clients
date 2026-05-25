@@ -51,13 +51,22 @@ pub use offset_commit_callback::OffsetCommitCallback;
 pub use offset_reset_strategy::OffsetResetStrategy;
 pub use subscription_pattern::SubscriptionPattern;
 
+// Re-export [`Deserializer`] at the consumer module root for API ergonomics.
+// The canonical location is [`crate::common::serialization::Deserializer`]
+// (per CLAUDE.md §2, the trait lives in `common::serialization` because it
+// is shared by producer + consumer). This re-export mirrors the convenience
+// re-exports of [`ConsumerInterceptor`], [`ConsumerRebalanceListener`], and
+// [`OffsetCommitCallback`] so that consumer-side users can `use
+// confluent_kafka::consumer::Deserializer;` alongside their other consumer
+// imports — matching the PLAN's intent for `src/consumer/deserializer.rs`.
+pub use crate::common::serialization::Deserializer;
+
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::time::Duration;
 
 use async_trait::async_trait;
 
-use crate::common::serialization::Deserializer;
 use crate::common::{KafkaError, PartitionInfo, TopicPartition};
 
 /// The single dispatch trait that `MockConsumer` (Phase 3) and
