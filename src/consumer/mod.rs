@@ -20,12 +20,14 @@
 pub mod close_options;
 pub mod consumer_config;
 pub mod consumer_group_metadata;
+pub mod consumer_rebalance_listener;
 pub mod consumer_record;
 pub mod consumer_records;
 pub mod errors;
 pub mod group_protocol;
 pub mod offset_and_metadata;
 pub mod offset_and_timestamp;
+pub mod offset_commit_callback;
 pub mod offset_reset_strategy;
 pub mod subscription_pattern;
 
@@ -34,6 +36,7 @@ pub(crate) mod internals;
 pub use close_options::{CloseOptions, GroupMembershipOperation};
 pub use consumer_config::ConsumerConfig;
 pub use consumer_group_metadata::ConsumerGroupMetadata;
+pub use consumer_rebalance_listener::ConsumerRebalanceListener;
 pub use consumer_record::{ConsumerRecord, NO_TIMESTAMP, NULL_SIZE};
 pub use consumer_records::ConsumerRecords;
 pub use errors::ConsumerError;
@@ -41,6 +44,7 @@ pub use group_protocol::GroupProtocol;
 pub use internals::auto_offset_reset_strategy::{AutoOffsetResetStrategy, StrategyType};
 pub use offset_and_metadata::OffsetAndMetadata;
 pub use offset_and_timestamp::OffsetAndTimestamp;
+pub use offset_commit_callback::OffsetCommitCallback;
 #[allow(deprecated)]
 pub use offset_reset_strategy::OffsetResetStrategy;
 pub use subscription_pattern::SubscriptionPattern;
