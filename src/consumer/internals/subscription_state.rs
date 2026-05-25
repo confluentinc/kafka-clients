@@ -46,6 +46,20 @@ use crate::metadata::LeaderAndEpoch;
 
 const SUBSCRIPTION_EXCEPTION_MESSAGE: &str = "Subscription to topics, partitions and pattern are mutually exclusive";
 
+/// Java's `Pattern.matcher(s).matches()` requires the regex to match the
+/// *whole* string. Rust's `regex::Regex::is_match` only requires a partial
+/// match (equivalent to Java's `find()`). To preserve Java semantics for
+/// the consumer's client-side regex subscription, we check that:
+/// 1. The regex matches the input at all (`find`), AND
+/// 2. The match spans the entire string (start == 0 && end == len).
+///
+/// We do this without modifying the user-provided regex string — anchoring
+/// with `^...$` would silently alter behavior for patterns that already
+/// contain alternation or anchors.
+fn regex_full_match(re: &Regex, s: &str) -> bool {
+    re.find(s).is_some_and(|m| m.start() == 0 && m.end() == s.len())
+}
+
 // ─── FetchStates ────────────────────────────────────────────────────────────
 
 /// State machine controlling the lifecycle of a partition's fetch state.
@@ -663,7 +677,7 @@ impl SubscriptionState {
     pub(crate) fn check_assignment_matched_subscription(&self, assignments: &[TopicPartition]) -> bool {
         for tp in assignments {
             if let Some(pat) = &self.subscribed_pattern {
-                if !pat.is_match(tp.topic()) {
+                if !regex_full_match(pat, tp.topic()) {
                     log::info!(
                         "Assigned partition {tp} for non-subscribed topic regex pattern; subscription pattern is {pat}"
                     );
@@ -740,11 +754,15 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `matchesSubscribedPattern(String)`.
+    ///
+    /// Uses a *full-match* check (mirroring Java's
+    /// `Matcher.matches()` rather than `Matcher.find()`) — see
+    /// [`regex_full_match`].
     pub(crate) fn matches_subscribed_pattern(&self, topic: &str) -> bool {
         if self.has_pattern_subscription()
             && let Some(p) = &self.subscribed_pattern
         {
-            return p.is_match(topic);
+            return regex_full_match(p, topic);
         }
         false
     }
@@ -843,12 +861,17 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `groupSubscribe(Collection<String>)`.
+    ///
+    /// Returns `true` iff the group's subscription contains topics that are
+    /// not part of the local subscription (i.e. the group leader needs
+    /// metadata for topics the local member is not directly subscribed to).
+    /// Java: `!subscription.containsAll(groupSubscription)`.
     pub(crate) fn group_subscribe(&mut self, topics: &[String]) -> Result<bool, KafkaError> {
         if !self.has_auto_assigned_partitions() {
             return Err(KafkaError::illegal_state(SUBSCRIPTION_EXCEPTION_MESSAGE));
         }
         self.group_subscription = topics.iter().cloned().collect();
-        Ok(!self.subscription.iter().all(|t| self.group_subscription.contains(t)))
+        Ok(!self.group_subscription.iter().all(|t| self.subscription.contains(t)))
     }
 
     /// Translates Java's `resetGroupSubscription`.
@@ -1631,5 +1654,996 @@ mod tests {
         let s = trunc.to_string();
         assert!(s.contains("partition=t-0"), "{s}");
         assert!(s.contains("divergentOffset=unknown"), "{s}");
+    }
+
+    // ─── SubscriptionStateTest translation ──────────────────────────────
+    //
+    // Translated from `org.apache.kafka.clients.consumer.internals.SubscriptionStateTest`.
+    //
+    // Tests using `maybeValidatePositionForCurrentLeader` /
+    // `maybeCompleteValidation` are deferred to Phase 7 alongside those
+    // methods (depend on `EpochEndOffset` / `OffsetForLeaderEpoch`):
+    // - `testMaybeCompleteValidation`
+    // - `testMaybeCompleteValidationAfterPositionChange`
+    // - `testMaybeCompleteValidationAfterOffsetReset`
+    // - `testMaybeValidatePositionForCurrentLeader`
+    // - `testTruncationDetectionWithResetPolicy`
+    // - `testTruncationDetectionWithoutResetPolicy`
+    // - `testTruncationDetectionUnknownDivergentOffsetWithResetPolicy`
+    // - `testTruncationDetectionUnknownDivergentOffsetWithoutResetPolicy`
+    // - `resetOffsetNoValidation`
+    // See `design/history/Milestone-8/Phase-4/PLAN.md` "Out of scope".
+    // The simpler validation-state tests (`testSeekUnvalidatedWithNoOffsetEpoch`,
+    // etc.) ARE translated because they only call `seek_unvalidated` /
+    // `seek_validated` / `complete_validation` / `awaiting_validation`.
+
+    use regex::Regex;
+
+    use crate::common::IsolationLevel;
+    use crate::consumer::{ConsumerRebalanceListener, SubscriptionPattern};
+
+    const TOPIC: &str = "test";
+    const TOPIC1: &str = "test1";
+
+    fn tp_test_0() -> crate::common::TopicPartition {
+        crate::common::TopicPartition::new(TOPIC.to_string(), 0)
+    }
+    fn tp_test_1() -> crate::common::TopicPartition {
+        crate::common::TopicPartition::new(TOPIC.to_string(), 1)
+    }
+    fn tp_test1_0() -> crate::common::TopicPartition {
+        crate::common::TopicPartition::new(TOPIC1.to_string(), 0)
+    }
+
+    fn no_leader_no_epoch() -> LeaderAndEpoch {
+        LeaderAndEpoch::no_leader_or_epoch()
+    }
+
+    /// Translation of Java's `MockRebalanceListener`: counts callback
+    /// invocations. We only need a placeholder that implements the trait —
+    /// none of the translated tests actually inspect the listener's state.
+    struct MockListener;
+
+    #[async_trait::async_trait]
+    impl ConsumerRebalanceListener for MockListener {
+        async fn on_partitions_revoked(
+            &self,
+            _partitions: &[crate::common::TopicPartition],
+        ) -> Result<(), crate::common::KafkaError> {
+            Ok(())
+        }
+        async fn on_partitions_assigned(
+            &self,
+            _partitions: &[crate::common::TopicPartition],
+        ) -> Result<(), crate::common::KafkaError> {
+            Ok(())
+        }
+    }
+
+    fn listener() -> Option<Arc<dyn ConsumerRebalanceListener>> {
+        Some(Arc::new(MockListener))
+    }
+
+    fn new_state() -> SubscriptionState {
+        SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST)
+    }
+
+    /// Translated from `partitionAssignment`.
+    #[test]
+    fn test_partition_assignment() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_0()]));
+        assert_eq!(state.num_assigned_partitions(), 1);
+        assert!(!state.has_all_fetch_positions());
+        state.seek(&tp_test_0(), 1).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 1);
+
+        state.assign_from_user(HashSet::new()).unwrap();
+        assert!(state.assigned_partitions().is_empty());
+        assert_eq!(state.num_assigned_partitions(), 0);
+        assert!(!state.is_assigned(&tp_test_0()));
+        assert!(!state.is_fetchable(&tp_test_0()));
+    }
+
+    /// Translated from `partitionAssignmentChangeOnTopicSubscription`.
+    #[test]
+    fn test_partition_assignment_change_on_topic_subscription() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0(), tp_test_1()])).unwrap();
+        assert_eq!(state.assigned_partitions().len(), 2);
+        assert!(state.assigned_partitions().contains(&tp_test_0()));
+        assert!(state.assigned_partitions().contains(&tp_test_1()));
+
+        state.unsubscribe();
+        assert!(state.assigned_partitions().is_empty());
+        assert_eq!(state.num_assigned_partitions(), 0);
+
+        state.subscribe_topics(HashSet::from([TOPIC1.to_string()]), listener()).unwrap();
+        assert!(state.assigned_partitions().is_empty());
+
+        assert!(state.check_assignment_matched_subscription(&[tp_test1_0()]));
+        state.assign_from_subscribed(&[tp_test1_0()]).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+        assert_eq!(state.num_assigned_partitions(), 1);
+
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        // Subscription changes don't immediately clear the assignment.
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+
+        state.unsubscribe();
+        assert!(state.assigned_partitions().is_empty());
+    }
+
+    /// Translated from `testIsFetchableOnManualAssignment`.
+    #[test]
+    fn test_is_fetchable_on_manual_assignment() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0(), tp_test_1()])).unwrap();
+        assert_assigned_partition_is_fetchable(&mut state);
+    }
+
+    /// Translated from `testIsFetchableOnAutoAssignment`.
+    #[test]
+    fn test_is_fetchable_on_auto_assignment() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        state.assign_from_subscribed(&[tp_test_0(), tp_test_1()]).unwrap();
+        assert_assigned_partition_is_fetchable(&mut state);
+    }
+
+    fn assert_assigned_partition_is_fetchable(state: &mut SubscriptionState) {
+        assert_eq!(state.assigned_partitions().len(), 2);
+        assert!(state.assigned_partitions().contains(&tp_test_0()));
+        assert!(state.assigned_partitions().contains(&tp_test_1()));
+        assert!(!state.is_fetchable(&tp_test_0()));
+        assert!(!state.is_fetchable(&tp_test_1()));
+        state.seek(&tp_test_0(), 1).unwrap();
+        state.seek(&tp_test_1(), 1).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(state.is_fetchable(&tp_test_1()));
+    }
+
+    /// Translated from `testIsFetchableConsidersExplicitTopicSubscription`.
+    #[test]
+    fn test_is_fetchable_considers_explicit_topic_subscription() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC1.to_string()]), listener()).unwrap();
+        state.assign_from_subscribed(&[tp_test1_0()]).unwrap();
+        state.seek(&tp_test1_0(), 1).unwrap();
+
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+        assert!(state.is_fetchable(&tp_test1_0()));
+
+        // Change subscription. Assigned partition remains, no longer fetchable.
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+        assert!(!state.is_fetchable(&tp_test1_0()));
+
+        state.unsubscribe();
+        assert!(state.assigned_partitions().is_empty());
+        assert!(!state.is_fetchable(&tp_test1_0()));
+    }
+
+    /// Translated from `testGroupSubscribe`.
+    #[test]
+    fn test_group_subscribe() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC1.to_string()]), listener()).unwrap();
+        assert_eq!(state.metadata_topics(), HashSet::from([TOPIC1.to_string()]));
+
+        assert!(!state.group_subscribe(&[TOPIC1.to_string()]).unwrap());
+        assert_eq!(state.metadata_topics(), HashSet::from([TOPIC1.to_string()]));
+
+        assert!(state.group_subscribe(&[TOPIC.to_string(), TOPIC1.to_string()]).unwrap());
+        assert_eq!(state.metadata_topics(), HashSet::from([TOPIC.to_string(), TOPIC1.to_string()]));
+
+        // `group_subscribe` does not accumulate.
+        assert!(!state.group_subscribe(&[TOPIC1.to_string()]).unwrap());
+        assert_eq!(state.metadata_topics(), HashSet::from([TOPIC1.to_string()]));
+
+        state
+            .subscribe_topics(HashSet::from(["anotherTopic".to_string()]), listener())
+            .unwrap();
+        assert_eq!(
+            state.metadata_topics(),
+            HashSet::from([TOPIC1.to_string(), "anotherTopic".to_string()])
+        );
+
+        assert!(!state.group_subscribe(&["anotherTopic".to_string()]).unwrap());
+        assert_eq!(state.metadata_topics(), HashSet::from(["anotherTopic".to_string()]));
+    }
+
+    /// Translated from `partitionAssignmentChangeOnPatternSubscription`.
+    #[test]
+    fn test_partition_assignment_change_on_pattern_subscription() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
+        assert!(state.assigned_partitions().is_empty());
+
+        state.subscribe_from_pattern(HashSet::from([TOPIC.to_string()])).unwrap();
+        assert!(state.assigned_partitions().is_empty());
+
+        assert!(state.check_assignment_matched_subscription(&[tp_test_1()]));
+        state.assign_from_subscribed(&[tp_test_1()]).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_1()]));
+        assert_eq!(state.subscription(), HashSet::from([TOPIC.to_string()]));
+
+        // checkAssignmentMatchedSubscription against the *pattern* (not the
+        // current subscribeFromPattern set): the pattern is ".*" so any
+        // topic matches.
+        assert!(state.check_assignment_matched_subscription(&[tp_test1_0()]));
+        state.assign_from_subscribed(&[tp_test1_0()]).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+        assert_eq!(state.subscription(), HashSet::from([TOPIC.to_string()]));
+
+        state.subscribe_pattern(Regex::new(".*t").unwrap(), listener()).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+
+        state.subscribe_from_pattern(HashSet::from([TOPIC.to_string()])).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test1_0()]));
+
+        assert!(state.check_assignment_matched_subscription(&[tp_test_0()]));
+        state.assign_from_subscribed(&[tp_test_0()]).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_0()]));
+        assert_eq!(state.subscription(), HashSet::from([TOPIC.to_string()]));
+
+        state.unsubscribe();
+        assert!(state.assigned_partitions().is_empty());
+    }
+
+    /// Translated from `verifyAssignmentId`.
+    #[test]
+    fn test_verify_assignment_id() {
+        let mut state = new_state();
+        assert_eq!(state.assignment_id(), 0);
+
+        let user_assignment: HashSet<crate::common::TopicPartition> = HashSet::from([tp_test_0(), tp_test_1()]);
+        state.assign_from_user(user_assignment.clone()).unwrap();
+        assert_eq!(state.assignment_id(), 1);
+        assert_eq!(state.assigned_partitions(), user_assignment);
+
+        state.unsubscribe();
+        assert_eq!(state.assignment_id(), 2);
+        assert!(state.assigned_partitions().is_empty());
+
+        let auto_assignment: HashSet<crate::common::TopicPartition> = HashSet::from([tp_test1_0()]);
+        state.subscribe_topics(HashSet::from([TOPIC1.to_string()]), listener()).unwrap();
+        assert!(state.check_assignment_matched_subscription(&[tp_test1_0()]));
+        state.assign_from_subscribed(&[tp_test1_0()]).unwrap();
+        assert_eq!(state.assignment_id(), 3);
+        assert_eq!(state.assigned_partitions(), auto_assignment);
+    }
+
+    /// Translated from `partitionReset`.
+    #[test]
+    fn test_partition_reset() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        state.seek(&tp_test_0(), 5).unwrap();
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 5);
+        state.request_offset_reset_default(&tp_test_0()).unwrap();
+        assert!(!state.is_fetchable(&tp_test_0()));
+        assert!(state.is_offset_reset_needed(&tp_test_0()).unwrap());
+        // Java returns `null` (Rust: `None`). Position was cleared by the
+        // transition to AWAIT_RESET.
+        assert!(state.position(&tp_test_0()).unwrap().is_none());
+
+        // Seek should clear the reset and make the partition fetchable.
+        state.seek(&tp_test_0(), 0).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `topicSubscription`.
+    #[test]
+    fn test_topic_subscription() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        assert_eq!(state.subscription().len(), 1);
+        assert!(state.assigned_partitions().is_empty());
+        assert!(state.has_auto_assigned_partitions());
+
+        assert!(state.check_assignment_matched_subscription(&[tp_test_0()]));
+        state.assign_from_subscribed(&[tp_test_0()]).unwrap();
+        state.seek(&tp_test_0(), 1).unwrap();
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 1);
+
+        assert!(state.check_assignment_matched_subscription(&[tp_test_1()]));
+        state.assign_from_subscribed(&[tp_test_1()]).unwrap();
+        assert!(state.is_assigned(&tp_test_1()));
+        assert!(!state.is_assigned(&tp_test_0()));
+        assert!(!state.is_fetchable(&tp_test_1()));
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_1()]));
+    }
+
+    /// Translated from `partitionPause`.
+    #[test]
+    fn test_partition_pause() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        state.seek(&tp_test_0(), 100).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        state.pause(&tp_test_0()).unwrap();
+        assert!(!state.is_fetchable(&tp_test_0()));
+        state.resume(&tp_test_0()).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+    }
+
+    /// Translated from `testMarkingPendingRevocation`.
+    #[test]
+    fn test_marking_pending_revocation() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        state.seek(&tp_test_0(), 100).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(!state.is_paused(&tp_test_0()));
+        state.mark_pending_revocation(&[tp_test_0()]).unwrap();
+        assert!(!state.is_fetchable(&tp_test_0()));
+        assert!(!state.is_paused(&tp_test_0()));
+    }
+
+    /// Translated from `testMarkingPendingRevocationPreventsInitializingPosition`.
+    #[test]
+    fn test_marking_pending_revocation_prevents_initializing_position() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        assert!(state.initializing_partitions().contains(&tp_test_0()));
+        state.mark_pending_revocation(&[tp_test_0()]).unwrap();
+        assert!(!state.initializing_partitions().contains(&tp_test_0()));
+    }
+
+    /// Translated from `testAssignedPartitionsAwaitingCallbackKeepPositionDefinedInCallback`.
+    #[test]
+    fn test_assigned_partitions_awaiting_callback_keep_position_defined_in_callback() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        state
+            .assign_from_subscribed_awaiting_callback(&[tp_test_0()], &[tp_test_0()])
+            .unwrap();
+        assert_assignment_applied_awaiting_callback(&state, &tp_test_0());
+        assert_eq!(state.subscription(), HashSet::from([tp_test_0().topic().to_string()]));
+
+        // Callback sets position.
+        state.seek(&tp_test_0(), 100).unwrap();
+        state.enable_partitions_awaiting_callback(&[tp_test_0()]).unwrap();
+
+        assert_eq!(state.initializing_partitions().len(), 0);
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(state.has_all_fetch_positions());
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 100);
+    }
+
+    /// Translated from `testAssignedPartitionsAwaitingCallbackInitializePositionsWhenCallbackCompletes`.
+    #[test]
+    fn test_assigned_partitions_awaiting_callback_initialize_positions_when_callback_completes() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        state
+            .assign_from_subscribed_awaiting_callback(&[tp_test_0()], &[tp_test_0()])
+            .unwrap();
+        assert_assignment_applied_awaiting_callback(&state, &tp_test_0());
+
+        state.enable_partitions_awaiting_callback(&[tp_test_0()]).unwrap();
+        assert_eq!(state.initializing_partitions().len(), 1);
+        state.seek(&tp_test_0(), 100).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(state.has_all_fetch_positions());
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 100);
+    }
+
+    /// Translated from `testAssignedPartitionsAwaitingCallbackDoesNotAffectPreviouslyOwnedPartitions`.
+    #[test]
+    fn test_assigned_partitions_awaiting_callback_does_not_affect_previously_owned_partitions() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        state
+            .assign_from_subscribed_awaiting_callback(&[tp_test_0()], &[tp_test_0()])
+            .unwrap();
+        state.enable_partitions_awaiting_callback(&[tp_test_0()]).unwrap();
+        state.seek(&tp_test_0(), 100).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+
+        // Add a second partition to assignment, with tp1 in `added`.
+        state
+            .assign_from_subscribed_awaiting_callback(&[tp_test_0(), tp_test_1()], &[tp_test_1()])
+            .unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(!state.is_fetchable(&tp_test_1()));
+        assert_eq!(state.initializing_partitions().len(), 1);
+
+        // Callback completes; tp1 still needs a position.
+        state.enable_partitions_awaiting_callback(&[tp_test_1()]).unwrap();
+        assert_eq!(state.initializing_partitions().len(), 1);
+        assert!(state.initializing_partitions().contains(&tp_test_1()));
+        state.seek(&tp_test_1(), 200).unwrap();
+        assert!(state.is_fetchable(&tp_test_1()));
+    }
+
+    fn assert_assignment_applied_awaiting_callback(state: &SubscriptionState, tp: &crate::common::TopicPartition) {
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp.clone()]));
+        assert_eq!(state.num_assigned_partitions(), 1);
+        assert!(!state.is_fetchable(tp));
+        assert_eq!(state.initializing_partitions().len(), 1);
+        assert!(!state.is_paused(tp));
+    }
+
+    /// Translated from `invalidPositionUpdate`.
+    #[test]
+    fn test_invalid_position_update() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        assert!(state.check_assignment_matched_subscription(&[tp_test_0()]));
+        state.assign_from_subscribed(&[tp_test_0()]).unwrap();
+        let err = state
+            .set_position(&tp_test_0(), FetchPosition::with_leader(0, None, no_leader_no_epoch()))
+            .unwrap_err();
+        // Java's IllegalStateException -> Rust's KafkaError::IllegalState.
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `cantAssignPartitionForUnsubscribedTopics`.
+    #[test]
+    fn test_cant_assign_partition_for_unsubscribed_topics() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        assert!(!state.check_assignment_matched_subscription(&[tp_test1_0()]));
+    }
+
+    /// Translated from `cantAssignPartitionForUnmatchedPattern`.
+    #[test]
+    fn test_cant_assign_partition_for_unmatched_pattern() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*t").unwrap(), listener()).unwrap();
+        state.subscribe_from_pattern(HashSet::from([TOPIC.to_string()])).unwrap();
+        assert!(!state.check_assignment_matched_subscription(&[tp_test1_0()]));
+    }
+
+    /// Translated from `cantChangePositionForNonAssignedPartition`.
+    #[test]
+    fn test_cant_change_position_for_non_assigned_partition() {
+        let mut state = new_state();
+        let err = state
+            .set_position(&tp_test_0(), FetchPosition::with_leader(1, None, no_leader_no_epoch()))
+            .unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `cantSubscribeTopicAndPattern`.
+    #[test]
+    fn test_cant_subscribe_topic_and_pattern() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `cantSubscribePartitionAndPattern`.
+    #[test]
+    fn test_cant_subscribe_partition_and_pattern() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `cantSubscribePatternAndTopic`.
+    #[test]
+    fn test_cant_subscribe_pattern_and_topic() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
+        let err = state
+            .subscribe_topics(HashSet::from([TOPIC.to_string()]), listener())
+            .unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `cantSubscribePatternAndPartition`.
+    #[test]
+    fn test_cant_subscribe_pattern_and_partition() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
+        let err = state.assign_from_user(HashSet::from([tp_test_0()])).unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `patternSubscription`.
+    #[test]
+    fn test_pattern_subscription_two_topics() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
+        state
+            .subscribe_from_pattern(HashSet::from([TOPIC.to_string(), TOPIC1.to_string()]))
+            .unwrap();
+        assert_eq!(state.subscription().len(), 2, "Expected subscribed topics count is incorrect");
+    }
+
+    /// Translated from `testSubscribeToRe2JPattern`.
+    #[test]
+    fn test_subscribe_to_re2j_pattern() {
+        let mut state = new_state();
+        let pattern = "t.*";
+        state
+            .subscribe_re2j_pattern(SubscriptionPattern::new(pattern), listener())
+            .unwrap();
+        let s = state.to_string();
+        assert!(s.contains("type=AUTO_PATTERN_RE2J"), "{s}");
+        assert!(s.contains(&format!("subscribedPattern={pattern}")), "{s}");
+        assert!(state.assigned_topic_ids().is_empty());
+    }
+
+    /// Translated from `testIsAssignedFromRe2j`.
+    ///
+    /// Java's `isAssignedFromRe2j(null)` is replaced by checking an
+    /// arbitrary UUID before subscribing (functionally equivalent: when no
+    /// subscription is set the function returns false unconditionally).
+    #[test]
+    fn test_is_assigned_from_re2j() {
+        let mut state = new_state();
+        let assigned_uuid = crate::common::Uuid::random_uuid();
+        assert!(!state.is_assigned_from_re2j(assigned_uuid));
+
+        state.subscribe_re2j_pattern(SubscriptionPattern::new("foo.*"), None).unwrap();
+        assert!(state.has_re2j_pattern_subscription());
+        assert!(!state.is_assigned_from_re2j(assigned_uuid));
+
+        state.set_assigned_topic_ids(HashSet::from([assigned_uuid]));
+        assert!(state.is_assigned_from_re2j(assigned_uuid));
+
+        state.unsubscribe();
+        assert!(!state.is_assigned_from_re2j(assigned_uuid));
+        assert!(!state.has_re2j_pattern_subscription());
+    }
+
+    /// Translated from `testAssignedPartitionsWithTopicIdsForRe2Pattern`.
+    #[test]
+    fn test_assigned_partitions_with_topic_ids_for_re2_pattern() {
+        let mut state = new_state();
+        state
+            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .unwrap();
+        assert!(state.assigned_topic_ids().is_empty());
+
+        state
+            .assign_from_subscribed_awaiting_callback(&[tp_test_0()], &[tp_test_0()])
+            .unwrap();
+        assert_assignment_applied_awaiting_callback(&state, &tp_test_0());
+
+        state.seek(&tp_test_0(), 100).unwrap();
+        state.enable_partitions_awaiting_callback(&[tp_test_0()]).unwrap();
+        assert_eq!(state.initializing_partitions().len(), 0);
+        assert!(state.is_fetchable(&tp_test_0()));
+        assert!(state.has_all_fetch_positions());
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 100);
+    }
+
+    /// Translated from `testAssignedTopicIdsPreservedWhenReconciliationCompletes`.
+    #[test]
+    fn test_assigned_topic_ids_preserved_when_reconciliation_completes() {
+        let mut state = new_state();
+        state
+            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .unwrap();
+        assert!(state.assigned_topic_ids().is_empty());
+
+        let first = crate::common::Uuid::random_uuid();
+        state.set_assigned_topic_ids(HashSet::from([first]));
+
+        let second = crate::common::Uuid::random_uuid();
+        state.set_assigned_topic_ids(HashSet::from([first, second]));
+
+        state
+            .assign_from_subscribed_awaiting_callback(&[tp_test_0()], &[tp_test_0()])
+            .unwrap();
+        assert_assignment_applied_awaiting_callback(&state, &tp_test_0());
+
+        let ids: HashSet<crate::common::Uuid> = state.assigned_topic_ids().iter().copied().collect();
+        assert_eq!(ids, HashSet::from([first, second]));
+    }
+
+    /// Translated from `testMixedPatternSubscriptionNotAllowed`.
+    #[test]
+    fn test_mixed_pattern_subscription_not_allowed() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
+        let err = state
+            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+
+        state.unsubscribe();
+
+        state
+            .subscribe_re2j_pattern(SubscriptionPattern::new("t.*"), listener())
+            .unwrap();
+        let err = state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `testSubscriptionPattern`.
+    #[test]
+    fn test_subscription_pattern_getter() {
+        let mut state = new_state();
+        let pattern = SubscriptionPattern::new("t.*");
+        state.subscribe_re2j_pattern(pattern.clone(), listener()).unwrap();
+        assert!(state.has_re2j_pattern_subscription());
+        assert_eq!(state.subscription_pattern(), Some(&pattern));
+        assert!(state.has_auto_assigned_partitions());
+
+        state.unsubscribe();
+        assert!(!state.has_re2j_pattern_subscription());
+        assert!(state.subscription_pattern().is_none());
+    }
+
+    /// Translated from `unsubscribeUserAssignment`.
+    #[test]
+    fn test_unsubscribe_user_assignment() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0(), tp_test_1()])).unwrap();
+        state.unsubscribe();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        assert_eq!(state.subscription(), HashSet::from([TOPIC.to_string()]));
+    }
+
+    /// Translated from `unsubscribeUserSubscribe`.
+    #[test]
+    fn test_unsubscribe_user_subscribe() {
+        let mut state = new_state();
+        state.subscribe_topics(HashSet::from([TOPIC.to_string()]), listener()).unwrap();
+        state.unsubscribe();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_0()]));
+        assert_eq!(state.num_assigned_partitions(), 1);
+    }
+
+    /// Translated from `unsubscription`.
+    #[test]
+    fn test_unsubscription() {
+        let mut state = new_state();
+        state.subscribe_pattern(Regex::new(".*").unwrap(), listener()).unwrap();
+        state
+            .subscribe_from_pattern(HashSet::from([TOPIC.to_string(), TOPIC1.to_string()]))
+            .unwrap();
+        assert!(state.check_assignment_matched_subscription(&[tp_test_1()]));
+        state.assign_from_subscribed(&[tp_test_1()]).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_1()]));
+
+        state.unsubscribe();
+        assert!(state.subscription().is_empty());
+        assert!(state.assigned_partitions().is_empty());
+
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        assert_eq!(state.assigned_partitions(), HashSet::from([tp_test_0()]));
+
+        state.unsubscribe();
+        assert!(state.subscription().is_empty());
+        assert!(state.assigned_partitions().is_empty());
+    }
+
+    /// Translated from `testPreferredReadReplicaLease`.
+    #[test]
+    fn test_subscription_state_preferred_read_replica_lease() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        assert!(state.preferred_read_replica(&tp_test_0(), 0).is_none());
+
+        state.update_preferred_read_replica(&tp_test_0(), 42, 10).unwrap();
+        assert_eq!(state.preferred_read_replica(&tp_test_0(), 9), Some(42));
+        assert_eq!(state.preferred_read_replica(&tp_test_0(), 10), Some(42));
+        assert!(state.preferred_read_replica(&tp_test_0(), 11).is_none());
+
+        state.clear_preferred_read_replica(&tp_test_0());
+        assert!(state.preferred_read_replica(&tp_test_0(), 9).is_none());
+        assert!(state.preferred_read_replica(&tp_test_0(), 11).is_none());
+
+        state.update_preferred_read_replica(&tp_test_0(), 43, 20).unwrap();
+        assert_eq!(state.preferred_read_replica(&tp_test_0(), 11), Some(43));
+        assert_eq!(state.preferred_read_replica(&tp_test_0(), 20), Some(43));
+        assert!(state.preferred_read_replica(&tp_test_0(), 21).is_none());
+
+        state.update_preferred_read_replica(&tp_test_0(), 44, 30).unwrap();
+        assert_eq!(state.preferred_read_replica(&tp_test_0(), 30), Some(44));
+        assert!(state.preferred_read_replica(&tp_test_0(), 31).is_none());
+    }
+
+    /// Translated from `testSeekUnvalidatedWithNoOffsetEpoch` (local-state half;
+    /// `maybeValidatePositionForCurrentLeader` half deferred to Phase 7).
+    #[test]
+    fn test_subscription_state_seek_unvalidated_with_no_offset_epoch() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(0, None, LeaderAndEpoch::new(Some(broker1), Some(5))),
+            )
+            .unwrap();
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `testSeekUnvalidatedWithNoEpochClearsAwaitingValidation`.
+    #[test]
+    fn test_seek_unvalidated_with_no_epoch_clears_awaiting_validation() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+
+        // With an offset epoch -> AWAIT_VALIDATION.
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(0, Some(2), LeaderAndEpoch::new(Some(broker1.clone()), Some(5))),
+            )
+            .unwrap();
+        assert!(!state.has_valid_position(&tp_test_0()));
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        // Now without -> back to FETCHING.
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(0, None, LeaderAndEpoch::new(Some(broker1), Some(5))),
+            )
+            .unwrap();
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `testSeekUnvalidatedWithOffsetEpoch` (local-state half;
+    /// `maybeValidatePositionForCurrentLeader` half deferred to Phase 7).
+    #[test]
+    fn test_subscription_state_seek_unvalidated_with_offset_epoch_enters_validation() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(0, Some(2), LeaderAndEpoch::new(Some(broker1), Some(5))),
+            )
+            .unwrap();
+        assert!(!state.has_valid_position(&tp_test_0()));
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `testSeekValidatedShouldClearAwaitingValidation`.
+    #[test]
+    fn test_seek_validated_should_clear_awaiting_validation() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(10, Some(5), LeaderAndEpoch::new(Some(broker1.clone()), Some(10))),
+            )
+            .unwrap();
+        assert!(!state.has_valid_position(&tp_test_0()));
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 10);
+
+        state
+            .seek_validated(
+                &tp_test_0(),
+                FetchPosition::with_leader(8, Some(4), LeaderAndEpoch::new(Some(broker1), Some(10))),
+            )
+            .unwrap();
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 8);
+    }
+
+    /// Translated from `testCompleteValidationShouldClearAwaitingValidation`.
+    #[test]
+    fn test_complete_validation_should_clear_awaiting_validation() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(10, Some(5), LeaderAndEpoch::new(Some(broker1), Some(10))),
+            )
+            .unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        state.complete_validation(&tp_test_0()).unwrap();
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert_eq!(state.position(&tp_test_0()).unwrap().unwrap().offset, 10);
+    }
+
+    /// Translated from `testOffsetResetWhileAwaitingValidation`.
+    #[test]
+    fn test_offset_reset_while_awaiting_validation() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(10, Some(5), LeaderAndEpoch::new(Some(broker1), Some(10))),
+            )
+            .unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        state
+            .request_offset_reset(&tp_test_0(), AutoOffsetResetStrategy::EARLIEST)
+            .unwrap();
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(state.is_offset_reset_needed(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `nullPositionLagOnNoPosition`.
+    #[test]
+    fn test_null_position_lag_on_no_position() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        assert!(
+            state
+                .partition_lag(&tp_test_0(), IsolationLevel::ReadUncommitted)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .partition_lag(&tp_test_0(), IsolationLevel::ReadCommitted)
+                .unwrap()
+                .is_none()
+        );
+
+        state.update_high_watermark(&tp_test_0(), 1).unwrap();
+        state.update_last_stable_offset(&tp_test_0(), 1).unwrap();
+
+        assert!(
+            state
+                .partition_lag(&tp_test_0(), IsolationLevel::ReadUncommitted)
+                .unwrap()
+                .is_none()
+        );
+        assert!(
+            state
+                .partition_lag(&tp_test_0(), IsolationLevel::ReadCommitted)
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    /// Translated from `testPositionOrNull`.
+    #[test]
+    fn test_position_or_null() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+        state.seek(&tp_test_0(), 5).unwrap();
+
+        assert_eq!(state.position_or_null(&tp_test_0()).unwrap().offset, 5);
+        assert!(state.position_or_null(&unassigned).is_none());
+    }
+
+    /// Translated from `testTryUpdatingHighWatermark`.
+    #[test]
+    fn test_try_updating_high_watermark() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+
+        let hw = 10;
+        assert!(state.try_updating_high_watermark(&tp_test_0(), hw));
+        assert_eq!(
+            state
+                .partition_end_offset(&tp_test_0(), IsolationLevel::ReadUncommitted)
+                .unwrap(),
+            Some(hw)
+        );
+        assert!(!state.try_updating_high_watermark(&unassigned, hw));
+    }
+
+    /// Translated from `testTryUpdatingLogStartOffset`.
+    #[test]
+    fn test_try_updating_log_start_offset() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+        let position = 25;
+        state.seek(&tp_test_0(), position).unwrap();
+
+        let log_start_offset = 10;
+        assert!(state.try_updating_log_start_offset(&tp_test_0(), log_start_offset));
+        assert_eq!(state.partition_lead(&tp_test_0()).unwrap(), Some(position - log_start_offset));
+        assert!(!state.try_updating_log_start_offset(&unassigned, log_start_offset));
+    }
+
+    /// Translated from `testTryUpdatingLastStableOffset`.
+    #[test]
+    fn test_try_updating_last_stable_offset() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+
+        let lso = 10;
+        assert!(state.try_updating_last_stable_offset(&tp_test_0(), lso));
+        assert_eq!(
+            state.partition_end_offset(&tp_test_0(), IsolationLevel::ReadCommitted).unwrap(),
+            Some(lso)
+        );
+        assert!(!state.try_updating_last_stable_offset(&unassigned, lso));
+    }
+
+    /// Translated from `testTryUpdatingPreferredReadReplica`.
+    #[test]
+    fn test_try_updating_preferred_read_replica() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+
+        let replica = 10;
+        let now: i64 = 1000;
+        let expiration = now + 60_000;
+        assert!(state.try_updating_preferred_read_replica(&tp_test_0(), replica, expiration));
+        assert_eq!(state.preferred_read_replica(&tp_test_0(), now), Some(replica));
+        assert!(!state.try_updating_preferred_read_replica(&unassigned, replica, expiration));
+        assert!(state.preferred_read_replica(&unassigned, now).is_none());
+    }
+
+    /// Translated from `testRequestOffsetResetIfPartitionAssigned`.
+    #[test]
+    fn test_request_offset_reset_if_partition_assigned() {
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        let unassigned = crate::common::TopicPartition::new("unassigned".to_string(), 0);
+
+        state.request_offset_reset_if_assigned(&tp_test_0());
+        assert!(state.is_offset_reset_needed(&tp_test_0()).unwrap());
+
+        // No-op on unassigned; subsequent `is_offset_reset_needed` errors
+        // because the partition is not in the assignment.
+        state.request_offset_reset_if_assigned(&unassigned);
+        let err = state.is_offset_reset_needed(&unassigned).unwrap_err();
+        assert!(matches!(err, crate::common::KafkaError::IllegalState(_)));
+    }
+
+    /// Translated from `testFetchablePartitionsPerformsCheapChecksFirst`.
+    #[test]
+    fn test_fetchable_partitions_performs_cheap_checks_first() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let mut state = new_state();
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+        state.seek(&tp_test_0(), 100).unwrap();
+        assert!(state.is_fetchable(&tp_test_0()));
+        state.pause(&tp_test_0()).unwrap();
+
+        let predicate_evaluated = Arc::new(AtomicBool::new(false));
+        let pe = Arc::clone(&predicate_evaluated);
+        let fetchable = state.fetchable_partitions(move |_| {
+            pe.store(true, Ordering::SeqCst);
+            true
+        });
+        assert!(fetchable.is_empty());
+        assert!(
+            !predicate_evaluated.load(Ordering::SeqCst),
+            "Custom predicate should not be evaluated when partitions are not fetchable"
+        );
+
+        state.resume(&tp_test_0()).unwrap();
+        predicate_evaluated.store(false, Ordering::SeqCst);
+        let pe = Arc::clone(&predicate_evaluated);
+        let fetchable = state.fetchable_partitions(move |_| {
+            pe.store(true, Ordering::SeqCst);
+            true
+        });
+        assert!(predicate_evaluated.load(Ordering::SeqCst));
+        assert_eq!(fetchable[0], tp_test_0());
     }
 }
