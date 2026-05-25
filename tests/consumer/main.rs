@@ -23,5 +23,6 @@ mod consumer_config_test;
 mod consumer_group_metadata_test;
 mod consumer_record_test;
 mod consumer_records_test;
+mod mock_consumer_test;
 mod offset_and_metadata_test;
 mod trait_surface_check;

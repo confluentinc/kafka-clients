@@ -56,7 +56,7 @@ const MOCK_CLIENT_ID: &str = "mock-consumer";
 /// the outer struct.
 pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 
-/// A mock of the [`Consumer`](crate::consumer::Consumer) interface, intended
+/// A mock of the [`Consumer`] interface, intended
 /// for testing code that uses Kafka.
 ///
 /// Translated from
@@ -64,7 +64,7 @@ pub type PollTask<K, V> = Box<dyn FnOnce(&mut MockConsumer<K, V>) + Send>;
 ///
 /// This struct is NOT thread-safe. However, you can use
 /// [`MockConsumer::schedule_poll_task`] to write multi-task tests where one
-/// task waits for [`Consumer::poll`](crate::consumer::Consumer::poll) to be
+/// task waits for [`Consumer::poll`] to be
 /// called by another task and can safely perform operations during a
 /// callback.
 ///
@@ -78,7 +78,7 @@ pub struct MockConsumer<K, V> {
     partitions: HashMap<String, Vec<PartitionInfo>>,
     /// Held directly (NOT `Arc<Mutex<...>>`). Per `consumer-threading.md` §16
     /// the mutex wrap is only required when state crosses task boundaries;
-    /// `MockConsumer`'s [`Consumer`](crate::consumer::Consumer) trait API is
+    /// `MockConsumer`'s [`Consumer`] trait API is
     /// `&mut self`, so the Rust borrow checker enforces single-writer access
     /// without runtime locking.
     subscriptions: SubscriptionState,
@@ -93,7 +93,7 @@ pub struct MockConsumer<K, V> {
     /// `consumer.schedule_poll_task(Box::new(|c| c.add_record(...).unwrap()));`.
     poll_tasks: VecDeque<PollTask<K, V>>,
     paused: HashSet<TopicPartition>,
-    /// Atomic so [`Consumer::wakeup`](crate::consumer::Consumer::wakeup) can
+    /// Atomic so [`Consumer::wakeup`] can
     /// take `&self` (callable from any task / signal handler). `SeqCst`
     /// because wakeup is rare and reorder reasoning is not worth the win.
     wakeup: AtomicBool,
@@ -136,7 +136,7 @@ impl<K, V> MockConsumer<K, V> {
 
     // ── Driver methods (mock-specific) ──────────────────────────────────
 
-    /// Add a record to the buffer that the next [`Consumer::poll`](crate::consumer::Consumer::poll)
+    /// Add a record to the buffer that the next [`Consumer::poll`]
     /// call will return. The record's `(topic, partition)` must already be
     /// assigned to the consumer.
     ///
@@ -164,8 +164,8 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Update the end offsets used for `seekToEnd` resets and for
-    /// [`Consumer::end_offsets`](crate::consumer::Consumer::end_offsets) /
-    /// [`Consumer::current_lag`](crate::consumer::Consumer::current_lag).
+    /// [`Consumer::end_offsets`] /
+    /// [`Consumer::current_lag`].
     ///
     /// Translates Java's `updateEndOffsets(Map<TopicPartition, Long>)`.
     pub fn update_end_offsets(&mut self, offsets: HashMap<TopicPartition, i64>) {
@@ -181,8 +181,8 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Configure the [`PartitionInfo`] list for a topic, used by
-    /// [`Consumer::partitions_for`](crate::consumer::Consumer::partitions_for)
-    /// and [`Consumer::list_topics`](crate::consumer::Consumer::list_topics).
+    /// [`Consumer::partitions_for`]
+    /// and [`Consumer::list_topics`].
     ///
     /// Translates Java's `updatePartitions(String, List<PartitionInfo>)`.
     pub fn update_partitions(&mut self, topic: &str, partitions: Vec<PartitionInfo>) -> Result<(), KafkaError> {
@@ -192,7 +192,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Inject an exception to be returned by the next
-    /// [`Consumer::poll`](crate::consumer::Consumer::poll) call. The
+    /// [`Consumer::poll`] call. The
     /// exception is taken (cleared) on use.
     ///
     /// Translates Java's `setPollException(KafkaException)`.
@@ -201,8 +201,8 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Inject an exception to be returned by the next
-    /// [`Consumer::beginning_offsets`](crate::consumer::Consumer::beginning_offsets) /
-    /// [`Consumer::end_offsets`](crate::consumer::Consumer::end_offsets)
+    /// [`Consumer::beginning_offsets`] /
+    /// [`Consumer::end_offsets`]
     /// call. The exception is taken (cleared) on use.
     ///
     /// Translates Java's `setOffsetsException(KafkaException)`.
@@ -211,7 +211,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Set the maximum number of records returned in a single
-    /// [`Consumer::poll`](crate::consumer::Consumer::poll) call.
+    /// [`Consumer::poll`] call.
     ///
     /// Translates Java's `setMaxPollRecords(long)`. Returns
     /// [`KafkaError::IllegalArgument`] when `max_poll_records < 1`, matching
@@ -226,7 +226,7 @@ impl<K, V> MockConsumer<K, V> {
 
     /// Simulate a rebalance event: compute revoked / added partitions
     /// against the current assignment, invoke any registered
-    /// [`ConsumerRebalanceListener`](crate::consumer::ConsumerRebalanceListener)
+    /// [`ConsumerRebalanceListener`]
     /// callbacks, and replace the assignment.
     ///
     /// Translates Java's `rebalance(Collection<TopicPartition>)`. Async
@@ -273,7 +273,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// Schedule a task to run on the next
-    /// [`Consumer::poll`](crate::consumer::Consumer::poll) call. One task
+    /// [`Consumer::poll`] call. One task
     /// is consumed per `poll` invocation, in FIFO order.
     ///
     /// Translates Java's `schedulePollTask(Runnable)`. Java's `Runnable`
@@ -307,7 +307,7 @@ impl<K, V> MockConsumer<K, V> {
     }
 
     /// The timeout passed to the most recent
-    /// [`Consumer::poll`](crate::consumer::Consumer::poll) call, or `None`
+    /// [`Consumer::poll`] call, or `None`
     /// if `poll` has not been called yet.
     ///
     /// Translates Java's `lastPollTimeout()`.
