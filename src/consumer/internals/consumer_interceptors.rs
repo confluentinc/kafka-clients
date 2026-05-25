@@ -125,14 +125,14 @@ where
             match result {
                 Ok(new_records) => {
                     intercept_records = new_records;
-                }
+                },
                 Err(_panic_payload) => {
                     // Matches Java's
                     //   log.warn("Error executing interceptor onConsume callback", e);
                     // Next interceptor is called with the previous good
                     // value (already in `intercept_records`).
                     log::warn!("Error executing interceptor onConsume callback");
-                }
+                },
             }
         }
         intercept_records
@@ -176,5 +176,402 @@ impl<K: 'static, V: 'static> Drop for ConsumerInterceptors<K, V> {
                 log::error!("Failed to close consumer interceptor");
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    //! Translated from
+    //! `org.apache.kafka.clients.consumer.internals.ConsumerInterceptorsTest`.
+    //!
+    //! Inline tests because [`ConsumerInterceptors`] is `pub(crate)` per
+    //! CLAUDE.md §2 (lives in `internals/`). The `tests/consumer/internals/`
+    //! path called out in the Phase 2 PLAN.md cannot reach `pub(crate)`
+    //! items; the producer module uses the same inline pattern for its
+    //! internals (see `producer::internals::buffer_pool`).
+    //!
+    //! Additional Rust-only regression test:
+    //! `test_on_consume_chain_panic_with_partition_filter` — exercises the
+    //! interceptor-panic recovery path through the actual filter logic
+    //! (the Java test sets `throwExceptionOnConsume = true` and asserts
+    //! the next interceptor still runs on the previous-good batch).
+    //! `test_on_consume_panic_does_not_poison_chain` is the focused
+    //! panic-safety unit test required by Phase 2 PLAN.md verification §7.
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use indexmap::IndexMap;
+
+    use super::*;
+    use crate::common::TopicPartition;
+    use crate::common::header::internals::RecordHeaders;
+    use crate::common::record::TimestampType;
+    use crate::consumer::interceptor::ConsumerInterceptor;
+    use crate::consumer::{ConsumerRecord, ConsumerRecords, OffsetAndMetadata};
+
+    /// Shared interior state for [`FilterConsumerInterceptor`]. Held in an
+    /// [`Arc`] so the test can poke the toggles and read the counts from
+    /// outside the container after the interceptor has been moved into the
+    /// `ConsumerInterceptors`.
+    struct FilterState {
+        filter_partition: i32,
+        throw_on_consume: std::sync::atomic::AtomicBool,
+        throw_on_commit: std::sync::atomic::AtomicBool,
+        on_consume_count: AtomicUsize,
+        on_commit_count: AtomicUsize,
+    }
+
+    impl FilterState {
+        fn new(filter_partition: i32) -> std::sync::Arc<Self> {
+            std::sync::Arc::new(Self {
+                filter_partition,
+                throw_on_consume: std::sync::atomic::AtomicBool::new(false),
+                throw_on_commit: std::sync::atomic::AtomicBool::new(false),
+                on_consume_count: AtomicUsize::new(0),
+                on_commit_count: AtomicUsize::new(0),
+            })
+        }
+
+        fn inject_on_consume_error(&self, on: bool) {
+            self.throw_on_consume.store(on, Ordering::SeqCst);
+        }
+
+        fn inject_on_commit_error(&self, on: bool) {
+            self.throw_on_commit.store(on, Ordering::SeqCst);
+        }
+
+        fn on_consume_count(&self) -> usize {
+            self.on_consume_count.load(Ordering::SeqCst)
+        }
+
+        fn on_commit_count(&self) -> usize {
+            self.on_commit_count.load(Ordering::SeqCst)
+        }
+    }
+
+    /// Test consumer interceptor that filters records in `on_consume`,
+    /// mirroring `FilterConsumerInterceptor` in the Java test. The
+    /// observable state lives behind an [`Arc<FilterState>`] so the test
+    /// can inspect counts after the interceptor has been moved into the
+    /// container — avoiding `unsafe` raw-pointer aliasing.
+    struct FilterConsumerInterceptor {
+        state: std::sync::Arc<FilterState>,
+    }
+
+    impl FilterConsumerInterceptor {
+        fn new(state: std::sync::Arc<FilterState>) -> Self {
+            Self { state }
+        }
+    }
+
+    impl ConsumerInterceptor<i32, i32> for FilterConsumerInterceptor {
+        fn on_consume(&self, records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+            self.state.on_consume_count.fetch_add(1, Ordering::SeqCst);
+            if self.state.throw_on_consume.load(Ordering::SeqCst) {
+                panic!("Injected exception in FilterConsumerInterceptor.on_consume.");
+            }
+
+            // Java filters out the topic/partition matching `filterPartition`.
+            // We rebuild a ConsumerRecords keeping only partitions whose
+            // partition id is not equal to `self.state.filter_partition`.
+            let mut new_records: IndexMap<TopicPartition, Vec<ConsumerRecord<i32, i32>>> = IndexMap::new();
+            let mut new_next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+            for tp in records.partitions() {
+                if tp.partition() != self.state.filter_partition {
+                    let recs: Vec<ConsumerRecord<i32, i32>> = records.records_for_partition(tp).to_vec();
+                    new_records.insert(tp.clone(), recs);
+                    if let Some(oam) = records.next_offsets().get(tp) {
+                        new_next_offsets.insert(tp.clone(), oam.clone());
+                    }
+                }
+            }
+            ConsumerRecords::new(new_records, new_next_offsets)
+        }
+
+        fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+            self.state.on_commit_count.fetch_add(1, Ordering::SeqCst);
+            if self.state.throw_on_commit.load(Ordering::SeqCst) {
+                panic!("Injected exception in FilterConsumerInterceptor.on_commit.");
+            }
+        }
+    }
+
+    fn make_consumer_record(topic: &str, partition: i32) -> ConsumerRecord<i32, i32> {
+        // Mirrors Java's
+        //   new ConsumerRecord<>(topic, partition, 0, 0L,
+        //       TimestampType.CREATE_TIME, 0, 0, 1, 1, new RecordHeaders(),
+        //       Optional.empty())
+        ConsumerRecord::with_all(
+            topic.to_string(),
+            partition,
+            0, // offset
+            0, // timestamp
+            TimestampType::CreateTime,
+            0, // serialized_key_size
+            0, // serialized_value_size
+            Some(1),
+            Some(1),
+            RecordHeaders::new(),
+            None, // leader_epoch
+            None, // delivery_count
+        )
+    }
+
+    fn make_offset_and_metadata(offset: i64) -> OffsetAndMetadata {
+        OffsetAndMetadata::with_leader_epoch(offset, None, "").unwrap()
+    }
+
+    fn validate_next_offsets(
+        next_offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+        size: usize,
+        tp: &TopicPartition,
+        filter_topic_part1: &TopicPartition,
+        filter_topic_part2: &TopicPartition,
+    ) {
+        assert_eq!(next_offsets.len(), size);
+        let expected = make_offset_and_metadata(1);
+        if size == 1 {
+            assert_eq!(next_offsets.get(tp), Some(&expected));
+        } else if size == 2 {
+            assert_eq!(next_offsets.get(tp), Some(&expected));
+            assert_eq!(next_offsets.get(filter_topic_part1), Some(&expected));
+        } else if size == 3 {
+            assert_eq!(next_offsets.get(tp), Some(&expected));
+            assert_eq!(next_offsets.get(filter_topic_part1), Some(&expected));
+            assert_eq!(next_offsets.get(filter_topic_part2), Some(&expected));
+        }
+    }
+
+    /// Translates `ConsumerInterceptorsTest.testOnConsumeChain`.
+    #[test]
+    fn test_on_consume_chain() {
+        let filter_partition1 = 5;
+        let filter_partition2 = 6;
+        let topic = "test";
+        let partition = 1;
+        let tp = TopicPartition::new(topic.to_string(), partition);
+        let filter_topic_part1 = TopicPartition::new("test5".to_string(), filter_partition1);
+        let filter_topic_part2 = TopicPartition::new("test6".to_string(), filter_partition2);
+
+        let state1 = FilterState::new(filter_partition1);
+        let state2 = FilterState::new(filter_partition2);
+        let interceptor1 = Box::new(FilterConsumerInterceptor::new(state1.clone()));
+        let interceptor2 = Box::new(FilterConsumerInterceptor::new(state2.clone()));
+        let interceptors: ConsumerInterceptors<i32, i32> = ConsumerInterceptors::new(vec![interceptor1, interceptor2]);
+        let i1 = &state1;
+        let i2 = &state2;
+
+        // Build the input ConsumerRecords with 3 partitions, 1 record each.
+        let mut records: IndexMap<TopicPartition, Vec<ConsumerRecord<i32, i32>>> = IndexMap::new();
+        let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+
+        records.insert(tp.clone(), vec![make_consumer_record(topic, partition)]);
+        next_offsets.insert(tp.clone(), make_offset_and_metadata(1));
+
+        records.insert(
+            filter_topic_part1.clone(),
+            vec![make_consumer_record(
+                filter_topic_part1.topic(),
+                filter_topic_part1.partition(),
+            )],
+        );
+        next_offsets.insert(filter_topic_part1.clone(), make_offset_and_metadata(1));
+
+        records.insert(
+            filter_topic_part2.clone(),
+            vec![make_consumer_record(
+                filter_topic_part2.topic(),
+                filter_topic_part2.partition(),
+            )],
+        );
+        next_offsets.insert(filter_topic_part2.clone(), make_offset_and_metadata(1));
+
+        let consumer_records = ConsumerRecords::new(records, next_offsets);
+
+        // verify that onConsume modifies ConsumerRecords
+        let intercepted = interceptors.on_consume(consumer_records.clone());
+        assert_eq!(intercepted.count(), 1);
+        let parts: Vec<TopicPartition> = intercepted.partitions().cloned().collect();
+        assert!(parts.contains(&tp));
+        assert!(!parts.contains(&filter_topic_part1));
+        assert!(!parts.contains(&filter_topic_part2));
+        assert_eq!(i1.on_consume_count() + i2.on_consume_count(), 2);
+        validate_next_offsets(intercepted.next_offsets(), 1, &tp, &filter_topic_part1, &filter_topic_part2);
+
+        // verify that even if one of the intermediate interceptors panics,
+        // all interceptors' on_consume are called and the next interceptor
+        // sees the previous-good batch (the input in this case, since
+        // interceptor1 panicked).
+        i1.inject_on_consume_error(true);
+        let part_intercepted = interceptors.on_consume(consumer_records.clone());
+        assert_eq!(part_intercepted.count(), 2);
+        let parts: Vec<TopicPartition> = part_intercepted.partitions().cloned().collect();
+        assert!(parts.contains(&filter_topic_part1)); // interceptor1 panicked
+        assert!(!parts.contains(&filter_topic_part2)); // interceptor2 still ran
+        assert_eq!(i1.on_consume_count() + i2.on_consume_count(), 4);
+        validate_next_offsets(
+            part_intercepted.next_offsets(),
+            2,
+            &tp,
+            &filter_topic_part1,
+            &filter_topic_part2,
+        );
+
+        // if all interceptors panic, records should be unmodified.
+        i2.inject_on_consume_error(true);
+        let none_intercepted = interceptors.on_consume(consumer_records.clone());
+        // Match Java's `assertEquals(noneInterceptedRecs, consumerRecords)`
+        // by comparing per-partition record counts (ConsumerRecords does
+        // not implement PartialEq directly; the Java assertion holds
+        // because no interceptor mutated the batch).
+        assert_eq!(none_intercepted.count(), 3);
+        let parts_in: Vec<TopicPartition> = consumer_records.partitions().cloned().collect();
+        let parts_out: Vec<TopicPartition> = none_intercepted.partitions().cloned().collect();
+        assert_eq!(parts_in, parts_out);
+        assert_eq!(i1.on_consume_count() + i2.on_consume_count(), 6);
+        validate_next_offsets(
+            none_intercepted.next_offsets(),
+            3,
+            &tp,
+            &filter_topic_part1,
+            &filter_topic_part2,
+        );
+
+        drop(interceptors); // explicit close (mirrors Java's interceptors.close())
+    }
+
+    /// Translates `ConsumerInterceptorsTest.testOnCommitChain`.
+    #[test]
+    fn test_on_commit_chain() {
+        let filter_partition1 = 5;
+        let filter_partition2 = 6;
+        let topic = "test";
+        let partition = 1;
+        let tp = TopicPartition::new(topic.to_string(), partition);
+
+        let state1 = FilterState::new(filter_partition1);
+        let state2 = FilterState::new(filter_partition2);
+        let interceptor1 = Box::new(FilterConsumerInterceptor::new(state1.clone()));
+        let interceptor2 = Box::new(FilterConsumerInterceptor::new(state2.clone()));
+        let interceptors: ConsumerInterceptors<i32, i32> = ConsumerInterceptors::new(vec![interceptor1, interceptor2]);
+        let i1 = &state1;
+        let i2 = &state2;
+
+        let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+        offsets.insert(tp, OffsetAndMetadata::new(0).unwrap());
+
+        // verify that on_commit is called for all interceptors in the chain.
+        interceptors.on_commit(&offsets);
+        assert_eq!(i1.on_commit_count() + i2.on_commit_count(), 2);
+
+        // verify that even if one of the interceptors panics, all
+        // interceptors' on_commit are called.
+        i1.inject_on_commit_error(true);
+        interceptors.on_commit(&offsets);
+        assert_eq!(i1.on_commit_count() + i2.on_commit_count(), 4);
+
+        drop(interceptors);
+    }
+
+    /// Focused panic-safety regression test required by Phase 2 PLAN.md §7
+    /// — separate from the Java-translated tests so a regression in the
+    /// `catch_unwind` wiring fails this test directly. A panicking
+    /// interceptor must not poison the chain or leak the panic.
+    #[test]
+    fn test_on_consume_panic_does_not_poison_chain() {
+        struct PanickyInterceptor;
+        impl ConsumerInterceptor<i32, i32> for PanickyInterceptor {
+            fn on_consume(&self, _records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+                panic!("boom");
+            }
+            fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+                panic!("boom-commit");
+            }
+        }
+
+        struct CountingState {
+            consume_count: AtomicUsize,
+            commit_count: AtomicUsize,
+        }
+        struct Counting {
+            state: std::sync::Arc<CountingState>,
+        }
+        impl ConsumerInterceptor<i32, i32> for Counting {
+            fn on_consume(&self, records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+                self.state.consume_count.fetch_add(1, Ordering::SeqCst);
+                records
+            }
+            fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+                self.state.commit_count.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let counting_state = std::sync::Arc::new(CountingState {
+            consume_count: AtomicUsize::new(0),
+            commit_count: AtomicUsize::new(0),
+        });
+        let counting = Box::new(Counting { state: counting_state.clone() });
+        let interceptors: ConsumerInterceptors<i32, i32> =
+            ConsumerInterceptors::new(vec![Box::new(PanickyInterceptor), counting, Box::new(PanickyInterceptor)]);
+        let counting = &counting_state;
+
+        // Build a minimal non-empty ConsumerRecords so we can inspect that
+        // the chain passes the value through.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let mut records: IndexMap<TopicPartition, Vec<ConsumerRecord<i32, i32>>> = IndexMap::new();
+        records.insert(tp.clone(), vec![make_consumer_record("t", 0)]);
+        let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+        next_offsets.insert(tp, make_offset_and_metadata(1));
+        let input = ConsumerRecords::new(records, next_offsets);
+
+        // No panic should escape `on_consume`. All three interceptors are
+        // called; the middle (Counting) interceptor records once.
+        let _ = interceptors.on_consume(input);
+        assert_eq!(counting.consume_count.load(Ordering::SeqCst), 1);
+
+        let empty_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+        interceptors.on_commit(&empty_offsets);
+        assert_eq!(counting.commit_count.load(Ordering::SeqCst), 1);
+    }
+
+    /// Translates Java's `testOnCommitChain` failure-recovery assertion in
+    /// a more focused form: verify that Drop-time close() panics do not
+    /// prevent subsequent interceptors from being closed.
+    #[test]
+    fn test_drop_close_panic_does_not_block_remaining_closes() {
+        struct PanicOnClose {
+            closed: std::sync::Arc<Mutex<bool>>,
+        }
+        impl ConsumerInterceptor<i32, i32> for PanicOnClose {
+            fn on_consume(&self, records: ConsumerRecords<i32, i32>) -> ConsumerRecords<i32, i32> {
+                records
+            }
+            fn on_commit(&self, _offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {}
+            fn close(&mut self) {
+                panic!("boom on close");
+            }
+        }
+        impl Drop for PanicOnClose {
+            fn drop(&mut self) {
+                // Track Drop separately so we can confirm both
+                // interceptors were dropped despite the first panicking on
+                // close.
+                *self.closed.lock().unwrap() = true;
+            }
+        }
+
+        let flag1 = std::sync::Arc::new(Mutex::new(false));
+        let flag2 = std::sync::Arc::new(Mutex::new(false));
+        let interceptors: ConsumerInterceptors<i32, i32> = ConsumerInterceptors::new(vec![
+            Box::new(PanicOnClose { closed: flag1.clone() }),
+            Box::new(PanicOnClose { closed: flag2.clone() }),
+        ]);
+        drop(interceptors);
+
+        // Both should have been close()-ed (and panicked on close()),
+        // then dropped (setting their flags).
+        assert!(*flag1.lock().unwrap());
+        assert!(*flag2.lock().unwrap());
     }
 }

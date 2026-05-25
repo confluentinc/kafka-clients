@@ -64,9 +64,5 @@ pub trait OffsetCommitCallback: Send + Sync + 'static {
     ///   applies to
     /// * `error` - `Some(&error)` if the commit failed, `None` if it
     ///   completed successfully
-    async fn on_complete(
-        &self,
-        offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
-        error: Option<&KafkaError>,
-    );
+    async fn on_complete(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>, error: Option<&KafkaError>);
 }

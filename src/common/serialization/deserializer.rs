@@ -82,12 +82,7 @@ pub trait Deserializer<T>: Send + Sync + 'static {
     /// Override this method in custom deserializer implementations that need
     /// to inspect headers during deserialization (for example, schema
     /// registry integration).
-    fn deserialize_with_headers(
-        &self,
-        topic: &str,
-        _headers: &RecordHeaders,
-        data: &[u8],
-    ) -> Result<T, KafkaError> {
+    fn deserialize_with_headers(&self, topic: &str, _headers: &RecordHeaders, data: &[u8]) -> Result<T, KafkaError> {
         self.deserialize(topic, data)
     }
 

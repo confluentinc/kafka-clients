@@ -211,10 +211,7 @@ where
     async fn commit_async(&mut self) -> Result<(), KafkaError>;
 
     /// Translates Java's `void commitAsync(OffsetCommitCallback)`.
-    async fn commit_async_with_callback(
-        &mut self,
-        callback: Arc<dyn OffsetCommitCallback>,
-    ) -> Result<(), KafkaError>;
+    async fn commit_async_with_callback(&mut self, callback: Arc<dyn OffsetCommitCallback>) -> Result<(), KafkaError>;
 
     /// Translates Java's
     /// `void commitAsync(Map<TopicPartition, OffsetAndMetadata>,
@@ -253,11 +250,7 @@ where
     async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError>;
 
     /// Translates Java's `long position(TopicPartition, Duration)`.
-    async fn position_timeout(
-        &mut self,
-        partition: &TopicPartition,
-        timeout: Duration,
-    ) -> Result<i64, KafkaError>;
+    async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError>;
 
     /// Translates Java's
     /// `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
@@ -334,10 +327,7 @@ where
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>)`.
-    async fn end_offsets(
-        &mut self,
-        partitions: &[TopicPartition],
-    ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
+    async fn end_offsets(&mut self, partitions: &[TopicPartition]) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
 
     /// Translates Java's
     /// `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>,
