@@ -75,3 +75,8 @@
 - [Phase 9b SASL channel wiring](phase9b_sasl_channel_wiring.md) — SaslAuthenticator trait + ChannelAuthenticator enum (BOTH, not one); PLAIN-only JAAS parser; sasl.username/password as fresh-impl extension; producer gate lift for SASL_PLAINTEXT
 - [Phase 9c SSL plumbing](phase9c_ssl_plumbing.md) — rustls ClientConfig from ProducerConfig; SNI via Selectable::connect(host); ChannelBuilder::build_channel_with_server_name trait-method-default; producer gate lift for SSL/SASL_SSL
 - [Phase 9c Round 1 patterns](phase9c_round1_patterns.md) — security-verifier direct unit tests via rcgen, "Java parity" vs documented-deviation framing, rustdoc rot in security code, substring vs assert_eq! policy
+- [Phase 9d SASL_PLAINTEXT integration](phase9d_sasl_plaintext_integration.md) — Java-runtime cross-verification narrative for hex fixtures; live-run uncovered producer-side connection-reuse regression (1st conn OK, 2nd times out)
+- [Phase 9d Round 2 selector filter](phase9d_round2_selector_filter.md) — Java NIO OP_READ is sticky from finishConnect onward; Tokio readability filter must check is_open+!is_muted, not ready()
+- [Phase 9e SASL_SSL integration](phase9e_sasl_ssl_integration.md) — combined TLS+SASL test; 9d Round 2 filter fix covers two sequential mid-channel phases by parity, validated live
+- [Phase 9f auth-failure integration](phase9f_auth_failure_integration.md) — wrong-password tests on both SASL listeners; broker-substring match preserved through KafkaError::Display prefix wrinkle
+- [Phase 9g Option A zero-change](phase9g_option_a_zero_change.md) — scope-resolved: both validator-time + broker-handshake scopes already pinned by 9b + 9a; close-stanza drift decision rule
