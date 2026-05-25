@@ -562,3 +562,40 @@ The phase is correct, internally consistent, conservatively scoped (single hostn
 **Recommendation: close 9e immediately — accept-with-no-followups. No Round 2 needed.**
 
 Phase 9e closes.
+
+---
+
+## Critic 9 — Phase 9f Round 1 review (2026-05-25) — zero findings
+
+Critic 9 review of the Phase 9f commit ladder (`e4fd8ec..621ce55`) returned **0 Suggestions + 0 Nits**.
+
+### Commits reviewed
+
+| Commit | Subject |
+|---|---|
+| `e4fd8ec` | Phase 9f (1/N): producer-smoke SASL auth-failure integration tests (PLAINTEXT + SSL) |
+| `621ce55` | Phase 9f (final/N): sub-phase 9f close stanza in NOTES.md |
+
+`git diff 1d0f5a7..621ce55 -- 'src/'` is empty — pure test-add phase, no production code changes.
+
+### Verification performed (per Critic 9 review entry)
+
+- **Java parity literal cross-verified.** Read `kafka/clients/src/main/java/org/apache/kafka/common/security/plain/internals/PlainSaslServer.java:106` — the broker emits exactly `"Authentication failed: Invalid username or password"` (literal match). Read `SaslAuthenticatorTest.java:278` — Java's own canonical test asserts the same literal, and `testInvalidUsernameSaslPlain:295` asserts the **identical** string, confirming Actor's claim that wrong-password and unknown-user collapse onto a single broker message — so a single per-listener test suffices to pin both Java assertions at integration level. Read `SaslServerAuthenticator.java:476-479` — `e.getMessage()` is packed verbatim into `SaslAuthenticateResponse.errorMessage`. The propagation chain Actor documented is correct end-to-end.
+- **`KafkaError::Display` prefix wrinkle verified.** Confirmed `src/common/network/kafka_channel.rs:291` uses `e.to_string()` to capture the wrapped `io::Error::other(KafkaError::Authentication(...))`. Confirmed `src/common/errors.rs:502-510` renders `KafkaError` as `"<java_class_name>: <message>"` and line 403 maps `Authentication(_) → "AuthenticationException"`. So the final wire message is `"AuthenticationException: Authentication failed: Invalid username or password"`, with the broker substring intact. `.contains()` substring matching is the correct compromise; the documented cleanup follow-up at `kafka_channel.rs:291` is real, and the deferral to 9g+ is acceptable for a test-only phase.
+- **Malformed-JAAS deferral coverage verified.** Read `src/common/security/jaas_config.rs:267-381` — counted **10** negative-path unit cases (Actor's claim of "8 explicit malformed cases" is conservative). Integration-level malformed-JAAS retest would not add wire-level evidence. Deferral justified.
+- **Test fails fast — not via timeout-masking.** Structural analysis: with `max.block.ms = 15000`, a broken auth-failure notify path would return `Err(KafkaError::Timeout)` (not `Authentication`) after ~15 s — the test's `match` arm `other => panic!("expected KafkaError::Authentication, got {other:?}")` correctly distinguishes "broker rejected" from "client timed out waiting". The `elapsed < 30s` assertion catches the partial-degradation case (returns `Authentication` slowly). Live timings (~313 ms PLAINTEXT, ~388 ms SSL) are well under both ceilings — proves fast-fail is intrinsic to the producer's metadata fatal-error notify path, not a timeout-masking artifact.
+- **Wire-level propagation chain spot-checked.** `PlainSaslServer.java:106` → `SaslServerAuthenticator.java:476-479` → `SaslClientAuthenticator::handle_sasl_authenticate_response` → `KafkaChannel::prepare` → `NetworkClient::process_disconnection` → `DefaultMetadataUpdater::handle_server_disconnect` → `metadata.fatal_error` → `await_update`'s `Notify::notify_waiters` → `wait_on_metadata` → `do_send_inner` → `send()`. The outer `.send().await` returns `Err(Authentication)` directly because `wait_on_metadata` propagates the fatal error from the metadata layer before any record-future is constructed — no need to also call `.get().await`. Sufficient test shape.
+- **Test shape consistent with 9d/9e siblings.** Same helpers (`TestContext`, `cluster_pool::get_or_create`, `create_topic`, `PLAIN_LOGIN_MODULE`, `SASL_USERNAME`), same `Arc::into_inner` + `close_with_timeout(30s)` cleanup, same inline `HashMap<String, String>` props composition, same physical location in `producer_smoke_test.rs` (right after `producer_smoke_sasl_ssl_1000_records`). No structural drift.
+- **No new structs/traits.** `grep -n "^struct\|^enum\|^trait" tests/integration/producer_smoke_test.rs` returns only the pre-existing `StderrLogger` from Phase 8a. CLAUDE.md rule 7 satisfied.
+- **`cargo check --features integration-tests --tests` clean by Critic.** No warnings, no errors.
+- **Close-stanza format consistent with 9e.** Commit ladder ✓, decisions made ✓ (4 decisions, all named and justified), deferrals carried into 9g+ ✓ (including the new Display-prefix cleanup follow-up), Java tests intentionally not translated ✓ (`testInvalidUsernameSaslPlain` collapses with `testInvalidPasswordSaslPlain` at the broker, `testMissingUsernameSaslPlain` is JAAS-config-validation level, SCRAM tests out of Milestone-1, re-auth permanently skipped), all-gates-green status ✓ with live timings + cluster ID (`5L6g3nShT-eMCtK--X86sw`).
+
+### Phase 9f — no findings
+
+The phase is correct, internally consistent, conservatively scoped (one wrong-password test per listener — well-justified by Java's single-message collapse at `PlainSaslServer.java:106`), and integration-test verified end-to-end against Apache Kafka 4.2. The deferred Display-prefix cleanup at `kafka_channel.rs:291` is correctly flagged as a production-code refinement out of 9f test-only scope; the `.contains()` substring assertion is robust under either rendering (prefixed or stripped), so there is no test-fragility risk from accepting the deferral.
+
+The fatal-error wakeup path in `process_disconnection` → `handle_server_disconnect` → `metadata.fatal_error` → `notify_waiters` exists in the live codebase, and the empirical sub-400 ms surface time on both listeners confirms the notify path is wired. The test is not just structurally sound — it's an empirical regression pin against `handle_server_disconnect` ever silently swallowing the captured exception.
+
+**Recommendation: close 9f immediately — accept-with-no-followups. No Round 2 needed.**
+
+Phase 9f closes.
