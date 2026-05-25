@@ -1273,9 +1273,14 @@ impl SubscriptionState {
     /// `log_start_offset` is updated via a fetch response).
     pub(crate) fn partition_lead(&self, tp: &TopicPartition) -> Result<Option<i64>, KafkaError> {
         let state = self.assigned_state(tp)?;
-        Ok(state
-            .log_start_offset
-            .map(|lso| state.position.as_ref().expect("position is null but logStartOffset is set").offset - lso))
+        Ok(state.log_start_offset.map(|lso| {
+            state
+                .position
+                .as_ref()
+                .expect("position is null but logStartOffset is set")
+                .offset
+                - lso
+        }))
     }
 
     /// Translates Java's `updateHighWatermark(TopicPartition, long)`.
