@@ -666,10 +666,14 @@ where
     // ── Commit ─────────────────────────────────────────────────────────
 
     async fn commit_sync(&mut self) -> Result<(), KafkaError> {
-        // Java line 378-380 → `commitAsync()` → line 367-369 → line 372-375
-        // which `ensureNotClosed()`s BEFORE reading `allConsumed()`. Check
-        // closed first so we don't traverse the subscription map for nothing
-        // when the consumer is already closed.
+        // Java's `commitSync()` (MockConsumer.java:378-380) reads
+        // `allConsumed()` BEFORE the closed check —
+        // `commitSync(allConsumed())` → line 362-364 →
+        // `commitAsync(offsets, null)` at line 353-358 where
+        // `ensureNotClosed()` is finally called. We tighten by checking
+        // closed first: end behavior is identical (both error when the
+        // consumer is closed) but Rust skips the wasted subscription-map
+        // traversal.
         self.ensure_not_closed()?;
         let offsets = self.subscriptions.all_consumed();
         self.commit_async_impl(offsets, None).await
