@@ -43,32 +43,50 @@ use crate::consumer::{ConsumerRecords, OffsetAndMetadata};
 /// each `on_consume` / `on_commit` / `close` call so that a panicking
 /// interceptor does not poison the poll loop.
 ///
-/// Per Java's contract, when `on_consume` panics, the **previous successful
-/// `records` value** is forwarded to the next interceptor in the chain
-/// (not the input to the panicking interceptor). [`Self::on_consume`]
-/// preserves this "pass last good value along" semantics.
+/// ## Java's structural guarantee vs Rust's behavioral guarantee
+///
+/// Java's `ConsumerRecords` is **structurally immutable** (see
+/// `ConsumerRecords.java:37-50`: `private final` fields, `Map.copyOf`,
+/// `Collections.unmodifiableList(...)` views). When an interceptor
+/// throws in Java, the input batch **cannot** have been mutated —
+/// `interceptRecords` retains its previous-good value because the
+/// assignment in `ConsumerInterceptors.java:70` evaluates the RHS
+/// before assigning, and a thrown exception aborts the assignment.
+/// The "previous-good batch" guarantee is a property of the *input
+/// type*, not of interceptor implementations.
+///
+/// The Rust `&mut ConsumerRecords` form cannot reproduce that
+/// structural immutability. The chain still catches the panic and
+/// passes `*records` (whatever state the panicking interceptor left
+/// it in) to the next interceptor. Matching Java's previous-good
+/// guarantee becomes an **interceptor-side discipline**: build the
+/// replacement off to the side, then commit with a single non-fallible
+/// `*records = new_batch;` assignment. See
+/// [`ConsumerInterceptor::on_consume`] for the detailed pattern.
+///
+/// **The in-repo test fixture `FilterConsumerInterceptor` uses this
+/// pattern**: it reads `records` immutably to build a new
+/// `ConsumerRecords` off to the side, then assigns at the end. This
+/// is the structural Rust analog of Java's immutable input and the
+/// reference pattern future in-tree interceptors should follow.
 ///
 /// ## Caveats
 ///
 /// 1. **`panic = "abort"`:** under this profile setting, panics call
 ///    `abort()` directly; `catch_unwind` cannot recover. A panicking
-///    interceptor crashes the process. Rust-wide limitation, not specific
-///    to this code.
+///    interceptor crashes the process. Rust-wide limitation, not
+///    specific to this code.
 /// 2. **Interior mutability + panic.** Interceptors using `RefCell`,
 ///    `Cell`, atomics, or `Mutex` are responsible for their own state
-///    consistency on panic. A panic mid-mutation may leave a `RefCell`
-///    borrowed or a `Mutex` poisoned; subsequent calls on the same
-///    interceptor are undefined-by-the-framework. Java's analog is
-///    "behavior is undefined if onConsume throws mid-modification" — same
-///    guarantee, different mechanism.
-/// 3. **Partial mutation through `&mut`.** [`Self::on_consume`] passes the
-///    records to each interceptor via `&mut`. If an interceptor panics
-///    after partially writing to `*records`, the partial write is
-///    observable to the next interceptor in the chain — matching Java's
-///    "undefined behavior on mid-modification panic" caveat above.
-///    Well-behaved interceptors construct their replacement batch
-///    off-stack and only write back to `*records` once the replacement
-///    is fully constructed.
+///    consistency on panic. Same caveat as Java's `synchronized` blocks.
+/// 3. **`std::mem::take` is an anti-pattern.**
+///    `mem::take(records)` writes `ConsumerRecords::default()` (empty)
+///    to `*records` immediately, then yields the owned previous value.
+///    If anything between the `take` and the final `*records = ...`
+///    assignment panics, the next interceptor sees an **empty batch**,
+///    not the previous-good batch. See
+///    [`ConsumerInterceptor::on_consume`] §"Anti-pattern" for the
+///    explicit example.
 pub(crate) struct ConsumerInterceptors<K: 'static, V: 'static> {
     interceptors: Vec<Box<dyn ConsumerInterceptor<K, V>>>,
 }
@@ -100,26 +118,26 @@ where
     ///
     /// Calls [`ConsumerInterceptor::on_consume`] for each interceptor in
     /// turn, passing the same `&mut ConsumerRecords` through the chain.
-    /// Each interceptor may mutate `records` in place (Java's `FilterConsumerInterceptor`
-    /// pattern: build a fresh batch, then `*records = new_batch;`).
+    /// Each interceptor may mutate `records` in place (Java's
+    /// `FilterConsumerInterceptor` pattern: build a fresh batch, then
+    /// `*records = new_batch;`).
     ///
     /// This method does not propagate panics. If an interceptor panics,
     /// the panic is caught and logged at WARN, and the next interceptor
-    /// is invoked with the current value of `*records` — which, for a
-    /// well-behaved interceptor, is the last successful interceptor's
-    /// output (Java's "previous-good batch" contract). `catch_unwind`
-    /// preserves this property because the only place this function
-    /// writes to `*records` is *inside* the call to `on_consume`; if the
-    /// closure panics before completing its write, `*records` retains
-    /// whatever value it had at entry.
+    /// is invoked with the **current value of `*records`**. For a
+    /// well-behaved interceptor that follows the "build off to the side,
+    /// commit at the end" pattern (see [`ConsumerInterceptor::on_consume`]
+    /// §"Recommended pattern"), `*records` retains its previous-good value
+    /// because no fallible work writes to it. For an interceptor that
+    /// uses `std::mem::take` followed by fallible work, the next
+    /// interceptor would see an empty batch — see
+    /// [`ConsumerInterceptor::on_consume`] §"Anti-pattern".
     ///
     /// [`AssertUnwindSafe`] is required because the `&mut` borrow of
     /// `records` is not auto-`UnwindSafe` (Rust assumes that a panic
     /// could leave the borrowed value in an inconsistent state). For
-    /// this chain that risk is real but explicit: Java has the same
-    /// caveat — "behavior is undefined if onConsume throws
-    /// mid-modification" — so we accept it and document it via the
-    /// `AssertUnwindSafe` wrapper.
+    /// this chain that risk is real but explicit and documented above;
+    /// we accept it and wrap with `AssertUnwindSafe`.
     ///
     /// Note: no `K: Clone, V: Clone` bound. The chain never clones the
     /// batch; the `&mut` form lets each interceptor observe / replace the
@@ -280,30 +298,60 @@ mod tests {
                 panic!("Injected exception in FilterConsumerInterceptor.on_consume.");
             }
 
-            // Java filters out the topic/partition matching
-            // `filterPartition` by constructing a fresh map keyed on the
-            // surviving partitions and storing the SAME `List` references
-            // from the input (ConsumerInterceptorsTest.java line 81:
-            // `recordMap.put(tp, records.records(tp));`). To translate
-            // that zero-copy reference-sharing into Rust, take ownership
-            // of the previous batch via `mem::take` (after the panic
-            // check, so the `injectOnConsumeError` path leaves `*records`
-            // untouched — matching Java) and move the surviving Vecs
-            // across into a fresh map — no `Clone` of record bytes,
-            // mirroring Java's reference semantics.
-            let owned = std::mem::take(records);
-            let (in_records, in_next_offsets) = owned.into_parts();
-
+            // Mirror Java's `FilterConsumerInterceptor.onConsume`
+            // (ConsumerInterceptorsTest.java:71-86): build a fresh
+            // `recordMap` from the surviving partitions, then commit it
+            // wholesale at the end.
+            //
+            // Build the replacement off to the side using a borrowed
+            // view of `*records` — no `std::mem::take` up front. This
+            // matches the "build off to the side, write at the end"
+            // pattern documented on [`ConsumerInterceptor::on_consume`]
+            // and is the structural Rust analog of Java's immutable
+            // input: any panic in the loop below leaves `*records`
+            // unchanged because the final assignment happens only after
+            // all fallible work is complete.
+            //
+            // For the test fixture's `<i32, i32>` records, cloning is
+            // cheap (`i32: Copy`, `RecordHeaders: Clone`); production
+            // interceptors over expensive `K, V` would need a different
+            // strategy (e.g. drain via `Vec::drain_filter` once stable),
+            // but the panic-safety pattern is the same.
             let mut new_records: IndexMap<TopicPartition, Vec<ConsumerRecord<i32, i32>>> = IndexMap::new();
             let mut new_next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
-            for (tp, recs) in in_records {
+            for tp in records.partitions().cloned().collect::<Vec<_>>() {
                 if tp.partition() != self.state.filter_partition {
-                    if let Some(oam) = in_next_offsets.get(&tp) {
+                    let recs: Vec<ConsumerRecord<i32, i32>> = records
+                        .records_for_partition(&tp)
+                        .iter()
+                        .map(|r| {
+                            ConsumerRecord::with_all(
+                                r.topic().to_string(),
+                                r.partition(),
+                                r.offset(),
+                                r.timestamp(),
+                                r.timestamp_type(),
+                                r.serialized_key_size(),
+                                r.serialized_value_size(),
+                                r.key().copied(),
+                                r.value().copied(),
+                                r.headers().clone(),
+                                r.leader_epoch(),
+                                r.delivery_count(),
+                            )
+                        })
+                        .collect();
+                    if let Some(oam) = records.next_offsets().get(&tp) {
                         new_next_offsets.insert(tp.clone(), oam.clone());
                     }
                     new_records.insert(tp, recs);
                 }
             }
+            // Single non-fallible commit: by the time we reach this line,
+            // every fallible step (record allocation, hashmap insertions)
+            // has already succeeded. If a panic occurred above, this
+            // assignment is never reached and `*records` retains its
+            // original value — Java's "previous-good batch" guarantee.
             *records = ConsumerRecords::new(new_records, new_next_offsets);
         }
 

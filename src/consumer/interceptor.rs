@@ -81,16 +81,66 @@ pub trait ConsumerInterceptor<K, V>: Send + 'static {
     ///
     /// # Panic safety
     ///
-    /// If this method panics, [`ConsumerInterceptors::on_consume`] catches
-    /// the panic, logs at WARN, and continues calling the next interceptor
-    /// with whatever value `*records` currently holds. To match Java's
-    /// "next interceptor receives the previous-good batch" guarantee,
-    /// implementors that need to construct a replacement batch should do
-    /// so off to the side and only write back to `*records` once the
-    /// replacement is fully constructed — partial writes followed by a
-    /// panic leave `*records` in whatever intermediate state the
-    /// interceptor produced. Java has the same caveat ("behavior is
-    /// undefined if onConsume throws mid-modification").
+    /// Java's `ConsumerRecords` is **structurally immutable** — its
+    /// fields are `private final` and the maps/lists exposed by its
+    /// getters are unmodifiable views (see
+    /// `ConsumerRecords.java:37-50`). An interceptor that throws
+    /// **cannot** corrupt the input batch in Java; the "next interceptor
+    /// receives the previous-good batch" guarantee
+    /// (`ConsumerInterceptor.java:63-65`) is a structural property of
+    /// the input type, not a contract on interceptor implementations.
+    ///
+    /// The Rust `&mut ConsumerRecords` form cannot reproduce that
+    /// structural immutability — `&mut` permits mutation, and any
+    /// partial write committed before a panic is observable to the next
+    /// interceptor. The chain still catches the panic and continues to
+    /// the next interceptor (mirroring Java's
+    /// `ConsumerInterceptors.java:60-61`), but matching Java's
+    /// "previous-good batch" guarantee becomes an **interceptor-side
+    /// discipline** rather than a structural property.
+    ///
+    /// ## Recommended pattern: build off to the side, commit at the end
+    ///
+    /// ```text
+    /// fn on_consume(&self, records: &mut ConsumerRecords<K, V>) {
+    ///     // Phase 1: read-only inspection / construction.
+    ///     let new_batch = build_replacement(records);  // may panic
+    ///
+    ///     // Phase 2: single non-fallible commit.
+    ///     *records = new_batch;
+    /// }
+    /// ```
+    ///
+    /// A panic anywhere in Phase 1 leaves `*records` unchanged because
+    /// the assignment is the only place we write to the borrow, and that
+    /// assignment cannot panic. This pattern reproduces Java's
+    /// "previous-good batch" guarantee for the common case.
+    ///
+    /// ## Anti-pattern: `std::mem::take` followed by fallible logic
+    ///
+    /// ```text
+    /// // DO NOT do this:
+    /// let owned = std::mem::take(records);           // (a) *records is now empty
+    /// let new_batch = build_from_owned(owned);       // (b) MAY PANIC
+    /// *records = new_batch;                          // (c) only reached on success
+    /// ```
+    ///
+    /// `std::mem::take` writes `ConsumerRecords::default()` (an empty
+    /// batch) to `*records` at step (a). If step (b) panics, the next
+    /// interceptor sees an **empty** batch — not the previous-good
+    /// batch. This is the failure mode Java does not have. If ownership
+    /// transfer is unavoidable, sequence it so that nothing fallible
+    /// runs between the take and the commit assignment.
+    ///
+    /// ## Implementation-defined: interior mutability + partial writes
+    ///
+    /// Even with the recommended pattern, interceptors using interior
+    /// mutability (`RefCell`, `Cell`, atomics, `Mutex`) are responsible
+    /// for their own state consistency on panic. A panic mid-mutation
+    /// of an interior-mutable field leaves that field in whatever state
+    /// the interceptor produced — undefined-by-the-framework. Java has
+    /// the same caveat (its `synchronized` and atomic state are likewise
+    /// the interceptor's responsibility).
     fn on_consume(&self, records: &mut ConsumerRecords<K, V>);
 
     /// Called when offsets get committed.

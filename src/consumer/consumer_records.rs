@@ -121,31 +121,6 @@ impl<K, V> ConsumerRecords<K, V> {
     pub fn next_offsets(&self) -> &HashMap<TopicPartition, OffsetAndMetadata> {
         &self.next_offsets
     }
-
-    /// Deconstruct the records into their underlying maps, transferring
-    /// ownership. Internal-only helper used by consumer-internal code
-    /// that needs to rebuild a batch from a previous batch without
-    /// requiring `K: Clone, V: Clone` (e.g. the
-    /// [`ConsumerInterceptor`](crate::consumer::ConsumerInterceptor)
-    /// chain's `&mut` form, where an interceptor can `std::mem::take`
-    /// the current batch, rebuild a filtered version, and write the
-    /// result back via `*records = ConsumerRecords::new(...)`).
-    ///
-    /// No Java equivalent — Java's `ConsumerRecords` exposes its inner
-    /// maps via getters returning unmodifiable views and Java reference
-    /// semantics let the rebuilder share `List` references freely.
-    /// Rust's ownership rules force an explicit deconstruction primitive
-    /// here, but the user-facing API surface (everything `pub`) is
-    /// unchanged.
-    #[allow(dead_code, clippy::type_complexity)] // used by tests; will be used by Phase 11's fetcher path.
-    pub(crate) fn into_parts(
-        self,
-    ) -> (
-        IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>>,
-        HashMap<TopicPartition, OffsetAndMetadata>,
-    ) {
-        (self.records, self.next_offsets)
-    }
 }
 
 impl<K, V> Default for ConsumerRecords<K, V> {
