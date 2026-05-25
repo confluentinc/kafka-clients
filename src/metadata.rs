@@ -1264,9 +1264,10 @@ impl Metadata {
     /// Constructs and returns a metadata request builder for fetching cluster data
     /// and all active topics.
     ///
-    /// When a custom `request_builder_fn` is set (e.g. by `ProducerMetadata`),
-    /// that function is called instead of the default `all_topics()`.
-    fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
+    /// When a custom `request_builder_fn` is set (e.g. by `ProducerMetadata`
+    /// or `ConsumerMetadata`), that function is called instead of the
+    /// default `all_topics()`.
+    pub(crate) fn new_metadata_request_builder(&self) -> MetadataRequestBuilder {
         if let Some(f) = &self.request_builder_fn {
             f()
         } else {
