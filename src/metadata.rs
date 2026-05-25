@@ -55,6 +55,23 @@ use super::common_client_configs;
 /// Parameters: `(topic_name, is_internal, now_ms) -> should_retain`.
 type RetainTopicFn = dyn Fn(&str, bool, i64) -> bool + Send + Sync;
 
+/// Type alias for the topic-id-aware retain topic function.
+///
+/// Corresponds to Java's two-argument `retainTopic(topicName, topicId, isInternal, nowMs)`
+/// override pattern (used by `ConsumerMetadata` to retain topics by id received in
+/// a broker-side regex assignment). Parameters:
+/// `(topic_name, topic_id_or_none, is_internal, now_ms) -> should_retain`.
+///
+/// `topic_id_or_none` is `None` when the metadata response has no topic id for the
+/// topic (older protocol versions); in that case implementations should fall back
+/// to the name-only retain check, matching Java's default delegation.
+type RetainTopicWithIdFn = dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + Send + Sync;
+
+/// Borrowed-closure aliases used by `handle_metadata_response`; not `Send+Sync`
+/// because they capture local references on each `update()` call.
+type RetainTopicCb<'a> = dyn Fn(&str, bool, i64) -> bool + 'a;
+type RetainTopicWithIdCb<'a> = dyn Fn(&str, Option<Uuid>, bool, i64) -> bool + 'a;
+
 /// Type alias for a function that builds metadata request builders.
 ///
 /// Used by subclasses (e.g., `ProducerMetadata`) to override metadata request
@@ -80,6 +97,14 @@ pub struct MetadataOverrides {
     /// Optional function to override topic retention behavior.
     /// When `None`, the default (retain all topics) is used.
     pub retain_topic_fn: Option<Box<RetainTopicFn>>,
+    /// Optional topic-id-aware retain function. Corresponds to Java's
+    /// `retainTopic(topicName, topicId, isInternal, nowMs)`.
+    ///
+    /// When set, this is invoked at metadata-response parsing time with the
+    /// topic id (if any) carried by the response — used by `ConsumerMetadata`
+    /// to retain topics received as topic ids in a broker-side regex
+    /// assignment. When `None`, `retain_topic_fn` is used.
+    pub retain_topic_with_id_fn: Option<Box<RetainTopicWithIdFn>>,
     /// When `true`, `new_metadata_request_builder_for_new_topics()` returns a
     /// builder, enabling partial metadata requests.
     pub enable_partial_updates: bool,
@@ -114,6 +139,14 @@ pub struct Metadata {
     /// subclasses (e.g., `ConsumerMetadata`). Lives outside the mutex because
     /// it is set once at construction and never mutated.
     retain_topic_fn: Option<Box<RetainTopicFn>>,
+    /// Optional custom topic-id-aware retain function. When set, this is
+    /// invoked at `MetadataResponse` parsing time and takes precedence over
+    /// `retain_topic_fn` for the per-topic retention check.
+    ///
+    /// Corresponds to Java's two-argument
+    /// `retainTopic(topicName, topicId, isInternal, nowMs)` override pattern
+    /// used by `ConsumerMetadata`.
+    retain_topic_with_id_fn: Option<Box<RetainTopicWithIdFn>>,
     /// When true, `new_metadata_request_builder_for_new_topics` returns a builder
     /// instead of `None`, enabling partial update requests.
     ///
@@ -285,6 +318,7 @@ impl Metadata {
             }),
             update_notify: Notify::new(),
             retain_topic_fn: None,
+            retain_topic_with_id_fn: None,
             enable_partial_updates: false,
             request_builder_fn: None,
             new_topics_request_builder_fn: None,
@@ -343,6 +377,7 @@ impl Metadata {
             }),
             update_notify: Notify::new(),
             retain_topic_fn: overrides.retain_topic_fn,
+            retain_topic_with_id_fn: overrides.retain_topic_with_id_fn,
             enable_partial_updates: overrides.enable_partial_updates,
             request_builder_fn: overrides.request_builder_fn,
             new_topics_request_builder_fn: overrides.new_topics_request_builder_fn,
@@ -624,6 +659,7 @@ impl Metadata {
     /// this can't actually happen).
     pub fn update(&self, request_version: i32, response: &MetadataResponse, is_partial_update: bool, now_ms: i64) {
         let retain_fn = &self.retain_topic_fn;
+        let retain_with_id_fn = &self.retain_topic_with_id_fn;
         let mut inner = self.inner.lock().unwrap();
         assert!(!inner.is_closed, "Update requested after metadata close");
 
@@ -641,6 +677,8 @@ impl Metadata {
 
         let previous_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
 
+        // Name-only retain (used for `last_seen_leader_epochs` cleanup and the
+        // partial-update mergeWith retain filter; both call sites have no topic id).
         let retain = |topic: &str, is_internal: bool, now: i64| -> bool {
             if let Some(f) = retain_fn {
                 f(topic, is_internal, now)
@@ -648,9 +686,20 @@ impl Metadata {
                 Self::retain_topic_default(topic, is_internal, now)
             }
         };
+        // Topic-id-aware retain (mirrors Java `retainTopic(topicName, topicId, isInternal, nowMs)`
+        // called from `handleMetadataResponse`). Falls back to the name-only retain
+        // when no `retain_topic_with_id_fn` is registered — matches Java's default
+        // `retainTopic(name, id, internal, ms) -> retainTopic(name, internal, ms)`.
+        let retain_with_id = |topic: &str, topic_id: Option<Uuid>, is_internal: bool, now: i64| -> bool {
+            if let Some(f) = retain_with_id_fn {
+                f(topic, topic_id, is_internal, now)
+            } else {
+                retain(topic, is_internal, now)
+            }
+        };
 
         inner.metadata_snapshot =
-            Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms, &retain);
+            Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms, &retain, &retain_with_id);
 
         let cluster = inner.metadata_snapshot.cluster().clone();
         Self::maybe_set_metadata_error(&mut inner, &cluster);
@@ -827,12 +876,19 @@ impl Metadata {
     }
 
     /// Transform a MetadataResponse into a new MetadataSnapshot.
+    ///
+    /// `retain_topic` is the name-only retain used by `mergeWith` (partial update)
+    /// and other call sites that lack a topic id; `retain_topic_with_id` is the
+    /// topic-id-aware retain matching Java's
+    /// `retainTopic(topicName, topicId, isInternal, nowMs)` invoked on every
+    /// topic in the response (mirrors `Metadata.java:511`).
     fn handle_metadata_response(
         inner: &mut MetadataInner,
         metadata_response: &MetadataResponse,
         is_partial_update: bool,
         now_ms: i64,
-        retain_topic: &dyn Fn(&str, bool, i64) -> bool,
+        retain_topic: &RetainTopicCb<'_>,
+        retain_topic_with_id: &RetainTopicWithIdCb<'_>,
     ) -> MetadataSnapshot {
         // All encountered topics
         let mut topics = HashSet::new();
@@ -862,7 +918,7 @@ impl Metadata {
                 effective_topic_id = None;
             }
 
-            if !retain_topic(&topic_name, metadata.is_internal(), now_ms) {
+            if !retain_topic_with_id(&topic_name, effective_topic_id, metadata.is_internal(), now_ms) {
                 continue;
             }
 
