@@ -1710,10 +1710,23 @@ mod tests {
         LeaderAndEpoch::no_leader_or_epoch()
     }
 
-    /// Translation of Java's `MockRebalanceListener`: counts callback
-    /// invocations. We only need a placeholder that implements the trait —
-    /// none of the translated tests actually inspect the listener's state.
-    struct MockListener;
+    /// Translation of Java's `MockRebalanceListener`
+    /// (`SubscriptionStateTest.java:980-996`): counts callback invocations.
+    /// Currently no Phase-4 test asserts on the counters, but Phase-11
+    /// rebalance-listener regression tests will inspect them.
+    struct MockListener {
+        revoked_count: std::sync::atomic::AtomicI32,
+        assigned_count: std::sync::atomic::AtomicI32,
+    }
+
+    impl MockListener {
+        fn new() -> Self {
+            Self {
+                revoked_count: std::sync::atomic::AtomicI32::new(0),
+                assigned_count: std::sync::atomic::AtomicI32::new(0),
+            }
+        }
+    }
 
     #[async_trait::async_trait]
     impl ConsumerRebalanceListener for MockListener {
@@ -1721,18 +1734,20 @@ mod tests {
             &self,
             _partitions: &[crate::common::TopicPartition],
         ) -> Result<(), crate::common::KafkaError> {
+            self.revoked_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
         async fn on_partitions_assigned(
             &self,
             _partitions: &[crate::common::TopicPartition],
         ) -> Result<(), crate::common::KafkaError> {
+            self.assigned_count.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             Ok(())
         }
     }
 
     fn listener() -> Option<Arc<dyn ConsumerRebalanceListener>> {
-        Some(Arc::new(MockListener))
+        Some(Arc::new(MockListener::new()))
     }
 
     fn new_state() -> SubscriptionState {
