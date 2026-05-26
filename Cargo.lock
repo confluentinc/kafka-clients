@@ -440,6 +440,7 @@ dependencies = [
  "testcontainers-modules",
  "tokio",
  "tokio-rustls",
+ "tokio-util",
  "uuid",
  "webpki-roots 0.26.11",
  "zstd",
