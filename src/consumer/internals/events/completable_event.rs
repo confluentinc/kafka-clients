@@ -119,6 +119,13 @@ impl<T: Send + 'static> CompletableEventHandle<T> {
 
     /// Returns an opaque, type-erased view of this handle suitable for
     /// the reaper.
+    ///
+    /// Two `erased()` calls on the same `CompletableEventHandle` return
+    /// **different** `Arc<dyn CompletableEventErasedHandle>` trait objects
+    /// (so `Arc::ptr_eq` between them is `false`), but both delegate to
+    /// the same underlying [`HandleInner`]. The reaper compares identity
+    /// via [`CompletableEventErasedHandle::inner_id`] instead of
+    /// `Arc::ptr_eq` for that reason — see [`crate::consumer::internals::events::CompletableEventReaper::contains`].
     pub(crate) fn erased(&self) -> Arc<dyn CompletableEventErasedHandle> {
         Arc::new(ErasedHandle::<T> { inner: Arc::clone(&self.inner), deadline_ms: self.deadline_ms })
     }
@@ -137,6 +144,15 @@ pub(crate) trait CompletableEventErasedHandle: Send + Sync + 'static {
     /// Diagnostic name for the wrapped `T` — used in log/trace messages
     /// equivalent to Java's `event.getClass().getSimpleName()`.
     fn type_name(&self) -> &'static str;
+    /// Stable identity of the underlying completion slot.
+    ///
+    /// Two erased handles created from the same
+    /// [`CompletableEventHandle`] (via repeated calls to
+    /// [`CompletableEventHandle::erased`]) MUST return the same
+    /// `inner_id()` even though their `Arc<dyn ...>` differ. The reaper
+    /// uses this to implement Java's `List.contains(event)`
+    /// reference-equality without relying on the trait-object `Arc`.
+    fn inner_id(&self) -> *const ();
 }
 
 /// Type-erased wrapper around [`HandleInner`]. Stored inside the reaper as
@@ -176,6 +192,15 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
 
     fn type_name(&self) -> &'static str {
         std::any::type_name::<T>()
+    }
+
+    fn inner_id(&self) -> *const () {
+        // The `HandleInner<T>` lives behind an `Arc`. `Arc::as_ptr`
+        // returns the pointer to the inner struct — invariant for the
+        // lifetime of every clone of that `Arc`. Casting through
+        // `*const ()` erases `T` so the comparison works across
+        // heterogeneous handles tracked by the reaper.
+        Arc::as_ptr(&self.inner) as *const ()
     }
 }
 

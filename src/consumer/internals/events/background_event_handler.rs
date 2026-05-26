@@ -20,8 +20,17 @@
 //! `org.apache.kafka.clients.consumer.internals.events.BackgroundEventHandler`.
 //! The `AsyncConsumerMetrics.recordBackgroundEventQueueSize` calls are
 //! dropped per the Phase-5 PLAN ("Out of scope: AsyncConsumerMetrics
-//! instrumentation"). The matching app-side `drain_events` lives on the
-//! consumer struct itself (Phase 10).
+//! instrumentation").
+//!
+//! # Sender-only by design
+//!
+//! Java's `BackgroundEventHandler` exposes a `drainEvents(...)` method
+//! used by the app side to pull pending events at once. The Rust handler
+//! deliberately omits `drain_events`: the app side holds the raw
+//! [`tokio::sync::mpsc::UnboundedReceiver`] and drains it directly via
+//! `try_recv` in a `while let` loop (`consumer-threading.md` §31). The
+//! handler is therefore **sender-only by design** — do NOT add a
+//! `drain_events` method here in Phase 10.
 //!
 //! As with [`super::application_event_handler::ApplicationEventHandler`],
 //! the channel is **unbounded** to match Java's `LinkedBlockingQueue`.
@@ -36,6 +45,9 @@ use super::background_event::{BackgroundEvent, BackgroundEventEnvelope};
 /// [`BackgroundEventHandler::add`] to enqueue an event; the matching
 /// `UnboundedReceiver` lives on the app side (held inside the consumer
 /// struct in Phase 10).
+///
+/// **Sender-only by design** — see the module-level docs for why
+/// `drain_events` is not provided.
 pub(crate) struct BackgroundEventHandler {
     sender: mpsc::UnboundedSender<BackgroundEventEnvelope>,
 }
