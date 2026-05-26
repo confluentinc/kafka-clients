@@ -81,3 +81,4 @@
 - [Phase 9f auth-failure integration](phase9f_auth_failure_integration.md) — wrong-password tests on both SASL listeners; broker-substring match preserved through KafkaError::Display prefix wrinkle
 - [Phase 9g Option A zero-change](phase9g_option_a_zero_change.md) — scope-resolved: both validator-time + broker-handshake scopes already pinned by 9b + 9a; close-stanza drift decision rule
 - [Phase 9h flakiness gate](phase9h_flakiness_gate.md) — 3-run integration matrix (10 tests, `producer_smoke_test::*`); cluster ID deterministic from image, NOT pool warm-reuse across `cargo test` invocations; closes Milestone-1
+- [Phase 9i CCloud wiring](phase9i_ccloud_wiring.md) — rustls-native-certs system-trust-store fallback (Java parity with `tmf.init(null)`) + skip-gated CCloud smoke test; post-Milestone-1 additive

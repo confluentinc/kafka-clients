@@ -2040,3 +2040,190 @@ with this phase.**
 
 Phase 9 / Milestone-1 closes; ready for Critic 9 final review.
 
+## Sub-phase 9i — closed (Round 1, post-Milestone-1 additive)
+
+Sub-phase 9i completes the pre-planned NOTES.md:54 deferral —
+"(Optional) CCloud smoke test … runs only when EC2/CCloud env is
+configured." Milestone-1 closed at commit `959ec03` (Phase 9h
+final), but the 9i scope was explicitly carried-forward as
+optional. This sub-phase is **additive post-close work** that
+completes the deferral; it does not reopen Milestone-1.
+
+### Branch strategy
+
+**Chose option A — stay on `fresh-impl`.** The branch is a
+feature branch (not master); the deferral was explicitly tracked
+in the Phase 9 ladder; and 9i is small enough (one new test
+file, one src module relax, one dep added) that a separate branch
+would be ceremonial overhead. Option B (new branch) was
+considered and rejected for these reasons; we would have used it
+only if 9i had grown into a multi-day Milestone-2-prep scope.
+
+### Scope expansion versus NOTES.md:54
+
+The user's CCloud-readiness investigation that triggered this
+work surfaced four concrete gaps; 9i closes all of them in one
+commit ladder rather than wiring a test that would have failed
+on the first gap (`ssl.truststore.location` required):
+
+1. **System trust store fallback for `SSL`/`SASL_SSL` when
+   `ssl.truststore.location` is unset.** Phase-9c made the key
+   required (commit `2a3dc83`). With CCloud's publicly-trusted CA
+   chain, requiring a bundled PEM is ergonomically wrong — the
+   client should fall back to the OS keychain, matching Java's
+   JVM-default-truststore behavior.
+
+2. **Trust-store crate choice — `rustls-native-certs`.**
+   Evaluated vs. `webpki-roots`. Chose
+   `rustls-native-certs` because it reads the OS keychain
+   dynamically (macOS Keychain Access, Linux `/etc/ssl/certs`,
+   Windows cert store) — closest analogue of Java's
+   `TrustManagerFactory.init(null)` semantic, which JSSE resolves
+   to `$JAVA_HOME/lib/security/cacerts` (typically a snapshot of
+   the OS roots at JVM-install time). `webpki-roots` would have
+   bundled the Mozilla list statically — same security drift
+   issue as `cacerts`, but rebuilt only when the crate version
+   bumps. Both options are well-tested by the ecosystem; the
+   Java-parity argument tipped it. (CLAUDE.md rule 1.2 says ask
+   before adding popular crates; the rationale is documented in
+   `Cargo.toml:27-40` and commit message 1/4.)
+
+   Note: the existing `webpki-roots = "0.26"` direct dep in
+   `Cargo.toml` is no longer referenced from `src/` or
+   `tests/` (it's only a transitive of `rustls-native-certs`
+   now). Left as-is — a separate cleanup pass could prune it.
+
+3. **Skip-when-`SASL_USERNAME`-unset CCloud test.** Added
+   `tests/integration/ccloud_smoke_test.rs` as a strictly
+   additive new test (option X from the task brief), preserving
+   the existing Docker-fallback behavior in
+   `performance_test.rs`. Skip path prints a clear notice and
+   returns success; un-skip path produces 10 records and asserts
+   every send ack carries the expected topic + non-negative
+   offset shape.
+
+4. **Stale `--features performance-tests` doc fix.**
+   `tests/integration/performance_test.rs:17` referenced a
+   non-existent feature gate; the actual gate is
+   `integration-tests` (`Cargo.toml:10`). Fixed.
+
+### Java parity citation
+
+`DefaultSslEngineFactory.getTrustManagers(SecurityStore, String)`
+at
+`kafka/clients/src/main/java/org/apache/kafka/common/security/ssl/DefaultSslEngineFactory.java:270-275`:
+
+```java
+protected TrustManager[] getTrustManagers(SecurityStore truststore, String tmfAlgorithm) {
+    TrustManagerFactory tmf = TrustManagerFactory.getInstance(tmfAlgorithm);
+    KeyStore ts = truststore == null ? null : truststore.get();
+    tmf.init(ts);
+    return tmf.getTrustManagers();
+}
+```
+
+`createTruststore(String, String, Password, Password)` at
+`DefaultSslEngineFactory.java:307-328` returns `null` when no
+truststore path/certs are configured (line 327), so the call
+above hits the `tmf.init(null)` branch — which JSSE resolves to
+the JVM-default trust store at
+`$JAVA_HOME/lib/security/cacerts`. This is the precedent the
+Phase-9i system-trust-store fallback mirrors.
+
+### Commit ladder (4 commits)
+
+| # | Subject |
+|---|---|
+| 1 | `Phase 9i (1/4): add rustls-native-certs dependency for system trust store fallback` |
+| 2 | `Phase 9i (2/4): system trust store fallback for SSL/SASL_SSL when ssl.truststore.location unset` |
+| 3 | `Phase 9i (3/4): CCloud smoke test (skip-when-SASL_USERNAME-unset) + doc fix` |
+| 4 | `Phase 9i (final/4): sub-phase 9i close stanza in NOTES.md` (this commit) |
+
+Folded commit 4-as-doc-fix into commit 3 as permitted by the
+task brief. Ladder length matches "(4/N)" subject numbering.
+
+### Integration test re-runs
+
+All performed locally with `--test-threads=1` against the
+shared Testcontainers KRaft cluster (warm via `cluster_pool`):
+
+| Test | Result | Wall-clock |
+|---|---|---|
+| `producer_smoke_ssl_1000_records` (Phase 9c) | OK | 8.85 s |
+| `producer_smoke_sasl_ssl_1000_records` (Phase 9e) | OK | 4.86 s |
+| `producer_smoke_sasl_plaintext_auth_failure` (Phase 9f) | OK | 5.28 s |
+| `ccloud_smoke_test` (Phase 9i, skip path) | OK | 0.00 s |
+
+Cluster ID across the runs: `5L6g3nShT-eMCtK--X86sw` (warm-image
+deterministic assignment; matches 9d/9e/9f/9h historical ID).
+
+### Live CCloud verification (un-skip path)
+
+**Not performed in this commit.** The actor does not have CCloud
+credentials. The un-skip path is unverified against a live
+cluster. A future operator with CCloud access (or a CI lane wired
+to a test cluster) should run:
+
+```sh
+SASL_USERNAME=<api-key> \
+SASL_PASSWORD=<api-secret> \
+BOOTSTRAP_SERVERS=<bootstrap-url> \
+TOPIC_NAME=<existing-topic> \
+cargo test --features integration-tests \
+  --test integration ccloud -- --nocapture --test-threads=1
+```
+
+and report the result on a follow-up commit or PR comment.
+
+### DoD gate evidence
+
+- `cargo build` OK
+- `cargo build --features integration-tests` OK
+- `cargo test --lib` **1344 passed** (Phase 9h baseline 1343 +
+  net 1: two new ssl-module tests minus one removed/replaced;
+  one renamed kafka_producer test net 0)
+- `cargo xtask format-check` OK
+- `cargo xtask lint` OK (clippy clean — `--all-targets`
+  without `--features integration-tests`, per xtask's
+  configuration; pre-existing lint warnings inside
+  `producer_smoke_test.rs` under `--features integration-tests`
+  remain as Phase 9 tech debt, out of 9i scope)
+- New unit tests assert error message content (DoD rule 3):
+  the build-config and producer-config error paths surface
+  `KafkaError::Config` with descriptive messages; the new
+  fallback positive tests assert the constructor succeeds.
+- Hot-path allocation audit (DoD rule 10): N/A — the change
+  is a one-time config-init path, not the send path.
+- Zero TODO/FIXME introduced.
+
+### What this closes
+
+- **Phase 9i** — the NOTES.md:54 CCloud smoke test deferral,
+  expanded to the four-gap CCloud-readiness scope.
+- Producer can now connect to publicly-trusted-CA brokers
+  (Confluent Cloud, Let's Encrypt-issued, etc.) without
+  requiring a bundled PEM truststore. The skip-gated CCloud
+  test is in the default `integration-tests` set, ready for
+  any future CI lane that supplies the CCloud env vars.
+
+### Deferrals into Milestone-2 (unchanged from 9h)
+
+- SCRAM-SHA-256/512 (still rejected at config validation)
+- OAUTHBEARER (still rejected)
+- `enable.idempotence=true` re-enablement
+- Transactions
+- Auto-topic-create / admin client
+- `kafka_channel.rs:291` `e.to_string()` Display-prefix cleanup
+  (cosmetic, surfaced in 9f close)
+- End-to-end compression matrix integration test (Phase 8d
+  carry-forward)
+- `MockProducer`, `KafkaConsumer`
+- `webpki-roots` direct-dep cleanup (made transitive by
+  `rustls-native-certs`)
+- Live verification of the 9i un-skip path against a real
+  CCloud cluster (see above — actor lacked credentials)
+
+**Recommendation: Phase 9i ready to close; Milestone-1 close
+state preserved (this is post-close additive work, not a
+reopen).**
+
