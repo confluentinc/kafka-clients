@@ -32,6 +32,8 @@
 #![allow(dead_code)]
 
 pub(crate) mod application_event;
+pub(crate) mod application_event_handler;
 pub(crate) mod background_event;
+pub(crate) mod background_event_handler;
 pub(crate) mod completable_event;
 pub(crate) mod completable_event_reaper;
