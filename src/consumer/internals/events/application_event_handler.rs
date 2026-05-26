@@ -143,8 +143,9 @@ mod tests {
             other => panic!("unexpected variant {}", other.type_name()),
         }
 
-        let result = send_task.await.expect("task ok").expect("add_and_get ok");
-        assert_eq!(result, ());
+        // `add_and_get::<()>` returns `Result<(), KafkaError>`; both expects
+        // unwrap the success path, no further assertion needed.
+        send_task.await.expect("task ok").expect("add_and_get ok");
     }
 
     #[tokio::test]
