@@ -25,3 +25,4 @@
 - [M8 Phase 2 patterns](review_m8_phase2_patterns.md) — Trait surface: Clone-on-panic leaks bounds into Consumer<K,V>; happy-path clones; weak PartialEq substitutes for assertEquals
 - [M8 Phase 4 patterns](review_m8_phase4_patterns.md) — debug_assert masks IllegalStateException in release; Display format divergence from Java toString; HashSet from BTreeSet loses ordering
 - [M8 Phase 3 patterns](review_m8_phase3_patterns.md) — MockConsumer: &self-vs-mutating-position shape mismatch; listener inline invocation; map+iter+mutate translation
+- [M8 Phase 5 patterns](review_m8_phase5_patterns.md) — Event-layer: CompletableApplicationEvent<T> must yield CompletableEventHandle<T>; AsyncPoll non-completable; Arc::ptr_eq vs Java identity; marker-interface translation
