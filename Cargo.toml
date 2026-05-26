@@ -25,6 +25,20 @@ tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", 
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["logging", "std", "tls12"] }
 rustls-pemfile = "2"
+# Mirror of Java's JVM-default trust store behavior. When
+# `ssl.truststore.location` is unset and `security.protocol` is `SSL` or
+# `SASL_SSL`, we load the OS keychain (macOS), `/etc/ssl/certs` (Linux),
+# or the Windows certificate store as the rustls RootCertStore — the
+# closest equivalent of `javax.net.ssl.TrustManagerFactory.init(null)`,
+# which JSSE resolves to `$JAVA_HOME/lib/security/cacerts`. Without this
+# fallback, users connecting to brokers issued by publicly-trusted CAs
+# (e.g. Confluent Cloud) would be forced to bundle a PEM truststore
+# even though their OS already trusts the broker. See
+# `DefaultSslEngineFactory.java:270-275` for the Java side: when
+# `truststore == null`, `tmf.init(ts)` is called with `ts = null`,
+# triggering the JVM default trust store. Phase 9i (post-Milestone-1
+# additive scope).
+rustls-native-certs = "0.8"
 webpki-roots = "0.26"
 indexmap = "2"
 log = "0.4"
