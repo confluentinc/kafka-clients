@@ -259,6 +259,12 @@ pub enum KafkaError {
     ///
     /// Corresponds to Java's `SerializationException`.
     Serialization(String),
+    /// Wakeup error — a blocking operation was preempted by `wakeup()`.
+    ///
+    /// Corresponds to Java's `WakeupException` (extends `KafkaException`,
+    /// carries no error code). Used by `Consumer::wakeup()` to break out
+    /// of a `poll()` / `commit_sync()` / etc. call.
+    Wakeup(String),
 }
 
 impl KafkaError {
@@ -341,6 +347,15 @@ impl KafkaError {
         Self::Generic(KafkaGenericError::with_message(Errors::UnsupportedVersion, message))
     }
 
+    /// Create a wakeup error.
+    ///
+    /// Corresponds to Java's `WakeupException`. Returned from blocking
+    /// `Consumer` operations (`poll`, `commit_sync`, `position`, etc.)
+    /// when `wakeup()` is invoked from another task.
+    pub fn wakeup(message: impl Into<String>) -> Self {
+        Self::Wakeup(message.into())
+    }
+
     /// Create a record batch too large error.
     ///
     /// Corresponds to Java's `RecordBatchTooLargeException`.
@@ -364,7 +379,8 @@ impl KafkaError {
             | Self::IllegalState(_)
             | Self::Timeout(_)
             | Self::RecordTooLarge(_)
-            | Self::Serialization(_) => None,
+            | Self::Serialization(_)
+            | Self::Wakeup(_) => None,
         }
     }
 
@@ -393,7 +409,8 @@ impl KafkaError {
             | Self::IllegalState(msg)
             | Self::Timeout(msg)
             | Self::RecordTooLarge(msg)
-            | Self::Serialization(msg) => msg,
+            | Self::Serialization(msg)
+            | Self::Wakeup(msg) => msg,
             _ => self.kafka_error().map_or("Unknown error", |e| e.message()),
         }
     }
@@ -440,7 +457,10 @@ impl KafkaError {
     /// - `IllegalState` (IllegalStateException extends RuntimeException)
     /// - `Serialization` (SerializationException extends KafkaException, NOT ApiException)
     pub fn is_api_exception(&self) -> bool {
-        !matches!(self, Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_))
+        !matches!(
+            self,
+            Self::IllegalArgument(_) | Self::IllegalState(_) | Self::Serialization(_) | Self::Wakeup(_)
+        )
     }
 }
 
@@ -462,6 +482,7 @@ impl fmt::Display for KafkaError {
             Self::Timeout(msg) => write!(f, "TimeoutError: {msg}"),
             Self::RecordTooLarge(msg) => write!(f, "RecordTooLargeError: {msg}"),
             Self::Serialization(msg) => write!(f, "SerializationError: {msg}"),
+            Self::Wakeup(msg) => write!(f, "WakeupError: {msg}"),
         }
     }
 }

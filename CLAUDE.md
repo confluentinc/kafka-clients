@@ -29,6 +29,9 @@ Suggestions for changes are possible through the process highlighted in [agent-r
    - Java `Exception` → Rust `Error` (e.g. `TopicAuthorizationException` → `TopicAuthorizationError`)
    - Java `throws` / `throw` → Rust `return Err(...)` (e.g. `maybeThrowAnyException` → `maybe_return_any_error`)
    - Preserve original architecture and logical structure
+   - Java `long` fields used in comparison (e.g. `Uuid`, producer IDs, offsets) must use `i64` in Rust, not `u64` — signed vs unsigned comparison produces different ordering for values with the high bit set
+   - Nullable `string`/`bytes` fields in the Kafka message specs without an explicit `"default": "null"` must default to empty (`Some(String::new())` / `Some(Vec::new())`), not `None`. Only use `None` when the spec explicitly sets `"default": "null"`
+   - When generating wire protocol code, always use per-field `flexibleVersions` overrides via `field_flexible_versions(field, msg_flex)` in the generator — never the raw message-level value. Some fields (e.g. `ClientId` in `RequestHeader`) override to `"none"` and must always use length-prefixed encoding
 3. **C FFI Conventions**:
     - Always define types ending with '_t' for opaque or public structures
     - `org.apache.kafka.common.KafkaException` -> `kafka_common_KafkaError_t`.
@@ -43,7 +46,7 @@ Suggestions for changes are possible through the process highlighted in [agent-r
 3. **Tests**: Keep the same tests, after translating a class, also translate and run all its corresponding tests.
 4. **Comments and documentation**: Keep similar comments as the Java source,
 translate javadoc to rustdoc. Never change the contract of public API.
-5. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done
+5. **Completeness**: Don't leave any TODO or FIXME — finish everything that should be done. If a Java code path is not yet implemented, fail the affected records/operations with an appropriate `KafkaError` — silently completing or hanging futures is worse than an explicit error.
 6. **Scripts**: Use xtask Rust programs instead of shell scripts
 7. **License**: All translated code, except GPL with CPE from OpenJDK, includes the Apache 2.0 license header.
     Copyright holder for Apache licensed code is Confluent Inc.
@@ -53,17 +56,31 @@ translate javadoc to rustdoc. Never change the contract of public API.
     2. Translate callbacks you find in Java client to code that is executed 
        after awaiting the corresponding call in Rust.
     3. In case the original method isn't blocking to await the callback response (for example awaiting a CompletableFuture), use Tokio `task::spawn` to create a coroutine that is detached from current flow.
+    4. When Java uses `thread.join()` or `Future.get()` to block until completion, the Rust translation must actually `.await` the corresponding handle — setting a flag or dropping a channel is not equivalent to joining.
+    5. Translating a Java callback to async does not eliminate the callback obligation. If Java guarantees exactly-once callback invocation per record at a specific lifecycle point (e.g. `completeFutureAndFireCallbacks`), the Rust translation must invoke the equivalent at the same point — not defer it or silently drop it.
+    6. **Tokio-specific pitfalls** (no Java equivalent — Java threads do not have cancellation semantics):
+       - `tokio::select!` cancels the losing branch's future mid-execution. Never put operations with side effects (incrementing a counter, sending on a channel, writing to a buffer) inside a `select!` arm unless the future is cancellation-safe. Use `biased;` when ordering matters.
+       - Holding a `MutexGuard` across an `.await` point deadlocks the async runtime — always drop locks before awaiting.
 10. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.
     2. Return a `Result` when Java code throws an exception even if unchecked but recoverable.
     3. Use a `KafkaError` similar to the librdkafka one with functions `is_retriable` or `is_fatal` or `txn_requires_abort()` and 
        an error code that corresponds to the Java Kafka exceptions.
-11. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack.
+11. **Language-related optimizations**: When the memory can be kept on the stack even if Java code creates a new object, keep it on the stack. On hot paths (send path, batch drain, wire framing, per-record processing), also account for costs Java's JIT/GC masks but Rust makes explicit:
+    - Identifiers cloned on every message (topic names, client IDs): prefer `Arc<str>` over `String` to make clones cheap
+    - A single numeric field shared across tasks: prefer `AtomicI64`/`AtomicU64` over `Mutex<i64>` to avoid lock contention
+    - Hot-path async dispatch: avoid `Pin<Box<dyn Future>>` per call — prefer concrete `async fn` return types or generic dispatch
+    - Per-message `tokio::spawn` on the send path: avoid — use a shared completion task with a channel instead
+
+    **"Hot path" definition**: per-record / per-message dispatch (send-path record build, batch drain, deserialize/serialize, wire framing). This does **not** include per-RPC or per-batch top-level API surfaces (e.g. the `Producer` / `Consumer` dispatch trait used at `send()` / `poll()` granularity) — there, one `Pin<Box<dyn Future>>` per call is amortized over many records and is negligible. `#[async_trait]` is acceptable for those top-level surfaces.
+
+    Outside hot paths, prefer the simpler type (`String`, `Mutex`) unless profiling shows otherwise.
 12. **Parameters and return values of public API**: Accept the most general borrowed form for input parameters. Borrow immutably, and return immutable values.
     Return a borrowed reference in case the data is still owned by the original struct (getter for example).
     When ownership is transferred to the caller prefer returning the struct (making use of RVO) over Box or Rc or Arc.
-    Don't copy byte arrays holding the key, value or headers passed to ProduceRecord or received in ConsumeRecord.
+    Don't copy byte arrays holding the key, value or headers passed to ProduceRecord or received in ConsumeRecord. This zero-copy requirement extends through the entire write path: serialized bytes must be written directly into the batch buffer (no intermediate buffer), batch finalization must not copy already-serialized bytes, and wire sends must use vectored I/O (`IoSlice` / `write_vectored`) so the framing header and payload are sent without assembling a single contiguous buffer. On the receive path, the symmetric rule applies: fetched bytes are owned by one buffer in `CompletedFetch`, every downstream type borrows slices from it, and the `Deserializer<T>` trait takes `&[u8]` (sync, no `#[async_trait]`) — see `consumer-threading.md` §27.
+13. **Consumer-specific rules**: see [consumer-threading.md](.claude/rules/consumer-threading.md) for `AsyncKafkaConsumer` API shape, background-task design, `wakeup()` cancellation, `SubscriptionState` ownership, group-protocol scope, receive-path zero-copy, and `ConsumerRebalanceListener` invocation thread. These rules supplement #8/#9/#11/#12 inside the consumer module.
 
 ## Agent Role
 
