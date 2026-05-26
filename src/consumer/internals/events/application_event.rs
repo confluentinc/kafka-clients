@@ -49,16 +49,12 @@ pub(crate) enum ApplicationEvent {
     // ─── Non-completable events ───
     /// `AssignmentChangeEvent` — `consumer.assign(...)`. Replaces the
     /// current assignment with `all_partitions`.
-    AssignmentChange {
-        all_partitions: HashSet<TopicPartition>,
-    },
+    AssignmentChange { all_partitions: HashSet<TopicPartition> },
     /// `CommitOnCloseEvent` — fire-and-forget commit during close.
     CommitOnClose,
     /// `LeaveGroupOnCloseEvent` — instructs the membership manager to
     /// send a final heartbeat with the `leave-group` epoch.
-    LeaveGroupOnClose {
-        reason: String,
-    },
+    LeaveGroupOnClose { reason: String },
     /// `StopFindCoordinatorOnCloseEvent` — tells the coordinator-finder
     /// to stop sending `FindCoordinator` requests during close.
     StopFindCoordinatorOnClose,
@@ -89,9 +85,7 @@ pub(crate) enum ApplicationEvent {
         offsets: HashMap<TopicPartition, OffsetAndMetadata>,
     },
     /// `AsyncPollEvent` — pumps the membership / fetch state machine.
-    AsyncPoll {
-        handle: CompletableEventHandle<()>,
-    },
+    AsyncPoll { handle: CompletableEventHandle<()> },
     /// `FetchCommittedOffsetsEvent`.
     FetchCommittedOffsets {
         handle: CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
@@ -105,9 +99,7 @@ pub(crate) enum ApplicationEvent {
     },
     /// `CheckAndUpdatePositionsEvent` — verifies fetch positions or
     /// resets them per `auto.offset.reset`.
-    CheckAndUpdatePositions {
-        handle: CompletableEventHandle<()>,
-    },
+    CheckAndUpdatePositions { handle: CompletableEventHandle<()> },
     /// `ResetOffsetEvent`.
     ResetOffset {
         handle: CompletableEventHandle<()>,
@@ -140,14 +132,10 @@ pub(crate) enum ApplicationEvent {
         pattern: SubscriptionPattern,
     },
     /// `UnsubscribeEvent`.
-    Unsubscribe {
-        handle: CompletableEventHandle<()>,
-    },
+    Unsubscribe { handle: CompletableEventHandle<()> },
     /// `CreateFetchRequestsEvent` — sometimes called eagerly to populate
     /// the fetch buffer ahead of `poll()`.
-    CreateFetchRequests {
-        handle: CompletableEventHandle<()>,
-    },
+    CreateFetchRequests { handle: CompletableEventHandle<()> },
     /// `PausePartitionsEvent`.
     PausePartitions {
         handle: CompletableEventHandle<()>,
@@ -268,10 +256,7 @@ mod tests {
     #[test]
     fn envelope_records_enqueued_ms() {
         let (h, _rx, _erased) = make_completable_event::<()>(0);
-        let env = ApplicationEventEnvelope {
-            event: ApplicationEvent::AsyncPoll { handle: h },
-            enqueued_ms: 123,
-        };
+        let env = ApplicationEventEnvelope { event: ApplicationEvent::AsyncPoll { handle: h }, enqueued_ms: 123 };
         assert_eq!(env.enqueued_ms, 123);
         assert_eq!(env.event.type_name(), "AsyncPoll");
     }

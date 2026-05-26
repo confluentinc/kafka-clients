@@ -194,7 +194,10 @@ where
         ));
 
         if handle.fail_with_timeout(error) {
-            debug!("Event {} completed exceptionally since the consumer is closing", handle.type_name());
+            debug!(
+                "Event {} completed exceptionally since the consumer is closing",
+                handle.type_name()
+            );
             count += 1;
         } else {
             trace!(

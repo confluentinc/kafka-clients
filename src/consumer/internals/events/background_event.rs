@@ -37,9 +37,7 @@ pub(crate) enum BackgroundEvent {
     /// `ErrorEvent` — surfaces a non-fatal error from the bg task to the
     /// app side. The app side returns this through the next `poll()` /
     /// `commit_*()` call.
-    Error {
-        error: KafkaError,
-    },
+    Error { error: KafkaError },
     /// `ConsumerRebalanceListenerCallbackNeededEvent` — bg → app half of
     /// the bidirectional rebalance-listener handshake
     /// (see `consumer-threading.md` §31).

@@ -130,9 +130,7 @@ mod tests {
         let (handle, receiver, _erased) = make_completable_event::<()>(0);
         let event = ApplicationEvent::AsyncPoll { handle };
 
-        let send_task = tokio::spawn(async move {
-            handler.add_and_get::<()>(event, receiver, 10).await
-        });
+        let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 10).await });
 
         // Drain the envelope from the channel and complete the event via
         // the handle inside.
@@ -157,9 +155,7 @@ mod tests {
         let (handle, receiver, _erased) = make_completable_event::<()>(0);
         let event = ApplicationEvent::AsyncPoll { handle };
 
-        let send_task = tokio::spawn(async move {
-            handler.add_and_get::<()>(event, receiver, 0).await
-        });
+        let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 0).await });
 
         let env = rx.recv().await.expect("got envelope");
         match env.event {
@@ -182,9 +178,7 @@ mod tests {
         let (handle, receiver, erased) = make_completable_event::<()>(0);
         let event = ApplicationEvent::AsyncPoll { handle };
 
-        let send_task = tokio::spawn(async move {
-            handler.add_and_get::<()>(event, receiver, 0).await
-        });
+        let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 0).await });
 
         let env = rx.recv().await.expect("got envelope");
         // Drop ALL handle clones: the envelope-held handle AND the reaper's

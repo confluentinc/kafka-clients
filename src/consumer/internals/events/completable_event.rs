@@ -185,7 +185,11 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
 /// reaper.
 pub(crate) fn make_completable_event<T: Send + 'static>(
     deadline_ms: i64,
-) -> (CompletableEventHandle<T>, oneshot::Receiver<Result<T, KafkaError>>, Arc<dyn CompletableEventErasedHandle>) {
+) -> (
+    CompletableEventHandle<T>,
+    oneshot::Receiver<Result<T, KafkaError>>,
+    Arc<dyn CompletableEventErasedHandle>,
+) {
     let (handle, rx) = CompletableEventHandle::<T>::new(deadline_ms);
     let erased = handle.erased();
     (handle, rx, erased)

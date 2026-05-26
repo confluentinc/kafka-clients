@@ -49,8 +49,8 @@
 
 #![allow(dead_code)] // Phase 5: trigger lands before its callers (Phases 10-11).
 
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use tokio::sync::watch;
 use tokio_util::sync::CancellationToken;
@@ -260,7 +260,10 @@ mod tests {
         trigger.rotate();
         let new_tok = trigger.current_token();
         assert!(!new_tok.is_cancelled(), "fresh token must not be cancelled");
-        assert!(trigger.maybe_trigger_wakeup().is_ok(), "rotation clears the pending wakeup state");
+        assert!(
+            trigger.maybe_trigger_wakeup().is_ok(),
+            "rotation clears the pending wakeup state"
+        );
     }
 
     /// `rotate()` is a no-op after `disable()`.
@@ -298,6 +301,9 @@ mod tests {
         // Initial value already present in `borrow()` — `changed()`
         // resolves only on subsequent writes.
         trigger.rotate();
-        timeout(Duration::from_millis(500), rx.changed()).await.expect("rotated").expect("rx ok");
+        timeout(Duration::from_millis(500), rx.changed())
+            .await
+            .expect("rotated")
+            .expect("rx ok");
     }
 }
