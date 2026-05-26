@@ -30,3 +30,8 @@ mod producer_smoke_test;
 // `producer_perf_test` stays muted until its Java source is translated.
 mod performance_test;
 // mod producer_perf_test;
+
+// Phase 9i — CCloud-style external-broker smoke test. Skips when
+// `SASL_USERNAME` is unset, so it's safe to include in the default
+// integration test set.
+mod ccloud_smoke_test;

@@ -14,7 +14,7 @@
 
 //! Producer performance test — measures throughput, latency, CPU, and memory.
 //!
-//! Run: `cargo test --features performance-tests -- performance_test --nocapture`
+//! Run: `cargo test --features integration-tests --test integration performance_test -- --nocapture`
 //!
 //! Configuration via environment variables (all optional):
 //!
