@@ -717,3 +717,66 @@ The two Nits (cluster-ID phrasing wrinkle and codec-audit spot-check filter labe
 Both NOTES.md:114 close criteria are met: (1) 9h's 3-consecutive-run gate is green (30/30 across 10 tests × 3 runs); (2) all comment files are resolved (COMMENTS.9.md contains only historical pointers).
 
 Phase 9h closes. Phase 9 closes. **Milestone-1 closes.**
+
+---
+
+## Critic 9 — Phase 9i Round 1 review (2026-05-26) — zero findings (one label-only Nit)
+
+Critic 9 review of the four-commit Phase 9i ladder (`660714e` → `e4e600d` → `70da3c1` → `0f4bba7`) returned **0 Suggestions + 1 label-only Nit, NOT BLOCKING**. Phase 9i is the first post-Milestone-1 work item — implements the NOTES.md:54 deferred sub-phase with scope expansion to four items (system-trust-store fallback + crate choice + skip-gated test + stale doc-comment) per the user's CCloud-readiness audit.
+
+### Commits reviewed
+
+| Commit | Subject |
+|---|---|
+| `660714e` | Phase 9i (1/4): add rustls-native-certs dependency for system trust store fallback |
+| `e4e600d` | Phase 9i (2/4): system trust store fallback for SSL/SASL_SSL when ssl.truststore.location unset |
+| `70da3c1` | Phase 9i (3/4): CCloud smoke test (skip-when-SASL_USERNAME-unset) + doc fix |
+| `0f4bba7` | Phase 9i (final/4): sub-phase 9i close stanza in NOTES.md |
+
+`git diff 959ec03..0f4bba7 --stat`: 10 files, +609/-43. Production source: `src/common/security/ssl/mod.rs` (+123/-25 relax-truststore-required), `src/producer/kafka_producer.rs` (+22/-21 test-only rewrite, no behavioural change). New: `tests/integration/ccloud_smoke_test.rs` (+211), one-line `tests/integration/main.rs` mod registration. Dependency: `rustls-native-certs = "0.8"` (Cargo.lock pins `0.8.3`; Apache-2.0/MIT/ISC triple-licensed). Doc fix: `tests/integration/performance_test.rs:17` one-line. Plus NOTES.md close stanza + actor-executor memory note. No surprise changes outside the documented 4-item scope.
+
+### Independent verification of Actor 9's claims
+
+**Claim 1 — `rustls-native-certs` is the right crate: VERIFIED.** Cargo.lock pins `0.8.3`, fully compatible with project's Apache-2.0. Rationale documented in both `Cargo.toml:27-40` (comment) and commit body of `660714e`. API parity against `rustls-native-certs-0.8.3/src/lib.rs`: `load_native_certs()` returns `CertificateResult { certs, errors, ... }`; Actor's helper at `src/common/security/ssl/mod.rs:285-292` consumes both fields correctly (warn-log each error, still use loaded certs). No feature-gated API; cross-platform contract is upstream's. CLAUDE.md rule 1.2 (ask before adding a popular crate) satisfied via the embedded rationale.
+
+**Claim 2 — system trust store fallback correctness: VERIFIED.** Relaxed-check site at `src/common/security/ssl/mod.rs:142-179`. `.ok_or_else(...)` removed; `truststore_location` becomes `Option<&str>`; `match` branches between custom-CA (`Some(path)`) and system-fallback (`None`); both feed the SAME `root_store` that feeds BOTH the `verify_hostname=true` AND `=false` branches at lines 235-256. Hostname-disable escape hatch (`""`) works identically for both CA sources. `build_client_config_from_producer_config` is only invoked when `security_protocol.uses_ssl()` is true (verified at `src/producer/kafka_producer.rs:659-663`) — PLAINTEXT/SASL_PLAINTEXT cannot reach the fallback by construction. Empty-string handling collapsed into `None` via `.filter(|s| !s.is_empty())`. Zero-cert handling returns a clear `KafkaError::Config(...)`.
+
+**Claim 3 — Java parity citation: VERIFIED.** `kafka/clients/src/main/java/org/apache/kafka/common/security/ssl/DefaultSslEngineFactory.java:270-275` directly confirms `KeyStore ts = truststore == null ? null : truststore.get(); tmf.init(ts);` — the JVM-default-truststore behavior the actor cites. `createTruststore` lines 307-328: `return null` at line 327 (1-line drift vs the actor's rustdoc `:307-328` is within tolerance — it includes the closing brace).
+
+**Claim 4 — `ccloud_smoke_test` skip-or-run is real, not a stub: VERIFIED.** Skip gate at lines 90-94: `if sasl_username.is_empty() { println!("ccloud_smoke_test: skipping ..."); return; }`. Gate is `SASL_USERNAME` only (matches NOTES.md:54). Un-skip path lines 96-189: builds `KafkaProducer` via `with_serializers`, sends 10 records, awaits each future's `.get().await`, asserts every ack carries the expected topic + non-negative offset, closes with 30s timeout. Real end-to-end production-path work. Pre-existing `TOPIC_NAME` env (defaults to `ccloud-smoke-test`) — does NOT attempt auto-create. Skip-path independently re-verified locally: `cargo test --features integration-tests --test integration ccloud_smoke` → `1 passed; 0 failed; ... finished in 0.00s`.
+
+**Claim 5 — stale doc-comment fix: VERIFIED.** `git show 70da3c1 -- tests/integration/performance_test.rs` shows exactly one line changed at line 17: `--features performance-tests` → `--features integration-tests --test integration performance_test -- --nocapture`. Nothing else snuck in. `Cargo.toml:10` confirms the only feature flag is `integration-tests`.
+
+**Claim 6 — no regression to 9c/9d/9e/9f: PARTIALLY VERIFIED (timings within historical bands).** Actor's timings (9c 8.85s, 9e 4.86s, 9f 5.28s) are all within historical bands. No SASL_PLAINTEXT-happy-path re-run was performed — would have been belt-and-braces coverage, but PLAINTEXT/SASL_PLAINTEXT cannot reach the modified code by construction. The 9f auth-failure re-run already exercises the SASL_PLAINTEXT channel-builder stack. **Nit-tier coverage thoroughness, not a Suggestion.**
+
+**Claim 7 — un-skip path unverified live: ACKNOWLEDGED.** Actor lacks CCloud credentials. The close stanza documents the unverified status with the env-var invocation a future operator can run. Risk model: someone runs the test against CCloud and hits a non-CCloud-config failure. Mitigation: the test's code path is heavily mirrored from working `producer_smoke_sasl_ssl_1000_records` (Phase 9e); the only delta is the SSL truststore source (system-root vs custom PEM), which is itself unit-tested via `load_native_certs_populates_root_store`. Composition risk is low. Carry-forward to Milestone-2.
+
+### New unit tests under `src/common/security/ssl/mod.rs`
+
+Two new tests at the bottom of the test module:
+
+1. `load_native_certs_populates_root_store` (`mod.rs:561-569`) — direct unit test of the new helper. Calls `load_native_certs_into_root_store(&mut root_store)`, asserts `added > 0` with a descriptive panic message. Real coverage of the new code path.
+2. `build_client_config_falls_back_to_system_trust_store_when_location_unset` (`mod.rs:531-552`) — replaces the Phase-9c `build_client_config_rejects_missing_truststore_location` reject test. Builds a `ProducerConfig` with `security.protocol=SSL` + `ssl.truststore.type=PEM` and NO `ssl.truststore.location`; asserts the build succeeds.
+
+**Nit (label-only):** the trailing `assert!(Arc::strong_count(&result) >= 1);` at `mod.rs:551` is dead weight — a returned `Arc<ClientConfig>` always has `strong_count ≥ 1` by Rust's type invariants. Load-bearing check is the `.expect(...)`. Non-harmful (always-true, doesn't mask anything), but could be removed or replaced with a more specific shape check in a future touch-up.
+
+`cargo test --lib` independently re-verified: **1344 passed; 0 failed** (+1 net from 1343). Two new tests in ssl module + one renamed-not-replaced test in kafka_producer = net +1.
+
+### Other checks
+
+- Custom-CA path pixel-identical to pre-9i (Phase-9c body still applies). Verified by diff inspection.
+- `kafka_producer.rs` +22/-21 is purely the test rewrite (`public_new_rejects_ssl_without_truststore_location` → `public_new_accepts_ssl_without_truststore_location_via_system_trust_store`). No production-code change.
+- `cargo xtask format-check` clean; `cargo xtask lint` clean (independently re-run).
+- `webpki-roots` direct-dep cleanup confirmed (`grep -rn "webpki_roots\|webpki-roots" --include='*.rs' src/ tests/` → 0 hits; remains transitive-only via `rustls-native-certs`).
+- No `#[ignore]` markers introduced.
+- No TODO/FIXME introduced in 9i-touched files.
+- Credential leak vector check: JAAS string in `HashMap<String, String>` consumed by `KafkaProducer::with_serializers`; panic paths print `KafkaError` Debug only (covered by Phase 9 credential redaction); no direct `SASL_PASSWORD` interpolation into panic messages. No leak vector identified.
+- Close-stanza format consistent with 9e/9f/9g/9h: branch-strategy opener, scope-expansion-vs-NOTES.md:54 rationale, trust-store-crate decision, Java parity citation, commit ladder, integration test re-run table, live-un-skip-path explicitly NOT performed acknowledgment, DoD gate evidence, what-closes / what's-deferred stanzas.
+
+### Phase 9i — no Suggestions, one label-only Nit, accept-with-no-followups
+
+All six load-bearing claims hold. The Nit (dead-weight `Arc::strong_count` assertion) is non-harmful documentation hygiene. The known limitation (un-skip CCloud path unverified live) is correctly documented as a Milestone-2 operator follow-up. Composition risk is low because the test's behavioural delta from working Phase 9e is contained to the SSL truststore source, which is unit-tested in isolation.
+
+**Recommendation: close 9i immediately — accept-with-no-followups. No Round 2 needed.**
+
+Phase 9i closes. First post-Milestone-1 work item complete. Carry-forwards to Milestone-2: live CCloud un-skip path verification (operator follow-up), `ssl/mod.rs:551` dead-weight Nit, plus the established Milestone-1 deferrals (SCRAM, OAUTHBEARER, idempotence, transactions, auto-topic-create, KafkaConsumer, MockProducer).
