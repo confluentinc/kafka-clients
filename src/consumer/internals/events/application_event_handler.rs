@@ -128,7 +128,7 @@ mod tests {
         let handler = ApplicationEventHandler::new(tx);
 
         let (handle, receiver, _erased) = make_completable_event::<()>(0);
-        let event = ApplicationEvent::AsyncPoll { handle };
+        let event = ApplicationEvent::CreateFetchRequests { handle };
 
         let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 10).await });
 
@@ -137,7 +137,7 @@ mod tests {
         let env = rx.recv().await.expect("got envelope");
         assert_eq!(env.enqueued_ms, 10);
         match env.event {
-            ApplicationEvent::AsyncPoll { handle } => {
+            ApplicationEvent::CreateFetchRequests { handle } => {
                 assert!(handle.complete(()));
             },
             other => panic!("unexpected variant {}", other.type_name()),
@@ -154,13 +154,13 @@ mod tests {
         let handler = ApplicationEventHandler::new(tx);
 
         let (handle, receiver, _erased) = make_completable_event::<()>(0);
-        let event = ApplicationEvent::AsyncPoll { handle };
+        let event = ApplicationEvent::CreateFetchRequests { handle };
 
         let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 0).await });
 
         let env = rx.recv().await.expect("got envelope");
         match env.event {
-            ApplicationEvent::AsyncPoll { handle } => {
+            ApplicationEvent::CreateFetchRequests { handle } => {
                 let err = KafkaError::illegal_state("boom");
                 assert!(handle.complete_exceptionally(err));
             },
@@ -177,7 +177,7 @@ mod tests {
         let handler = ApplicationEventHandler::new(tx);
 
         let (handle, receiver, erased) = make_completable_event::<()>(0);
-        let event = ApplicationEvent::AsyncPoll { handle };
+        let event = ApplicationEvent::CreateFetchRequests { handle };
 
         let send_task = tokio::spawn(async move { handler.add_and_get::<()>(event, receiver, 0).await });
 
