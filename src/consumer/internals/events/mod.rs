@@ -34,3 +34,4 @@
 pub(crate) mod application_event;
 pub(crate) mod background_event;
 pub(crate) mod completable_event;
+pub(crate) mod completable_event_reaper;
