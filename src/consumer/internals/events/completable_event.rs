@@ -179,17 +179,20 @@ impl<T: Send + 'static> CompletableEventErasedHandle for ErasedHandle<T> {
     }
 }
 
+/// Return-type alias for [`make_completable_event`] — keeps the
+/// `clippy::type_complexity` lint quiet without sacrificing the
+/// explicit-triple ergonomics at the call site.
+pub(crate) type CompletableEventTriple<T> = (
+    CompletableEventHandle<T>,
+    oneshot::Receiver<Result<T, KafkaError>>,
+    Arc<dyn CompletableEventErasedHandle>,
+);
+
 /// Helper that constructs a `(handle, receiver, erased_handle)` triple in
 /// one call. Most callers use this rather than [`CompletableEventHandle::new`]
 /// directly so they don't forget to register the erased handle with the
 /// reaper.
-pub(crate) fn make_completable_event<T: Send + 'static>(
-    deadline_ms: i64,
-) -> (
-    CompletableEventHandle<T>,
-    oneshot::Receiver<Result<T, KafkaError>>,
-    Arc<dyn CompletableEventErasedHandle>,
-) {
+pub(crate) fn make_completable_event<T: Send + 'static>(deadline_ms: i64) -> CompletableEventTriple<T> {
     let (handle, rx) = CompletableEventHandle::<T>::new(deadline_ms);
     let erased = handle.erased();
     (handle, rx, erased)
