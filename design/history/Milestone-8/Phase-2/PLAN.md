@@ -130,8 +130,20 @@ Notes for the Actor / Critic:
   caller-side handling for "no data" (the receive path never passes a
   null slice; it passes an empty slice or skips the call entirely).
 - The bounds `Send + Sync + 'static` are mandatory: the deserializer is
-  held inside `AsyncKafkaConsumer<K, V>` which is itself `Send + Sync` and
-  spawned into a runtime task transitively.
+  stored as `Box<dyn Deserializer<T>>` inside `Deserializers<K, V>`,
+  which is shared via `Arc<Deserializers<K, V>>` between the app side
+  and the bg task (see `Deserializers` section below). `Arc<T>: Send`
+  requires `T: Send + Sync`; that requirement transits the `Box<dyn>`
+  boundary to the trait.
+- **Async needs.** `deserialize` is synchronous to keep the receive path
+  zero-copy and allocation-free (one `Pin<Box<Future>>` per record would
+  dominate hot-path cost per CLAUDE.md §11). Deserializers that depend
+  on external state — most notably a schema registry — should
+  pre-populate an in-memory cache before the consumer starts polling.
+  Add a rustdoc note pointing users at this pattern. For rare blocking
+  calls inside `deserialize`, users can wrap with
+  `tokio::task::block_in_place` on the multi-thread runtime; this is
+  not free and should not be the per-record default.
 
 ### `ConsumerInterceptor<K, V>` (`src/consumer/interceptor.rs`)
 
@@ -142,7 +154,7 @@ record, so the per-batch boxed-dyn cost is negligible. **No
 `#[async_trait]`** — Java's `onConsume`/`onCommit` are sync.
 
 ```rust
-pub trait ConsumerInterceptor<K, V>: Send + Sync + 'static {
+pub trait ConsumerInterceptor<K, V>: Send + 'static {
     /// Java: `ConsumerRecords<K, V> onConsume(ConsumerRecords<K, V> records)`.
     /// Takes ownership of the batch and returns a (possibly modified) batch.
     fn on_consume(&self, records: ConsumerRecords<K, V>) -> ConsumerRecords<K, V>;
@@ -170,6 +182,12 @@ Notes:
 - Stored inside `ConsumerInterceptors<K, V>` as
   `Vec<Box<dyn ConsumerInterceptor<K, V>>>` — see below. This is OK on the
   per-batch granularity.
+- **Bound is `Send + 'static`, NOT `Send + Sync + 'static`.** The
+  interceptor lives in a `Box<dyn>` with a single owner (the
+  `ConsumerInterceptors` container on the app side); no `Arc<dyn>` or
+  shared `&dyn` storage exists. Dropping `Sync` lets users use interior
+  mutability (`RefCell`, `Cell`) inside their interceptors without
+  wrapping in `Mutex`. The Critic verifies the bound matches.
 
 ### `ConsumerInterceptors<K, V>` (`src/consumer/internals/consumer_interceptors.rs`)
 
@@ -215,6 +233,29 @@ Translation note on panic handling: Java catches `Exception` (not
 poll loop. Use `log::warn!` for the logged-and-continued case, matching
 the Java `LoggerFactory.getLogger(...).warn(...)` pattern.
 
+**`AssertUnwindSafe` placement:** required only for the `&mut self`
+methods (`configure`, `close`). `&dyn ConsumerInterceptor` is
+auto-`UnwindSafe` since the trait is `Send`, so `on_consume` /
+`on_commit` calls don't need the assertion. The Critic should
+specifically check the implementation does NOT wrap `&self` calls in
+`AssertUnwindSafe` (sloppy; misleading the reader about which calls
+have the assertion).
+
+**Caveats to document in rustdoc on the `ConsumerInterceptors` struct
+(not on the user-facing `ConsumerInterceptor` trait):**
+
+1. **`panic = "abort"`**: under this profile setting, panics call
+   `abort()` directly; `catch_unwind` cannot recover. A panicking
+   interceptor crashes the process. Rust-wide limitation, not specific
+   to this code. Document, do not try to enforce.
+2. **Interior mutability + panic.** Interceptors using `RefCell`,
+   `Cell`, atomics, or `Mutex` are responsible for their own state
+   consistency on panic. A panic mid-mutation may leave a `RefCell`
+   borrowed or a `Mutex` poisoned; subsequent calls on the same
+   interceptor are undefined-by-the-framework. Java's analog is
+   "behavior is undefined if onConsume throws mid-modification" — same
+   guarantee, different mechanism.
+
 ### `ConsumerRebalanceListener` (`src/consumer/consumer_rebalance_listener.rs`)
 
 Per `consumer-threading.md` §31, **`#[async_trait]`** — callbacks may
@@ -258,8 +299,16 @@ Notes for the Critic:
 - `partitions` is `&[TopicPartition]`, **not** `Vec<TopicPartition>`. Per
   CLAUDE.md §12 — accept the most general borrowed form. The implementor
   can `to_vec()` if they need ownership.
-- The bound `Send + Sync + 'static` is required because the listener is
-  stored on the consumer (Phase 11) as `Arc<dyn ConsumerRebalanceListener>`.
+- **The bound `Send + Sync + 'static` is required**, not merely
+  convenient, by §16+§31 combined. The listener is stored in
+  `SubscriptionState` as `Arc<dyn ConsumerRebalanceListener>`.
+  `SubscriptionState` lives behind `Arc<Mutex<...>>` per §16; §31
+  invokes the listener on the app task by **cloning the Arc out of the
+  lock** before any `.await` (§16 forbids holding the guard across
+  await). Cloning an Arc out of a lock requires `Arc<dyn>: Send`, which
+  requires the trait to be `Send + Sync`. With `Box<dyn>` the clone is
+  impossible and the design collapses; `Arc<dyn>` is structurally
+  required.
 - Phase 11 ships the two regression tests required by `consumer-threading.md`
   §31. We do not write them here because there's no consumer to test
   against yet.
@@ -291,45 +340,66 @@ Notes:
   commit has already happened. The `Exception` parameter is informational.
 - `error: Option<&KafkaError>` matches Java's pattern of "exception == null
   means success".
-- `Send + Sync + 'static` for the same Arc-storage reason as the listener.
+- `Send + Sync + 'static` because the callback travels through events
+  on the bg task and is invoked on the app task after the bg task has
+  already moved on — `Arc<dyn>` storage is required for the same
+  clone-out-of-channel pattern as the listener. `Box<dyn>` would forbid
+  the symmetric "send through channel, invoke later on app side"
+  pipeline.
 
 ### `Deserializers<K, V>` (`src/consumer/internals/deserializers.rs`)
 
-`pub(crate)`. Holds the key + value deserializer. The deserializers are
-stored as **trait objects** behind `Arc`, not as type-erased parametric
-types:
+`pub(crate)`. Holds the key + value deserializer as concrete trait
+objects. The consumer, `Fetcher`, and `FetchCollector` all need to call
+the same deserializers; in Rust this is modeled as **one struct shared
+via `Arc<Deserializers<K, V>>`** (Shape B), not three copies of a
+`Clone`-able struct:
 
 ```rust
 pub(crate) struct Deserializers<K, V> {
-    key: Arc<dyn Deserializer<K>>,
-    value: Arc<dyn Deserializer<V>>,
+    key: Box<dyn Deserializer<K>>,
+    value: Box<dyn Deserializer<V>>,
 }
 
 impl<K, V> Deserializers<K, V> {
     pub(crate) fn new(
-        key: Arc<dyn Deserializer<K>>,
-        value: Arc<dyn Deserializer<V>>,
+        key: Box<dyn Deserializer<K>>,
+        value: Box<dyn Deserializer<V>>,
     ) -> Self;
 
     pub(crate) fn key_deserializer(&self) -> &dyn Deserializer<K> { &*self.key }
     pub(crate) fn value_deserializer(&self) -> &dyn Deserializer<V> { &*self.value }
 }
 
-impl<K, V> Clone for Deserializers<K, V> {
-    fn clone(&self) -> Self {
-        Self { key: Arc::clone(&self.key), value: Arc::clone(&self.value) }
-    }
-}
+// NOT Clone. Sharing happens at the outer `Arc<Deserializers<K, V>>`.
 ```
+
+The consumer holds `Arc<Deserializers<K, V>>` and clones the Arc into
+`Fetcher` and `FetchCollector` at construction (3 Arc bumps total).
+Cloning the deserializer trait objects themselves never happens.
+
+**Why Shape B (one Arc-shared struct) instead of Shape A
+(`Deserializers: Clone` over inner `Arc<dyn Deserializer<T>>`):**
+
+The alternative — making `Deserializers` itself `Clone` by storing
+`Arc<dyn Deserializer<K>>` inside — forces every owner to hold their own
+`Deserializers` instance that happens to point at the same inner Arcs.
+That is operationally identical to `Arc<Deserializers>` but adds a
+redundant type-shape concept (`Deserializers: Clone` whose only purpose
+is to share the same inner Arcs). With Shape B, there is exactly one
+`Deserializers` struct per consumer; sharing happens at the outer Arc.
+One concept instead of two.
 
 **Rationale on hot-path cost (CLAUDE.md §11 / DoD §10):**
 
 The receive path calls `Deserializer::deserialize` once per key and once
-per value per record. With `Arc<dyn Deserializer<K>>`:
+per value per record. With Shape B's `Box<dyn Deserializer<T>>` inside
+`Arc<Deserializers>`:
 
-- One pointer-indirection per call (vtable lookup): ~1 ns
-- One `Arc` deref per call (atomic load of the `Arc` strong count is NOT
-  triggered here — `&*self.key` is just a pointer deref): ~0 ns
+- One pointer-indirection per call (vtable lookup through `Box<dyn>`):
+  ~1 ns
+- Zero atomic ops per record — the outer Arc is dereferenced once per
+  poll (or once at fetcher construction), not per record.
 
 This is acceptable because (a) actual deserializer bodies are 100ns+
 (parsing UTF-8, parsing protobuf, etc.) and (b) the alternative —
@@ -341,7 +411,7 @@ VD>`, defeating the `Box<dyn Consumer<K, V>>` factory return.
 
 The Critic should specifically NOT flag the boxed-dyn dispatch here as a
 hot-path allocation issue. The §11 hot-path rule targets `Pin<Box<dyn
-Future>>` per call (full heap alloc + virtual dispatch) — `Arc<dyn
+Future>>` per call (full heap alloc + virtual dispatch) — `Box<dyn
 Deserializer>` is a one-time setup cost with vtable dispatch only.
 
 No `From<ConsumerConfig>` constructor in Phase 2 — that's reflection-style
@@ -368,29 +438,59 @@ it (CLAUDE.md §5 — finish the work, don't carry dead variants).
 ```rust
 use async_trait::async_trait;
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::common::{
-    KafkaError, Metric, MetricName, Node, PartitionInfo, TopicPartition, Uuid,
-};
+use crate::common::{KafkaError, PartitionInfo, TopicPartition};
 use crate::consumer::{
     CloseOptions, ConsumerGroupMetadata, ConsumerRebalanceListener,
     ConsumerRecords, OffsetAndMetadata, OffsetAndTimestamp,
     OffsetCommitCallback, SubscriptionPattern,
 };
 
+/// # Parameter conventions
+///
+/// The trait uses three argument shapes deliberately:
+///
+/// - **Owned collections (`Vec<T>`, `HashMap<K, V>`):** the
+///   implementation stores or forwards the input long-term
+///   (subscription state, request payload). Ownership transfer avoids a
+///   per-element clone.
+///
+/// - **Borrowed slices / maps (`&[T]`, `&HashMap<K, V>`):** the
+///   implementation iterates but does not retain the input. Callers can
+///   pass `&Vec<T>`, `&[T; N]`, or any slice without conversion.
+///
+/// - **Borrowed scalars (`&TopicPartition`, `&str`):** read-only access
+///   to a single value.
+///
+/// Methods that take `Vec<T>` are the ones that *consume* the input;
+/// methods that take `&[T]` only *iterate* it. This rule is mechanical:
+/// if the impl retains, it owns; if the impl reads, it borrows.
+///
+/// # Bounds: `Send + 'static`, NOT `Send + Sync`
+///
+/// The trait is `Send + 'static` so it can be stored as
+/// `Box<dyn Consumer<K, V>>` and moved between tokio tasks (required
+/// for multi-thread runtime support). `Sync` is intentionally NOT
+/// required because the API is `&mut self` — only one task can call
+/// methods at a time, no shared `&Consumer` reference exists.
+///
+/// Users who need cross-task sharing wrap in `Arc<Mutex<dyn Consumer>>`,
+/// which works without `Sync` on the trait itself. Dropping `Sync` lets
+/// users plug in `K`/`V` types that are `Send` but not `Sync` (e.g.
+/// types containing `Cell`) without artificial restrictions.
 #[async_trait]
-pub trait Consumer<K, V>: Send + Sync + 'static
+pub trait Consumer<K, V>: Send + 'static
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + 'static,
+    V: Send + 'static,
 {
     // ── State reads (sync — Java: non-blocking accessors)
 
     fn assignment(&self) -> HashSet<TopicPartition>;
     fn subscription(&self) -> HashSet<String>;
     fn paused(&self) -> HashSet<TopicPartition>;
-    fn metrics(&self) -> HashMap<MetricName, Metric>;
     fn group_metadata(&self) -> ConsumerGroupMetadata;
     fn client_id(&self) -> &str;
     fn current_lag(&self, topic_partition: &TopicPartition) -> Option<i64>;
@@ -472,12 +572,12 @@ where
 
     fn seek_to_beginning(
         &mut self,
-        partitions: Vec<TopicPartition>,
+        partitions: &[TopicPartition],
     ) -> Result<(), KafkaError>;
 
     fn seek_to_end(
         &mut self,
-        partitions: Vec<TopicPartition>,
+        partitions: &[TopicPartition],
     ) -> Result<(), KafkaError>;
 
     // ── Position / committed (async — may fetch from broker)
@@ -495,12 +595,12 @@ where
 
     async fn committed(
         &mut self,
-        partitions: &HashSet<TopicPartition>,
+        partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
 
     async fn committed_timeout(
         &mut self,
-        partitions: &HashSet<TopicPartition>,
+        partitions: &[TopicPartition],
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
 
@@ -539,42 +639,31 @@ where
 
     async fn beginning_offsets(
         &mut self,
-        partitions: &HashSet<TopicPartition>,
+        partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
 
     async fn beginning_offsets_timeout(
         &mut self,
-        partitions: &HashSet<TopicPartition>,
+        partitions: &[TopicPartition],
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
 
     async fn end_offsets(
         &mut self,
-        partitions: &HashSet<TopicPartition>,
+        partitions: &[TopicPartition],
     ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
 
     async fn end_offsets_timeout(
         &mut self,
-        partitions: &HashSet<TopicPartition>,
+        partitions: &[TopicPartition],
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
 
-    async fn client_instance_id(
-        &mut self,
-        timeout: Duration,
-    ) -> Result<Uuid, KafkaError>;
-
     // ── Pause / resume (sync — Java: pure SubscriptionState mutation)
 
-    fn pause(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError>;
+    fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
 
-    fn resume(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError>;
-
-    // ── Metric subscription (sync — local registry mutation)
-
-    fn register_metric_for_subscription(&mut self, metric: Metric);
-
-    fn unregister_metric_from_subscription(&mut self, metric: &MetricName);
+    fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
 
     // ── Lifecycle
 
@@ -598,6 +687,18 @@ where
 }
 ```
 
+**Methods deliberately NOT translated in Phase 2 (consistency with the
+producer, which has no metrics framework either):**
+
+- `metrics() -> Map<MetricName, ? extends Metric>`
+- `registerMetricForSubscription(KafkaMetric metric)`
+- `unregisterMetricFromSubscription(KafkaMetric metric)`
+- `clientInstanceId(Duration timeout)` (KIP-714 telemetry)
+
+When the metrics framework lands as its own milestone, the `Producer`
+and `Consumer` traits gain these methods together. Until then, the
+`Metric` / `MetricName` types are not introduced.
+
 Notes for the Critic:
 
 - Every method takes `&mut self` *except* the sync accessors and
@@ -612,12 +713,16 @@ Notes for the Critic:
 - Sync `seek` etc. return `Result` because Java throws
   `IllegalArgumentException` / `IllegalStateException` on invalid input;
   per CLAUDE.md §10 we surface those as `Result`.
-- `Vec<TopicPartition>` (not `&[TopicPartition]`) on `assign` / `pause` /
-  `resume` because the implementation typically takes ownership and
-  builds a `HashSet`. `&[TopicPartition]` would force a copy. Same
-  reasoning as Java accepting `Collection<TopicPartition>` (consumed).
-- `&HashSet<TopicPartition>` on `committed` / `*_offsets` because the
-  implementation only reads from it.
+- **Owned `Vec` only when stored.** `subscribe(Vec<String>)` and
+  `assign(Vec<TopicPartition>)` take ownership because the impl moves
+  the elements into `SubscriptionState`. Same logic for
+  `commit_sync_offsets(HashMap<TP, OAM>)` and `offsets_for_times(...)`
+  — the impl forwards the map as a request payload.
+- **Borrowed `&[T]` for read-only methods.** `pause`, `resume`,
+  `seek_to_beginning`, `seek_to_end`, `committed`, `beginning_offsets`,
+  `end_offsets` all iterate the input without retaining it. `&[T]` is
+  strictly more general than `&HashSet<T>` (accepts slices, Vec deref,
+  arrays); the impl can dedup internally if the operation requires it.
 - The Java overload `poll(long timeoutMs)` is `@Deprecated`; we don't
   translate it.
 - The Java `close(Duration timeout)` is `@Deprecated`; users call
@@ -631,12 +736,12 @@ Per `consumer-threading.md` §2:
 ```rust
 pub fn new_consumer<K, V>(
     config: ConsumerConfig,
-    key_deserializer: Arc<dyn Deserializer<K>>,
-    value_deserializer: Arc<dyn Deserializer<V>>,
+    key_deserializer: Box<dyn Deserializer<K>>,
+    value_deserializer: Box<dyn Deserializer<V>>,
 ) -> Result<Box<dyn Consumer<K, V>>, KafkaError>
 where
-    K: Send + Sync + 'static,
-    V: Send + Sync + 'static,
+    K: Send + 'static,
+    V: Send + 'static,
 {
     match config.group_protocol() {
         GroupProtocol::Consumer => {
@@ -658,9 +763,14 @@ Phase 11 replaces the `Consumer` arm with
 value_deserializer)?))`. The signature stays the same.
 
 The factory takes `key_deserializer` and `value_deserializer` as
-parameters (Java passes them via `ConsumerConfig` reflection); in Rust
-this is explicit per Phase 1's decision not to translate reflection
-machinery.
+`Box<dyn>` parameters — caller hands over ownership exactly once
+(Shape B: the consumer wraps them in `Arc<Deserializers<K, V>>`
+internally for sharing with `Fetcher`/`FetchCollector`). Java passes
+them via `ConsumerConfig` reflection; in Rust this is explicit per
+Phase 1's decision not to translate reflection machinery.
+
+The K/V bounds match the trait (`Send + 'static`, no `Sync`). See the
+bounds rationale above.
 
 `MockConsumer` (Phase 3) does NOT come through `new_consumer` — it has
 its own constructor. The factory is for the production consumer only.
@@ -677,6 +787,15 @@ its own constructor. The factory is for the production consumer only.
   - `Deserializer<T>` → sync fn, no `#[async_trait]` ✓
   - `ConsumerInterceptor<K, V>` → sync fn, no `#[async_trait]` ✓
   - No `?Send` anywhere.
+- **Trait bounds checklist** (Critic verifies the exact bounds):
+  | Trait | Bound |
+  |---|---|
+  | `Deserializer<T>` | `Send + Sync + 'static` (Arc storage forces Sync) |
+  | `ConsumerRebalanceListener` | `Send + Sync + 'static` (Arc storage forces Sync) |
+  | `OffsetCommitCallback` | `Send + Sync + 'static` (Arc storage forces Sync) |
+  | `ConsumerInterceptor<K, V>` | `Send + 'static` (Box single-owner; **no Sync**) |
+  | `Consumer<K, V>` trait | `Send + 'static` (**no Sync**) |
+  | `K, V` bounds on `Consumer` | `Send + 'static` (**no Sync**) |
 - **No `block_on`-wrapped sync façade** anywhere — only the async trait
   is offered (DoD §11 / consumer-threading.md §1).
 - **No new dependency** without explicit user approval. `async-trait` is
@@ -694,12 +813,17 @@ its own constructor. The factory is for the production consumer only.
 6. **Compile-time consumer-trait surface check**: a hidden test file
    `tests/consumer/trait_surface_check.rs` that does:
    ```rust
-   fn _assert_object_safe<K, V>(_: Box<dyn Consumer<K, V>>) {}
-   fn _assert_send_sync<K, V>(_: &dyn Consumer<K, V>) {}
+   fn _assert_object_safe<K, V>(_: Box<dyn Consumer<K, V>>)
+   where K: Send + 'static, V: Send + 'static {}
+   fn _assert_send<K, V>(_: Box<dyn Consumer<K, V>>)
+   where K: Send + 'static, V: Send + 'static {}
+   // Intentionally NO _assert_sync — Consumer<K, V> is Send-only.
    ```
    This catches accidental `Self: Sized` bounds, non-`Send` async
    futures, or other object-safety regressions at compile time. Failure
-   here means DoD §11 is broken.
+   here means DoD §11 is broken. If a future change tries to add
+   `Sync` to the trait, the bounds-checklist row above flags it; this
+   surface check does NOT enforce `Sync`.
 7. `ConsumerInterceptors::on_consume` panic-recovery test specifically
    asserts that a panicking interceptor (using
    `std::panic::catch_unwind` and `AssertUnwindSafe`) does not poison

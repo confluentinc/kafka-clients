@@ -1,3 +1,7 @@
+- [Phase 1 foundation types](phase1_design_notes.md) — Milestone-8 Phase 1: ConsumerRecord Arc<str>, header re-exports, ConsumerError enum, ISO-8601 parser, default group.protocol=classic
+- [Phase 2 trait surface](phase2_design_notes.md) — Milestone-8 Phase 2: Clone on ConsumerRecord/Records for panic recovery, inline tests for pub(crate), 'static bounds on containers with catch_unwind Drop, Arc<State> in tests
+- [Phase 4 SubscriptionState + ConsumerMetadata](phase4_design_notes.md) — Milestone-8 Phase 4: PartitionStates, MetadataOverrides extension, regex full-match semantics, group_subscribe direction
+- [Phase 3 MockConsumer](phase3_design_notes.md) — Milestone-8 Phase 3: KafkaError::Wakeup variant, plain SubscriptionState field, PollTask alias, async rebalance, dropped null-input assertions
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
