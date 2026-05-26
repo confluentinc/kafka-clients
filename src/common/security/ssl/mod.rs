@@ -105,9 +105,17 @@ const PEM_TYPE: &str = "PEM";
 /// `SslFactory.configure(Map<String, ?>)` →
 /// `DefaultSslEngineFactory.createClientSslEngine`. Specifically:
 ///
-/// * **Truststore** — `ssl.truststore.location` is required.
-///   `ssl.truststore.type` must be `PEM` (default; only supported
-///   value). The PEM file is loaded into a [`RootCertStore`].
+/// * **Truststore** — `ssl.truststore.location` is **optional**. When
+///   set, `ssl.truststore.type` must be `PEM` (default; only supported
+///   value) and the PEM file is loaded into a [`RootCertStore`]. When
+///   unset, the OS system trust store is loaded via
+///   [`rustls_native_certs::load_native_certs`] — mirroring Java's
+///   `DefaultSslEngineFactory.getTrustManagers` behavior at
+///   `kafka/clients/src/main/java/org/apache/kafka/common/security/ssl/
+///   DefaultSslEngineFactory.java:270-275`, where `tmf.init(null)`
+///   triggers the JVM-default trust store. This lets clients connecting
+///   to brokers issued by publicly-trusted CAs (Confluent Cloud,
+///   Let's Encrypt, etc.) work without bundling a PEM truststore.
 /// * **Endpoint identification** — `ssl.endpoint.identification.algorithm`
 ///   (default `"https"`) enables rustls's SAN check.
 ///   Empty string disables it (escape hatch). Any other value is
@@ -122,16 +130,19 @@ pub(crate) fn build_client_config_from_producer_config(
 ) -> Result<Arc<ClientConfig>, KafkaError> {
     let values = config.inner().values();
 
-    // ---- Truststore: required ----
+    // ---- Truststore: optional (system-default fallback when unset) ----
+    //
+    // Java parity: `DefaultSslEngineFactory.createTruststore` returns
+    // `null` when no path/certs are configured (line 327), and
+    // `getTrustManagers(null, ...)` calls `tmf.init(null)` (line 273),
+    // which JSSE resolves to the JVM-default trust store. We mirror by
+    // calling `rustls_native_certs::load_native_certs()` — which reads
+    // the OS keychain (macOS), `/etc/ssl/certs` (Linux), or the Windows
+    // cert store. See the rustls-native-certs rationale in Cargo.toml.
     let truststore_location = values
         .get(SSL_TRUSTSTORE_LOCATION_CONFIG)
         .and_then(ConfigValue::as_str)
-        .filter(|s| !s.is_empty())
-        .ok_or_else(|| {
-            KafkaError::Config(format!(
-                "{SSL_TRUSTSTORE_LOCATION_CONFIG} is required when security.protocol uses SSL"
-            ))
-        })?;
+        .filter(|s| !s.is_empty());
 
     let truststore_type = values
         .get(SSL_TRUSTSTORE_TYPE_CONFIG)
@@ -144,11 +155,27 @@ pub(crate) fn build_client_config_from_producer_config(
     }
 
     let mut root_store = RootCertStore::empty();
-    let added = load_certs_into_root_store(truststore_location, &mut root_store)?;
-    if added == 0 {
-        return Err(KafkaError::Config(format!(
-            "{SSL_TRUSTSTORE_LOCATION_CONFIG}={truststore_location} contains no CERTIFICATE PEM blocks"
-        )));
+    match truststore_location {
+        Some(path) => {
+            let added = load_certs_into_root_store(path, &mut root_store)?;
+            if added == 0 {
+                return Err(KafkaError::Config(format!(
+                    "{SSL_TRUSTSTORE_LOCATION_CONFIG}={path} contains no CERTIFICATE PEM blocks"
+                )));
+            }
+        },
+        None => {
+            // Java-parity fallback: load the OS-default trust store
+            // (equivalent to `tmf.init(null)`). Surface a clear error
+            // when the OS yields zero usable certs — better than a
+            // mysterious TLS handshake failure on first connect.
+            let added = load_native_certs_into_root_store(&mut root_store)?;
+            if added == 0 {
+                return Err(KafkaError::Config(format!(
+                    "{SSL_TRUSTSTORE_LOCATION_CONFIG} is unset and the OS system trust store contains no usable CA certificates"
+                )));
+            }
+        },
     }
 
     // ---- Endpoint identification ----
@@ -237,6 +264,31 @@ pub(crate) fn build_client_config_from_producer_config(
         None => builder.with_no_client_auth(),
     };
     Ok(Arc::new(config))
+}
+
+/// Load the OS-default trust store (macOS Keychain, Linux
+/// `/etc/ssl/certs`, Windows cert store) and append every parseable CA
+/// to `root_store`. Returns the number of certificates added (zero if
+/// the OS yields no usable roots).
+///
+/// Java parity: mirrors
+/// `TrustManagerFactory.init(null)` in
+/// `DefaultSslEngineFactory.getTrustManagers` (line 273) — JSSE's
+/// default-truststore path which is also the source of the JVM's
+/// behavior when `javax.net.ssl.trustStore` is unset.
+///
+/// We treat `load_native_certs`'s `errors` field as a non-fatal
+/// diagnostic (logged at `warn`), not a hard failure. Even with partial
+/// parse errors, the successfully-loaded certs are still usable. The
+/// caller's zero-cert check above turns a fully-empty trust store into
+/// a `KafkaError::Config`.
+fn load_native_certs_into_root_store(root_store: &mut RootCertStore) -> Result<usize, KafkaError> {
+    let result = rustls_native_certs::load_native_certs();
+    for err in &result.errors {
+        log::warn!("rustls-native-certs reported a non-fatal load error: {err}");
+    }
+    let (added, _ignored) = root_store.add_parsable_certificates(result.certs);
+    Ok(added)
 }
 
 /// Load a PEM file from `path` and append every CERTIFICATE block to
@@ -464,9 +516,20 @@ mod tests {
         assert!(err.message().contains("ssl.truststore.type=JKS"), "got: {}", err.message());
     }
 
+    /// Phase 9i: when `ssl.truststore.location` is unset, the builder
+    /// must fall back to the OS system trust store (Java parity with
+    /// `DefaultSslEngineFactory.getTrustManagers(null, ...)`). This
+    /// test asserts the build succeeds — meaning at least one CA was
+    /// loaded from the host OS. On a stock developer/CI machine
+    /// (macOS Keychain, Linux `/etc/ssl/certs`, Windows cert store)
+    /// the OS always carries the Mozilla baseline roots, so this is
+    /// safe to assert unconditionally.
+    ///
+    /// Replaces Phase 9c's
+    /// `build_client_config_rejects_missing_truststore_location` test,
+    /// whose assumption (missing key = error) no longer holds.
     #[test]
-    fn build_client_config_rejects_missing_truststore_location() {
-        // No truststore location at all.
+    fn build_client_config_falls_back_to_system_trust_store_when_location_unset() {
         let mut props = std::collections::HashMap::from([
             ("bootstrap.servers".to_owned(), "localhost:9092".to_owned()),
             (
@@ -479,10 +542,30 @@ mod tests {
             ),
         ]);
         props.insert("security.protocol".to_owned(), "SSL".to_owned());
+        // Override the schema's JKS default — rustls only handles PEM
+        // in this milestone (per the module rustdoc).
+        props.insert(SSL_TRUSTSTORE_TYPE_CONFIG.to_owned(), PEM_TYPE.to_owned());
         let cfg = ProducerConfig::new(props).expect("valid config");
-        let err = build_client_config_from_producer_config(&cfg).expect_err("must reject");
-        assert!(matches!(err, KafkaError::Config(_)));
-        assert!(err.message().contains("ssl.truststore.location"), "got: {}", err.message());
+        let result = build_client_config_from_producer_config(&cfg)
+            .expect("Phase 9i: SSL without ssl.truststore.location MUST fall back to OS system trust store");
+        assert!(Arc::strong_count(&result) >= 1);
+    }
+
+    /// Phase 9i: positive direct unit test of the fallback helper. The
+    /// stock OS trust store on any developer / CI machine carries the
+    /// Mozilla baseline roots; we just assert at least one cert lands
+    /// in the [`RootCertStore`]. If a hardened build environment ever
+    /// strips the OS trust store (very rare), this test surfaces it as
+    /// a clear unit-level failure instead of a mysterious integration
+    /// hang.
+    #[test]
+    fn load_native_certs_populates_root_store() {
+        let mut root_store = RootCertStore::empty();
+        let added = load_native_certs_into_root_store(&mut root_store).expect("native certs load");
+        assert!(
+            added > 0,
+            "Phase 9i: expected rustls-native-certs to load at least one CA from the OS keychain; got 0"
+        );
     }
 
     #[test]

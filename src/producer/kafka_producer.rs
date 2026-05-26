@@ -2638,31 +2638,32 @@ mod tests {
         drop(producer);
     }
 
-    /// Phase 9c.3: `security.protocol=SSL` WITHOUT
-    /// `ssl.truststore.location` must fail with a clear error message
-    /// naming the missing key.
+    /// Phase 9i: `security.protocol=SSL` WITHOUT
+    /// `ssl.truststore.location` must succeed by falling back to the
+    /// OS system trust store. Mirrors Java's
+    /// `DefaultSslEngineFactory.getTrustManagers(null, ...)` →
+    /// `tmf.init(null)` path (kafka/clients/.../DefaultSslEngineFactory
+    /// .java:270-275), which delegates to the JVM default trust store.
     ///
-    /// Substring assertion (mirrors the symmetric SASL test
-    /// `public_new_rejects_sasl_plaintext_without_credentials` below).
-    /// Full error message is `"ssl.truststore.location is required when
-    /// security.protocol uses SSL"`. Substring is sufficient because
-    /// the missing-key name is the load-bearing diagnostic — and is
-    /// resilient to harmless suffix additions (e.g. a remediation
-    /// hint). If a refactor changes the key name itself, this test
-    /// will surface it.
-    #[test]
-    fn public_new_rejects_ssl_without_truststore_location() {
+    /// On any stock developer/CI machine the OS keychain carries the
+    /// Mozilla baseline roots, so this assertion is safe
+    /// unconditionally. If a hardened environment ever strips the OS
+    /// trust store, the inner check in
+    /// `build_client_config_from_producer_config` surfaces a clear
+    /// `KafkaError::Config` (covered by the SSL module's unit tests).
+    ///
+    /// Replaces `public_new_rejects_ssl_without_truststore_location`
+    /// from Phase 9c, whose assumption (missing key = error) no longer
+    /// holds.
+    #[tokio::test]
+    async fn public_new_accepts_ssl_without_truststore_location_via_system_trust_store() {
         let mut props = minimal_props();
         props.insert("security.protocol".to_owned(), "SSL".to_owned());
-        let Err(err) = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props) else {
-            panic!("expected Err for SSL without truststore location");
-        };
-        assert!(matches!(err, KafkaError::Config(_)));
-        assert!(
-            err.message().contains("ssl.truststore.location"),
-            "expected ssl.truststore.location in error, got: {}",
-            err.message(),
-        );
+        // Override schema's JKS default — rustls only handles PEM.
+        props.insert("ssl.truststore.type".to_owned(), "PEM".to_owned());
+        let producer = KafkaProducer::<Vec<u8>, Vec<u8>, _>::new(props)
+            .expect("Phase 9i: SSL without ssl.truststore.location MUST fall back to OS system trust store");
+        drop(producer);
     }
 
     /// Phase 9b: `KafkaProducer::new` with `security.protocol=SASL_PLAINTEXT`
