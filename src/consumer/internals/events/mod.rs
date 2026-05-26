@@ -37,3 +37,4 @@ pub(crate) mod background_event;
 pub(crate) mod background_event_handler;
 pub(crate) mod completable_event;
 pub(crate) mod completable_event_reaper;
+pub(crate) mod event_processor;
