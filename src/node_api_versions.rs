@@ -12,99 +12,112 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-node API version information.
+//! Translation of `org.apache.kafka.clients.NodeApiVersions`.
 //!
-//! Translated from `org.apache.kafka.clients.NodeApiVersions`.
+//! Note: the Java type lives in `org.apache.kafka.clients` (not `common`),
+//! so it sits at the crate root rather than under `common::`.
 
 use std::collections::{BTreeMap, HashMap};
-use std::fmt;
 
-use crate::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
-use crate::common::KafkaError;
+use crate::common::errors::KafkaError;
 use crate::common::feature::SupportedVersionRange;
-use crate::common::protocol::ApiKeys;
+use crate::common::message::api_versions_response_data::{ApiVersion, FinalizedFeatureKey, SupportedFeatureKey};
+use crate::common::protocol::{ApiKey, ApiKeys};
 use crate::common::requests::ApiVersionsResponse;
 
-/// An internal class which represents the API versions supported by a particular node.
-#[derive(Debug, Clone)]
+/// An internal class which represents the API versions supported by a
+/// particular node.
+///
+/// Mirrors the Java class.
 pub struct NodeApiVersions {
-    /// A map of the usable versions of each API, keyed by the ApiKeys instance.
-    supported_versions: HashMap<ApiKeys, ApiVersion>,
-    /// List of APIs which the broker supports, but which are unknown to the client.
+    /// A map of the usable versions of each API, keyed by the api key
+    /// `id`. Mirrors Java's `EnumMap<ApiKeys, ApiVersion>`.
+    supported_versions: HashMap<i16, ApiVersion>,
+    /// List of APIs which the broker supports, but which are unknown to
+    /// the client. Mirrors Java's `List<ApiVersion> unknownApis`.
     unknown_apis: Vec<ApiVersion>,
-    /// Supported features advertised by the node.
+    /// Mirrors Java's `Map<String, SupportedVersionRange> supportedFeatures`.
     supported_features: HashMap<String, SupportedVersionRange>,
-    /// Finalized features advertised by the node.
+    /// Mirrors Java's `Map<String, Short> finalizedFeatures`.
     finalized_features: HashMap<String, i16>,
-    /// The finalized features epoch.
+    /// Mirrors Java's `long finalizedFeaturesEpoch`.
     finalized_features_epoch: i64,
 }
 
 impl NodeApiVersions {
     /// Create a `NodeApiVersions` object with the current ApiVersions.
-    pub fn create() -> Self {
-        Self::create_with_overrides(&[])
+    /// Mirrors `NodeApiVersions.create()`.
+    pub fn create_default() -> Self {
+        Self::create_with_overrides(Vec::new()).expect("default range is always valid")
     }
 
     /// Create a `NodeApiVersions` object.
     ///
-    /// Any ApiVersion not specified in `overrides` will be set to the current client value.
-    pub fn create_with_overrides(overrides: &[ApiVersion]) -> Self {
-        let mut api_versions: Vec<ApiVersion> = overrides.to_vec();
+    /// `overrides` — API versions to override. Any `ApiVersion` not
+    /// specified here will be set to the current client value.
+    ///
+    /// Mirrors `NodeApiVersions.create(Collection<ApiVersion>)`.
+    ///
+    /// # Errors
+    ///
+    /// Propagates any [`KafkaError`] from the inner constructor.
+    pub fn create_with_overrides(overrides: Vec<ApiVersion>) -> Result<Self, KafkaError> {
+        let mut api_versions: Vec<ApiVersion> = overrides;
         for api_key in ApiKeys::client_apis() {
-            let exists = api_versions.iter().any(|v| v.api_key == api_key.id());
+            let exists = api_versions.iter().any(|av| av.api_key == api_key.id);
             if !exists {
                 api_versions.push(ApiVersionsResponse::to_api_version(api_key));
             }
         }
-        Self::new(&api_versions, &[], &[], -1)
+        Self::with_features(api_versions, Vec::new(), Vec::new(), -1)
     }
 
-    /// Create a `NodeApiVersions` object with a single ApiKey. Mainly used in tests.
-    pub fn create_single(api_key: i16, min_version: i16, max_version: i16) -> Self {
-        let mut v = ApiVersion::new();
-        v.set_api_key(api_key);
-        v.set_min_version(min_version);
-        v.set_max_version(max_version);
-        Self::create_with_overrides(&[v])
+    /// Create a `NodeApiVersions` object with a single ApiKey. Mainly
+    /// used in tests.
+    ///
+    /// Mirrors `NodeApiVersions.create(short, short, short)`.
+    pub fn create_single(api_key: i16, min_version: i16, max_version: i16) -> Result<Self, KafkaError> {
+        Self::create_with_overrides(vec![ApiVersion {
+            api_key,
+            min_version,
+            max_version,
+            unknown_tagged_fields: Vec::new(),
+        }])
     }
 
-    /// Create a `NodeApiVersions` from API versions and supported features.
-    pub fn with_supported_features(
-        node_api_versions: &[ApiVersion],
-        node_supported_features: &[SupportedFeatureKey],
-    ) -> Self {
-        Self::new(node_api_versions, node_supported_features, &[], -1)
-    }
-
-    /// Create a `NodeApiVersions` from API versions, supported features,
-    /// finalized features, and epoch.
+    /// Mirrors `new NodeApiVersions(Collection<ApiVersion>, Collection<SupportedFeatureKey>)`.
     pub fn new(
-        node_api_versions: &[ApiVersion],
-        node_supported_features: &[SupportedFeatureKey],
-        node_finalized_features: &[FinalizedFeatureKey],
-        finalized_features_epoch: i64,
-    ) -> Self {
-        let mut supported_versions = HashMap::new();
-        let mut unknown_apis = Vec::new();
+        node_api_versions: Vec<ApiVersion>,
+        node_supported_features: Vec<SupportedFeatureKey>,
+    ) -> Result<Self, KafkaError> {
+        Self::with_features(node_api_versions, node_supported_features, Vec::new(), -1)
+    }
 
+    /// Mirrors `new NodeApiVersions(Collection<ApiVersion>,
+    /// Collection<SupportedFeatureKey>, Collection<FinalizedFeatureKey>, long)`.
+    pub fn with_features(
+        node_api_versions: Vec<ApiVersion>,
+        node_supported_features: Vec<SupportedFeatureKey>,
+        node_finalized_features: Vec<FinalizedFeatureKey>,
+        finalized_features_epoch: i64,
+    ) -> Result<Self, KafkaError> {
+        let mut supported_versions: HashMap<i16, ApiVersion> = HashMap::new();
+        let mut unknown_apis: Vec<ApiVersion> = Vec::new();
         for node_api_version in node_api_versions {
-            if let Some(api_key) = ApiKeys::for_id(node_api_version.api_key) {
-                supported_versions.insert(*api_key, node_api_version.clone());
+            if ApiKeys::has_id(node_api_version.api_key as i32) {
+                supported_versions.insert(node_api_version.api_key, node_api_version);
             } else {
                 // Newer brokers may support ApiKeys we don't know about
-                unknown_apis.push(node_api_version.clone());
+                unknown_apis.push(node_api_version);
             }
         }
 
         let mut supported_features = HashMap::new();
         for supported_feature in node_supported_features {
-            // SupportedVersionRange::new returns Result; since the data comes from the broker
-            // we trust the values are valid, but handle the error gracefully.
-            if let Ok(range) = SupportedVersionRange::new(supported_feature.min_version, supported_feature.max_version)
-            {
-                supported_features.insert(supported_feature.name.clone(), range);
-            }
+            supported_features.insert(
+                supported_feature.name.clone(),
+                SupportedVersionRange::new(supported_feature.min_version, supported_feature.max_version)?,
+            );
         }
 
         let mut finalized_features = HashMap::new();
@@ -112,51 +125,53 @@ impl NodeApiVersions {
             finalized_features.insert(finalized_feature.name.clone(), finalized_feature.max_version_level);
         }
 
-        Self {
+        Ok(NodeApiVersions {
             supported_versions,
             unknown_apis,
             supported_features,
             finalized_features,
             finalized_features_epoch,
-        }
+        })
     }
 
-    /// Return the most recent version supported by both the node and the local software.
-    ///
-    /// # Errors
-    /// Returns an error if the node does not support the given API key.
-    pub fn latest_usable_version(&self, api_key: &ApiKeys) -> Result<i16, KafkaError> {
+    /// Return the most recent version supported by both the node and
+    /// the local software. Mirrors
+    /// `NodeApiVersions.latestUsableVersion(ApiKeys)`.
+    pub fn latest_usable_version(&self, api_key: &ApiKey) -> Result<i16, KafkaError> {
         self.latest_usable_version_in_range(api_key, api_key.oldest_version(), api_key.latest_version())
     }
 
-    /// Get the latest version supported by the broker within an allowed range of versions.
-    ///
-    /// # Errors
-    /// Returns an error if the node does not support the API key or if there is no
-    /// intersection between the node's supported range and the allowed range.
+    /// Get the latest version supported by the broker within an allowed
+    /// range of versions. Mirrors
+    /// `NodeApiVersions.latestUsableVersion(ApiKeys, short, short)`.
     pub fn latest_usable_version_in_range(
         &self,
-        api_key: &ApiKeys,
+        api_key: &ApiKey,
         oldest_allowed_version: i16,
         latest_allowed_version: i16,
     ) -> Result<i16, KafkaError> {
-        let supported_version = self
-            .supported_versions
-            .get(api_key)
-            .ok_or_else(|| KafkaError::unsupported_version(format!("The node does not support {}", api_key.name())))?;
+        let supported_version = match self.supported_versions.get(&api_key.id) {
+            Some(v) => v,
+            None => {
+                return Err(KafkaError::UnsupportedVersion(format!(
+                    "The node does not support {}",
+                    api_key.name
+                )));
+            },
+        };
 
-        let mut allowed = ApiVersion::new();
-        allowed.set_api_key(api_key.id());
-        allowed.set_min_version(oldest_allowed_version);
-        allowed.set_max_version(latest_allowed_version);
-
-        let intersect_version = ApiVersionsResponse::intersect(Some(supported_version), Some(&allowed));
-        match intersect_version {
+        let candidate = ApiVersion {
+            api_key: api_key.id,
+            min_version: oldest_allowed_version,
+            max_version: latest_allowed_version,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let intersect = ApiVersionsResponse::intersect(Some(supported_version), Some(&candidate))?;
+        match intersect {
             Some(v) => Ok(v.max_version),
-            None => Err(KafkaError::unsupported_version(format!(
-                "The node does not support {} with version in range [{},{}]. \
-                 The supported range is [{},{}].",
-                api_key.name(),
+            None => Err(KafkaError::UnsupportedVersion(format!(
+                "The node does not support {} with version in range [{},{}]. The supported range is [{},{}].",
+                api_key.name,
                 oldest_allowed_version,
                 latest_allowed_version,
                 supported_version.min_version,
@@ -165,14 +180,73 @@ impl NodeApiVersions {
         }
     }
 
-    /// Convert the object to a string.
-    ///
-    /// If `line_breaks` is true, a linebreak is added after each API.
-    pub fn to_string_with_line_breaks(&self, line_breaks: bool) -> String {
-        // The apiVersion collection may not be in sorted order. We put it into
-        // a BTreeMap before printing it out to ensure ascending order.
-        let mut api_keys_text: BTreeMap<i16, String> = BTreeMap::new();
+    /// Get the version information for a given API. Mirrors
+    /// `NodeApiVersions.apiVersion(ApiKeys)`. Returns `None` if the API
+    /// is unsupported.
+    pub fn api_version(&self, api_key: &ApiKey) -> Option<&ApiVersion> {
+        self.supported_versions.get(&api_key.id)
+    }
 
+    /// Mirrors `NodeApiVersions.allSupportedApiVersions()`.
+    pub fn all_supported_api_versions(&self) -> &HashMap<i16, ApiVersion> {
+        &self.supported_versions
+    }
+
+    /// Mirrors `NodeApiVersions.supportedFeatures()`.
+    pub fn supported_features(&self) -> &HashMap<String, SupportedVersionRange> {
+        &self.supported_features
+    }
+
+    /// Mirrors `NodeApiVersions.finalizedFeatures()`.
+    pub fn finalized_features(&self) -> &HashMap<String, i16> {
+        &self.finalized_features
+    }
+
+    /// Mirrors `NodeApiVersions.finalizedFeaturesEpoch()`.
+    pub fn finalized_features_epoch(&self) -> i64 {
+        self.finalized_features_epoch
+    }
+
+    fn api_version_to_text(&self, api_version: &ApiVersion) -> String {
+        let mut bld = String::new();
+        let api_key = if ApiKeys::has_id(api_version.api_key as i32) {
+            let key = ApiKeys::for_id(api_version.api_key as i32).expect("checked by has_id");
+            bld.push_str(&format!("{}({}): ", key.name, key.id));
+            Some(key)
+        } else {
+            bld.push_str(&format!("UNKNOWN({}): ", api_version.api_key));
+            None
+        };
+
+        if api_version.min_version == api_version.max_version {
+            bld.push_str(&api_version.min_version.to_string());
+        } else {
+            bld.push_str(&format!("{} to {}", api_version.min_version, api_version.max_version));
+        }
+
+        if let Some(api_key) = api_key {
+            let supported_version = self.supported_versions.get(&api_key.id).expect(
+                "supported_versions contains every api_key.id known to api_version_to_text — \
+                 the only callers thread the id through `supported_versions.values()` or `unknown_apis` (latter excluded by has_id)",
+            );
+            if api_key.latest_version() < supported_version.min_version {
+                bld.push_str(" [unusable: node too new]");
+            } else if supported_version.max_version < api_key.oldest_version() {
+                bld.push_str(" [unusable: node too old]");
+            } else {
+                let latest_usable = api_key.latest_version().min(supported_version.max_version);
+                bld.push_str(&format!(" [usable: {latest_usable}]"));
+            }
+        }
+        bld
+    }
+
+    /// Mirrors `NodeApiVersions.toString(boolean)`.
+    pub fn to_string_with_line_breaks(&self, line_breaks: bool) -> String {
+        // The apiVersion collection may not be in sorted order. Put it
+        // into a `BTreeMap` (Java uses TreeMap) before printing so we
+        // always print in ascending order of api key id.
+        let mut api_keys_text: BTreeMap<i16, String> = BTreeMap::new();
         for supported_version in self.supported_versions.values() {
             api_keys_text.insert(supported_version.api_key, self.api_version_to_text(supported_version));
         }
@@ -180,12 +254,13 @@ impl NodeApiVersions {
             api_keys_text.insert(api_version.api_key, self.api_version_to_text(api_version));
         }
 
-        // Also handle the case where some apiKey types are not specified at all in the given
-        // ApiVersions, which may happen when the remote is too old.
+        // Also handle the case where some apiKey types are not specified
+        // at all in the given ApiVersions, which may happen when the
+        // remote is too old.
         for api_key in ApiKeys::client_apis() {
-            api_keys_text
-                .entry(api_key.id())
-                .or_insert_with(|| format!("{}({}): UNSUPPORTED", api_key.name(), api_key.id()));
+            if let std::collections::btree_map::Entry::Vacant(entry) = api_keys_text.entry(api_key.id) {
+                entry.insert(format!("{}({}): UNSUPPORTED", api_key.name, api_key.id));
+            }
         }
 
         let separator = if line_breaks { ",\n\t" } else { ", " };
@@ -194,306 +269,247 @@ impl NodeApiVersions {
         if line_breaks {
             bld.push_str("\n\t");
         }
-        let values: Vec<&String> = api_keys_text.values().collect();
-        bld.push_str(&values.iter().map(|s| s.as_str()).collect::<Vec<&str>>().join(separator));
+        let joined: Vec<&String> = api_keys_text.values().collect();
+        let joined_str: Vec<&str> = joined.iter().map(|s| s.as_str()).collect();
+        bld.push_str(&joined_str.join(separator));
         if line_breaks {
             bld.push('\n');
         }
         bld.push(')');
         bld
     }
+}
 
-    /// Format a single API version entry as a human-readable string.
-    fn api_version_to_text(&self, api_version: &ApiVersion) -> String {
-        let mut bld = String::new();
-        let api_key = ApiKeys::for_id(api_version.api_key);
-
-        if let Some(key) = api_key {
-            bld.push_str(key.name());
-            bld.push('(');
-            bld.push_str(&key.id().to_string());
-            bld.push_str("): ");
-        } else {
-            bld.push_str("UNKNOWN(");
-            bld.push_str(&api_version.api_key.to_string());
-            bld.push_str("): ");
-        }
-
-        if api_version.min_version == api_version.max_version {
-            bld.push_str(&api_version.min_version.to_string());
-        } else {
-            bld.push_str(&api_version.min_version.to_string());
-            bld.push_str(" to ");
-            bld.push_str(&api_version.max_version.to_string());
-        }
-
-        if let Some(key) = api_key {
-            let supported_version = &self.supported_versions[key];
-            if key.latest_version() < supported_version.min_version {
-                bld.push_str(" [unusable: node too new]");
-            } else if supported_version.max_version < key.oldest_version() {
-                bld.push_str(" [unusable: node too old]");
-            } else {
-                let latest_usable_version = key.latest_version().min(supported_version.max_version);
-                bld.push_str(" [usable: ");
-                bld.push_str(&latest_usable_version.to_string());
-                bld.push(']');
-            }
-        }
-        bld
-    }
-
-    /// Get the version information for a given API.
-    ///
-    /// Returns `None` if the API is unsupported by this node.
-    pub fn api_version(&self, api_key: &ApiKeys) -> Option<&ApiVersion> {
-        self.supported_versions.get(api_key)
-    }
-
-    /// Returns all supported API versions.
-    pub fn all_supported_api_versions(&self) -> &HashMap<ApiKeys, ApiVersion> {
-        &self.supported_versions
-    }
-
-    /// Returns the supported features.
-    pub fn supported_features(&self) -> &HashMap<String, SupportedVersionRange> {
-        &self.supported_features
-    }
-
-    /// Returns the finalized features.
-    pub fn finalized_features(&self) -> &HashMap<String, i16> {
-        &self.finalized_features
-    }
-
-    /// Returns the finalized features epoch.
-    pub fn finalized_features_epoch(&self) -> i64 {
-        self.finalized_features_epoch
+impl std::fmt::Display for NodeApiVersions {
+    /// Mirrors `NodeApiVersions.toString()` (no line breaks). The Java
+    /// rustdoc warns this method is relatively expensive — same caveat
+    /// applies here.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.to_string_with_line_breaks(false))
     }
 }
 
-impl fmt::Display for NodeApiVersions {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.to_string_with_line_breaks(false))
+impl std::fmt::Debug for NodeApiVersions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NodeApiVersions")
+            .field("supported_versions", &self.supported_versions.len())
+            .field("unknown_apis", &self.unknown_apis.len())
+            .field("supported_features", &self.supported_features.len())
+            .field("finalized_features_epoch", &self.finalized_features_epoch)
+            .finish()
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-    use crate::api_message_type::ListenerType;
+    //! Translation of `NodeApiVersionsTest`.
 
-    /// Translated from `NodeApiVersionsTest.testUnsupportedVersionsToString`
+    use super::*;
+    use crate::common::message::api_versions_response_data::{FinalizedFeatureKey, SupportedFeatureKey};
+
+    /// Java: `testUnsupportedVersionsToString`.
     #[test]
-    fn test_unsupported_versions_to_string() {
-        let versions = NodeApiVersions::with_supported_features(&[], &[]);
-        let mut bld = String::new();
+    fn unsupported_versions_to_string() {
+        let versions = NodeApiVersions::new(Vec::new(), Vec::new()).expect("constructor");
+        let mut expected = String::new();
         let mut prefix = "(";
         for api_key in ApiKeys::client_apis() {
-            bld.push_str(prefix);
-            bld.push_str(api_key.name());
-            bld.push('(');
-            bld.push_str(&api_key.id().to_string());
-            bld.push_str("): UNSUPPORTED");
+            expected.push_str(prefix);
+            expected.push_str(&format!("{}({}): UNSUPPORTED", api_key.name, api_key.id));
             prefix = ", ";
         }
-        bld.push(')');
-        assert_eq!(bld, versions.to_string());
+        expected.push(')');
+        assert_eq!(versions.to_string(), expected);
     }
 
-    /// Translated from `NodeApiVersionsTest.testUnknownApiVersionsToString`
+    /// Java: `testUnknownApiVersionsToString`.
     #[test]
-    fn test_unknown_api_versions_to_string() {
-        let versions = NodeApiVersions::create_single(337, 0, 1);
-        assert!(
-            versions.to_string().ends_with("UNKNOWN(337): 0 to 1)"),
-            "Unexpected toString: {}",
-            versions
-        );
+    fn unknown_api_versions_to_string() {
+        let versions = NodeApiVersions::create_single(337, 0, 1).expect("constructor");
+        assert!(versions.to_string().ends_with("UNKNOWN(337): 0 to 1)"), "got: {}", versions);
     }
 
-    /// Translated from `NodeApiVersionsTest.testVersionsToString`
+    /// Java: `testVersionsToString`.
     #[test]
-    fn test_versions_to_string() {
-        let mut version_list = Vec::new();
-        for api_key in ApiKeys::ALL {
-            if *api_key == ApiKeys::DELETE_TOPICS {
-                let mut v = ApiVersion::new();
-                v.set_api_key(api_key.id());
-                v.set_min_version(10000);
-                v.set_max_version(10001);
-                version_list.push(v);
+    fn versions_to_string() {
+        let mut version_list: Vec<ApiVersion> = Vec::new();
+        for api_key in ApiKeys::values() {
+            if api_key.id == 20 {
+                // DELETE_TOPICS
+                version_list.push(ApiVersion {
+                    api_key: api_key.id,
+                    min_version: 10000,
+                    max_version: 10001,
+                    unknown_tagged_fields: Vec::new(),
+                });
             } else {
                 version_list.push(ApiVersionsResponse::to_api_version(api_key));
             }
         }
-        let versions = NodeApiVersions::with_supported_features(&version_list, &[]);
-        let mut bld = String::new();
+        let versions = NodeApiVersions::new(version_list, Vec::new()).expect("constructor");
+
+        let mut expected = String::new();
         let mut prefix = "(";
-        for api_key in ApiKeys::ALL {
-            bld.push_str(prefix);
-            if *api_key == ApiKeys::DELETE_TOPICS {
-                bld.push_str("DeleteTopics(20): 10000 to 10001 [unusable: node too new]");
+        for api_key in ApiKeys::values() {
+            expected.push_str(prefix);
+            if api_key.id == 20 {
+                expected.push_str("DeleteTopics(20): 10000 to 10001 [unusable: node too new]");
             } else if !api_key.has_valid_version() {
-                bld.push_str(&format!(
-                    "{}({}): 0 to -1 [unusable: node too new]",
-                    api_key.name(),
-                    api_key.id()
-                ));
+                expected.push_str(&format!("{}({}): 0 to -1 [unusable: node too new]", api_key.name, api_key.id));
             } else {
-                bld.push_str(api_key.name());
-                bld.push('(');
-                bld.push_str(&api_key.id().to_string());
-                bld.push_str("): ");
+                expected.push_str(&format!("{}({}): ", api_key.name, api_key.id));
                 if api_key.oldest_version() == api_key.latest_version() {
-                    bld.push_str(&api_key.oldest_version().to_string());
+                    expected.push_str(&api_key.oldest_version().to_string());
                 } else {
-                    bld.push_str(&api_key.oldest_version().to_string());
-                    bld.push_str(" to ");
-                    bld.push_str(&api_key.latest_version().to_string());
+                    expected.push_str(&format!("{} to {}", api_key.oldest_version(), api_key.latest_version()));
                 }
-                bld.push_str(" [usable: ");
-                bld.push_str(&api_key.latest_version().to_string());
-                bld.push(']');
+                expected.push_str(&format!(" [usable: {}]", api_key.latest_version()));
             }
             prefix = ", ";
         }
-        bld.push(')');
-        assert_eq!(bld, versions.to_string());
+        expected.push(')');
+        assert_eq!(versions.to_string(), expected);
     }
 
-    /// Translated from `NodeApiVersionsTest.testLatestUsableVersion`
+    /// Java: `testLatestUsableVersion`.
     #[test]
-    fn test_latest_usable_version() {
-        let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 8, 10);
-        assert_eq!(10, api_versions.latest_usable_version(&ApiKeys::PRODUCE).unwrap());
-        assert_eq!(8, api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 7, 8).unwrap());
-        assert_eq!(8, api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 8, 8).unwrap());
-        assert_eq!(9, api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 8, 9).unwrap());
-        assert_eq!(
-            10,
-            api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 8, 10).unwrap()
-        );
-        assert_eq!(9, api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 9, 9).unwrap());
-        assert_eq!(
-            10,
-            api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 9, 10).unwrap()
-        );
-        assert_eq!(
-            10,
-            api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 10, 10).unwrap()
-        );
-        assert_eq!(
-            10,
-            api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 10, 11).unwrap()
-        );
+    fn latest_usable_version() {
+        let api_versions = NodeApiVersions::create_single(0, 8, 10).expect("constructor"); // PRODUCE
+        let produce = ApiKeys::for_id(0).expect("PRODUCE");
+        assert_eq!(api_versions.latest_usable_version(produce).unwrap(), 10);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 7, 8).unwrap(), 8);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 8, 8).unwrap(), 8);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 8, 9).unwrap(), 9);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 8, 10).unwrap(), 10);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 9, 9).unwrap(), 9);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 9, 10).unwrap(), 10);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 10, 10).unwrap(), 10);
+        assert_eq!(api_versions.latest_usable_version_in_range(produce, 10, 11).unwrap(), 10);
     }
 
-    /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRangeLow`
+    /// Java: `testLatestUsableVersionOutOfRangeLow`.
     #[test]
-    fn test_latest_usable_version_out_of_range_low() {
-        let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 1, 2);
-        assert!(api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 3, 4).is_err());
+    fn latest_usable_version_out_of_range_low() {
+        let api_versions = NodeApiVersions::create_single(0, 1, 2).expect("constructor"); // PRODUCE
+        let produce = ApiKeys::for_id(0).expect("PRODUCE");
+        let err = api_versions.latest_usable_version_in_range(produce, 3, 4).unwrap_err();
+        assert!(matches!(err, KafkaError::UnsupportedVersion(_)));
     }
 
-    /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRangeHigh`
+    /// Java: `testLatestUsableVersionOutOfRangeHigh`.
     #[test]
-    fn test_latest_usable_version_out_of_range_high() {
-        let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 2, 3);
-        assert!(api_versions.latest_usable_version_in_range(&ApiKeys::PRODUCE, 0, 1).is_err());
+    fn latest_usable_version_out_of_range_high() {
+        let api_versions = NodeApiVersions::create_single(0, 2, 3).expect("constructor"); // PRODUCE
+        let produce = ApiKeys::for_id(0).expect("PRODUCE");
+        let err = api_versions.latest_usable_version_in_range(produce, 0, 1).unwrap_err();
+        assert!(matches!(err, KafkaError::UnsupportedVersion(_)));
     }
 
-    /// Translated from `NodeApiVersionsTest.testUsableVersionCalculationNoKnownVersions`
+    /// Java: `testUsableVersionCalculationNoKnownVersions`.
     #[test]
-    fn test_usable_version_calculation_no_known_versions() {
-        let versions = NodeApiVersions::with_supported_features(&[], &[]);
-        assert!(versions.latest_usable_version(&ApiKeys::FETCH).is_err());
+    fn usable_version_calculation_no_known_versions() {
+        let versions = NodeApiVersions::new(Vec::new(), Vec::new()).expect("constructor");
+        let fetch = ApiKeys::for_id(1).expect("FETCH");
+        let err = versions.latest_usable_version(fetch).unwrap_err();
+        assert!(matches!(err, KafkaError::UnsupportedVersion(_)));
     }
 
-    /// Translated from `NodeApiVersionsTest.testLatestUsableVersionOutOfRange`
+    /// Java: `testLatestUsableVersionOutOfRange`.
     #[test]
-    fn test_latest_usable_version_out_of_range() {
-        let api_versions = NodeApiVersions::create_single(ApiKeys::PRODUCE.id(), 300, 300);
-        assert!(api_versions.latest_usable_version(&ApiKeys::PRODUCE).is_err());
+    fn latest_usable_version_out_of_range() {
+        let api_versions = NodeApiVersions::create_single(0, 300, 300).expect("constructor"); // PRODUCE
+        let produce = ApiKeys::for_id(0).expect("PRODUCE");
+        let err = api_versions.latest_usable_version(produce).unwrap_err();
+        assert!(matches!(err, KafkaError::UnsupportedVersion(_)));
     }
 
-    /// Translated from `NodeApiVersionsTest.testUsableVersionLatestVersions`
-    ///
-    /// Parameterized in Java over `ApiMessageType.ListenerType`; expanded here.
+    /// Java: `testUsableVersionLatestVersions` (`@ParameterizedTest`
+    /// with `EnumSource(ApiMessageType.ListenerType.class)`). The Rust
+    /// translation iterates the same enum.
     #[test]
-    fn test_usable_version_latest_versions_broker() {
-        test_usable_version_latest_versions(ListenerType::Broker);
-    }
+    fn usable_version_latest_versions_for_all_listeners() {
+        use crate::common::message::api_message_type::ListenerType;
 
-    #[test]
-    fn test_usable_version_latest_versions_controller() {
-        test_usable_version_latest_versions(ListenerType::Controller);
-    }
-
-    fn test_usable_version_latest_versions(scope: ListenerType) {
-        let default_response = ApiVersionsResponse::default_api_versions_response(scope);
-        let mut version_list: Vec<ApiVersion> = default_response.data().api_keys.clone();
-        // Add an API key that we don't know about.
-        let mut unknown = ApiVersion::new();
-        unknown.set_api_key(100);
-        unknown.set_min_version(0);
-        unknown.set_max_version(1);
-        version_list.push(unknown);
-        let versions = NodeApiVersions::with_supported_features(&version_list, &[]);
-        for api_key in ApiKeys::apis_for_listener(scope) {
-            assert_eq!(
-                api_key.latest_version(),
-                versions.latest_usable_version(api_key).unwrap(),
-                "Failed for {}",
-                api_key.name()
-            );
+        for scope in [ListenerType::Broker, ListenerType::Controller] {
+            // Mirror Java's `TestUtils.defaultApiVersionsResponse(scope)`
+            // — Java's helper synthesises a default `ApiVersionsResponse`
+            // via `filterApis`, which goes through
+            // `toApiVersionForApiResponse(enableUnstableLastVersion=true,
+            // listenerType)`. That helper drops keys with no valid
+            // version (`max < min`), so the fixture is filtered before
+            // the loop iterates. Mirror the filter here so the loop
+            // assertion below can be unconditional, matching Java.
+            let scoped_keys: Vec<&'static ApiKey> = ApiKeys::apis_for_listener(scope)
+                .into_iter()
+                .filter(|k| k.has_valid_version())
+                .collect();
+            let mut version_list: Vec<ApiVersion> =
+                scoped_keys.iter().map(|k| ApiVersionsResponse::to_api_version(k)).collect();
+            // Add an API key that we don't know about.
+            version_list.push(ApiVersion {
+                api_key: 100,
+                min_version: 0,
+                max_version: 1,
+                unknown_tagged_fields: Vec::new(),
+            });
+            let versions = NodeApiVersions::new(version_list, Vec::new()).expect("constructor");
+            for api_key in &scoped_keys {
+                assert_eq!(
+                    versions.latest_usable_version(api_key).unwrap(),
+                    api_key.latest_version(),
+                    "api_key {}({})",
+                    api_key.name,
+                    api_key.id
+                );
+            }
         }
     }
 
-    /// Translated from `NodeApiVersionsTest.testConstructionFromApiVersionsResponse`
-    ///
-    /// Parameterized in Java over `ApiMessageType.ListenerType`; expanded here.
+    /// Java: `testConstructionFromApiVersionsResponse` (`@ParameterizedTest`).
     #[test]
-    fn test_construction_from_api_versions_response_broker() {
-        test_construction_from_api_versions_response(ListenerType::Broker);
-    }
+    fn construction_from_api_versions_response() {
+        use crate::common::message::api_message_type::ListenerType;
 
-    #[test]
-    fn test_construction_from_api_versions_response_controller() {
-        test_construction_from_api_versions_response(ListenerType::Controller);
-    }
-
-    fn test_construction_from_api_versions_response(scope: ListenerType) {
-        let api_versions_response = ApiVersionsResponse::default_api_versions_response(scope);
-        let versions = NodeApiVersions::with_supported_features(&api_versions_response.data().api_keys, &[]);
-
-        for api_version_key in &api_versions_response.data().api_keys {
-            let api_key = ApiKeys::for_id(api_version_key.api_key).unwrap();
-            let api_version = versions.api_version(api_key).unwrap();
-            assert_eq!(api_version_key.api_key, api_version.api_key);
-            assert_eq!(api_version_key.min_version, api_version.min_version);
-            assert_eq!(api_version_key.max_version, api_version.max_version);
+        for scope in [ListenerType::Broker, ListenerType::Controller] {
+            let api_keys: Vec<ApiVersion> = ApiKeys::apis_for_listener(scope)
+                .into_iter()
+                .map(ApiVersionsResponse::to_api_version)
+                .collect();
+            let versions = NodeApiVersions::new(api_keys.clone(), Vec::new()).expect("constructor");
+            for api_version_key in &api_keys {
+                let api_key = ApiKeys::for_id(api_version_key.api_key as i32).expect("known api key");
+                let api_version = versions.api_version(api_key).expect("present");
+                assert_eq!(api_version_key.api_key, api_version.api_key);
+                assert_eq!(api_version_key.min_version, api_version.min_version);
+                assert_eq!(api_version_key.max_version, api_version.max_version);
+            }
         }
     }
 
-    /// Translated from `NodeApiVersionsTest.testFeatures`
+    /// Java: `testFeatures`.
     #[test]
-    fn test_features() {
-        let mut supported_feature = SupportedFeatureKey::new();
-        supported_feature.set_name("transaction.version".to_string());
-        supported_feature.set_max_version(2);
-        supported_feature.set_min_version(0);
-
-        let mut finalized_feature = FinalizedFeatureKey::new();
-        finalized_feature.set_name("transaction.version".to_string());
-        finalized_feature.set_max_version_level(2);
-        finalized_feature.set_min_version_level(2);
-
-        let versions = NodeApiVersions::new(&[], &[supported_feature], &[finalized_feature], 0);
-
-        let supported_version_range = versions.supported_features().get("transaction.version").unwrap();
-        assert_eq!(0, supported_version_range.min());
-        assert_eq!(2, supported_version_range.max());
-        assert_eq!(&2_i16, versions.finalized_features().get("transaction.version").unwrap());
-        assert_eq!(0, versions.finalized_features_epoch());
+    fn features() {
+        let versions = NodeApiVersions::with_features(
+            Vec::new(),
+            vec![SupportedFeatureKey {
+                name: "transaction.version".into(),
+                min_version: 0,
+                max_version: 2,
+                unknown_tagged_fields: Vec::new(),
+            }],
+            vec![FinalizedFeatureKey {
+                name: "transaction.version".into(),
+                max_version_level: 2,
+                min_version_level: 2,
+                unknown_tagged_fields: Vec::new(),
+            }],
+            0,
+        )
+        .expect("constructor");
+        let supported_version_range = versions.supported_features().get("transaction.version").expect("present");
+        assert_eq!(supported_version_range.min(), 0);
+        assert_eq!(supported_version_range.max(), 2);
+        assert_eq!(*versions.finalized_features().get("transaction.version").expect("present"), 2);
+        assert_eq!(versions.finalized_features_epoch(), 0);
     }
 }

@@ -15,61 +15,62 @@
 // Fail on warnings in development
 #![deny(warnings)]
 
+//! Confluent Kafka Rust — translation of the Apache Kafka 4.2 Java client.
+//!
+//! Phase 1 surfaces only the foundational utilities (errors, time, headers,
+//! configuration, UUID, byte/varint encoding, CRC, exponential backoff,
+//! topic-name validation). Higher-level types (records, network, producer)
+//! are added in subsequent phases.
+
 pub mod api_versions;
+pub mod client_dns_lookup;
 pub mod client_request;
 pub mod client_response;
-pub(crate) mod client_utils;
+pub mod client_utils;
 pub mod cluster_connection_states;
 pub mod common;
-pub(crate) mod common_client_configs;
+pub mod common_client_configs;
 pub mod connection_state;
+pub mod default_host_resolver;
+// Phase 8.0 translated Java's package-private inner class
+// `NetworkClient.DefaultMetadataUpdater` as a free struct here.
+// Although Java's surface is package-private, the Rust visibility model
+// can't replicate that exactly — Rust public callers (including
+// integration tests in a separate test crate) need to *name* the type
+// transitively because `KafkaProducer::with_serializers` returns
+// `KafkaProducer<K, V, NetworkClient<Selector, DefaultMetadataUpdater>>`.
+// Demoting the module to `pub(crate)` makes the public constructor
+// unusable from downstream crates (the compiler refuses any value
+// whose type names a private item). We expose the module `pub` and
+// keep an `#[doc(hidden)]` marker so docs.rs renders an Anti-API
+// stamp — callers should hold the value behind the `Producer` trait
+// or via inference, not reach for the type by name.
+#[doc(hidden)]
+pub mod default_metadata_updater;
 pub mod host_resolver;
 pub mod in_flight_requests;
 pub mod kafka_client;
 pub mod least_loaded_node;
+pub mod manual_metadata_updater;
 pub mod metadata;
 pub mod metadata_recovery_strategy;
 pub mod metadata_snapshot;
 pub mod metadata_updater;
-#[cfg(test)]
-pub(crate) mod mock_client;
-pub(crate) mod network_client;
-pub(crate) mod network_client_utils;
+pub mod network_client;
+pub mod network_client_utils;
 pub mod node_api_versions;
 pub mod producer;
-
-#[cfg(feature = "ffi")]
-pub mod ffi;
-
-/// Callback type for request completion.
-///
-/// Replaces Java's `RequestCompletionHandler` callback interface. Per CLAUDE.md
-/// rule 9, Java callbacks are replaced with closures executed after awaiting the
-/// corresponding call.
-///
-/// The callback receives a mutable reference to the [`client_response::ClientResponse`]
-/// so it can inspect the response (e.g., extract the response body).
-pub type RequestCompletionHandler = Box<dyn FnOnce(&mut client_response::ClientResponse) + Send>;
+pub mod request_completion_handler;
+pub mod stale_metadata_error;
 
 pub use api_versions::ApiVersions;
 pub use client_request::ClientRequest;
 pub use client_response::ClientResponse;
-pub use cluster_connection_states::ClusterConnectionStates;
 pub use connection_state::ConnectionState;
-pub use host_resolver::{DefaultHostResolver, HostResolver};
-pub use in_flight_requests::{InFlightRequest, InFlightRequests};
 pub use kafka_client::KafkaClient;
 pub use least_loaded_node::LeastLoadedNode;
-pub use metadata::Metadata;
-pub use metadata_recovery_strategy::MetadataRecoveryStrategy;
-pub use metadata_snapshot::MetadataSnapshot;
+pub use manual_metadata_updater::ManualMetadataUpdater;
 pub use metadata_updater::MetadataUpdater;
+pub use network_client::NetworkClient;
 pub use node_api_versions::NodeApiVersions;
-
-// Include generated message definitions
-#[allow(dead_code, clippy::all)]
-pub mod generated {
-    include!(concat!(env!("OUT_DIR"), "/generated/mod.rs"));
-}
-
-pub use generated::*;
+pub use request_completion_handler::RequestCompletionHandler;

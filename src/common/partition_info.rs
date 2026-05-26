@@ -12,16 +12,25 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Per-partition state in the MetadataResponse.
+//! Translation of `org.apache.kafka.common.PartitionInfo`.
 
 use std::fmt;
+use std::sync::Arc;
 
-use super::Node;
+use crate::common::Node;
 
-/// This is used to describe per-partition state in the MetadataResponse.
-#[derive(Clone, Debug)]
+/// Per-partition state, as appears in a `MetadataResponse`.
+///
+/// Topic name is stored as `Arc<str>` so the `Cluster` indexes that
+/// re-key by topic name (`partitionsByTopic`, `availablePartitionsByTopic`)
+/// share the same allocation as the per-`TopicPartition` map. See
+/// CLAUDE.md rule 11 (hot-path identifier interning).
+///
+/// `leader` is `Option<Node>` to match Java's nullable `leader` field —
+/// the metadata response may report a partition without a current leader.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub struct PartitionInfo {
-    topic: String,
+    topic: Arc<str>,
     partition: i32,
     leader: Option<Node>,
     replicas: Vec<Node>,
@@ -30,31 +39,45 @@ pub struct PartitionInfo {
 }
 
 impl PartitionInfo {
-    /// Creates a new `PartitionInfo` with no offline replicas.
+    /// Create with no offline replicas — equivalent to Java's 5-argument
+    /// constructor.
     pub fn new(
-        topic: String,
+        topic: impl Into<Arc<str>>,
         partition: i32,
         leader: Option<Node>,
         replicas: Vec<Node>,
         in_sync_replicas: Vec<Node>,
     ) -> Self {
-        Self::with_offline_replicas(topic, partition, leader, replicas, in_sync_replicas, vec![])
+        Self::new_with_offline(topic, partition, leader, replicas, in_sync_replicas, Vec::new())
     }
 
-    /// Creates a new `PartitionInfo` with offline replicas.
-    pub fn with_offline_replicas(
-        topic: String,
+    /// Create with all six fields — equivalent to Java's 6-argument
+    /// constructor.
+    pub fn new_with_offline(
+        topic: impl Into<Arc<str>>,
         partition: i32,
         leader: Option<Node>,
         replicas: Vec<Node>,
         in_sync_replicas: Vec<Node>,
         offline_replicas: Vec<Node>,
     ) -> Self {
-        Self { topic, partition, leader, replicas, in_sync_replicas, offline_replicas }
+        Self {
+            topic: topic.into(),
+            partition,
+            leader,
+            replicas,
+            in_sync_replicas,
+            offline_replicas,
+        }
     }
 
     /// The topic name.
     pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Borrow the topic as the shared `Arc<str>`.
+    pub fn topic_arc(&self) -> &Arc<str> {
         &self.topic
     }
 
@@ -63,18 +86,20 @@ impl PartitionInfo {
         self.partition
     }
 
-    /// The node currently acting as a leader for this partition, or `None` if there is no leader.
+    /// The node currently acting as leader for this partition, or `None`
+    /// if there is no leader.
     pub fn leader(&self) -> Option<&Node> {
         self.leader.as_ref()
     }
 
-    /// The complete set of replicas for this partition regardless of whether they are alive or up-to-date.
+    /// The complete set of replicas for this partition regardless of whether
+    /// they are alive or up-to-date.
     pub fn replicas(&self) -> &[Node] {
         &self.replicas
     }
 
-    /// The subset of the replicas that are in sync, that is caught-up to the leader and ready to
-    /// take over as leader if the leader should fail.
+    /// The subset of the replicas that are in sync, that is caught-up to the
+    /// leader and ready to take over as leader if the leader should fail.
     pub fn in_sync_replicas(&self) -> &[Node] {
         &self.in_sync_replicas
     }
@@ -85,47 +110,11 @@ impl PartitionInfo {
     }
 }
 
-impl PartialEq for PartitionInfo {
-    fn eq(&self, other: &Self) -> bool {
-        self.topic == other.topic
-            && self.partition == other.partition
-            && self.leader == other.leader
-            && self.replicas == other.replicas
-            && self.in_sync_replicas == other.in_sync_replicas
-            && self.offline_replicas == other.offline_replicas
-    }
-}
-
-impl Eq for PartitionInfo {}
-
-impl std::hash::Hash for PartitionInfo {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.topic.hash(state);
-        self.partition.hash(state);
-        self.leader.hash(state);
-        self.replicas.hash(state);
-        self.in_sync_replicas.hash(state);
-        self.offline_replicas.hash(state);
-    }
-}
-
-/// Format node ids from a slice for display.
-fn format_node_ids(nodes: &[Node]) -> String {
-    let mut b = String::from("[");
-    for (i, node) in nodes.iter().enumerate() {
-        b.push_str(node.id_string());
-        if i < nodes.len() - 1 {
-            b.push(',');
-        }
-    }
-    b.push(']');
-    b
-}
-
 impl fmt::Display for PartitionInfo {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let leader_str = match &self.leader {
-            Some(l) => l.id_string().to_string(),
+        // Java: "Partition(topic = %s, partition = %d, leader = %s, replicas = %s, isr = %s, offlineReplicas = %s)"
+        let leader = match &self.leader {
+            Some(n) => n.id_string().to_string(),
             None => "none".to_string(),
         };
         write!(
@@ -133,52 +122,76 @@ impl fmt::Display for PartitionInfo {
             "Partition(topic = {}, partition = {}, leader = {}, replicas = {}, isr = {}, offlineReplicas = {})",
             self.topic,
             self.partition,
-            leader_str,
+            leader,
             format_node_ids(&self.replicas),
             format_node_ids(&self.in_sync_replicas),
-            format_node_ids(&self.offline_replicas),
+            format_node_ids(&self.offline_replicas)
         )
     }
+}
+
+/// Mirror of Java's private `formatNodeIds` helper.
+fn format_node_ids(nodes: &[Node]) -> String {
+    let mut s = String::from("[");
+    for (i, n) in nodes.iter().enumerate() {
+        s.push_str(n.id_string());
+        if i + 1 < nodes.len() {
+            s.push(',');
+        }
+    }
+    s.push(']');
+    s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn make_node(id: i32) -> Node {
-        Node::new(id, format!("host{id}"), 9092)
+    #[test]
+    fn to_string_matches_java() {
+        // Translation of PartitionInfoTest.testToString.
+        let topic = "sample";
+        let partition = 0;
+        let leader = Node::new(0, "localhost".to_string(), 9092);
+        let r1 = Node::new(1, "localhost".to_string(), 9093);
+        let r2 = Node::new(2, "localhost".to_string(), 9094);
+        let replicas = vec![leader.clone(), r1.clone(), r2.clone()];
+        let isr = vec![leader.clone(), r1.clone()];
+        let offline = vec![r2.clone()];
+
+        let info = PartitionInfo::new_with_offline(topic, partition, Some(leader.clone()), replicas, isr, offline);
+
+        let expected = format!(
+            "Partition(topic = {}, partition = {}, leader = {}, replicas = {}, isr = {}, offlineReplicas = {})",
+            topic,
+            partition,
+            leader.id_string(),
+            "[0,1,2]",
+            "[0,1]",
+            "[2]"
+        );
+        assert_eq!(info.to_string(), expected);
     }
 
     #[test]
-    fn test_partition_info_creation() {
-        let leader = make_node(0);
-        let replicas = vec![make_node(0), make_node(1), make_node(2)];
-        let isr = vec![make_node(0), make_node(1)];
+    fn equals_uses_all_fields() {
+        let leader = Node::new(0, "h".to_string(), 9092);
+        let a = PartitionInfo::new("t", 0, Some(leader.clone()), vec![leader.clone()], vec![leader.clone()]);
+        let b = PartitionInfo::new("t", 0, Some(leader.clone()), vec![leader.clone()], vec![leader.clone()]);
+        assert_eq!(a, b);
 
-        let pi = PartitionInfo::new("test".to_string(), 0, Some(leader), replicas, isr);
-        assert_eq!(pi.topic(), "test");
-        assert_eq!(pi.partition(), 0);
-        assert_eq!(pi.leader().unwrap().id(), 0);
-        assert_eq!(pi.replicas().len(), 3);
-        assert_eq!(pi.in_sync_replicas().len(), 2);
-        assert!(pi.offline_replicas().is_empty());
+        // differing topic
+        let c = PartitionInfo::new("t2", 0, Some(leader.clone()), vec![leader.clone()], vec![leader.clone()]);
+        assert_ne!(a, c);
+
+        // differing leader (None vs Some)
+        let d = PartitionInfo::new("t", 0, None, vec![leader.clone()], vec![leader.clone()]);
+        assert_ne!(a, d);
     }
 
     #[test]
-    fn test_partition_info_no_leader() {
-        let pi = PartitionInfo::new("test".to_string(), 0, None, vec![], vec![]);
-        assert!(pi.leader().is_none());
-    }
-
-    #[test]
-    fn test_partition_info_display() {
-        let leader = make_node(0);
-        let replicas = vec![make_node(0), make_node(1)];
-        let isr = vec![make_node(0)];
-        let pi = PartitionInfo::new("test".to_string(), 0, Some(leader), replicas, isr);
-        let display = pi.to_string();
-        assert!(display.contains("topic = test"));
-        assert!(display.contains("partition = 0"));
-        assert!(display.contains("leader = 0"));
+    fn no_offline_default_to_empty() {
+        let info = PartitionInfo::new("t", 0, None, Vec::new(), Vec::new());
+        assert!(info.offline_replicas().is_empty());
     }
 }

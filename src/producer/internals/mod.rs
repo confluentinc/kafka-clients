@@ -12,24 +12,42 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Producer internal types (org.apache.kafka.clients.producer.internals)
+//! Translation of `org.apache.kafka.clients.producer.internals`.
 
 pub(crate) mod buffer_pool;
 pub(crate) mod built_in_partitioner;
+pub(crate) mod error_logging_callback;
 pub(crate) mod future_record_metadata;
 pub(crate) mod incomplete_batches;
 pub(crate) mod produce_request_result;
 pub(crate) mod producer_batch;
+pub(crate) mod producer_interceptors;
 pub(crate) mod producer_metadata;
 pub(crate) mod record_accumulator;
 pub(crate) mod sender;
+pub(crate) mod transaction_manager;
 
+#[allow(unused_imports)]
 pub(crate) use buffer_pool::BufferPool;
+#[allow(unused_imports)]
 pub(crate) use built_in_partitioner::BuiltInPartitioner;
+#[allow(unused_imports)]
+pub(crate) use error_logging_callback::ErrorLoggingCallback;
+#[allow(unused_imports)]
 pub(crate) use future_record_metadata::FutureRecordMetadata;
+#[allow(unused_imports)]
 pub(crate) use incomplete_batches::IncompleteBatches;
+#[allow(unused_imports)]
 pub(crate) use produce_request_result::ProduceRequestResult;
-pub(crate) use producer_batch::{Callback, ProducerBatch};
+#[allow(unused_imports)]
+pub(crate) use producer_batch::ProducerBatch;
+#[allow(unused_imports)]
+pub(crate) use producer_interceptors::ProducerInterceptors;
+#[allow(unused_imports)]
 pub(crate) use producer_metadata::ProducerMetadata;
-pub(crate) use record_accumulator::{PartitionerConfig, RecordAccumulator};
+#[allow(unused_imports)]
+pub(crate) use record_accumulator::RecordAccumulator;
+#[allow(unused_imports)]
 pub(crate) use sender::Sender;
+#[allow(unused_imports)]
+pub(crate) use transaction_manager::TransactionManager;

@@ -12,64 +12,115 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Writable trait for serializing Kafka protocol messages.
+//! Translation of `org.apache.kafka.common.protocol.Writable`.
 //!
-//! Corresponds to org.apache.kafka.common.protocol.Writable
+//! `Writable` is the generic sink for typed wire-protocol primitives,
+//! mirroring the Java interface of the same name. Its canonical
+//! implementation is [`crate::common::protocol::ByteBufferAccessor`]; the
+//! [`crate::common::protocol::DataOutputStreamWritable`] adapter targets a
+//! `std::io::Write` instead of an in-memory buffer, and
+//! [`crate::common::protocol::SendBuilder`] uses it to assemble vectored
+//! sends.
+//!
+//! As with [`super::Readable`], the default `writeRecords`/`writeUuid`/
+//! `writeUnsignedShort`/`writeUnsignedInt` helpers are translated as
+//! provided trait methods so every implementor inherits them automatically.
 
 use crate::common::Uuid;
-use std::io;
+use crate::common::utils::byte_utils;
 
-/// Trait for writing Kafka protocol data types to a byte stream.
-///
-/// This trait provides methods for writing primitive types and Kafka-specific
-/// types like varints, UUIDs, and byte arrays.
+/// Translation of `org.apache.kafka.common.protocol.Writable`.
 pub trait Writable {
-    /// Write a single byte.
-    fn write_byte(&mut self, val: i8) -> io::Result<()>;
+    /// Mirrors `writeByte(byte)`.
+    fn write_byte(&mut self, val: i8);
 
-    /// Write a 16-bit signed integer (big-endian).
-    fn write_short(&mut self, val: i16) -> io::Result<()>;
+    /// Mirrors `writeShort(short)`.
+    fn write_short(&mut self, val: i16);
 
-    /// Write a 32-bit signed integer (big-endian).
-    fn write_int(&mut self, val: i32) -> io::Result<()>;
+    /// Mirrors `writeInt(int)`.
+    fn write_int(&mut self, val: i32);
 
-    /// Write a 64-bit signed integer (big-endian).
-    fn write_long(&mut self, val: i64) -> io::Result<()>;
+    /// Mirrors `writeLong(long)`.
+    fn write_long(&mut self, val: i64);
 
-    /// Write a 64-bit floating point number (big-endian).
-    fn write_double(&mut self, val: f64) -> io::Result<()>;
+    /// Mirrors `writeDouble(double)`.
+    fn write_double(&mut self, val: f64);
 
-    /// Write a byte array.
-    fn write_byte_array(&mut self, arr: &[u8]) -> io::Result<()>;
+    /// Mirrors `writeByteArray(byte[])`.
+    fn write_byte_array(&mut self, arr: &[u8]);
 
-    /// Write an unsigned varint (for sizes, lengths, counts).
-    fn write_unsigned_varint(&mut self, val: u32) -> io::Result<()>;
+    /// Mirrors `writeUnsignedVarint(int)`.
+    fn write_unsigned_varint(&mut self, value: u32);
 
-    /// Write a signed varint (zig-zag encoded).
-    fn write_varint(&mut self, val: i32) -> io::Result<()>;
+    /// Mirrors `writeByteBuffer(ByteBuffer)`. Writes the entire byte slice.
+    /// Implementations that support zero-copy (e.g. [`SendBuilder`]) may
+    /// retain a reference rather than copying.
+    fn write_byte_buffer(&mut self, buf: &[u8]);
 
-    /// Write a signed varlong (zig-zag encoded).
-    fn write_varlong(&mut self, val: i64) -> io::Result<()>;
+    /// Mirrors `writeVarint(int)`.
+    fn write_varint(&mut self, value: i32);
 
-    /// Write a UUID (128-bit value, most significant bits first).
-    fn write_uuid(&mut self, uuid: &Uuid) -> io::Result<()> {
-        self.write_long(uuid.most_sig_bits() as i64)?;
-        self.write_long(uuid.least_sig_bits() as i64)?;
-        Ok(())
+    /// Mirrors `writeVarlong(long)`.
+    fn write_varlong(&mut self, value: i64);
+
+    /// Mirrors the Java default `writeUuid(Uuid)`.
+    fn write_uuid(&mut self, uuid: &Uuid) {
+        self.write_long(uuid.most_significant_bits());
+        self.write_long(uuid.least_significant_bits());
     }
 
-    /// Write bytes from a slice (convenience method).
-    fn write_bytes(&mut self, data: &[u8]) -> io::Result<()> {
-        self.write_byte_array(data)
+    /// Mirrors the Java default `writeUnsignedShort(int)`.
+    fn write_unsigned_short(&mut self, value: u16) {
+        self.write_short(value as i16);
     }
 
-    /// Write an unsigned 16-bit integer.
-    fn write_unsigned_short(&mut self, val: u16) -> io::Result<()> {
-        self.write_short(val as i16)
+    /// Mirrors the Java default `writeUnsignedInt(long)`.
+    fn write_unsigned_int(&mut self, value: u32) {
+        self.write_int(value as i32);
+    }
+}
+
+/// Convenience [`Writable`] impl over `Vec<u8>` — appends each primitive at
+/// the current end of the vector. Used by tests and by simple builder paths
+/// that do not need position tracking.
+impl Writable for Vec<u8> {
+    fn write_byte(&mut self, val: i8) {
+        self.push(val as u8);
     }
 
-    /// Write an unsigned 32-bit integer.
-    fn write_unsigned_int(&mut self, val: u32) -> io::Result<()> {
-        self.write_int(val as i32)
+    fn write_short(&mut self, val: i16) {
+        self.extend_from_slice(&val.to_be_bytes());
+    }
+
+    fn write_int(&mut self, val: i32) {
+        self.extend_from_slice(&val.to_be_bytes());
+    }
+
+    fn write_long(&mut self, val: i64) {
+        self.extend_from_slice(&val.to_be_bytes());
+    }
+
+    fn write_double(&mut self, val: f64) {
+        self.extend_from_slice(&val.to_be_bytes());
+    }
+
+    fn write_byte_array(&mut self, arr: &[u8]) {
+        self.extend_from_slice(arr);
+    }
+
+    fn write_unsigned_varint(&mut self, value: u32) {
+        byte_utils::write_unsigned_varint(value, self);
+    }
+
+    fn write_byte_buffer(&mut self, buf: &[u8]) {
+        self.extend_from_slice(buf);
+    }
+
+    fn write_varint(&mut self, value: i32) {
+        byte_utils::write_varint(value, self);
+    }
+
+    fn write_varlong(&mut self, value: i64) {
+        byte_utils::write_varlong(value, self);
     }
 }

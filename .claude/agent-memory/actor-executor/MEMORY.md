@@ -1,5 +1,84 @@
-- [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
-- [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
-- [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
-- [SSL/TLS Transport](ssl_tls_transport.md) — rustls patterns, ChannelBuilder refactor, NoHostnameVerifier, Box<TlsStream> for enum size
-- [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN goes INTERMEDIATE->COMPLETE directly, CLIENT_COMPLETE is for SCRAM only
+- [Phase 1 lint gotchas](phase1_lint_gotchas.md) — clippy patterns I hit repeatedly during foundation translation
+- [Module name collisions](module_inception_pattern.md) — `header/header.rs`, `utils/utils.rs` need `#[allow(clippy::module_inception)]`
+- [Generator crate layout](generator_layout.md) — codegen lives in lib.rs (~5000 lines), not the message/ submodules
+- [Phase 2b types design](phase2b_types_design.md) — Type/Value enums, Schema id, ReadBuffer cursor, Records bytes-level only
+- [Phase 2c protocol layout](phase2c_protocol_layout.md) — Readable/Writable/ByteBufferAccessor moved out of types/io.rs
+- [Phase 2d generator/runtime gap](phase2d_generator_runtime_gap.md) — generator emits an API surface that doesn't match Phase 2c traits
+- [Phase 2d-4 byte fixtures](phase2d4_byte_fixtures.md) — Java-authoritative byte capture process + 2 produce-path generator emit fixes
+- [Phase 2e requests layout](phase2e_requests_layout.md) — wrapper trait shape choices: `&dyn Message`, `HashMap<Errors,_>`, no associated const
+- [Phase 2 review fixes](phase2_review_fixes.md) — patterns kept from Phase 2 review round (write_byte_buffer split, OnceLock api_key, ListenerType dedup)
+- [Phase 3a record base](phase3a_record_base.md) — record/ trait base layer summary, what's deferred to 3c/3d/5
+- [Phase 3a compression gap](phase3a_compression_dispatch_gap.md) — RESOLVED in Phase 3c (kept for history)
+- [Phase 3c compression](phase3c_compression.md) — compress/ module + dispatch wiring + ratio estimator: what landed, what's deferred
+- [Phase 3c snappy framing gap](phase3c_snappy_framing_gap.md) — `snap` crate emits RFC framing, not xerial — wire-incompat with Java brokers
+- [Phase 3b serializers](phase3b_serializers.md) — what landed/skipped/deferred for serialization module
+- [Phase 3b serializer design](phase3b_serializer_design.md) — dual `serialize`/`serialize_to` trait shape; Headers-overload omission rationale
+- [Phase 3b list serde gap](phase3b_list_serde_gap.md) — `ListSerializer` cross-process Java-FQN limitation, what we support vs defer
+- [Phase 3d-1 default_record](phase3d1_default_record.md) — DefaultRecord/PartialDefaultRecord landed; `increment_sequence` temporarily inlined, move to 3d-2 batch file
+- [Phase 3d-2 default_record_batch](phase3d2_default_record_batch.md) — DefaultRecordBatch + LogInputStream + RecordBatchIterator + RecordValidationStats; Vec<u8> storage with per-iter Bytes view
+- [Phase 3d-3 memory_records](phase3d3_memory_records.md) — MemoryRecords + UnalignedMemoryRecords (Bytes-backed, zero-copy slice) + RecordsSend state-core; `Records::records()` per-record alloc; `to_send()` on concrete impls only
+- [Phase 3d-4 builder](phase3d4_memory_records_builder.md) — MemoryRecordsBuilder + with_records factories; uncompressed path direct-write into bufferStream; close() moves Vec to satisfy strict zero-copy DoD
+- [Phase 3d-4 streaming codec](phase3d4_streaming_codec.md) — self-borrow pattern: Box the borrowee + 'static-erased writer + explicit Drop impl for "appendStream wraps bufferStream" Java idiom
+- [Phase 3e wire fixtures](phase3e_wire_fixtures.md) — Java-derived byte vectors + codec close-path fixes (gzip flush removal, zstd flush+finish chain)
+- [Phase 4a cluster data types](phase4a_cluster_data_types.md) — Arc<str> interning, null-topic empty-string substitution, Cluster shuffle/equality scope, bootstrap_with_hosts
+- [Phase 4b metadata stack](phase4b_metadata_stack.md) — single-mutex sync, retain-topic predicate via composition, await_update wall-clock deadline, KafkaError::StaleMetadata
+- [Phase 4b Round 2 patterns](phase4b_round2_patterns.md) — ArcSwap as `volatile Arc<T>`, listener-under-lock, "covered elsewhere" deferral trap, slice .len() vs iterator .count()
+- [Phase 4c client utils](phase4c_client_utils.md) — InetSocketAddress shim, sync HostResolver+spawn_blocking, file-level deferral rustdoc, ClientDnsLookup 2-variant truth
+- [Phase 5a network primitives](phase5a_network_primitives.md) — Send/Receive/TransferableChannel traits, ByteBufferSend zero-copy, Ok(0)≠EOF, AbstractRequestBuilder erasure
+- [Phase 5a review fixes](phase5a_review_fixes.md) — NetworkReceive `with_buffer` semantics + payload_pos field for zero-alloc fill; `try_with_timed_out` removal
+- [Phase 5b-1 transport layer](phase5b1_transport_layer.md) — TransportLayer trait + PlaintextTransportLayer + KafkaPrincipal; how SSL (5b-2) slots in
+- [Phase 5b-2 SSL transport](phase5b2_ssl_transport.md) — rustls low-level state machine, Tokio↔rustls adapter, handshake test harness gotchas
+- [Phase 5b-2 rustls bookkeeping](phase5b2_rustls_bookkeeping.md) — set_buffer_limit + IoState capture + IANA cipher-name mapping bridges where rustls defaults diverge from Java SSLEngine
+- [Phase 5b-3 kafka channel](phase5b3_kafka_channel.md) — KafkaChannel + ChannelBuilders trait shape; Authenticator stub design; pub-not-pub(crate) for sibling-Selector callers
+- [Phase 5b-3 review fixes](phase5b3_review_fixes.md) — lazy-lookup via trait method arg; mock partial-write cap; Java package-private → pub(crate)+#[allow(dead_code)]
+- [Phase 5c-1 connection state](phase5c1_connection_state.md) — i32 connection ids end-to-end, async-poll Selectable, Arc<NodeApiVersions> for the cache, SupportedVersionRange new module
+- [Tokio↔Java NIO read bridge](tokio_nio_read_bridge.md) — three-way `try_read` outcome translation; never collapse `WouldBlock` and `Ok(0)`/EOF
+- [Phase 5c-1 review fixes](phase5c1_review_fixes.md) — Java test-fixture parity, end-to-end i32 sibling consistency, pub(crate) + dead_code allow lint annotation pattern
+- [Phase 5c-2 Selector](phase5c2_selector.md) — single-task design + connect-task pattern + IdleExpiryManager LRU + EchoServer test harness
+- [Phase 5d NetworkClient](phase5d_network_client.md) — KafkaClient `&mut self` divergence, internal metadata response re-parse, AbstractRequest+Send/Sync trait change
+- [Phase 5d review fixes](phase5d_review_fixes.md) — MockTime jitter math, MetadataUpdater test mocks, KIP-511 same-poll re-dispatch
+- [Phase 6a patterns](phase6a_patterns.md) — Tokio-fair waiter pool, async-fn FutureRecordMetadata, identity-HashSet→pointer-keyed HashMap
+- [Phase 6a Round 1 patterns](phase6a_round1_patterns.md) — Cancellation-safe RAII Drop guard, `ByteBuffer.clear()` zero-fill audit, `#![allow(dead_code)]` per-file scope
+- [Phase 6b ProducerBatch](phase6b_producer_batch.md) — unsafe Send/Sync over Mutex<MutState>, OnceLock<FinalState>, panic::catch_unwind on user callbacks, zero-copy split path
+- [Phase 6b Round 1 patterns](phase6b_round1_patterns.md) — Vec<u8> ownership through Bytes::try_into_mut, initial_capacity snapshot, Java-binary bifurcation
+- [Phase 6b Round 2 patterns](phase6b_round2_patterns.md) — bifurcate `unsafe set_len` by origin (zero-init Vec vs fresh `to_vec()`), tail-zero assertion as soundness signal
+- [Phase 6c partitioners + interceptors](phase6c_partitioners_interceptors.md) — owned-record interceptor chain with K/V Clone, randomPartition virtual hook via Box<dyn Fn>, ArcSwapOption for volatile state
+- [Phase 6c Round 1 patterns](phase6c_round1_patterns.md) — type-level null elimination, ArithmeticException → panic per CLAUDE.md 10.1, original-input log parity, fast/slow-path coverage, Arc::ptr_eq for staged-state
+- [Phase 6d RecordAccumulator](phase6d_record_accumulator.md) — lock-then-await pattern, AppendCallbacks upcasting, KAFKA-19012 surrogate buffer, Outcome enum for drain
+- [Phase 6d Round 1 patterns](phase6d_round1_patterns.md) — interleaved-drain stress shape, leader-epoch test pattern, cancellation-guard test scaffolding, get_key_value Arc<str> reuse, checked_add overflow idiom, skip-rationale tightening rule
+- [Phase 6e Sender + MockClient subset](phase6e_sender.md) — Sender struct generic over KafkaClient, pending_responses by correlation_id (NOT via callback), ProduceRequestBuilder local to sender.rs, AbstractResponse::as_any, MockClientImpl subset
+- [Phase 6e Round 1 patterns](phase6e_round1_patterns.md) — Java instanceof→Rust enum-list audit, async catch_unwind via futures_util, MockClient panic injection, KIP-951 PartitionResponseRow, MockClient 3-tick disconnect→resend
+- [Phase 6e Round 2 patterns](phase6e_round2_patterns.md) — test-passes-for-wrong-reason fidelity check, current_thread starvation from sync mocks, sync-callback→async bridge via spawn+JoinHandle gather
+- [Always allow cd](feedback_cd_allowed.md) — `cd anywhere` is pre-approved; do not phrase commands defensively to avoid it
+- [Phase 7a config validators](phase7a_config_validators.md) — CaseInsensitive/NonEmpty/ValidList added; SSL/SASL helpers as ConfigDef methods delegating to free fns
+- [Phase 7a ProducerConfig](phase7a_producer_config.md) — post_processed overlay, i64-Range cast, post-process ordering for error-message parity, Milestone-1 deviations
+- [Phase 7a Round 1 patterns](phase7a_round1_patterns.md) — anchor-import smell, public/private DOC gradient, append-not-replace deviation notes, reachable-subset skip rationales
+- [Phase 7b Producer trait](phase7b_producer_trait.md) — async-fn-in-trait (NOT dyn-compat), Java Future-collapse for `send`, deferred consumer-package methods, KafkaError::UnsupportedOperation
+- [Phase 7c KafkaProducer skeleton](phase7c_kafka_producer.md) — deferred public ctor, +Send on poll futures, Drop for spawned task, StubKafkaClient test mock
+- [Phase 7c Round 1 patterns](phase7c_round1_patterns.md) — log-vs-tracing translation, peek-handle-before-drop for Drop-side-effect tests, log_unused already exists in AbstractConfig
+- [Phase 7d send hot path](phase7d_send_path.md) — wait_on_metadata + partition + AppendCallbacksImpl + impl Producer; sender_wakeup deferred; double-fire interceptor fix on catch path
+- [Phase 7d Round 1 patterns](phase7d_round1_patterns.md) — Java exception class hierarchy contract for catch-arm fan-out, is_api_exception classifier, Phase deferral warn pattern, ownership-as-readonly rustdoc
+- [Phase 7e public surface](phase7e_public_surface.md) — partitioner.class factory, Mutex<Option<JoinHandle>> for idempotent close, inline initiate_close, DefaultMetadataUpdater Phase 8 deferral
+- [Phase 7e Round 1 patterns](phase7e_round1_patterns.md) — select! over &mut JoinHandle for Java join() parity, external counter for termination-proof tests, FQCN-vs-simple-name test differentiation
+- [Phase 7f KafkaProducer tests](phase7f_kafkaproducer_tests.md) — pub(crate) tests-mod hoist for cross-module mock, Drop-as-CLOSE_COUNT, metadata.close production gap surfaced
+- [Phase 8.0 DefaultMetadataUpdater](phase8_0_default_metadata_updater.md) — Option<M> take/put-back + MetadataUpdaterContext callback trait + Metadata builder-factory injection
+- [Phase 8.0 KafkaProducer::new wiring](phase8_0_kafka_producer_new.md) — three-layer constructor (new -> with_serializers -> from_config); ApiVersions divergence + SSL deferral patterns
+- [Phase 8.0 Round 1 patterns](phase8_0_round1_patterns.md) — inner-class field-capture as struct field; trait-method-returns-Result for take/put-pattern callback holes; raw-pointer Drop guard for panic-safe take/put; ApiVersions-not-Clone caveat
+- [Phase 8a blocker + visibility](phase8a_blocker_and_visibility.md) — integration tests are downstream-crate not same-crate; ApiVersions wire blocker on first real-broker exchange; `pub` + `#[doc(hidden)]` cordon for Rust-visibility-forced types
+- [Phase 8a.0 first-broker wire debug](phase8a0_wire_debug.md) — wire bytes were correct; bug was Selector::poll missing OP_READ arm + has_send() check — and the debug recipe
+- [Phase 8a.0 Round 2 Notify wakeup](phase8a0_round2_notify_wakeup.md) — `tokio::sync::Notify` replaces no-op `sender_wakeup`; Selector owns the Notify, producer extracts handle pre-spawn
+- [Phase 7g two-phase send](phase7g_two_phase_send.md) — `Result<KafkaFuture<RecordMetadata>, _>` restores Java parity; `Arc<dyn KafkaFutureOps>` wrapper, one alloc/send
+- [Phase 8a.1 perf test re-enable](phase8a1_perf_test_reenable.md) — third `pub + #[doc(hidden)]` (`from_config`); `ProducerConfig::new` validator demands FQCN placeholders for required serializer keys; smoke-run gate ≠ compile gate
+- [Phase 8c byte fidelity](phase8c_byte_fidelity.md) — kafka-console-consumer harness gotchas (--formatter-property, key.separator not tab, exit=1 on timeout); clippy struct-rustdoc attachment trap
+- [Phase 9.0 SASL wire types](phase9_0_sasl_wire_types.md) — generator works out-of-box for SASL; flex-boundary fixture process; KafkaError::Authentication covers UnsupportedSaslMechanism; parse_response_body extended for keys 17+36; Debug-masking pattern
+- [Phase 9a SASL client state machine](phase9a_sasl_client_state_machine.md) — sync state-loop design, generator-level credential redaction (option a), channel-wiring deferred to 9b
+- [Phase 9b SASL channel wiring](phase9b_sasl_channel_wiring.md) — SaslAuthenticator trait + ChannelAuthenticator enum (BOTH, not one); PLAIN-only JAAS parser; sasl.username/password as fresh-impl extension; producer gate lift for SASL_PLAINTEXT
+- [Phase 9c SSL plumbing](phase9c_ssl_plumbing.md) — rustls ClientConfig from ProducerConfig; SNI via Selectable::connect(host); ChannelBuilder::build_channel_with_server_name trait-method-default; producer gate lift for SSL/SASL_SSL
+- [Phase 9c Round 1 patterns](phase9c_round1_patterns.md) — security-verifier direct unit tests via rcgen, "Java parity" vs documented-deviation framing, rustdoc rot in security code, substring vs assert_eq! policy
+- [Phase 9d SASL_PLAINTEXT integration](phase9d_sasl_plaintext_integration.md) — Java-runtime cross-verification narrative for hex fixtures; live-run uncovered producer-side connection-reuse regression (1st conn OK, 2nd times out)
+- [Phase 9d Round 2 selector filter](phase9d_round2_selector_filter.md) — Java NIO OP_READ is sticky from finishConnect onward; Tokio readability filter must check is_open+!is_muted, not ready()
+- [Phase 9e SASL_SSL integration](phase9e_sasl_ssl_integration.md) — combined TLS+SASL test; 9d Round 2 filter fix covers two sequential mid-channel phases by parity, validated live
+- [Phase 9f auth-failure integration](phase9f_auth_failure_integration.md) — wrong-password tests on both SASL listeners; broker-substring match preserved through KafkaError::Display prefix wrinkle
+- [Phase 9g Option A zero-change](phase9g_option_a_zero_change.md) — scope-resolved: both validator-time + broker-handshake scopes already pinned by 9b + 9a; close-stanza drift decision rule
+- [Phase 9h flakiness gate](phase9h_flakiness_gate.md) — 3-run integration matrix (10 tests, `producer_smoke_test::*`); cluster ID deterministic from image, NOT pool warm-reuse across `cargo test` invocations; closes Milestone-1
+- [Phase 9i CCloud wiring](phase9i_ccloud_wiring.md) — rustls-native-certs system-trust-store fallback (Java parity with `tmf.init(null)`) + skip-gated CCloud smoke test; post-Milestone-1 additive

@@ -12,140 +12,132 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A mutable ordered collection of record headers.
-//!
-//! Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
+//! Translation of `org.apache.kafka.common.header.internals.RecordHeaders`.
 
-use crate::common::header::internals::RecordHeader;
-use crate::common::header::{Header, Headers, IllegalStateError};
+use std::fmt;
 
-/// A mutable ordered collection of [`RecordHeader`] objects.
+use crate::common::header::Header;
+use crate::common::header::Headers;
+use crate::common::header::internals::record_header::RecordHeader;
+
+/// Errors returned by mutating methods on [`RecordHeaders`]. Mirrors Java's
+/// `IllegalStateException` for read-only headers.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecordHeadersError {
+    /// Mutating a `RecordHeaders` after `set_read_only()` has been called.
+    /// Mirrors `IllegalStateException("RecordHeaders has been closed.")`.
+    ReadOnly,
+}
+
+impl fmt::Display for RecordHeadersError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            RecordHeadersError::ReadOnly => f.write_str("RecordHeaders has been closed."),
+        }
+    }
+}
+
+impl std::error::Error for RecordHeadersError {}
+
+/// Mutable, ordered, multi-map of record headers. Mirrors Java's
+/// `RecordHeaders`.
 ///
-/// Note that multiple headers may have the same key. The order of headers
-/// is preserved in the order they were added.
+/// The underlying storage is a `Vec<RecordHeader>` because:
 ///
-/// Once [`set_read_only()`](RecordHeaders::set_read_only) is called, all
-/// mutating operations will return an error.
-///
-/// Corresponds to Java's `org.apache.kafka.common.header.internals.RecordHeaders`.
-#[derive(Clone, Debug)]
+/// 1. Header lists are typically small (under a dozen entries) so a linear
+///    scan is faster than a hash lookup.
+/// 2. Insertion order is part of the public contract (see Java's
+///    `Headers#add` rustdoc).
+/// 3. We need to support multiple entries per key (`headers(String)` returns
+///    every match in order).
+#[derive(Default, Clone)]
 pub struct RecordHeaders {
     headers: Vec<RecordHeader>,
     is_read_only: bool,
 }
 
 impl RecordHeaders {
-    /// Create an empty `RecordHeaders`.
+    /// Construct an empty `RecordHeaders`. Mirrors `new RecordHeaders()`.
     pub fn new() -> Self {
-        Self { headers: Vec::new(), is_read_only: false }
+        RecordHeaders::default()
     }
 
-    /// Create `RecordHeaders` from a slice of headers.
-    ///
-    /// # Panics
-    ///
-    /// This corresponds to the Java behavior where null entries in the array
-    /// cause a NullPointerException. In Rust, the Option type prevents null
-    /// headers so this is safe by construction.
-    pub fn from_slice(headers: &[RecordHeader]) -> Self {
-        Self { headers: headers.to_vec(), is_read_only: false }
+    /// Construct from an existing iterable of headers. Mirrors
+    /// `new RecordHeaders(Iterable<Header>)` and `new RecordHeaders(Header[])`.
+    /// Also available via the standard [`FromIterator`] trait.
+    pub fn from_headers<I: IntoIterator<Item = RecordHeader>>(iter: I) -> Self {
+        RecordHeaders { headers: iter.into_iter().collect(), is_read_only: false }
     }
 
-    /// Create `RecordHeaders` from headers.
-    pub fn from_headers(headers: impl IntoIterator<Item = RecordHeader>) -> Self {
-        Self { headers: headers.into_iter().collect(), is_read_only: false }
-    }
-
-    /// Create `RecordHeaders` by copying from another `RecordHeaders`.
-    ///
-    /// The new instance is writable regardless of the source's read-only state.
-    pub fn from_record_headers(other: &RecordHeaders) -> Self {
-        Self { headers: other.headers.clone(), is_read_only: false }
-    }
-
-    /// Set the headers to read-only mode.
-    ///
-    /// After calling this, all mutating operations will return an error.
+    /// Mark the headers as read-only. After this any mutation returns
+    /// [`RecordHeadersError::ReadOnly`]. Mirrors `setReadOnly()`.
     pub fn set_read_only(&mut self) {
         self.is_read_only = true;
     }
 
-    /// Returns whether the headers are in read-only mode.
+    /// True iff [`RecordHeaders::set_read_only`] has been called.
     pub fn is_read_only(&self) -> bool {
         self.is_read_only
     }
 
-    /// Check whether writing is allowed.
-    fn can_write(&self) -> Result<(), IllegalStateError> {
+    /// Iterate every header in insertion order. Mirrors `iterator()`.
+    pub fn iter(&self) -> std::slice::Iter<'_, RecordHeader> {
+        self.headers.iter()
+    }
+
+    /// Number of headers in the collection. Convenience getter (Java callers
+    /// use `toArray().length`).
+    pub fn len(&self) -> usize {
+        self.headers.len()
+    }
+
+    /// True iff there are no headers.
+    pub fn is_empty(&self) -> bool {
+        self.headers.is_empty()
+    }
+
+    fn check_writable(&self) -> Result<(), RecordHeadersError> {
         if self.is_read_only {
-            Err(IllegalStateError::new("RecordHeaders has been closed."))
+            Err(RecordHeadersError::ReadOnly)
         } else {
             Ok(())
         }
     }
 }
 
-impl Default for RecordHeaders {
-    fn default() -> Self {
-        Self::new()
+impl FromIterator<RecordHeader> for RecordHeaders {
+    fn from_iter<I: IntoIterator<Item = RecordHeader>>(iter: I) -> Self {
+        RecordHeaders::from_headers(iter)
     }
 }
 
 impl Headers for RecordHeaders {
-    fn add(&mut self, header: RecordHeader) -> Result<(), IllegalStateError> {
-        self.can_write()?;
+    fn add(&mut self, header: RecordHeader) -> Result<&mut Self, RecordHeadersError> {
+        self.check_writable()?;
         self.headers.push(header);
-        Ok(())
+        Ok(self)
     }
 
-    fn add_key_value(&mut self, key: &str, value: Option<&[u8]>) -> Result<(), IllegalStateError> {
-        self.add(RecordHeader::new(key.to_owned(), value.map(|v| v.to_vec())))
+    fn add_kv(&mut self, key: &str, value: Option<&[u8]>) -> Result<&mut Self, RecordHeadersError> {
+        self.add(RecordHeader::new(key, value))
     }
 
-    fn remove(&mut self, key: &str) -> Result<(), IllegalStateError> {
-        self.can_write()?;
+    fn remove(&mut self, key: &str) -> Result<&mut Self, RecordHeadersError> {
+        self.check_writable()?;
         self.headers.retain(|h| h.key() != key);
-        Ok(())
+        Ok(self)
     }
 
     fn last_header(&self, key: &str) -> Option<&RecordHeader> {
         self.headers.iter().rev().find(|h| h.key() == key)
     }
 
-    fn headers_for_key(&self, key: &str) -> Vec<&RecordHeader> {
-        self.headers.iter().filter(|h| h.key() == key).collect()
+    fn headers<'a>(&'a self, key: &'a str) -> Box<dyn Iterator<Item = &'a RecordHeader> + 'a> {
+        Box::new(self.headers.iter().filter(move |h| h.key() == key))
     }
 
-    fn to_array(&self) -> &[RecordHeader] {
-        &self.headers
-    }
-
-    fn iter(&self) -> std::slice::Iter<'_, RecordHeader> {
-        self.headers.iter()
-    }
-}
-
-impl PartialEq for RecordHeaders {
-    fn eq(&self, other: &Self) -> bool {
-        self.headers == other.headers
-    }
-}
-
-impl Eq for RecordHeaders {}
-
-impl std::hash::Hash for RecordHeaders {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.headers.hash(state);
-    }
-}
-
-impl std::fmt::Display for RecordHeaders {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "RecordHeaders(headers = {:?}, isReadOnly = {})",
-            self.headers, self.is_read_only
-        )
+    fn to_vec(&self) -> Vec<&RecordHeader> {
+        self.headers.iter().collect()
     }
 }
 
@@ -158,285 +150,219 @@ impl<'a> IntoIterator for &'a RecordHeaders {
     }
 }
 
-impl std::iter::FromIterator<RecordHeader> for RecordHeaders {
-    fn from_iter<I: IntoIterator<Item = RecordHeader>>(iter: I) -> Self {
-        Self { headers: iter.into_iter().collect(), is_read_only: false }
+impl PartialEq for RecordHeaders {
+    fn eq(&self, other: &Self) -> bool {
+        self.headers == other.headers
+    }
+}
+
+impl Eq for RecordHeaders {}
+
+impl fmt::Debug for RecordHeaders {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            f,
+            "RecordHeaders(headers = {:?}, isReadOnly = {})",
+            self.headers, self.is_read_only
+        )
     }
 }
 
 #[cfg(test)]
 mod tests {
+    // Translation of `RecordHeadersTest` (the parts that exercise
+    // `RecordHeaders` rather than `RecordHeader`). RecordHeader-specific
+    // tests live in the `record_header.rs` module.
+    //
+    // SKIPPED tests:
+    // * `testHeadersIteratorRemove` — Java exposes a mutable iterator that
+    //   throws `UnsupportedOperationException` on `remove()`. Rust's
+    //   `slice::Iter` is immutable, so this contract is enforced statically;
+    //   no runtime test is needed.
+    // * `shouldThrowNpeWhenAddingNullHeader` /
+    //   `shouldThrowNpeWhenAddingCollectionWithNullHeader` — Rust types
+    //   prevent `None`/null from being passed in the first place (the
+    //   signatures take `RecordHeader` and `IntoIterator<Item=RecordHeader>`,
+    //   not optional values).
+
     use super::*;
-    use crate::common::header::Header;
 
-    fn assert_header(key: &str, value: &str, actual: &RecordHeader) {
-        assert_eq!(key, actual.key());
-        assert_eq!(
-            Some(value.as_bytes()),
-            actual.value(),
-            "Header value mismatch for key '{}'",
-            key
-        );
+    fn h(key: &str, value: &[u8]) -> RecordHeader {
+        RecordHeader::new(key, Some(value))
     }
 
-    fn get_count(headers: &RecordHeaders) -> usize {
-        headers.to_array().len()
-    }
-
-    /// Corresponds to Java's testAdd.
+    /// Java: `testAdd`.
     #[test]
-    fn test_add() {
+    fn add_basic() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
+        let first = headers.iter().next().unwrap();
+        assert_eq!(first.key(), "key");
+        assert_eq!(first.value(), Some(b"value".as_slice()));
 
-        let header = headers.iter().next().unwrap();
-        assert_header("key", "value", header);
-
-        headers
-            .add(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
-
-        assert_header("key2", "value2", headers.last_header("key2").unwrap());
-        assert_eq!(2, get_count(&headers));
+        headers.add(h("key2", b"value2")).unwrap();
+        let last = headers.last_header("key2").unwrap();
+        assert_eq!(last.key(), "key2");
+        assert_eq!(last.value(), Some(b"value2".as_slice()));
+        assert_eq!(headers.len(), 2);
     }
 
-    /// Corresponds to Java's testAddHeadersPreserveOrder.
+    /// Java: `testAddHeadersPreserveOrder`.
     #[test]
-    fn test_add_headers_preserve_order() {
+    fn add_preserves_order() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
+        headers.add(h("key2", b"value2")).unwrap();
+        headers.add(h("key3", b"value3")).unwrap();
 
-        let headers_arr = headers.to_array();
-        assert_header("key", "value", &headers_arr[0]);
-        assert_header("key2", "value2", &headers_arr[1]);
-        assert_header("key3", "value3", &headers_arr[2]);
-
-        assert_eq!(3, get_count(&headers));
+        let arr = headers.to_vec();
+        assert_eq!(arr[0].key(), "key");
+        assert_eq!(arr[0].value(), Some(b"value".as_slice()));
+        assert_eq!(arr[1].key(), "key2");
+        assert_eq!(arr[1].value(), Some(b"value2".as_slice()));
+        assert_eq!(arr[2].key(), "key3");
+        assert_eq!(arr[2].value(), Some(b"value3".as_slice()));
+        assert_eq!(headers.len(), 3);
     }
 
-    /// Corresponds to Java's testRemove.
+    /// Java: `testRemove`.
     #[test]
-    fn test_remove() {
+    fn remove_basic() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-
+        headers.add(h("key", b"value")).unwrap();
         assert!(headers.iter().next().is_some());
-
         headers.remove("key").unwrap();
-
         assert!(headers.iter().next().is_none());
     }
 
-    /// Corresponds to Java's testPreserveOrderAfterRemove.
+    /// Java: `testPreserveOrderAfterRemove`.
     #[test]
-    fn test_preserve_order_after_remove() {
+    fn remove_preserves_order() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
+        headers.add(h("key2", b"value2")).unwrap();
+        headers.add(h("key3", b"value3")).unwrap();
 
         headers.remove("key").unwrap();
-        let headers_arr = headers.to_array();
-        assert_header("key2", "value2", &headers_arr[0]);
-        assert_header("key3", "value3", &headers_arr[1]);
-        assert_eq!(2, get_count(&headers));
+        let arr = headers.to_vec();
+        assert_eq!(arr[0].key(), "key2");
+        assert_eq!(arr[0].value(), Some(b"value2".as_slice()));
+        assert_eq!(arr[1].key(), "key3");
+        assert_eq!(arr[1].value(), Some(b"value3".as_slice()));
+        assert_eq!(headers.len(), 2);
 
-        headers
-            .add(RecordHeader::new("key4".to_string(), Some(b"value4".to_vec())))
-            .unwrap();
+        headers.add(h("key4", b"value4")).unwrap();
         headers.remove("key3").unwrap();
-        let headers_arr = headers.to_array();
-        assert_header("key2", "value2", &headers_arr[0]);
-        assert_header("key4", "value4", &headers_arr[1]);
-        assert_eq!(2, get_count(&headers));
+        let arr = headers.to_vec();
+        assert_eq!(arr[0].key(), "key2");
+        assert_eq!(arr[0].value(), Some(b"value2".as_slice()));
+        assert_eq!(arr[1].key(), "key4");
+        assert_eq!(arr[1].value(), Some(b"value4".as_slice()));
+        assert_eq!(headers.len(), 2);
     }
 
-    /// Corresponds to Java's testAddRemoveInterleaved.
+    /// Java: `testAddRemoveInterleaved`.
     #[test]
-    fn test_add_remove_interleaved() {
+    fn add_remove_interleaved() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key2".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
+        headers.add(h("key2", b"value2")).unwrap();
 
         assert!(headers.iter().next().is_some());
-
         headers.remove("key").unwrap();
+        assert_eq!(headers.len(), 1);
 
-        assert_eq!(1, get_count(&headers));
-
-        headers
-            .add(RecordHeader::new("key3".to_string(), Some(b"value3".to_vec())))
-            .unwrap();
-
+        headers.add(h("key3", b"value3")).unwrap();
         assert!(headers.last_header("key").is_none());
-
-        assert_header("key2", "value2", headers.last_header("key2").unwrap());
-
-        assert_header("key3", "value3", headers.last_header("key3").unwrap());
-
-        assert_eq!(2, get_count(&headers));
+        assert_eq!(headers.last_header("key2").unwrap().value(), Some(b"value2".as_slice()));
+        assert_eq!(headers.last_header("key3").unwrap().value(), Some(b"value3".as_slice()));
+        assert_eq!(headers.len(), 2);
 
         headers.remove("key2").unwrap();
-
         assert!(headers.last_header("key").is_none());
-
         assert!(headers.last_header("key2").is_none());
+        assert_eq!(headers.last_header("key3").unwrap().value(), Some(b"value3".as_slice()));
+        assert_eq!(headers.len(), 1);
 
-        assert_header("key3", "value3", headers.last_header("key3").unwrap());
+        headers.add(h("key3", b"value4")).unwrap();
+        assert_eq!(headers.last_header("key3").unwrap().value(), Some(b"value4".as_slice()));
+        assert_eq!(headers.len(), 2);
 
-        assert_eq!(1, get_count(&headers));
-
-        headers
-            .add(RecordHeader::new("key3".to_string(), Some(b"value4".to_vec())))
-            .unwrap();
-
-        assert_header("key3", "value4", headers.last_header("key3").unwrap());
-
-        assert_eq!(2, get_count(&headers));
-
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"valueNew".to_vec())))
-            .unwrap();
-
-        assert_eq!(3, get_count(&headers));
-
-        assert_header("key", "valueNew", headers.last_header("key").unwrap());
+        headers.add(h("key", b"valueNew")).unwrap();
+        assert_eq!(headers.len(), 3);
+        assert_eq!(headers.last_header("key").unwrap().value(), Some(b"valueNew".as_slice()));
 
         headers.remove("key3").unwrap();
-
-        assert_eq!(1, get_count(&headers));
-
+        assert_eq!(headers.len(), 1);
         assert!(headers.last_header("key2").is_none());
 
         headers.remove("key").unwrap();
-
         assert!(headers.iter().next().is_none());
     }
 
-    /// Corresponds to Java's testLastHeader.
+    /// Java: `testLastHeader`.
     #[test]
-    fn test_last_header() {
+    fn last_header_returns_most_recent() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value3".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
+        headers.add(h("key", b"value2")).unwrap();
+        headers.add(h("key", b"value3")).unwrap();
 
-        assert_header("key", "value3", headers.last_header("key").unwrap());
-        assert_eq!(3, get_count(&headers));
+        assert_eq!(headers.last_header("key").unwrap().value(), Some(b"value3".as_slice()));
+        assert_eq!(headers.len(), 3);
     }
 
-    /// Corresponds to Java's testReadOnly.
+    /// Java: `testReadOnly`.
     #[test]
-    fn test_read_only() {
+    fn read_only_blocks_mutations() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
         headers.set_read_only();
 
-        // Adding should fail
-        let result = headers.add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())));
-        assert!(result.is_err(), "Should fail as headers are closed.");
+        let err = headers.add(h("key", b"value")).unwrap_err();
+        assert_eq!(err, RecordHeadersError::ReadOnly);
 
-        // Removing should fail
-        let result = headers.remove("key");
-        assert!(result.is_err(), "Should fail as headers are closed.");
+        let err = headers.remove("key").unwrap_err();
+        assert_eq!(err, RecordHeadersError::ReadOnly);
     }
 
-    /// Corresponds to Java's testHeaders.
+    /// Java: `testHeaders`.
     #[test]
-    fn test_headers() {
+    fn headers_iterator_filters_by_key() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key1".to_string(), Some(b"key1value".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
-        headers
-            .add(RecordHeader::new("key2".to_string(), Some(b"key2value".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
+        headers.add(h("key1", b"key1value")).unwrap();
+        headers.add(h("key", b"value2")).unwrap();
+        headers.add(h("key2", b"key2value")).unwrap();
 
-        let key_headers = headers.headers_for_key("key");
-        assert_eq!(2, key_headers.len());
-        assert_header("key", "value", key_headers[0]);
-        assert_header("key", "value2", key_headers[1]);
+        let key_headers: Vec<_> = headers.headers("key").collect();
+        assert_eq!(key_headers.len(), 2);
+        assert_eq!(key_headers[0].value(), Some(b"value".as_slice()));
+        assert_eq!(key_headers[1].value(), Some(b"value2".as_slice()));
 
-        let key1_headers = headers.headers_for_key("key1");
-        assert_eq!(1, key1_headers.len());
-        assert_header("key1", "key1value", key1_headers[0]);
+        let key1_headers: Vec<_> = headers.headers("key1").collect();
+        assert_eq!(key1_headers.len(), 1);
+        assert_eq!(key1_headers[0].value(), Some(b"key1value".as_slice()));
 
-        let key2_headers = headers.headers_for_key("key2");
-        assert_eq!(1, key2_headers.len());
-        assert_header("key2", "key2value", key2_headers[0]);
+        let key2_headers: Vec<_> = headers.headers("key2").collect();
+        assert_eq!(key2_headers.len(), 1);
+        assert_eq!(key2_headers[0].value(), Some(b"key2value".as_slice()));
     }
 
-    /// Corresponds to Java's testNew.
+    /// Java: `testNew`.
     #[test]
-    fn test_new_from_existing() {
+    fn copy_construction_does_not_share_state() {
         let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
+        headers.add(h("key", b"value")).unwrap();
         headers.set_read_only();
 
-        let mut new_headers = RecordHeaders::from_record_headers(&headers);
-        new_headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value2".to_vec())))
-            .unwrap();
+        let mut new_headers: RecordHeaders = headers.iter().cloned().collect();
+        new_headers.add(h("key", b"value2")).unwrap();
 
-        // Ensure existing headers are not modified
-        assert_header("key", "value", headers.last_header("key").unwrap());
-        assert_eq!(1, get_count(&headers));
+        assert_eq!(headers.last_header("key").unwrap().value(), Some(b"value".as_slice()));
+        assert_eq!(headers.len(), 1);
 
-        // Ensure new headers are modified
-        assert_header("key", "value2", new_headers.last_header("key").unwrap());
-        assert_eq!(2, get_count(&new_headers));
-    }
-
-    /// Corresponds to Java's testHeadersIteratorRemove.
-    /// In Rust, iterators over slices do not support removal,
-    /// so this is inherently safe by the type system.
-    #[test]
-    fn test_headers_for_key_iterator_is_read_only() {
-        let mut headers = RecordHeaders::new();
-        headers
-            .add(RecordHeader::new("key".to_string(), Some(b"value".to_vec())))
-            .unwrap();
-
-        // headers_for_key returns Vec<&RecordHeader> which is inherently read-only
-        let key_headers = headers.headers_for_key("key");
-        assert_eq!(1, key_headers.len());
+        assert_eq!(new_headers.last_header("key").unwrap().value(), Some(b"value2".as_slice()));
+        assert_eq!(new_headers.len(), 2);
     }
 }

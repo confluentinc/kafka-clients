@@ -12,140 +12,154 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Channel state tracking for [`KafkaChannel`](super::kafka_channel::KafkaChannel).
-//!
-//! Translated from `org.apache.kafka.common.network.ChannelState`.
-//!
-//! States for KafkaChannel:
-//! - `NotConnected`: Connections are created in this state. State is updated on
-//!   `TransportLayer::finish_connect()` when socket connection is established.
-//!   PLAINTEXT channels transition from NotConnected to Ready, others transition
-//!   to Authenticate.
-//! - `Authenticate`: SSL, SASL_SSL and SASL_PLAINTEXT channels are in this state
-//!   during SSL and SASL handshake.
-//! - `Ready`: Connected, authenticated channels are in this state.
-//! - `Expired`: Idle connections are moved to this state on idle timeout.
-//! - `FailedSend`: Channels transition from Ready to FailedSend if closed due to
-//!   a send failure.
-//! - `AuthenticationFailed`: Channels are moved to this state if the requested SASL
-//!   mechanism is not enabled in the broker or when brokers provide an error response
-//!   during SASL authentication.
-//! - `LocalClose`: Channels are moved to this state if close() is initiated locally.
-//!
-//! Typical transitions:
-//! - PLAINTEXT Good path: NotConnected => Ready => LocalClose
-//! - SASL/SSL Good path: NotConnected => Authenticate => Ready => LocalClose
-//! - Bootstrap server misconfiguration: NotConnected, disconnected in NotConnected state
-//! - Security misconfiguration: NotConnected => Authenticate => AuthenticationFailed
+//! Translation of `org.apache.kafka.common.network.ChannelState`.
 
-use std::fmt;
+use crate::common::errors::KafkaError;
 
-/// The state enum for a Kafka channel.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum State {
-    /// Connections are created in this state.
+/// Inner state names for [`ChannelState`]. Mirrors the Java `ChannelState.State`
+/// enum.
+///
+/// State machine summary (from the Java javadoc):
+///   * `NotConnected` — created in this state. PLAINTEXT transitions to
+///     `Ready`; SSL/SASL transitions to `Authenticate`.
+///   * `Authenticate` — SSL handshake or SASL authentication in progress.
+///   * `Ready` — connected and authenticated; healthy.
+///   * `Expired` — moved here on idle timeout.
+///   * `FailedSend` — moved here on send-side failure from `Ready`.
+///   * `AuthenticationFailed` — moved here when SASL authentication is
+///     refused by the broker. The associated [`KafkaError::Authentication`]
+///     carries the failure reason.
+///   * `LocalClose` — moved here when `close()` is initiated locally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ChannelStateName {
     NotConnected,
-    /// SSL/SASL handshake in progress.
     Authenticate,
-    /// Connected and authenticated.
     Ready,
-    /// Idle connection expired.
     Expired,
-    /// Send failure.
     FailedSend,
-    /// Authentication failed.
     AuthenticationFailed,
-    /// Locally initiated close.
     LocalClose,
 }
 
-impl fmt::Display for State {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            State::NotConnected => write!(f, "NOT_CONNECTED"),
-            State::Authenticate => write!(f, "AUTHENTICATE"),
-            State::Ready => write!(f, "READY"),
-            State::Expired => write!(f, "EXPIRED"),
-            State::FailedSend => write!(f, "FAILED_SEND"),
-            State::AuthenticationFailed => write!(f, "AUTHENTICATION_FAILED"),
-            State::LocalClose => write!(f, "LOCAL_CLOSE"),
-        }
-    }
-}
-
-/// Channel state with optional error and remote address information.
+/// State of a [`crate::common::network::Send`]'s underlying channel.
+/// Mirrors the Java `ChannelState` value type.
 ///
-/// For `AuthenticationFailed`, the error message describes the failure reason.
-/// For other states, reusable constants are provided.
+/// Java uses six static singletons (`NOT_CONNECTED`, `AUTHENTICATE`,
+/// `READY`, `EXPIRED`, `FAILED_SEND`, `LOCAL_CLOSE`) plus a constructor
+/// path for `AUTHENTICATION_FAILED` that carries an
+/// `AuthenticationException`. We reproduce the same shape with
+/// constructors and the `not_connected()` / `ready()` / etc. constants.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChannelState {
-    state: State,
-    /// The error message, if any (used for authentication failures).
-    error: Option<String>,
-    /// The remote address string, if known.
+    state: ChannelStateName,
+    /// Set on `AuthenticationFailed`; `None` otherwise. Mirrors Java's
+    /// `AuthenticationException exception`.
+    exception: Option<KafkaError>,
     remote_address: Option<String>,
 }
 
 impl ChannelState {
-    /// Creates a new `ChannelState` with the given state, no error, and no remote address.
-    pub fn new(state: State) -> Self {
-        Self { state, error: None, remote_address: None }
+    /// Construct a `ChannelState` with no exception or remote address.
+    /// Mirrors `new ChannelState(State state)`.
+    pub fn new(state: ChannelStateName) -> Self {
+        ChannelState { state, exception: None, remote_address: None }
     }
 
-    /// Creates a new `ChannelState` with the given state and remote address.
-    pub fn with_remote_address(state: State, remote_address: &str) -> Self {
-        Self { state, error: None, remote_address: Some(remote_address.to_string()) }
+    /// Mirrors `new ChannelState(State state, String remoteAddress)`.
+    pub fn with_remote_address(state: ChannelStateName, remote_address: impl Into<String>) -> Self {
+        ChannelState { state, exception: None, remote_address: Some(remote_address.into()) }
     }
 
-    /// Creates a new `ChannelState` with the given state, error message, and remote address.
-    pub fn with_error(state: State, error: &str, remote_address: Option<&str>) -> Self {
-        Self {
-            state,
-            error: Some(error.to_string()),
-            remote_address: remote_address.map(|s| s.to_string()),
-        }
+    /// Mirrors `new ChannelState(State, AuthenticationException, String)`.
+    /// The exception is required to be an authentication failure.
+    pub fn with_exception(state: ChannelStateName, exception: KafkaError, remote_address: Option<String>) -> Self {
+        ChannelState { state, exception: Some(exception), remote_address }
     }
 
-    /// Returns the state.
-    pub fn state(&self) -> State {
+    /// Mirrors `ChannelState.NOT_CONNECTED`.
+    pub fn not_connected() -> Self {
+        Self::new(ChannelStateName::NotConnected)
+    }
+
+    /// Mirrors `ChannelState.AUTHENTICATE`.
+    pub fn authenticate() -> Self {
+        Self::new(ChannelStateName::Authenticate)
+    }
+
+    /// Mirrors `ChannelState.READY`.
+    pub fn ready() -> Self {
+        Self::new(ChannelStateName::Ready)
+    }
+
+    /// Mirrors `ChannelState.EXPIRED`.
+    pub fn expired() -> Self {
+        Self::new(ChannelStateName::Expired)
+    }
+
+    /// Mirrors `ChannelState.FAILED_SEND`.
+    pub fn failed_send() -> Self {
+        Self::new(ChannelStateName::FailedSend)
+    }
+
+    /// Mirrors `ChannelState.LOCAL_CLOSE`.
+    pub fn local_close() -> Self {
+        Self::new(ChannelStateName::LocalClose)
+    }
+
+    /// Mirrors `ChannelState.state()`.
+    pub fn state(&self) -> ChannelStateName {
         self.state
     }
 
-    /// Returns the error message, if any.
-    pub fn error(&self) -> Option<&str> {
-        self.error.as_deref()
+    /// Mirrors `ChannelState.exception()`.
+    pub fn exception(&self) -> Option<&KafkaError> {
+        self.exception.as_ref()
     }
 
-    /// Returns the remote address, if known.
+    /// Mirrors `ChannelState.remoteAddress()`.
     pub fn remote_address(&self) -> Option<&str> {
         self.remote_address.as_deref()
     }
 }
 
-// Reusable constants for common states (matching Java's static final fields)
+#[cfg(test)]
+mod tests {
+    use super::*;
 
-/// Not connected state.
-pub const NOT_CONNECTED: ChannelState = ChannelState { state: State::NotConnected, error: None, remote_address: None };
-/// Authenticate state.
-pub const AUTHENTICATE: ChannelState = ChannelState { state: State::Authenticate, error: None, remote_address: None };
-/// Ready state.
-pub const READY: ChannelState = ChannelState { state: State::Ready, error: None, remote_address: None };
-/// Expired state.
-pub const EXPIRED: ChannelState = ChannelState { state: State::Expired, error: None, remote_address: None };
-/// Failed send state.
-pub const FAILED_SEND: ChannelState = ChannelState { state: State::FailedSend, error: None, remote_address: None };
-/// Local close state.
-pub const LOCAL_CLOSE: ChannelState = ChannelState { state: State::LocalClose, error: None, remote_address: None };
+    #[test]
+    fn singleton_constructors_carry_state() {
+        assert_eq!(ChannelState::not_connected().state(), ChannelStateName::NotConnected);
+        assert_eq!(ChannelState::authenticate().state(), ChannelStateName::Authenticate);
+        assert_eq!(ChannelState::ready().state(), ChannelStateName::Ready);
+        assert_eq!(ChannelState::expired().state(), ChannelStateName::Expired);
+        assert_eq!(ChannelState::failed_send().state(), ChannelStateName::FailedSend);
+        assert_eq!(ChannelState::local_close().state(), ChannelStateName::LocalClose);
+    }
 
-impl fmt::Display for ChannelState {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "ChannelState(state={}", self.state)?;
-        if let Some(ref err) = self.error {
-            write!(f, ", error={err}")?;
-        }
-        if let Some(ref addr) = self.remote_address {
-            write!(f, ", remoteAddress={addr}")?;
-        }
-        write!(f, ")")
+    #[test]
+    fn no_exception_or_address_by_default() {
+        let s = ChannelState::ready();
+        assert!(s.exception().is_none());
+        assert!(s.remote_address().is_none());
+    }
+
+    #[test]
+    fn with_remote_address_stores_address() {
+        let s = ChannelState::with_remote_address(ChannelStateName::NotConnected, "127.0.0.1:9092");
+        assert_eq!(s.remote_address(), Some("127.0.0.1:9092"));
+        assert!(s.exception().is_none());
+    }
+
+    #[test]
+    fn with_exception_stores_authentication_failure() {
+        let err = KafkaError::Authentication("invalid credentials".into());
+        let s = ChannelState::with_exception(
+            ChannelStateName::AuthenticationFailed,
+            err.clone(),
+            Some("127.0.0.1:9092".to_owned()),
+        );
+        assert_eq!(s.state(), ChannelStateName::AuthenticationFailed);
+        assert_eq!(s.exception(), Some(&err));
+        assert_eq!(s.remote_address(), Some("127.0.0.1:9092"));
     }
 }

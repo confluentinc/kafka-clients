@@ -12,134 +12,194 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A Kafka connection channel with transport, authentication, and I/O.
+//! Translation of `org.apache.kafka.common.network.KafkaChannel`.
 //!
-//! Translated from `org.apache.kafka.common.network.KafkaChannel`.
+//! Phase 5b-3 ships the producer-relevant subset:
 //!
-//! Each instance has:
-//! - A unique ID identifying it in the `Selector`
-//! - A reference to the underlying [`TransportLayer`] for reading and writing
-//! - An [`Authenticator`] that performs authentication
-//! - A [`NetworkReceive`] representing the current in-progress receive, if any
-//! - A [`NetworkSend`] representing the current in-progress send, if any
-//! - A [`ChannelMuteState`] to document if the channel has been muted
+//! * `setSend` / `write` / `maybeCompleteSend` — write path.
+//! * `read` / `currentReceive` / `maybeCompleteReceive` — read path.
+//! * `prepare` / `ready` / `finishConnect` / `disconnect` / `close` —
+//!   lifecycle.
+//! * `mute` / `maybeUnmute` / `handleChannelMuteEvent` / `muteState` —
+//!   mute state machine. The server-only `MUTED_AND_*` transitions are
+//!   carried verbatim so the state machine matches Java byte-for-byte;
+//!   the producer never originates the events that drive those
+//!   transitions.
+//!
+//! Server-only and re-authentication paths are deferred:
+//! `maybeBeginServerReauthentication`, `maybeBeginClientReauthentication`,
+//! `serverAuthenticationSessionExpired`, `reauthenticationLatencyMs`,
+//! `pollResponseReceivedDuringReauthentication`,
+//! `connectedClientSupportsReauthentication`,
+//! `swapAuthenticatorsAndBeginReauthentication`,
+//! `maybeAddWriteInterestAfterReauth`. They land with SASL in Phase 9.
+//!
+//! `MemoryPool` is also deferred — Phase 5a's `NetworkReceive` allocates
+//! its payload buffer eagerly, sized to the parsed length-prefix. The
+//! [`KafkaChannel::is_in_mutable_state`] check below collapses to "is
+//! the receive in-progress and the transport ready"; it never reports
+//! "out of memory" because there is no pool.
 
-use super::Authenticator;
-use super::ChannelMetadataRegistry;
-use super::KafkaSend;
-use super::NetworkReceive;
-use super::NetworkSend;
-use super::Receive;
-use super::channel_state::State;
-use super::{ChannelState, channel_state};
-use super::{InterestOps, TransportLayer};
-
-use std::future::Future;
 use std::io;
-use std::net::SocketAddr;
-use std::pin::Pin;
+use std::net::{IpAddr, SocketAddr};
+use std::sync::Arc;
 
-/// Minimum interval between re-authentication attempts: 1 second in nanoseconds.
-const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: u64 = 1_000_000_000;
+use crate::common::errors::KafkaError;
+use crate::common::network::authenticator::ChannelAuthenticator;
+use crate::common::network::transport_layer::{OP_READ, OP_WRITE};
+use crate::common::network::{
+    ChannelMetadataRegistry, ChannelState, ChannelStateName, NetworkReceive, NetworkSend, Receive, Send as KafkaSend,
+    TransportLayer,
+};
+use crate::common::security::auth::KafkaPrincipal;
 
-/// Mute states for KafkaChannel.
+/// Mute states for [`KafkaChannel`]. Mirrors the Java
+/// `KafkaChannel.ChannelMuteState` enum exactly.
 ///
-/// - `NotMuted`: Channel is not muted. This is the default state.
-/// - `Muted`: Channel is muted. Channel must be in this state to be unmuted.
-/// - `MutedAndResponsePending`: (SocketServer only) Channel is muted and a response
-///   has not been sent back to the client yet.
-/// - `MutedAndThrottled`: (SocketServer only) Channel is muted and throttling is in
-///   progress due to quota violation.
-/// - `MutedAndThrottledAndResponsePending`: (SocketServer only) Channel is muted,
-///   throttling is in progress, and a response is pending.
+/// * `NotMuted` — channel is not muted (default state).
+/// * `Muted` — channel is muted; only this state can transition out via
+///   [`KafkaChannel::maybe_unmute`].
+/// * `MutedAndResponsePending` — server-only: channel is muted and
+///   `SocketServer` has not sent a response back to the client yet.
+/// * `MutedAndThrottled` — server-only: channel is muted and throttling
+///   is in progress due to quota violation.
+/// * `MutedAndThrottledAndResponsePending` — server-only: channel is
+///   muted, throttling is in progress, and a response is currently
+///   pending.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelMuteState {
-    /// Channel is not muted.
     NotMuted,
-    /// Channel is muted.
     Muted,
-    /// Muted with response pending.
     MutedAndResponsePending,
-    /// Muted and throttled.
     MutedAndThrottled,
-    /// Muted, throttled, and response pending.
     MutedAndThrottledAndResponsePending,
 }
 
-/// Socket server events that change the mute state.
-///
-/// Valid transitions:
-/// - `RequestReceived`: `Muted` => `MutedAndResponsePending`
-/// - `ResponseSent`: `MutedAndResponsePending` => `Muted`,
-///   `MutedAndThrottledAndResponsePending` => `MutedAndThrottled`
-/// - `ThrottleStarted`: `MutedAndResponsePending` => `MutedAndThrottledAndResponsePending`
-/// - `ThrottleEnded`: `MutedAndThrottled` => `Muted`,
-///   `MutedAndThrottledAndResponsePending` => `MutedAndResponsePending`
+/// Events that drive the [`ChannelMuteState`] transitions. Mirrors the
+/// Java `KafkaChannel.ChannelMuteEvent` enum.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ChannelMuteEvent {
-    /// A request has been received from the client.
     RequestReceived,
-    /// A response has been sent out to the client.
     ResponseSent,
-    /// Throttling started due to quota violation.
     ThrottleStarted,
-    /// Throttling ended.
     ThrottleEnded,
 }
 
-/// A Kafka connection channel with transport, authentication, and I/O.
+impl ChannelMuteEvent {
+    /// Mirrors Java's `Enum.name()` on the `ChannelMuteEvent`. Used for
+    /// the `IllegalStateException` message in
+    /// [`KafkaChannel::handle_channel_mute_event`].
+    pub fn name(self) -> &'static str {
+        match self {
+            ChannelMuteEvent::RequestReceived => "REQUEST_RECEIVED",
+            ChannelMuteEvent::ResponseSent => "RESPONSE_SENT",
+            ChannelMuteEvent::ThrottleStarted => "THROTTLE_STARTED",
+            ChannelMuteEvent::ThrottleEnded => "THROTTLE_ENDED",
+        }
+    }
+}
+
+impl ChannelMuteState {
+    /// Mirrors Java's `Enum.name()` on the `ChannelMuteState`. Used for
+    /// the `IllegalStateException` message in
+    /// [`KafkaChannel::handle_channel_mute_event`].
+    pub fn name(self) -> &'static str {
+        match self {
+            ChannelMuteState::NotMuted => "NOT_MUTED",
+            ChannelMuteState::Muted => "MUTED",
+            ChannelMuteState::MutedAndResponsePending => "MUTED_AND_RESPONSE_PENDING",
+            ChannelMuteState::MutedAndThrottled => "MUTED_AND_THROTTLED",
+            ChannelMuteState::MutedAndThrottledAndResponsePending => "MUTED_AND_THROTTLED_AND_RESPONSE_PENDING",
+        }
+    }
+}
+
+/// Owned trait object alias for the transport layer the channel uses.
+/// `Send` is required so a `KafkaChannel` can be moved between Tokio
+/// tasks (Phase 5c will park each channel on its own read/write task).
+/// `Sync` is required so [`Selector::poll`] can hold
+/// `&(dyn TransportLayer + Sync)` references across an `.await` point
+/// (Phase 8a.0 readiness-notification arm). Both production
+/// transports (`PlaintextTransportLayer`, `SslTransportLayer`) are
+/// already `Sync` — adding the bound here just makes the constraint
+/// explicit at the type-alias level.
+pub type BoxedTransport = Box<dyn TransportLayer + std::marker::Send + std::marker::Sync>;
+
+/// The channel's authenticator. Phase 9b introduced a
+/// [`ChannelAuthenticator`] enum that wraps either a non-SASL
+/// [`crate::common::network::authenticator::Authenticator`] (Plaintext
+/// / SSL) or a SASL
+/// [`crate::common::network::authenticator::SaslAuthenticator`]. The
+/// alias is kept (instead of using the enum name directly throughout)
+/// to minimise churn at the call sites that already use
+/// `BoxedAuthenticator`.
+pub type BoxedAuthenticator = ChannelAuthenticator;
+
+/// Owned trait object alias for the metadata registry. `Send` so the
+/// channel can move tasks; the registry mutates on the same task that
+/// drives the channel so no `Sync` is required.
+pub type BoxedMetadataRegistry = Box<dyn ChannelMetadataRegistry + std::marker::Send>;
+
+/// A Kafka connection bridging the [`TransportLayer`] (raw bytes) to the
+/// [`Receive`]/[`KafkaSend`] traits (request/response framing). Mirrors
+/// the Java [`KafkaChannel`].
 ///
-/// Translated from `org.apache.kafka.common.network.KafkaChannel`.
+/// The channel owns the transport, an authenticator, an in-progress
+/// [`NetworkReceive`] and [`NetworkSend`], the mute-state machine, and
+/// the [`ChannelState`] used by upper-layer disconnect handling.
 ///
-/// Key differences from Java:
-/// - `selectionKey()` eliminated — Selector uses `HashMap<String, KafkaChannel>` keyed by ID
-/// - `read()`, `write()`, `prepare()`, `finish_connect()`, `close()` are `async fn`
-/// - No `MemoryPool` parameter on `NetworkReceive` creation (pooling deferred)
+/// Re-authentication state is deferred to Phase 9 — see the module
+/// docstring for the per-method deferral matrix.
 pub struct KafkaChannel {
-    /// Unique channel identifier.
-    id: String,
-    /// The underlying transport layer.
-    transport_layer: Box<dyn TransportLayer>,
-    /// The authenticator for this channel.
-    authenticator: Box<dyn Authenticator>,
-    /// Maximum receive size in bytes.
+    /// Connection id. Java uses `String`; Rust uses `Arc<str>` so per-
+    /// message clones (e.g. when constructing a [`NetworkSend`] tagged
+    /// with this id) are cheap. CLAUDE.md rule 11.
+    id: Arc<str>,
+    transport_layer: BoxedTransport,
+    authenticator: BoxedAuthenticator,
+    /// Maximum size of a single receive buffer to allocate. Mirrors
+    /// Java's `maxReceiveSize`. Used when constructing the in-progress
+    /// [`NetworkReceive`] on the first call to [`Self::read`].
     max_receive_size: i32,
-    /// Channel metadata registry.
-    metadata_registry: Box<dyn ChannelMetadataRegistry>,
-    /// Current in-progress receive, if any.
+    metadata_registry: BoxedMetadataRegistry,
+    /// In-progress receive (None when no receive is being built).
     receive: Option<NetworkReceive>,
-    /// Current in-progress send, if any.
+    /// In-progress send (None when no send is queued).
     send: Option<NetworkSend>,
-    /// Whether the channel has been disconnected.
+    /// Track connection and mute state of channels to enable outstanding
+    /// requests on channels to be processed after the channel is
+    /// disconnected.
     disconnected: bool,
-    /// Current mute state.
     mute_state: ChannelMuteState,
-    /// Current channel state.
     state: ChannelState,
-    /// Remote address, captured before finishConnect.
+    /// Last-known peer address — captured by [`Self::finish_connect`]
+    /// before the underlying socket can become disconnected (refused
+    /// connections, half-closes). Used by [`Self::disconnect`] to enrich
+    /// the [`ChannelState`] returned to the upper layer.
     remote_address: Option<SocketAddr>,
-    /// Number of successful authentications.
-    successful_authentications: u32,
-    /// Whether a write is mid-progress.
+    /// True iff a [`Self::write`] call has happened since the last
+    /// [`Self::set_send`]. Mirrors Java's `midWrite` flag, used by the
+    /// (Phase-9-deferred) client-side reauthentication path to refuse
+    /// re-authentication mid-write.
     mid_write: bool,
-    /// Accumulated network thread time in nanoseconds.
-    network_thread_time_nanos: u64,
-    /// Time of last re-authentication start in nanoseconds.
-    last_reauthentication_start_nanos: u64,
 }
 
 impl KafkaChannel {
-    /// Creates a new `KafkaChannel` with the given ID, transport layer, authenticator,
-    /// maximum receive size, and metadata registry.
+    /// Construct a `KafkaChannel`. Mirrors Java's
+    /// `new KafkaChannel(id, transportLayer, authenticatorCreator,
+    /// maxReceiveSize, memoryPool, metadataRegistry)` minus the
+    /// `Supplier<Authenticator>` (the producer side never re-creates an
+    /// authenticator since re-authentication is deferred to Phase 9)
+    /// and the `MemoryPool` (deferred — see the module docstring).
     pub fn new(
-        id: &str,
-        transport_layer: Box<dyn TransportLayer>,
-        authenticator: Box<dyn Authenticator>,
+        id: Arc<str>,
+        transport_layer: BoxedTransport,
+        authenticator: BoxedAuthenticator,
         max_receive_size: i32,
-        metadata_registry: Box<dyn ChannelMetadataRegistry>,
+        metadata_registry: BoxedMetadataRegistry,
     ) -> Self {
-        Self {
-            id: id.to_string(),
+        KafkaChannel {
+            id,
             transport_layer,
             authenticator,
             max_receive_size,
@@ -148,156 +208,219 @@ impl KafkaChannel {
             send: None,
             disconnected: false,
             mute_state: ChannelMuteState::NotMuted,
-            state: channel_state::NOT_CONNECTED.clone(),
+            state: ChannelState::not_connected(),
             remote_address: None,
-            successful_authentications: 0,
             mid_write: false,
-            network_thread_time_nanos: 0,
-            last_reauthentication_start_nanos: 0,
         }
     }
 
-    /// Closes the channel.
-    pub async fn close(&mut self) -> io::Result<()> {
+    /// Close the channel, releasing all owned resources. Mirrors Java's
+    /// `close()` (the `AutoCloseable` impl). Java calls `Utils.closeAll`
+    /// which best-effort-closes every resource even on intermediate
+    /// errors; we mirror by capturing the first error and continuing.
+    pub fn close(&mut self) -> io::Result<()> {
         self.disconnected = true;
-        // Close transport layer
-        let transport_result = self.transport_layer.close().await;
-        // Close authenticator
-        self.authenticator.close();
-        // Close metadata registry
+        let mut first_err: Option<io::Error> = None;
+        if let Err(e) = self.transport_layer.close() {
+            first_err.get_or_insert(e);
+        }
+        if let Err(e) = self.authenticator.close() {
+            first_err.get_or_insert(e);
+        }
+        if let Some(receive) = self.receive.as_mut()
+            && let Err(e) = receive.close()
+        {
+            first_err.get_or_insert(e);
+        }
+        // metadata_registry.close() is infallible (Java returns void).
         self.metadata_registry.close();
-        transport_result
+        match first_err {
+            Some(e) => Err(e),
+            None => Ok(()),
+        }
     }
 
-    /// Does handshake of transport layer and authentication using configured authenticator.
-    ///
-    /// For SSL with client authentication enabled, `TransportLayer::handshake()` performs
-    /// authentication. For SASL, authentication is performed by `Authenticator::authenticate()`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the handshake or authentication fails.
-    pub async fn prepare(&mut self) -> io::Result<()> {
+    /// Returns the principal returned by `authenticator.principal()`.
+    /// Mirrors Java's `principal()` — the lookup is lazy, mirroring
+    /// Java's `SslAuthenticator` re-reading `transportLayer.sslSession()`
+    /// on every call. The owning channel forwards its transport
+    /// reference into the authenticator so SSL impls can read the
+    /// post-handshake peer certificate without holding the transport
+    /// themselves.
+    pub fn principal(&self) -> KafkaPrincipal {
+        self.authenticator.principal(self.transport_layer.as_ref())
+    }
+
+    /// Drives the transport handshake and authentication. Mirrors Java's
+    /// `prepare()`. Returns `Err(KafkaError::Authentication)` when the
+    /// handshake or authentication fails.
+    pub fn prepare(&mut self) -> Result<(), KafkaError> {
         let mut authenticating = false;
-        let result: io::Result<()> = async {
-            if !self.transport_layer.ready() {
-                self.transport_layer.handshake().await?;
+        // Borrow-checker note: the closure can't borrow `self` for the
+        // transport AND `self.authenticator` simultaneously. We split
+        // the field borrows manually.
+        let transport = self.transport_layer.as_mut();
+        let authenticator = &mut self.authenticator;
+        let result: io::Result<()> = (|| {
+            if !transport.ready() {
+                transport.handshake()?;
             }
-            if self.transport_layer.ready() && !self.authenticator.complete() {
+            if transport.ready() && !authenticator.complete() {
                 authenticating = true;
-                let auth = &mut *self.authenticator;
-                let transport = &mut *self.transport_layer;
-                auth.authenticate(transport).await?;
+                authenticator.authenticate(transport)?;
             }
             Ok(())
-        }
-        .await;
+        })();
 
         if let Err(e) = result {
-            let remote_desc = self.remote_address.map(|a| a.to_string());
-            self.state = ChannelState::with_error(State::AuthenticationFailed, &e.to_string(), remote_desc.as_deref());
-            if authenticating {
-                self.delay_close_on_authentication_failure();
+            // Mirror Java: an `AuthenticationException` is captured into
+            // the channel state so the upper layer can surface the
+            // failure without a retry. Other I/O errors are re-thrown
+            // unchanged so the Selector can disconnect the channel.
+            let remote_desc = self.remote_address.as_ref().map(|a| a.to_string());
+            // We classify errors by content because the Phase 5b SSL
+            // handshake surfaces `SslAuthenticationException` as
+            // `io::Error::other(KafkaError::Authentication(...))`; the
+            // plaintext and connect-time errors come through as the
+            // raw `io::Error`. Java distinguishes via Java exception
+            // hierarchy.
+            let is_auth = matches!(
+                e.get_ref().and_then(|inner| inner.downcast_ref::<KafkaError>()),
+                Some(KafkaError::Authentication(_))
+            );
+            let msg = e.to_string();
+            if is_auth {
+                self.state = ChannelState::with_exception(
+                    ChannelStateName::AuthenticationFailed,
+                    KafkaError::Authentication(msg.clone()),
+                    remote_desc,
+                );
+                if authenticating {
+                    self.delay_close_on_authentication_failure();
+                }
+                return Err(KafkaError::Authentication(msg));
             }
-            return Err(e);
+            // Non-authentication error: surface as a Network error
+            // (Java's `IOException` subtypes that are not
+            // `AuthenticationException`).
+            return Err(KafkaError::Network(msg));
         }
-
         if self.ready() {
-            self.successful_authentications += 1;
-            self.state = channel_state::READY.clone();
+            self.state = ChannelState::ready();
         }
         Ok(())
     }
 
-    /// Disconnects the channel.
+    /// Mark the channel as disconnected. Mirrors Java's `disconnect()`:
+    /// flips the `disconnected` flag, enriches the channel state with
+    /// the captured remote address (if any), and disconnects the
+    /// underlying transport.
     pub fn disconnect(&mut self) {
         self.disconnected = true;
-        if self.state == channel_state::NOT_CONNECTED
-            && let Some(addr) = &self.remote_address
+        if self.state.state() == ChannelStateName::NotConnected
+            && let Some(addr) = self.remote_address.as_ref()
         {
-            // If we captured the remote address we can provide more information
-            self.state = ChannelState::with_remote_address(State::NotConnected, &addr.to_string());
+            self.state = ChannelState::with_remote_address(ChannelStateName::NotConnected, addr.to_string());
         }
         self.transport_layer.disconnect();
     }
 
-    /// Sets the channel state.
+    /// Override the channel state. Mirrors Java's `state(ChannelState)`.
     pub fn set_state(&mut self, state: ChannelState) {
         self.state = state;
     }
 
-    /// Returns the channel state.
+    /// Borrow the channel's current [`ChannelState`]. Mirrors Java's
+    /// `state()` getter.
     pub fn state(&self) -> &ChannelState {
         &self.state
     }
 
-    /// Finishes the connection process.
-    ///
-    /// Captures the remote address before `finish_connect()` is called, since it
-    /// becomes inaccessible if the connection was refused.
-    pub async fn finish_connect(&mut self) -> io::Result<bool> {
-        // Grab remote address before finishConnect() — it becomes
-        // inaccessible if the connection was refused.
-        if let Ok(addr) = self.transport_layer.peer_addr() {
+    /// Finish the connect process on the underlying transport. Mirrors
+    /// Java's `finishConnect()`. Returns `true` once the underlying
+    /// transport reports the connect is complete.
+    pub fn finish_connect(&mut self) -> io::Result<bool> {
+        // Capture the remote address before `finishConnect` runs — Java
+        // calls `socketChannel.getRemoteAddress()` before the connect
+        // completes so a refused connection still records who we tried
+        // to reach. The Tokio transport surfaces `peer_addr()` only
+        // after the connect is complete, so we capture lazily and
+        // ignore failures (the address is best-effort metadata).
+        if self.remote_address.is_none()
+            && let Ok(addr) = self.transport_layer.peer_addr()
+        {
             self.remote_address = Some(addr);
         }
-
-        let connected = self.transport_layer.finish_connect().await?;
+        let connected = self.transport_layer.finish_connect()?;
         if connected {
             if self.ready() {
-                self.state = channel_state::READY.clone();
-            } else if let Some(addr) = self.remote_address {
-                self.state = ChannelState::with_remote_address(State::Authenticate, &addr.to_string());
+                self.state = ChannelState::ready();
+            } else if let Some(addr) = self.remote_address.as_ref() {
+                self.state = ChannelState::with_remote_address(ChannelStateName::Authenticate, addr.to_string());
             } else {
-                self.state = channel_state::AUTHENTICATE.clone();
+                self.state = ChannelState::authenticate();
             }
         }
         Ok(connected)
     }
 
-    /// Returns `true` if the underlying transport is connected.
+    /// Returns `true` if the underlying transport reports a connected
+    /// socket. Mirrors Java's `isConnected()`.
     pub fn is_connected(&self) -> bool {
         self.transport_layer.is_connected()
     }
 
-    /// Returns the channel ID.
+    /// Channel id. Mirrors Java's `id()`.
     pub fn id(&self) -> &str {
         &self.id
     }
 
-    /// Externally muting a channel should be done via selector to ensure proper
-    /// state handling.
+    /// Channel id as a clone of the underlying [`Arc<str>`]. Cheap
+    /// (atomic refcount bump) — used when the caller needs to outlive
+    /// the borrow.
+    pub fn id_arc(&self) -> Arc<str> {
+        Arc::clone(&self.id)
+    }
+
+    /// Externally muting a channel should be done via the Selector to
+    /// ensure proper state handling. Mirrors Java's package-private
+    /// `mute()`. `pub(crate)` matches Java's package-private boundary —
+    /// the Phase 5c `Selector` (sibling module in the same crate) drives
+    /// this on the muted-channel re-tick path; downstream consumers
+    /// outside the crate must not call it. `dead_code` is allowed
+    /// because no in-crate caller exists until Phase 5c lands.
+    #[allow(dead_code)]
     pub(crate) fn mute(&mut self) {
         if self.mute_state == ChannelMuteState::NotMuted {
             if !self.disconnected {
-                self.transport_layer.remove_interest_ops(InterestOps::OP_READ);
+                self.transport_layer.remove_interest_ops(OP_READ);
             }
             self.mute_state = ChannelMuteState::Muted;
         }
     }
 
-    /// Unmute the channel. The channel can be unmuted only if it is in the `Muted` state.
-    /// For other muted states (`MutedAnd*`), this is a no-op.
-    ///
-    /// Returns `true` if the channel is in the `NotMuted` state after the call.
+    /// Unmute the channel. The channel can be unmuted only if it is in
+    /// the [`ChannelMuteState::Muted`] state. For other muted states
+    /// (`MutedAnd*`), this is a no-op. Returns whether the channel is
+    /// in the [`ChannelMuteState::NotMuted`] state after the call.
+    /// Mirrors Java's package-private `maybeUnmute()` — see [`Self::mute`]
+    /// for why `pub(crate)` is the right Rust visibility. `dead_code`
+    /// allowed until the Phase 5c Selector wires it up.
     #[allow(dead_code)]
     pub(crate) fn maybe_unmute(&mut self) -> bool {
         if self.mute_state == ChannelMuteState::Muted {
             if !self.disconnected {
-                self.transport_layer.add_interest_ops(InterestOps::OP_READ);
+                self.transport_layer.add_interest_ops(OP_READ);
             }
             self.mute_state = ChannelMuteState::NotMuted;
         }
         self.mute_state == ChannelMuteState::NotMuted
     }
 
-    /// Handle the specified channel mute-related event and transition the mute state
-    /// according to the state machine.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the event is not valid for the current state.
-    pub fn handle_channel_mute_event(&mut self, event: ChannelMuteEvent) {
+    /// Handle the specified mute-related event and transition the mute
+    /// state according to the state machine. Mirrors Java's
+    /// `handleChannelMuteEvent(ChannelMuteEvent)`.
+    pub fn handle_channel_mute_event(&mut self, event: ChannelMuteEvent) -> Result<(), KafkaError> {
         let mut state_changed = false;
         match event {
             ChannelMuteEvent::RequestReceived => {
@@ -334,311 +457,265 @@ impl KafkaChannel {
             },
         }
         if !state_changed {
-            panic!("Cannot transition from {:?} for {:?}", self.mute_state, event);
+            return Err(KafkaError::IllegalState(format!(
+                "Cannot transition from {} for {}",
+                self.mute_state.name(),
+                event.name()
+            )));
         }
+        Ok(())
     }
 
-    /// Returns the current mute state.
+    /// Current mute state. Mirrors Java's `muteState()`.
     pub fn mute_state(&self) -> ChannelMuteState {
         self.mute_state
     }
 
-    /// Delay channel close on authentication failure.
-    ///
-    /// This removes the write interest from the channel until
-    /// `complete_close_on_authentication_failure()` is called.
+    /// Delay channel close on authentication failure. Mirrors Java's
+    /// private `delayCloseOnAuthenticationFailure`. Removes
+    /// [`OP_WRITE`] so the upper layer's pending sends do not race
+    /// with the close.
     fn delay_close_on_authentication_failure(&mut self) {
-        self.transport_layer.remove_interest_ops(InterestOps::OP_WRITE);
+        self.transport_layer.remove_interest_ops(OP_WRITE);
     }
 
-    /// Finish up any processing on `prepare()` failure.
+    /// Re-arm the OP_WRITE interest after an authentication-failure
+    /// delay. Mirrors Java's package-private
+    /// `completeCloseOnAuthenticationFailure` — `pub(crate)` matches
+    /// Java's package-private boundary; the Phase 5c `Selector`
+    /// (sibling module) calls this during its disconnect-with-delay
+    /// path. `dead_code` allowed until the Phase 5c Selector wires
+    /// it up.
     #[allow(dead_code)]
     pub(crate) fn complete_close_on_authentication_failure(&mut self) -> io::Result<()> {
-        self.transport_layer.add_interest_ops(InterestOps::OP_WRITE);
-        self.authenticator.handle_authentication_failure()
+        self.transport_layer.add_interest_ops(OP_WRITE);
+        // Java calls `authenticator.handleAuthenticationFailure()`; the
+        // Phase 5b-3 non-SASL authenticators do not have that hook.
+        Ok(())
     }
 
-    /// Returns `true` if this channel has been explicitly muted.
+    /// Returns true iff this channel has been explicitly muted via
+    /// [`Self::mute`]. Mirrors Java's `isMuted()`.
     pub fn is_muted(&self) -> bool {
         self.mute_state != ChannelMuteState::NotMuted
     }
 
-    /// Returns `true` if the channel is in a state where it could be muted
-    /// due to memory pressure.
+    /// Returns true iff the channel can be muted by the upper layer.
+    /// Mirrors Java's `isInMutableState()`. The Java semantics gate on
+    /// memory-pool allocation status; our [`NetworkReceive`] allocates
+    /// eagerly, so the gate collapses to "is the receive in progress
+    /// and the transport ready".
     pub fn is_in_mutable_state(&self) -> bool {
-        // Some requests do not require memory, so if we do not know what the
-        // current (or future) request is (receive == None) we don't mute.
-        // We also don't mute if whatever memory required has already been
-        // successfully allocated.
-        match &self.receive {
+        // Mirror Java: if there's no in-progress receive (or the
+        // memory has already been allocated), there's no reason to
+        // mute. Our `NetworkReceive::memory_allocated` becomes true
+        // once the size header is parsed and the payload buffer is
+        // allocated, which always happens within a single `read_from`
+        // — so this returns false in practice and the producer never
+        // mutes itself for memory pressure.
+        match self.receive.as_ref() {
             None => false,
-            Some(recv) => {
-                if recv.memory_allocated() {
-                    return false;
-                }
-                // Also cannot mute if underlying transport is not in the ready state
-                self.transport_layer.ready()
-            },
+            Some(r) if r.memory_allocated() => false,
+            _ => self.transport_layer.ready(),
         }
     }
 
-    /// Returns `true` if the channel is ready (transport ready and authentication complete).
+    /// Returns true when the transport handshake and the authenticator
+    /// are both done. Mirrors Java's `ready()`.
     pub fn ready(&self) -> bool {
         self.transport_layer.ready() && self.authenticator.complete()
     }
 
-    /// Returns `true` if there is an in-progress send.
+    /// Borrow the underlying transport layer. Phase 8a.0 — needed by
+    /// the `Selector` poll loop to register socket-readiness wakeups
+    /// without owning the transport. Mirrors Java's package-private
+    /// `transportLayer()` getter the Selector uses to dispatch reads.
+    pub fn transport_layer_ref(&self) -> &dyn TransportLayer {
+        self.transport_layer.as_ref()
+    }
+
+    /// Variant of [`Self::transport_layer_ref`] that preserves the
+    /// `+ Sync` bound, so the borrow can cross `.await` points
+    /// (`&T: Send` iff `T: Sync`). Used by the [`Selector`]'s
+    /// readiness-notification select arm — see
+    /// [`crate::common::network::selector::wait_any_transport_readable`].
+    pub fn transport_layer_sync_ref(&self) -> &(dyn TransportLayer + Sync) {
+        self.transport_layer.as_ref()
+    }
+
+    /// Returns true iff there is an in-progress send. Mirrors Java's
+    /// `hasSend()`.
     pub fn has_send(&self) -> bool {
         self.send.is_some()
     }
 
-    /// Sets the send for this channel.
+    /// Returns the peer host (IP address only). Mirrors Java's
+    /// `socketAddress()` which returns
+    /// `transportLayer.socketChannel().socket().getInetAddress()` — the
+    /// remote `InetAddress`, with no port. Falls back to the captured
+    /// `remote_address` if the underlying socket is no longer accessible
+    /// (post-disconnect).
+    pub fn socket_address(&self) -> io::Result<IpAddr> {
+        let addr = match self.transport_layer.peer_addr() {
+            Ok(addr) => addr,
+            Err(_) => self
+                .remote_address
+                .ok_or_else(|| io::Error::new(io::ErrorKind::NotConnected, "peer address unknown — never connected"))?,
+        };
+        Ok(addr.ip())
+    }
+
+    /// Returns the peer port, or `0` if the socket has never been
+    /// connected. Mirrors Java's `socketPort()`. The Java doc states
+    /// "If the socket was connected prior to being closed, then this
+    /// method will continue to return the connected port number after
+    /// the socket is closed", which we mirror through the captured
+    /// `remote_address` fallback.
+    pub fn socket_port(&self) -> u16 {
+        match self.transport_layer.peer_addr() {
+            Ok(addr) => addr.port(),
+            Err(_) => self.remote_address.map(|a| a.port()).unwrap_or(0),
+        }
+    }
+
+    /// Returns a stable string suitable for log lines. Mirrors Java's
+    /// `socketDescription()` which falls back to the local socket
+    /// address when the peer address is unknown.
     ///
-    /// # Errors
+    /// Phase 5c's `Selector` uses this in disconnect log lines.
+    pub fn socket_description(&self) -> String {
+        if let Ok(addr) = self.transport_layer.peer_addr() {
+            return addr.ip().to_string();
+        }
+        // No peer — fall back to captured remote, then local.
+        if let Some(addr) = self.remote_address {
+            return addr.ip().to_string();
+        }
+        match self.transport_layer.local_addr() {
+            Ok(local) => local.ip().to_string(),
+            Err(_) => String::from("<unknown>"),
+        }
+    }
+
+    /// Borrow the channel's metadata registry. Mirrors Java's
+    /// `channelMetadataRegistry()`.
+    pub fn channel_metadata_registry(&self) -> &dyn ChannelMetadataRegistry {
+        self.metadata_registry.as_ref()
+    }
+
+    /// Mutably borrow the channel's metadata registry. Mirrors Java's
+    /// `channelMetadataRegistry()` returning a reference whose
+    /// register* methods mutate the registry in place.
+    pub fn channel_metadata_registry_mut(&mut self) -> &mut dyn ChannelMetadataRegistry {
+        self.metadata_registry.as_mut()
+    }
+
+    /// Queue a [`NetworkSend`] on this channel. Mirrors Java's
+    /// `setSend(NetworkSend)`. Returns `Err(IllegalState)` when there
+    /// is already a send in progress — mirroring Java's
+    /// `IllegalStateException`.
     ///
-    /// Returns an error if there is already an in-progress send.
-    pub fn set_send(&mut self, send: NetworkSend) -> Result<(), String> {
+    /// The actual write happens lazily on the next call to
+    /// [`Self::write`] (which is invoked on the next `Selector::poll`
+    /// tick). Mirrors Java's lazy-send pattern — see PLAN.md line
+    /// 263–264.
+    pub fn set_send(&mut self, send: NetworkSend) -> Result<(), KafkaError> {
         if self.send.is_some() {
-            return Err(format!(
+            return Err(KafkaError::IllegalState(format!(
                 "Attempt to begin a send operation with prior send operation still in progress, connection id is {}",
                 self.id
-            ));
+            )));
         }
         self.send = Some(send);
-        self.transport_layer.add_interest_ops(InterestOps::OP_WRITE);
+        self.transport_layer.add_interest_ops(OP_WRITE);
         Ok(())
     }
 
-    /// If the current send is complete, returns it and clears the send state.
+    /// If the in-progress send has completed, take it and return it,
+    /// clearing OP_WRITE. Returns `None` if there is no send in
+    /// progress, or the send is not yet complete. Mirrors Java's
+    /// `maybeCompleteSend()`.
     pub fn maybe_complete_send(&mut self) -> Option<NetworkSend> {
-        if self.send.as_ref().is_some_and(|s| s.completed()) {
+        if self.send.as_ref().is_some_and(KafkaSend::completed) {
             self.mid_write = false;
-            self.transport_layer.remove_interest_ops(InterestOps::OP_WRITE);
-            self.send.take()
-        } else {
-            None
+            self.transport_layer.remove_interest_ops(OP_WRITE);
+            return self.send.take();
         }
+        None
     }
 
-    pub(crate) fn transport_readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        self.transport_layer.readable()
-    }
-
-    pub(crate) fn transport_writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        self.transport_layer.writable()
-    }
-
-    /// Reads data from the transport layer into the current receive buffer.
+    /// Drive the read path: lazily construct a [`NetworkReceive`] on
+    /// first call, then ask it to read from the transport. Returns the
+    /// number of bytes read in this call (`0` for "no progress"). Mirrors
+    /// Java's `read()`.
     ///
-    /// Creates a new `NetworkReceive` if there is no current receive.
-    pub async fn read(&mut self) -> io::Result<usize> {
+    /// The return type is `i64` to mirror Java's `long` return — Phase
+    /// 5c's metric path accumulates total bytes read in a `long`.
+    pub fn read(&mut self) -> io::Result<i64> {
         if self.receive.is_none() {
-            self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, &self.id));
+            self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, self.id.as_ref()));
         }
-
-        let bytes_received = {
-            let receive = self.receive.as_mut().unwrap();
-            let transport = &mut *self.transport_layer;
-            receive.read_from(transport).await?
-        };
-
-        // Check if we should mute due to memory pressure
-        if let Some(ref recv) = self.receive
-            && recv.required_memory_amount_known()
-            && !recv.memory_allocated()
-            && self.is_in_mutable_state()
-        {
-            // Pool must be out of memory, mute ourselves.
-            self.mute();
-        }
-
-        Ok(bytes_received)
+        // SAFETY: `receive` is Some immediately above.
+        let receive = self.receive.as_mut().expect("receive constructed above");
+        // Bridge `&mut dyn TransportLayer` to `&mut dyn io::Read` —
+        // both `PlaintextTransportLayer` and `SslTransportLayer`
+        // implement `io::Read` (the Phase 5b-1/5b-2 forwarder).
+        let bytes_received = read_with_transport(receive, self.transport_layer.as_mut())?;
+        // No mute-on-OOM logic — see `is_in_mutable_state`'s docstring.
+        Ok(bytes_received as i64)
     }
 
-    /// Returns the current in-progress receive, if any.
+    /// Borrow the in-progress [`NetworkReceive`]. Mirrors Java's
+    /// `currentReceive()`. Returns `None` when there is no receive in
+    /// flight (e.g. immediately after a complete-receive was taken).
     pub fn current_receive(&self) -> Option<&NetworkReceive> {
         self.receive.as_ref()
     }
 
-    /// If the current receive is complete, returns it and clears the receive state.
+    /// If the in-progress receive has completed, take it and return it.
+    /// Mirrors Java's `maybeCompleteReceive()`. The Java implementation
+    /// rewinds the payload buffer's `position` to zero before returning;
+    /// our `BytesMut` payload buffer has no separate read cursor, so
+    /// `take_payload()` already returns a buffer ready to be consumed.
     pub fn maybe_complete_receive(&mut self) -> Option<NetworkReceive> {
-        if self.receive.as_ref().is_some_and(|r| r.complete()) {
-            self.receive.take()
-        } else {
-            None
+        if self.receive.as_ref().is_some_and(Receive::complete) {
+            return self.receive.take();
         }
+        None
     }
 
-    /// Writes data from the current send to the transport layer.
-    ///
-    /// Returns the number of bytes written.
-    pub async fn write(&mut self) -> io::Result<usize> {
-        if self.send.is_none() {
+    /// Drive the write path: ask the in-progress send to write what it
+    /// can. Returns the number of bytes written (`0` for "no progress",
+    /// `0` when there is no send in progress). Mirrors Java's `write()`.
+    pub fn write(&mut self) -> io::Result<i64> {
+        let Some(send) = self.send.as_mut() else {
             return Ok(0);
-        }
-
+        };
         self.mid_write = true;
-        let transport = &mut *self.transport_layer;
-        let send = self.send.as_mut().unwrap();
-        send.write_to(transport).await
+        let written = send.write_to(self.transport_layer.as_mut())?;
+        Ok(written as i64)
     }
 
-    /// Accumulates network thread time for this channel.
-    pub fn add_network_thread_time_nanos(&mut self, nanos: u64) {
-        self.network_thread_time_nanos += nanos;
-    }
-
-    /// Returns accumulated network thread time for this channel and resets
-    /// the value to zero.
-    pub fn get_and_reset_network_thread_time_nanos(&mut self) -> u64 {
-        let current = self.network_thread_time_nanos;
-        self.network_thread_time_nanos = 0;
-        current
-    }
-
-    /// Returns `true` if the underlying transport has bytes remaining to be read
-    /// from any intermediate buffers.
+    /// `true` iff the underlying transport has bytes buffered internally
+    /// that may be processed without further reads from the network.
+    /// Mirrors Java's `hasBytesBuffered()`. SSL surfaces `true` when
+    /// rustls has decrypted plaintext queued; PLAINTEXT always returns
+    /// `false`.
     pub fn has_bytes_buffered(&self) -> bool {
         self.transport_layer.has_bytes_buffered()
     }
 
-    /// Returns the number of successful authentications.
-    pub fn successful_authentications(&self) -> u32 {
-        self.successful_authentications
-    }
-
-    /// Returns the re-authentication latency in milliseconds, if applicable.
-    pub fn reauthentication_latency_ms(&self) -> Option<u64> {
-        self.authenticator.reauthentication_latency_ms()
-    }
-
-    /// Returns `true` if this is a server-side channel and the given time is past
-    /// the session expiration time.
-    pub fn server_authentication_session_expired(&self, now_nanos: u64) -> bool {
-        if let Some(expiration) = self.authenticator.server_session_expiration_time_nanos() {
-            now_nanos > expiration
-        } else {
-            false
-        }
-    }
-
-    /// Returns the client-side `NetworkReceive` response that arrived during
-    /// re-authentication that is unrelated to re-authentication, if any.
-    pub fn poll_response_received_during_reauthentication(&mut self) -> Option<NetworkReceive> {
-        self.authenticator.poll_response_received_during_reauthentication()
-    }
-
-    /// Returns `true` if this is a server-side channel and the connected client
-    /// has indicated that it supports re-authentication.
-    pub fn connected_client_supports_reauthentication(&self) -> bool {
-        self.authenticator.connected_client_supports_reauthentication()
-    }
-
-    /// Returns a reference to the channel metadata registry.
-    pub fn channel_metadata_registry(&mut self) -> &mut dyn ChannelMetadataRegistry {
-        &mut *self.metadata_registry
-    }
-
-    /// Maybe add write interest after re-authentication. This ensures that any
-    /// pending write operation is resumed.
-    pub fn maybe_add_write_interest_after_reauth(&mut self) {
-        if self.send.is_some() {
-            self.transport_layer.add_interest_ops(InterestOps::OP_WRITE);
-        }
-    }
-
-    /// Returns a description of the socket for logging.
-    pub fn socket_description(&self) -> String {
-        match self.transport_layer.peer_addr() {
-            Ok(addr) => addr.to_string(),
-            Err(_) => "unknown".to_string(),
-        }
-    }
-
-    /// If this is a server-side connection that has an expiration time and at least
-    /// 1 second has passed since the prior re-authentication (if any) started then
-    /// begin the process of re-authenticating the connection and return true,
-    /// otherwise return false.
-    ///
-    /// For PLAINTEXT, this always returns `false` since re-authentication does not
-    /// apply.
-    pub fn maybe_begin_server_reauthentication(
-        &mut self,
-        _sasl_handshake_network_receive: &NetworkReceive,
-        now_nanos_supplier: impl FnOnce() -> u64,
-    ) -> io::Result<bool> {
-        if !self.ready() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "KafkaChannel should be \"ready\" when processing SASL Handshake for potential re-authentication",
-            ));
-        }
-        if self.authenticator.server_session_expiration_time_nanos().is_none() {
-            return Ok(false);
-        }
-        let now_nanos = now_nanos_supplier();
-        if self.last_reauthentication_start_nanos != 0
-            && now_nanos - self.last_reauthentication_start_nanos < MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS
-        {
-            return Ok(false);
-        }
-        self.last_reauthentication_start_nanos = now_nanos;
-        self.authenticator.reauthenticate()?;
-        Ok(true)
-    }
-
-    /// If this is a client-side connection that is not muted, there is no
-    /// in-progress write, and there is a session expiration time defined that has
-    /// passed, then begin the process of re-authenticating and return true,
-    /// otherwise return false.
-    ///
-    /// For PLAINTEXT, this always returns `false`.
-    pub fn maybe_begin_client_reauthentication(
-        &mut self,
-        now_nanos_supplier: impl FnOnce() -> u64,
-    ) -> io::Result<bool> {
-        if !self.ready() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidInput,
-                "KafkaChannel should always be \"ready\" when it is checked for possible re-authentication",
-            ));
-        }
-        if self.mute_state != ChannelMuteState::NotMuted
-            || self.mid_write
-            || self.authenticator.client_session_reauthentication_time_nanos().is_none()
-        {
-            return Ok(false);
-        }
-        let now_nanos = now_nanos_supplier();
-        if now_nanos < self.authenticator.client_session_reauthentication_time_nanos().unwrap() {
-            return Ok(false);
-        }
-        self.receive = None;
-        self.authenticator.reauthenticate()?;
-        Ok(true)
-    }
-
-    /// Returns a mutable reference to the transport layer.
-    ///
-    /// This is used by the Selector for non-blocking I/O operations.
-    #[allow(dead_code)]
-    pub(crate) fn transport_layer(&mut self) -> &mut dyn TransportLayer {
-        &mut *self.transport_layer
-    }
-
-    /// Returns `true` if the transport layer is open.
-    #[allow(dead_code)]
-    pub(crate) fn is_open(&self) -> bool {
-        self.transport_layer.is_open()
-    }
-
-    /// Returns the remote address, if known.
-    pub fn remote_address(&self) -> Option<SocketAddr> {
-        self.remote_address
+    /// `true` iff [`Self::disconnect`] has been called or
+    /// [`Self::close`] has been called. Mirrors Java's `disconnected`
+    /// field, which is package-private but read by the Selector via
+    /// `KafkaChannel.state()`.
+    pub fn is_disconnected(&self) -> bool {
+        self.disconnected
     }
 }
 
 impl PartialEq for KafkaChannel {
+    /// Mirrors Java's `equals` — equality by id only.
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
@@ -647,297 +724,465 @@ impl PartialEq for KafkaChannel {
 impl Eq for KafkaChannel {}
 
 impl std::hash::Hash for KafkaChannel {
+    /// Mirrors Java's `hashCode` — hash by id only.
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
         self.id.hash(state);
-    }
-}
-
-impl std::fmt::Display for KafkaChannel {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "KafkaChannel id={}", self.id)
     }
 }
 
 impl std::fmt::Debug for KafkaChannel {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaChannel")
-            .field("id", &self.id)
-            .field("state", &self.state)
+            .field("id", &&*self.id)
+            .field("state", &self.state.state())
             .field("mute_state", &self.mute_state)
             .field("disconnected", &self.disconnected)
             .finish()
     }
 }
 
+impl std::fmt::Display for KafkaChannel {
+    /// Mirrors Java's `toString()` — `<typename> id=<id>`.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "KafkaChannel id={}", self.id)
+    }
+}
+
+/// Adapter: hand a `&mut dyn TransportLayer` to a `Receive` that wants
+/// `&mut dyn io::Read`. We know both the plaintext and SSL transports
+/// implement `io::Read`; this helper unifies the call site so
+/// `KafkaChannel::read` is generic-free.
+fn read_with_transport(receive: &mut NetworkReceive, transport: &mut dyn TransportLayer) -> io::Result<u64> {
+    struct TransportReader<'a> {
+        inner: &'a mut dyn TransportLayer,
+    }
+    impl io::Read for TransportReader<'_> {
+        fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+            self.inner.read(buf)
+        }
+    }
+    let mut adapter = TransportReader { inner: transport };
+    receive.read_from(&mut adapter)
+}
+
 #[cfg(test)]
 mod tests {
+    use std::io::IoSlice;
+
+    use bytes::Bytes;
+
     use super::*;
-    use crate::common::network::ByteBufferSend;
-    use crate::common::network::DefaultChannelMetadataRegistry;
-    use crate::common::network::InterestOps;
+    use crate::common::network::byte_buffer_send::ByteBufferSend;
+    use crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry;
+    use crate::common::network::transport_layer::{OP_CONNECT, OP_READ};
 
-    use std::future::Future;
-    use std::io;
-    use std::net::SocketAddr;
-    use std::pin::Pin;
-
-    /// Mock transport layer for testing KafkaChannel.
-    ///
-    /// Supports configurable read/write behavior through closures.
-    struct MockTransportLayer {
+    /// Shared backing state for [`MockTransport`]. Keeping the read
+    /// queue (and the connect/open/interest-ops bookkeeping) behind an
+    /// `Arc<Mutex<_>>` lets the test enqueue canned reads through a
+    /// handle the test owns, even after the [`MockTransport`] itself
+    /// has been moved into the [`KafkaChannel`]. This mirrors the
+    /// Mockito pattern (`Mockito.when(transport.read(...))`) where the
+    /// stub is configured through a reference held by the test.
+    #[derive(Default)]
+    struct MockState {
+        writes: Vec<u8>,
+        read_queue: std::collections::VecDeque<Vec<u8>>,
         ready: bool,
         connected: bool,
-        open: bool,
-        read_data: Vec<u8>,
-        read_pos: usize,
-        write_results: Vec<io::Result<usize>>,
-        interest_ops: InterestOps,
+        is_open: bool,
+        interest_ops: i32,
+        /// Optional cap on bytes accepted by a single `write_vectored`
+        /// call. `None` writes everything at once (the default — fastest
+        /// path); `Some(n)` truncates the call to at most `n` bytes,
+        /// mirroring Java's mocked `transport.write(...)` returning
+        /// partial counts in `KafkaChannelTest.testSending`.
+        max_bytes_per_write: Option<usize>,
     }
 
-    impl MockTransportLayer {
-        fn new() -> Self {
-            Self {
+    /// Mock transport that records writes into a `Vec<u8>` and serves
+    /// reads from a queue of canned responses. Modelled on Mockito's
+    /// `transport.read(...).thenAnswer(...)` chains used by the Java
+    /// `KafkaChannelTest`.
+    struct MockTransport {
+        state: Arc<std::sync::Mutex<MockState>>,
+    }
+
+    impl MockTransport {
+        fn new() -> (Self, Arc<std::sync::Mutex<MockState>>) {
+            let state = Arc::new(std::sync::Mutex::new(MockState {
+                writes: Vec::new(),
+                read_queue: std::collections::VecDeque::new(),
                 ready: true,
                 connected: true,
-                open: true,
-                read_data: Vec::new(),
-                read_pos: 0,
-                write_results: Vec::new(),
-                interest_ops: InterestOps::OP_READ,
-            }
-        }
-
-        fn with_read_data(mut self, data: Vec<u8>) -> Self {
-            self.read_data = data;
-            self
-        }
-
-        fn with_write_results(mut self, results: Vec<io::Result<usize>>) -> Self {
-            self.write_results = results;
-            self
+                is_open: true,
+                interest_ops: OP_READ,
+                max_bytes_per_write: None,
+            }));
+            (MockTransport { state: Arc::clone(&state) }, state)
         }
     }
 
-    impl TransportLayer for MockTransportLayer {
-        fn peer_addr(&self) -> io::Result<SocketAddr> {
-            Ok("127.0.0.1:9092".parse().unwrap())
-        }
+    /// Configure the per-call write cap. Mirrors Mockito stubbing
+    /// `when(transport.write(any())).thenReturn(4, 64, 64)` in
+    /// `KafkaChannelTest.testSending` — letting a single test drive the
+    /// write loop through multiple ticks of partial progress.
+    fn set_max_bytes_per_write(state: &Arc<std::sync::Mutex<MockState>>, cap: usize) {
+        state.lock().expect("mock state").max_bytes_per_write = Some(cap);
+    }
 
-        fn ready(&self) -> bool {
-            self.ready
-        }
+    /// Convenience: enqueue a canned-read chunk on a shared mock state.
+    fn enqueue_read(state: &Arc<std::sync::Mutex<MockState>>, bytes: Vec<u8>) {
+        state.lock().expect("mock state").read_queue.push_back(bytes);
+    }
 
-        fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
-            Box::pin(async { Ok(true) })
+    impl crate::common::network::TransferableChannel for MockTransport {
+        fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+            let mut s = self.state.lock().expect("mock state");
+            // When the cap is set, accept up to `cap` bytes of the
+            // vectored input. This faithfully mirrors a kernel-buffer-
+            // exhausted write in Java's `SocketChannel.write` returning a
+            // partial byte count.
+            let cap = s.max_bytes_per_write;
+            let mut total: usize = 0;
+            for buf in bufs {
+                let remaining_cap = match cap {
+                    Some(c) => c.saturating_sub(total),
+                    None => buf.len(),
+                };
+                if remaining_cap == 0 {
+                    break;
+                }
+                let take = buf.len().min(remaining_cap);
+                s.writes.extend_from_slice(&buf[..take]);
+                total += take;
+                if take < buf.len() {
+                    // Hit the cap mid-buffer — stop iterating.
+                    break;
+                }
+            }
+            Ok(total)
         }
-
-        fn disconnect(&mut self) {
-            self.connected = false;
-        }
-
-        fn is_connected(&self) -> bool {
-            self.connected
-        }
-
-        fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn add_interest_ops(&mut self, ops: InterestOps) {
-            self.interest_ops |= ops;
-        }
-
-        fn remove_interest_ops(&mut self, ops: InterestOps) {
-            self.interest_ops = self.interest_ops.remove(ops);
-        }
-
-        fn is_mute(&self) -> bool {
-            !self.interest_ops.contains(InterestOps::OP_READ)
-        }
-
-        fn has_bytes_buffered(&self) -> bool {
-            false
-        }
-
         fn has_pending_writes(&self) -> bool {
             false
         }
+    }
 
+    impl TransportLayer for MockTransport {
+        fn ready(&self) -> bool {
+            self.state.lock().expect("mock state").ready
+        }
+        fn finish_connect(&mut self) -> io::Result<bool> {
+            let mut s = self.state.lock().expect("mock state");
+            s.connected = true;
+            s.interest_ops = (s.interest_ops & !OP_CONNECT) | OP_READ;
+            Ok(true)
+        }
+        fn disconnect(&mut self) {
+            let mut s = self.state.lock().expect("mock state");
+            s.is_open = false;
+            s.connected = false;
+        }
+        fn is_connected(&self) -> bool {
+            self.state.lock().expect("mock state").connected
+        }
         fn is_open(&self) -> bool {
-            self.open
+            self.state.lock().expect("mock state").is_open
         }
-
-        fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            self.open = false;
-            Box::pin(async { Ok(()) })
+        fn close(&mut self) -> io::Result<()> {
+            self.state.lock().expect("mock state").is_open = false;
+            Ok(())
         }
-
-        fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-            let remaining = self.read_data.len() - self.read_pos;
-            let to_read = remaining.min(dst.len());
-            if to_read == 0 {
-                return Box::pin(async { Err(io::Error::from(io::ErrorKind::WouldBlock)) });
-            }
-            dst[..to_read].copy_from_slice(&self.read_data[self.read_pos..self.read_pos + to_read]);
-            self.read_pos += to_read;
-            Box::pin(async move { Ok(to_read) })
-        }
-
-        fn write<'a>(&'a mut self, _src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-            Box::pin(async { Ok(0) })
-        }
-
-        fn write_vectored<'a>(
-            &'a mut self,
-            srcs: &'a [io::IoSlice<'a>],
-        ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-            if !self.write_results.is_empty() {
-                let first = self.write_results.remove(0);
-                let result = match first {
-                    Ok(n) => Ok(n),
-                    Err(e) => Err(io::Error::new(e.kind(), e.to_string())),
-                };
-                Box::pin(async { result })
-            } else {
-                let total: usize = srcs.iter().map(|s| s.len()).sum();
-                Box::pin(async move { Ok(total) })
+        fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            let mut s = self.state.lock().expect("mock state");
+            match s.read_queue.pop_front() {
+                Some(chunk) => {
+                    let n = chunk.len().min(dst.len());
+                    dst[..n].copy_from_slice(&chunk[..n]);
+                    Ok(n)
+                },
+                None => Ok(0),
             }
         }
-    }
-
-    /// Mock authenticator for testing.
-    struct MockAuthenticator {
-        complete: bool,
-    }
-
-    impl MockAuthenticator {
-        fn new(complete: bool) -> Self {
-            Self { complete }
+        fn handshake(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+        fn peer_principal(&self) -> io::Result<KafkaPrincipal> {
+            Ok(KafkaPrincipal::anonymous())
+        }
+        fn add_interest_ops(&mut self, ops: i32) {
+            self.state.lock().expect("mock state").interest_ops |= ops;
+        }
+        fn remove_interest_ops(&mut self, ops: i32) {
+            self.state.lock().expect("mock state").interest_ops &= !ops;
+        }
+        fn interest_ops(&self) -> i32 {
+            self.state.lock().expect("mock state").interest_ops
+        }
+        fn is_mute(&self) -> bool {
+            let s = self.state.lock().expect("mock state");
+            s.is_open && (s.interest_ops & OP_READ) == 0
+        }
+        fn has_bytes_buffered(&self) -> bool {
+            false
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 0)))
+        }
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 9092)))
         }
     }
 
-    impl Authenticator for MockAuthenticator {
-        fn authenticate<'a>(
-            &'a mut self,
-            _transport: &'a mut (dyn TransportLayer + Send),
-        ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn complete(&self) -> bool {
-            self.complete
-        }
-
-        fn close(&mut self) {}
+    fn build_channel() -> (KafkaChannel, Arc<std::sync::Mutex<MockState>>) {
+        use crate::common::network::authenticator::{ChannelAuthenticator, PlaintextAuthenticator};
+        let (transport, state) = MockTransport::new();
+        let channel = KafkaChannel::new(
+            Arc::from("0"),
+            Box::new(transport),
+            ChannelAuthenticator::network(PlaintextAuthenticator::new()),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        (channel, state)
     }
 
-    /// Translated from `KafkaChannelTest.testSending` in
-    /// `org.apache.kafka.common.network.KafkaChannelTest`.
-    #[tokio::test]
-    async fn test_sending() {
-        let transport = MockTransportLayer::new().with_write_results(vec![
-            Ok(4),  // First write: 4 bytes
-            Ok(64), // Second write: 64 bytes
-            Ok(64), // Third write: 64 bytes
-        ]);
-        let authenticator = MockAuthenticator::new(true);
-        let metadata = DefaultChannelMetadataRegistry::new();
+    /// Translation of `KafkaChannelTest.testSending`. The Java version
+    /// uses `transport.write(ByteBuffer[])` returning a partial-byte
+    /// count; the default `MockTransport::write_vectored` writes
+    /// everything at once, so this single-tick test exercises the
+    /// lifecycle (`setSend`, `write`, `maybeCompleteSend`,
+    /// `IllegalStateException` on double-set). The multi-tick partial-
+    /// write contract is exercised by
+    /// [`sending_partial_writes_progress_across_multiple_ticks`].
+    #[test]
+    fn sending_lifecycle() {
+        let (mut channel, _state) = build_channel();
+        let payload = (0..128u8).collect::<Vec<u8>>();
+        let send = ByteBufferSend::size_prefixed(Bytes::from(payload));
+        let network_send = NetworkSend::new(channel.id_arc(), Box::new(send));
 
-        let mut channel =
-            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
-
-        let send = ByteBufferSend::size_prefixed(vec![0xABu8; 128]);
-        let network_send = NetworkSend::new("0", Box::new(send));
-
-        channel.set_send(network_send).unwrap();
+        channel.set_send(network_send).expect("set send");
         assert!(channel.has_send());
 
-        // Duplicate send should fail
-        let send2 = ByteBufferSend::size_prefixed(vec![0xCDu8; 32]);
-        let network_send2 = NetworkSend::new("0", Box::new(send2));
-        assert!(channel.set_send(network_send2).is_err());
+        // Setting again while a send is in progress is illegal.
+        let payload2 = (0..128u8).collect::<Vec<u8>>();
+        let send2 = ByteBufferSend::size_prefixed(Bytes::from(payload2));
+        let dup = NetworkSend::new(channel.id_arc(), Box::new(send2));
+        let err = channel.set_send(dup).expect_err("double-set");
+        assert!(matches!(err, KafkaError::IllegalState(_)));
 
-        // First write: 4 bytes
-        let written = channel.write().await.unwrap();
-        assert_eq!(4, written);
-        assert!(channel.maybe_complete_send().is_none());
-
-        // Second write: 64 bytes
-        let written = channel.write().await.unwrap();
-        assert_eq!(64, written);
-        assert!(channel.maybe_complete_send().is_none());
-
-        // Third write: 64 bytes (completes the send)
-        let written = channel.write().await.unwrap();
-        assert_eq!(64, written);
-        assert!(channel.maybe_complete_send().is_some());
+        // First write completes the entire send (mock writes everything).
+        let written = channel.write().expect("write");
+        assert_eq!(written, 4 + 128);
+        let completed = channel.maybe_complete_send().expect("complete");
+        assert_eq!(completed.size(), 4 + 128);
+        assert!(!channel.has_send());
     }
 
-    /// Translated from `KafkaChannelTest.testReceiving` in
-    /// `org.apache.kafka.common.network.KafkaChannelTest`.
-    #[tokio::test]
-    async fn test_receiving() {
-        // Build read data: 4-byte size header (128) + 128 bytes of payload
-        let mut read_data = Vec::new();
-        read_data.extend_from_slice(&128_i32.to_be_bytes());
-        read_data.extend_from_slice(&[0xABu8; 128]);
+    /// Mirrors the Java `KafkaChannelTest.testSending` partial-write
+    /// progression: with `transport.write` capped to return 4, then 64,
+    /// then 64 bytes, drive three ticks asserting `maybe_complete_send`
+    /// returns `None` until the third tick. This locks in the
+    /// `bytes_remaining > 0 → maybe_complete_send() == None` invariant
+    /// the Selector relies on to schedule another write tick when the
+    /// kernel TCP buffer is full.
+    #[test]
+    fn sending_partial_writes_progress_across_multiple_ticks() {
+        let (mut channel, state) = build_channel();
+        let payload = (0..128u8).collect::<Vec<u8>>();
+        let send = ByteBufferSend::size_prefixed(Bytes::from(payload));
+        let network_send = NetworkSend::new(channel.id_arc(), Box::new(send));
 
-        let transport = MockTransportLayer::new().with_read_data(read_data);
-        let authenticator = MockAuthenticator::new(true);
-        let metadata = DefaultChannelMetadataRegistry::new();
+        channel.set_send(network_send).expect("set send");
+        assert!(channel.has_send());
 
-        let mut channel =
-            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
+        // Tick 1: cap at 4 bytes — only the size header lands.
+        set_max_bytes_per_write(&state, 4);
+        let written = channel.write().expect("write 1");
+        assert_eq!(written, 4);
+        // Send is not complete yet — must return None so the Selector
+        // re-schedules OP_WRITE on the next tick.
+        assert!(
+            channel.maybe_complete_send().is_none(),
+            "partial send (4/132 bytes written) must not return a completed send"
+        );
+        assert!(channel.has_send());
 
-        // First read: should read the 4-byte size header + 128 bytes payload
-        // (all available in the mock)
-        let bytes_read = channel.read().await.unwrap();
-        assert!(bytes_read > 0);
-        // The total bytes read should be 4 (header) + 128 (payload) = 132
-        assert_eq!(132, channel.current_receive().unwrap().bytes_read());
-        // The receive should be complete since we have all 128 bytes
-        let completed = channel.maybe_complete_receive();
-        assert!(completed.is_some());
+        // Tick 2: cap at 64 bytes — half the payload.
+        set_max_bytes_per_write(&state, 64);
+        let written = channel.write().expect("write 2");
+        assert_eq!(written, 64);
+        assert!(
+            channel.maybe_complete_send().is_none(),
+            "partial send (68/132 bytes written) must not return a completed send"
+        );
+        assert!(channel.has_send());
+
+        // Tick 3: cap at 64 bytes — the remaining payload finishes the send.
+        set_max_bytes_per_write(&state, 64);
+        let written = channel.write().expect("write 3");
+        assert_eq!(written, 64);
+        let completed = channel.maybe_complete_send().expect("send completes on tick 3");
+        assert_eq!(completed.size(), 4 + 128);
+        assert!(!channel.has_send());
+    }
+
+    /// Translation of `KafkaChannelTest.testReceiving`. Drives the read
+    /// path through three ticks. Java's mock returns the size header
+    /// then `0` from subsequent internal `read` calls in tick 1, then
+    /// `Mockito.reset(transport)` replaces the answer for tick 2 / 3.
+    /// We mirror by enqueuing exactly the bytes each tick is supposed
+    /// to consume — `MockTransport::read` returns `Ok(0)` when the
+    /// queue is empty, matching Java's `thenReturn(0)`.
+    #[test]
+    fn receiving_lifecycle() {
+        let (mut channel, state) = build_channel();
+        // Tick 1: enqueue only the size header. The internal second
+        // read inside `NetworkReceive::read_from` (which fills the
+        // payload buffer) will see an empty queue and return Ok(0),
+        // matching Java's `thenReturn(0)` chain.
+        enqueue_read(&state, 128i32.to_be_bytes().to_vec());
+
+        let n = channel.read().expect("read 1");
+        assert_eq!(n, 4);
+        // Java: assertEquals(4, channel.currentReceive().bytesRead());
+        assert_eq!(channel.current_receive().expect("receive").bytes_read(), 4);
+        assert!(channel.maybe_complete_receive().is_none());
+
+        // Tick 2: enqueue 64 payload bytes. The size header is already
+        // parsed so `read_from` only fills the payload region.
+        enqueue_read(&state, vec![0xAB; 64]);
+        let n = channel.read().expect("read 2");
+        assert_eq!(n, 64);
+        assert_eq!(channel.current_receive().expect("receive").bytes_read(), 68);
+        assert!(channel.maybe_complete_receive().is_none());
+
+        // Tick 3: enqueue final 64 payload bytes — completes.
+        enqueue_read(&state, vec![0xCD; 64]);
+        let n = channel.read().expect("read 3");
+        assert_eq!(n, 64);
+        assert_eq!(channel.current_receive().expect("receive").bytes_read(), 132);
+        let received = channel.maybe_complete_receive().expect("complete");
+        assert_eq!(received.payload().expect("payload").len(), 128);
         assert!(channel.current_receive().is_none());
     }
 
     #[test]
-    fn test_mute_state_machine() {
-        let transport = MockTransportLayer::new();
-        let authenticator = MockAuthenticator::new(true);
-        let metadata = DefaultChannelMetadataRegistry::new();
+    fn ready_requires_transport_and_authenticator() {
+        let (channel, _state) = build_channel();
+        // PlaintextAuthenticator is always complete; MockTransport is
+        // ready by default.
+        assert!(channel.ready());
+    }
 
-        let mut channel =
-            KafkaChannel::new("0", Box::new(transport), Box::new(authenticator), 1024, Box::new(metadata));
+    #[test]
+    fn channel_id_used_for_equality_and_hash() {
+        use std::collections::HashSet;
+        let (a, _sa) = build_channel();
+        let (b, _sb) = build_channel();
+        assert_eq!(a, b, "two channels with the same id must compare equal");
+        let mut set = HashSet::new();
+        set.insert(a.id_arc());
+        assert!(set.contains(&b.id_arc()));
+    }
 
-        assert_eq!(ChannelMuteState::NotMuted, channel.mute_state());
+    #[test]
+    fn mute_unmute_lifecycle() {
+        let (mut channel, _state) = build_channel();
         assert!(!channel.is_muted());
-
+        assert_eq!(channel.mute_state(), ChannelMuteState::NotMuted);
         channel.mute();
-        assert_eq!(ChannelMuteState::Muted, channel.mute_state());
         assert!(channel.is_muted());
-
-        channel.handle_channel_mute_event(ChannelMuteEvent::RequestReceived);
-        assert_eq!(ChannelMuteState::MutedAndResponsePending, channel.mute_state());
-
-        channel.handle_channel_mute_event(ChannelMuteEvent::ThrottleStarted);
-        assert_eq!(ChannelMuteState::MutedAndThrottledAndResponsePending, channel.mute_state());
-
-        channel.handle_channel_mute_event(ChannelMuteEvent::ResponseSent);
-        assert_eq!(ChannelMuteState::MutedAndThrottled, channel.mute_state());
-
-        channel.handle_channel_mute_event(ChannelMuteEvent::ThrottleEnded);
-        assert_eq!(ChannelMuteState::Muted, channel.mute_state());
-
+        assert_eq!(channel.mute_state(), ChannelMuteState::Muted);
+        // Re-mute is a no-op.
+        channel.mute();
+        assert_eq!(channel.mute_state(), ChannelMuteState::Muted);
+        // Unmute returns true (back to NotMuted).
         assert!(channel.maybe_unmute());
-        assert_eq!(ChannelMuteState::NotMuted, channel.mute_state());
+        assert!(!channel.is_muted());
+    }
+
+    /// Mute-state transitions for the server-only states. Even though
+    /// the producer never originates these events, the state-machine
+    /// table must match Java byte-for-byte (CLAUDE.md rule on
+    /// preserving original architecture).
+    #[test]
+    fn mute_event_state_machine() {
+        let (mut channel, _state) = build_channel();
+        channel.mute();
+        // Muted -> RequestReceived -> MutedAndResponsePending
+        channel
+            .handle_channel_mute_event(ChannelMuteEvent::RequestReceived)
+            .expect("transition");
+        assert_eq!(channel.mute_state(), ChannelMuteState::MutedAndResponsePending);
+        // ThrottleStarted -> MutedAndThrottledAndResponsePending
+        channel
+            .handle_channel_mute_event(ChannelMuteEvent::ThrottleStarted)
+            .expect("transition");
+        assert_eq!(channel.mute_state(), ChannelMuteState::MutedAndThrottledAndResponsePending);
+        // ThrottleEnded from MutedAndThrottledAndResponsePending ->
+        // MutedAndResponsePending
+        channel
+            .handle_channel_mute_event(ChannelMuteEvent::ThrottleEnded)
+            .expect("transition");
+        assert_eq!(channel.mute_state(), ChannelMuteState::MutedAndResponsePending);
+        // ResponseSent from MutedAndResponsePending -> Muted
+        channel
+            .handle_channel_mute_event(ChannelMuteEvent::ResponseSent)
+            .expect("transition");
+        assert_eq!(channel.mute_state(), ChannelMuteState::Muted);
+    }
+
+    #[test]
+    fn invalid_mute_transition_returns_illegal_state() {
+        let (mut channel, _state) = build_channel();
+        // From NotMuted, RequestReceived has no transition (only Muted
+        // accepts it) — must return IllegalState.
+        let err = channel
+            .handle_channel_mute_event(ChannelMuteEvent::RequestReceived)
+            .expect_err("illegal");
+        assert!(matches!(err, KafkaError::IllegalState(_)));
+    }
+
+    #[test]
+    fn disconnect_marks_channel_disconnected() {
+        let (mut channel, _state) = build_channel();
+        assert!(!channel.is_disconnected());
+        channel.disconnect();
+        assert!(channel.is_disconnected());
+    }
+
+    #[test]
+    fn close_releases_resources() {
+        let (mut channel, _state) = build_channel();
+        channel.close().expect("close");
+        assert!(channel.is_disconnected());
+        // Idempotent — calling close again should not error.
+        channel.close().expect("close idempotent");
+    }
+
+    #[test]
+    fn finish_connect_captures_remote_address_and_advances_state() {
+        use crate::common::network::authenticator::{ChannelAuthenticator, PlaintextAuthenticator};
+        let (transport, state) = MockTransport::new();
+        // Force the connect-pending pattern: pre-set `connected = false`,
+        // then call finish_connect through the channel.
+        {
+            let mut s = state.lock().expect("mock state");
+            s.connected = false;
+            s.interest_ops = OP_CONNECT;
+        }
+        let mut channel = KafkaChannel::new(
+            Arc::from("0"),
+            Box::new(transport),
+            ChannelAuthenticator::network(PlaintextAuthenticator::new()),
+            1024,
+            Box::new(DefaultChannelMetadataRegistry::new()),
+        );
+        let connected = channel.finish_connect().expect("finish_connect");
+        assert!(connected);
+        // After finish_connect, the channel is in Ready (transport is
+        // ready & authenticator is complete).
+        assert_eq!(channel.state().state(), ChannelStateName::Ready);
     }
 }

@@ -12,86 +12,61 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Object serialization cache for two-pass serialization.
+//! Translation of
+//! `org.apache.kafka.common.protocol.ObjectSerializationCache`.
 //!
-//! The ObjectSerializationCache stores sizes and values computed during the
-//! first serialization pass. This avoids recalculating and recomputing the same
-//! values during the second pass.
-//!
-//! It is intended to be used as part of a two-pass serialization process:
-//! ```ignore
-//! let mut cache = ObjectSerializationCache::new();
-//! let size = message.size(&mut cache, version);
-//! message.write(&mut writable, &cache, version);
-//! ```
-//!
-//! Corresponds to org.apache.kafka.common.protocol.ObjectSerializationCache
+//! The Java implementation uses an `IdentityHashMap` keyed by `Object`
+//! references to cache (1) array sizes computed during the size pass and
+//! (2) UTF-8-encoded bytes of strings so the write pass does not have to
+//! recompute them. Rust does not have stable identity-by-reference on values,
+//! so we key by the address of the Rust value the generated code holds. The
+//! generated code always passes the *same* `Vec<u8>` / `String` reference to
+//! `add_size` and to `write`, mirroring how the Java code passes the same
+//! `Object` reference to both calls.
 
 use std::collections::HashMap;
 
-/// Cache key based on object identity (pointer address).
+/// Cache of pre-computed array sizes and serialized values used to avoid
+/// recomputing during the second pass of message serialisation.
 ///
-/// In Java, this uses IdentityHashMap which compares by reference identity.
-/// In Rust, we use the raw pointer address of the referenced object as the key.
-type IdentityKey = usize;
-
-/// Cached value that can be either an array size or serialized bytes.
-#[derive(Debug, Clone)]
-enum CachedValue {
-    Size(i32),
-    Bytes(Vec<u8>),
-}
-
-/// Stores sizes and serialized values computed during the first serialization pass.
-///
-/// This avoids recalculating and recomputing the same values during the second pass.
-/// Uses object identity (pointer address) as keys, matching Java's IdentityHashMap.
+/// Generated code calls into this cache via:
+/// * [`Self::set_array_size_in_bytes`] / [`Self::get_array_size_in_bytes`]
+///   — for arrays whose element count is known but whose total wire size has
+///   to be summed up.
+/// * [`Self::cache_serialized_value`] / [`Self::get_serialized_value`] —
+///   for `String` fields that need to be UTF-8 encoded once and reused.
 #[derive(Debug, Default)]
 pub struct ObjectSerializationCache {
-    map: HashMap<IdentityKey, CachedValue>,
+    sizes: HashMap<usize, i32>,
+    values: HashMap<usize, Vec<u8>>,
 }
 
 impl ObjectSerializationCache {
-    /// Creates a new empty cache.
+    /// Construct an empty cache. Mirrors `new ObjectSerializationCache()`.
     pub fn new() -> Self {
-        Self::default()
+        ObjectSerializationCache::default()
     }
 
-    /// Cache the serialized size in bytes for a given object (identified by reference).
-    ///
-    /// The object is identified by its memory address. The caller must ensure
-    /// the object is not moved between `set` and `get` calls.
-    pub fn set_array_size_in_bytes<T: ?Sized>(&mut self, obj: &T, size: i32) {
-        let key = obj as *const T as *const () as usize;
-        self.map.insert(key, CachedValue::Size(size));
+    /// Cache `size` for the value identified by `key`. The key is the
+    /// address of the Rust object the generated code holds, mirroring Java's
+    /// `IdentityHashMap` semantics.
+    pub fn set_array_size_in_bytes<T>(&mut self, key: &T, size: i32) {
+        self.sizes.insert(key as *const T as usize, size);
     }
 
-    /// Retrieve the cached serialized size in bytes for a given object.
-    ///
-    /// Returns `None` if no size was cached for this object.
-    pub fn get_array_size_in_bytes<T: ?Sized>(&self, obj: &T) -> Option<i32> {
-        let key = obj as *const T as *const () as usize;
-        match self.map.get(&key) {
-            Some(CachedValue::Size(size)) => Some(*size),
-            _ => None,
-        }
+    /// Retrieve the cached size for `key`, or `None` if absent.
+    pub fn get_array_size_in_bytes<T>(&self, key: &T) -> Option<i32> {
+        self.sizes.get(&(key as *const T as usize)).copied()
     }
 
-    /// Cache a serialized byte representation for a given object.
-    pub fn cache_serialized_value<T: ?Sized>(&mut self, obj: &T, val: Vec<u8>) {
-        let key = obj as *const T as *const () as usize;
-        self.map.insert(key, CachedValue::Bytes(val));
+    /// Cache the UTF-8 byte representation of the value identified by `key`.
+    pub fn cache_serialized_value<T>(&mut self, key: &T, value: Vec<u8>) {
+        self.values.insert(key as *const T as usize, value);
     }
 
-    /// Retrieve a cached serialized byte representation for a given object.
-    ///
-    /// Returns `None` if no value was cached for this object.
-    pub fn get_serialized_value<T: ?Sized>(&self, obj: &T) -> Option<&[u8]> {
-        let key = obj as *const T as *const () as usize;
-        match self.map.get(&key) {
-            Some(CachedValue::Bytes(bytes)) => Some(bytes),
-            _ => None,
-        }
+    /// Retrieve the cached UTF-8 representation for `key`, or `None`.
+    pub fn get_serialized_value<T>(&self, key: &T) -> Option<&[u8]> {
+        self.values.get(&(key as *const T as usize)).map(|v| v.as_slice())
     }
 }
 
@@ -100,37 +75,22 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_cache_array_size() {
+    fn caches_size_by_identity() {
         let mut cache = ObjectSerializationCache::new();
-        let arr = vec![1, 2, 3];
-        cache.set_array_size_in_bytes(&arr, 42);
-        assert_eq!(cache.get_array_size_in_bytes(&arr), Some(42));
+        let a: Vec<i32> = vec![1, 2, 3];
+        let b: Vec<i32> = vec![1, 2, 3];
+        cache.set_array_size_in_bytes(&a, 12);
+        // `b` is an equal but distinct value; Java would not match either.
+        assert_eq!(cache.get_array_size_in_bytes(&a), Some(12));
+        assert_eq!(cache.get_array_size_in_bytes(&b), None);
     }
 
     #[test]
-    fn test_cache_serialized_value() {
+    fn caches_serialized_value() {
         let mut cache = ObjectSerializationCache::new();
-        let s = String::from("hello");
-        cache.cache_serialized_value(&s, vec![0x68, 0x65, 0x6c, 0x6c, 0x6f]);
-        assert_eq!(cache.get_serialized_value(&s), Some(&[0x68, 0x65, 0x6c, 0x6c, 0x6f][..]));
-    }
-
-    #[test]
-    fn test_different_objects_different_keys() {
-        let mut cache = ObjectSerializationCache::new();
-        let arr1 = vec![1, 2, 3];
-        let arr2 = vec![1, 2, 3];
-        cache.set_array_size_in_bytes(&arr1, 10);
-        cache.set_array_size_in_bytes(&arr2, 20);
-        assert_eq!(cache.get_array_size_in_bytes(&arr1), Some(10));
-        assert_eq!(cache.get_array_size_in_bytes(&arr2), Some(20));
-    }
-
-    #[test]
-    fn test_uncached_returns_none() {
-        let cache = ObjectSerializationCache::new();
-        let arr = vec![1, 2, 3];
-        assert_eq!(cache.get_array_size_in_bytes(&arr), None);
-        assert_eq!(cache.get_serialized_value(&arr), None);
+        let key = String::from("topic");
+        let bytes = key.as_bytes().to_vec();
+        cache.cache_serialized_value(&key, bytes.clone());
+        assert_eq!(cache.get_serialized_value(&key), Some(bytes.as_slice()));
     }
 }

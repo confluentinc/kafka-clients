@@ -12,18 +12,13 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Client software name and version information.
-//!
-//! Translated from `org.apache.kafka.common.network.ClientInformation`.
+//! Translation of `org.apache.kafka.common.network.ClientInformation`.
 
-use std::fmt;
+/// Mirrors `ClientInformation.UNKNOWN_NAME_OR_VERSION`.
+pub const UNKNOWN_NAME_OR_VERSION: &str = "unknown";
 
-/// The value used when the client software name or version is unknown.
-pub const CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION: &str = "unknown";
-
-/// Client software name and version information.
-///
-/// Empty names and versions are replaced with [`CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
+/// Software name and version reported by an `ApiVersionsRequest`.
+/// Mirrors the Java `ClientInformation` value type.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct ClientInformation {
     software_name: String,
@@ -31,49 +26,95 @@ pub struct ClientInformation {
 }
 
 impl ClientInformation {
-    /// Creates a new `ClientInformation` with the given software name and version.
-    ///
-    /// Empty strings are replaced with [`CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION`].
-    pub fn new(software_name: &str, software_version: &str) -> Self {
-        Self {
+    /// Construct from explicit name/version. Empty inputs are normalised
+    /// to the literal `"unknown"`, matching Java.
+    pub fn new(software_name: impl Into<String>, software_version: impl Into<String>) -> Self {
+        let software_name = software_name.into();
+        let software_version = software_version.into();
+        ClientInformation {
             software_name: if software_name.is_empty() {
-                CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION.to_string()
+                UNKNOWN_NAME_OR_VERSION.to_owned()
             } else {
-                software_name.to_string()
+                software_name
             },
             software_version: if software_version.is_empty() {
-                CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION.to_string()
+                UNKNOWN_NAME_OR_VERSION.to_owned()
             } else {
-                software_version.to_string()
+                software_version
             },
         }
     }
 
-    /// Returns an empty `ClientInformation` with unknown name and version.
+    /// Mirrors `ClientInformation.EMPTY`.
     pub fn empty() -> Self {
-        Self::new(
-            CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION,
-            CLIENT_INFORMATION_UNKNOWN_NAME_OR_VERSION,
-        )
+        ClientInformation {
+            software_name: UNKNOWN_NAME_OR_VERSION.to_owned(),
+            software_version: UNKNOWN_NAME_OR_VERSION.to_owned(),
+        }
     }
 
-    /// Returns the software name.
+    /// Mirrors `ClientInformation.softwareName()`.
     pub fn software_name(&self) -> &str {
         &self.software_name
     }
 
-    /// Returns the software version.
+    /// Mirrors `ClientInformation.softwareVersion()`.
     pub fn software_version(&self) -> &str {
         &self.software_version
     }
 }
 
-impl fmt::Display for ClientInformation {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Display for ClientInformation {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
             "ClientInformation(softwareName={}, softwareVersion={})",
             self.software_name, self.software_version
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn populated_inputs_are_preserved() {
+        let info = ClientInformation::new("apache-kafka-java", "4.2.0");
+        assert_eq!(info.software_name(), "apache-kafka-java");
+        assert_eq!(info.software_version(), "4.2.0");
+    }
+
+    #[test]
+    fn empty_inputs_become_unknown() {
+        let info = ClientInformation::new("", "");
+        assert_eq!(info.software_name(), "unknown");
+        assert_eq!(info.software_version(), "unknown");
+    }
+
+    #[test]
+    fn empty_constant() {
+        let empty = ClientInformation::empty();
+        assert_eq!(empty.software_name(), "unknown");
+        assert_eq!(empty.software_version(), "unknown");
+    }
+
+    #[test]
+    fn equality_and_hash() {
+        use std::collections::HashSet;
+        let a = ClientInformation::new("n", "v");
+        let b = ClientInformation::new("n", "v");
+        let c = ClientInformation::new("n", "x");
+        assert_eq!(a, b);
+        assert_ne!(a, c);
+        let mut set = HashSet::new();
+        set.insert(a);
+        assert!(set.contains(&b));
+    }
+
+    #[test]
+    fn display_format() {
+        let info = ClientInformation::new("kafka", "4.0.0");
+        assert_eq!(info.to_string(), "ClientInformation(softwareName=kafka, softwareVersion=4.0.0)");
     }
 }

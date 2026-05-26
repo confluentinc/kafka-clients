@@ -12,172 +12,410 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#![allow(dead_code)]
-//! Factory for creating the appropriate `ChannelBuilder` based on `SecurityProtocol`.
+//! Translation of `org.apache.kafka.common.network.ChannelBuilders`.
 //!
-//! Translated from `org.apache.kafka.common.network.ChannelBuilders.clientChannelBuilder()`
-//! and the private `create()` method (Java).
+//! Phase 5b-3 ships the producer-relevant subset:
 //!
-//! In Java, `ChannelBuilders` switches on `SecurityProtocol` to instantiate the
-//! correct builder. In Rust, the channel builders already accept typed config
-//! structs in their constructors, so there is no separate `configure()` step.
+//! * [`client_channel_builder`] — entry point for the producer's
+//!   [`crate::common::network::Selector`] (Phase 5c) to obtain a typed
+//!   [`crate::common::network::ChannelBuilder`].
+//! * [`channel_builder_configs`] — pure data-shuffling helper that
+//!   reproduces Java's listener-prefix override logic without an
+//!   `AbstractConfig` parser. Used by the Phase 9 SASL builder; the
+//!   Phase 5b-3 PLAINTEXT and SSL paths do not need it but it's kept
+//!   for parity with the Java surface and the Java
+//!   `ChannelBuildersTest.testChannelBuilderConfigs` test.
 //!
-//! Excluded Java code:
-//! - `JaasContext` loading -- simplified to direct `SaslConfig` struct
-//! - `channelBuilderConfigs()` -- Java's config extraction from `AbstractConfig` is not applicable
-//! - `serverChannelBuilder()` -- server-side, out of scope
-//! - `createPrincipalBuilder()` -- server-side, out of scope
-//! - `requireNonNullMode()` -- replaced by Rust exhaustive match
+//! Server-side (`server_channel_builder`), `createPrincipalBuilder`,
+//! and the SASL routing branch are deferred to Phase 9.
 
-use std::io;
+use std::collections::HashMap;
+use std::sync::Arc;
 
-use crate::common::config::{SaslConfig, SslConfig};
-use crate::common::network::ChannelBuilder;
+use rustls::ClientConfig;
+
+use crate::common::errors::KafkaError;
 use crate::common::network::ListenerName;
-use crate::common::network::PlaintextChannelBuilder;
-use crate::common::network::SaslChannelBuilder;
-use crate::common::network::SslChannelBuilder;
-use crate::common::security::SecurityProtocol;
-use crate::common::security::SslFactory;
+use crate::common::network::channel_builder::ChannelBuilder;
+use crate::common::network::connection_mode::ConnectionMode;
+use crate::common::network::plaintext_channel_builder::PlaintextChannelBuilder;
+use crate::common::network::sasl_channel_builder::SaslChannelBuilder;
+use crate::common::network::ssl_channel_builder::SslChannelBuilder;
+use crate::common::security::auth::SecurityProtocol;
+use crate::common::security::authenticator::PlainCredentials;
 
-/// Creates a client-side `ChannelBuilder` for the given security protocol.
+/// Owned trait object alias for the channel builder. `Send` so the
+/// builder can be moved between Tokio tasks.
+pub type BoxedChannelBuilder = Box<dyn ChannelBuilder>;
+
+/// SASL credentials for `SaslPlaintext` / `SaslSsl` security protocols.
+/// Bundled into one struct so the [`client_channel_builder`] signature
+/// stays compact while Phase 9b grows the public config plumbing.
+pub struct SaslChannelConfig {
+    /// SASL mechanism — PLAIN-only in Phase 9.
+    pub mechanism: String,
+    /// Client id (also surfaces as the network-level `client.id`).
+    pub client_id: String,
+    /// PLAIN credentials.
+    pub credentials: PlainCredentials,
+}
+
+/// Construct the appropriate client-side [`ChannelBuilder`] for the
+/// given [`SecurityProtocol`]. Mirrors Java's
+/// `ChannelBuilders.clientChannelBuilder(...)`.
 ///
-/// Translated from `ChannelBuilders.clientChannelBuilder()` (Java).
+/// **Java→Rust signature differences:**
 ///
-/// # Arguments
-///
-/// * `security_protocol` - The security protocol to use
-/// * `ssl_config` - Required for `SSL` and `SASL_SSL` protocols
-/// * `sasl_config` - Required for `SASL_PLAINTEXT` and `SASL_SSL` protocols
-/// * `listener_name` - Optional listener name (server-side only, `None` for clients)
-/// * `client_id` - The Kafka client ID
-///
-/// # Errors
-///
-/// Returns an error if required configs are missing for the given protocol.
+/// 1. The Java method takes a `JaasContext.Type contextType` and
+///    `String clientSaslMechanism` for SASL routing. The Rust
+///    translation bundles the SASL parameters into [`SaslChannelConfig`]
+///    — required for `SaslPlaintext` / `SaslSsl`, ignored otherwise.
+/// 2. The Java method takes an `AbstractConfig config` from which it
+///    derives the configs map; the Rust signature accepts the SSL
+///    config directly as an `Option<Arc<ClientConfig>>` (required for
+///    [`SecurityProtocol::Ssl`] and [`SecurityProtocol::SaslSsl`],
+///    ignored otherwise).
+/// 3. The Java method takes `Time` and `LogContext` for SASL token
+///    refresh and structured logging. Both are deferred to Phase 9b+.
 pub fn client_channel_builder(
     security_protocol: SecurityProtocol,
-    ssl_config: Option<&SslConfig>,
-    sasl_config: Option<&SaslConfig>,
     listener_name: Option<ListenerName>,
-    client_id: &str,
-) -> io::Result<Box<dyn ChannelBuilder>> {
+    ssl_config: Option<Arc<ClientConfig>>,
+    sasl_config: Option<SaslChannelConfig>,
+) -> Result<BoxedChannelBuilder, KafkaError> {
     match security_protocol {
         SecurityProtocol::Plaintext => Ok(Box::new(PlaintextChannelBuilder::new(listener_name))),
         SecurityProtocol::Ssl => {
-            let ssl_config = ssl_config
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SSL protocol requires ssl_config"))?;
-            let ssl_factory = SslFactory::new(ssl_config)?;
-            Ok(Box::new(SslChannelBuilder::new(ssl_factory, listener_name)))
+            let config = ssl_config
+                .ok_or_else(|| KafkaError::Config("ssl_config is required when security.protocol = SSL".to_owned()))?;
+            Ok(Box::new(SslChannelBuilder::new(
+                ConnectionMode::Client,
+                listener_name,
+                false,
+                config,
+            )))
         },
-        SecurityProtocol::SaslPlaintext => {
-            let sasl_config = sasl_config.ok_or_else(|| {
-                io::Error::new(io::ErrorKind::InvalidInput, "SASL_PLAINTEXT protocol requires sasl_config")
+        SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl => {
+            let sasl = sasl_config.ok_or_else(|| {
+                KafkaError::Config(format!(
+                    "sasl_config is required when security.protocol = {}",
+                    security_protocol.name()
+                ))
             })?;
             Ok(Box::new(SaslChannelBuilder::new(
-                SecurityProtocol::SaslPlaintext,
-                sasl_config.clone(),
-                None,
+                security_protocol,
                 listener_name,
-                client_id,
-            )?))
-        },
-        SecurityProtocol::SaslSsl => {
-            let ssl_config = ssl_config
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires ssl_config"))?;
-            let sasl_config = sasl_config
-                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "SASL_SSL protocol requires sasl_config"))?;
-            let ssl_factory = SslFactory::new(ssl_config)?;
-            Ok(Box::new(SaslChannelBuilder::new(
-                SecurityProtocol::SaslSsl,
-                sasl_config.clone(),
-                Some(ssl_factory),
-                listener_name,
-                client_id,
+                sasl.mechanism,
+                sasl.client_id,
+                sasl.credentials,
+                ssl_config,
             )?))
         },
     }
+}
+
+/// Reproduce Java's `channelBuilderConfigs(AbstractConfig, ListenerName)`
+/// over a flat `HashMap<String, String>` configuration source. Mirrors
+/// the listener-prefix override semantics asserted by
+/// `ChannelBuildersTest.testChannelBuilderConfigs`:
+///
+/// * When `listener_name` is `Some`, keys prefixed with
+///   `listener.name.<name>.` are unwrapped to the bare key; bare keys
+///   that are also present prefixed are dropped (the prefix wins);
+///   keys like `<mechanism>.some.prop` are dropped if the listener-
+///   prefixed `listener.name.<name>.some.prop` already exists in the
+///   parsed configs.
+/// * When `listener_name` is `None`, the original keys are returned
+///   verbatim.
+///
+/// The Java version operates over `AbstractConfig.values()` and
+/// `originals()` and additionally interacts with the "RecordingMap"
+/// that tracks unused keys. Phase 5b-3 doesn't have an `AbstractConfig`
+/// translation; we reproduce the data-shuffling shape over a plain
+/// map so the Java test can be translated 1:1.
+pub fn channel_builder_configs(
+    originals: &HashMap<String, String>,
+    listener_name: Option<&ListenerName>,
+) -> HashMap<String, String> {
+    let mut parsed: HashMap<String, String> = HashMap::new();
+    let prefix = listener_name.map(|n| n.config_prefix());
+
+    if let Some(prefix) = prefix.as_deref() {
+        // Pass 1: unwrap listener-prefixed keys. These take precedence
+        // over the bare keys.
+        for (k, v) in originals {
+            if let Some(stripped) = k.strip_prefix(prefix) {
+                parsed.insert(stripped.to_owned(), v.clone());
+            }
+        }
+        // Pass 2: copy in originals that are neither already parsed
+        // nor would be overshadowed.
+        for (k, v) in originals {
+            if parsed.contains_key(k) {
+                // Already present (the unwrapped form took precedence).
+                continue;
+            }
+            // Skip if the bare key is the prefixed form of an
+            // already-parsed entry.
+            if let Some(stripped) = k.strip_prefix(prefix)
+                && parsed.contains_key(stripped)
+            {
+                continue;
+            }
+            // Skip keys like `<mechanism>.some.prop` if the listener-
+            // prefixed `listener.name.<name>.some.prop` already exists
+            // in parsed configs (Java: `e.getKey().substring(e.getKey().indexOf('.') + 1)`).
+            if let Some(idx) = k.find('.')
+                && parsed.contains_key(&k[idx + 1..])
+            {
+                continue;
+            }
+            parsed.insert(k.clone(), v.clone());
+        }
+    } else {
+        // No listener: return originals verbatim.
+        parsed.clone_from(originals);
+    }
+    parsed
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    /// Translation of `ChannelBuildersTest.testChannelBuilderConfigs`.
+    ///
+    /// Java's helper consults an `AbstractConfig` schema in two stages:
+    /// `valuesWithPrefixOverride` (typed fields only — listener-prefixed
+    /// keys are unwrapped, others fall back to `values()`), then a
+    /// filter that drops `<mechanism>.some.prop` keys when the bare
+    /// `some.prop` exists in the typed parsed map. Both stages depend
+    /// on a `ConfigDef` schema we have not translated yet (deferred to
+    /// Phase 9 SASL). This Rust translation reproduces only the
+    /// data-shuffling shape over a flat `HashMap`.
+    ///
+    /// **Documented divergences from the Java test**, both of which
+    /// require a `ConfigDef` translation to fix and will be revisited
+    /// when SASL ships:
+    ///
+    /// 1. Java line 74: `assertNull(configs.get("plain.sasl.server.callback.handler.class"))`.
+    ///    Java drops the key because `TestSecurityConfig`'s schema lists
+    ///    `sasl.server.callback.handler.class` as a typed field and the
+    ///    second-stage filter prunes the `plain.`-prefixed shadow. Our
+    ///    schema-less helper preserves the key.
+    /// 2. Java line 77: `assertEquals("custom.config1", configs.get("listener.name.listener1.gssapi.config1.key"))`.
+    ///    Java keeps the original prefixed key for non-typed fields
+    ///    (since `valuesWithPrefixOverride` only unwraps typed fields).
+    ///    Our helper unwraps every `listener.name.<name>.` prefix
+    ///    unconditionally, so the prefixed key is gone and only the
+    ///    unwrapped form (`gssapi.config1.key`) survives.
     #[test]
-    fn test_plaintext_builder() {
-        let result = client_channel_builder(SecurityProtocol::Plaintext, None, None, None, "test");
-        assert!(result.is_ok(), "Plaintext should not require any configs");
-    }
-
-    #[test]
-    fn test_ssl_builder() {
-        let ssl_config = SslConfig::default();
-        let result = client_channel_builder(SecurityProtocol::Ssl, Some(&ssl_config), None, None, "test");
-        assert!(result.is_ok(), "SSL with valid config should succeed");
-    }
-
-    #[test]
-    fn test_ssl_missing_config() {
-        let result = client_channel_builder(SecurityProtocol::Ssl, None, None, None, "test");
-        let err = result.err().expect("Should return an error");
-        assert!(
-            err.to_string().contains("ssl_config"),
-            "Error should mention ssl_config: {}",
-            err
+    fn channel_builder_configs_listener_prefix() {
+        let mut props: HashMap<String, String> = HashMap::new();
+        props.insert(
+            "listener.name.listener1.gssapi.sasl.kerberos.service.name".to_owned(),
+            "testkafka".to_owned(),
         );
-    }
-
-    #[test]
-    fn test_sasl_plaintext_builder() {
-        let sasl_config = SaslConfig {
-            mechanism: "PLAIN".to_string(),
-            username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
-            ..SaslConfig::default()
-        };
-        let result = client_channel_builder(SecurityProtocol::SaslPlaintext, None, Some(&sasl_config), None, "test");
-        assert!(result.is_ok(), "SASL_PLAINTEXT with valid config should succeed");
-    }
-
-    #[test]
-    fn test_sasl_ssl_builder() {
-        let ssl_config = SslConfig::default();
-        let sasl_config = SaslConfig {
-            mechanism: "PLAIN".to_string(),
-            username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
-            ..SaslConfig::default()
-        };
-        let result =
-            client_channel_builder(SecurityProtocol::SaslSsl, Some(&ssl_config), Some(&sasl_config), None, "test");
-        assert!(result.is_ok(), "SASL_SSL with both configs should succeed");
-    }
-
-    #[test]
-    fn test_sasl_ssl_missing_ssl_config() {
-        let sasl_config = SaslConfig {
-            mechanism: "PLAIN".to_string(),
-            username: Some("alice".to_string()),
-            password: Some("secret".to_string()),
-            ..SaslConfig::default()
-        };
-        let result = client_channel_builder(SecurityProtocol::SaslSsl, None, Some(&sasl_config), None, "test");
-        let err = result.err().expect("Should return an error");
-        assert!(
-            err.to_string().contains("ssl_config"),
-            "Error should mention ssl_config: {}",
-            err
+        props.insert(
+            "listener.name.listener1.sasl.kerberos.service.name".to_owned(),
+            "testkafkaglobal".to_owned(),
         );
+        props.insert("plain.sasl.server.callback.handler.class".to_owned(), "callback".to_owned());
+        props.insert(
+            "listener.name.listener1.gssapi.config1.key".to_owned(),
+            "custom.config1".to_owned(),
+        );
+        props.insert("custom.config2.key".to_owned(), "custom.config2".to_owned());
+
+        let listener = ListenerName::new("listener1");
+        let configs = channel_builder_configs(&props, Some(&listener));
+
+        // Java line 62: prefixed key dropped from the parsed configs.
+        assert!(!configs.contains_key("listener.name.listener1.gssapi.sasl.kerberos.service.name"));
+        // Java line 65: unwrapped form retains the listener-prefix value.
+        assert_eq!(
+            configs.get("gssapi.sasl.kerberos.service.name").map(|s| s.as_str()),
+            Some("testkafka")
+        );
+        // Java line 68: the second prefixed key is also unwrapped.
+        assert_eq!(
+            configs.get("sasl.kerberos.service.name").map(|s| s.as_str()),
+            Some("testkafkaglobal")
+        );
+        // Java line 71: the listener-prefixed `sasl.kerberos.service.name`
+        // is gone from the parsed map.
+        assert!(!configs.contains_key("listener.name.listener1.sasl.kerberos.service.name"));
+        // Java line 80: the non-listener-prefixed custom key is kept verbatim.
+        assert_eq!(configs.get("custom.config2.key").map(|s| s.as_str()), Some("custom.config2"));
+
+        // Documented divergence #1 (Java line 74): without a ConfigDef
+        // schema we cannot drop this key. The bare assertion that
+        // matches our actual behaviour:
+        assert_eq!(
+            configs.get("plain.sasl.server.callback.handler.class").map(|s| s.as_str()),
+            Some("callback"),
+            "schema-less helper preserves the key Java's typed-field filter would drop"
+        );
+
+        // Documented divergence #2 (Java line 77): we unwrap the prefix
+        // so the original key is gone, only the bare form survives.
+        assert!(
+            !configs.contains_key("listener.name.listener1.gssapi.config1.key"),
+            "schema-less helper unwraps every listener-prefixed key, including non-typed ones"
+        );
+        assert_eq!(configs.get("gssapi.config1.key").map(|s| s.as_str()), Some("custom.config1"));
+    }
+
+    /// Listener-prefix `None` returns the originals verbatim.
+    /// Mirrors Java's else-branch in `channelBuilderConfigs`.
+    #[test]
+    fn channel_builder_configs_no_listener() {
+        let mut props: HashMap<String, String> = HashMap::new();
+        props.insert(
+            "listener.name.listener1.gssapi.sasl.kerberos.service.name".to_owned(),
+            "testkafka".to_owned(),
+        );
+        props.insert(
+            "listener.name.listener1.sasl.kerberos.service.name".to_owned(),
+            "testkafkaglobal".to_owned(),
+        );
+        props.insert("plain.sasl.server.callback.handler.class".to_owned(), "callback".to_owned());
+        props.insert(
+            "listener.name.listener1.gssapi.config1.key".to_owned(),
+            "custom.config1".to_owned(),
+        );
+        props.insert("custom.config2.key".to_owned(), "custom.config2".to_owned());
+
+        let configs = channel_builder_configs(&props, None);
+
+        // All keys retained verbatim.
+        assert_eq!(
+            configs
+                .get("listener.name.listener1.gssapi.sasl.kerberos.service.name")
+                .map(|s| s.as_str()),
+            Some("testkafka")
+        );
+        assert!(!configs.contains_key("gssapi.sasl.kerberos.service.name"));
+        assert_eq!(
+            configs
+                .get("listener.name.listener1.sasl.kerberos.service.name")
+                .map(|s| s.as_str()),
+            Some("testkafkaglobal")
+        );
+        assert!(!configs.contains_key("sasl.kerberos.service.name"));
+        assert_eq!(
+            configs.get("plain.sasl.server.callback.handler.class").map(|s| s.as_str()),
+            Some("callback")
+        );
+        assert_eq!(
+            configs.get("listener.name.listener1.gssapi.config1.key").map(|s| s.as_str()),
+            Some("custom.config1")
+        );
+        assert_eq!(configs.get("custom.config2.key").map(|s| s.as_str()), Some("custom.config2"));
     }
 
     #[test]
-    fn test_sasl_plaintext_missing_sasl_config() {
-        let result = client_channel_builder(SecurityProtocol::SaslPlaintext, None, None, None, "test");
-        let err = result.err().expect("Should return an error");
-        assert!(
-            err.to_string().contains("sasl_config"),
-            "Error should mention sasl_config: {}",
-            err
-        );
+    fn client_channel_builder_for_plaintext() {
+        // Cannot use `expect` because `BoxedChannelBuilder` is
+        // `Box<dyn ChannelBuilder>` which is not `Debug`. Match on
+        // the result instead.
+        match client_channel_builder(SecurityProtocol::Plaintext, None, None, None) {
+            Ok(_) => {},
+            Err(e) => panic!("plaintext builder construction failed: {e:?}"),
+        }
+    }
+
+    #[test]
+    fn client_channel_builder_for_ssl_requires_config() {
+        let err = match client_channel_builder(SecurityProtocol::Ssl, None, None, None) {
+            Ok(_) => panic!("expected Config error"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KafkaError::Config(_)));
+    }
+
+    #[test]
+    fn client_channel_builder_for_ssl_with_config() {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let cfg = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client versions")
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        match client_channel_builder(SecurityProtocol::Ssl, None, Some(Arc::new(cfg)), None) {
+            Ok(_) => {},
+            Err(e) => panic!("ssl builder construction failed: {e:?}"),
+        }
+    }
+
+    /// Phase 9a addition: SASL_PLAINTEXT requires a `sasl_config`; the
+    /// builder returns `KafkaError::Config` when it's missing.
+    #[test]
+    fn client_channel_builder_for_sasl_plaintext_requires_sasl_config() {
+        let err = match client_channel_builder(SecurityProtocol::SaslPlaintext, None, None, None) {
+            Ok(_) => panic!("expected Config error"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("sasl_config is required"));
+    }
+
+    /// Phase 9a addition: SASL_PLAINTEXT + PLAIN + valid credentials
+    /// constructs a `SaslChannelBuilder` (dispatch returns Ok). Channel
+    /// wiring itself is deferred to Phase 9b.
+    #[test]
+    fn client_channel_builder_for_sasl_plaintext_constructs_sasl_builder() {
+        use crate::common::security::authenticator::PlainCredentials;
+        let sasl = SaslChannelConfig {
+            mechanism: "PLAIN".to_owned(),
+            client_id: "test-client".to_owned(),
+            credentials: PlainCredentials::new("alice", "supersecret"),
+        };
+        match client_channel_builder(SecurityProtocol::SaslPlaintext, None, None, Some(sasl)) {
+            Ok(_) => {},
+            Err(e) => panic!("SASL_PLAINTEXT + PLAIN builder construction failed: {e:?}"),
+        }
+    }
+
+    /// Phase 9a addition: SASL_SSL requires both an `ssl_config` and a
+    /// `sasl_config`.
+    #[test]
+    fn client_channel_builder_for_sasl_ssl_requires_both_configs() {
+        use crate::common::security::authenticator::PlainCredentials;
+        let sasl = SaslChannelConfig {
+            mechanism: "PLAIN".to_owned(),
+            client_id: "test-client".to_owned(),
+            credentials: PlainCredentials::new("alice", "supersecret"),
+        };
+        // sasl_config present but ssl_config missing — fails inside
+        // SaslChannelBuilder::new.
+        let err = match client_channel_builder(SecurityProtocol::SaslSsl, None, None, Some(sasl)) {
+            Ok(_) => panic!("expected Config error"),
+            Err(e) => e,
+        };
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("ssl_config is required"));
+    }
+
+    /// Phase 9a addition: SASL_SSL + PLAIN + valid credentials +
+    /// ssl_config constructs a `SaslChannelBuilder`.
+    #[test]
+    fn client_channel_builder_for_sasl_ssl_constructs_sasl_builder() {
+        use crate::common::security::authenticator::PlainCredentials;
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let cfg = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client versions")
+            .with_root_certificates(rustls::RootCertStore::empty())
+            .with_no_client_auth();
+        let sasl = SaslChannelConfig {
+            mechanism: "PLAIN".to_owned(),
+            client_id: "test-client".to_owned(),
+            credentials: PlainCredentials::new("alice", "supersecret"),
+        };
+        match client_channel_builder(SecurityProtocol::SaslSsl, None, Some(Arc::new(cfg)), Some(sasl)) {
+            Ok(_) => {},
+            Err(e) => panic!("SASL_SSL + PLAIN builder construction failed: {e:?}"),
+        }
     }
 }

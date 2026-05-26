@@ -12,239 +12,190 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A class that models the future completion of a produce request for a single partition.
+//! Translation of `org.apache.kafka.clients.producer.internals.ProduceRequestResult`.
 //!
-//! There is one of these per partition in a produce request and it is shared by all the
-//! [`RecordMetadata`](crate::producer::RecordMetadata) instances that are batched
-//! together for the same partition in the request.
+//! Models the future completion of a produce request for a single
+//! partition. There is one of these per partition in a produce request,
+//! and it is shared by all the [`RecordMetadata`](crate::producer::RecordMetadata)
+//! instances batched for the same partition in the request.
 //!
-//! Translated from `org.apache.kafka.clients.producer.internals.ProduceRequestResult`.
+//! Java uses a [`CountDownLatch`] of count 1; Rust replaces it with a
+//! [`tokio::sync::Notify`] backed by an [`std::sync::atomic::AtomicBool`]
+//! for the "completed" flag. The `errors_by_index` callback is stored
+//! behind a [`std::sync::Mutex`] so we can return references without
+//! cloning, mirroring Java's `volatile Function<Integer, RuntimeException>`.
+//!
+//! Per CLAUDE.md rule 9.6 the mutex is **never** held across an `.await`.
+
+#![allow(dead_code)] // Phase 6b (ProducerBatch) wires `set`/`done`/await_*.
 
 use std::collections::VecDeque;
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
+use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
 
-use tokio::sync::watch;
+use tokio::sync::Notify;
+use tokio::time::error::Elapsed;
 
-use crate::common::KafkaError;
-use crate::common::TopicPartition;
-use crate::common::record::RecordBatch;
+use crate::common::errors::KafkaError;
+use crate::common::record::record_batch::NO_TIMESTAMP;
+use crate::common::topic_partition::TopicPartition;
 
-/// The inner result data set when a produce request completes.
-#[derive(Clone)]
-pub struct ProduceResult {
-    /// The base offset assigned to the record.
-    pub base_offset: i64,
-    /// The log append time or -1 if CreateTime is being used.
-    pub log_append_time: i64,
-    /// Optional error function that maps batch index to a typed error.
-    /// `None` means no error (successful response).
-    ///
-    /// In Java, this is `Function<Integer, RuntimeException>` which returns a typed
-    /// exception preserving error code information needed by
-    /// `FutureRecordMetadata.valueOrError()`.
-    pub error: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
+/// A function mapping batch index → optional [`KafkaError`]. `None` means
+/// the indexed record succeeded; `Some(err)` means it failed with that
+/// error. Mirrors Java's `Function<Integer, RuntimeException>`.
+///
+/// Wrapped in `Arc<dyn Fn ...>` so it can be cheaply cloned out of the
+/// producer state and consulted by every record's `FutureRecordMetadata`.
+pub(crate) type ErrorsByIndex = Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>;
+
+/// Set fields populated by `set(...)`. Held inside a `Mutex` so that
+/// `set` and the readers (`base_offset`, `log_append_time`, `error`) see
+/// a consistent snapshot.
+struct ResultData {
+    base_offset: Option<i64>,
+    log_append_time: i64,
+    errors_by_index: Option<ErrorsByIndex>,
 }
 
-impl std::fmt::Debug for ProduceResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProduceResult")
-            .field("base_offset", &self.base_offset)
-            .field("log_append_time", &self.log_append_time)
-            .field("error", &self.error.as_ref().map(|_| "<fn>"))
-            .finish()
-    }
-}
-
-/// A class that models the future completion of a produce request for a single partition.
-///
-/// There is one of these per partition in a produce request and it is shared by all the
-/// [`RecordMetadata`](crate::producer::RecordMetadata) instances that are
-/// batched together for the same partition in the request.
-///
-/// In Java, this uses a `CountDownLatch` for synchronization. In Rust, we use a
-/// two-phase approach matching Java's semantics:
-/// - `set()` stores the result data in a `Mutex` without notifying waiters
-/// - `done()` publishes the result through the `watch` channel, unblocking waiters
-///
-/// This separation is critical because `ProducerBatch.completeFutureAndFireCallbacks()`
-/// calls `set()` first, then executes user callbacks, then calls `done()`. External
-/// waiters (e.g. `flush()`) are intentionally blocked until after all callbacks complete.
-pub struct ProduceRequestResult {
-    /// The watch channel sender. Sends `true` when `done()` is called.
-    tx: watch::Sender<bool>,
-    /// The watch channel receiver (cloned for each FutureRecordMetadata).
-    rx: watch::Receiver<bool>,
-    /// Stores the result data set by `set()`, separate from notification.
-    ///
-    /// This implements the two-phase set/done protocol: `set()` writes here,
-    /// `done()` notifies via the watch channel. Waiters read from here after
-    /// being unblocked.
-    result: Mutex<Option<ProduceResult>>,
-    /// The topic and partition to which this record set was sent.
+/// See module-level docs.
+pub(crate) struct ProduceRequestResult {
+    completed: AtomicBool,
+    notify: Notify,
     topic_partition: TopicPartition,
-    /// List of dependent ProduceRequestResults created when this batch is split.
-    /// When a batch is too large to send, it's split into multiple smaller batches.
-    /// The original batch's ProduceRequestResult tracks all the split batches here
-    /// so that flush() can wait for all splits to complete via `await_all_dependents()`.
+    data: Mutex<ResultData>,
+    /// Dependent results created when this batch is split into multiple
+    /// smaller batches. The original batch's `ProduceRequestResult`
+    /// tracks all the splits here so that `flush()` can wait for all
+    /// splits to complete via [`ProduceRequestResult::await_all_dependents`].
     dependent_results: Mutex<Vec<Arc<ProduceRequestResult>>>,
 }
 
 impl ProduceRequestResult {
     /// Create an instance of this class.
     ///
-    /// # Arguments
-    ///
-    /// * `topic_partition` - The topic and partition to which this record set was sent
+    /// `topic_partition` is the topic and partition to which this record
+    /// set was sent.
     pub fn new(topic_partition: TopicPartition) -> Self {
-        let (tx, rx) = watch::channel(false);
-        Self {
-            tx,
-            rx,
-            result: Mutex::new(None),
+        ProduceRequestResult {
+            completed: AtomicBool::new(false),
+            notify: Notify::new(),
             topic_partition,
+            data: Mutex::new(ResultData { base_offset: None, log_append_time: NO_TIMESTAMP, errors_by_index: None }),
             dependent_results: Mutex::new(Vec::new()),
         }
     }
 
-    /// Set the result of the produce request.
-    ///
-    /// This stores the result data but does **not** notify waiters.
-    /// Waiters are only unblocked when [`done()`](Self::done) is called,
-    /// matching Java's two-phase `set()` / `done()` protocol where user
-    /// callbacks are executed between the two calls.
-    ///
-    /// # Arguments
-    ///
-    /// * `base_offset` - The base offset assigned to the record
-    /// * `log_append_time` - The log append time or -1 if CreateTime is being used
-    /// * `errors_by_index` - Function mapping the batch index to a typed error,
-    ///   or `None` if the response was successful
-    pub fn set(
-        &self,
-        base_offset: i64,
-        log_append_time: i64,
-        errors_by_index: Option<Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync>>,
-    ) {
-        let mut guard = self.result.lock().unwrap();
-        *guard = Some(ProduceResult { base_offset, log_append_time, error: errors_by_index });
-        // Do NOT notify receivers here — done() does that.
+    /// Set the result of the produce request. Mirrors Java's `set(...)`.
+    pub fn set(&self, base_offset: i64, log_append_time: i64, errors_by_index: Option<ErrorsByIndex>) {
+        let mut data = self.data.lock().unwrap();
+        data.base_offset = Some(base_offset);
+        data.log_append_time = log_append_time;
+        data.errors_by_index = errors_by_index;
     }
 
-    /// Mark this request as complete and unblock any tasks waiting on its completion.
-    ///
-    /// This is the second phase of the two-phase protocol. After `set()` stores the
-    /// result and user callbacks have been executed, `done()` notifies all waiters.
-    ///
-    /// # Panics
-    ///
-    /// Panics if `set` was not called before `done`.
+    /// Mark this request as complete and unblock any tasks awaiting it.
+    /// Mirrors Java's `done()`. Panics on `IllegalStateException` if
+    /// `set` has not been called first — this is a programmer error
+    /// (not user input), per CLAUDE.md rule 10.1.
     pub fn done(&self) {
         {
-            let guard = self.result.lock().unwrap();
-            assert!(guard.is_some(), "The method `set` must be invoked before `done`.");
+            let data = self.data.lock().unwrap();
+            assert!(
+                data.base_offset.is_some(),
+                "The method `set` must be invoked before this method."
+            );
         }
-        // Now notify all waiters via the watch channel.
-        let _ = self.tx.send(true);
+        self.completed.store(true, Ordering::Release);
+        // `notify_waiters` wakes all currently-waiting `notified()`
+        // futures. Late-comers see `completed == true` on entry and
+        // skip the await entirely.
+        self.notify.notify_waiters();
     }
 
-    /// Add a dependent ProduceRequestResult.
-    ///
-    /// This is used when a batch is split into multiple batches — in some cases
-    /// like flush(), the original batch's result should not complete until all
-    /// split batches have completed.
+    /// Add a dependent [`ProduceRequestResult`]. Used when a batch is
+    /// split into multiple batches — for `flush()` semantics, the
+    /// original batch's result should not complete until all split
+    /// batches have completed.
     pub fn add_dependent(&self, dependent_result: Arc<ProduceRequestResult>) {
-        let mut deps = self.dependent_results.lock().unwrap();
-        deps.push(dependent_result);
+        self.dependent_results.lock().unwrap().push(dependent_result);
     }
 
     /// Await the completion of this request.
     ///
-    /// This only waits for THIS request and not dependent results.
-    /// When a batch is split into multiple batches, dependent results are created and
-    /// tracked separately, but this method does not wait for them. Individual record
-    /// futures automatically handle waiting for their respective split batch via
-    /// [`FutureRecordMetadata::chain`](super::FutureRecordMetadata::chain),
-    /// which redirects the future to point to the correct split batch's result.
-    ///
-    /// For flush() semantics that require waiting for all dependent results, use
-    /// [`await_all_dependents`](Self::await_all_dependents).
+    /// This only waits for THIS request and not its dependent results.
+    /// Individual record futures handle waiting for their respective
+    /// split batch via [`FutureRecordMetadata::chain`](super::future_record_metadata::FutureRecordMetadata::chain).
     pub async fn await_completion(&self) {
-        let mut rx = self.rx.clone();
-        // Wait until done() has been called (value becomes true).
-        let _ = rx.wait_for(|done| *done).await;
+        if self.completed.load(Ordering::Acquire) {
+            return;
+        }
+        // Register the waker BEFORE re-checking the flag to avoid a
+        // missed-wake race. The future returned by `notified()` only
+        // observes calls to `notify_waiters` made AFTER the future is
+        // created.
+        let notified = self.notify.notified();
+        if self.completed.load(Ordering::Acquire) {
+            return;
+        }
+        notified.await;
     }
 
-    /// Await the completion of this request with a timeout.
-    ///
-    /// Returns `true` if the request completed, `false` if the timeout elapsed.
-    pub async fn await_timeout(&self, timeout: std::time::Duration) -> bool {
-        let mut rx = self.rx.clone();
-        tokio::time::timeout(timeout, rx.wait_for(|done| *done)).await.is_ok()
+    /// Await the completion of this request, up to the given duration.
+    /// Returns `true` if the request completed, `false` if we timed
+    /// out. Mirrors `await(long timeout, TimeUnit unit)`.
+    pub async fn await_with_timeout(&self, timeout: Duration) -> bool {
+        if self.completed.load(Ordering::Acquire) {
+            return true;
+        }
+        let result: Result<(), Elapsed> = tokio::time::timeout(timeout, self.await_completion()).await;
+        result.is_ok() && self.completed.load(Ordering::Acquire)
     }
 
-    /// Await the completion of this request and all the dependent requests.
-    ///
-    /// This method is used by flush() to ensure all split batches have completed
-    /// before returning. This method waits for all dependent
-    /// [`ProduceRequestResult`]s that were created when the batch was split.
-    pub async fn await_all_dependents(self: &Arc<Self>) {
+    /// Await the completion of this request and all the dependent
+    /// requests. Used by `flush()` to ensure all split batches have
+    /// completed before returning.
+    pub async fn await_all_dependents(self: Arc<Self>) {
         let mut to_wait: VecDeque<Arc<ProduceRequestResult>> = VecDeque::new();
-        to_wait.push_back(Arc::clone(self));
+        to_wait.push_back(self);
 
         while let Some(current) = to_wait.pop_front() {
-            // First wait for THIS result to be released
             current.await_completion().await;
-
-            // Add all dependent split batches to the queue.
-            // We synchronize to get a consistent snapshot, then release the lock
-            // before continuing. The actual waiting happens outside the lock.
-            let deps: Vec<Arc<ProduceRequestResult>> = {
+            // Snapshot dependents under the mutex, then release before
+            // recursing — never hold the lock across `.await`.
+            let snapshot: Vec<Arc<ProduceRequestResult>> = {
                 let guard = current.dependent_results.lock().unwrap();
-                guard.clone()
+                guard.iter().cloned().collect()
             };
-            to_wait.extend(deps);
+            to_wait.extend(snapshot);
         }
     }
 
-    /// The base offset for the request (the first offset in the record set).
-    ///
-    /// Returns `None` if the result has not been set yet.
+    /// The base offset for the request (the first offset in the record
+    /// set). Returns `None` if `set` has not been called.
     pub fn base_offset(&self) -> Option<i64> {
-        self.result.lock().unwrap().as_ref().map(|r| r.base_offset)
+        self.data.lock().unwrap().base_offset
     }
 
-    /// Return true if log append time is being used for this topic.
+    /// `true` iff log-append-time is being used for this topic.
     pub fn has_log_append_time(&self) -> bool {
-        self.result
-            .lock()
-            .unwrap()
-            .as_ref()
-            .is_some_and(|r| r.log_append_time != RecordBatch::NO_TIMESTAMP)
+        self.log_append_time() != NO_TIMESTAMP
     }
 
-    /// The log append time or -1 if CreateTime is being used.
+    /// The log-append-time, or `-1` if `CreateTime` is being used.
     pub fn log_append_time(&self) -> i64 {
-        self.result
-            .lock()
-            .unwrap()
-            .as_ref()
-            .map_or(RecordBatch::NO_TIMESTAMP, |r| r.log_append_time)
+        self.data.lock().unwrap().log_append_time
     }
 
-    /// The error thrown (generally on the server) while processing this request.
-    ///
-    /// Returns `None` if there was no error for the given batch index.
-    /// Returns a typed [`KafkaError`] preserving error code information
-    /// needed by `FutureRecordMetadata.value_or_error()`.
+    /// The error thrown (generally on the server) while processing this
+    /// request. Returns `None` if there was no error.
     pub fn error(&self, batch_index: i32) -> Option<KafkaError> {
-        let guard = self.result.lock().unwrap();
-        match guard.as_ref() {
-            Some(result) => match &result.error {
-                Some(errors_fn) => errors_fn(batch_index),
-                None => None,
-            },
-            None => None,
-        }
+        let cb = {
+            let guard = self.data.lock().unwrap();
+            guard.errors_by_index.clone()
+        };
+        cb.and_then(|f| f(batch_index))
     }
 
     /// The topic and partition to which the record was appended.
@@ -252,190 +203,101 @@ impl ProduceRequestResult {
         &self.topic_partition
     }
 
-    /// Has the request completed?
-    ///
-    /// This method only checks if THIS request has completed and not its dependent results.
-    /// Completion means that `done()` has been called (not just `set()`).
+    /// `true` iff `done()` has been called.
     pub fn completed(&self) -> bool {
-        *self.rx.borrow()
-    }
-
-    /// Subscribe to this result by obtaining a watch receiver clone.
-    ///
-    /// Used internally by [`FutureRecordMetadata`](super::FutureRecordMetadata) to observe
-    /// completion. The receiver yields `true` when `done()` is called.
-    /// The actual result data can be read from the `ProduceRequestResult` methods
-    /// after the subscription fires.
-    pub fn subscribe(&self) -> watch::Receiver<bool> {
-        self.rx.clone()
-    }
-}
-
-impl std::fmt::Debug for ProduceRequestResult {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("ProduceRequestResult")
-            .field("topic_partition", &self.topic_partition)
-            .field("completed", &self.completed())
-            .finish()
+        self.completed.load(Ordering::Acquire)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! There is no dedicated `ProduceRequestResultTest.java` in the Apache
+    //! Kafka 4.2 test suite; the class is exercised end-to-end through
+    //! `RecordSendTest` (translated alongside `FutureRecordMetadata`)
+    //! and through `RecordAccumulatorTest` / `SenderTest` (deferred to
+    //! Phase 6d / 6e).
+
     use super::*;
-    use crate::common::protocol::Errors;
 
     #[tokio::test]
-    async fn test_set_and_done() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = ProduceRequestResult::new(tp);
-
-        assert!(!result.completed());
-        assert!(result.base_offset().is_none());
-
-        result.set(42, RecordBatch::NO_TIMESTAMP, None);
-        result.done();
-
-        assert!(result.completed());
-        assert_eq!(result.base_offset(), Some(42));
-        assert!(!result.has_log_append_time());
-        assert_eq!(result.log_append_time(), RecordBatch::NO_TIMESTAMP);
-        assert!(result.error(0).is_none());
+    async fn await_returns_immediately_when_already_done() {
+        let r = ProduceRequestResult::new(TopicPartition::new("t", 0));
+        r.set(7, NO_TIMESTAMP, None);
+        r.done();
+        r.await_completion().await;
+        assert_eq!(Some(7), r.base_offset());
+        assert!(r.completed());
     }
 
     #[tokio::test]
-    async fn test_with_log_append_time() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = ProduceRequestResult::new(tp);
-
-        result.set(0, 1234567890, None);
-        result.done();
-
-        assert!(result.has_log_append_time());
-        assert_eq!(result.log_append_time(), 1234567890);
+    async fn await_with_timeout_times_out() {
+        let r = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
+        let occurred = r.await_with_timeout(Duration::from_millis(20)).await;
+        assert!(!occurred);
+        assert!(!r.completed());
     }
 
     #[tokio::test]
-    async fn test_with_errors() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = ProduceRequestResult::new(tp);
+    async fn await_with_timeout_returns_true_after_done() {
+        let r = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
+        let r2 = Arc::clone(&r);
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+            r2.set(42, NO_TIMESTAMP, None);
+            r2.done();
+        });
+        let occurred = r.await_with_timeout(Duration::from_millis(500)).await;
+        assert!(occurred);
+        assert_eq!(Some(42), r.base_offset());
+    }
 
-        let errors_fn: Arc<dyn Fn(i32) -> Option<KafkaError> + Send + Sync> = Arc::new(|idx| {
-            if idx == 0 {
-                Some(KafkaError::new(Errors::RecordListTooLarge))
+    #[tokio::test]
+    async fn await_all_dependents_walks_chain() {
+        let parent = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 0)));
+        let child = Arc::new(ProduceRequestResult::new(TopicPartition::new("t", 1)));
+        parent.add_dependent(Arc::clone(&child));
+
+        let parent2 = Arc::clone(&parent);
+        let child2 = Arc::clone(&child);
+        tokio::spawn(async move {
+            parent2.set(0, NO_TIMESTAMP, None);
+            parent2.done();
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            child2.set(0, NO_TIMESTAMP, None);
+            child2.done();
+        });
+
+        Arc::clone(&parent).await_all_dependents().await;
+        assert!(parent.completed());
+        assert!(child.completed());
+    }
+
+    #[test]
+    #[should_panic(expected = "The method `set` must be invoked before this method.")]
+    fn done_panics_without_set() {
+        let r = ProduceRequestResult::new(TopicPartition::new("t", 0));
+        r.done();
+    }
+
+    #[test]
+    fn error_returns_none_when_no_function() {
+        let r = ProduceRequestResult::new(TopicPartition::new("t", 0));
+        r.set(0, NO_TIMESTAMP, None);
+        assert!(r.error(3).is_none());
+    }
+
+    #[test]
+    fn error_dispatches_to_function() {
+        let r = ProduceRequestResult::new(TopicPartition::new("t", 0));
+        let f: ErrorsByIndex = Arc::new(|idx| {
+            if idx == 2 {
+                Some(KafkaError::CorruptRecord("boom".to_string()))
             } else {
                 None
             }
         });
-
-        result.set(-1, RecordBatch::NO_TIMESTAMP, Some(errors_fn));
-        result.done();
-
-        let err = result.error(0).expect("should have error for index 0");
-        assert_eq!(err.error(), Errors::RecordListTooLarge);
-        assert!(result.error(1).is_none());
-    }
-
-    #[tokio::test]
-    async fn test_set_does_not_notify_waiters() {
-        // Verifies the two-phase protocol: set() should NOT unblock waiters.
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = Arc::new(ProduceRequestResult::new(tp));
-
-        result.set(42, RecordBatch::NO_TIMESTAMP, None);
-
-        // After set() but before done(), the result should NOT be completed
-        assert!(!result.completed());
-
-        // A short await should time out because done() hasn't been called
-        let completed = result.await_timeout(std::time::Duration::from_millis(10)).await;
-        assert!(!completed, "set() should not unblock waiters before done()");
-
-        // But the data should be readable via the accessor methods
-        assert_eq!(result.base_offset(), Some(42));
-
-        // Now call done() and verify completion
-        result.done();
-        assert!(result.completed());
-    }
-
-    #[tokio::test]
-    async fn test_await_completion() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = Arc::new(ProduceRequestResult::new(tp));
-
-        let result_clone = Arc::clone(&result);
-        let handle = tokio::spawn(async move {
-            result_clone.await_completion().await;
-            assert!(result_clone.completed());
-        });
-
-        // Set and complete the result
-        result.set(0, RecordBatch::NO_TIMESTAMP, None);
-        result.done();
-
-        handle.await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn test_await_timeout() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = ProduceRequestResult::new(tp);
-
-        // Should timeout since we never complete
-        let completed = result.await_timeout(std::time::Duration::from_millis(10)).await;
-        assert!(!completed);
-
-        // Now complete it
-        result.set(0, RecordBatch::NO_TIMESTAMP, None);
-        result.done();
-
-        let completed = result.await_timeout(std::time::Duration::from_millis(100)).await;
-        assert!(completed);
-    }
-
-    #[tokio::test]
-    async fn test_await_all_dependents() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let main_result = Arc::new(ProduceRequestResult::new(tp.clone()));
-
-        let dep1 = Arc::new(ProduceRequestResult::new(tp.clone()));
-        let dep2 = Arc::new(ProduceRequestResult::new(tp));
-
-        main_result.add_dependent(Arc::clone(&dep1));
-        main_result.add_dependent(Arc::clone(&dep2));
-
-        let main_clone = Arc::clone(&main_result);
-        let handle = tokio::spawn(async move {
-            main_clone.await_all_dependents().await;
-        });
-
-        // Complete main
-        main_result.set(0, RecordBatch::NO_TIMESTAMP, None);
-        main_result.done();
-
-        // Complete dependents
-        dep1.set(1, RecordBatch::NO_TIMESTAMP, None);
-        dep1.done();
-
-        dep2.set(2, RecordBatch::NO_TIMESTAMP, None);
-        dep2.done();
-
-        handle.await.unwrap();
-    }
-
-    #[test]
-    fn test_topic_partition() {
-        let tp = TopicPartition::new("my-topic".to_string(), 3);
-        let result = ProduceRequestResult::new(tp.clone());
-        assert_eq!(result.topic_partition(), &tp);
-    }
-
-    #[tokio::test]
-    #[should_panic(expected = "The method `set` must be invoked before `done`.")]
-    async fn test_done_without_set_panics() {
-        let tp = TopicPartition::new("test".to_string(), 0);
-        let result = ProduceRequestResult::new(tp);
-        result.done();
+        r.set(-1, NO_TIMESTAMP, Some(f));
+        assert!(r.error(0).is_none());
+        assert!(matches!(r.error(2), Some(KafkaError::CorruptRecord(_))));
     }
 }

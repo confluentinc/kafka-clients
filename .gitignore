@@ -6,3 +6,10 @@
 COMMENTS\.[0-9]*\.md
 COMMENTS\.TBR\.[0-9]*\.md
 /coverage
+
+# Perf test output (Phase 8a.1). Override via METRICS_FILE env var.
+/metrics.jsonl
+/perf-*.jsonl
+
+# Local harness state (Claude Code scheduled tasks).
+.claude/scheduled_tasks.lock

@@ -1,7 +1,7 @@
 ---
 name: "kafka-critic"
 description: "Use this agent when a Critic role is needed to review Actor commits in the Kafka Rust translation project. This agent is reviewing new commits for bugs, wrong tests, design flaws, and deviations from the Java client behavior.\\n\\nExamples:\\n\\n- user: \"Start reviewing Actor 1's work\"\\n  assistant: \"I'll launch the kafka-critic agent to begin the review loop for Actor 1's commits.\"\\n  <uses Agent tool to launch kafka-critic>\\n\\n- user: \"Review the latest changes from Actor 0\"\\n  assistant: \"I'll use the kafka-critic agent to review the latest commits from Actor 0.\"\\n  <uses Agent tool to launch kafka-critic>\\n\\n- user: \"Start the critic for agent number 2\"\\n  assistant: \"I'll launch the kafka-critic agent assigned as Critic number 2 to begin reviewing.\"\\n  <uses Agent tool to launch kafka-critic>"
-model: opus
+model: claude-opus-4-7
 color: red
 memory: project
 ---
@@ -62,7 +62,10 @@ For each commit, check:
 - Thread safety concerns
 - Memory safety (unnecessary clones, lifetime issues)
 - API design that deviates from Rust idioms while CLAUDE.md requires it
-- Performance issues compared to Java (unnecessary allocations, copies)
+- Performance issues compared to Java (unnecessary allocations, copies). For performance concerns, the false-positive bar is lower than for correctness — report if you can point to a specific avoidable allocation or copy, even without measuring the impact. Flag as **Performance** severity.
+- **Lifecycle tracking completeness**: verify that lifecycle management objects have all sides wired — add, remove, and query. A structure where `has_incomplete()` is always false because `add()` was never called compiles and passes unit tests but is silently broken.
+- **Resource pool return-paths**: watch for pool `deallocate`/`release` implementations that allocate a new object instead of returning the original. This compiles but wastes memory and defeats the pool.
+- **Ownership transfer in retry paths**: when Java passes an object to multiple consumers (e.g. a batch to both a callback and a collection), verify the Rust ownership model supports all the same operations. A `&mut T` reference cannot be moved into an owning collection — this silently drops records instead of re-enqueuing them.
 
 ## Comment Format
 

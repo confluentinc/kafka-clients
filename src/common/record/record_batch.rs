@@ -12,175 +12,185 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Record batch constants.
-//!
-//! Corresponds to Java's `org.apache.kafka.common.record.RecordBatch` (interface)
-//! and `org.apache.kafka.common.record.DefaultRecordBatch` (constants).
-//!
-//! This module defines the wire-protocol constants for record batch headers.
-//! The full `RecordBatch` trait will be implemented in a later phase when
-//! `DefaultRecordBatch` is translated.
+//! Translation of `org.apache.kafka.common.record.RecordBatch`.
 
-use crate::common::header::internals::RecordHeader;
+use crate::common::errors::KafkaError;
+use crate::common::record::{CompressionType, Record, TimestampType};
+use crate::common::utils::buffer_supplier::BufferSupplier;
 
-/// Constants for record batch magic values and sentinel values.
+// Magic-byte constants — these mirror Java's `RecordBatch.MAGIC_VALUE_V0` etc.
+/// Magic byte for the v0 record format.
+pub const MAGIC_VALUE_V0: i8 = 0;
+/// Magic byte for the v1 record format.
+pub const MAGIC_VALUE_V1: i8 = 1;
+/// Magic byte for the v2 record format (current).
+pub const MAGIC_VALUE_V2: i8 = 2;
+/// Current magic byte.
+pub const CURRENT_MAGIC_VALUE: i8 = MAGIC_VALUE_V2;
+
+/// Sentinel timestamp for records without a timestamp.
+pub const NO_TIMESTAMP: i64 = -1;
+
+// Sentinel values used in the v2 record format by non-idempotent /
+// non-transactional producers, or when up-converting from older formats.
+/// Sentinel producer-id meaning "no producer".
+pub const NO_PRODUCER_ID: i64 = -1;
+/// Sentinel producer epoch meaning "no producer".
+pub const NO_PRODUCER_EPOCH: i16 = -1;
+/// Sentinel base-sequence meaning "no sequence".
+pub const NO_SEQUENCE: i32 = -1;
+
+/// Sentinel value for an unknown partition leader epoch (the case when the
+/// record set is first created by the producer).
+pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
+
+/// A record batch is a container for records. In old versions of the record
+/// format (versions 0 and 1), a batch consisted always of a single record if
+/// no compression was enabled, but could contain many records otherwise.
+/// Newer versions (magic 2 and above) always contain one or more records,
+/// regardless of compression.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.RecordBatch` interface constants.
-pub struct RecordBatch;
+/// Java's `RecordBatch` extends `Iterable<Record>`. In Rust we expose
+/// [`RecordBatch::iter`] returning a boxed iterator yielding boxed `Record`
+/// trait objects. The default trait methods [`has_producer_id`],
+/// [`next_offset`], [`is_compressed`] and [`offset_of_max_timestamp`] mirror
+/// the implementations Java factors out into `AbstractRecordBatch` and the
+/// `default` body on the `RecordBatch` interface.
+pub trait RecordBatch {
+    /// Whether the batch's checksum is correct.
+    fn is_valid(&self) -> bool;
 
-impl RecordBatch {
-    // -- Magic values ---------------------------------------------------------
+    /// Raise an error if the checksum is not valid.
+    fn ensure_valid(&self) -> Result<(), KafkaError>;
 
-    /// Magic value for record format version 0.
-    pub const MAGIC_VALUE_V0: i8 = 0;
-    /// Magic value for record format version 1.
-    pub const MAGIC_VALUE_V1: i8 = 1;
-    /// Magic value for record format version 2 (current).
-    pub const MAGIC_VALUE_V2: i8 = 2;
-    /// The current magic value.
-    pub const CURRENT_MAGIC_VALUE: i8 = Self::MAGIC_VALUE_V2;
+    /// 4-byte unsigned checksum, returned as `i64` to mirror Java's `long`
+    /// signature.
+    fn checksum(&self) -> i64;
 
-    // -- Sentinel values ------------------------------------------------------
+    /// The maximum timestamp in this batch (or the log-append timestamp).
+    fn max_timestamp(&self) -> i64;
 
-    /// Timestamp value for records without a timestamp.
-    pub const NO_TIMESTAMP: i64 = -1;
-    /// Producer ID value for non-idempotent/non-transactional producers.
-    pub const NO_PRODUCER_ID: i64 = -1;
-    /// Producer epoch value for non-idempotent/non-transactional producers.
-    pub const NO_PRODUCER_EPOCH: i16 = -1;
-    /// Sequence number value for non-idempotent/non-transactional producers.
-    pub const NO_SEQUENCE: i32 = -1;
-    /// Unknown partition leader epoch (used when first created by the producer).
-    pub const NO_PARTITION_LEADER_EPOCH: i32 = -1;
+    /// The timestamp type. Always [`TimestampType::NoTimestampType`] for magic
+    /// 0.
+    fn timestamp_type(&self) -> TimestampType;
 
-    // -- Batch header field offsets (from DefaultRecordBatch) ------------------
+    /// Base offset contained in this batch.
+    fn base_offset(&self) -> i64;
 
-    /// Offset of the base offset field in the batch header.
-    pub const BASE_OFFSET_OFFSET: usize = 0;
-    /// Length of the base offset field.
-    pub const BASE_OFFSET_LENGTH: usize = 8;
+    /// Last offset in this batch (inclusive).
+    fn last_offset(&self) -> i64;
 
-    /// Offset of the batch length field.
-    pub const LENGTH_OFFSET: usize = Self::BASE_OFFSET_OFFSET + Self::BASE_OFFSET_LENGTH;
-    /// Length of the batch length field.
-    pub const LENGTH_LENGTH: usize = 4;
-
-    /// Offset of the partition leader epoch field.
-    pub const PARTITION_LEADER_EPOCH_OFFSET: usize = Self::LENGTH_OFFSET + Self::LENGTH_LENGTH;
-    /// Length of the partition leader epoch field.
-    pub const PARTITION_LEADER_EPOCH_LENGTH: usize = 4;
-
-    /// Offset of the magic byte field.
-    pub const MAGIC_OFFSET: usize = Self::PARTITION_LEADER_EPOCH_OFFSET + Self::PARTITION_LEADER_EPOCH_LENGTH;
-    /// Length of the magic byte field.
-    pub const MAGIC_LENGTH: usize = 1;
-
-    /// Offset of the CRC field.
-    pub const CRC_OFFSET: usize = Self::MAGIC_OFFSET + Self::MAGIC_LENGTH;
-    /// Length of the CRC field.
-    pub const CRC_LENGTH: usize = 4;
-
-    /// Offset of the attributes field.
-    pub const ATTRIBUTES_OFFSET: usize = Self::CRC_OFFSET + Self::CRC_LENGTH;
-    /// Length of the attributes field.
-    pub const ATTRIBUTE_LENGTH: usize = 2;
-
-    /// Offset of the last offset delta field.
-    pub const LAST_OFFSET_DELTA_OFFSET: usize = Self::ATTRIBUTES_OFFSET + Self::ATTRIBUTE_LENGTH;
-    /// Length of the last offset delta field.
-    pub const LAST_OFFSET_DELTA_LENGTH: usize = 4;
-
-    /// Offset of the base timestamp field.
-    pub const BASE_TIMESTAMP_OFFSET: usize = Self::LAST_OFFSET_DELTA_OFFSET + Self::LAST_OFFSET_DELTA_LENGTH;
-    /// Length of the base timestamp field.
-    pub const BASE_TIMESTAMP_LENGTH: usize = 8;
-
-    /// Offset of the max timestamp field.
-    pub const MAX_TIMESTAMP_OFFSET: usize = Self::BASE_TIMESTAMP_OFFSET + Self::BASE_TIMESTAMP_LENGTH;
-    /// Length of the max timestamp field.
-    pub const MAX_TIMESTAMP_LENGTH: usize = 8;
-
-    /// Offset of the producer ID field.
-    pub const PRODUCER_ID_OFFSET: usize = Self::MAX_TIMESTAMP_OFFSET + Self::MAX_TIMESTAMP_LENGTH;
-    /// Length of the producer ID field.
-    pub const PRODUCER_ID_LENGTH: usize = 8;
-
-    /// Offset of the producer epoch field.
-    pub const PRODUCER_EPOCH_OFFSET: usize = Self::PRODUCER_ID_OFFSET + Self::PRODUCER_ID_LENGTH;
-    /// Length of the producer epoch field.
-    pub const PRODUCER_EPOCH_LENGTH: usize = 2;
-
-    /// Offset of the base sequence field.
-    pub const BASE_SEQUENCE_OFFSET: usize = Self::PRODUCER_EPOCH_OFFSET + Self::PRODUCER_EPOCH_LENGTH;
-    /// Length of the base sequence field.
-    pub const BASE_SEQUENCE_LENGTH: usize = 4;
-
-    /// Offset of the records count field.
-    pub const RECORDS_COUNT_OFFSET: usize = Self::BASE_SEQUENCE_OFFSET + Self::BASE_SEQUENCE_LENGTH;
-    /// Length of the records count field.
-    pub const RECORDS_COUNT_LENGTH: usize = 4;
-
-    /// Offset where the actual records begin (immediately after the batch header).
-    pub const RECORDS_OFFSET: usize = Self::RECORDS_COUNT_OFFSET + Self::RECORDS_COUNT_LENGTH;
-
-    /// Total overhead of a record batch header (equals `RECORDS_OFFSET`).
-    pub const RECORD_BATCH_OVERHEAD: usize = Self::RECORDS_OFFSET;
-
-    /// Empty headers array constant, used when no headers are present.
-    pub const EMPTY_HEADERS: &'static [RecordHeader] = &[];
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_magic_values() {
-        assert_eq!(RecordBatch::MAGIC_VALUE_V0, 0);
-        assert_eq!(RecordBatch::MAGIC_VALUE_V1, 1);
-        assert_eq!(RecordBatch::MAGIC_VALUE_V2, 2);
-        assert_eq!(RecordBatch::CURRENT_MAGIC_VALUE, 2);
+    /// The offset following this batch (`last_offset() + 1`). Provided as a
+    /// default impl mirroring Java's interface body.
+    fn next_offset(&self) -> i64 {
+        self.last_offset() + 1
     }
 
-    #[test]
-    fn test_sentinel_values() {
-        assert_eq!(RecordBatch::NO_TIMESTAMP, -1);
-        assert_eq!(RecordBatch::NO_PRODUCER_ID, -1);
-        assert_eq!(RecordBatch::NO_PRODUCER_EPOCH, -1);
-        assert_eq!(RecordBatch::NO_SEQUENCE, -1);
-        assert_eq!(RecordBatch::NO_PARTITION_LEADER_EPOCH, -1);
+    /// Magic value of this batch.
+    fn magic(&self) -> i8;
+
+    /// Producer id, or [`NO_PRODUCER_ID`].
+    fn producer_id(&self) -> i64;
+
+    /// Producer epoch, or [`NO_PRODUCER_EPOCH`].
+    fn producer_epoch(&self) -> i16;
+
+    /// Whether the batch carries a producer id. Default impl mirrors Java's
+    /// `AbstractRecordBatch#hasProducerId`.
+    fn has_producer_id(&self) -> bool {
+        NO_PRODUCER_ID < self.producer_id()
     }
 
-    #[test]
-    fn test_record_batch_overhead() {
-        // The record batch overhead should be 61 bytes
-        // 8 (base_offset) + 4 (length) + 4 (partition_leader_epoch) + 1 (magic)
-        // + 4 (crc) + 2 (attributes) + 4 (last_offset_delta) + 8 (base_timestamp)
-        // + 8 (max_timestamp) + 8 (producer_id) + 2 (producer_epoch)
-        // + 4 (base_sequence) + 4 (records_count) = 61
-        assert_eq!(RecordBatch::RECORD_BATCH_OVERHEAD, 61);
+    /// Base sequence number, or [`NO_SEQUENCE`].
+    fn base_sequence(&self) -> i32;
+
+    /// Last sequence number, or [`NO_SEQUENCE`].
+    fn last_sequence(&self) -> i32;
+
+    /// Compression type used by this batch.
+    fn compression_type(&self) -> CompressionType;
+
+    /// Total size of this batch in bytes.
+    fn size_in_bytes(&self) -> i32;
+
+    /// Number of records, where supported (magic 2 and above). Returns `None`
+    /// for older magic versions.
+    fn count_or_null(&self) -> Option<i32>;
+
+    /// Whether the batch is compressed. Default impl mirrors
+    /// `AbstractRecordBatch#isCompressed`.
+    fn is_compressed(&self) -> bool {
+        self.compression_type() != CompressionType::None
     }
 
-    #[test]
-    fn test_field_offsets() {
-        assert_eq!(RecordBatch::BASE_OFFSET_OFFSET, 0);
-        assert_eq!(RecordBatch::LENGTH_OFFSET, 8);
-        assert_eq!(RecordBatch::PARTITION_LEADER_EPOCH_OFFSET, 12);
-        assert_eq!(RecordBatch::MAGIC_OFFSET, 16);
-        assert_eq!(RecordBatch::CRC_OFFSET, 17);
-        assert_eq!(RecordBatch::ATTRIBUTES_OFFSET, 21);
-        assert_eq!(RecordBatch::LAST_OFFSET_DELTA_OFFSET, 23);
-        assert_eq!(RecordBatch::BASE_TIMESTAMP_OFFSET, 27);
-        assert_eq!(RecordBatch::MAX_TIMESTAMP_OFFSET, 35);
-        assert_eq!(RecordBatch::PRODUCER_ID_OFFSET, 43);
-        assert_eq!(RecordBatch::PRODUCER_EPOCH_OFFSET, 51);
-        assert_eq!(RecordBatch::BASE_SEQUENCE_OFFSET, 53);
-        assert_eq!(RecordBatch::RECORDS_COUNT_OFFSET, 57);
-        assert_eq!(RecordBatch::RECORDS_OFFSET, 61);
-    }
+    /// Write this batch into the supplied byte buffer.
+    fn write_to(&self, buffer: &mut Vec<u8>);
 
-    #[test]
-    fn test_empty_headers() {
-        assert_eq!(RecordBatch::EMPTY_HEADERS.len(), 0);
+    /// Whether this batch is part of a transaction.
+    fn is_transactional(&self) -> bool;
+
+    /// Delete-horizon timestamp, or `None` if the first timestamp is not the
+    /// delete horizon. Mirrors Java's `OptionalLong`.
+    fn delete_horizon_ms(&self) -> Option<i64>;
+
+    /// Partition leader epoch, or [`NO_PARTITION_LEADER_EPOCH`].
+    fn partition_leader_epoch(&self) -> i32;
+
+    /// Whether this is a control batch.
+    fn is_control_batch(&self) -> bool;
+
+    /// Iterate over the records in this batch. Mirrors Java's
+    /// `Iterable<Record>` parent on `RecordBatch`.
+    ///
+    /// Each item is `Result<Box<dyn Record + 'a>, KafkaError>`: corrupt
+    /// records (e.g. declared `RecordCount` mismatches actual records, varint
+    /// decode error) yield `Err(KafkaError::CorruptRecord(_))` and the
+    /// iterator stops. Java throws `InvalidRecordException` in the same
+    /// situations; CLAUDE.md rule 10.2 maps these to `Result`.
+    fn iter<'a>(&'a self) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a>;
+
+    /// Return a streaming iterator that defers decompression of the record
+    /// stream until each next() call. The supplied buffer supplier may be
+    /// reused across batches to avoid large per-batch allocations.
+    ///
+    /// Phase 3a defines this as part of the contract; the concrete iterator
+    /// implementations land in Phase 3c/3d.
+    ///
+    /// Each item is `Result<Box<dyn Record + 'a>, KafkaError>` for the same
+    /// reason as [`iter`](Self::iter).
+    fn streaming_iterator<'a>(
+        &'a self,
+        decompression_buffer_supplier: &'a mut BufferSupplier,
+    ) -> Box<dyn Iterator<Item = Result<Box<dyn Record + 'a>, KafkaError>> + 'a>;
+
+    /// Iterate all records to find the offset of the maximum timestamp.
+    ///
+    /// Notes (mirroring Java's contract):
+    /// 1. The earliest offset is returned if multiple records share the max
+    ///    timestamp.
+    /// 2. Always returns `None` for magic 0 batches.
+    ///
+    /// Mirrors Java's no-arg `RecordBatch#offsetOfMaxTimestamp` (default
+    /// interface body), which internally allocates a fresh
+    /// `BufferSupplier.create()` inside a try-with-resources. The Rust
+    /// translation does the same: a local [`BufferSupplier::create`] is
+    /// instantiated for the duration of the streaming-iterator scope, then
+    /// dropped when the borrow ends.
+    fn offset_of_max_timestamp(&self) -> Result<Option<i64>, KafkaError> {
+        if self.magic() == MAGIC_VALUE_V0 {
+            return Ok(None);
+        }
+        let max_timestamp = self.max_timestamp();
+        // Mirror Java's `try (CloseableIterator<Record> iter =
+        // streamingIterator(BufferSupplier.create()))`: the supplier is
+        // owned locally and dropped when this block exits.
+        let mut supplier = BufferSupplier::create();
+        for record in self.streaming_iterator(&mut supplier) {
+            let record = record?;
+            if max_timestamp == record.timestamp() {
+                return Ok(Some(record.offset()));
+            }
+        }
+        Ok(None)
     }
 }

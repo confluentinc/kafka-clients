@@ -12,214 +12,166 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Transport layer trait for underlying network communication.
-//!
-//! Translated from `org.apache.kafka.common.network.TransportLayer`.
-//!
-//! At a very basic level it is a wrapper around a TCP stream and can be used as a
-//! substitute for socket channel and other network channel implementations.
-//!
-//! In Java this extends `ScatteringByteChannel` and `TransferableChannel`.
-//! In Rust, the async read/write capabilities and the Kafka-specific methods are
-//! combined into this single trait, backed by `tokio::net::TcpStream`.
+//! Translation of `org.apache.kafka.common.network.TransportLayer`.
 
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::ops;
-use std::pin::Pin;
+use std::task::{Context, Poll};
 
-/// Interest operations for the transport layer, analogous to Java `SelectionKey` ops.
+use crate::common::network::TransferableChannel;
+use crate::common::security::auth::KafkaPrincipal;
+
+/// Selection-key interest-op flags. Mirror the same bit values as Java's
+/// `java.nio.channels.SelectionKey` so existing code paths that bitwise-OR
+/// these constants behave identically.
 ///
-/// These flags control which I/O operations the selector is interested in for a channel.
-/// Supports bitwise OR (`|`) to combine ops, bitwise AND (`&`) to intersect,
-/// and `remove` to clear specific flags.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct InterestOps(u8);
+/// Phase 5b/5c uses these to track which I/O readiness events the
+/// `KafkaChannel`/`Selector` layer is interested in for a given
+/// transport. Tokio drives the readiness on its own, but the Java
+/// `Selector` and `KafkaChannel` toggle these to mute/unmute the channel,
+/// so we keep them as first-class state on the transport.
+pub const OP_READ: i32 = 1 << 0;
+pub const OP_WRITE: i32 = 1 << 2;
+pub const OP_CONNECT: i32 = 1 << 3;
 
-impl InterestOps {
-    /// No interest operations.
-    pub const NONE: InterestOps = InterestOps(0);
-    /// Interested in read operations (analogous to `SelectionKey.OP_READ`).
-    pub const OP_READ: InterestOps = InterestOps(1 << 0);
-    /// Interested in write operations (analogous to `SelectionKey.OP_WRITE`).
-    pub const OP_WRITE: InterestOps = InterestOps(1 << 2);
-    /// Interested in connect operations (analogous to `SelectionKey.OP_CONNECT`).
-    pub const OP_CONNECT: InterestOps = InterestOps(1 << 3);
-
-    /// Returns `true` if the given ops are set.
-    pub fn contains(self, other: InterestOps) -> bool {
-        (self.0 & other.0) == other.0
-    }
-
-    /// Returns these ops with the given ops removed.
-    pub fn remove(self, other: InterestOps) -> InterestOps {
-        InterestOps(self.0 & !other.0)
-    }
-
-    /// Returns the raw u8 value.
-    pub fn bits(self) -> u8 {
-        self.0
-    }
-}
-
-impl ops::BitOr for InterestOps {
-    type Output = InterestOps;
-
-    fn bitor(self, rhs: InterestOps) -> InterestOps {
-        InterestOps(self.0 | rhs.0)
-    }
-}
-
-impl ops::BitOrAssign for InterestOps {
-    fn bitor_assign(&mut self, rhs: InterestOps) {
-        self.0 |= rhs.0;
-    }
-}
-
-impl ops::BitAnd for InterestOps {
-    type Output = InterestOps;
-
-    fn bitand(self, rhs: InterestOps) -> InterestOps {
-        InterestOps(self.0 & rhs.0)
-    }
-}
-
-/// Transport layer for underlying network communication.
+/// Transport layer for underlying communication.
 ///
-/// Provides async read/write operations on a TCP connection along with
-/// Kafka-specific connection management (handshake, interest ops, muting).
+/// At a very basic level, this is a wrapper around the underlying socket
+/// (a `tokio::net::TcpStream` for the Rust translation) that can be used
+/// as a substitute for the socket and other network channel
+/// implementations. As `NetworkClient` replaces `BlockingChannel` and
+/// other implementations, `KafkaChannel` is the network I/O channel
+/// layered on top of a `TransportLayer`.
 ///
-/// In Java, `TransportLayer` extends `ScatteringByteChannel` and `TransferableChannel`.
-/// In Rust, the async I/O capabilities and the Kafka-specific methods are combined
-/// into this single trait. I/O methods return boxed futures for object safety (`dyn TransportLayer`).
+/// The Java interface extends `ScatteringByteChannel` and
+/// `TransferableChannel` (which itself extends `GatheringByteChannel`).
+/// The Rust trait keeps the same shape:
 ///
-/// Per CLAUDE.md rule 8, all I/O is async using Tokio.
-pub trait TransportLayer: Send {
-    /// Returns the remote address of the connected peer, if available.
-    ///
-    /// This replaces Java's `transportLayer.socketChannel().getRemoteAddress()`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the socket is not connected or the address cannot
-    /// be determined.
-    fn peer_addr(&self) -> io::Result<SocketAddr>;
-
-    /// Returns `true` if the channel has completed handshake and authentication.
+/// * `TransferableChannel::write_vectored` mirrors the gathering write
+///   (`GatheringByteChannel.write(ByteBuffer[])`).
+/// * [`TransportLayer::read`] mirrors the scattering read into a single
+///   buffer (`ReadableByteChannel.read(ByteBuffer)`).
+///
+/// `read` is sync and treats `WouldBlock` as `Ok(0)` (Java NIO's "would
+/// block" signal) so that it composes with [`io::Read`] adapters and
+/// with [`crate::common::network::Receive::read_from`], which expects
+/// `Ok(0)` to mean "no progress on this call". End-of-stream (peer
+/// closed the socket) is surfaced as `Err(io::ErrorKind::UnexpectedEof)`,
+/// mirroring Java's `EOFException` thrown by `NetworkReceive.readFrom`
+/// when `channel.read()` returns `-1`. The upper layer (`KafkaChannel`,
+/// `Selector`) translates that error into a channel-disconnected event.
+///
+/// **Java SocketChannel/SelectionKey accessors are intentionally absent
+/// from this trait.** Java's `socketChannel()` / `selectionKey()` getters
+/// are tied to the NIO event loop; in the Tokio-based translation the
+/// readiness mechanism is the runtime itself, and the `Selector` reaches
+/// state via [`Self::add_interest_ops`] / [`Self::remove_interest_ops`]
+/// / [`Self::is_mute`] rather than fishing it out of a `SelectionKey`.
+pub trait TransportLayer: TransferableChannel {
+    /// Returns true if the channel has handshake and authentication done.
+    /// Mirrors `TransportLayer.ready()`. Plaintext is always `true`; SSL
+    /// returns `true` only after the handshake completes.
     fn ready(&self) -> bool;
 
-    /// Finishes the process of connecting a socket channel.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the connection cannot be completed.
-    fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>>;
+    /// Finishes the process of connecting a socket channel. Mirrors
+    /// `TransportLayer.finishConnect()`. Returns `true` when the underlying
+    /// connection is fully established; flips the interest-op set
+    /// (`OP_CONNECT` cleared, `OP_READ` set) to mirror the Java
+    /// behaviour.
+    fn finish_connect(&mut self) -> io::Result<bool>;
 
-    /// Disconnects the underlying socket channel.
+    /// Disconnect the underlying socket. Mirrors
+    /// `TransportLayer.disconnect()`. In Java this calls
+    /// `selectionKey.cancel()`; in Rust this drops/closes the socket on
+    /// the next `close()` call but is otherwise a hint-only operation.
     fn disconnect(&mut self);
 
-    /// Returns `true` if this channel's network socket is connected.
+    /// Tells whether this channel's network socket is connected.
+    /// Mirrors `TransportLayer.isConnected()`.
     fn is_connected(&self) -> bool;
 
-    /// Performs protocol-specific handshake.
-    ///
-    /// This is a no-op for the non-secure PLAINTEXT implementation.
-    /// For SSL, this would perform the SSL handshake.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the handshake fails.
-    fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
-
-    /// Adds the given interest operations.
-    fn add_interest_ops(&mut self, ops: InterestOps);
-
-    /// Removes the given interest operations.
-    fn remove_interest_ops(&mut self, ops: InterestOps);
-
-    /// Returns `true` if this channel is muted (not interested in read operations).
-    fn is_mute(&self) -> bool;
-
-    /// Returns `true` if the channel has bytes to be read in any intermediate buffers
-    /// which may be processed without reading additional data from the network.
-    fn has_bytes_buffered(&self) -> bool;
-
-    /// Returns `true` if there are any pending writes that have not yet been flushed
-    /// to the underlying transport.
-    fn has_pending_writes(&self) -> bool;
-
-    /// Returns `true` if the transport layer is open.
+    /// Tells whether the channel is open. Mirrors `Channel.isOpen()`.
     fn is_open(&self) -> bool;
 
-    /// Closes the transport layer.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the close operation fails.
-    fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+    /// Close the underlying socket. Mirrors `Closeable.close()`.
+    fn close(&mut self) -> io::Result<()>;
 
-    /// Reads data from this channel into the given buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `dst` - The buffer into which bytes are to be transferred
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes read, possibly zero. Returns `Ok(0)` only to indicate
-    /// EOF (remote closed the connection), consistent with Tokio's `AsyncRead`.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the read fails.
-    fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    /// Read a sequence of bytes from this channel into the given buffer.
+    /// Mirrors `ReadableByteChannel.read(ByteBuffer)`. Returns the number
+    /// of bytes read; `Ok(0)` means the underlying socket has no bytes
+    /// ready (Java NIO's "would block" signal). End-of-stream (peer
+    /// closed) is surfaced as `Err(io::ErrorKind::UnexpectedEof)` to
+    /// mirror Java's `channel.read() == -1 → throw EOFException`.
+    fn read(&mut self, dst: &mut [u8]) -> io::Result<usize>;
 
-    /// Writes data to this channel from the given buffer.
-    ///
-    /// # Arguments
-    ///
-    /// * `src` - The buffer from which bytes are to be retrieved
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes written, possibly zero.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the write fails.
-    fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    /// Performs SSL handshake. No-op for the PLAINTEXT implementation.
+    /// Mirrors `TransportLayer.handshake()`. Returns
+    /// `Err(KafkaError::Authentication)` when the SSL handshake fails.
+    fn handshake(&mut self) -> io::Result<()>;
 
-    /// Returns a future that resolves when the transport is ready for reading.
-    ///
-    /// Used by the Selector to wait for I/O readiness across all channels,
-    /// replacing busy-polling. The future does not perform any I/O itself.
-    ///
-    /// Takes `&self` (not `&mut self`) so multiple channels can be polled
-    /// simultaneously.
-    fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+    /// Returns the peer principal — `KafkaPrincipal::ANONYMOUS` for
+    /// PLAINTEXT, the SSL session's `getPeerPrincipal()` (or ANONYMOUS
+    /// if peer auth was not requested) for SSL. Mirrors
+    /// `TransportLayer.peerPrincipal()`.
+    fn peer_principal(&self) -> io::Result<KafkaPrincipal>;
 
-    /// Returns a future that resolves when the transport is ready for writing.
-    ///
-    /// Takes `&self` (not `&mut self`) so multiple channels can be polled
-    /// simultaneously.
-    fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+    /// Add the given interest-op flags. Bits should be a bitwise-OR of the
+    /// `OP_*` constants in this module.
+    fn add_interest_ops(&mut self, ops: i32);
 
-    /// Writes data from multiple buffers to this channel (scatter-gather write).
+    /// Remove the given interest-op flags.
+    fn remove_interest_ops(&mut self, ops: i32);
+
+    /// Read the current interest-op flag set. Returns 0 if the channel
+    /// has been closed/cancelled.
+    fn interest_ops(&self) -> i32;
+
+    /// `true` iff `OP_READ` is *not* in the interest-op set (and the
+    /// channel is still open). Mirrors Java's
+    /// `selectionKey.isValid() && (interestOps() & OP_READ) == 0`.
     ///
-    /// # Arguments
+    /// **Connect-pending caveat**: a freshly-`pending_connect`-constructed
+    /// channel reports `is_mute() == true` because its initial interest-op
+    /// set is `OP_CONNECT` only — `OP_READ` is added by `finish_connect`.
+    /// Callers that need to distinguish "actively muted by the upper
+    /// layer" from "not yet eligible to read because the connect has not
+    /// completed" should pair this with [`Self::is_connected`] /
+    /// [`Self::ready`] rather than treating `is_mute() == true` as a
+    /// monolithic signal.
+    fn is_mute(&self) -> bool;
+
+    /// `true` iff this transport has bytes buffered internally that may be
+    /// processed without reading additional data from the network. SSL
+    /// implementations override this to signal that the
+    /// decrypted-but-not-yet-consumed data is available; the plaintext
+    /// implementation always returns `false`.
+    fn has_bytes_buffered(&self) -> bool;
+
+    /// Local address of the underlying socket. Mirrors Java's
+    /// `transportLayer.socketChannel().socket().getLocalSocketAddress()`,
+    /// which `KafkaChannel` reads for connection-introspection metadata
+    /// (selector logging, idle-expiry, channel id computation).
+    fn local_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Peer (remote) address of the underlying socket. Mirrors Java's
+    /// `transportLayer.socketChannel().socket().getRemoteSocketAddress()`.
+    fn peer_addr(&self) -> io::Result<SocketAddr>;
+
+    /// Poll the underlying socket for readability. Used by
+    /// [`crate::common::network::Selector::poll`] to wake from its
+    /// timeout sleep when bytes arrive on any open channel — the Tokio
+    /// equivalent of Java's `nio.Selector.select(timeout)` returning on
+    /// OS-level read readiness.
     ///
-    /// * `srcs` - The buffers from which bytes are to be retrieved
+    /// Returns `Poll::Ready(())` when the underlying socket has bytes
+    /// available (or is in a state that should be checked, such as
+    /// EOF); `Poll::Pending` registers the context's waker so Tokio
+    /// will re-poll when readability changes.
     ///
-    /// # Returns
-    ///
-    /// The number of bytes written, possibly zero.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the write fails.
-    fn write_vectored<'a>(
-        &'a mut self,
-        srcs: &'a [io::IoSlice<'a>],
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+    /// Default implementation returns `Poll::Ready(())` so a transport
+    /// that doesn't model OS-level readiness still works (the upper
+    /// poll loop falls back to the timeout-driven retry path).
+    fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<()> {
+        Poll::Ready(())
+    }
 }

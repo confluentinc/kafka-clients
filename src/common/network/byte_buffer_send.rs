@@ -12,133 +12,267 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A send backed by an array of byte buffers.
-//!
-//! Translated from `org.apache.kafka.common.network.ByteBufferSend`.
+//! Translation of `org.apache.kafka.common.network.ByteBufferSend`.
 
-use super::KafkaSend;
-use super::TransportLayer;
+use std::io::{self, IoSlice};
 
-use std::fmt;
-use std::future::Future;
-use std::io;
-use std::pin::Pin;
+use bytes::Bytes;
+
+use super::{Send, TransferableChannel};
 
 /// A send backed by an array of byte buffers.
 ///
-/// Each buffer is written in sequence to the destination channel.
-/// Uses vectored writes (`IoSlice`) for efficient scatter-gather I/O.
+/// Mirrors the Java `ByteBufferSend`. The Java implementation holds a
+/// `ByteBuffer[]` and tracks a `remaining` byte counter plus a `pending`
+/// flag set from `TransferableChannel.hasPendingWrites()`. We mirror that
+/// shape with `Vec<Bytes>` (each `bytes::Bytes` is cheap-cloneable shared
+/// ownership — never deep-copied on the send path) and per-buffer cursors.
+///
+/// The wire-write path uses `write_vectored` (Java's
+/// `GatheringByteChannel.write(ByteBuffer[])`) so the concatenated framing
+/// header + payload is never assembled into a single contiguous buffer
+/// (CLAUDE.md rule 12).
 pub struct ByteBufferSend {
-    /// The byte buffers to send. Each buffer tracks its own position
-    /// as a `(data, offset)` pair where offset marks the next byte to write.
-    buffers: Vec<(Vec<u8>, usize)>,
-    /// The total size of this send (sum of all buffer lengths).
-    size: usize,
-    /// The remaining number of bytes to write.
-    remaining: usize,
-    /// Whether the underlying channel has pending writes.
+    buffers: Vec<Bytes>,
+    /// Per-buffer offset of how many bytes have already been written.
+    /// `offsets[i] <= buffers[i].len()`.
+    offsets: Vec<usize>,
+    size: u64,
+    remaining: u64,
     pending: bool,
 }
 
 impl ByteBufferSend {
-    /// Creates a new `ByteBufferSend` from the given byte buffers.
-    ///
-    /// The size is computed as the sum of all buffer lengths.
-    pub fn new(buffers: Vec<Vec<u8>>) -> Self {
-        let remaining: usize = buffers.iter().map(|b| b.len()).sum();
-        let size = remaining;
-        let buffers = buffers.into_iter().map(|b| (b, 0)).collect();
-        Self { buffers, size, remaining, pending: false }
+    /// Construct a `ByteBufferSend` from a sequence of `Bytes` chunks. The
+    /// total size is the sum of the chunk lengths. Mirrors the Java
+    /// varargs constructor `ByteBufferSend(ByteBuffer... buffers)`.
+    pub fn from_buffers(buffers: Vec<Bytes>) -> Self {
+        let size: u64 = buffers.iter().map(|b| b.len() as u64).sum();
+        let offsets = vec![0; buffers.len()];
+        ByteBufferSend { buffers, offsets, size, remaining: size, pending: false }
     }
 
-    /// Creates a new `ByteBufferSend` from the given byte buffers with a pre-computed size.
-    ///
-    /// This constructor allows specifying the size explicitly, which may differ from the
-    /// sum of buffer lengths if buffers have already been partially consumed.
-    pub fn with_size(buffers: Vec<Vec<u8>>, size: usize) -> Self {
-        let buffers = buffers.into_iter().map(|b| (b, 0)).collect();
-        Self { buffers, size, remaining: size, pending: false }
+    /// Construct a `ByteBufferSend` with an explicit size. Mirrors
+    /// `ByteBufferSend(ByteBuffer[] buffers, long size)`. The Java
+    /// constructor is used when only part of the buffer's contents will be
+    /// sent — the size is taken as authoritative.
+    pub fn from_buffers_with_size(buffers: Vec<Bytes>, size: u64) -> Self {
+        let offsets = vec![0; buffers.len()];
+        ByteBufferSend { buffers, offsets, size, remaining: size, pending: false }
     }
 
-    /// Creates a size-prefixed send: prepends a 4-byte big-endian size header
-    /// followed by the given buffer's content.
-    pub fn size_prefixed(buffer: Vec<u8>) -> Self {
-        let size_buffer = (buffer.len() as i32).to_be_bytes().to_vec();
-        Self::new(vec![size_buffer, buffer])
-    }
-
-    /// Returns the number of bytes remaining to be written.
-    pub fn remaining(&self) -> usize {
+    /// Number of bytes remaining to be written. Mirrors
+    /// `ByteBufferSend.remaining()`.
+    pub fn remaining(&self) -> u64 {
         self.remaining
+    }
+
+    /// Mirrors `ByteBufferSend.sizePrefixed(ByteBuffer)`. Prepends a
+    /// 4-byte big-endian length header in front of `payload`. Header and
+    /// payload are kept as separate buffers so the eventual
+    /// `write_vectored` send path can hand them to the kernel in a single
+    /// `writev` call without an intermediate copy (CLAUDE.md rule 12).
+    pub fn size_prefixed(payload: Bytes) -> Self {
+        let len = payload.len() as i32;
+        let mut header = [0u8; 4];
+        header.copy_from_slice(&len.to_be_bytes());
+        let header_buf = Bytes::copy_from_slice(&header);
+        Self::from_buffers(vec![header_buf, payload])
     }
 }
 
-impl KafkaSend for ByteBufferSend {
+impl Send for ByteBufferSend {
     fn completed(&self) -> bool {
         self.remaining == 0 && !self.pending
     }
 
-    fn write_to<'a>(
-        &'a mut self,
-        channel: &'a mut dyn TransportLayer,
-    ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-        Box::pin(async {
-            // Build IoSlice views of unwritten portions of each buffer
-            let slices: Vec<io::IoSlice<'_>> = self
-                .buffers
-                .iter()
-                .filter(|(data, offset)| *offset < data.len())
-                .map(|(data, offset)| io::IoSlice::new(&data[*offset..]))
-                .collect();
-
-            let written = if slices.is_empty() {
-                0
-            } else {
-                match channel.write_vectored(&slices).await {
-                    Ok(n) => n,
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // No space in the socket buffer right now. Matches Java NIO
-                        // non-blocking write returning 0: try again later.
-                        0
-                    },
-                    Err(e) => return Err(e),
-                }
-            };
-
-            if written == 0 {
-                self.pending = channel.has_pending_writes();
-                return Ok(0);
-            }
-
-            // Advance buffer offsets based on bytes written
-            let mut to_consume = written;
-            for (data, offset) in &mut self.buffers {
-                if to_consume == 0 {
-                    break;
-                }
-                let available = data.len() - *offset;
-                let consumed = to_consume.min(available);
-                *offset += consumed;
-                to_consume -= consumed;
-            }
-
-            self.remaining -= written;
-            self.pending = channel.has_pending_writes();
-            Ok(written)
-        })
+    fn size(&self) -> u64 {
+        self.size
     }
 
-    fn size(&self) -> usize {
-        self.size
+    fn write_to(&mut self, channel: &mut dyn TransferableChannel) -> io::Result<u64> {
+        // Build the IoSlice list from the unsent tail of each buffer.
+        let mut slices: Vec<IoSlice<'_>> = Vec::with_capacity(self.buffers.len());
+        for (buf, off) in self.buffers.iter().zip(self.offsets.iter()) {
+            if *off < buf.len() {
+                slices.push(IoSlice::new(&buf[*off..]));
+            }
+        }
+
+        if slices.is_empty() {
+            self.pending = channel.has_pending_writes();
+            return Ok(0);
+        }
+
+        let written = channel.write_vectored(&slices)?;
+        // Mirror Java's EOF check: `if (written < 0) throw new EOFException`.
+        // Rust's `io::Write::write_vectored` cannot return negative — but we
+        // forward `Ok(0)` straight through (a closed channel returns it).
+
+        // Advance offsets/remaining to match `written` bytes.
+        let mut to_consume = written;
+        for (buf, off) in self.buffers.iter().zip(self.offsets.iter_mut()) {
+            if to_consume == 0 {
+                break;
+            }
+            let avail = buf.len() - *off;
+            let step = avail.min(to_consume);
+            *off += step;
+            to_consume -= step;
+        }
+        self.remaining = self.remaining.saturating_sub(written as u64);
+        self.pending = channel.has_pending_writes();
+        Ok(written as u64)
     }
 }
 
-impl fmt::Display for ByteBufferSend {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl std::fmt::Debug for ByteBufferSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ByteBufferSend")
+            .field("size", &self.size)
+            .field("remaining", &self.remaining)
+            .field("pending", &self.pending)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for ByteBufferSend {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "ByteBufferSend(size={}, remaining={}, pending={})",
+            "ByteBufferSend(, size={}, remaining={}, pending={})",
             self.size, self.remaining, self.pending
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Mock channel that records what was written and reports
+    /// `hasPendingWrites = false`. The `write_vectored` impl writes at most
+    /// `max_per_call` bytes per invocation so we can exercise partial
+    /// writes.
+    struct MockChannel {
+        sink: Vec<u8>,
+        max_per_call: Option<usize>,
+        pending: bool,
+    }
+
+    impl MockChannel {
+        fn new() -> Self {
+            MockChannel { sink: Vec::new(), max_per_call: None, pending: false }
+        }
+
+        fn with_cap(max_per_call: usize) -> Self {
+            MockChannel { sink: Vec::new(), max_per_call: Some(max_per_call), pending: false }
+        }
+    }
+
+    impl TransferableChannel for MockChannel {
+        fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+            let mut total = 0usize;
+            let cap = self.max_per_call;
+            for slice in bufs {
+                let remaining_cap = cap.map(|c| c.saturating_sub(total));
+                let step = match remaining_cap {
+                    Some(0) => break,
+                    Some(c) => slice.len().min(c),
+                    None => slice.len(),
+                };
+                self.sink.extend_from_slice(&slice[..step]);
+                total += step;
+                if remaining_cap == Some(step) && step < slice.len() {
+                    // We hit the cap mid-buffer.
+                    break;
+                }
+            }
+            Ok(total)
+        }
+
+        fn has_pending_writes(&self) -> bool {
+            self.pending
+        }
+    }
+
+    #[test]
+    fn empty_send_is_completed() {
+        let send = ByteBufferSend::from_buffers(Vec::new());
+        assert!(send.completed());
+        assert_eq!(send.size(), 0);
+        assert_eq!(send.remaining(), 0);
+    }
+
+    #[test]
+    fn single_buffer_full_write() {
+        let payload = Bytes::from_static(b"abcdef");
+        let mut send = ByteBufferSend::from_buffers(vec![payload]);
+        assert_eq!(send.size(), 6);
+        assert!(!send.completed());
+
+        let mut channel = MockChannel::new();
+        let written = send.write_to(&mut channel).expect("write");
+        assert_eq!(written, 6);
+        assert!(send.completed());
+        assert_eq!(channel.sink, b"abcdef");
+    }
+
+    #[test]
+    fn multi_buffer_concatenation() {
+        let mut send = ByteBufferSend::from_buffers(vec![Bytes::from_static(b"head"), Bytes::from_static(b"-tail")]);
+        assert_eq!(send.size(), 9);
+        let mut channel = MockChannel::new();
+        let written = send.write_to(&mut channel).expect("write");
+        assert_eq!(written, 9);
+        assert!(send.completed());
+        assert_eq!(channel.sink, b"head-tail");
+    }
+
+    #[test]
+    fn partial_write_then_resume() {
+        let mut send = ByteBufferSend::from_buffers(vec![Bytes::from_static(b"hello"), Bytes::from_static(b"world")]);
+        let mut channel = MockChannel::with_cap(3);
+        // First call: 3 bytes from buffer 0.
+        let n1 = send.write_to(&mut channel).expect("w1");
+        assert_eq!(n1, 3);
+        assert_eq!(send.remaining(), 7);
+        assert!(!send.completed());
+        // Second call: 3 more (2 from buffer 0, 1 from buffer 1).
+        let n2 = send.write_to(&mut channel).expect("w2");
+        assert_eq!(n2, 3);
+        assert_eq!(send.remaining(), 4);
+        // Drain the rest.
+        channel.max_per_call = None;
+        let n3 = send.write_to(&mut channel).expect("w3");
+        assert_eq!(n3, 4);
+        assert!(send.completed());
+        assert_eq!(channel.sink, b"helloworld");
+    }
+
+    #[test]
+    fn size_prefixed_emits_header_then_payload() {
+        let payload = Bytes::from_static(b"hello");
+        let mut send = ByteBufferSend::size_prefixed(payload);
+        assert_eq!(send.size(), 4 + 5);
+        let mut channel = MockChannel::new();
+        send.write_to(&mut channel).expect("write");
+        assert!(send.completed());
+        // Header is the big-endian i32 length (5).
+        assert_eq!(channel.sink, vec![0, 0, 0, 5, b'h', b'e', b'l', b'l', b'o']);
+    }
+
+    #[test]
+    fn pending_writes_keep_send_incomplete() {
+        let mut send = ByteBufferSend::from_buffers(vec![Bytes::from_static(b"x")]);
+        let mut channel = MockChannel::new();
+        channel.pending = true;
+        let written = send.write_to(&mut channel).expect("write");
+        assert_eq!(written, 1);
+        assert!(!send.completed());
+        // Once pending clears, the send is complete.
+        channel.pending = false;
+        let _ = send.write_to(&mut channel).expect("flush pending");
+        assert!(send.completed());
     }
 }

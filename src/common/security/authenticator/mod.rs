@@ -12,8 +12,14 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SASL authenticator implementations (org.apache.kafka.common.security.authenticator).
+//! Translation of `org.apache.kafka.common.security.authenticator`.
+//!
+//! Phase 9a ships the PLAIN-only client-side authenticator. SCRAM,
+//! OAUTHBEARER, Kerberos/GSSAPI are out of scope and rejected at config
+//! validation time (Phase 9b). Server-side classes
+//! (`SaslServerAuthenticator`, `KafkaPrincipalBuilder`, `LoginManager`,
+//! JAAS server contexts) are out of Milestone 1 entirely.
 
 pub mod sasl_client_authenticator;
 
-pub use sasl_client_authenticator::SaslClientAuthenticator;
+pub use sasl_client_authenticator::{PlainCredentials, SaslClientAuthenticator, SaslState};

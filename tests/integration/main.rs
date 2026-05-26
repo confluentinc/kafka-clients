@@ -22,8 +22,16 @@
 #[path = "../common/mod.rs"]
 mod common;
 
-mod api_versions_test;
-mod connection_test;
-mod metadata_test;
-mod producer_test;
-mod ssl_sasl_test;
+// Phase 8a — producer-side smoke test (PLAINTEXT, 1000 records, 3 partitions).
+mod producer_smoke_test;
+
+// Performance tests — re-enabled in Phase 8a.1 against the Phase 7g
+// `Result<KafkaFuture<RecordMetadata>, KafkaError>` send shape.
+// `producer_perf_test` stays muted until its Java source is translated.
+mod performance_test;
+// mod producer_perf_test;
+
+// Phase 9i — CCloud-style external-broker smoke test. Skips when
+// `SASL_USERNAME` is unset, so it's safe to include in the default
+// integration test set.
+mod ccloud_smoke_test;

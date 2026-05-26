@@ -12,48 +12,49 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Defines the record format versions supported by Kafka.
-//!
-//! For historical reasons, the record format version is also known as `magic`
-//! and `message format version`. Note that the version actually applies to the
-//! record batch (instead of the individual record).
-//!
-//! Corresponds to Java's `org.apache.kafka.common.record.RecordVersion`.
+//! Translation of `org.apache.kafka.common.record.RecordVersion`.
 
-/// Record format versions supported by Kafka.
+use crate::common::errors::KafkaError;
+
+/// Defines the record format versions supported by Kafka.
 ///
-/// Corresponds to Java's `org.apache.kafka.common.record.RecordVersion`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+/// For historical reasons, the record format version is also known as `magic`
+/// and `message format version`. Note that the version actually applies to the
+/// `RecordBatch` (instead of the `Record`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum RecordVersion {
-    /// Record version 0 (oldest format).
-    V0 = 0,
-    /// Record version 1 (added timestamps).
-    V1 = 1,
-    /// Record version 2 (current format, added headers and idempotent producer support).
-    V2 = 2,
+    V0,
+    V1,
+    V2,
 }
 
 impl RecordVersion {
-    /// The byte value of this record version.
-    pub fn value(self) -> i8 {
-        self as i8
-    }
-
-    /// Look up a `RecordVersion` by byte value.
-    ///
-    /// Returns `None` if the value is not recognized.
-    pub fn lookup(value: i8) -> Option<Self> {
-        match value {
-            0 => Some(Self::V0),
-            1 => Some(Self::V1),
-            2 => Some(Self::V2),
-            _ => None,
+    /// The numeric value (`magic` byte) for this version.
+    pub fn value(&self) -> i8 {
+        match self {
+            RecordVersion::V0 => 0,
+            RecordVersion::V1 => 1,
+            RecordVersion::V2 => 2,
         }
     }
 
-    /// Returns the current (latest) record version.
-    pub fn current() -> Self {
-        Self::V2
+    /// Look up a `RecordVersion` from its raw `magic` byte value.
+    ///
+    /// Mirrors Java's `RecordVersion.lookup(byte)` — Java throws
+    /// `IllegalArgumentException` for unknown values; we surface that as a
+    /// [`KafkaError::InvalidRecord`].
+    pub fn lookup(value: i8) -> Result<RecordVersion, KafkaError> {
+        match value {
+            0 => Ok(RecordVersion::V0),
+            1 => Ok(RecordVersion::V1),
+            2 => Ok(RecordVersion::V2),
+            _ => Err(KafkaError::InvalidRecord(format!("Unknown record version: {value}"))),
+        }
+    }
+
+    /// The current record format version. Mirrors Java's `RecordVersion.current()`.
+    pub fn current() -> RecordVersion {
+        RecordVersion::V2
     }
 }
 
@@ -62,23 +63,31 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_values() {
+    fn lookup_known_versions() {
+        assert_eq!(RecordVersion::lookup(0).unwrap(), RecordVersion::V0);
+        assert_eq!(RecordVersion::lookup(1).unwrap(), RecordVersion::V1);
+        assert_eq!(RecordVersion::lookup(2).unwrap(), RecordVersion::V2);
+    }
+
+    #[test]
+    fn lookup_unknown_returns_error() {
+        let err = RecordVersion::lookup(3).unwrap_err();
+        assert!(matches!(err, KafkaError::InvalidRecord(_)));
+        assert!(err.to_string().contains("Unknown record version: 3"));
+
+        let err = RecordVersion::lookup(-1).unwrap_err();
+        assert!(matches!(err, KafkaError::InvalidRecord(_)));
+    }
+
+    #[test]
+    fn value_returns_magic_byte() {
         assert_eq!(RecordVersion::V0.value(), 0);
         assert_eq!(RecordVersion::V1.value(), 1);
         assert_eq!(RecordVersion::V2.value(), 2);
     }
 
     #[test]
-    fn test_lookup() {
-        assert_eq!(RecordVersion::lookup(0), Some(RecordVersion::V0));
-        assert_eq!(RecordVersion::lookup(1), Some(RecordVersion::V1));
-        assert_eq!(RecordVersion::lookup(2), Some(RecordVersion::V2));
-        assert_eq!(RecordVersion::lookup(-1), None);
-        assert_eq!(RecordVersion::lookup(3), None);
-    }
-
-    #[test]
-    fn test_current() {
+    fn current_is_v2() {
         assert_eq!(RecordVersion::current(), RecordVersion::V2);
     }
 }

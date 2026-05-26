@@ -12,1183 +12,1547 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SASL client-side authenticator state machine.
+//! Translation of
+//! `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator`.
 //!
-//! Translated from `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator`.
+//! Phase 9a deliverable. PLAIN-only state machine. SCRAM, OAUTHBEARER,
+//! Kerberos/GSSAPI are explicitly out of scope and rejected by config
+//! validation (Phase 9b).
 //!
-//! Implements the SASL authentication flow for the client side:
+//! ## State machine
+//!
+//! Translation of Java's
+//! `SaslClientAuthenticator.SaslState`:
 //!
 //! ```text
 //! SendApiVersionsRequest → ReceiveApiVersionsResponse
-//!   → SendHandshakeRequest → ReceiveHandshakeResponse
-//!   → Initial (send PLAIN token) → Intermediate (receive response)
-//!   → ClientComplete (if using SaslAuthenticate header) → Complete
+//!                       → SendHandshakeRequest
+//!                       → ReceiveHandshakeResponse
+//!                       → SendPlainToken (sends the RFC 4616 \0user\0pass)
+//!                       → ReceiveAuthenticateResponse
+//!                       → Complete | Failed
 //! ```
 //!
-//! Currently supports PLAIN mechanism only (RFC 4616). The state machine is
-//! designed for extensibility to SCRAM and other challenge-response mechanisms.
+//! Re-authentication states from Java
+//! (`REAUTH_PROCESS_ORIG_APIVERSIONS_RESPONSE`,
+//! `REAUTH_SEND_HANDSHAKE_REQUEST`, `REAUTH_RECEIVE_HANDSHAKE_OR_OTHER_RESPONSE`,
+//! `REAUTH_INITIAL`) are deferred: re-authentication is out of scope for
+//! Milestone 1 per PLAN.md:367 and Phase 5b-3's
+//! `Authenticator::reauthenticate` no-op.
 //!
-//! # Non-blocking Design
+//! ## Translation differences from Java
 //!
-//! `authenticate()` is called repeatedly by `KafkaChannel::prepare()`. Each call:
-//! 1. Flushes pending outbound data
-//! 2. Attempts one state transition
-//! 3. Returns `Ok(())` if I/O would block (partial read/write)
-//! 4. Stores partial reads in `net_in_buffer` for the next call
+//! - Java uses `javax.security.sasl.SaslClient` from JCA. For PLAIN only,
+//!   the SASL exchange is a single client-initiated token of the form
+//!   `\0username\0password` (RFC 4616). The Rust translation inlines this
+//!   token format because we do not need a pluggable JCA-style SASL
+//!   provider for PLAIN alone.
+//! - Java uses a `Subject` populated via JAAS to carry the credentials.
+//!   The Rust translation accepts an explicit [`PlainCredentials`] struct
+//!   — JAAS parsing is deferred to Phase 9b.
+//! - Java uses a reserved correlation-id range (`MIN_RESERVED..=MAX_RESERVED`)
+//!   to disambiguate SASL request/response pairs from in-flight Kafka
+//!   requests. Phase 9a translates this verbatim since the constants and
+//!   `isReserved` predicate are part of the public surface.
+//! - Java's `authenticate()` is a sync, non-blocking step function called
+//!   repeatedly from the Selector loop. Phase 9a mirrors this: the state
+//!   machine advances one step per `authenticate()` call, returns
+//!   `Ok(())` when no further progress can be made without I/O, and
+//!   completes when the state reaches `Complete`.
 
-use crate::common::network::Authenticator;
-use crate::common::network::ByteBufferSend;
-use crate::common::network::KafkaSend;
-use crate::common::network::NetworkReceive;
-use crate::common::network::Receive;
-use crate::common::network::{InterestOps, TransportLayer};
-use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors};
-use crate::common::requests::ApiVersionsRequestBuilder;
-use crate::common::requests::ApiVersionsResponse;
-use crate::common::requests::ConcreteRequest;
-use crate::common::requests::ConcreteResponse;
-use crate::common::requests::RequestBuilder;
-use crate::common::requests::RequestHeader;
-use crate::common::requests::SaslAuthenticateRequest;
-use crate::common::requests::SaslHandshakeRequest;
-use crate::common::requests::SaslHandshakeResponse;
-use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
-use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
-
-use log::debug;
-
-use std::future::Future;
+use std::collections::VecDeque;
 use std::io;
-use std::pin::Pin;
 
-/// Sentinel version value indicating that the Kafka SASL authenticate header
-/// should not be used (legacy mode, pre-KIP-152).
-const DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER: i16 = -1;
+use crate::common::errors::KafkaError;
+use crate::common::message::sasl_authenticate_request_data::SaslAuthenticateRequestData;
+use crate::common::message::sasl_handshake_request_data::SaslHandshakeRequestData;
+use crate::common::network::network_receive::NetworkReceive;
+use crate::common::network::send::Send as KafkaSend;
+use crate::common::network::transferable_channel::TransferableChannel;
+use crate::common::network::transport_layer::{OP_READ, OP_WRITE, TransportLayer};
+use crate::common::network::{ByteBufferSend, Receive};
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::{ApiKey, ApiKeys, Errors};
+use crate::common::requests::{
+    AbstractRequest, AbstractResponse, ApiVersionsRequest, ApiVersionsResponse, RequestHeader, SaslAuthenticateRequest,
+    SaslAuthenticateResponse, SaslHandshakeRequest, SaslHandshakeResponse, parse_response,
+};
 
-/// The maximum reserved correlation ID for SASL requests.
-///
-/// The reserved range of correlation IDs for SASL requests ensures that SASL
-/// requests are separated from those used in `NetworkClient` for Kafka requests.
-/// This prevents mismatched correlation IDs during re-authentication.
-pub const SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
+/// Inclusive lower bound of the SASL-reserved correlation id range.
+/// Mirrors Java's `SaslClientAuthenticator.MIN_RESERVED_CORRELATION_ID`.
+pub const MIN_RESERVED_CORRELATION_ID: i32 = i32::MAX - 7;
 
-/// The minimum reserved correlation ID for SASL requests.
-///
-/// Only one request is expected in-flight at a time during authentication,
-/// so the small range (8 values) is sufficient.
-pub const SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID: i32 =
-    SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID - 7;
+/// Inclusive upper bound. Mirrors `SaslClientAuthenticator.MAX_RESERVED_CORRELATION_ID`.
+pub const MAX_RESERVED_CORRELATION_ID: i32 = i32::MAX;
 
-/// Returns `true` if the correlation ID is reserved for SASL requests.
+/// Predicate translation of Java's `SaslClientAuthenticator.isReserved(int)`.
 pub fn is_reserved(correlation_id: i32) -> bool {
-    correlation_id >= SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID
+    correlation_id >= MIN_RESERVED_CORRELATION_ID
 }
 
-/// Internal state transitions for SASL client authentication.
-///
-/// The states are declared in order, starting with `SendApiVersionsRequest` and
-/// ending in either `Complete` or `Failed`.
-///
-/// Translated from `SaslClientAuthenticator.SaslState` in Java.
+/// Sentinel meaning "this broker speaks pre-1.0 SASL — no Kafka header
+/// wraps the SASL tokens." Mirrors
+/// `SaslClientAuthenticator.DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER = -1`.
+const DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER: i16 = -1;
+
+/// PLAIN credentials. Owned by the authenticator. The byte form is
+/// constructed lazily inside [`SaslClientAuthenticator::build_plain_token`]
+/// so we keep the secret out of the type's `Debug` output.
+#[derive(Clone)]
+pub struct PlainCredentials {
+    username: String,
+    password: String,
+}
+
+impl PlainCredentials {
+    /// Construct PLAIN credentials. Mirrors Java's
+    /// `Subject.getPublicCredentials(String.class)` +
+    /// `getPrivateCredentials(String.class)` indirection — Phase 9a
+    /// accepts them as explicit fields instead of going through JAAS.
+    pub fn new(username: impl Into<String>, password: impl Into<String>) -> Self {
+        PlainCredentials { username: username.into(), password: password.into() }
+    }
+
+    /// Borrow the username. Used for the SASL handshake mechanism log.
+    pub fn username(&self) -> &str {
+        &self.username
+    }
+
+    /// Borrow the password. `pub(crate)` so it never reaches a public
+    /// downstream consumer (the only legitimate use is the JAAS parser
+    /// test asserting it produced the right `PlainCredentials`).
+    /// Internal callers that need the actual token build it inside the
+    /// SASL authenticator's RFC 4616 token assembler (not exposed as a
+    /// public API). This accessor does NOT redact, so do not call it
+    /// from logging code.
+    #[allow(dead_code)]
+    pub(crate) fn password(&self) -> &str {
+        &self.password
+    }
+}
+
+/// Hand-emitted `Debug` impl that masks the password (CLAUDE.md credential
+/// handling). Username is preserved — it is not sensitive on its own and
+/// it's useful for diagnostic logs.
+impl std::fmt::Debug for PlainCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("PlainCredentials")
+            .field("username", &self.username)
+            .field("password", &"<redacted>")
+            .finish()
+    }
+}
+
+/// SASL state. Translation of Java's
+/// `SaslClientAuthenticator.SaslState`. Re-authentication states are
+/// omitted; if re-authentication is added in a future milestone, model
+/// them as a separate state set rather than overloading the initial path.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SaslState {
-    /// Initial state: client sends ApiVersionsRequest.
+    /// Send the initial `ApiVersionsRequest` (always v0 — mirrors Java's
+    /// "always use version 0 request since brokers treat requests with
+    /// schema exceptions as GSSAPI tokens").
     SendApiVersionsRequest,
-    /// Awaiting ApiVersionsResponse from server.
+    /// Awaiting `ApiVersionsResponse`.
     ReceiveApiVersionsResponse,
-    /// Received ApiVersionsResponse, send SaslHandshake request.
+    /// Send `SaslHandshakeRequest` with the chosen mechanism.
     SendHandshakeRequest,
-    /// Awaiting SaslHandshake response from server.
+    /// Awaiting `SaslHandshakeResponse`.
     ReceiveHandshakeResponse,
-    /// Initial authentication state: send first SASL token.
-    Initial,
-    /// Intermediate state during SASL token exchange: process challenges and send responses.
-    Intermediate,
-    /// Sent response to last challenge. If using SaslAuthenticate, wait for server status.
-    ClientComplete,
-    /// Authentication sequence complete.
+    /// Send the SASL PLAIN initial token (`\0user\0pass`) wrapped in a
+    /// `SaslAuthenticateRequest` (when the broker speaks
+    /// `SASL_AUTHENTICATE`) or as a raw size-prefixed payload (legacy
+    /// brokers).
+    SendInitialToken,
+    /// Awaiting `SaslAuthenticateResponse` (or a raw legacy token).
+    ReceiveAuthenticateResponse,
+    /// Authentication completed successfully.
     Complete,
-    /// Failed authentication due to an error at some stage.
+    /// Authentication failed. The error is captured on the authenticator
+    /// itself; further calls to `authenticate()` return the same error.
     Failed,
 }
 
-/// SASL client authenticator that implements the SASL PLAIN authentication flow.
+/// Outgoing SASL message in flight on the wire. Mirrors Java's
+/// `Send netOutBuffer` field.
+struct PendingSend {
+    /// Wrapping payload (handles partial writes across multiple
+    /// `authenticate()` calls).
+    inner: ByteBufferSend,
+    /// `RequestHeader` we expect back in the matching response. `None`
+    /// for legacy raw SASL tokens (no Kafka header).
+    correlation_header: Option<RequestHeader>,
+}
+
+/// Client-side SASL authenticator. PLAIN-only. Translation of
+/// `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator`.
 ///
-/// Translated from `org.apache.kafka.common.security.authenticator.SaslClientAuthenticator`.
+/// The authenticator owns the credentials, the in-flight send buffer, the
+/// in-flight receive buffer, and the negotiated `SaslAuthenticate` /
+/// `SaslHandshake` versions. It does not own the
+/// [`TransportLayer`] — Java's design passes the transport via the
+/// `KafkaChannel` to keep the authenticator and the transport lifetime
+/// independent. Phase 9a's `authenticate(transport)` mirrors this.
 ///
-/// This implementation supports PLAIN mechanism only (RFC 4616). The token format
-/// is `\0username\0password`.
-///
-/// # Re-authentication
-///
-/// Re-authentication states from the Java source are intentionally omitted since
-/// they are out of scope for the current milestone.
+/// `Debug` is hand-emitted to redact the embedded
+/// [`PlainCredentials`] password and the in-flight send buffer (which
+/// may carry the PLAIN token bytes mid-flight).
 pub struct SaslClientAuthenticator {
-    /// Current SASL state.
-    state: SaslState,
-    /// SASL mechanism name (e.g., "PLAIN").
-    mechanism: String,
-    /// Username for PLAIN authentication.
-    username: String,
-    /// Password for PLAIN authentication.
-    password: String,
-    /// The node identifier for this connection.
+    /// Channel id (mirrors Java's `String node`). Used in error messages
+    /// and in the `NetworkReceive` source label.
     node: String,
-    /// The broker hostname.
-    /// Used by GSSAPI/Kerberos for service principal construction; retained for
-    /// future mechanism support.
-    #[allow(dead_code)]
-    host: String,
-    /// The Kafka client ID for request headers.
+    /// Configured client id (mirrors Java's `configs.get(CLIENT_ID_CONFIG)`).
     client_id: String,
-    /// Correlation ID counter for the next request.
-    correlation_id: i32,
-    /// Version of SaslHandshake request/responses.
-    sasl_handshake_version: i16,
-    /// Version of SaslAuthenticate request/responses.
-    /// `-1` means no SaslAuthenticate header (legacy mode).
-    sasl_authenticate_version: i16,
-    /// Request header for which a response from the server is pending.
+    /// Chosen SASL mechanism (PLAIN only in Phase 9a; rejected at the
+    /// validation boundary otherwise).
+    mechanism: String,
+    /// Credentials. Loaded from `sasl.jaas.config` /
+    /// `sasl.username`/`sasl.password` (Phase 9b).
+    credentials: PlainCredentials,
+
+    /// Current state.
+    state: SaslState,
+    /// Captured error if `state == Failed`. Distinct field from the
+    /// state itself because Java carries the throwable separately.
+    failure: Option<KafkaError>,
+
+    /// In-flight send buffer (Java: `Send netOutBuffer`).
+    pending_send: Option<PendingSend>,
+    /// In-flight receive buffer (Java: `NetworkReceive netInBuffer`).
+    pending_receive: Option<NetworkReceive>,
+    /// Most recent request header for which we are waiting on a response.
+    /// Mirrors Java's `RequestHeader currentRequestHeader`.
     current_request_header: Option<RequestHeader>,
-    /// Pending outbound data.
-    net_out_buffer: Option<Box<dyn KafkaSend>>,
-    /// Pending inbound data.
-    net_in_buffer: Option<NetworkReceive>,
-    /// Next SASL state to be set when outgoing writes complete.
-    pending_sasl_state: Option<SaslState>,
+
+    /// Negotiated SaslAuthenticate version, or
+    /// `DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER` if the broker doesn't
+    /// support the `SASL_AUTHENTICATE` API key (legacy brokers).
+    sasl_authenticate_version: i16,
+    /// Negotiated SaslHandshake version (defaults to 1 — the minimum
+    /// since 1.0.0).
+    sasl_handshake_version: i16,
+
+    /// Correlation-id ring counter. Mirrors Java's `int correlationId`.
+    correlation_id: i32,
+
+    /// Optional `Send` queued so other connections from the
+    /// `Selector` can poll us for outgoing bytes. Currently unused in
+    /// Phase 9a because the channel's KafkaChannel hosts the
+    /// authenticator directly — Java has the same shape.
+    #[allow(dead_code)]
+    deferred_sends: VecDeque<ByteBufferSend>,
+}
+
+/// Hand-emitted `Debug` impl that masks the password and the in-flight
+/// send buffer (the PLAIN token may be mid-flight there).
+impl std::fmt::Debug for SaslClientAuthenticator {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("SaslClientAuthenticator")
+            .field("node", &self.node)
+            .field("client_id", &self.client_id)
+            .field("mechanism", &self.mechanism)
+            .field("credentials", &self.credentials)
+            .field("state", &self.state)
+            .field("failure", &self.failure)
+            .field("pending_send", &self.pending_send.as_ref().map(|_| "<in-flight>"))
+            .field("pending_receive", &self.pending_receive.is_some())
+            .field("current_request_header", &self.current_request_header.is_some())
+            .field("sasl_authenticate_version", &self.sasl_authenticate_version)
+            .field("sasl_handshake_version", &self.sasl_handshake_version)
+            .field("correlation_id", &self.correlation_id)
+            .finish()
+    }
 }
 
 impl SaslClientAuthenticator {
-    /// Creates a new `SaslClientAuthenticator`.
+    /// Construct a new PLAIN authenticator. Mirrors the Java constructor
+    /// `SaslClientAuthenticator(Map configs, AuthenticateCallbackHandler,
+    /// String node, Subject, String servicePrincipal, String host, String
+    /// mechanism, TransportLayer, Time, LogContext)`.
     ///
-    /// # Arguments
+    /// Phase 9a omits:
+    /// - `AuthenticateCallbackHandler` — PLAIN's only callbacks (Name,
+    ///   Password) are inlined.
+    /// - `Subject` / `servicePrincipal` — PLAIN does not need a Kerberos
+    ///   service principal.
+    /// - `host` — only relevant for GSSAPI.
+    /// - `Time` — only relevant for re-authentication session expiry
+    ///   (deferred).
+    /// - `LogContext` — Rust `tracing` carries the equivalent.
     ///
-    /// * `mechanism` - SASL mechanism name (e.g., "PLAIN")
-    /// * `username` - Username for PLAIN authentication
-    /// * `password` - Password for PLAIN authentication
-    /// * `node` - Node identifier for this connection
-    /// * `host` - Broker hostname
-    /// * `client_id` - Kafka client ID for request headers
-    pub fn new(mechanism: &str, username: &str, password: &str, node: &str, host: &str, client_id: &str) -> Self {
-        let mut authenticator = Self {
+    /// Returns `KafkaError::Config` for any mechanism other than `PLAIN`.
+    pub fn new(
+        node: impl Into<String>,
+        client_id: impl Into<String>,
+        mechanism: impl Into<String>,
+        credentials: PlainCredentials,
+    ) -> Result<Self, KafkaError> {
+        let mechanism = mechanism.into();
+        if mechanism != "PLAIN" {
+            return Err(KafkaError::Config(format!(
+                "Unsupported SASL mechanism: {mechanism}. Phase 9 supports only PLAIN."
+            )));
+        }
+        Ok(SaslClientAuthenticator {
+            node: node.into(),
+            client_id: client_id.into(),
+            mechanism,
+            credentials,
             state: SaslState::SendApiVersionsRequest,
-            mechanism: mechanism.to_string(),
-            username: username.to_string(),
-            password: password.to_string(),
-            node: node.to_string(),
-            host: host.to_string(),
-            client_id: client_id.to_string(),
-            correlation_id: 0,
-            sasl_handshake_version: 0,
-            sasl_authenticate_version: DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER,
+            failure: None,
+            pending_send: None,
+            pending_receive: None,
             current_request_header: None,
-            net_out_buffer: None,
-            net_in_buffer: None,
-            pending_sasl_state: None,
-        };
-        authenticator.set_sasl_state(SaslState::SendApiVersionsRequest);
-        authenticator
+            sasl_authenticate_version: DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER,
+            sasl_handshake_version: 1, // Minimum since 1.0.0
+            correlation_id: MIN_RESERVED_CORRELATION_ID,
+            deferred_sends: VecDeque::new(),
+        })
     }
 
-    /// Returns the current SASL state.
-    pub fn sasl_state(&self) -> SaslState {
+    /// Current SASL state (read-only; used by tests and `complete()`).
+    pub fn state(&self) -> SaslState {
         self.state
     }
 
-    /// Returns the SASL handshake version negotiated with the broker.
-    pub fn sasl_handshake_version(&self) -> i16 {
-        self.sasl_handshake_version
+    /// Returns the captured failure (if `state == Failed`), else `None`.
+    pub fn failure(&self) -> Option<&KafkaError> {
+        self.failure.as_ref()
     }
 
-    /// Returns the SASL authenticate version negotiated with the broker.
-    ///
-    /// Returns `-1` if legacy mode (no SaslAuthenticate header).
-    pub fn sasl_authenticate_version(&self) -> i16 {
-        self.sasl_authenticate_version
+    /// `true` iff the authenticator has reached the `Complete` state.
+    /// Mirrors Java's `SaslClientAuthenticator.complete()`.
+    pub fn complete(&self) -> bool {
+        self.state == SaslState::Complete
     }
 
-    /// Allocates the next correlation ID from the reserved range.
-    fn next_correlation_id(&mut self) -> i32 {
+    /// Returns the next correlation id in the SASL-reserved range,
+    /// wrapping back to [`MIN_RESERVED_CORRELATION_ID`] when the range
+    /// is exhausted. Mirrors Java's
+    /// `SaslClientAuthenticator.nextCorrelationId()`. Pub for tests.
+    pub fn next_correlation_id(&mut self) -> i32 {
         if !is_reserved(self.correlation_id) {
-            self.correlation_id = SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID;
+            self.correlation_id = MIN_RESERVED_CORRELATION_ID;
         }
         let id = self.correlation_id;
         self.correlation_id = self.correlation_id.wrapping_add(1);
         id
     }
 
-    /// Creates the next request header for the given API key and version.
-    fn next_request_header(&mut self, api_key: &'static ApiKeys, version: i16) -> io::Result<RequestHeader> {
-        let correlation_id = self.next_correlation_id();
-        let header = RequestHeader::new(api_key, version, &self.client_id, correlation_id)?;
-        self.current_request_header = Some(header.clone());
-        Ok(header)
-    }
-
-    /// Creates a PLAIN SASL token in RFC 4616 format: `\0username\0password`.
-    ///
-    /// For PLAIN, the token is always the same regardless of whether this is
-    /// an initial token or a challenge response.
-    fn create_sasl_token(&self) -> Vec<u8> {
-        // PLAIN token: \0<username>\0<password>
-        let mut token = Vec::with_capacity(1 + self.username.len() + 1 + self.password.len());
-        token.push(0);
-        token.extend_from_slice(self.username.as_bytes());
-        token.push(0);
-        token.extend_from_slice(self.password.as_bytes());
+    /// Build the SASL PLAIN token per RFC 4616:
+    /// `\0username\0password` (one literal NUL before username, one
+    /// between, no trailing NUL). Inlined here because we do not pull
+    /// in a JCA-style SASL provider for PLAIN — the token is a
+    /// straightforward byte concatenation.
+    fn build_plain_token(&self) -> Vec<u8> {
+        let username = self.credentials.username.as_bytes();
+        let password = self.credentials.password.as_bytes();
+        let mut token = Vec::with_capacity(2 + username.len() + password.len());
+        token.push(0u8);
+        token.extend_from_slice(username);
+        token.push(0u8);
+        token.extend_from_slice(password);
         token
     }
 
-    /// Sends an API request through the transport layer.
+    /// Drive the SASL state machine forward, mirroring Java's
+    /// `SaslClientAuthenticator.authenticate()`. Returns `Ok(())` when:
+    /// - the current step's I/O has been issued (send buffered, response
+    ///   awaited);
+    /// - or there's nothing to do because the authenticator is already
+    ///   `Complete` or in a state that needs more network bytes.
     ///
-    /// Sets `net_out_buffer` and attempts to flush. On I/O error, transitions
-    /// to `Failed` state.
-    async fn send_request(
-        &mut self,
-        send: Box<dyn KafkaSend>,
-        transport: &mut (dyn TransportLayer + Send),
-    ) -> io::Result<()> {
-        self.net_out_buffer = Some(send);
-        match self.flush_net_out_buffer_and_update_interest_ops(transport).await {
-            Ok(_) => Ok(()),
-            Err(e) => {
-                self.set_sasl_state(SaslState::Failed);
-                Err(e)
-            },
-        }
-    }
-
-    /// Sends the initial SASL token (PLAIN: `\0username\0password`).
+    /// Returns `Err(io::Error::other(KafkaError::Authentication(...)))`
+    /// on authentication failure, with the error captured in
+    /// [`Self::failure`].
     ///
-    /// Corresponds to `sendInitialToken()` and `sendSaslClientToken()` in Java.
-    async fn send_initial_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
-        self.send_sasl_client_token(transport).await
-    }
-
-    /// Sends a SASL client token to the server.
-    ///
-    /// For PLAIN, this always sends the token. When `sasl_authenticate_version`
-    /// is `-1` (legacy mode), the token is sent as a size-prefixed raw byte
-    /// buffer. Otherwise, it's wrapped in a SaslAuthenticate request.
-    ///
-    /// Returns `true` if a token was sent.
-    async fn send_sasl_client_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
-        let sasl_token = self.create_sasl_token();
-        let send: Box<dyn KafkaSend> = if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
-            Box::new(ByteBufferSend::size_prefixed(sasl_token))
-        } else {
-            let mut data = SaslAuthenticateRequestData::new();
-            data.set_auth_bytes(sasl_token);
-            let request = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
-            let header = self.next_request_header(&ApiKeys::SASL_AUTHENTICATE, self.sasl_authenticate_version)?;
-            let concrete = ConcreteRequest::SaslAuthenticate(request);
-            let byte_buffer_send = concrete.to_send(&header)?;
-            Box::new(byte_buffer_send)
-        };
-        self.send_request(send, transport).await
-    }
-
-    /// Flushes the outbound buffer to the transport and updates interest ops.
-    ///
-    /// Returns `true` if the buffer was completely flushed.
-    async fn flush_net_out_buffer_and_update_interest_ops(
-        &mut self,
-        transport: &mut (dyn TransportLayer + Send),
-    ) -> io::Result<bool> {
-        let flushed_completely = self.flush_net_out_buffer(transport).await?;
-        if flushed_completely {
-            transport.remove_interest_ops(InterestOps::OP_WRITE);
-            if let Some(pending) = self.pending_sasl_state.take() {
-                self.set_sasl_state(pending);
-            }
-        } else {
-            transport.add_interest_ops(InterestOps::OP_WRITE);
-        }
-        Ok(flushed_completely)
-    }
-
-    /// Writes pending data from the outbound buffer to the transport.
-    ///
-    /// Returns `true` if the buffer is completely written.
-    async fn flush_net_out_buffer(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<bool> {
-        if let Some(ref mut buf) = self.net_out_buffer {
-            if !buf.completed() {
-                buf.write_to(transport).await?;
-            }
-            Ok(buf.completed())
-        } else {
-            Ok(true)
-        }
-    }
-
-    /// Reads a size-delimited response or token from the transport.
-    ///
-    /// Returns `None` if the read is incomplete (would block), `Some(bytes)`
-    /// when a complete message is available.
-    async fn receive_response_or_token(
-        &mut self,
-        transport: &mut (dyn TransportLayer + Send),
-    ) -> io::Result<Option<Vec<u8>>> {
-        if self.net_in_buffer.is_none() {
-            self.net_in_buffer = Some(NetworkReceive::with_source(&self.node));
-        }
-        let net_in = self.net_in_buffer.as_mut().unwrap();
-        net_in.read_from(transport).await?;
-        if net_in.complete() {
-            let payload = net_in.payload().map(|p| p.to_vec());
-            self.net_in_buffer = None;
-            Ok(payload)
-        } else {
-            Ok(None)
-        }
-    }
-
-    /// Receives and parses a Kafka response (header + body).
-    ///
-    /// Returns `None` if the read is incomplete. On successful read, validates
-    /// the correlation ID against `current_request_header`.
-    async fn receive_kafka_response(
-        &mut self,
-        transport: &mut (dyn TransportLayer + Send),
-    ) -> io::Result<Option<ConcreteResponse>> {
-        let response_bytes = match self.receive_response_or_token(transport).await {
-            Ok(Some(bytes)) => bytes,
-            Ok(None) => return Ok(None),
-            Err(e) => {
-                debug!("Invalid SASL mechanism response, server may be expecting only GSSAPI tokens");
-                self.set_sasl_state(SaslState::Failed);
-                return Err(io::Error::new(
-                    io::ErrorKind::InvalidData,
-                    format!("Invalid SASL mechanism response, server may be expecting a different protocol: {e}"),
-                ));
-            },
-        };
-
-        let request_header = self
-            .current_request_header
-            .as_ref()
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "No pending request header for SASL response"))?;
-        let mut buffer = ByteBufferAccessor::from_bytes(response_bytes);
-        let response = ConcreteResponse::parse_response(&mut buffer, request_header).map_err(|e| {
-            debug!("Invalid SASL mechanism response, server may be expecting only GSSAPI tokens");
-            self.set_sasl_state(SaslState::Failed);
-            io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!("Invalid SASL mechanism response, server may be expecting a different protocol: {e}"),
-            )
-        })?;
-        self.current_request_header = None;
-        Ok(Some(response))
-    }
-
-    /// Receives a SASL token from the server.
-    ///
-    /// In legacy mode (no SaslAuthenticate header), this reads a raw size-delimited
-    /// token. Otherwise, it parses a SaslAuthenticateResponse and validates the
-    /// error code.
-    async fn receive_token(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<Option<Vec<u8>>> {
-        if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
-            self.receive_response_or_token(transport).await
-        } else {
-            match self.receive_kafka_response(transport).await? {
-                Some(ConcreteResponse::SaslAuthenticate(response)) => {
-                    let error = response.error();
-                    if error != Errors::None {
-                        self.set_sasl_state(SaslState::Failed);
-                        let err_msg = response.error_message().unwrap_or(error.message());
-                        return Err(io::Error::new(io::ErrorKind::PermissionDenied, err_msg.to_string()));
-                    }
-                    Ok(Some(response.sasl_auth_bytes().to_vec()))
-                },
-                Some(_) => Err(io::Error::new(io::ErrorKind::InvalidData, "Expected SaslAuthenticate response")),
-                None => Ok(None),
-            }
-        }
-    }
-
-    /// Sets the SASL state, deferring the transition if there is pending outbound data.
-    fn set_sasl_state(&mut self, sasl_state: SaslState) {
-        if let Some(ref buf) = self.net_out_buffer
-            && !buf.completed()
+    /// The Java version is called repeatedly from the Selector's main
+    /// poll loop; the Rust translation expects the same pattern (call
+    /// after each `transport.read()` cycle).
+    pub fn authenticate(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
+        // Phase 9b Suggestion S2 (Critic 9): a peer that closes the
+        // socket mid-handshake (EOF / ConnectionReset) must transition
+        // the state machine to `Failed` so a subsequent retry-layer
+        // re-invocation surfaces a deterministic error rather than
+        // wedging at an in-progress receive state.
+        //
+        // Java relies on the JVM exception propagating through the
+        // upper layer (Selector) which then closes the channel; Rust's
+        // `io::Result` plumbing doesn't enforce that ordering by
+        // itself. We capture the EOF here, mark the state Failed +
+        // record the captured failure, and propagate the original
+        // `io::Error`.
+        let result = self.authenticate_inner(transport);
+        if let Err(ref e) = result
+            && self.state != SaslState::Failed
+            && matches!(e.kind(), io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset)
         {
-            self.pending_sasl_state = Some(sasl_state);
-            return;
+            let kafka_err = KafkaError::Authentication("EOF during SASL handshake".to_owned());
+            self.state = SaslState::Failed;
+            self.failure = Some(kafka_err);
         }
-        self.pending_sasl_state = None;
-        self.state = sasl_state;
-        debug!("Set SASL client state to {:?}", sasl_state);
-        if sasl_state == SaslState::Complete {
-            // In the full Java implementation, this would set session
-            // re-authentication times and update interest ops. For the
-            // client-only PLAIN implementation, authentication is done.
-        }
+        result
     }
 
-    /// Extracts SASL handshake and authenticate versions from the ApiVersionsResponse.
-    ///
-    /// Translated from `setSaslAuthenticateAndHandshakeVersions` in Java.
-    fn set_sasl_authenticate_and_handshake_versions(&mut self, api_versions_response: &ApiVersionsResponse) {
-        if let Some(auth_version) = api_versions_response.api_version(ApiKeys::SASL_AUTHENTICATE.id()) {
-            self.sasl_authenticate_version = auth_version.max_version.min(ApiKeys::SASL_AUTHENTICATE.latest_version());
-        }
-        if let Some(hs_version) = api_versions_response.api_version(ApiKeys::SASL_HANDSHAKE.id()) {
-            self.sasl_handshake_version = hs_version.max_version.min(ApiKeys::SASL_HANDSHAKE.latest_version());
-        }
-    }
-
-    /// Validates the SaslHandshake response.
-    ///
-    /// Checks the error code and throws descriptive errors for unsupported
-    /// mechanisms or illegal SASL states.
-    fn handle_sasl_handshake_response(&mut self, response: &SaslHandshakeResponse) -> io::Result<()> {
-        let error = response.error();
-        if error != Errors::None {
-            self.set_sasl_state(SaslState::Failed);
-        }
-        match error {
-            Errors::None => Ok(()),
-            Errors::UnsupportedSaslMechanism => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!(
-                    "Client SASL mechanism '{}' not enabled in the server, enabled mechanisms are {:?}",
-                    self.mechanism,
-                    response.enabled_mechanisms()
-                ),
-            )),
-            Errors::IllegalSaslState => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Unexpected handshake request with client mechanism {}, enabled mechanisms are {:?}",
-                    self.mechanism,
-                    response.enabled_mechanisms()
-                ),
-            )),
-            _ => Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Unknown error code {:?}, client mechanism is {}, enabled mechanisms are {:?}",
-                    error,
-                    self.mechanism,
-                    response.enabled_mechanisms()
-                ),
-            )),
-        }
-    }
-
-    /// The main authenticate loop. This is the async implementation that is
-    /// called from the `Authenticator` trait.
-    async fn authenticate_impl(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
-        // Flush any pending outbound data first
-        if self.net_out_buffer.is_some() && !self.flush_net_out_buffer_and_update_interest_ops(transport).await? {
+    /// Internal driver — separated from `authenticate()` so the outer
+    /// wrapper can post-process EOF/ConnectionReset into the `Failed`
+    /// state (Phase 9b Suggestion S2 from Critic 9). Maintains the
+    /// same shape as Java's `authenticate()` body.
+    fn authenticate_inner(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
+        // Java's `authenticate()` opens with:
+        //   if (netOutBuffer != null && !flushNetOutBufferAndUpdateInterestOps())
+        //       return;
+        // Mirror that: finish flushing any pending send before advancing.
+        if self.pending_send.is_some() && !self.flush_pending_send(transport)? {
             return Ok(());
         }
 
-        match self.state {
-            SaslState::SendApiVersionsRequest => {
-                // Always use version 0 request since brokers treat requests with
-                // schema exceptions as GSSAPI tokens
-                let builder = ApiVersionsRequestBuilder::for_version(0);
-                let request = builder.build()?;
-                let header = self.next_request_header(&ApiKeys::API_VERSIONS, request.version())?;
-                let send = Box::new(request.to_send(&header)?);
-                self.send_request(send, transport).await?;
-                self.set_sasl_state(SaslState::ReceiveApiVersionsResponse);
-            },
-            SaslState::ReceiveApiVersionsResponse => {
-                let response = self.receive_kafka_response(transport).await?;
-                if let Some(ConcreteResponse::ApiVersions(api_versions_response)) = response {
-                    self.set_sasl_authenticate_and_handshake_versions(&api_versions_response);
-                    self.set_sasl_state(SaslState::SendHandshakeRequest);
-                    // Fall through to send handshake request
-                    self.send_handshake_request(transport).await?;
-                    self.set_sasl_state(SaslState::ReceiveHandshakeResponse);
-                } else if response.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Expected ApiVersions response during SASL authentication",
-                    ));
-                }
-                // response is None -> I/O incomplete, return and try again
-            },
-            SaslState::SendHandshakeRequest => {
-                self.send_handshake_request(transport).await?;
-                self.set_sasl_state(SaslState::ReceiveHandshakeResponse);
-            },
-            SaslState::ReceiveHandshakeResponse => {
-                let response = self.receive_kafka_response(transport).await?;
-                if let Some(ConcreteResponse::SaslHandshake(handshake_response)) = response {
-                    self.handle_sasl_handshake_response(&handshake_response)?;
-                    self.set_sasl_state(SaslState::Initial);
-                    // Fall through and start SASL authentication
-                    self.send_initial_token(transport).await?;
-                    self.set_sasl_state(SaslState::Intermediate);
-                } else if response.is_some() {
-                    return Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "Expected SaslHandshake response during SASL authentication",
-                    ));
-                }
-                // response is None -> I/O incomplete, return and try again
-            },
-            SaslState::Initial => {
-                self.send_initial_token(transport).await?;
-                self.set_sasl_state(SaslState::Intermediate);
-            },
-            SaslState::Intermediate => {
-                let server_token = self.receive_token(transport).await?;
-                if server_token.is_some() {
-                    // For PLAIN mechanism, the client is always complete after
-                    // the initial token exchange. The saslClient.isComplete()
-                    // check in Java always returns true for PLAIN after
-                    // evaluateChallenge, and sendSaslClientToken returns false
-                    // (no additional token to send), making noResponsesPending
-                    // true. So for PLAIN we go directly to Complete.
-                    //
-                    // The CLIENT_COMPLETE state is used by challenge-response
-                    // mechanisms (SCRAM) where the client sends a final response
-                    // and waits for the server's acknowledgment.
-                    self.set_sasl_state(SaslState::Complete);
-                }
-                // server_token is None -> I/O incomplete, return and try again
-            },
-            SaslState::ClientComplete => {
-                // This state is used by challenge-response mechanisms (SCRAM)
-                // where the client has sent its final token and waits for the
-                // server's acknowledgment via SaslAuthenticate.
-                // For PLAIN, we never enter this state.
-                let server_response = self.receive_token(transport).await?;
-                if server_response.is_some() {
-                    self.set_sasl_state(SaslState::Complete);
-                }
-            },
-            SaslState::Complete => {
-                // Nothing to do
-            },
-            SaslState::Failed => {
-                return Err(io::Error::other("SASL handshake has already failed"));
-            },
+        loop {
+            // The state machine is intentionally a simple match (no
+            // fall-through). Each branch performs one logical step:
+            // either queues a send or attempts to read+parse a response.
+            // We continue looping while a state transition happens
+            // without I/O blocking (e.g. just-sent → expect-response
+            // immediately), and bail with `Ok(())` when further progress
+            // requires a real network read.
+            let started_state = self.state;
+            match self.state {
+                SaslState::SendApiVersionsRequest => {
+                    // Mirror Java: "Always use version 0 request since
+                    // brokers treat requests with schema exceptions as
+                    // GSSAPI tokens". Build the request directly — no
+                    // builder needed, we know the version is 0.
+                    let data = crate::common::message::api_versions_request_data::ApiVersionsRequestData {
+                        client_software_name: self.client_id.clone(),
+                        client_software_version: env!("CARGO_PKG_VERSION").to_owned(),
+                        unknown_tagged_fields: Vec::new(),
+                    };
+                    let req = ApiVersionsRequest::new(data, 0);
+                    self.queue_request(transport, ApiKeys::for_id(18).expect("API_VERSIONS"), 0, &req)?;
+                    self.state = SaslState::ReceiveApiVersionsResponse;
+                },
+                SaslState::ReceiveApiVersionsResponse => {
+                    // Drive the receive forward. Returns Ok(None) if
+                    // more bytes are needed.
+                    match self.receive_response(transport)? {
+                        None => return Ok(()),
+                        Some(response) => {
+                            // Cast the boxed dyn response back to
+                            // `ApiVersionsResponse`. This is the same
+                            // shape as `NetworkClient.parseResponse`
+                            // re-wraps the parsed response.
+                            let api_versions_response =
+                                response.as_any().downcast_ref::<ApiVersionsResponse>().ok_or_else(|| {
+                                    io::Error::other(KafkaError::Authentication(
+                                        "expected ApiVersionsResponse from SASL handshake start".to_owned(),
+                                    ))
+                                })?;
+                            self.set_sasl_versions_from_api_versions(api_versions_response);
+                            self.state = SaslState::SendHandshakeRequest;
+                            // Fall through (Java does this with a
+                            // labelled fallthrough); continue the loop.
+                        },
+                    }
+                },
+                SaslState::SendHandshakeRequest => {
+                    let data = SaslHandshakeRequestData {
+                        mechanism: self.mechanism.clone(),
+                        unknown_tagged_fields: Vec::new(),
+                    };
+                    let req = SaslHandshakeRequest::new(data, self.sasl_handshake_version);
+                    self.queue_request(
+                        transport,
+                        ApiKeys::for_id(17).expect("SASL_HANDSHAKE"),
+                        self.sasl_handshake_version,
+                        &req,
+                    )?;
+                    self.state = SaslState::ReceiveHandshakeResponse;
+                },
+                SaslState::ReceiveHandshakeResponse => match self.receive_response(transport)? {
+                    None => return Ok(()),
+                    Some(response) => {
+                        let handshake_response =
+                            response.as_any().downcast_ref::<SaslHandshakeResponse>().ok_or_else(|| {
+                                io::Error::other(KafkaError::Authentication(
+                                    "expected SaslHandshakeResponse during SASL handshake".to_owned(),
+                                ))
+                            })?;
+                        self.handle_sasl_handshake_response(handshake_response)?;
+                        self.state = SaslState::SendInitialToken;
+                    },
+                },
+                SaslState::SendInitialToken => {
+                    let token = self.build_plain_token();
+                    if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
+                        // Legacy broker — raw size-prefixed token, no
+                        // `SaslAuthenticateRequest` wrapper. Translation
+                        // of Java's
+                        // `Send = ByteBufferSend.sizePrefixed(tokenBuf)`.
+                        let send = ByteBufferSend::size_prefixed(bytes::Bytes::from(token));
+                        self.pending_send = Some(PendingSend { inner: send, correlation_header: None });
+                        if !self.flush_pending_send(transport)? {
+                            return Ok(());
+                        }
+                    } else {
+                        let data = SaslAuthenticateRequestData { auth_bytes: token, unknown_tagged_fields: Vec::new() };
+                        let req = SaslAuthenticateRequest::new(data, self.sasl_authenticate_version);
+                        self.queue_request(
+                            transport,
+                            ApiKeys::for_id(36).expect("SASL_AUTHENTICATE"),
+                            self.sasl_authenticate_version,
+                            &req,
+                        )?;
+                    }
+                    self.state = SaslState::ReceiveAuthenticateResponse;
+                },
+                SaslState::ReceiveAuthenticateResponse => {
+                    if self.sasl_authenticate_version == DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER {
+                        // Legacy: just read the raw size-prefixed
+                        // response (no Kafka header). PLAIN's success
+                        // response is empty — receipt is enough.
+                        match self.receive_raw_token(transport)? {
+                            None => return Ok(()),
+                            Some(_token) => {
+                                // PLAIN sends no further challenge; we're done.
+                                self.state = SaslState::Complete;
+                                transport.remove_interest_ops(OP_WRITE);
+                            },
+                        }
+                    } else {
+                        match self.receive_response(transport)? {
+                            None => return Ok(()),
+                            Some(response) => {
+                                let auth_response =
+                                    response.as_any().downcast_ref::<SaslAuthenticateResponse>().ok_or_else(|| {
+                                        io::Error::other(KafkaError::Authentication(
+                                            "expected SaslAuthenticateResponse during SASL auth".to_owned(),
+                                        ))
+                                    })?;
+                                self.handle_sasl_authenticate_response(auth_response)?;
+                                // PLAIN single-step exchange: no more
+                                // challenges to respond to.
+                                self.state = SaslState::Complete;
+                                transport.remove_interest_ops(OP_WRITE);
+                            },
+                        }
+                    }
+                },
+                SaslState::Complete => return Ok(()),
+                SaslState::Failed => {
+                    // Java throws `IllegalStateException` here. We
+                    // surface the captured failure as `io::Error::other`
+                    // wrapping a `KafkaError::Authentication`, which the
+                    // upper layer (`KafkaChannel::prepare`) recognises
+                    // by content.
+                    let err = self
+                        .failure
+                        .clone()
+                        .unwrap_or_else(|| KafkaError::Authentication("SASL handshake already failed".to_owned()));
+                    return Err(io::Error::other(err));
+                },
+            }
+
+            // If the state did not change in this iteration, we cannot
+            // make further progress without I/O — return and wait for
+            // the next poll. Java's switch uses fall-through; ours uses
+            // an explicit loop with the same termination signal.
+            if self.state == started_state {
+                return Ok(());
+            }
         }
+    }
+
+    /// Compute and pin the negotiated SASL_AUTHENTICATE and
+    /// SASL_HANDSHAKE versions from a freshly received
+    /// `ApiVersionsResponse`. Mirrors Java's
+    /// `setSaslAuthenticateAndHandshakeVersions(ApiVersionsResponse)`.
+    fn set_sasl_versions_from_api_versions(&mut self, response: &ApiVersionsResponse) {
+        let sasl_authenticate_key = ApiKeys::for_id(36).expect("SASL_AUTHENTICATE");
+        if let Some(api_version) = response.api_version(36) {
+            // Pin to the maximum of (broker's max, our max). Java uses
+            // `Math.min(api_version.maxVersion(), latestVersion())`.
+            self.sasl_authenticate_version = api_version.max_version.min(sasl_authenticate_key.latest_version());
+        }
+        let sasl_handshake_key = ApiKeys::for_id(17).expect("SASL_HANDSHAKE");
+        if let Some(api_version) = response.api_version(17) {
+            self.sasl_handshake_version = api_version.max_version.min(sasl_handshake_key.latest_version());
+        }
+    }
+
+    /// Translation of Java's `handleSaslHandshakeResponse`. Inspects the
+    /// handshake response's error code and either transitions through
+    /// or transitions to `Failed` with the appropriate error message.
+    fn handle_sasl_handshake_response(&mut self, response: &SaslHandshakeResponse) -> io::Result<()> {
+        let error = response.error();
+        if error == Errors::None {
+            return Ok(());
+        }
+        let mechanism = self.mechanism.clone();
+        // Render the enabled-mechanisms list in the same shape as Java's
+        // `List<String>.toString()` — `[m1, m2]` (no quotes around items,
+        // comma-space separated) — to keep parity with Java error strings.
+        // Rust's `{:?}` on `Vec<String>` would emit `["m1", "m2"]` which
+        // diverges from Java's reference text (DoD #1: "error message
+        // content is asserted").
+        let enabled = format!("[{}]", response.enabled_mechanisms().join(", "));
+        let err = match error {
+            Errors::UnsupportedSaslMechanism => KafkaError::Authentication(format!(
+                "Client SASL mechanism '{mechanism}' not enabled in the server, enabled mechanisms are {enabled}"
+            )),
+            Errors::IllegalSaslState => KafkaError::Authentication(format!(
+                "Unexpected handshake request with client mechanism {mechanism}, enabled mechanisms are {enabled}"
+            )),
+            other => KafkaError::Authentication(format!(
+                "Unknown error code {other:?}, client mechanism is {mechanism}, enabled mechanisms are {enabled}"
+            )),
+        };
+        self.state = SaslState::Failed;
+        self.failure = Some(err.clone());
+        Err(io::Error::other(err))
+    }
+
+    /// Translation of Java's `receiveToken`'s error-handling for
+    /// `SaslAuthenticateResponse`: on a non-`NONE` error code, throw
+    /// the `SaslAuthenticationException` with the broker's error message.
+    fn handle_sasl_authenticate_response(&mut self, response: &SaslAuthenticateResponse) -> io::Result<()> {
+        let error = response.error();
+        if error == Errors::None {
+            return Ok(());
+        }
+        // Prefer the broker-provided message; fall back to the canonical
+        // wire-code message if the broker omitted it.
+        let message = response
+            .error_message()
+            .map(|m| m.to_owned())
+            .unwrap_or_else(|| format!("{error:?}"));
+        let err = KafkaError::Authentication(message);
+        self.state = SaslState::Failed;
+        self.failure = Some(err.clone());
+        Err(io::Error::other(err))
+    }
+
+    /// Encode a request with its header into a `Send` queued on
+    /// `pending_send`, then immediately attempt to flush. Mirrors Java's
+    /// `send(send)` followed by `flushNetOutBufferAndUpdateInterestOps`.
+    fn queue_request(
+        &mut self,
+        transport: &mut dyn TransportLayer,
+        api_key: &'static ApiKey,
+        version: i16,
+        request: &dyn AbstractRequest,
+    ) -> io::Result<()> {
+        let correlation_id = self.next_correlation_id();
+        let header = RequestHeader::new(api_key, version, &self.client_id, correlation_id);
+        let body = request.serialize_with_header(&header).map_err(io::Error::other)?;
+        // Size-prefix it for the wire: ByteBufferSend automatically
+        // emits a 4-byte big-endian length header in front of `payload`.
+        let send = ByteBufferSend::size_prefixed(bytes::Bytes::from(body));
+        self.pending_send = Some(PendingSend { inner: send, correlation_header: Some(header) });
+        let _ = self.flush_pending_send(transport)?;
         Ok(())
     }
 
-    /// Sends a SaslHandshake request with the negotiated version.
-    async fn send_handshake_request(&mut self, transport: &mut (dyn TransportLayer + Send)) -> io::Result<()> {
-        let mut data = SaslHandshakeRequestData::new();
-        data.set_mechanism(self.mechanism.clone());
-        let request = SaslHandshakeRequest::new(data, self.sasl_handshake_version);
-        let header = self.next_request_header(&ApiKeys::SASL_HANDSHAKE, request.version())?;
-        let concrete = ConcreteRequest::SaslHandshake(request);
-        let send = Box::new(concrete.to_send(&header)?);
-        self.send_request(send, transport).await
+    /// Attempt to flush the pending send. Returns `Ok(true)` when the
+    /// send completed (the buffer is drained and removed); `Ok(false)`
+    /// when more bytes remain to be written. Mirrors Java's
+    /// `flushNetOutBufferAndUpdateInterestOps`.
+    fn flush_pending_send(&mut self, transport: &mut dyn TransportLayer) -> io::Result<bool> {
+        let Some(pending) = self.pending_send.as_mut() else {
+            return Ok(true);
+        };
+        // ByteBufferSend.write_to → channel.write_vectored. Pass the
+        // transport as a `&mut dyn TransferableChannel` — the supertrait
+        // bound on TransportLayer makes this safe (`as` coercion).
+        let _written = pending.inner.write_to(transport as &mut dyn TransferableChannel)?;
+        if pending.inner.completed() {
+            // Drain the send; latch its correlation header so the next
+            // `receive_response` knows what to expect.
+            let drained = self.pending_send.take().expect("pending_send still Some");
+            if let Some(header) = drained.correlation_header {
+                self.current_request_header = Some(header);
+            }
+            transport.remove_interest_ops(OP_WRITE);
+            Ok(true)
+        } else {
+            // Keep OP_WRITE armed so the Selector wakes us when there's
+            // capacity for more bytes.
+            transport.add_interest_ops(OP_WRITE);
+            Ok(false)
+        }
+    }
+
+    /// Read the size-prefixed framed response and parse it against the
+    /// latched request header. Returns `Ok(None)` when more bytes are
+    /// needed. Mirrors Java's `receiveKafkaResponse()` minus
+    /// re-authentication branches.
+    fn receive_response(
+        &mut self,
+        transport: &mut dyn TransportLayer,
+    ) -> io::Result<Option<Box<dyn AbstractResponse>>> {
+        let Some(bytes) = self.receive_raw_token(transport)? else {
+            return Ok(None);
+        };
+        let header = self.current_request_header.take().ok_or_else(|| {
+            io::Error::other(KafkaError::Authentication(
+                "received SASL response with no pending request header".to_owned(),
+            ))
+        })?;
+        let mut accessor = ByteBufferAccessor::wrap(bytes);
+        let response = parse_response(&mut accessor, &header).map_err(io::Error::other)?;
+        // Keep OP_READ armed — the next state may also need to read.
+        transport.add_interest_ops(OP_READ);
+        Ok(Some(response))
+    }
+
+    /// Lower-level read: drives the NetworkReceive forward and returns
+    /// the payload bytes when the size-prefixed frame has been fully
+    /// received; returns `Ok(None)` if more bytes are needed.
+    fn receive_raw_token(&mut self, transport: &mut dyn TransportLayer) -> io::Result<Option<Vec<u8>>> {
+        let receive = self
+            .pending_receive
+            .get_or_insert_with(|| NetworkReceive::with_source(self.node.clone()));
+        // The transport layer's read() returns Ok(0) on WouldBlock and
+        // surfaces EOF as Err(UnexpectedEof) — both behaviours we forward
+        // verbatim.
+        let _read = receive.read_from(&mut WrapTransportRead::new(transport))?;
+        if !receive.complete() {
+            transport.add_interest_ops(OP_READ);
+            return Ok(None);
+        }
+        let payload = self
+            .pending_receive
+            .take()
+            .expect("pending_receive present")
+            .take_payload()
+            .ok_or_else(|| {
+                io::Error::other(KafkaError::Authentication("SASL receive completed without payload".to_owned()))
+            })?
+            .to_vec();
+        Ok(Some(payload))
     }
 }
 
-impl Authenticator for SaslClientAuthenticator {
-    fn authenticate<'a>(
-        &'a mut self,
-        transport: &'a mut (dyn TransportLayer + Send),
-    ) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + 'a>> {
-        Box::pin(self.authenticate_impl(transport))
+/// Bridge to the network-layer
+/// [`crate::common::network::authenticator::SaslAuthenticator`] trait so
+/// the [`crate::common::network::KafkaChannel`] can host a SASL
+/// authenticator alongside Plaintext and SSL ones via the
+/// [`crate::common::network::authenticator::ChannelAuthenticator`] enum.
+///
+/// Mirrors Java's `Authenticator` interface contract where
+/// `SaslClientAuthenticator` is a concrete implementation. The Rust
+/// translation splits the interface in two ([`Authenticator`] and
+/// [`crate::common::network::authenticator::SaslAuthenticator`]) so that
+/// the non-SASL [`crate::common::network::authenticator::PlaintextAuthenticator`]
+/// / [`crate::common::network::authenticator::SslAuthenticator`] impls
+/// do not have to plumb a `&mut dyn TransportLayer` through
+/// `authenticate()`.
+impl crate::common::network::authenticator::SaslAuthenticator for SaslClientAuthenticator {
+    fn authenticate(&mut self, transport: &mut dyn TransportLayer) -> io::Result<()> {
+        // Delegate to the inherent method that carries the full state
+        // machine.
+        SaslClientAuthenticator::authenticate(self, transport)
+    }
+
+    fn principal(&self, _transport: &dyn TransportLayer) -> crate::common::security::auth::KafkaPrincipal {
+        // Returns `User:<configured-username>` for log identity.
+        //
+        // Documented deviation from Java: Java's
+        // `SaslClientAuthenticator.principal()` for non-GSSAPI
+        // mechanisms (including PLAIN) reads from `clientPrincipalName`,
+        // which is set to `null` on construction (`SaslClientAuthenticator.java:200-206`).
+        // `principal()` then calls `new KafkaPrincipal(USER_TYPE, clientPrincipalName)`
+        // (`SaslClientAuthenticator.java:487-489`), and `KafkaPrincipal`'s
+        // ctor calls `requireNonNull(name)` (`KafkaPrincipal.java:51-58`)
+        // — so on the JVM client side, `principal()` for PLAIN throws
+        // NPE if ever invoked. The Rust translation returns the
+        // configured SASL username instead because principals are only
+        // consumed for log/metric surfaces on the client side, and
+        // `User:ANONYMOUS` would be misleading when credentials were
+        // actually supplied. This is documented deviation, not parity.
+        crate::common::security::auth::KafkaPrincipal::new(
+            crate::common::security::auth::kafka_principal::USER_TYPE,
+            &self.credentials.username,
+        )
     }
 
     fn complete(&self) -> bool {
-        self.state == SaslState::Complete
+        SaslClientAuthenticator::complete(self)
     }
 
-    fn close(&mut self) {
-        // No resources to release for PLAIN mechanism.
+    fn close(&mut self) -> io::Result<()> {
+        // No long-lived resources to release in PLAIN. Java's
+        // `Closeable.close()` is `saslClient.dispose()` which is a no-op
+        // for `PlainSaslClient`.
+        Ok(())
+    }
+}
+
+/// Wrapper that adapts `&mut dyn TransportLayer` to `&mut dyn io::Read`
+/// so [`NetworkReceive::read_from`] can drive it. The `io::Read` trait
+/// is intentionally not a supertrait of `TransportLayer` (Java's
+/// `TransportLayer` extends `ScatteringByteChannel`, not
+/// `InputStream`), so we synthesise the adapter here for the SASL
+/// receive path.
+struct WrapTransportRead<'a> {
+    inner: &'a mut dyn TransportLayer,
+}
+
+impl<'a> WrapTransportRead<'a> {
+    fn new(inner: &'a mut dyn TransportLayer) -> Self {
+        WrapTransportRead { inner }
+    }
+}
+
+impl io::Read for WrapTransportRead<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        self.inner.read(buf)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
-    use crate::common::network::InterestOps;
-    use crate::common::protocol::Message;
-    use crate::common::protocol::ObjectSerializationCache;
-    use crate::common::protocol::Writable;
-    use crate::common::requests::ResponseHeader;
-    use crate::sasl_authenticate_response_data::SaslAuthenticateResponseData;
-    use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
-
+    use std::cell::RefCell;
     use std::collections::VecDeque;
     use std::net::SocketAddr;
+    use std::task::{Context, Poll};
 
-    // -----------------------------------------------------------------------
-    // MockTransportLayer for testing
-    // -----------------------------------------------------------------------
+    use std::io::IoSlice;
 
-    /// A mock transport layer that captures writes and returns pre-programmed reads.
-    struct MockTransportLayer {
-        /// Pre-programmed read data, consumed in FIFO order.
-        read_data: VecDeque<u8>,
-        /// Captured write data.
-        write_data: Vec<u8>,
-        /// Interest operations currently set.
-        interest_ops: InterestOps,
+    use crate::common::message::api_versions_response_data::{ApiVersion, ApiVersionsResponseData};
+    use crate::common::message::sasl_authenticate_response_data::SaslAuthenticateResponseData;
+    use crate::common::message::sasl_handshake_response_data::SaslHandshakeResponseData;
+    use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+    use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+    use crate::common::requests::AbstractResponse;
+    use crate::common::requests::ResponseHeader;
+    use crate::common::security::auth::KafkaPrincipal;
+
+    /// Mock transport: a pair of in-memory queues. Bytes written by the
+    /// authenticator land on `outbound`; bytes the test pre-loads into
+    /// `inbound` are returned from `read`.
+    ///
+    /// Behaviour mirrors Java's non-blocking NIO contract:
+    /// - `write_vectored` returns the number of bytes accepted into the
+    ///   `outbound` queue. By default the mock accepts everything in
+    ///   one call. The Phase 9b S3 partial-write regression test sets
+    ///   `max_write_per_call = Some(N)` to cap the accepted bytes at
+    ///   N, forcing the state machine to call `write_vectored` again
+    ///   with the remaining bytes.
+    /// - `read` returns `Ok(n)` for `n > 0`, `Ok(0)` for WouldBlock when
+    ///   the queue is empty, and `Err(UnexpectedEof)` when the test
+    ///   explicitly sets `eof_after_drain`.
+    struct MockTransport {
+        outbound: RefCell<Vec<u8>>,
+        inbound: RefCell<VecDeque<u8>>,
+        interest_ops: i32,
+        connected: bool,
+        eof_after_drain: bool,
+        /// `Some(N)`: accept at most N bytes per `write_vectored` call.
+        /// `None`: accept everything in one call (default).
+        max_write_per_call: Option<usize>,
     }
 
-    impl MockTransportLayer {
+    impl MockTransport {
         fn new() -> Self {
-            Self {
-                read_data: VecDeque::new(),
-                write_data: Vec::new(),
-                interest_ops: InterestOps::NONE,
+            MockTransport {
+                outbound: RefCell::new(Vec::new()),
+                inbound: RefCell::new(VecDeque::new()),
+                interest_ops: OP_READ,
+                connected: true,
+                eof_after_drain: false,
+                max_write_per_call: None,
             }
         }
 
-        /// Enqueue data that will be returned by read operations.
-        fn enqueue_read_data(&mut self, data: &[u8]) {
-            self.read_data.extend(data);
+        /// Pre-load a complete framed response (length-prefix + body) into
+        /// the inbound queue.
+        fn push_framed(&self, body: &[u8]) {
+            let mut q = self.inbound.borrow_mut();
+            for b in (body.len() as i32).to_be_bytes() {
+                q.push_back(b);
+            }
+            q.extend(body);
         }
 
-        /// Returns all data written by the authenticator.
-        fn written_data(&self) -> &[u8] {
-            &self.write_data
+        fn outbound_bytes(&self) -> Vec<u8> {
+            self.outbound.borrow().clone()
         }
     }
 
-    impl TransportLayer for MockTransportLayer {
-        fn peer_addr(&self) -> io::Result<SocketAddr> {
-            Ok("127.0.0.1:9092".parse().unwrap())
-        }
-
-        fn ready(&self) -> bool {
-            true
-        }
-
-        fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
-            Box::pin(async { Ok(true) })
-        }
-
-        fn disconnect(&mut self) {}
-
-        fn is_connected(&self) -> bool {
-            true
-        }
-
-        fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
-        }
-
-        fn add_interest_ops(&mut self, ops: InterestOps) {
-            self.interest_ops |= ops;
-        }
-
-        fn remove_interest_ops(&mut self, ops: InterestOps) {
-            self.interest_ops = self.interest_ops.remove(ops);
-        }
-
-        fn is_mute(&self) -> bool {
-            false
-        }
-
-        fn has_bytes_buffered(&self) -> bool {
-            false
+    impl TransferableChannel for MockTransport {
+        fn write_vectored(&mut self, bufs: &[IoSlice<'_>]) -> io::Result<usize> {
+            let cap = self.max_write_per_call;
+            let mut accepted = 0;
+            let mut out = self.outbound.borrow_mut();
+            for s in bufs {
+                if let Some(max) = cap {
+                    let remaining = max.saturating_sub(accepted);
+                    if remaining == 0 {
+                        break;
+                    }
+                    let take = remaining.min(s.len());
+                    out.extend_from_slice(&s[..take]);
+                    accepted += take;
+                    if take < s.len() {
+                        // Cap hit mid-slice.
+                        break;
+                    }
+                } else {
+                    out.extend_from_slice(s);
+                    accepted += s.len();
+                }
+            }
+            Ok(accepted)
         }
 
         fn has_pending_writes(&self) -> bool {
             false
         }
+    }
 
-        fn is_open(&self) -> bool {
+    impl TransportLayer for MockTransport {
+        fn ready(&self) -> bool {
             true
         }
-
-        fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
+        fn finish_connect(&mut self) -> io::Result<bool> {
+            Ok(true)
         }
-
-        fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
+        fn disconnect(&mut self) {
+            self.connected = false;
         }
-
-        fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-            Box::pin(async { Ok(()) })
+        fn is_connected(&self) -> bool {
+            self.connected
         }
-
-        fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-            let available = self.read_data.len();
-            let to_read = available.min(dst.len());
-            if to_read == 0 {
-                return Box::pin(async { Err(io::Error::from(io::ErrorKind::WouldBlock)) });
+        fn is_open(&self) -> bool {
+            self.connected
+        }
+        fn close(&mut self) -> io::Result<()> {
+            self.connected = false;
+            Ok(())
+        }
+        fn read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            let mut q = self.inbound.borrow_mut();
+            if q.is_empty() {
+                if self.eof_after_drain {
+                    return Err(io::Error::from(io::ErrorKind::UnexpectedEof));
+                }
+                return Ok(0); // WouldBlock
             }
-            for byte in dst.iter_mut().take(to_read) {
-                *byte = self.read_data.pop_front().unwrap();
+            let mut n = 0;
+            while n < dst.len() {
+                match q.pop_front() {
+                    Some(b) => {
+                        dst[n] = b;
+                        n += 1;
+                    },
+                    None => break,
+                }
             }
-            Box::pin(async move { Ok(to_read) })
+            Ok(n)
         }
-
-        fn write<'a>(&'a mut self, src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-            self.write_data.extend_from_slice(src);
-            let len = src.len();
-            Box::pin(async move { Ok(len) })
+        fn handshake(&mut self) -> io::Result<()> {
+            Ok(())
         }
-
-        fn write_vectored<'a>(
-            &'a mut self,
-            srcs: &'a [io::IoSlice<'a>],
-        ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
-            let mut total = 0;
-            for slice in srcs {
-                self.write_data.extend_from_slice(slice);
-                total += slice.len();
-            }
-            Box::pin(async move { Ok(total) })
+        fn peer_principal(&self) -> io::Result<KafkaPrincipal> {
+            Ok(KafkaPrincipal::anonymous())
+        }
+        fn add_interest_ops(&mut self, ops: i32) {
+            self.interest_ops |= ops;
+        }
+        fn remove_interest_ops(&mut self, ops: i32) {
+            self.interest_ops &= !ops;
+        }
+        fn interest_ops(&self) -> i32 {
+            self.interest_ops
+        }
+        fn is_mute(&self) -> bool {
+            self.interest_ops & OP_READ == 0
+        }
+        fn has_bytes_buffered(&self) -> bool {
+            !self.inbound.borrow().is_empty()
+        }
+        fn local_addr(&self) -> io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 0)))
+        }
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            Ok(SocketAddr::from(([127, 0, 0, 1], 9092)))
+        }
+        fn poll_read_ready(&self, _cx: &mut Context<'_>) -> Poll<()> {
+            Poll::Ready(())
         }
     }
 
-    // -----------------------------------------------------------------------
-    // Helper functions for building serialized responses
-    // -----------------------------------------------------------------------
-
-    /// Builds a size-prefixed ApiVersionsResponse containing the given SASL versions.
-    ///
-    /// The response is formatted as: [4-byte size][ResponseHeader][ApiVersionsResponseData]
-    fn build_api_versions_response_bytes(
-        correlation_id: i32,
-        sasl_handshake_max: i16,
-        sasl_authenticate_max: i16,
-    ) -> Vec<u8> {
-        let mut data = ApiVersionsResponseData::new();
-        data.set_error_code(Errors::None.code());
-
-        let mut hs_version = ApiVersion::new();
-        hs_version.set_api_key(ApiKeys::SASL_HANDSHAKE.id());
-        hs_version.set_min_version(0);
-        hs_version.set_max_version(sasl_handshake_max);
-
-        let mut auth_version = ApiVersion::new();
-        auth_version.set_api_key(ApiKeys::SASL_AUTHENTICATE.id());
-        auth_version.set_min_version(0);
-        auth_version.set_max_version(sasl_authenticate_max);
-
-        data.set_api_keys(vec![hs_version, auth_version]);
-
-        // Serialize header + body
-        let response_header = ResponseHeader::new(correlation_id, 0); // v0 header for ApiVersions v0
-        let mut cache = ObjectSerializationCache::new();
-        let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
-        let body_size = Message::size(&data, &mut cache, 0).unwrap();
-        let total_size = header_size + body_size;
-
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
-        buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, 0).unwrap();
-        buf.buffer().to_vec()
+    /// Serialise an `ApiVersionsResponse` for a SASL bootstrap exchange:
+    /// includes the SASL_HANDSHAKE (17) and SASL_AUTHENTICATE (36) entries.
+    fn serialize_api_versions_response(correlation_id: i32) -> Vec<u8> {
+        let response = ApiVersionsResponse::new(ApiVersionsResponseData {
+            error_code: 0,
+            api_keys: vec![
+                ApiVersion { api_key: 17, min_version: 0, max_version: 1, unknown_tagged_fields: Vec::new() },
+                ApiVersion { api_key: 36, min_version: 0, max_version: 2, unknown_tagged_fields: Vec::new() },
+                ApiVersion { api_key: 18, min_version: 0, max_version: 3, unknown_tagged_fields: Vec::new() },
+            ],
+            throttle_time_ms: 0,
+            supported_features: Vec::new(),
+            finalized_features_epoch: -1,
+            finalized_features: Vec::new(),
+            zk_migration_ready: false,
+            unknown_tagged_fields: Vec::new(),
+        });
+        wrap_with_header(response.api_key(), 0, correlation_id, &response, 0)
     }
 
-    /// Builds a size-prefixed SaslHandshakeResponse.
-    fn build_sasl_handshake_response_bytes(
+    fn serialize_sasl_handshake_response(
         correlation_id: i32,
-        error: &Errors,
+        error: Errors,
         mechanisms: Vec<String>,
         version: i16,
     ) -> Vec<u8> {
-        let mut data = SaslHandshakeResponseData::new();
-        data.set_error_code(error.code());
-        data.set_mechanisms(mechanisms);
-
-        let api_key = &ApiKeys::SASL_HANDSHAKE;
-        let header_version = api_key.response_header_version(version);
-        let response_header = ResponseHeader::new(correlation_id, header_version);
-
-        let mut cache = ObjectSerializationCache::new();
-        let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
-        let body_size = Message::size(&data, &mut cache, version).unwrap();
-        let total_size = header_size + body_size;
-
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
-        buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, version).unwrap();
-        buf.buffer().to_vec()
+        let response = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: error.code(),
+            mechanisms,
+            unknown_tagged_fields: Vec::new(),
+        });
+        wrap_with_header(response.api_key(), version, correlation_id, &response, version)
     }
 
-    /// Builds a size-prefixed SaslAuthenticateResponse.
-    fn build_sasl_authenticate_response_bytes(
+    fn serialize_sasl_authenticate_response(
         correlation_id: i32,
-        error: &Errors,
-        error_message: Option<&str>,
-        auth_bytes: &[u8],
+        error: Errors,
+        message: Option<&str>,
         version: i16,
     ) -> Vec<u8> {
-        let mut data = SaslAuthenticateResponseData::new();
-        data.set_error_code(error.code());
-        data.set_error_message(error_message.map(|s| s.to_string()));
-        data.set_auth_bytes(auth_bytes.to_vec());
-
-        let api_key = &ApiKeys::SASL_AUTHENTICATE;
-        let header_version = api_key.response_header_version(version);
-        let response_header = ResponseHeader::new(correlation_id, header_version);
-
-        let mut cache = ObjectSerializationCache::new();
-        let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
-        let body_size = Message::size(&data, &mut cache, version).unwrap();
-        let total_size = header_size + body_size;
-
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
-        buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, version).unwrap();
-        buf.buffer().to_vec()
+        let response = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: error.code(),
+            error_message: message.map(|s| s.to_owned()),
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: Vec::new(),
+        });
+        wrap_with_header(response.api_key(), version, correlation_id, &response, version)
     }
 
-    // -----------------------------------------------------------------------
-    // Tests
-    // -----------------------------------------------------------------------
+    /// Prepend a `ResponseHeader` to a serialised response body, mirroring
+    /// what Java's `NetworkClient` puts on the wire for the broker side.
+    fn wrap_with_header(
+        api_key: &'static ApiKey,
+        api_version: i16,
+        correlation_id: i32,
+        response: &dyn AbstractResponse,
+        body_version: i16,
+    ) -> Vec<u8> {
+        let body = AbstractResponse::serialize(response, body_version).expect("serialize body");
+        let mut header_accessor = ByteBufferAccessor::wrap(Vec::new());
+        let header_version = api_key.response_header_version(api_version);
+        let header = ResponseHeader::new(correlation_id, header_version);
+        let cache = ObjectSerializationCache::new();
+        header.write(&mut header_accessor, &cache).expect("write response header");
+        let mut combined = header_accessor.buffer().to_vec();
+        combined.extend_from_slice(body.buffer());
+        combined
+    }
 
-    /// Test 1: PLAIN token generation matches RFC 4616 format.
+    /// Happy path: full PLAIN exchange completes.
     #[test]
-    fn test_plain_token_generation() {
-        let auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
-        let token = auth.create_sasl_token();
-        assert_eq!(token, b"\0alice\0secret");
+    fn plain_happy_path_drives_state_machine_to_complete() {
+        let mut transport = MockTransport::new();
+        let mut auth = SaslClientAuthenticator::new(
+            "node-0",
+            "test-client",
+            "PLAIN",
+            PlainCredentials::new("alice", "supersecret"),
+        )
+        .expect("PLAIN authenticator construction");
+
+        assert_eq!(auth.state(), SaslState::SendApiVersionsRequest);
+
+        // Step 1: drive — should send ApiVersionsRequest, transition to
+        // ReceiveApiVersionsResponse, then return Ok(()) waiting for
+        // bytes.
+        auth.authenticate(&mut transport).expect("step 1");
+        assert_eq!(auth.state(), SaslState::ReceiveApiVersionsResponse);
+        assert!(!transport.outbound_bytes().is_empty(), "ApiVersionsRequest must have been sent");
+
+        // The request used correlation_id = MIN_RESERVED. We respond
+        // with the matching header.
+        let api_versions_response_bytes = serialize_api_versions_response(MIN_RESERVED_CORRELATION_ID);
+        transport.push_framed(&api_versions_response_bytes);
+
+        // Step 2: parse ApiVersionsResponse, transition through
+        // SendHandshakeRequest → ReceiveHandshakeResponse.
+        auth.authenticate(&mut transport).expect("step 2");
+        assert_eq!(auth.state(), SaslState::ReceiveHandshakeResponse);
+        assert_eq!(auth.sasl_authenticate_version, 2, "negotiated min(client=2, broker=2)");
+        assert_eq!(auth.sasl_handshake_version, 1);
+
+        // Push a successful SaslHandshakeResponse v1 (correlation_id
+        // MIN+1).
+        let handshake_response_bytes = serialize_sasl_handshake_response(
+            MIN_RESERVED_CORRELATION_ID + 1,
+            Errors::None,
+            vec!["PLAIN".to_owned()],
+            1,
+        );
+        transport.push_framed(&handshake_response_bytes);
+
+        // Step 3: parse handshake, transition through SendInitialToken
+        // → ReceiveAuthenticateResponse.
+        auth.authenticate(&mut transport).expect("step 3");
+        assert_eq!(auth.state(), SaslState::ReceiveAuthenticateResponse);
+
+        // The PLAIN token is now on the wire. The exact bytes are
+        // verified by the next assertion via the outbound trace shape.
+        assert!(transport.outbound_bytes().windows(7).any(|w| w == b"\0alice\0"));
+
+        // Push success response.
+        let auth_response_bytes =
+            serialize_sasl_authenticate_response(MIN_RESERVED_CORRELATION_ID + 2, Errors::None, None, 2);
+        transport.push_framed(&auth_response_bytes);
+
+        // Step 4: parse authenticate response, transition to Complete.
+        auth.authenticate(&mut transport).expect("step 4");
+        assert_eq!(auth.state(), SaslState::Complete);
+        assert!(auth.complete());
     }
 
-    /// Test 2: Initial state is SendApiVersionsRequest and complete() is false.
+    /// Broker reports `UNSUPPORTED_SASL_MECHANISM` in the handshake
+    /// response → state transitions to Failed with the Java-parity
+    /// error message.
     #[test]
-    fn test_initial_state() {
-        let auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
-        assert_eq!(auth.sasl_state(), SaslState::SendApiVersionsRequest);
-        assert!(!auth.complete());
+    fn handshake_unsupported_mechanism_fails_with_java_message() {
+        let mut transport = MockTransport::new();
+        let mut auth = SaslClientAuthenticator::new(
+            "node-0",
+            "test-client",
+            "PLAIN",
+            PlainCredentials::new("alice", "supersecret"),
+        )
+        .expect("authenticator");
+
+        // Drive past ApiVersions.
+        auth.authenticate(&mut transport).expect("step 1");
+        transport.push_framed(&serialize_api_versions_response(MIN_RESERVED_CORRELATION_ID));
+        auth.authenticate(&mut transport).expect("step 2");
+
+        // Broker rejects PLAIN — supports only SCRAM-SHA-512.
+        transport.push_framed(&serialize_sasl_handshake_response(
+            MIN_RESERVED_CORRELATION_ID + 1,
+            Errors::UnsupportedSaslMechanism,
+            vec!["SCRAM-SHA-512".to_owned()],
+            1,
+        ));
+
+        let err = auth.authenticate(&mut transport).expect_err("step 3 must fail");
+        let inner = err.into_inner().expect("inner");
+        let kafka_err = inner.downcast_ref::<KafkaError>().expect("KafkaError captured");
+        assert!(matches!(kafka_err, KafkaError::Authentication(_)));
+        assert!(kafka_err.is_fatal(), "auth failures are fatal");
+        assert!(!kafka_err.is_retriable(), "auth failures are non-retriable");
+        let msg = kafka_err.message();
+        // DoD #1: assert the EXACT Java error string format, not just
+        // substring containment. Java emits:
+        //   "Client SASL mechanism 'PLAIN' not enabled in the server,
+        //    enabled mechanisms are [SCRAM-SHA-512]"
+        // The brackets+items must use Java `List<String>.toString()`
+        // shape: `[SCRAM-SHA-512]`, NOT Rust's `["SCRAM-SHA-512"]`.
+        assert_eq!(
+            msg,
+            "Client SASL mechanism 'PLAIN' not enabled in the server, enabled mechanisms are [SCRAM-SHA-512]"
+        );
+        assert_eq!(auth.state(), SaslState::Failed);
     }
 
-    /// Test 3: Correlation ID management uses reserved range.
+    /// Broker reports `SASL_AUTHENTICATION_FAILED` with a message in
+    /// the authenticate response → state transitions to Failed,
+    /// error message is preserved.
     #[test]
-    fn test_correlation_id_management() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
-        let id1 = auth.next_correlation_id();
-        assert!(is_reserved(id1));
-        assert_eq!(id1, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
+    fn authenticate_failure_preserves_broker_message() {
+        let mut transport = MockTransport::new();
+        let mut auth = SaslClientAuthenticator::new(
+            "node-0",
+            "test-client",
+            "PLAIN",
+            PlainCredentials::new("alice", "wrong-password"),
+        )
+        .expect("authenticator");
 
-        let id2 = auth.next_correlation_id();
-        assert!(is_reserved(id2));
-        assert_eq!(id2, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1);
+        auth.authenticate(&mut transport).expect("step 1");
+        transport.push_framed(&serialize_api_versions_response(MIN_RESERVED_CORRELATION_ID));
+        auth.authenticate(&mut transport).expect("step 2");
+        transport.push_framed(&serialize_sasl_handshake_response(
+            MIN_RESERVED_CORRELATION_ID + 1,
+            Errors::None,
+            vec!["PLAIN".to_owned()],
+            1,
+        ));
+        auth.authenticate(&mut transport).expect("step 3");
+
+        // Wrong creds → broker says no.
+        let broker_msg = "Authentication failed: Invalid username or password";
+        transport.push_framed(&serialize_sasl_authenticate_response(
+            MIN_RESERVED_CORRELATION_ID + 2,
+            Errors::SaslAuthenticationFailed,
+            Some(broker_msg),
+            2,
+        ));
+
+        let err = auth.authenticate(&mut transport).expect_err("step 4 must fail");
+        let inner = err.into_inner().expect("inner");
+        let kafka_err = inner.downcast_ref::<KafkaError>().expect("KafkaError captured");
+        assert!(matches!(kafka_err, KafkaError::Authentication(m) if m == broker_msg));
+        assert_eq!(auth.state(), SaslState::Failed);
     }
 
-    /// Test 3b: Correlation ID wraps correctly when reserved range is exhausted.
+    /// EOF mid-handshake surfaces as `UnexpectedEof` AND transitions
+    /// the state machine to `Failed` (Phase 9b Suggestion S2).
     ///
-    /// Java's `int` wraps silently on overflow (`Integer.MAX_VALUE + 1` becomes
-    /// `Integer.MIN_VALUE`). After wrapping, `isReserved()` returns false, so
-    /// `nextCorrelationId()` resets to `SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID`. This test
-    /// ensures the Rust implementation matches this wrapping behavior in both
-    /// debug and release builds.
+    /// Note: the state-machine loop sends `ApiVersionsRequest` then
+    /// falls through to receive on the same `authenticate()` call.
+    /// When the inbound queue is empty and `eof_after_drain` is true,
+    /// the receive surfaces `UnexpectedEof` immediately. This matches
+    /// Java's behaviour: a peer that closes the socket right after we
+    /// send the bootstrap is indistinguishable from a slow peer that
+    /// then closes — both surface as `EOFException` from
+    /// `channel.read() == -1`.
+    ///
+    /// Phase 9b: the outer wrapper post-processes EOF into the
+    /// `Failed` state + records the captured `KafkaError::Authentication`
+    /// so a buggy retry-layer re-invocation surfaces a deterministic
+    /// error instead of wedging at an in-progress state.
     #[test]
-    fn test_correlation_id_wraps_on_overflow() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
-        // Exhaust all 8 reserved IDs
-        for i in 0..8 {
-            let id = auth.next_correlation_id();
-            assert_eq!(id, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + i);
-            assert!(is_reserved(id));
+    fn eof_mid_handshake_surfaces_as_unexpected_eof() {
+        let mut transport = MockTransport::new();
+        transport.eof_after_drain = true;
+        let mut auth = SaslClientAuthenticator::new(
+            "node-0",
+            "test-client",
+            "PLAIN",
+            PlainCredentials::new("alice", "supersecret"),
+        )
+        .expect("authenticator");
+        let err = auth.authenticate(&mut transport).expect_err("expected EOF");
+        assert_eq!(err.kind(), io::ErrorKind::UnexpectedEof);
+        // Phase 9b S2 fix: state transitioned to Failed, not stuck at
+        // ReceiveApiVersionsResponse. The outbound side definitely has
+        // the framed ApiVersionsRequest.
+        assert_eq!(auth.state(), SaslState::Failed);
+        assert!(matches!(
+            auth.failure(),
+            Some(KafkaError::Authentication(m)) if m == "EOF during SASL handshake"
+        ));
+        assert!(!transport.outbound_bytes().is_empty(), "request was sent before EOF");
+
+        // Re-invocation on a Failed authenticator must return the
+        // captured error, not wedge or panic. Java throws
+        // `IllegalStateException` here; we wrap the captured
+        // `KafkaError::Authentication` for consistent surfacing.
+        let err2 = auth.authenticate(&mut transport).expect_err("re-invocation must error");
+        let inner = err2.into_inner().expect("inner");
+        let kafka_err = inner.downcast_ref::<KafkaError>().expect("KafkaError");
+        assert!(matches!(kafka_err, KafkaError::Authentication(m) if m == "EOF during SASL handshake"));
+        assert_eq!(auth.state(), SaslState::Failed);
+    }
+
+    /// Partial-write regression test (Phase 9b Suggestion S3). Caps
+    /// the mock transport's `write_vectored` at 4 bytes per call so
+    /// the state machine has to call back multiple times to finish
+    /// sending each request. Verifies the state machine resumes
+    /// correctly across the partial writes and ultimately drives the
+    /// PLAIN handshake to `Complete`.
+    ///
+    /// The eager state transition in [`SaslClientAuthenticator::queue
+    /// _request`] advances the state immediately after kicking off
+    /// the send; the receive-state's `receive_response` then waits
+    /// for a response. Across partial writes, repeated `authenticate()`
+    /// calls hit the loop's top-guard
+    /// `if self.pending_send.is_some() && !flush_pending_send(...)`
+    /// — that branch keeps flushing the same request without
+    /// re-entering the state branch. This test pins the contract.
+    #[test]
+    fn partial_writes_resume_correctly_to_complete() {
+        let mut transport = MockTransport::new();
+        // Cap each write at 4 bytes — most SASL frames are 10+ bytes,
+        // so this forces at least one partial-write resume per send.
+        transport.max_write_per_call = Some(4);
+        let mut auth = SaslClientAuthenticator::new(
+            "node-0",
+            "test-client",
+            "PLAIN",
+            PlainCredentials::new("alice", "supersecret"),
+        )
+        .expect("authenticator");
+
+        // Drive the state machine until ApiVersionsRequest is fully
+        // sent. With the 4-byte cap, this needs multiple authenticate()
+        // calls; loop until pending_send is fully drained.
+        let mut iterations = 0;
+        while auth.pending_send.is_some()
+            || matches!(
+                auth.state(),
+                SaslState::SendApiVersionsRequest | SaslState::SendHandshakeRequest
+            )
+        {
+            auth.authenticate(&mut transport)
+                .expect("partial-write iteration must not error");
+            iterations += 1;
+            assert!(iterations < 50, "state machine wedged on partial-write resume");
+            if matches!(auth.state(), SaslState::ReceiveApiVersionsResponse) && auth.pending_send.is_none() {
+                break;
+            }
         }
-        // At this point correlation_id has wrapped past i32::MAX.
-        // The 9th call should detect that the ID is no longer reserved and
-        // reset to SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID.
-        let id = auth.next_correlation_id();
-        assert_eq!(id, SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID);
-        assert!(is_reserved(id));
-    }
-
-    /// Test 4: is_reserved boundary conditions.
-    #[test]
-    fn test_is_reserved() {
-        assert!(is_reserved(SASL_CLIENT_AUTHENTICATOR_MAX_RESERVED_CORRELATION_ID));
-        assert!(is_reserved(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID));
-        assert!(!is_reserved(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID - 1));
-        assert!(!is_reserved(0));
-        assert!(!is_reserved(-1));
-    }
-
-    /// Test 5: Version negotiation extracts SASL versions from ApiVersionsResponse.
-    #[test]
-    fn test_version_negotiation() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "client-1");
-
-        let mut data = ApiVersionsResponseData::new();
-        data.set_error_code(Errors::None.code());
-
-        let mut hs_version = ApiVersion::new();
-        hs_version.set_api_key(ApiKeys::SASL_HANDSHAKE.id());
-        hs_version.set_min_version(0);
-        hs_version.set_max_version(10); // Higher than latest
-
-        let mut auth_version = ApiVersion::new();
-        auth_version.set_api_key(ApiKeys::SASL_AUTHENTICATE.id());
-        auth_version.set_min_version(0);
-        auth_version.set_max_version(10); // Higher than latest
-
-        data.set_api_keys(vec![hs_version, auth_version]);
-        let response = ApiVersionsResponse::new(data);
-
-        auth.set_sasl_authenticate_and_handshake_versions(&response);
-
-        // Should be capped to latest supported version
-        assert_eq!(auth.sasl_handshake_version(), ApiKeys::SASL_HANDSHAKE.latest_version());
-        assert_eq!(auth.sasl_authenticate_version(), ApiKeys::SASL_AUTHENTICATE.latest_version());
-    }
-
-    /// Test 6: Successful full authentication flow with mock transport.
-    #[tokio::test]
-    async fn test_successful_authentication() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
-        let mut transport = MockTransportLayer::new();
-
-        // Step 1: Send ApiVersionsRequest
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
-        assert!(!transport.written_data().is_empty());
-
-        // Step 2: Receive ApiVersionsResponse
-        let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-            ApiKeys::SASL_HANDSHAKE.latest_version(),
-            ApiKeys::SASL_AUTHENTICATE.latest_version(),
-        );
-        transport.enqueue_read_data(&api_versions_bytes);
-        transport.write_data.clear();
-
-        // This call receives ApiVersionsResponse and falls through to send handshake
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        assert_eq!(auth.sasl_state(), SaslState::ReceiveHandshakeResponse);
-
-        // Step 3: Receive SaslHandshakeResponse
-        let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
-            &Errors::None,
-            vec!["PLAIN".to_string()],
-            auth.sasl_handshake_version(),
-        );
-        transport.enqueue_read_data(&handshake_bytes);
-        transport.write_data.clear();
-
-        // This call receives handshake response and falls through to send initial token
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        assert_eq!(auth.sasl_state(), SaslState::Intermediate);
-
-        // Step 4: Receive SaslAuthenticateResponse
-        // For PLAIN, the server sends a single success response after the token.
-        // The client goes directly to Complete (no CLIENT_COMPLETE intermediate
-        // state, since PLAIN has no challenge-response cycle).
-        let sasl_auth_bytes = build_sasl_authenticate_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
-            &Errors::None,
-            None,
-            &[],
-            auth.sasl_authenticate_version(),
-        );
-        transport.enqueue_read_data(&sasl_auth_bytes);
-
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        assert_eq!(auth.sasl_state(), SaslState::Complete);
-        assert!(auth.complete());
-    }
-
-    /// Test 7: Unsupported mechanism error in handshake response.
-    #[tokio::test]
-    async fn test_unsupported_mechanism() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
-        let mut transport = MockTransportLayer::new();
-
-        // Send ApiVersionsRequest
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive ApiVersionsResponse
-        let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-            ApiKeys::SASL_HANDSHAKE.latest_version(),
-            ApiKeys::SASL_AUTHENTICATE.latest_version(),
-        );
-        transport.enqueue_read_data(&api_versions_bytes);
-        transport.write_data.clear();
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive SaslHandshakeResponse with UNSUPPORTED_SASL_MECHANISM
-        let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
-            &Errors::UnsupportedSaslMechanism,
-            vec!["SCRAM-SHA-256".to_string()],
-            auth.sasl_handshake_version(),
-        );
-        transport.enqueue_read_data(&handshake_bytes);
-
-        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("PLAIN"));
-        assert!(err.to_string().contains("SCRAM-SHA-256"));
-        assert_eq!(auth.sasl_state(), SaslState::Failed);
-    }
-
-    /// Test 8: Authentication failure in SaslAuthenticateResponse.
-    #[tokio::test]
-    async fn test_auth_failure() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "wrong", "node-0", "broker1", "test-client");
-        let mut transport = MockTransportLayer::new();
-
-        // Send ApiVersionsRequest
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive ApiVersionsResponse
-        let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-            ApiKeys::SASL_HANDSHAKE.latest_version(),
-            ApiKeys::SASL_AUTHENTICATE.latest_version(),
-        );
-        transport.enqueue_read_data(&api_versions_bytes);
-        transport.write_data.clear();
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive SaslHandshakeResponse (success)
-        let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
-            &Errors::None,
-            vec!["PLAIN".to_string()],
-            auth.sasl_handshake_version(),
-        );
-        transport.enqueue_read_data(&handshake_bytes);
-        transport.write_data.clear();
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive SaslAuthenticateResponse with error
-        let sasl_auth_bytes = build_sasl_authenticate_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 2,
-            &Errors::SaslAuthenticationFailed,
-            Some("Authentication failed: Invalid credentials"),
-            &[],
-            auth.sasl_authenticate_version(),
-        );
-        transport.enqueue_read_data(&sasl_auth_bytes);
-
-        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("Authentication failed"));
-        assert_eq!(auth.sasl_state(), SaslState::Failed);
-    }
-
-    /// Test 9: Legacy raw token mode (sasl_authenticate_version == -1).
-    #[tokio::test]
-    async fn test_raw_token_mode() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
-        let mut transport = MockTransportLayer::new();
-
-        // Send ApiVersionsRequest
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive ApiVersionsResponse WITHOUT SASL_AUTHENTICATE support
-        // (only SASL_HANDSHAKE)
-        let mut data = ApiVersionsResponseData::new();
-        data.set_error_code(Errors::None.code());
-
-        let mut hs_version = ApiVersion::new();
-        hs_version.set_api_key(ApiKeys::SASL_HANDSHAKE.id());
-        hs_version.set_min_version(0);
-        hs_version.set_max_version(0); // Only v0
-
-        data.set_api_keys(vec![hs_version]);
-
-        let response_header = ResponseHeader::new(SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID, 0);
-        let mut cache = ObjectSerializationCache::new();
-        let header_size = Message::size(response_header.data(), &mut cache, response_header.header_version()).unwrap();
-        let body_size = Message::size(&data, &mut cache, 0).unwrap();
-        let total_size = header_size + body_size;
-        let mut buf = ByteBufferAccessor::new(4 + total_size as usize);
-        buf.write_int(total_size).unwrap();
-        Message::write(response_header.data(), &mut buf, &cache, response_header.header_version()).unwrap();
-        Message::write(&data, &mut buf, &cache, 0).unwrap();
-        transport.enqueue_read_data(buf.buffer());
-        transport.write_data.clear();
-
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        // Should be in ReceiveHandshakeResponse (fell through from ReceiveApiVersionsResponse)
-        assert_eq!(auth.sasl_authenticate_version(), DISABLE_KAFKA_SASL_AUTHENTICATE_HEADER);
-
-        // Receive SaslHandshakeResponse
-        let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
-            &Errors::None,
-            vec!["PLAIN".to_string()],
-            0,
-        );
-        transport.enqueue_read_data(&handshake_bytes);
-        transport.write_data.clear();
-
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        assert_eq!(auth.sasl_state(), SaslState::Intermediate);
-
-        // In legacy mode, the token was sent as raw size-prefixed bytes.
-        // Now provide a raw size-prefixed empty response (server "OK").
-        let empty_response: Vec<u8> = 0_i32.to_be_bytes().to_vec();
-        transport.enqueue_read_data(&empty_response);
-
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        // In legacy mode, PLAIN goes directly to Complete
-        assert_eq!(auth.sasl_state(), SaslState::Complete);
-        assert!(auth.complete());
-    }
-
-    /// Test 10: Illegal SASL state error in handshake response.
-    #[tokio::test]
-    async fn test_handle_sasl_handshake_illegal_state() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
-        let mut transport = MockTransportLayer::new();
-
-        // Send ApiVersionsRequest
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive ApiVersionsResponse
-        let api_versions_bytes = build_api_versions_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID,
-            ApiKeys::SASL_HANDSHAKE.latest_version(),
-            ApiKeys::SASL_AUTHENTICATE.latest_version(),
-        );
-        transport.enqueue_read_data(&api_versions_bytes);
-        transport.write_data.clear();
-        auth.authenticate_impl(&mut transport).await.unwrap();
-
-        // Receive SaslHandshakeResponse with ILLEGAL_SASL_STATE
-        let handshake_bytes = build_sasl_handshake_response_bytes(
-            SASL_CLIENT_AUTHENTICATOR_MIN_RESERVED_CORRELATION_ID + 1,
-            &Errors::IllegalSaslState,
-            vec!["PLAIN".to_string()],
-            auth.sasl_handshake_version(),
-        );
-        transport.enqueue_read_data(&handshake_bytes);
-
-        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert!(err.to_string().contains("Unexpected handshake request"));
-        assert_eq!(auth.sasl_state(), SaslState::Failed);
-    }
-
-    /// Test 11: Parse error in receive_kafka_response sets state to Failed.
-    ///
-    /// When the response body is malformed (e.g., truncated), the parse error
-    /// must transition the state to Failed before returning the error, matching
-    /// the Java try-catch in `receiveKafkaResponse()`.
-    #[tokio::test]
-    async fn test_parse_error_sets_state_to_failed() {
-        let mut auth = SaslClientAuthenticator::new("PLAIN", "alice", "secret", "node-0", "broker1", "test-client");
-        let mut transport = MockTransportLayer::new();
-
-        // Send ApiVersionsRequest to advance state and set current_request_header
-        auth.authenticate_impl(&mut transport).await.unwrap();
-        assert_eq!(auth.sasl_state(), SaslState::ReceiveApiVersionsResponse);
-
-        // Enqueue a size-prefixed but truncated/garbage response body.
-        // The 4-byte size prefix says 4 bytes follow, but the body is garbage
-        // that won't parse as a valid ApiVersionsResponse.
-        let garbage: Vec<u8> = vec![
-            0x00, 0x00, 0x00, 0x04, // size = 4
-            0xFF, 0xFF, 0xFF, 0xFF, // garbage body
-        ];
-        transport.enqueue_read_data(&garbage);
-
-        let err = auth.authenticate_impl(&mut transport).await.unwrap_err();
-        assert_eq!(auth.sasl_state(), SaslState::Failed);
+        assert_eq!(auth.state(), SaslState::ReceiveApiVersionsResponse);
         assert!(
-            err.to_string().contains("Invalid SASL mechanism response"),
-            "Expected parse error message, got: {}",
-            err
+            auth.pending_send.is_none(),
+            "ApiVersionsRequest fully sent across partial writes"
         );
+
+        // Push a response and drive forward.
+        transport.push_framed(&serialize_api_versions_response(MIN_RESERVED_CORRELATION_ID));
+        // Now drive ApiVersionsResponse → SendHandshake; the handshake
+        // request will again hit partial writes.
+        let mut iterations = 0;
+        while !matches!(auth.state(), SaslState::ReceiveHandshakeResponse) || auth.pending_send.is_some() {
+            auth.authenticate(&mut transport).expect("handshake partial-write iteration");
+            iterations += 1;
+            assert!(iterations < 50, "handshake send wedged");
+            if matches!(auth.state(), SaslState::ReceiveHandshakeResponse) && auth.pending_send.is_none() {
+                break;
+            }
+        }
+        assert_eq!(auth.state(), SaslState::ReceiveHandshakeResponse);
+
+        // Push handshake response.
+        transport.push_framed(&serialize_sasl_handshake_response(
+            MIN_RESERVED_CORRELATION_ID + 1,
+            Errors::None,
+            vec!["PLAIN".to_owned()],
+            1,
+        ));
+
+        // Drive ReceiveHandshake → SendInitialToken (the PLAIN token)
+        // → ReceiveAuthenticateResponse. Partial writes apply here
+        // too — the PLAIN token frame is ~20 bytes.
+        let mut iterations = 0;
+        while !matches!(auth.state(), SaslState::ReceiveAuthenticateResponse) || auth.pending_send.is_some() {
+            auth.authenticate(&mut transport).expect("token partial-write iteration");
+            iterations += 1;
+            assert!(iterations < 50, "PLAIN token send wedged");
+            if matches!(auth.state(), SaslState::ReceiveAuthenticateResponse) && auth.pending_send.is_none() {
+                break;
+            }
+        }
+        assert_eq!(auth.state(), SaslState::ReceiveAuthenticateResponse);
+
+        // PLAIN token must have made it through despite partial writes.
+        assert!(transport.outbound_bytes().windows(7).any(|w| w == b"\0alice\0"));
+
+        // Push success response and finish.
+        transport.push_framed(&serialize_sasl_authenticate_response(
+            MIN_RESERVED_CORRELATION_ID + 2,
+            Errors::None,
+            None,
+            2,
+        ));
+        auth.authenticate(&mut transport).expect("final step");
+        assert_eq!(auth.state(), SaslState::Complete);
+        assert!(auth.complete());
+    }
+
+    /// Reject construction for unsupported mechanisms — Phase 9b config
+    /// validator boundary, surfaced here at construction for defense
+    /// in depth.
+    #[test]
+    fn reject_non_plain_mechanism_at_construction() {
+        let err = SaslClientAuthenticator::new("node-0", "test", "SCRAM-SHA-512", PlainCredentials::new("a", "b"))
+            .expect_err("must reject");
+        assert!(matches!(err, KafkaError::Config(_)));
+        assert!(err.message().contains("Unsupported SASL mechanism: SCRAM-SHA-512"));
+    }
+
+    /// Translation of Java `SaslAuthenticatorTest.testCorrelationId`:
+    /// IDs must be unique within the reserved range, must all be
+    /// `>= MIN_RESERVED`, and `is_reserved` returns true for each.
+    ///
+    /// Iteration math: the reserved range spans `[MIN_RESERVED..=MAX_RESERVED]`
+    /// = 8 distinct ids (MAX - MIN + 1). We exercise `(MAX - MIN) * 2 = 14`
+    /// calls, which guarantees the counter wraps back through MIN at
+    /// least once. After the loop, the `seen` HashSet must contain
+    /// exactly 8 distinct ids (the full range).
+    #[test]
+    fn next_correlation_id_stays_in_reserved_range() {
+        let mut auth = SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("a", "b"))
+            .expect("authenticator");
+        let range_size = (MAX_RESERVED_CORRELATION_ID - MIN_RESERVED_CORRELATION_ID + 1) as usize;
+        // Exercise full range + 6 additional calls past wrap to prove
+        // reset to MIN; expected distinct ids = MAX-MIN+1 = 8.
+        let iterations = 2 * (MAX_RESERVED_CORRELATION_ID - MIN_RESERVED_CORRELATION_ID) as usize;
+        let mut seen = std::collections::HashSet::new();
+        for _ in 0..iterations {
+            let id = auth.next_correlation_id();
+            assert!(id >= MIN_RESERVED_CORRELATION_ID, "id {id} below MIN_RESERVED");
+            assert!(is_reserved(id), "id {id} not reserved");
+            seen.insert(id);
+        }
+        assert_eq!(seen.len(), range_size);
+    }
+
+    /// `is_reserved` boundary check.
+    #[test]
+    fn is_reserved_boundary() {
+        assert!(!is_reserved(0));
+        assert!(!is_reserved(MIN_RESERVED_CORRELATION_ID - 1));
+        assert!(is_reserved(MIN_RESERVED_CORRELATION_ID));
+        assert!(is_reserved(MAX_RESERVED_CORRELATION_ID));
+    }
+
+    /// RFC 4616 PLAIN token format. Exposed for direct test access via
+    /// the public `build_plain_token` flow — verifies the literal byte
+    /// sequence on the wire is `\0user\0pass` (one NUL before, one
+    /// between, no trailing NUL).
+    #[test]
+    fn plain_token_rfc_4616_byte_shape() {
+        let auth =
+            SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("alice", "supersecret"))
+                .expect("authenticator");
+        let token = auth.build_plain_token();
+        assert_eq!(token, b"\0alice\0supersecret");
+    }
+
+    /// Tagged-field response at v2 round-trips through the
+    /// authenticator — the response data includes a tagged trailer
+    /// that the parser must accept and discard.
+    ///
+    /// Phase 9b R1 N1: this test originally only asserted that the
+    /// encoder produces a tagged trailer with bytes `01 07 02 AB CD`
+    /// in the framed wire form and that the state machine reached
+    /// `Complete`. Critic 9 noted the test name implied a
+    /// parser-preservation claim that wasn't actually checked — so
+    /// after the in-band authenticate flow we additionally feed the
+    /// same framed bytes into a standalone parse and assert that
+    /// `unknown_tagged_fields` round-tripped (tag id, payload bytes,
+    /// and that exactly one tagged field was parsed). This closes the
+    /// loop the original test only half-walked.
+    #[test]
+    fn tagged_field_round_trip_on_authenticate_v2_response() {
+        use crate::common::protocol::ByteBufferAccessor;
+        use crate::common::protocol::RawTaggedField;
+        let mut transport = MockTransport::new();
+        let mut auth = SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("alice", "p"))
+            .expect("authenticator");
+        auth.authenticate(&mut transport).expect("step 1");
+        transport.push_framed(&serialize_api_versions_response(MIN_RESERVED_CORRELATION_ID));
+        auth.authenticate(&mut transport).expect("step 2");
+        transport.push_framed(&serialize_sasl_handshake_response(
+            MIN_RESERVED_CORRELATION_ID + 1,
+            Errors::None,
+            vec!["PLAIN".to_owned()],
+            1,
+        ));
+        auth.authenticate(&mut transport).expect("step 3");
+
+        // Hand-craft an authenticate response with a tagged-field on the
+        // trailer (v2 flexible encoding).
+        let response = SaslAuthenticateResponse::new(SaslAuthenticateResponseData {
+            error_code: Errors::None.code(),
+            error_message: None,
+            auth_bytes: Vec::new(),
+            session_lifetime_ms: 0,
+            unknown_tagged_fields: vec![RawTaggedField::new(7, vec![0xAB, 0xCD])],
+        });
+        let framed_bytes = wrap_with_header(response.api_key(), 2, MIN_RESERVED_CORRELATION_ID + 2, &response, 2);
+        // (a) Encoding side: pin the tagged-field bytes — tag-id 7
+        // (`0x07`), uvarint length 2 (`0x02`), then the 2-byte payload
+        // `AB CD`. The varint count of tagged fields itself is `0x01`
+        // (1 tagged field); the trailing sequence `01 07 02 AB CD`
+        // must appear contiguously in the framed body.
+        let tagged_bytes: &[u8] = &[0x01, 0x07, 0x02, 0xAB, 0xCD];
+        assert!(
+            framed_bytes.windows(tagged_bytes.len()).any(|w| w == tagged_bytes),
+            "tagged-field trailer bytes (01 07 02 AB CD) not present in framed response — \
+             encoder silently dropped the tagged field"
+        );
+        transport.push_framed(&framed_bytes);
+
+        auth.authenticate(&mut transport).expect("step 4");
+        assert_eq!(auth.state(), SaslState::Complete);
+
+        // (b) Parser side: re-parse the framed bytes standalone and
+        // assert `unknown_tagged_fields` round-tripped. The original
+        // test ran the bytes through the authenticator's internal
+        // parse but had no observation channel into the parsed
+        // response — so a parser that silently dropped the tagged
+        // field would still have left `state() == Complete`. This
+        // half closes the parser-preservation claim the test name
+        // makes.
+        // `wrap_with_header` returns `header || body` directly (no 4-byte
+        // length prefix — the prefix is added at transport time by
+        // `push_framed`). So we feed it straight into the accessor.
+        use crate::common::requests::ResponseHeader;
+        let mut accessor = ByteBufferAccessor::wrap(framed_bytes.clone());
+        // Response header for SaslAuthenticate v2 is at flex header
+        // version 1 (the API key has `responseHeaderVersion(2) == 1`).
+        let _header = ResponseHeader::parse(&mut accessor, 1).expect("parse response header");
+        let parsed = SaslAuthenticateResponseData::read(&mut accessor, 2).expect("parse v2 response");
+        assert_eq!(
+            parsed.unknown_tagged_fields.len(),
+            1,
+            "parser must preserve exactly one unknown tagged field; got {:?}",
+            parsed.unknown_tagged_fields,
+        );
+        assert_eq!(parsed.unknown_tagged_fields[0].tag(), 7, "tag id mismatch on round-trip");
+        assert_eq!(
+            parsed.unknown_tagged_fields[0].data(),
+            &[0xAB, 0xCD],
+            "tag payload mismatch on round-trip"
+        );
+    }
+
+    /// Phase 9c R1 S3: regression test for the
+    /// [`SaslAuthenticator::principal`] return shape. The Rust impl
+    /// deviates from Java (Java's behaviour for PLAIN is a latent NPE
+    /// on `requireNonNull(clientPrincipalName)`) and instead returns
+    /// `User:<configured-username>` so log / metric surfaces don't
+    /// render `ANONYMOUS` when credentials were actually supplied.
+    ///
+    /// Pins both the `USER_TYPE` tag and the literal username — an
+    /// inadvertent revert to `KafkaPrincipal::anonymous()` (the Phase
+    /// 9a placeholder) would compile and silently regress production
+    /// log identity.
+    #[test]
+    fn sasl_authenticator_principal_returns_configured_username() {
+        use crate::common::network::authenticator::SaslAuthenticator;
+        use crate::common::security::auth::kafka_principal::USER_TYPE;
+
+        let auth = SaslClientAuthenticator::new("node-0", "test", "PLAIN", PlainCredentials::new("alice", "p"))
+            .expect("PLAIN constructs");
+        let transport = MockTransport::new();
+        let principal = <SaslClientAuthenticator as SaslAuthenticator>::principal(&auth, &transport);
+        assert_eq!(
+            principal.principal_type(),
+            USER_TYPE,
+            "principal type must be USER_TYPE ({USER_TYPE:?}); SASL surfaces are never ANONYMOUS post-9c.5",
+        );
+        assert_eq!(
+            principal.name(),
+            "alice",
+            "principal name must be the configured SASL username; got {:?}",
+            principal.name(),
+        );
+    }
+
+    /// `PlainCredentials::Debug` masks the password.
+    #[test]
+    fn plain_credentials_debug_masks_password() {
+        const PWD: &str = "very-secret-password-456";
+        let creds = PlainCredentials::new("alice", PWD);
+        let dbg = format!("{creds:?}");
+        assert!(
+            !dbg.contains(PWD),
+            "PlainCredentials Debug leaked password! dbg.len()={}",
+            dbg.len()
+        );
+        assert!(dbg.contains("<redacted>"));
+        assert!(dbg.contains("alice")); // username is fine
     }
 }

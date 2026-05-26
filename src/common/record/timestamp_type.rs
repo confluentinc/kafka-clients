@@ -12,63 +12,58 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The timestamp type of the records.
-//!
-//! Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
+//! Translation of `org.apache.kafka.common.record.TimestampType`.
 
-use crate::common::KafkaError;
-use crate::common::protocol::Errors;
+use std::fmt;
+
+use crate::common::errors::KafkaError;
 
 /// The timestamp type of the records.
-///
-/// Corresponds to Java's `org.apache.kafka.common.record.TimestampType`.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum TimestampType {
-    /// No timestamp type (magic v0).
-    NoTimestampType = -1,
-    /// Timestamp set by the producer at creation time.
-    CreateTime = 0,
-    /// Timestamp set by the broker when appending to the log.
-    LogAppendTime = 1,
+    NoTimestampType,
+    CreateTime,
+    LogAppendTime,
 }
 
 impl TimestampType {
-    /// Returns the numeric ID for this timestamp type.
-    pub fn id(self) -> i32 {
-        self as i32
-    }
-
-    /// Returns the name of this timestamp type.
-    pub fn name(self) -> &'static str {
+    /// Numeric id stored on the wire (matches Java's `id` field).
+    pub fn id(&self) -> i32 {
         match self {
-            Self::NoTimestampType => "NoTimestampType",
-            Self::CreateTime => "CreateTime",
-            Self::LogAppendTime => "LogAppendTime",
+            TimestampType::NoTimestampType => -1,
+            TimestampType::CreateTime => 0,
+            TimestampType::LogAppendTime => 1,
         }
     }
 
-    /// Look up a `TimestampType` by name.
+    /// Camel-case name used by the Java client and the metrics layer (matches
+    /// Java's `name` field).
+    pub fn name(&self) -> &'static str {
+        match self {
+            TimestampType::NoTimestampType => "NoTimestampType",
+            TimestampType::CreateTime => "CreateTime",
+            TimestampType::LogAppendTime => "LogAppendTime",
+        }
+    }
+
+    /// Look up a `TimestampType` by its camel-case name.
     ///
-    /// # Errors
-    ///
-    /// Returns a `KafkaError` if the name is not recognized, matching Java's
-    /// `NoSuchElementException` thrown by `TimestampType.forName()`.
-    pub fn for_name(name: &str) -> Result<Self, KafkaError> {
+    /// Mirrors Java's `TimestampType.forName(String)`. Java throws
+    /// `NoSuchElementException`; we surface that as
+    /// [`KafkaError::InvalidRequest`].
+    pub fn for_name(name: &str) -> Result<TimestampType, KafkaError> {
         match name {
-            "NoTimestampType" => Ok(Self::NoTimestampType),
-            "CreateTime" => Ok(Self::CreateTime),
-            "LogAppendTime" => Ok(Self::LogAppendTime),
-            _ => Err(KafkaError::with_message(
-                Errors::UnknownServerError,
-                format!("No timestamp type with name: {name}"),
-            )),
+            "NoTimestampType" => Ok(TimestampType::NoTimestampType),
+            "CreateTime" => Ok(TimestampType::CreateTime),
+            "LogAppendTime" => Ok(TimestampType::LogAppendTime),
+            other => Err(KafkaError::InvalidRequest(format!("Invalid timestamp type {other}"))),
         }
     }
 }
 
-impl std::fmt::Display for TimestampType {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}", self.name())
+impl fmt::Display for TimestampType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.name())
     }
 }
 
@@ -77,39 +72,39 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_ids() {
+    fn ids_match_wire_values() {
         assert_eq!(TimestampType::NoTimestampType.id(), -1);
         assert_eq!(TimestampType::CreateTime.id(), 0);
         assert_eq!(TimestampType::LogAppendTime.id(), 1);
     }
 
     #[test]
-    fn test_names() {
+    fn names_match_java() {
         assert_eq!(TimestampType::NoTimestampType.name(), "NoTimestampType");
         assert_eq!(TimestampType::CreateTime.name(), "CreateTime");
         assert_eq!(TimestampType::LogAppendTime.name(), "LogAppendTime");
     }
 
     #[test]
-    fn test_for_name() {
-        assert_eq!(
-            TimestampType::for_name("NoTimestampType").unwrap(),
-            TimestampType::NoTimestampType
-        );
-        assert_eq!(TimestampType::for_name("CreateTime").unwrap(), TimestampType::CreateTime);
-        assert_eq!(TimestampType::for_name("LogAppendTime").unwrap(), TimestampType::LogAppendTime);
+    fn for_name_round_trips() {
+        for t in [
+            TimestampType::NoTimestampType,
+            TimestampType::CreateTime,
+            TimestampType::LogAppendTime,
+        ] {
+            assert_eq!(TimestampType::for_name(t.name()).unwrap(), t);
+        }
     }
 
     #[test]
-    fn test_for_name_unknown() {
-        let err = TimestampType::for_name("Unknown").unwrap_err();
-        assert!(err.message().contains("No timestamp type with name: Unknown"));
+    fn for_name_unknown_is_error() {
+        let err = TimestampType::for_name("Bogus").unwrap_err();
+        assert!(matches!(err, KafkaError::InvalidRequest(_)));
+        assert!(err.to_string().contains("Invalid timestamp type Bogus"));
     }
 
     #[test]
-    fn test_display() {
-        assert_eq!(format!("{}", TimestampType::CreateTime), "CreateTime");
-        assert_eq!(format!("{}", TimestampType::LogAppendTime), "LogAppendTime");
-        assert_eq!(format!("{}", TimestampType::NoTimestampType), "NoTimestampType");
+    fn display_uses_name() {
+        assert_eq!(TimestampType::CreateTime.to_string(), "CreateTime");
     }
 }

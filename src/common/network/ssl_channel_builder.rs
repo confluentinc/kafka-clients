@@ -12,130 +12,223 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SSL channel builder that creates TLS-encrypted channels.
-//!
-//! Translated from `org.apache.kafka.common.network.SslChannelBuilder`.
-//!
-//! In Java, `SslChannelBuilder` creates an `SslTransportLayer` from a
-//! `SelectionKey` and wraps it with a `PlaintextAuthenticator` in a `KafkaChannel`.
-//! SSL authentication is performed at the transport layer level during the TLS
-//! handshake, not via the `Authenticator` interface.
-//!
-//! In Rust, the builder receives a raw `TcpStream`, wraps it in an
-//! `SslTransportLayer` (which handles the TLS handshake), and pairs it with a
-//! `PlaintextAuthenticator`.
+//! Translation of `org.apache.kafka.common.network.SslChannelBuilder`.
 
-use super::ChannelBuilder;
-use super::ChannelMetadataRegistry;
-use super::KafkaChannel;
-use super::ListenerName;
-use super::PlaintextAuthenticator;
-use super::SslTransportLayer;
+use std::sync::Arc;
 
-use crate::common::security::SslFactory;
-
-use std::io;
-
+use rustls::ClientConfig;
+use rustls::pki_types::ServerName;
 use tokio::net::TcpStream;
 
-/// SSL channel builder that creates TLS-encrypted channels.
+use crate::common::errors::KafkaError;
+use crate::common::network::authenticator::{ChannelAuthenticator, SslAuthenticator};
+use crate::common::network::channel_builder::ChannelBuilder;
+use crate::common::network::connection_mode::ConnectionMode;
+use crate::common::network::kafka_channel::BoxedMetadataRegistry;
+use crate::common::network::{KafkaChannel, ListenerName, SslTransportLayer};
+
+/// Builds [`KafkaChannel`]s wrapping an [`SslTransportLayer`].
+/// Mirrors Java's `SslChannelBuilder`.
 ///
-/// Holds an `SslFactory` that provides the compiled TLS client configuration.
-/// The `listener_name` is non-null when instantiated in the broker and `None`
-/// otherwise (client mode).
+/// Java holds a stateful `SslFactory` that maintains the `KeyManager` /
+/// `TrustManager` chain. The rustls-based translation receives a
+/// pre-built [`Arc<rustls::ClientConfig>`] — config loading (PEM cert
+/// loading, root-store building) is the caller's responsibility, with
+/// helpers in [`crate::common::network::channel_builders`]. This keeps
+/// the builder pure-data so it can be shared across many channels.
 ///
-/// Translated from `org.apache.kafka.common.network.SslChannelBuilder`.
+/// The `ListenerReconfigurable` interface from Java is intentionally
+/// not translated: dynamic broker reconfiguration of listener TLS is
+/// a Phase 9 concern.
 pub struct SslChannelBuilder {
-    /// SSL factory for creating TLS connectors.
-    ssl_factory: SslFactory,
-    /// The listener name, if any (server-side only).
-    #[allow(dead_code)]
+    /// Listener name. Non-`None` only when instantiated on the broker.
+    /// Mirrors Java's nullable `ListenerName listenerName` field.
     listener_name: Option<ListenerName>,
+    /// Whether or not this listener is used for inter-broker requests.
+    /// Mirrors Java's `boolean isInterBrokerListener`. The producer
+    /// always passes `false`.
+    is_inter_broker_listener: bool,
+    /// `CLIENT` or `SERVER`. Mirrors Java's `ConnectionMode connectionMode`.
+    connection_mode: ConnectionMode,
+    /// rustls client configuration, shared across all channels built
+    /// from this builder.
+    client_config: Arc<ClientConfig>,
 }
 
 impl SslChannelBuilder {
-    /// Creates a new `SslChannelBuilder` with the given SSL factory.
+    /// Constructs an SSL channel builder with the given rustls
+    /// [`ClientConfig`]. Mirrors Java's
+    /// `SslChannelBuilder(ConnectionMode, ListenerName, boolean)` plus
+    /// `configure(Map<String, ?>)` folded into one call (the rustls
+    /// config is constructed by the caller — see
+    /// [`crate::common::network::channel_builders`] for the helpers).
+    pub fn new(
+        connection_mode: ConnectionMode,
+        listener_name: Option<ListenerName>,
+        is_inter_broker_listener: bool,
+        client_config: Arc<ClientConfig>,
+    ) -> Self {
+        SslChannelBuilder { listener_name, is_inter_broker_listener, connection_mode, client_config }
+    }
+
+    /// Borrow the listener name configured on this builder. Mirrors
+    /// the Java `listenerName()` method on the
+    /// `ListenerReconfigurable` interface.
+    pub fn listener_name(&self) -> Option<&ListenerName> {
+        self.listener_name.as_ref()
+    }
+
+    /// `true` iff this listener is used for inter-broker requests.
+    /// Mirrors the Java field accessor.
+    pub fn is_inter_broker_listener(&self) -> bool {
+        self.is_inter_broker_listener
+    }
+
+    /// Mirrors Java's `connectionMode` field accessor.
+    pub fn connection_mode(&self) -> ConnectionMode {
+        self.connection_mode
+    }
+
+    /// Build an SSL channel against the given `server_name` (used for
+    /// SNI and certificate verification).
     ///
-    /// `listener_name` is `Some` when instantiated in the broker and `None` otherwise.
-    pub fn new(ssl_factory: SslFactory, listener_name: Option<ListenerName>) -> Self {
-        Self { ssl_factory, listener_name }
+    /// Java's signature does not take a `server_name` — it derives the
+    /// peer hostname from the `SocketChannel.socket().getInetAddress()`
+    /// of the connected socket. The rustls translation requires the
+    /// caller to provide the SNI hostname explicitly because the
+    /// connecting code (Phase 5c Selector) already knows it from the
+    /// resolved bootstrap address; reverse-DNS would be redundant and
+    /// could disagree with the cert's SAN.
+    pub fn build_ssl_channel(
+        &self,
+        id: Arc<str>,
+        stream: TcpStream,
+        server_name: ServerName<'static>,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        // Mirror Java: wrap construction in a try/catch that closes the
+        // transport on error.
+        let transport = SslTransportLayer::new(id.as_ref(), stream, Arc::clone(&self.client_config), server_name)
+            .map_err(|e| KafkaError::Network(e.to_string()))?;
+        // SslAuthenticator is stateless — it queries
+        // `transport.peer_principal()` lazily on every `principal()`
+        // call (mirrors Java's `transportLayer.sslSession()` lookup).
+        // This is intentional: at construction time the TLS handshake
+        // has not run yet, so an eager fetch would freeze the
+        // pre-handshake anonymous principal forever.
+        let authenticator = ChannelAuthenticator::network(SslAuthenticator::new());
+        Ok(KafkaChannel::new(
+            id,
+            Box::new(transport),
+            authenticator,
+            max_receive_size,
+            metadata_registry,
+        ))
     }
 }
 
 impl ChannelBuilder for SslChannelBuilder {
     fn build_channel(
         &self,
-        id: &str,
-        stream: TcpStream,
-        peer_host: &str,
-        max_receive_size: i32,
-        metadata_registry: Box<dyn ChannelMetadataRegistry>,
-    ) -> io::Result<KafkaChannel> {
-        let connector = self.ssl_factory.create_tls_connector();
-        let domain = SslFactory::create_server_name(peer_host)?;
-        let transport_layer = Box::new(SslTransportLayer::new(stream, connector, domain));
-
-        // SSL authentication happens during the TLS handshake (in the transport
-        // layer), so we use a PlaintextAuthenticator — matching Java's
-        // SslChannelBuilder which uses a no-op Authenticator.
-        let authenticator = Box::new(PlaintextAuthenticator::new());
-
-        Ok(KafkaChannel::new(
-            id,
-            transport_layer,
-            authenticator,
-            max_receive_size,
-            metadata_registry,
+        _id: Arc<str>,
+        _stream: TcpStream,
+        _max_receive_size: i32,
+        _metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        // The trait method does not carry a `server_name` parameter
+        // because the Java `ChannelBuilder.buildChannel` signature is
+        // identical for plaintext/SSL/SASL. SSL callers must use
+        // [`ChannelBuilder::build_channel_with_server_name`] (or the
+        // direct [`Self::build_ssl_channel`]) to supply the SNI server
+        // name — we surface a clear error here so a misuse is obvious
+        // rather than silently picking a default.
+        Err(KafkaError::IllegalState(
+            "SslChannelBuilder requires a server name; call build_channel_with_server_name(...) instead".to_owned(),
         ))
     }
 
+    /// Dispatches to [`Self::build_ssl_channel`] when `server_name` is
+    /// `Some`. Returns `IllegalState` when `None` — the connecting code
+    /// must always supply the hostname for an SSL channel (peers
+    /// connected by raw IP address with no hostname cannot be
+    /// SNI-verified).
+    fn build_channel_with_server_name(
+        &self,
+        id: Arc<str>,
+        stream: TcpStream,
+        server_name: Option<ServerName<'static>>,
+        max_receive_size: i32,
+        metadata_registry: BoxedMetadataRegistry,
+    ) -> Result<KafkaChannel, KafkaError> {
+        let server_name = server_name.ok_or_else(|| {
+            KafkaError::IllegalState(
+                "SslChannelBuilder requires a server name; \
+                 build_channel_with_server_name called with None"
+                    .to_owned(),
+            )
+        })?;
+        self.build_ssl_channel(id, stream, server_name, max_receive_size, metadata_registry)
+    }
+
     fn close(&mut self) {
-        // no-op — the SslFactory is owned and will be dropped naturally
+        // Java releases the SslFactory; rustls's ClientConfig is freed
+        // automatically when the last `Arc` is dropped. No-op.
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
+    use rustls::ClientConfig;
+    use rustls::RootCertStore;
+
     use super::*;
-    use crate::common::config::SslConfig;
-    use crate::common::network::DefaultChannelMetadataRegistry;
 
-    /// Test that SslChannelBuilder creates a channel that is not immediately ready
-    /// (TLS handshake has not been performed yet).
-    #[tokio::test]
-    async fn test_build_channel_not_ready() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
-
-        let stream = TcpStream::connect(addr).await.unwrap();
-
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
-        let builder = SslChannelBuilder::new(ssl_factory, None);
-        let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
-
-        let channel = builder
-            .build_channel("test-0", stream, "localhost", 1024 * 1024, metadata_registry)
-            .unwrap();
-
-        // Channel should not be ready because TLS handshake hasn't happened
-        assert!(!channel.ready());
-        assert_eq!(channel.id(), "test-0");
+    fn empty_client_config() -> Arc<ClientConfig> {
+        let provider = Arc::new(rustls::crypto::aws_lc_rs::default_provider());
+        let cfg = ClientConfig::builder_with_provider(provider)
+            .with_safe_default_protocol_versions()
+            .expect("client versions")
+            .with_root_certificates(RootCertStore::empty())
+            .with_no_client_auth();
+        Arc::new(cfg)
     }
 
-    /// Test that invalid peer_host returns an error.
-    #[tokio::test]
-    async fn test_build_channel_invalid_peer_host() {
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let addr = listener.local_addr().unwrap();
+    #[test]
+    fn build_channel_via_trait_method_returns_illegal_state() {
+        // The trait method on `ChannelBuilder` doesn't carry the SNI
+        // server name; using it for SSL is a programming error.
+        let builder = SslChannelBuilder::new(ConnectionMode::Client, None, false, empty_client_config());
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().expect("rt");
+        runtime.block_on(async {
+            let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("bind");
+            let addr = listener.local_addr().expect("local_addr");
+            let connect = tokio::net::TcpStream::connect(addr);
+            let accept = listener.accept();
+            let (client, accepted) = tokio::join!(connect, accept);
+            let _server = accepted.expect("accept").0;
+            let stream = client.expect("connect");
+            let err = builder
+                .build_channel(
+                    Arc::from("0"),
+                    stream,
+                    1024,
+                    Box::new(crate::common::network::channel_metadata_registry::DefaultChannelMetadataRegistry::new()),
+                )
+                .expect_err("trait method must fail");
+            assert!(matches!(err, KafkaError::IllegalState(_)));
+        });
+    }
 
-        let stream = TcpStream::connect(addr).await.unwrap();
-
-        let ssl_factory = SslFactory::new(&SslConfig::default()).unwrap();
-        let builder = SslChannelBuilder::new(ssl_factory, None);
-        let metadata_registry = Box::new(DefaultChannelMetadataRegistry::new());
-
-        // Empty peer_host should produce an error
-        let result = builder.build_channel("test-0", stream, "", 1024 * 1024, metadata_registry);
-        assert!(result.is_err(), "Empty peer_host should produce an error");
+    #[test]
+    fn metadata_accessors() {
+        let listener_name = ListenerName::new("INTERNAL");
+        let builder =
+            SslChannelBuilder::new(ConnectionMode::Server, Some(listener_name.clone()), true, empty_client_config());
+        assert_eq!(builder.listener_name(), Some(&listener_name));
+        assert!(builder.is_inter_broker_listener());
+        assert_eq!(builder.connection_mode(), ConnectionMode::Server);
     }
 }

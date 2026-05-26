@@ -12,15 +12,22 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Represents the result of finding the least loaded node in a cluster.
+//! Translation of `org.apache.kafka.clients.LeastLoadedNode`.
 //!
-//! Translated from `org.apache.kafka.clients.LeastLoadedNode`.
+//! Note: the Java type lives in `org.apache.kafka.clients` (not `common`),
+//! so it sits at the crate root rather than under `common::`.
 
 use crate::common::Node;
 
-/// Represents the result of finding the least loaded node in a cluster.
+/// The result of [`crate::KafkaClient::least_loaded_node`]: the node that
+/// should next receive a request together with a flag indicating whether
+/// at least one connection is currently ready.
 ///
-/// Contains the node (if available) and whether at least one connection is ready.
+/// Mirrors the Java class. A returned `node` of `None` together with
+/// `at_least_one_connection_ready == true` indicates "no node free *right
+/// now*, but we have a working connection elsewhere — back off rather
+/// than reconnect", per the Java rustdoc on
+/// `hasNodeAvailableOrConnectionReady`.
 #[derive(Debug, Clone)]
 pub struct LeastLoadedNode {
     node: Option<Node>,
@@ -28,25 +35,28 @@ pub struct LeastLoadedNode {
 }
 
 impl LeastLoadedNode {
-    /// Creates a new `LeastLoadedNode`.
+    /// Mirrors `new LeastLoadedNode(Node, boolean)`.
     ///
-    /// # Arguments
-    /// * `node` - The least loaded node, or `None` if no node is available.
-    /// * `at_least_one_connection_ready` - Whether at least one connection to a live node is ready.
+    /// Java accepts `null` for `node`; the Rust translation uses
+    /// `Option<Node>` so the absence is type-checked.
     pub fn new(node: Option<Node>, at_least_one_connection_ready: bool) -> Self {
-        Self { node, at_least_one_connection_ready }
+        LeastLoadedNode { node, at_least_one_connection_ready }
     }
 
-    /// Returns a reference to the node, if available.
+    /// Mirrors `LeastLoadedNode.node()`. Returns `None` when no node is
+    /// currently available.
     pub fn node(&self) -> Option<&Node> {
         self.node.as_ref()
     }
 
-    /// Indicates if the least loaded node is available or at least a ready connection exists.
+    /// Indicates if the least loaded node is available or at least a ready
+    /// connection exists.
     ///
-    /// There may be no node available while ready connections to live nodes exist. This may happen
-    /// when the connections are overloaded with in-flight requests. This function takes this into
-    /// account.
+    /// There may be no node available while ready connections to live nodes
+    /// exist. This may happen when the connections are overloaded with
+    /// in-flight requests. This function takes this into account.
+    ///
+    /// Mirrors `LeastLoadedNode.hasNodeAvailableOrConnectionReady()`.
     pub fn has_node_available_or_connection_ready(&self) -> bool {
         self.node.is_some() || self.at_least_one_connection_ready
     }
@@ -57,32 +67,24 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_no_node_no_connection() {
-        let lln = LeastLoadedNode::new(None, false);
-        assert!(lln.node().is_none());
-        assert!(!lln.has_node_available_or_connection_ready());
+    fn node_present() {
+        let node = Node::new(7, "host".into(), 9092);
+        let llm = LeastLoadedNode::new(Some(node.clone()), false);
+        assert_eq!(llm.node().expect("node").id(), 7);
+        assert!(llm.has_node_available_or_connection_ready());
     }
 
     #[test]
-    fn test_no_node_with_connection() {
-        let lln = LeastLoadedNode::new(None, true);
-        assert!(lln.node().is_none());
-        assert!(lln.has_node_available_or_connection_ready());
+    fn no_node_but_connection_ready() {
+        let llm = LeastLoadedNode::new(None, true);
+        assert!(llm.node().is_none());
+        assert!(llm.has_node_available_or_connection_ready());
     }
 
     #[test]
-    fn test_with_node_no_connection() {
-        let node = Node::new(0, "localhost".to_string(), 9092);
-        let lln = LeastLoadedNode::new(Some(node), false);
-        assert!(lln.node().is_some());
-        assert!(lln.has_node_available_or_connection_ready());
-    }
-
-    #[test]
-    fn test_with_node_and_connection() {
-        let node = Node::new(0, "localhost".to_string(), 9092);
-        let lln = LeastLoadedNode::new(Some(node), true);
-        assert!(lln.node().is_some());
-        assert!(lln.has_node_available_or_connection_ready());
+    fn no_node_and_no_ready_connection() {
+        let llm = LeastLoadedNode::new(None, false);
+        assert!(llm.node().is_none());
+        assert!(!llm.has_node_available_or_connection_ready());
     }
 }

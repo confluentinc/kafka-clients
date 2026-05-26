@@ -12,48 +12,43 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Defines the strategies which clients can follow to deal with the situation
-//! when none of the known nodes is available.
-//!
-//! Translated from `org.apache.kafka.clients.MetadataRecoveryStrategy`.
+//! Translation of `org.apache.kafka.clients.MetadataRecoveryStrategy`.
 
-use std::fmt;
+use crate::common::errors::KafkaError;
 
-/// Defines the strategies which clients can follow to deal with the situation
-/// when none of the known nodes is available.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+/// Defines the strategies which clients can follow to deal with the
+/// situation when none of the known nodes is available.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, Hash)]
 pub enum MetadataRecoveryStrategy {
-    /// No recovery strategy.
+    /// Mirrors Java `NONE`.
     None,
-    /// Re-bootstrap from the initial bootstrap servers.
+    /// Mirrors Java `REBOOTSTRAP`.
     Rebootstrap,
 }
 
 impl MetadataRecoveryStrategy {
-    /// The string name of this strategy.
+    /// The lowercase string identifier used in client configs. Mirrors the
+    /// `name` field on the Java enum constants.
     pub fn name(&self) -> &'static str {
         match self {
-            Self::None => "none",
-            Self::Rebootstrap => "rebootstrap",
+            MetadataRecoveryStrategy::None => "none",
+            MetadataRecoveryStrategy::Rebootstrap => "rebootstrap",
         }
     }
 
-    /// Parses a strategy from its string name (case-insensitive).
-    ///
-    /// # Errors
-    /// Returns an error if the name does not match any known strategy.
-    pub fn for_name(name: &str) -> Result<Self, String> {
-        match name.to_uppercase().as_str() {
-            "NONE" => Ok(Self::None),
-            "REBOOTSTRAP" => Ok(Self::Rebootstrap),
-            _ => Err(format!("Illegal MetadataRecoveryStrategy: {}", name)),
+    /// Mirrors `MetadataRecoveryStrategy.forName(String)`. Returns
+    /// `KafkaError::IllegalArgument` for unknown / null inputs.
+    pub fn from_name(name: &str) -> Result<Self, KafkaError> {
+        // Java does `valueOf(name.toUpperCase(Locale.ROOT))` and catches
+        // `IllegalArgumentException`. We match against the canonical
+        // constant names directly.
+        match name.to_ascii_uppercase().as_str() {
+            "NONE" => Ok(MetadataRecoveryStrategy::None),
+            "REBOOTSTRAP" => Ok(MetadataRecoveryStrategy::Rebootstrap),
+            other => Err(KafkaError::IllegalArgument(format!(
+                "Illegal MetadataRecoveryStrategy: {other}"
+            ))),
         }
-    }
-}
-
-impl fmt::Display for MetadataRecoveryStrategy {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
     }
 }
 
@@ -62,34 +57,36 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_for_name_valid() {
-        assert_eq!(
-            MetadataRecoveryStrategy::for_name("none").unwrap(),
-            MetadataRecoveryStrategy::None
-        );
-        assert_eq!(
-            MetadataRecoveryStrategy::for_name("NONE").unwrap(),
-            MetadataRecoveryStrategy::None
-        );
-        assert_eq!(
-            MetadataRecoveryStrategy::for_name("rebootstrap").unwrap(),
-            MetadataRecoveryStrategy::Rebootstrap
-        );
-        assert_eq!(
-            MetadataRecoveryStrategy::for_name("REBOOTSTRAP").unwrap(),
-            MetadataRecoveryStrategy::Rebootstrap
-        );
-    }
-
-    #[test]
-    fn test_for_name_invalid() {
-        let err = MetadataRecoveryStrategy::for_name("invalid").unwrap_err();
-        assert_eq!(err, "Illegal MetadataRecoveryStrategy: invalid");
-    }
-
-    #[test]
-    fn test_name() {
+    fn name_matches_java_lowercase() {
         assert_eq!(MetadataRecoveryStrategy::None.name(), "none");
         assert_eq!(MetadataRecoveryStrategy::Rebootstrap.name(), "rebootstrap");
+    }
+
+    #[test]
+    fn from_name_round_trip() {
+        assert_eq!(
+            MetadataRecoveryStrategy::from_name("none").unwrap(),
+            MetadataRecoveryStrategy::None
+        );
+        assert_eq!(
+            MetadataRecoveryStrategy::from_name("NONE").unwrap(),
+            MetadataRecoveryStrategy::None
+        );
+        assert_eq!(
+            MetadataRecoveryStrategy::from_name("rebootstrap").unwrap(),
+            MetadataRecoveryStrategy::Rebootstrap
+        );
+        assert_eq!(
+            MetadataRecoveryStrategy::from_name("REBOOTSTRAP").unwrap(),
+            MetadataRecoveryStrategy::Rebootstrap
+        );
+    }
+
+    #[test]
+    fn from_name_unknown_is_illegal_argument() {
+        let err = MetadataRecoveryStrategy::from_name("bogus").unwrap_err();
+        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+        let msg = err.to_string();
+        assert!(msg.contains("Illegal MetadataRecoveryStrategy: BOGUS"), "got: {msg}");
     }
 }

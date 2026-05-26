@@ -12,142 +12,156 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! In-flight request tracking for the Kafka network client.
+//! Translation of `org.apache.kafka.clients.InFlightRequests` and the
+//! companion `NetworkClient.InFlightRequest` inner class.
 //!
-//! Translated from `org.apache.kafka.clients.NetworkClient.InFlightRequest`
-//! (inner class) and `org.apache.kafka.clients.InFlightRequests`.
+//! Java's `InFlightRequest` is a static inner class of `NetworkClient`.
+//! Since `NetworkClient` itself does not land until Phase 5d, the inner
+//! class is defined here (next to the collection that owns it) and is
+//! `pub(crate)` — Java's package-private visibility (the class name is
+//! `static class`, not `public static class`).
+//!
+//! ## Hot-path key type
+//!
+//! Java keys per-node deques by `String` (the broker connection id).
+//! The Rust translation uses `i32` everywhere (CLAUDE.md rule 11; see
+//! `design/history/Milestone-1/Phase-5/NOTES.md` "Hot-path identifier
+//! interning"). The Java string is `Integer.toString(node.id())` —
+//! switching to the integer avoids a per-request `String` clone. The
+//! `Selectable` trait is updated in lock-step (Phase 5c-2 Selector takes
+//! `i32`).
+//!
+//! ## Order
+//!
+//! Java's `Deque<InFlightRequest>` orders newest-at-front, oldest-at-back
+//! (`addFirst` on add; `pollLast` on `completeNext`). The Rust
+//! `VecDeque<InFlightRequest>` preserves the same convention so the
+//! `lastSent` / `completeLastSent` / `completeNext` semantics match
+//! exactly.
 
 use std::collections::{HashMap, VecDeque};
-use std::fmt;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicI32, Ordering};
 
-use crate::common::network::NetworkSend;
-use crate::common::requests::{ConcreteRequest, ConcreteResponse, RequestHeader};
+use crate::ClientResponse;
+use crate::RequestCompletionHandler;
+use crate::common::network::SendCompletion;
+use crate::common::requests::{AbstractRequest, RequestHeader};
 
-use super::ClientResponse;
-use super::RequestCompletionHandler;
-
-/// A single in-flight request that has been sent (or is being sent) to a broker
-/// but has not yet received a response.
+/// An in-flight request awaiting a response from the broker.
 ///
-/// Translated from `NetworkClient.InFlightRequest` inner class in Java.
-pub struct InFlightRequest {
-    /// The request header.
-    pub header: RequestHeader,
-    /// The request timeout in milliseconds.
-    pub request_timeout_ms: i64,
-    /// The unix timestamp when the request was created.
-    pub created_time_ms: i64,
-    /// The destination node id.
-    pub destination: String,
-    /// The completion callback, if any.
-    callback: Option<RequestCompletionHandler>,
-    /// Whether we expect a response message or this request is complete once sent.
-    pub expect_response: bool,
-    /// Whether this request is initiated internally by the `NetworkClient`.
-    pub is_internal_request: bool,
-    /// The built request.
-    pub request: Option<ConcreteRequest>,
-    /// The network send associated with this request.
-    pub send: NetworkSend,
-    /// Whether the network send has been completed (confirmed by the selector).
+/// Mirrors the package-private `NetworkClient.InFlightRequest` inner
+/// class. Phase 5d (`NetworkClient`) is its only producer; tests in the
+/// same crate construct it directly via [`InFlightRequest::new`].
+///
+/// All fields use `pub(crate)` visibility — the equivalent of Java's
+/// package-private access on the inner class fields (`final RequestHeader
+/// header;` without an explicit modifier).
+///
+/// `#[allow(dead_code)]` on the struct silences `dead_code` warnings for
+/// fields and methods that the in-crate `NetworkClient` (Phase 5d) will
+/// be the first non-test caller of.
+#[allow(dead_code)]
+pub(crate) struct InFlightRequest {
+    pub(crate) header: RequestHeader,
+    pub(crate) destination: i32,
+    pub(crate) callback: Option<Arc<dyn RequestCompletionHandler>>,
+    pub(crate) expect_response: bool,
+    /// `None` for synthetic / fault-injected request entries (Java's
+    /// `request` parameter accepts `null`).
+    pub(crate) request: Option<Box<dyn AbstractRequest>>,
+    pub(crate) is_internal_request: bool,
+    /// Cheap, observe-only handle to the paired `NetworkSend`'s
+    /// completion bit. Populated by `NetworkClient::do_send` before the
+    /// `NetworkSend` is handed to the selector, so
+    /// [`InFlightRequests::can_send_more`] can mirror Java's
+    /// `peekFirst().send.completed()` check (InFlightRequests.java:99).
     ///
-    /// In Java, the same `Send` object is shared between `InFlightRequest` and
-    /// the selector, so `send.completed()` reflects the actual I/O state. In
-    /// Rust we use separate copies, so this flag is set by `NetworkClient` when
-    /// the selector reports a completed send for this destination.
-    send_completed: bool,
-    /// The unix timestamp when this request was sent.
-    pub send_time_ms: i64,
-    /// Accumulated throttle time in milliseconds.
-    throttle_time_ms: i64,
+    /// `None` for synthetic / fault-injected request entries (Java's
+    /// `send` parameter accepts `null`).
+    pub(crate) send: Option<SendCompletion>,
+    pub(crate) send_time_ms: i64,
+    pub(crate) created_time_ms: i64,
+    pub(crate) request_timeout_ms: i32,
+    /// Tracks accumulated throttle time. Atomic so callers can fire
+    /// `incrementThrottleTime` from multiple lifecycle points without
+    /// retaking the outer `&mut`.
+    throttle_time_ms: AtomicI32,
 }
 
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
 impl InFlightRequest {
-    /// Creates a new `InFlightRequest` from a `ClientRequest` and additional send-time metadata.
-    ///
-    /// This corresponds to the Java constructor that takes a `ClientRequest`.
-    pub fn from_client_request(
-        client_request: &mut super::client_request::ClientRequest,
-        header: RequestHeader,
-        is_internal_request: bool,
-        request: Option<ConcreteRequest>,
-        send: NetworkSend,
-        send_time_ms: i64,
-    ) -> Self {
-        Self {
-            header,
-            request_timeout_ms: client_request.request_timeout_ms() as i64,
-            created_time_ms: client_request.created_time_ms(),
-            destination: client_request.destination().to_string(),
-            callback: client_request.take_callback(),
-            expect_response: client_request.expect_response(),
-            is_internal_request,
-            request,
-            send,
-            send_completed: false,
-            send_time_ms,
-            throttle_time_ms: 0,
-        }
-    }
-
-    /// Creates a new `InFlightRequest` with all fields specified directly.
-    ///
-    /// This corresponds to the Java constructor with explicit parameters.
+    /// Mirrors the 10-arg Java constructor.
     #[allow(clippy::too_many_arguments)]
-    pub fn new(
+    pub(crate) fn new(
         header: RequestHeader,
-        request_timeout_ms: i64,
+        request_timeout_ms: i32,
         created_time_ms: i64,
-        destination: &str,
-        callback: Option<RequestCompletionHandler>,
+        destination: i32,
+        callback: Option<Arc<dyn RequestCompletionHandler>>,
         expect_response: bool,
         is_internal_request: bool,
-        request: Option<ConcreteRequest>,
-        send: NetworkSend,
+        request: Option<Box<dyn AbstractRequest>>,
+        send: Option<SendCompletion>,
         send_time_ms: i64,
     ) -> Self {
-        Self {
+        InFlightRequest {
             header,
-            request_timeout_ms,
-            created_time_ms,
-            destination: destination.to_string(),
+            destination,
             callback,
             expect_response,
-            is_internal_request,
             request,
+            is_internal_request,
             send,
-            send_completed: false,
             send_time_ms,
-            throttle_time_ms: 0,
+            created_time_ms,
+            request_timeout_ms,
+            throttle_time_ms: AtomicI32::new(0),
         }
     }
 
-    /// Returns the elapsed time since this request was sent, in milliseconds.
-    ///
-    /// Returns 0 if the current time is before the send time (clock skew).
-    pub fn time_elapsed_since_send_ms(&self, current_time_ms: i64) -> i64 {
+    /// Mirrors `InFlightRequest.timeElapsedSinceSendMs(long)`.
+    pub(crate) fn time_elapsed_since_send_ms(&self, current_time_ms: i64) -> i64 {
         (current_time_ms - self.send_time_ms).max(0)
     }
 
-    /// Returns the accumulated throttle time in milliseconds.
-    pub fn throttle_time_ms(&self) -> i64 {
-        self.throttle_time_ms
+    /// Mirrors `InFlightRequest.throttleTimeMs()`.
+    pub(crate) fn throttle_time_ms(&self) -> i32 {
+        self.throttle_time_ms.load(Ordering::Relaxed)
     }
 
-    /// Returns the elapsed time since this request was created, in milliseconds.
-    ///
-    /// Returns 0 if the current time is before the creation time (clock skew).
-    pub fn time_elapsed_since_create_ms(&self, current_time_ms: i64) -> i64 {
+    /// Mirrors `InFlightRequest.incrementThrottleTime(long)`. The Java
+    /// signature takes a `long` but the value is bounded by request
+    /// timeout — `i32` is sufficient and matches the wire field.
+    pub(crate) fn increment_throttle_time(&self, throttle_time_ms: i32) {
+        self.throttle_time_ms.fetch_add(throttle_time_ms, Ordering::Relaxed);
+    }
+
+    /// Mirrors `InFlightRequest.timeElapsedSinceCreateMs(long)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn time_elapsed_since_create_ms(&self, current_time_ms: i64) -> i64 {
         (current_time_ms - self.created_time_ms).max(0)
     }
 
-    /// Creates a [`ClientResponse`] for a successfully completed request.
-    pub fn completed(&mut self, response: Option<ConcreteResponse>, time_ms: i64) -> ClientResponse {
+    /// Mirrors `InFlightRequest.completed(AbstractResponse response, long timeMs)`.
+    ///
+    /// Java's helper passes the connection's `String destination`; the
+    /// Rust translation accepts the broker's `Arc<str>` label that
+    /// [`crate::ClientResponse`] expects (carried alongside the i32
+    /// connection id).
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn completed(
+        &self,
+        response: Option<Box<dyn crate::common::requests::AbstractResponse>>,
+        time_ms: i64,
+        destination: Arc<str>,
+    ) -> ClientResponse {
+        let header = self.header.clone();
+        let callback = self.callback.clone();
         ClientResponse::new(
-            self.header.clone(),
-            self.callback.take(),
-            &self.destination,
+            header,
+            callback,
+            destination,
             self.created_time_ms,
             time_ms,
             false,
@@ -157,14 +171,15 @@ impl InFlightRequest {
         )
     }
 
-    /// Creates a [`ClientResponse`] for a timed-out request.
-    ///
-    /// A timed-out request is also considered disconnected.
-    pub fn timed_out(&mut self, time_ms: i64) -> ClientResponse {
-        ClientResponse::with_timeout(
-            self.header.clone(),
-            self.callback.take(),
-            &self.destination,
+    /// Mirrors `InFlightRequest.timedOut(long timeMs)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn timed_out(&self, time_ms: i64, destination: Arc<str>) -> ClientResponse {
+        let header = self.header.clone();
+        let callback = self.callback.clone();
+        ClientResponse::with_timed_out(
+            header,
+            callback,
+            destination,
             self.created_time_ms,
             time_ms,
             true,
@@ -175,12 +190,15 @@ impl InFlightRequest {
         )
     }
 
-    /// Creates a [`ClientResponse`] for a disconnected request.
-    pub fn disconnected(&mut self, time_ms: i64) -> ClientResponse {
+    /// Mirrors `InFlightRequest.disconnected(long timeMs)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn disconnected(&self, time_ms: i64, destination: Arc<str>) -> ClientResponse {
+        let header = self.header.clone();
+        let callback = self.callback.clone();
         ClientResponse::new(
-            self.header.clone(),
-            self.callback.take(),
-            &self.destination,
+            header,
+            callback,
+            destination,
             self.created_time_ms,
             time_ms,
             true,
@@ -189,380 +207,348 @@ impl InFlightRequest {
             None,
         )
     }
+}
 
-    /// Increments the accumulated throttle time by the given amount.
-    pub fn increment_throttle_time(&mut self, throttle_time_ms: i64) {
-        self.throttle_time_ms += throttle_time_ms;
+impl std::fmt::Debug for InFlightRequest {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("InFlightRequest")
+            .field("destination", &self.destination)
+            .field("expect_response", &self.expect_response)
+            .field("is_internal_request", &self.is_internal_request)
+            .field("created_time_ms", &self.created_time_ms)
+            .field("send_time_ms", &self.send_time_ms)
+            .field("correlation_id", &self.header.correlation_id())
+            .field("throttle_time_ms", &self.throttle_time_ms.load(Ordering::Relaxed))
+            .finish()
     }
 }
 
-impl fmt::Display for InFlightRequest {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "InFlightRequest(header={}, destination={}, expectResponse={}, \
-             createdTimeMs={}, sendTimeMs={}, isInternalRequest={})",
-            self.header,
-            self.destination,
-            self.expect_response,
-            self.created_time_ms,
-            self.send_time_ms,
-            self.is_internal_request,
-        )
-    }
-}
-
-// ---------------------------------------------------------------------------
-// InFlightRequests — the collection
-// ---------------------------------------------------------------------------
-
-/// The set of requests which have been sent or are being sent but have not yet
-/// received a response.
+/// The set of requests which have been sent or are being sent but
+/// haven't yet received a response.
 ///
-/// Translated from `org.apache.kafka.clients.InFlightRequests`.
+/// Mirrors the package-private Java class
+/// `org.apache.kafka.clients.InFlightRequests`.
 ///
-/// # Thread safety
-///
-/// In Java, `inFlightRequestCount` is an `AtomicInteger` for thread-safe reads.
-/// We preserve this via [`AtomicI32`] so that `count()` (total) can be called
-/// from other threads without taking a lock.
-pub struct InFlightRequests {
-    max_in_flight_requests_per_connection: usize,
-    requests: HashMap<String, VecDeque<InFlightRequest>>,
-    /// Thread-safe total number of in-flight requests.
+/// Per-node deques are ordered newest-at-front (back-loaded by `add` via
+/// [`VecDeque::push_front`]; oldest popped from the back by
+/// [`Self::complete_next`]; newest popped from the front by
+/// [`Self::complete_last_sent`]).
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
+pub(crate) struct InFlightRequests {
+    max_in_flight_requests_per_connection: i32,
+    requests: HashMap<i32, VecDeque<InFlightRequest>>,
+    /// Total number of in-flight requests across all nodes. Atomic in
+    /// Java; kept atomic here so [`Self::count`] is `&self`. Mirrors
+    /// Java's `AtomicInteger inFlightRequestCount`.
     in_flight_request_count: AtomicI32,
 }
 
+#[allow(dead_code)] // Phase 5d NetworkClient is the first non-test caller
 impl InFlightRequests {
-    /// Creates a new `InFlightRequests` with the given per-connection limit.
-    pub fn new(max_in_flight_requests_per_connection: usize) -> Self {
-        Self {
+    /// Mirrors `new InFlightRequests(int)`.
+    pub(crate) fn new(max_in_flight_requests_per_connection: i32) -> Self {
+        InFlightRequests {
             max_in_flight_requests_per_connection,
             requests: HashMap::new(),
             in_flight_request_count: AtomicI32::new(0),
         }
     }
 
-    /// Adds the given request to the queue for the connection it was directed to.
-    ///
-    /// New requests are added to the *front* of the deque (most recently sent first).
-    pub fn add(&mut self, request: InFlightRequest) {
-        let destination = request.destination.clone();
-        let reqs = self.requests.entry(destination).or_default();
-        reqs.push_front(request);
+    /// Add the given request to the queue for the connection it was
+    /// directed to. Mirrors `InFlightRequests.add(InFlightRequest)`.
+    pub(crate) fn add(&mut self, request: InFlightRequest) {
+        let dest = request.destination;
+        self.requests.entry(dest).or_default().push_front(request);
         self.in_flight_request_count.fetch_add(1, Ordering::Relaxed);
     }
 
-    /// Returns a reference to the request queue for the given node.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if there are no in-flight requests for the node.
-    fn request_queue(&self, node: &str) -> Result<&VecDeque<InFlightRequest>, String> {
-        match self.requests.get(node) {
-            Some(reqs) if !reqs.is_empty() => Ok(reqs),
-            _ => Err(format!("There are no in-flight requests for node {node}")),
+    /// Get the request queue for the given node, panicking with the
+    /// Java error message if missing. Mirrors the private
+    /// `requestQueue` method.
+    fn request_queue(&mut self, node: i32) -> &mut VecDeque<InFlightRequest> {
+        match self.requests.get_mut(&node) {
+            Some(queue) if !queue.is_empty() => queue,
+            _ => panic!("There are no in-flight requests for node {node}"),
         }
     }
 
-    /// Returns a mutable reference to the request queue for the given node.
-    ///
-    /// # Errors
-    ///
-    /// Returns `Err` if there are no in-flight requests for the node.
-    fn request_queue_mut(&mut self, node: &str) -> Result<&mut VecDeque<InFlightRequest>, String> {
-        match self.requests.get_mut(node) {
-            Some(reqs) if !reqs.is_empty() => Ok(reqs),
-            _ => Err(format!("There are no in-flight requests for node {node}")),
+    fn request_queue_ref(&self, node: i32) -> &VecDeque<InFlightRequest> {
+        match self.requests.get(&node) {
+            Some(queue) if !queue.is_empty() => queue,
+            _ => panic!("There are no in-flight requests for node {node}"),
         }
     }
 
-    /// Gets the oldest request (the one that will be completed next) for the given
-    /// node and removes it from the queue.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are no in-flight requests for the given node.
-    pub fn complete_next(&mut self, node: &str) -> InFlightRequest {
-        let reqs = self.request_queue_mut(node).unwrap_or_else(|e| panic!("{e}"));
-        let request = reqs.pop_back().expect("Queue should not be empty");
+    /// Get the oldest request (the one that will be completed next) for
+    /// the given node. Mirrors `InFlightRequests.completeNext(String)`.
+    pub(crate) fn complete_next(&mut self, node: i32) -> InFlightRequest {
+        let queue = self.request_queue(node);
+        let request = queue.pop_back().expect("non-empty queue checked by request_queue");
         self.in_flight_request_count.fetch_sub(1, Ordering::Relaxed);
         request
     }
 
-    /// Gets the last request sent to the given node (but does not remove it from
-    /// the queue).
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are no in-flight requests for the given node.
-    pub fn last_sent(&self, node: &str) -> &InFlightRequest {
-        let reqs = self.request_queue(node).unwrap_or_else(|e| panic!("{e}"));
-        reqs.front().expect("Queue should not be empty")
+    /// Get the last request we sent to the given node (but don't remove
+    /// it from the queue). Mirrors `InFlightRequests.lastSent(String)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn last_sent(&self, node: i32) -> &InFlightRequest {
+        self.request_queue_ref(node)
+            .front()
+            .expect("non-empty queue checked by request_queue_ref")
     }
 
-    /// Marks the last request sent to the given node as send-completed.
-    ///
-    /// In Java, the same `Send` object is shared between `InFlightRequest` and
-    /// the selector, so `send.completed()` reflects the actual I/O state
-    /// automatically. In Rust we use separate copies, so this method must be
-    /// called when the selector reports a completed send.
-    pub fn mark_last_sent_completed(&mut self, node: &str) {
-        if let Some(queue) = self.requests.get_mut(node)
-            && let Some(req) = queue.front_mut()
-        {
-            req.send_completed = true;
-        }
-    }
-
-    /// Removes and returns the last request that was sent to a particular node.
-    ///
-    /// # Panics
-    ///
-    /// Panics if there are no in-flight requests for the given node.
-    pub fn complete_last_sent(&mut self, node: &str) -> InFlightRequest {
-        let reqs = self.request_queue_mut(node).unwrap_or_else(|e| panic!("{e}"));
-        let request = reqs.pop_front().expect("Queue should not be empty");
+    /// Complete the last request that was sent to a particular node.
+    /// Mirrors `InFlightRequests.completeLastSent(String)`.
+    pub(crate) fn complete_last_sent(&mut self, node: i32) -> InFlightRequest {
+        let queue = self.request_queue(node);
+        let request = queue.pop_front().expect("non-empty queue checked by request_queue");
         self.in_flight_request_count.fetch_sub(1, Ordering::Relaxed);
         request
     }
 
-    /// Returns whether more requests can be sent to this node.
+    /// Can we send more requests to this node?
     ///
-    /// More requests can be sent if:
-    /// - There are no requests in the queue, or
-    /// - The most recently sent request's send is completed AND the queue size is
-    ///   below the per-connection limit.
-    pub fn can_send_more(&self, node: &str) -> bool {
-        match self.requests.get(node) {
+    /// Returns true iff we have no requests still being sent to the
+    /// given node. Mirrors `InFlightRequests.canSendMore(String)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn can_send_more(&self, node: i32) -> bool {
+        match self.requests.get(&node) {
             None => true,
+            Some(queue) if queue.is_empty() => true,
             Some(queue) => {
-                queue.is_empty()
-                    || (queue.front().is_some_and(|r| r.send_completed)
-                        && queue.len() < self.max_in_flight_requests_per_connection)
+                // Java: queue.peekFirst().send.completed() && queue.size() < max
+                let first = queue.front().expect("non-empty");
+                let first_send_completed = match &first.send {
+                    Some(send) => send.completed(),
+                    // Java's `peekFirst().send.completed()` would throw on
+                    // a null `send` — the only way an `InFlightRequest`
+                    // gets created with no send in production is internal
+                    // book-keeping or tests. We treat the absence as
+                    // "completed" (the entry isn't blocking the wire).
+                    None => true,
+                };
+                first_send_completed && (queue.len() as i32) < self.max_in_flight_requests_per_connection
             },
         }
     }
 
-    /// Returns the number of in-flight requests directed at the given node.
-    pub fn count_for_node(&self, node: &str) -> usize {
-        self.requests.get(node).map_or(0, VecDeque::len)
+    /// Return the number of in-flight requests directed at the given
+    /// node. Mirrors `InFlightRequests.count(String)`.
+    pub(crate) fn count_for(&self, node: i32) -> i32 {
+        self.requests.get(&node).map(|q| q.len() as i32).unwrap_or(0)
     }
 
-    /// Returns `true` if there are no in-flight requests directed at the given node.
-    pub fn is_empty_for_node(&self, node: &str) -> bool {
-        self.requests.get(node).is_none_or(VecDeque::is_empty)
+    /// Return true if there is no in-flight request directed at the
+    /// given node and false otherwise. Mirrors
+    /// `InFlightRequests.isEmpty(String)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn is_empty_for(&self, node: i32) -> bool {
+        self.requests.get(&node).map(|q| q.is_empty()).unwrap_or(true)
     }
 
-    /// Returns the total count of in-flight requests across all nodes.
-    ///
-    /// This method is thread-safe but may lag the actual count.
-    pub fn count(&self) -> i32 {
+    /// Count all in-flight requests for all nodes. Mirrors
+    /// `InFlightRequests.count()`.
+    pub(crate) fn count(&self) -> i32 {
         self.in_flight_request_count.load(Ordering::Relaxed)
     }
 
-    /// Returns `true` if there are no in-flight requests for any node.
-    pub fn is_empty(&self) -> bool {
-        self.requests.values().all(VecDeque::is_empty)
+    /// Return true if there is no in-flight request and false otherwise.
+    /// Mirrors `InFlightRequests.isEmpty()`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn is_empty(&self) -> bool {
+        self.requests.values().all(|q| q.is_empty())
     }
 
-    /// Clears all in-flight requests for the given node and returns them.
+    /// Clear out all the in-flight requests for the given node and
+    /// return them in oldest-to-newest order (Java's
+    /// `descendingIterator()` semantics — the deque is newest-at-front
+    /// so descending == oldest-to-newest).
     ///
-    /// The returned requests are in oldest-first order (the order they were
-    /// originally sent).
-    pub fn clear_all(&mut self, node: &str) -> Vec<InFlightRequest> {
-        match self.requests.remove(node) {
-            None => Vec::new(),
-            Some(mut cleared) => {
-                let count = cleared.len() as i32;
-                self.in_flight_request_count.fetch_sub(count, Ordering::Relaxed);
-                // Java's clearAll returns descendingIterator which iterates from
-                // tail to head (oldest to newest), since addFirst puts newest at head.
-                // Our VecDeque with push_front has newest at front, oldest at back.
-                // Reversing gives oldest-first order, matching Java's behavior.
-                let result: Vec<InFlightRequest> = cleared.drain(..).rev().collect();
-                result
-            },
+    /// Mirrors `InFlightRequests.clearAll(String)`.
+    pub(crate) fn clear_all(&mut self, node: i32) -> Vec<InFlightRequest> {
+        let removed = self.requests.remove(&node).unwrap_or_default();
+        if removed.is_empty() {
+            return Vec::new();
         }
+        self.in_flight_request_count.fetch_sub(removed.len() as i32, Ordering::Relaxed);
+        // Java's `clearedRequests::descendingIterator` walks the deque
+        // newest-first → oldest-first as a *reverse* — so the first
+        // element of the resulting `Iterable` is the *oldest*. Match
+        // that by reversing the front-loaded deque.
+        let mut out: Vec<InFlightRequest> = removed.into_iter().collect();
+        out.reverse();
+        out
     }
 
-    /// Returns a list of nodes with pending in-flight requests that have timed out.
+    fn has_expired_request(now: i64, deque: &VecDeque<InFlightRequest>) -> bool {
+        deque.iter().any(|request| {
+            // We exclude throttle time here because we want to ensure that
+            // we don't expire requests while they are throttled. The
+            // request timeout should take effect only after the throttle
+            // time has elapsed.
+            request.time_elapsed_since_send_ms(now) - (request.throttle_time_ms() as i64)
+                > request.request_timeout_ms as i64
+        })
+    }
+
+    /// Returns a list of nodes with pending in-flight request, that need
+    /// to be timed out. Mirrors
+    /// `InFlightRequests.nodesWithTimedOutRequests(long)`.
     ///
-    /// A request is considered timed out if the elapsed time since send (minus
-    /// any throttle time) exceeds its request timeout.
-    pub fn nodes_with_timed_out_requests(&self, now: i64) -> Vec<String> {
+    /// The order of the result follows the Java implementation: it walks
+    /// `requests.entrySet()` (HashMap iteration order) — the test
+    /// `testTimedOutNodes` constructs nodes in an order whose iteration
+    /// happens to match the assertion. Rust's `HashMap` does not
+    /// preserve insertion order either, so the test sorts the result
+    /// before comparison (see `nodes_with_timed_out_requests` test).
+    pub(crate) fn nodes_with_timed_out_requests(&self, now: i64) -> Vec<i32> {
         let mut node_ids = Vec::new();
-        for (node_id, deque) in &self.requests {
+        for (node, deque) in &self.requests {
             if Self::has_expired_request(now, deque) {
-                node_ids.push(node_id.clone());
+                node_ids.push(*node);
             }
         }
         node_ids
     }
 
-    /// Increments the throttle time for all in-flight requests to the given node.
-    pub fn increment_throttle_time(&mut self, node_id: &str, throttle_time_ms: i64) {
-        if let Some(deque) = self.requests.get_mut(node_id) {
-            for request in deque.iter_mut() {
+    /// Mirrors `InFlightRequests.incrementThrottleTime(String, long)`.
+    #[allow(dead_code)] // Used by Phase 5d NetworkClient
+    pub(crate) fn increment_throttle_time(&self, node_id: i32, throttle_time_ms: i32) {
+        if let Some(deque) = self.requests.get(&node_id) {
+            for request in deque {
                 request.increment_throttle_time(throttle_time_ms);
             }
         }
-    }
-
-    /// Checks if any request in the deque has expired.
-    fn has_expired_request(now: i64, deque: &VecDeque<InFlightRequest>) -> bool {
-        for request in deque {
-            // Exclude throttle time because we want to ensure that we don't expire
-            // requests while they are throttled. The request timeout should take
-            // effect only after the throttle time has elapsed.
-            if request.time_elapsed_since_send_ms(now) - request.throttle_time_ms() > request.request_timeout_ms {
-                return true;
-            }
-        }
-        false
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! Translation of `InFlightRequestsTest`. The test fixtures here use
+    //! synthetic `InFlightRequest` values constructed directly (Java's
+    //! test does the same via the package-private constructor).
+
+    use std::sync::Arc;
+
     use super::*;
-    use crate::common::network::{ByteBufferSend, NetworkSend};
     use crate::common::protocol::ApiKeys;
+    use crate::common::utils::{MockTime, Time};
 
-    fn add_request(
-        in_flight_requests: &mut InFlightRequests,
-        destination: &str,
-        correlation_id: &mut i32,
+    const DEST: i32 = 17;
+
+    fn make_request(
+        destination: i32,
         send_time_ms: i64,
-        request_timeout_ms: i64,
-    ) -> i32 {
-        let id = *correlation_id;
-        *correlation_id += 1;
-
-        let header =
-            RequestHeader::new(&ApiKeys::METADATA, 0, "clientId", id).expect("header creation should not fail");
-
-        // Create a minimal completed NetworkSend for testing.
-        // An empty ByteBufferSend is immediately "completed" (remaining == 0).
-        let inner_send = ByteBufferSend::new(Vec::new());
-        let send = NetworkSend::new(destination, Box::new(inner_send));
-
-        let ifr = InFlightRequest::new(
+        request_timeout_ms: i32,
+        correlation_id: i32,
+    ) -> InFlightRequest {
+        let api_key = ApiKeys::for_id(3).expect("METADATA"); // Match Java fixture (METADATA / v0)
+        let header = RequestHeader::new(api_key, 0, "clientId", correlation_id);
+        InFlightRequest::new(
             header,
             request_timeout_ms,
             0,
             destination,
             None,
+            // Match Java fixture (`expectResponse = false`,
+            // `isInternalRequest = false`).
             false,
             false,
             None,
-            send,
+            None,
             send_time_ms,
-        );
-        in_flight_requests.add(ifr);
-        id
+        )
     }
 
-    fn add_request_default(
-        in_flight_requests: &mut InFlightRequests,
-        destination: &str,
-        correlation_id: &mut i32,
-    ) -> i32 {
-        add_request(in_flight_requests, destination, correlation_id, 0, 10000)
-    }
-
-    /// Translated from Java `InFlightRequestsTest.testCompleteLastSent`.
+    /// Java: `testCompleteLastSent`.
     #[test]
-    fn test_complete_last_sent() {
+    fn complete_last_sent() {
         let mut in_flight = InFlightRequests::new(12);
-        let mut correlation_id = 0;
-        let dest = "dest";
+        in_flight.add(make_request(DEST, 0, 10000, 0));
+        in_flight.add(make_request(DEST, 0, 10000, 1));
+        assert_eq!(in_flight.count(), 2);
 
-        let correlation_id1 = add_request_default(&mut in_flight, dest, &mut correlation_id);
-        let correlation_id2 = add_request_default(&mut in_flight, dest, &mut correlation_id);
-        assert_eq!(2, in_flight.count());
+        // Java asserts correlation IDs in LIFO order — most recently
+        // added comes back first via `completeLastSent`.
+        assert_eq!(in_flight.complete_last_sent(DEST).header.correlation_id(), 1);
+        assert_eq!(in_flight.count(), 1);
 
-        assert_eq!(correlation_id2, in_flight.complete_last_sent(dest).header.correlation_id());
-        assert_eq!(1, in_flight.count());
-
-        assert_eq!(correlation_id1, in_flight.complete_last_sent(dest).header.correlation_id());
-        assert_eq!(0, in_flight.count());
+        assert_eq!(in_flight.complete_last_sent(DEST).header.correlation_id(), 0);
+        assert_eq!(in_flight.count(), 0);
     }
 
-    /// Translated from Java `InFlightRequestsTest.testClearAll`.
+    /// Java: `testClearAll`.
     #[test]
-    fn test_clear_all() {
+    fn clear_all() {
         let mut in_flight = InFlightRequests::new(12);
-        let mut correlation_id = 0;
-        let dest = "dest";
+        in_flight.add(make_request(DEST, 0, 10000, 0));
+        in_flight.add(make_request(DEST, 0, 10000, 1));
 
-        let correlation_id1 = add_request_default(&mut in_flight, dest, &mut correlation_id);
-        let correlation_id2 = add_request_default(&mut in_flight, dest, &mut correlation_id);
-
-        let cleared_requests = in_flight.clear_all(dest);
-        assert_eq!(0, in_flight.count());
-        assert_eq!(2, cleared_requests.len());
-        assert_eq!(correlation_id1, cleared_requests[0].header.correlation_id());
-        assert_eq!(correlation_id2, cleared_requests[1].header.correlation_id());
+        let cleared = in_flight.clear_all(DEST);
+        assert_eq!(in_flight.count(), 0);
+        assert_eq!(cleared.len(), 2);
+        // Java asserts correlation_id order [first added, second added]
+        // because `descendingIterator()` walks newest→oldest in a
+        // newest-front deque, which is oldest→newest after reversing.
+        assert_eq!(cleared[0].header.correlation_id(), 0);
+        assert_eq!(cleared[1].header.correlation_id(), 1);
     }
 
-    /// Translated from Java `InFlightRequestsTest.testTimedOutNodes`.
+    /// Java: `testTimedOutNodes`.
     #[test]
-    fn test_timed_out_nodes() {
+    fn nodes_with_timed_out_requests() {
         let mut in_flight = InFlightRequests::new(12);
-        let mut correlation_id = 0;
-        let mut time_ms: i64 = 0;
+        let time = Arc::new(MockTime::default());
 
-        add_request(&mut in_flight, "A", &mut correlation_id, time_ms, 50);
-        add_request(&mut in_flight, "B", &mut correlation_id, time_ms, 200);
-        add_request(&mut in_flight, "B", &mut correlation_id, time_ms, 100);
+        in_flight.add(make_request(101, time.milliseconds(), 50, 0));
+        in_flight.add(make_request(202, time.milliseconds(), 200, 1));
+        in_flight.add(make_request(202, time.milliseconds(), 100, 2));
 
-        time_ms += 50;
-        assert!(in_flight.nodes_with_timed_out_requests(time_ms).is_empty());
+        time.sleep(50);
+        let mut timed_out = in_flight.nodes_with_timed_out_requests(time.milliseconds());
+        timed_out.sort();
+        assert_eq!(timed_out, Vec::<i32>::new());
 
-        time_ms += 25;
-        let timed_out = in_flight.nodes_with_timed_out_requests(time_ms);
-        assert_eq!(1, timed_out.len());
-        assert!(timed_out.contains(&"A".to_string()));
+        time.sleep(25);
+        let mut timed_out = in_flight.nodes_with_timed_out_requests(time.milliseconds());
+        timed_out.sort();
+        assert_eq!(timed_out, vec![101]);
 
-        time_ms += 50;
-        let timed_out = in_flight.nodes_with_timed_out_requests(time_ms);
-        assert_eq!(2, timed_out.len());
-        assert!(timed_out.contains(&"A".to_string()));
-        assert!(timed_out.contains(&"B".to_string()));
+        time.sleep(50);
+        let mut timed_out = in_flight.nodes_with_timed_out_requests(time.milliseconds());
+        timed_out.sort();
+        assert_eq!(timed_out, vec![101, 202]);
     }
 
-    /// Translated from Java `InFlightRequestsTest.testCompleteNext`.
+    /// Java: `testCompleteNext`.
     #[test]
-    fn test_complete_next() {
+    fn complete_next() {
         let mut in_flight = InFlightRequests::new(12);
-        let mut correlation_id = 0;
-        let dest = "dest";
+        in_flight.add(make_request(DEST, 0, 10000, 0));
+        in_flight.add(make_request(DEST, 0, 10000, 1));
+        assert_eq!(in_flight.count(), 2);
 
-        let correlation_id1 = add_request_default(&mut in_flight, dest, &mut correlation_id);
-        let correlation_id2 = add_request_default(&mut in_flight, dest, &mut correlation_id);
-        assert_eq!(2, in_flight.count());
+        // Oldest first
+        assert_eq!(in_flight.complete_next(DEST).header.correlation_id(), 0);
+        assert_eq!(in_flight.count(), 1);
 
-        assert_eq!(correlation_id1, in_flight.complete_next(dest).header.correlation_id());
-        assert_eq!(1, in_flight.count());
-
-        assert_eq!(correlation_id2, in_flight.complete_next(dest).header.correlation_id());
-        assert_eq!(0, in_flight.count());
+        assert_eq!(in_flight.complete_next(DEST).header.correlation_id(), 1);
+        assert_eq!(in_flight.count(), 0);
     }
 
-    /// Translated from Java `InFlightRequestsTest.testCompleteNextThrowsIfNoInFlights`.
+    /// Java: `testCompleteNextThrowsIfNoInFlights`.
     #[test]
-    #[should_panic(expected = "There are no in-flight requests for node dest")]
-    fn test_complete_next_panics_if_no_in_flights() {
+    #[should_panic(expected = "no in-flight requests")]
+    fn complete_next_panics_if_no_in_flights() {
         let mut in_flight = InFlightRequests::new(12);
-        in_flight.complete_next("dest");
+        let _ = in_flight.complete_next(DEST);
     }
 
-    /// Translated from Java `InFlightRequestsTest.testCompleteLastSentThrowsIfNoInFlights`.
+    /// Java: `testCompleteLastSentThrowsIfNoInFlights`.
     #[test]
-    #[should_panic(expected = "There are no in-flight requests for node dest")]
-    fn test_complete_last_sent_panics_if_no_in_flights() {
+    #[should_panic(expected = "no in-flight requests")]
+    fn complete_last_sent_panics_if_no_in_flights() {
         let mut in_flight = InFlightRequests::new(12);
-        in_flight.complete_last_sent("dest");
+        let _ = in_flight.complete_last_sent(DEST);
     }
 }

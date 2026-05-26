@@ -12,33 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A utility class for keeping the parameters and providing the value of exponential
-//! retry backoff, exponential reconnect backoff, exponential timeout, etc.
-//!
-//! The formula is:
-//! ```text
-//! Backoff(attempts) = random(1 - jitter, 1 + jitter) * initial_interval * multiplier ^ attempts
-//! ```
-//! If `max_interval` is less than `initial_interval`, a constant backoff of
-//! `max_interval` will be provided. The jitter will never cause the backoff to exceed
-//! `max_interval`.
-//!
-//! This struct is thread-safe (all fields are immutable after construction).
-
-use std::fmt;
+//! Translation of `org.apache.kafka.common.utils.ExponentialBackoff`.
 
 use rand::Rng;
 
-/// Provides exponential backoff values with optional jitter.
+/// Computes exponential retry / reconnect backoff with optional jitter.
 ///
-/// Used for retry backoff, reconnect backoff, exponential timeout, etc.
-/// The formula is:
-/// ```text
-/// Backoff(attempts) = random(1 - jitter, 1 + jitter) * initial_interval * multiplier ^ attempts
-/// ```
+/// `Backoff(attempts) = random(1 - jitter, 1 + jitter) * initial * multiplier ^ attempts`.
+/// If `max_interval` is less than `initial_interval`, a constant backoff of
+/// `max_interval` is returned. The jitter never causes the backoff to exceed
+/// `max_interval`.
 ///
-/// This struct is `Send + Sync` since all fields are immutable after construction.
-#[derive(Debug)]
+/// This struct is thread-safe (immutable after construction; the random
+/// source is per-thread via `rand::thread_rng()`).
+#[derive(Clone, Debug)]
 pub struct ExponentialBackoff {
     initial_interval: i64,
     multiplier: i32,
@@ -48,122 +35,103 @@ pub struct ExponentialBackoff {
 }
 
 impl ExponentialBackoff {
-    /// Creates a new `ExponentialBackoff` with the given parameters.
-    ///
-    /// # Arguments
-    /// * `initial_interval` - The initial backoff interval in milliseconds.
-    /// * `multiplier` - The multiplier applied to the interval for each attempt.
-    /// * `max_interval` - The maximum backoff interval in milliseconds.
-    /// * `jitter` - The jitter factor, must be between 0.0 and 1.0 (inclusive).
+    /// Construct a new backoff strategy. Mirrors Java's
+    /// `new ExponentialBackoff(long, int, long, double)`.
     ///
     /// # Errors
-    /// Returns an error if `jitter` is not between 0.0 and 1.0.
+    ///
+    /// Returns [`String`] (matching the Java `IllegalArgumentException`
+    /// message) when `jitter` is outside `[0, 1]`. Java raises an unchecked
+    /// exception; we surface it as a `Result` so the producer config
+    /// validator can compose this with other config errors instead of
+    /// panicking on user input.
     pub fn new(initial_interval: i64, multiplier: i32, max_interval: i64, jitter: f64) -> Result<Self, String> {
         if !(0.0..=1.0).contains(&jitter) {
-            return Err(format!("jitter must be between 0 and 1, but got {}", jitter));
+            return Err(format!("jitter must be between 0 and 1, but got {jitter:?}"));
         }
-        let clamped_initial = initial_interval.min(max_interval);
-        let exp_max = if max_interval > clamped_initial {
-            (max_interval as f64 / (clamped_initial.max(1) as f64)).ln() / (multiplier as f64).ln()
+        let initial_interval = initial_interval.min(max_interval);
+        let exp_max = if max_interval > initial_interval {
+            (max_interval as f64 / initial_interval.max(1) as f64).ln() / (multiplier as f64).ln()
         } else {
             0.0
         };
-        Ok(Self { initial_interval: clamped_initial, multiplier, max_interval, jitter, exp_max })
+        Ok(ExponentialBackoff { initial_interval, multiplier, max_interval, jitter, exp_max })
     }
 
-    /// Returns the initial interval.
+    /// The initial (capped) interval, mirroring Java's `initialInterval()`.
     pub fn initial_interval(&self) -> i64 {
         self.initial_interval
     }
 
-    /// Computes the backoff value for the given number of attempts.
-    ///
-    /// The returned value is clamped to `max_interval` and includes jitter if configured.
+    /// Compute the backoff for the given number of attempts.
     pub fn backoff(&self, attempts: i64) -> i64 {
         if self.exp_max == 0.0 {
             return self.initial_interval;
         }
         let exp = (attempts as f64).min(self.exp_max);
-        let term = self.initial_interval as f64 * (self.multiplier as f64).powf(exp);
+        let term = (self.initial_interval as f64) * (self.multiplier as f64).powf(exp);
         let random_factor = if self.jitter < f64::MIN_POSITIVE {
             1.0
         } else {
-            let mut rng = rand::rng();
-            rng.random_range((1.0 - self.jitter)..(1.0 + self.jitter))
+            rand::rng().random_range((1.0 - self.jitter)..(1.0 + self.jitter))
         };
         let backoff_value = (random_factor * term) as i64;
         backoff_value.min(self.max_interval)
     }
 }
 
-impl fmt::Display for ExponentialBackoff {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "ExponentialBackoff{{multiplier={}, expMax={}, initialInterval={}, jitter={}}}",
-            self.multiplier, self.exp_max, self.initial_interval, self.jitter
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    // Translation of `ExponentialBackoffTest`.
+
     use super::*;
 
-    /// Translated from `ExponentialBackoffTest.testExponentialBackoff`
+    /// Java: `testExponentialBackoff`.
     #[test]
-    fn test_exponential_backoff() {
+    fn exponential_backoff_with_jitter() {
         let scale_factor: i64 = 100;
-        let ratio: i32 = 2;
+        let ratio = 2;
         let backoff_max: i64 = 2000;
-        let jitter: f64 = 0.2;
-        let exponential_backoff = ExponentialBackoff::new(scale_factor, ratio, backoff_max, jitter).unwrap();
+        let jitter = 0.2;
+        let exp = ExponentialBackoff::new(scale_factor, ratio, backoff_max, jitter).unwrap();
 
-        for _i in 0..=100 {
+        for _ in 0..=100 {
             for attempts in 0..=10 {
+                let backoff = exp.backoff(attempts);
                 if attempts <= 4 {
-                    let expected = scale_factor as f64 * (ratio as f64).powi(attempts);
+                    let expected = scale_factor as f64 * (ratio as f64).powi(attempts as i32);
                     let tolerance = expected * jitter;
-                    let actual = exponential_backoff.backoff(attempts as i64);
+                    let diff = (backoff as f64 - expected).abs();
                     assert!(
-                        (actual as f64 - expected).abs() <= tolerance,
-                        "Expected backoff({}) ~= {} +/- {}, got {}",
-                        attempts,
-                        expected,
-                        tolerance,
-                        actual
+                        diff <= tolerance + 1.0,
+                        "attempts={attempts}, backoff={backoff}, expected={expected}, tol={tolerance}"
                     );
                 } else {
-                    let actual = exponential_backoff.backoff(attempts as i64);
                     assert!(
-                        actual as f64 <= backoff_max as f64 * (1.0 + jitter),
-                        "Expected backoff({}) <= {}, got {}",
-                        attempts,
-                        backoff_max as f64 * (1.0 + jitter),
-                        actual
+                        (backoff as f64) <= (backoff_max as f64) * (1.0 + jitter),
+                        "attempts={attempts}, backoff={backoff} exceeds cap"
                     );
                 }
             }
         }
     }
 
-    /// Translated from `ExponentialBackoffTest.testExponentialBackoffWithoutJitter`
+    /// Java: `testExponentialBackoffWithoutJitter`.
     #[test]
-    fn test_exponential_backoff_without_jitter() {
-        let exponential_backoff = ExponentialBackoff::new(100, 2, 400, 0.0).unwrap();
-        assert_eq!(100, exponential_backoff.backoff(0));
-        assert_eq!(200, exponential_backoff.backoff(1));
-        assert_eq!(400, exponential_backoff.backoff(2));
-        assert_eq!(400, exponential_backoff.backoff(3));
+    fn exponential_backoff_without_jitter() {
+        let exp = ExponentialBackoff::new(100, 2, 400, 0.0).unwrap();
+        assert_eq!(exp.backoff(0), 100);
+        assert_eq!(exp.backoff(1), 200);
+        assert_eq!(exp.backoff(2), 400);
+        assert_eq!(exp.backoff(3), 400);
     }
 
-    /// Translated from `ExponentialBackoffTest.testExponentialBackoffWithInvalidJitter`
+    /// Java: `testExponentialBackoffWithInvalidJitter`.
     #[test]
-    fn test_exponential_backoff_with_invalid_jitter() {
+    fn exponential_backoff_with_invalid_jitter() {
         let err = ExponentialBackoff::new(100, 2, 400, -1.0).unwrap_err();
-        assert_eq!("jitter must be between 0 and 1, but got -1", err);
-
+        assert_eq!(err, "jitter must be between 0 and 1, but got -1.0");
         let err = ExponentialBackoff::new(100, 2, 400, 3000.0).unwrap_err();
-        assert_eq!("jitter must be between 0 and 1, but got 3000", err);
+        assert_eq!(err, "jitter must be between 0 and 1, but got 3000.0");
     }
 }

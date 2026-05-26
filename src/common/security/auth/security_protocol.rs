@@ -12,54 +12,56 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security protocol enum for Kafka connections.
+//! Translation of `org.apache.kafka.common.security.auth.SecurityProtocol`.
 //!
-//! Translated from `org.apache.kafka.common.security.auth.SecurityProtocol`.
+//! Phase 9 adds SASL_PLAINTEXT (id 2) and SASL_SSL (id 3) variants —
+//! both gated on the PLAIN mechanism only at this milestone. SCRAM,
+//! OAUTHBEARER, Kerberos/GSSAPI are rejected at the config-validation
+//! boundary (Phase 9b).
 
-use std::fmt;
-use std::str::FromStr;
+/// On-wire id for the `PLAINTEXT` security protocol. Mirrors
+/// `SecurityProtocol.PLAINTEXT.id`. Stable as part of Kafka's wire
+/// protocol — see `kafka.cluster.SecurityProtocol`.
+pub const ID_PLAINTEXT: i16 = 0;
 
-/// Defines the security protocol used for communication with Kafka brokers.
-///
-/// Each protocol has a permanent, immutable numeric ID that matches the
-/// wire-protocol values used by the Java client.
-///
-/// Translated from `org.apache.kafka.common.security.auth.SecurityProtocol`.
+/// On-wire id for the `SSL` security protocol. Mirrors
+/// `SecurityProtocol.SSL.id`.
+pub const ID_SSL: i16 = 1;
+
+/// On-wire id for the `SASL_PLAINTEXT` security protocol. Mirrors
+/// `SecurityProtocol.SASL_PLAINTEXT.id`.
+pub const ID_SASL_PLAINTEXT: i16 = 2;
+
+/// On-wire id for the `SASL_SSL` security protocol. Mirrors
+/// `SecurityProtocol.SASL_SSL.id`.
+pub const ID_SASL_SSL: i16 = 3;
+
+/// Translation of `org.apache.kafka.common.security.auth.SecurityProtocol`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SecurityProtocol {
     /// Un-authenticated, non-encrypted channel.
     Plaintext,
-    /// SSL channel.
+    /// SSL-encrypted channel.
     Ssl,
-    /// SASL authenticated, non-encrypted channel.
+    /// SASL authentication on un-encrypted transport.
     SaslPlaintext,
-    /// SASL authenticated, SSL channel.
+    /// SASL authentication on SSL-encrypted transport.
     SaslSsl,
 }
 
 impl SecurityProtocol {
-    /// All protocol variants in declaration order.
-    const ALL: [SecurityProtocol; 4] = [
-        SecurityProtocol::Plaintext,
-        SecurityProtocol::Ssl,
-        SecurityProtocol::SaslPlaintext,
-        SecurityProtocol::SaslSsl,
-    ];
-
-    /// Returns the permanent and immutable numeric ID for this security protocol.
-    ///
-    /// This value matches `kafka.cluster.SecurityProtocol` and must never change.
-    pub fn id(self) -> i16 {
+    /// Permanent and immutable on-wire id. Mirrors `SecurityProtocol.id`.
+    pub fn id(&self) -> i16 {
         match self {
-            SecurityProtocol::Plaintext => 0,
-            SecurityProtocol::Ssl => 1,
-            SecurityProtocol::SaslPlaintext => 2,
-            SecurityProtocol::SaslSsl => 3,
+            SecurityProtocol::Plaintext => ID_PLAINTEXT,
+            SecurityProtocol::Ssl => ID_SSL,
+            SecurityProtocol::SaslPlaintext => ID_SASL_PLAINTEXT,
+            SecurityProtocol::SaslSsl => ID_SASL_SSL,
         }
     }
 
-    /// Returns the protocol name as used in configuration (e.g. `"PLAINTEXT"`, `"SASL_SSL"`).
-    pub fn name(self) -> &'static str {
+    /// Name as used in client configuration. Mirrors `SecurityProtocol.name`.
+    pub fn name(&self) -> &'static str {
         match self {
             SecurityProtocol::Plaintext => "PLAINTEXT",
             SecurityProtocol::Ssl => "SSL",
@@ -68,45 +70,48 @@ impl SecurityProtocol {
         }
     }
 
-    /// Looks up a security protocol by its numeric ID.
-    ///
-    /// Returns `None` if no protocol has the given ID.
-    pub fn for_id(id: i16) -> Option<Self> {
+    /// All names defined by this enum. Mirrors `SecurityProtocol.names()`.
+    pub fn names() -> &'static [&'static str] {
+        &["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"]
+    }
+
+    /// Lookup by on-wire id. Mirrors `SecurityProtocol.forId(short)`.
+    pub fn for_id(id: i16) -> Option<SecurityProtocol> {
         match id {
-            0 => Some(SecurityProtocol::Plaintext),
-            1 => Some(SecurityProtocol::Ssl),
-            2 => Some(SecurityProtocol::SaslPlaintext),
-            3 => Some(SecurityProtocol::SaslSsl),
+            ID_PLAINTEXT => Some(SecurityProtocol::Plaintext),
+            ID_SSL => Some(SecurityProtocol::Ssl),
+            ID_SASL_PLAINTEXT => Some(SecurityProtocol::SaslPlaintext),
+            ID_SASL_SSL => Some(SecurityProtocol::SaslSsl),
             _ => None,
         }
     }
 
-    /// Case-insensitive lookup by protocol name.
-    ///
-    /// Returns `None` if no protocol matches the given name.
-    pub fn for_name(name: &str) -> Option<Self> {
-        let upper = name.to_uppercase();
-        Self::ALL.iter().find(|p| p.name() == upper).copied()
+    /// Case-insensitive lookup by name. Mirrors
+    /// `SecurityProtocol.forName(String)`. Returns `None` for unknown
+    /// names; Java throws `IllegalArgumentException` from `Enum.valueOf`,
+    /// but in Rust we keep the more conservative `Option` return so
+    /// callers can produce a typed [`crate::common::errors::KafkaError::Config`].
+    pub fn for_name(name: &str) -> Option<SecurityProtocol> {
+        match name.to_ascii_uppercase().as_str() {
+            "PLAINTEXT" => Some(SecurityProtocol::Plaintext),
+            "SSL" => Some(SecurityProtocol::Ssl),
+            "SASL_PLAINTEXT" => Some(SecurityProtocol::SaslPlaintext),
+            "SASL_SSL" => Some(SecurityProtocol::SaslSsl),
+            _ => None,
+        }
     }
 
-    /// Returns the names of all security protocols.
-    pub fn names() -> Vec<&'static str> {
-        Self::ALL.iter().map(|p| p.name()).collect()
+    /// `true` iff this protocol layers SASL on top of the underlying
+    /// transport. Mirrors Java's check
+    /// `protocol == SASL_PLAINTEXT || protocol == SASL_SSL`.
+    pub fn is_sasl(&self) -> bool {
+        matches!(self, SecurityProtocol::SaslPlaintext | SecurityProtocol::SaslSsl)
     }
-}
 
-impl fmt::Display for SecurityProtocol {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.name())
-    }
-}
-
-impl FromStr for SecurityProtocol {
-    type Err = String;
-
-    /// Parses a security protocol from its name (case-insensitive).
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        SecurityProtocol::for_name(s).ok_or_else(|| format!("No enum constant SecurityProtocol.{}", s))
+    /// `true` iff this protocol uses TLS for the underlying transport.
+    /// Mirrors Java's check `protocol == SSL || protocol == SASL_SSL`.
+    pub fn uses_ssl(&self) -> bool {
+        matches!(self, SecurityProtocol::Ssl | SecurityProtocol::SaslSsl)
     }
 }
 
@@ -115,100 +120,54 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_id_values() {
+    fn id_and_name_match_java_enum() {
         assert_eq!(SecurityProtocol::Plaintext.id(), 0);
-        assert_eq!(SecurityProtocol::Ssl.id(), 1);
-        assert_eq!(SecurityProtocol::SaslPlaintext.id(), 2);
-        assert_eq!(SecurityProtocol::SaslSsl.id(), 3);
-    }
-
-    #[test]
-    fn test_name_values() {
         assert_eq!(SecurityProtocol::Plaintext.name(), "PLAINTEXT");
+        assert_eq!(SecurityProtocol::Ssl.id(), 1);
         assert_eq!(SecurityProtocol::Ssl.name(), "SSL");
+        assert_eq!(SecurityProtocol::SaslPlaintext.id(), 2);
         assert_eq!(SecurityProtocol::SaslPlaintext.name(), "SASL_PLAINTEXT");
+        assert_eq!(SecurityProtocol::SaslSsl.id(), 3);
         assert_eq!(SecurityProtocol::SaslSsl.name(), "SASL_SSL");
     }
 
     #[test]
-    fn test_for_id_roundtrip() {
-        for id in 0..=3 {
-            let protocol = SecurityProtocol::for_id(id).unwrap();
-            assert_eq!(protocol.id(), id);
-        }
+    fn for_id_round_trip() {
+        assert_eq!(SecurityProtocol::for_id(0), Some(SecurityProtocol::Plaintext));
+        assert_eq!(SecurityProtocol::for_id(1), Some(SecurityProtocol::Ssl));
+        assert_eq!(SecurityProtocol::for_id(2), Some(SecurityProtocol::SaslPlaintext));
+        assert_eq!(SecurityProtocol::for_id(3), Some(SecurityProtocol::SaslSsl));
+        assert_eq!(SecurityProtocol::for_id(99), None);
     }
 
     #[test]
-    fn test_for_id_invalid() {
-        assert_eq!(SecurityProtocol::for_id(-1), None);
-        assert_eq!(SecurityProtocol::for_id(4), None);
-        assert_eq!(SecurityProtocol::for_id(100), None);
-    }
-
-    #[test]
-    fn test_for_name_roundtrip() {
-        let names = ["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"];
-        for name in &names {
-            let protocol = SecurityProtocol::for_name(name).unwrap();
-            assert_eq!(protocol.name(), *name);
-        }
-    }
-
-    #[test]
-    fn test_for_name_case_insensitive() {
+    fn for_name_is_case_insensitive() {
+        assert_eq!(SecurityProtocol::for_name("PLAINTEXT"), Some(SecurityProtocol::Plaintext));
         assert_eq!(SecurityProtocol::for_name("plaintext"), Some(SecurityProtocol::Plaintext));
-        assert_eq!(SecurityProtocol::for_name("Plaintext"), Some(SecurityProtocol::Plaintext));
-        assert_eq!(SecurityProtocol::for_name("sasl_ssl"), Some(SecurityProtocol::SaslSsl));
+        assert_eq!(SecurityProtocol::for_name("Ssl"), Some(SecurityProtocol::Ssl));
         assert_eq!(
-            SecurityProtocol::for_name("Sasl_Plaintext"),
+            SecurityProtocol::for_name("SASL_PLAINTEXT"),
             Some(SecurityProtocol::SaslPlaintext)
         );
+        assert_eq!(SecurityProtocol::for_name("sasl_ssl"), Some(SecurityProtocol::SaslSsl));
+        assert_eq!(SecurityProtocol::for_name("UNKNOWN"), None);
     }
 
     #[test]
-    fn test_for_name_invalid() {
-        assert_eq!(SecurityProtocol::for_name("INVALID"), None);
-        assert_eq!(SecurityProtocol::for_name(""), None);
+    fn names_lists_implemented_variants() {
+        assert_eq!(SecurityProtocol::names(), &["PLAINTEXT", "SSL", "SASL_PLAINTEXT", "SASL_SSL"]);
     }
 
     #[test]
-    fn test_names() {
-        let names = SecurityProtocol::names();
-        assert_eq!(names.len(), 4);
-        assert_eq!(names[0], "PLAINTEXT");
-        assert_eq!(names[1], "SSL");
-        assert_eq!(names[2], "SASL_PLAINTEXT");
-        assert_eq!(names[3], "SASL_SSL");
-    }
+    fn is_sasl_and_uses_ssl_predicates() {
+        assert!(!SecurityProtocol::Plaintext.is_sasl());
+        assert!(!SecurityProtocol::Ssl.is_sasl());
+        assert!(SecurityProtocol::SaslPlaintext.is_sasl());
+        assert!(SecurityProtocol::SaslSsl.is_sasl());
 
-    #[test]
-    fn test_display() {
-        assert_eq!(format!("{}", SecurityProtocol::Plaintext), "PLAINTEXT");
-        assert_eq!(format!("{}", SecurityProtocol::SaslSsl), "SASL_SSL");
-    }
-
-    #[test]
-    fn test_from_str() {
-        assert_eq!("PLAINTEXT".parse::<SecurityProtocol>().unwrap(), SecurityProtocol::Plaintext);
-        assert_eq!("ssl".parse::<SecurityProtocol>().unwrap(), SecurityProtocol::Ssl);
-        assert!("INVALID".parse::<SecurityProtocol>().is_err());
-    }
-
-    #[test]
-    fn test_equality_and_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(SecurityProtocol::Plaintext);
-        set.insert(SecurityProtocol::Plaintext);
-        assert_eq!(set.len(), 1);
-        set.insert(SecurityProtocol::Ssl);
-        assert_eq!(set.len(), 2);
-    }
-
-    #[test]
-    fn test_clone_and_copy() {
-        let p = SecurityProtocol::SaslPlaintext;
-        let p2 = p;
-        assert_eq!(p, p2);
+        assert!(!SecurityProtocol::Plaintext.uses_ssl());
+        assert!(SecurityProtocol::Ssl.uses_ssl());
+        assert!(!SecurityProtocol::SaslPlaintext.uses_ssl());
+        assert!(SecurityProtocol::SaslSsl.uses_ssl());
     }
 }

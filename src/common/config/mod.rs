@@ -12,12 +12,16 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Configuration types for Kafka clients (org.apache.kafka.common.config).
+//! Translation of `org.apache.kafka.common.config`.
 
+pub mod abstract_config;
+pub mod config_def;
+pub mod config_exception;
 pub mod sasl_configs;
-pub mod ssl_client_auth;
 pub mod ssl_configs;
+pub mod topic_config;
 
-pub use sasl_configs::SaslConfig;
-pub use ssl_client_auth::SslClientAuth;
-pub use ssl_configs::SslConfig;
+pub use abstract_config::AbstractConfig;
+pub use config_def::{
+    ConfigDef, ConfigKey, ConfigValue, Importance, NonNullValidator, Password, Range, Type, ValidString, Validator,
+};

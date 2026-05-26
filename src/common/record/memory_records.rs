@@ -12,513 +12,166 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A records implementation backed by a byte buffer.
+//! Translation of `org.apache.kafka.common.record.MemoryRecords`.
 //!
-//! This is used only for reading or modifying in-place an existing buffer of
-//! record batches. To create a new buffer see [`MemoryRecordsBuilder`],
-//! or one of the [`builder()`](MemoryRecords::builder) variants.
+//! A [`Records`] implementation backed by a [`bytes::Bytes`] buffer of one or
+//! more record batches. The Java class wraps a `ByteBuffer`; we wrap a
+//! `Bytes` so:
 //!
-//! Corresponds to Java's `org.apache.kafka.common.record.MemoryRecords`.
+//! * `clone()` is a cheap refcount bump (matches Java's `buffer.duplicate()`
+//!   semantics).
+//! * [`MemoryRecords::slice`] is zero-copy via [`Bytes::slice`] — the sliced
+//!   view aliases the same backing storage exactly as
+//!   `ByteBuffer.duplicate().position(p).limit(p + size).slice()` does in
+//!   Java.
+//! * The downstream `RecordsSend` path (Phase 5 wire send) can hand a
+//!   `Bytes` chunk to `write_vectored` without an intermediate copy.
+//!
+//! The Phase 3d-3 surface covers the *read* path — construction from an
+//! existing buffer (`readableRecords`), iteration through batches/records,
+//! slicing, and `firstBatchSize`. The construction-from-`SimpleRecord`
+//! factories (`withRecords`, `withIdempotentRecords`,
+//! `withTransactionalRecords`, `withEndTransactionMarker`,
+//! `withLeaderChangeMessage`, etc.) are deferred to Phase 3d-4 because they
+//! all internally route through `MemoryRecordsBuilder`. Likewise the
+//! `filterTo` rewriter and the `RecordFilter`/`FilterResult` nested classes
+//! are deferred — they too rely on `MemoryRecordsBuilder` for batch
+//! reconstruction.
 
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::OnceLock;
 
-use crate::common::KafkaError;
-use crate::common::compress::Compression;
-use crate::common::protocol::Errors;
-use crate::common::record::DefaultRecord;
-use crate::common::record::DefaultRecordBatch;
-use crate::common::record::MemoryRecordsBuilder;
-use crate::common::record::RecordBatch;
-use crate::common::record::SimpleRecord;
-use crate::common::record::TimestampType;
-use crate::common::record::abstract_records;
-use crate::common::record::abstract_records::LOG_OVERHEAD;
+use bytes::Bytes;
 
-/// A records implementation backed by a byte buffer.
+use crate::common::errors::KafkaError;
+use crate::common::record::byte_buffer_log_input_stream::ByteBufferLogInputStream;
+use crate::common::record::default_record::DefaultRecord;
+use crate::common::record::default_record_batch::DefaultRecordBatch;
+use crate::common::record::memory_records_builder::MemoryRecordsBuilder;
+use crate::common::record::record_batch::{
+    CURRENT_MAGIC_VALUE, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, NO_TIMESTAMP,
+};
+use crate::common::record::record_batch_iterator::RecordBatchIterator;
+use crate::common::record::{
+    BaseRecords, CompressionType, DefaultRecordsSend, Record, RecordBatch, Records, SimpleRecord, TimestampType,
+    TransferableRecords, default_record_batch,
+};
+use crate::common::utils::byte_buffer_output_stream::ByteBufferOutputStream;
+
+/// A [`Records`] implementation backed by a [`Bytes`] buffer of contiguous
+/// record batches.
 ///
-/// Contains one or more complete record batches in serialized form.
-///
-/// Corresponds to Java's `org.apache.kafka.common.record.MemoryRecords`.
+/// Mirrors Java's `org.apache.kafka.common.record.MemoryRecords`. The buffer
+/// must contain zero or more concatenated v2 batches; legacy v0/v1 magic
+/// bytes are rejected by [`ByteBufferLogInputStream`] when iterated.
 #[derive(Clone, Debug)]
 pub struct MemoryRecords {
-    buffer: Vec<u8>,
+    buffer: Bytes,
 }
 
 impl MemoryRecords {
-    /// Create a new `MemoryRecords` wrapping the given buffer.
-    pub fn new(buffer: Vec<u8>) -> Self {
-        Self { buffer }
+    /// The empty record set. Mirrors Java's
+    /// `MemoryRecords.EMPTY = readableRecords(ByteBuffer.allocate(0))`.
+    pub fn empty() -> &'static MemoryRecords {
+        static EMPTY: OnceLock<MemoryRecords> = OnceLock::new();
+        EMPTY.get_or_init(|| MemoryRecords::readable_records(Bytes::new()))
     }
 
-    /// Create an empty `MemoryRecords`.
-    pub fn empty() -> Self {
-        Self { buffer: Vec::new() }
+    /// Construct an instance for reading the supplied buffer. Mirrors Java's
+    /// `MemoryRecords.readableRecords(ByteBuffer)` static factory.
+    ///
+    /// The `Bytes` is moved in — no copy — and downstream slicing is also
+    /// zero-copy via [`Bytes::slice`].
+    pub fn readable_records(buffer: Bytes) -> Self {
+        MemoryRecords { buffer }
     }
 
-    /// Create a `MemoryRecords` from a byte slice (copies the data).
-    pub fn readable_records(data: &[u8]) -> Self {
-        Self { buffer: data.to_vec() }
+    /// Convenience: construct from an owned `Vec<u8>`. The vec is moved into a
+    /// `Bytes` without copying.
+    pub fn readable_records_from_vec(vec: Vec<u8>) -> Self {
+        MemoryRecords::readable_records(Bytes::from(vec))
     }
 
-    /// Returns the total size of this records set in bytes.
-    pub fn size_in_bytes(&self) -> usize {
-        self.buffer.len()
-    }
-
-    /// Returns a reference to the underlying buffer.
-    pub fn buffer(&self) -> &[u8] {
+    /// Borrow the underlying buffer (read-only). Mirrors Java's `buffer()`
+    /// (which returns `buffer.duplicate()`); both expose a read-only view
+    /// over the same backing storage.
+    pub fn buffer(&self) -> &Bytes {
         &self.buffer
     }
 
-    /// Returns a mutable reference to the underlying buffer.
-    pub fn buffer_mut(&mut self) -> &mut Vec<u8> {
-        &mut self.buffer
+    /// Consume `self` and return the underlying `Bytes`. Used by the
+    /// `BufferPool` recycle path (see
+    /// [`MemoryRecordsBuilder::buffer_owned`]) to recover the originating
+    /// `Vec<u8>` allocation. There is no Java analogue — Java's
+    /// `ByteBuffer` is reference-shared between the builder's `bufferStream`
+    /// and the materialized `MemoryRecords`, so the pool's
+    /// `deallocate(buffer)` call uses that same reference. In Rust we
+    /// MOVED the `Vec<u8>` into the `Bytes` at `build()` for zero-copy
+    /// finalization, so recovery is "consume the `MemoryRecords`, take
+    /// its `Bytes`, and `try_into_mut`".
+    pub(crate) fn into_buffer(self) -> Bytes {
+        self.buffer
     }
 
-    /// Returns an iterator over the batches in this records set.
+    /// The total number of bytes in this message set not including any
+    /// partial, trailing messages. Mirrors Java's `validBytes()`. Walks
+    /// every batch; corrupt records terminate early.
     ///
-    /// Each batch is a `DefaultRecordBatch` containing the full batch header
-    /// and record data.
-    pub fn batches(&self) -> BatchIterator<'_> {
-        BatchIterator { data: &self.buffer, pos: 0 }
-    }
-
-    /// Returns an iterator over all individual records across all batches.
-    pub fn records(&self) -> impl Iterator<Item = DefaultRecord> + '_ {
-        self.batches().flat_map(|batch| batch.iter_records().unwrap_or_default())
-    }
-
-    /// The total number of valid bytes (excluding any partial, trailing data).
-    pub fn valid_bytes(&self) -> usize {
-        let mut bytes = 0;
-        for batch in self.batches() {
-            bytes += batch.size_in_bytes();
+    /// Java caches the result on first call. We do not — `MemoryRecords` is
+    /// cheaply clonable and the caller can cache themselves if needed.
+    pub fn valid_bytes(&self) -> i32 {
+        let mut bytes = 0i32;
+        for batch in self.batch_iterator() {
+            // Java returns the running total on `CorruptRecordException`
+            // (it propagates the exception). We instead stop at the first
+            // corrupt batch and return what we've counted, mirroring
+            // `Records::batches`'s "skip-corrupt-and-stop" semantic.
+            match batch {
+                Ok(b) => bytes += b.size_in_bytes(),
+                Err(_) => break,
+            }
         }
         bytes
     }
 
-    /// Validates the header of the first batch and returns batch size.
+    /// Validate the header of the first batch and return its full size
+    /// (including [`crate::common::record::records::LOG_OVERHEAD`]).
     ///
-    /// Returns `Ok(None)` if the buffer does not contain enough bytes for a
-    /// header. Returns `Err(CorruptMessage)` if the record size is invalid
-    /// (too small, too large, or negative) or if the magic byte is invalid.
+    /// Mirrors Java's `firstBatchSize()`. Returns:
     ///
-    /// Corresponds to Java's `MemoryRecords.firstBatchSize()` which delegates
-    /// to `ByteBufferLogInputStream.nextBatchSize()`.
-    pub fn first_batch_size(&self) -> Result<Option<usize>, KafkaError> {
-        // Minimum overhead for LegacyRecord v0:
-        //   CRC(4) + Magic(1) + Attributes(1) + KeySize(4) + ValueSize(4) = 14
-        const LEGACY_RECORD_OVERHEAD_V0: i32 = 14;
-
-        if self.buffer.len() < LOG_OVERHEAD {
+    /// * `Ok(Some(n))` — header is valid, batch size is `n` bytes;
+    /// * `Ok(None)` — buffer doesn't yet hold enough bytes for the header;
+    /// * `Err(KafkaError::CorruptRecord)` — record size or magic is invalid.
+    pub fn first_batch_size(&self) -> Result<Option<i32>, KafkaError> {
+        // Java: `if (buffer.remaining() < HEADER_SIZE_UP_TO_MAGIC) return null;`
+        // before calling `nextBatchSize()`. This early-out short-circuits
+        // the SIZE-field validation in `next_batch_size`: a buffer with a
+        // partial header skips raising a CorruptRecord and just returns
+        // None, mirroring Java's "not enough yet, try again" semantic.
+        if self.buffer.len() < crate::common::record::records::HEADER_SIZE_UP_TO_MAGIC {
             return Ok(None);
         }
-
-        // Read the record size (length) field
-        let record_size = i32::from_be_bytes(
-            self.buffer[RecordBatch::LENGTH_OFFSET..RecordBatch::LENGTH_OFFSET + 4]
-                .try_into()
-                .map_err(|_| KafkaError::with_message(Errors::CorruptMessage, "Failed to read record size"))?,
-        );
-
-        // Validate minimum record size (V0 has the smallest overhead)
-        if record_size < LEGACY_RECORD_OVERHEAD_V0 {
-            return Err(KafkaError::with_message(
-                Errors::CorruptMessage,
-                format!(
-                    "Record size {} is less than the minimum record overhead ({})",
-                    record_size, LEGACY_RECORD_OVERHEAD_V0
-                ),
-            ));
-        }
-
-        // Validate maximum message size (use i32::MAX like Java's Integer.MAX_VALUE)
-        // Java passes Integer.MAX_VALUE as maxMessageSize from firstBatchSize(),
-        // so this check only catches negative values that wrapped or truly
-        // enormous sizes. Since we already checked >= LEGACY_RECORD_OVERHEAD_V0
-        // and record_size is i32, the max check here matches Java behavior.
-
-        if self.buffer.len() < abstract_records::HEADER_SIZE_UP_TO_MAGIC {
-            return Ok(None);
-        }
-
-        // Validate magic byte
-        let magic = self.buffer[RecordBatch::MAGIC_OFFSET] as i8;
-        if !(0..=RecordBatch::CURRENT_MAGIC_VALUE).contains(&magic) {
-            return Err(KafkaError::with_message(
-                Errors::CorruptMessage,
-                format!("Invalid magic found in record: {}", magic),
-            ));
-        }
-
-        Ok(Some(LOG_OVERHEAD + record_size as usize))
+        ByteBufferLogInputStream::new(self.buffer.as_ref(), i32::MAX).next_batch_size()
     }
 
-    /// Returns a slice of the records data at the given position and size.
+    /// Iterator over batches that surfaces corrupt-record errors. Used
+    /// internally by [`MemoryRecords::valid_bytes`] and the trait-level
+    /// `batches()` implementation.
+    fn batch_iterator(&self) -> RecordBatchIterator<ByteBufferLogInputStream<'_>, DefaultRecordBatch> {
+        // Java passes `Integer.MAX_VALUE` for the per-batch size cap.
+        RecordBatchIterator::new(ByteBufferLogInputStream::new(self.buffer.as_ref(), i32::MAX))
+    }
+
+    /// Build a [`MemoryRecords`] from the given records using
+    /// [`MemoryRecordsBuilder`]. Mirrors Java's most general
+    /// `withRecords(byte, long, Compression, TimestampType, long, short,
+    /// int, int, boolean, SimpleRecord...)` factory.
     ///
-    /// The `size` parameter is clamped to the available bytes from `position`
-    /// to the end of the buffer, matching Java's
-    /// `MemoryRecords.slice(int, int)` which uses
-    /// `Math.min(size, buffer.limit() - position)`.
-    pub fn slice(&self, position: usize, size: usize) -> MemoryRecords {
-        assert!(
-            position <= self.buffer.len(),
-            "Slice from position {} exceeds end position",
-            position
-        );
-        let available_bytes = size.min(self.buffer.len() - position);
-        MemoryRecords::new(self.buffer[position..position + available_bytes].to_vec())
-    }
-
-    // -- Builder factory methods --
-
-    /// Create a builder with default parameters.
-    pub fn builder(
-        initial_capacity: usize,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-    ) -> MemoryRecordsBuilder {
-        Self::builder_with_magic(
-            initial_capacity,
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            compression,
-            timestamp_type,
-            base_offset,
-        )
-    }
-
-    /// Create a builder with a specific magic value.
-    pub fn builder_with_magic(
-        initial_capacity: usize,
-        magic: i8,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-    ) -> MemoryRecordsBuilder {
-        let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
-            current_time_millis()
-        } else {
-            RecordBatch::NO_TIMESTAMP
-        };
-        Self::builder_full(
-            initial_capacity,
-            magic,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            RecordBatch::NO_PRODUCER_ID,
-            RecordBatch::NO_PRODUCER_EPOCH,
-            RecordBatch::NO_SEQUENCE,
-            false,
-            false,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            initial_capacity,
-        )
-    }
-
-    /// Create a builder using a pre-allocated buffer.
-    ///
-    /// This is the equivalent of Java's `MemoryRecords.builder(ByteBuffer, ...)` overload
-    /// that accepts an existing buffer (e.g., from a buffer pool) instead of allocating a
-    /// new one.
-    pub fn builder_with_buffer(
-        buffer: Vec<u8>,
-        magic: i8,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-    ) -> MemoryRecordsBuilder {
-        let write_limit = buffer.capacity();
-        let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
-            current_time_millis()
-        } else {
-            RecordBatch::NO_TIMESTAMP
-        };
-        MemoryRecordsBuilder::new_default(
-            buffer,
-            0,
-            magic,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            RecordBatch::NO_PRODUCER_ID,
-            RecordBatch::NO_PRODUCER_EPOCH,
-            RecordBatch::NO_SEQUENCE,
-            false,
-            false,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            write_limit,
-        )
-    }
-
-    /// Create a builder with a max size limit.
-    pub fn builder_with_max_size(
-        initial_capacity: usize,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-        max_size: usize,
-    ) -> MemoryRecordsBuilder {
-        let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
-            current_time_millis()
-        } else {
-            RecordBatch::NO_TIMESTAMP
-        };
-        Self::builder_full(
-            initial_capacity,
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            RecordBatch::NO_PRODUCER_ID,
-            RecordBatch::NO_PRODUCER_EPOCH,
-            RecordBatch::NO_SEQUENCE,
-            false,
-            false,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            max_size,
-        )
-    }
-
-    /// Create a builder with magic, compression, timestamp type, and log append time.
-    pub fn builder_with_log_append_time(
-        initial_capacity: usize,
-        magic: i8,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-        log_append_time: i64,
-    ) -> MemoryRecordsBuilder {
-        Self::builder_full(
-            initial_capacity,
-            magic,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            RecordBatch::NO_PRODUCER_ID,
-            RecordBatch::NO_PRODUCER_EPOCH,
-            RecordBatch::NO_SEQUENCE,
-            false,
-            false,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            initial_capacity,
-        )
-    }
-
-    /// Create a builder with producer state.
+    /// Returns [`MemoryRecords::empty`]'s clone for an empty input slice.
     #[allow(clippy::too_many_arguments)]
-    pub fn builder_with_producer(
-        initial_capacity: usize,
-        magic: i8,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-        log_append_time: i64,
-        producer_id: i64,
-        producer_epoch: i16,
-        base_sequence: i32,
-    ) -> MemoryRecordsBuilder {
-        Self::builder_full(
-            initial_capacity,
-            magic,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            producer_id,
-            producer_epoch,
-            base_sequence,
-            false,
-            false,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            initial_capacity,
-        )
-    }
-
-    /// Create a builder with full parameters (no delete horizon).
-    #[allow(clippy::too_many_arguments)]
-    pub fn builder_full(
-        initial_capacity: usize,
-        magic: i8,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-        log_append_time: i64,
-        producer_id: i64,
-        producer_epoch: i16,
-        base_sequence: i32,
-        is_transactional: bool,
-        is_control_batch: bool,
-        partition_leader_epoch: i32,
-        write_limit: usize,
-    ) -> MemoryRecordsBuilder {
-        let buffer = Vec::with_capacity(initial_capacity);
-        MemoryRecordsBuilder::new_default(
-            buffer,
-            0,
-            magic,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            producer_id,
-            producer_epoch,
-            base_sequence,
-            is_transactional,
-            is_control_batch,
-            partition_leader_epoch,
-            write_limit,
-        )
-    }
-
-    /// Create a builder with full parameters including delete horizon.
-    #[allow(clippy::too_many_arguments)]
-    pub fn builder_full_with_delete_horizon(
-        initial_capacity: usize,
-        magic: i8,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        base_offset: i64,
-        log_append_time: i64,
-        producer_id: i64,
-        producer_epoch: i16,
-        base_sequence: i32,
-        is_transactional: bool,
-        is_control_batch: bool,
-        partition_leader_epoch: i32,
-        write_limit: usize,
-        delete_horizon_ms: i64,
-    ) -> MemoryRecordsBuilder {
-        let buffer = Vec::with_capacity(initial_capacity);
-        MemoryRecordsBuilder::new(
-            buffer,
-            0,
-            magic,
-            compression,
-            timestamp_type,
-            base_offset,
-            log_append_time,
-            producer_id,
-            producer_epoch,
-            base_sequence,
-            is_transactional,
-            is_control_batch,
-            partition_leader_epoch,
-            write_limit,
-            delete_horizon_ms,
-        )
-    }
-
-    // -- Convenience factory methods for creating records directly --
-
-    /// Create a `MemoryRecords` with the given records using default settings.
-    pub fn with_records(compression: Compression, records: &[SimpleRecord]) -> MemoryRecords {
-        Self::with_records_magic(RecordBatch::CURRENT_MAGIC_VALUE, compression, records)
-    }
-
-    /// Create a `MemoryRecords` with a specific magic value.
-    pub fn with_records_magic(magic: i8, compression: Compression, records: &[SimpleRecord]) -> MemoryRecords {
-        Self::with_records_at_offset(magic, 0, compression, TimestampType::CreateTime, records)
-    }
-
-    /// Create a `MemoryRecords` with records starting at a specific offset.
-    pub fn with_records_at_offset(
+    pub fn with_records(
         magic: i8,
         initial_offset: i64,
-        compression: Compression,
-        timestamp_type: TimestampType,
-        records: &[SimpleRecord],
-    ) -> MemoryRecords {
-        Self::with_records_full(
-            magic,
-            initial_offset,
-            compression,
-            timestamp_type,
-            RecordBatch::NO_PRODUCER_ID,
-            RecordBatch::NO_PRODUCER_EPOCH,
-            RecordBatch::NO_SEQUENCE,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            false,
-            records,
-        )
-    }
-
-    /// Create a `MemoryRecords` with records at a specific offset and partition leader epoch.
-    pub fn with_records_at_offset_plep(
-        initial_offset: i64,
-        compression: Compression,
-        partition_leader_epoch: i32,
-        records: &[SimpleRecord],
-    ) -> MemoryRecords {
-        Self::with_records_full(
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            initial_offset,
-            compression,
-            TimestampType::CreateTime,
-            RecordBatch::NO_PRODUCER_ID,
-            RecordBatch::NO_PRODUCER_EPOCH,
-            RecordBatch::NO_SEQUENCE,
-            partition_leader_epoch,
-            false,
-            records,
-        )
-    }
-
-    /// Create idempotent records.
-    pub fn with_idempotent_records(
-        compression: Compression,
-        producer_id: i64,
-        producer_epoch: i16,
-        base_sequence: i32,
-        records: &[SimpleRecord],
-    ) -> MemoryRecords {
-        Self::with_records_full(
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            0,
-            compression,
-            TimestampType::CreateTime,
-            producer_id,
-            producer_epoch,
-            base_sequence,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            false,
-            records,
-        )
-    }
-
-    /// Create transactional records.
-    pub fn with_transactional_records(
-        compression: Compression,
-        producer_id: i64,
-        producer_epoch: i16,
-        base_sequence: i32,
-        records: &[SimpleRecord],
-    ) -> MemoryRecords {
-        Self::with_records_full(
-            RecordBatch::CURRENT_MAGIC_VALUE,
-            0,
-            compression,
-            TimestampType::CreateTime,
-            producer_id,
-            producer_epoch,
-            base_sequence,
-            RecordBatch::NO_PARTITION_LEADER_EPOCH,
-            true,
-            records,
-        )
-    }
-
-    /// Create a `MemoryRecords` with full parameters.
-    #[allow(clippy::too_many_arguments)]
-    pub fn with_records_full(
-        magic: i8,
-        initial_offset: i64,
-        compression: Compression,
+        compression: CompressionType,
         timestamp_type: TimestampType,
         producer_id: i64,
         producer_epoch: i16,
@@ -526,21 +179,26 @@ impl MemoryRecords {
         partition_leader_epoch: i32,
         is_transactional: bool,
         records: &[SimpleRecord],
-    ) -> MemoryRecords {
+    ) -> Result<MemoryRecords, KafkaError> {
         if records.is_empty() {
-            return MemoryRecords::empty();
+            return Ok(MemoryRecords::empty().clone());
         }
-
-        let size_estimate = abstract_records::estimate_size_in_bytes(magic, compression.compression_type(), records);
+        let size_estimate = estimate_size_in_bytes(magic, compression, records);
+        let stream = ByteBufferOutputStream::with_capacity(size_estimate as usize);
+        // Mirrors Java's MemoryRecords.java:511-514:
+        //   long logAppendTime = RecordBatch.NO_TIMESTAMP;
+        //   if (timestampType == TimestampType.LOG_APPEND_TIME)
+        //       logAppendTime = System.currentTimeMillis();
         let log_append_time = if timestamp_type == TimestampType::LogAppendTime {
-            current_time_millis()
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_millis() as i64)
+                .unwrap_or(NO_TIMESTAMP)
         } else {
-            RecordBatch::NO_TIMESTAMP
+            NO_TIMESTAMP
         };
-
-        let mut builder = MemoryRecordsBuilder::new_default(
-            Vec::with_capacity(size_estimate),
-            0,
+        let mut builder = MemoryRecordsBuilder::from_stream_no_delete_horizon(
+            stream,
             magic,
             compression,
             timestamp_type,
@@ -553,13 +211,308 @@ impl MemoryRecords {
             false,
             partition_leader_epoch,
             size_estimate,
-        );
-
+        )?;
         for record in records {
-            builder.append_simple(record);
+            builder.append_simple(record)?;
         }
-
         builder.build()
+    }
+
+    /// Convenience: build a [`MemoryRecords`] for the default case used
+    /// by tests — no producer state, no partition leader epoch,
+    /// `CreateTime`, `initial_offset = 0`.
+    ///
+    /// Mirrors Java's `withRecords(Compression, SimpleRecord...)` at
+    /// `MemoryRecords.java:587-589` — which itself routes to
+    /// `withRecords(CURRENT_MAGIC_VALUE, compression, records)`.
+    pub fn with_records_default(
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records_magic(CURRENT_MAGIC_VALUE, compression, records)
+    }
+
+    /// Mirrors Java's `withRecords(byte magic, Compression, SimpleRecord...)`
+    /// at `MemoryRecords.java:597-599` — magic explicit, default
+    /// `initial_offset = 0` and `CreateTime`.
+    pub fn with_records_magic(
+        magic: i8,
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records_create_time(magic, 0, compression, records)
+    }
+
+    /// Mirrors Java's `withRecords(long initialOffset, Compression,
+    /// SimpleRecord...)` at `MemoryRecords.java:601-604` — explicit
+    /// initial offset, magic = `CURRENT_MAGIC_VALUE`, `CreateTime`.
+    pub fn with_records_initial_offset(
+        initial_offset: i64,
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records_create_time(CURRENT_MAGIC_VALUE, initial_offset, compression, records)
+    }
+
+    /// Mirrors Java's `withRecords(byte magic, long initialOffset,
+    /// Compression, SimpleRecord...)` at `MemoryRecords.java:606-608`
+    /// and the underlying `withRecords(magic, initialOffset, compression,
+    /// CREATE_TIME, records)` at `:655-660` — explicit magic and
+    /// initial offset, `CreateTime`, no producer state.
+    pub fn with_records_create_time(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            NO_PARTITION_LEADER_EPOCH,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withRecords(Compression, int partitionLeaderEpoch,
+    /// SimpleRecord...)` at `MemoryRecords.java:591-595` — partition
+    /// leader epoch explicit, magic = `CURRENT_MAGIC_VALUE`,
+    /// `initial_offset = 0`, `CreateTime`.
+    pub fn with_records_partition_leader_epoch(
+        compression: CompressionType,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            TimestampType::CreateTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            partition_leader_epoch,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withRecords(long initialOffset, Compression,
+    /// int partitionLeaderEpoch, SimpleRecord...)` at
+    /// `MemoryRecords.java:610-613` — explicit `initial_offset` and
+    /// `partition_leader_epoch`, magic = `CURRENT_MAGIC_VALUE`,
+    /// `CreateTime`, no producer state.
+    pub fn with_records_initial_offset_partition_leader_epoch(
+        initial_offset: i64,
+        compression: CompressionType,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            partition_leader_epoch,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withRecords(byte, long, Compression,
+    /// TimestampType, SimpleRecord...)` at `MemoryRecords.java:655-660`
+    /// — explicit timestamp type, no producer state.
+    pub fn with_records_timestamp_type(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        timestamp_type: TimestampType,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            timestamp_type,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            NO_PARTITION_LEADER_EPOCH,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withIdempotentRecords(byte, long, Compression,
+    /// long, short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:621-626` — sets `producer_id` and
+    /// `base_sequence` but leaves `is_transactional` false.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_idempotent_records(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            false,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withIdempotentRecords(Compression, long, short, int,
+    /// SimpleRecord...)` at `MemoryRecords.java:615-619` — short-form
+    /// overload using `CURRENT_MAGIC_VALUE`, `initial_offset = 0`, and
+    /// `NO_PARTITION_LEADER_EPOCH`.
+    pub fn with_idempotent_records_default(
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_idempotent_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            NO_PARTITION_LEADER_EPOCH,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withIdempotentRecords(long, Compression, long,
+    /// short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:628-633` — explicit `initial_offset` and
+    /// `partition_leader_epoch`, magic = `CURRENT_MAGIC_VALUE`.
+    pub fn with_idempotent_records_initial_offset(
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_idempotent_records(
+            CURRENT_MAGIC_VALUE,
+            initial_offset,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords(byte, long, Compression,
+    /// long, short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:641-646` — sets `producer_id`,
+    /// `base_sequence`, and `is_transactional`.
+    #[allow(clippy::too_many_arguments)]
+    pub fn with_transactional_records(
+        magic: i8,
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_records(
+            magic,
+            initial_offset,
+            compression,
+            TimestampType::CreateTime,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            true,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords(Compression, long, short,
+    /// int, SimpleRecord...)` at `MemoryRecords.java:635-639` —
+    /// short-form overload using `CURRENT_MAGIC_VALUE`,
+    /// `initial_offset = 0`, and `NO_PARTITION_LEADER_EPOCH`.
+    pub fn with_transactional_records_default(
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_transactional_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            NO_PARTITION_LEADER_EPOCH,
+            records,
+        )
+    }
+
+    /// Mirrors Java's `withTransactionalRecords(long, Compression, long,
+    /// short, int, int, SimpleRecord...)` at
+    /// `MemoryRecords.java:648-653` — explicit `initial_offset` and
+    /// `partition_leader_epoch`, magic = `CURRENT_MAGIC_VALUE`.
+    pub fn with_transactional_records_initial_offset(
+        initial_offset: i64,
+        compression: CompressionType,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        partition_leader_epoch: i32,
+        records: &[SimpleRecord],
+    ) -> Result<MemoryRecords, KafkaError> {
+        MemoryRecords::with_transactional_records(
+            CURRENT_MAGIC_VALUE,
+            initial_offset,
+            compression,
+            producer_id,
+            producer_epoch,
+            base_sequence,
+            partition_leader_epoch,
+            records,
+        )
+    }
+
+    /// Build a [`DefaultRecordsSend`] sized to this record set's full size.
+    ///
+    /// Mirrors Java's `AbstractRecords#toSend()` override (which returns
+    /// `new DefaultRecordsSend<>(this)`). Consuming `self` here mirrors
+    /// Java's reference-passing — the underlying `Bytes` is refcount-shared
+    /// so callers that still need the records can `clone()` first.
+    pub fn to_send(self) -> DefaultRecordsSend<MemoryRecords> {
+        DefaultRecordsSend::new(self)
     }
 }
 
@@ -579,458 +532,746 @@ impl std::hash::Hash for MemoryRecords {
 
 impl std::fmt::Display for MemoryRecords {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "MemoryRecords(size={})", self.size_in_bytes())
+        // Mirrors Java's toString().
+        write!(f, "MemoryRecords(size={}, buffer={:?})", self.size_in_bytes(), self.buffer)
     }
 }
 
-/// Iterator over record batches in a `MemoryRecords`.
-pub struct BatchIterator<'a> {
-    data: &'a [u8],
-    pos: usize,
+impl BaseRecords for MemoryRecords {
+    fn size_in_bytes(&self) -> i32 {
+        // Java returns `buffer.limit()`. With `Bytes` the "limit" is the
+        // length of the slice — they're the same: the materialized window
+        // that callers can read.
+        self.buffer.len() as i32
+    }
 }
 
-impl<'a> Iterator for BatchIterator<'a> {
-    type Item = DefaultRecordBatch;
+impl TransferableRecords for MemoryRecords {}
+
+impl Records for MemoryRecords {
+    fn batches<'a>(&'a self) -> Box<dyn Iterator<Item = Result<Box<dyn RecordBatch + 'a>, KafkaError>> + 'a> {
+        // Mirrors Java's `MemoryRecordsBatchIterator` which throws
+        // `CorruptRecordException` on the first malformed batch. The Rust
+        // translation surfaces that signal as `Err(KafkaError::CorruptRecord)`
+        // at the same iteration step. The underlying `RecordBatchIterator`
+        // is "poisoned" after the first error, so subsequent calls return
+        // `None` (matching Java's "throw and stop" semantic).
+        Box::new(
+            self.batch_iterator()
+                .map(|r| r.map(|b| Box::new(b) as Box<dyn RecordBatch + 'a>)),
+        )
+    }
+
+    fn records<'a>(&'a self) -> Box<dyn Iterator<Item = Box<dyn Record + 'a>> + 'a> {
+        // Mirrors Java's `AbstractRecords.records()` — flat-map each batch
+        // into its records. Although `RecordBatch::iter` yields
+        // `Box<dyn Record + '_>` borrowing from the batch buffer, every
+        // concrete record produced by the v2 batch path
+        // (`DefaultRecord`) owns its key/value/headers (`Option<Bytes>`,
+        // `Vec<RecordHeader>`). The borrow in the trait signature is
+        // therefore conservative — the records survive the batch drop.
+        //
+        // We collect each batch's decoded records into a `Vec<DefaultRecord>`
+        // and discard the batch wrapper. Per-batch buffering is unavoidable
+        // because the trait object's lifetime is tied to the borrowing
+        // batch; routing through the concrete `DefaultRecord` lets us drop
+        // the batch and yield owned records.
+        //
+        // Key/value `Bytes` still alias the original `Bytes` payload — the
+        // collect cost is one `Box<dyn Record>` per record (Rc-shared
+        // payload bytes are not copied). This is the *consumer-side*
+        // iterator (broker rewriting / metrics) and is **not on the
+        // producer hot path**.
+        let batches = self.batch_iterator();
+        Box::new(BatchFlatIter { batches, current: Vec::new().into_iter() })
+    }
+
+    fn slice(&self, position: i32, size: i32) -> Result<Box<dyn Records + '_>, KafkaError> {
+        Ok(Box::new(self.slice_inner(position, size)?))
+    }
+}
+
+impl MemoryRecords {
+    /// Concrete typed slice — used by the trait `slice` and by callers that
+    /// need a `MemoryRecords` directly. Mirrors Java's
+    /// `MemoryRecords#slice(int position, int size)` returning
+    /// `MemoryRecords`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KafkaError::IllegalArgument`] when `position` is negative,
+    /// when `position` exceeds the buffer length, or when `size` is
+    /// negative — mirroring Java's `IllegalArgumentException`.
+    pub fn slice_inner(&self, position: i32, size: i32) -> Result<MemoryRecords, KafkaError> {
+        if position < 0 {
+            return Err(KafkaError::IllegalArgument(format!(
+                "Invalid position: {position} in read from {self}"
+            )));
+        }
+        if position as usize > self.buffer.len() {
+            return Err(KafkaError::IllegalArgument(format!(
+                "Slice from position {position} exceeds end position of {self}"
+            )));
+        }
+        if size < 0 {
+            return Err(KafkaError::IllegalArgument(format!("Invalid size: {size} in read from {self}")));
+        }
+        let position = position as usize;
+        let size = size as usize;
+        let available = (self.buffer.len() - position).min(size);
+        // Zero-copy slice: shares the same backing allocation.
+        let sliced = self.buffer.slice(position..position + available);
+        Ok(MemoryRecords::readable_records(sliced))
+    }
+}
+
+/// Mirrors Java's `AbstractRecords.estimateSizeInBytes(byte,
+/// CompressionType, Iterable<SimpleRecord>)`. For magic v2 dispatches
+/// to `DefaultRecordBatch::size_in_bytes_simple`. Compression compresses
+/// estimate per Java's heuristic.
+fn estimate_size_in_bytes(magic: i8, compression: CompressionType, records: &[SimpleRecord]) -> i32 {
+    let size = if magic <= crate::common::record::record_batch::MAGIC_VALUE_V0 + 1 {
+        // v0/v1 path uses LegacyRecord which is out of scope. Phase 3 only
+        // produces v2 batches; for v0/v1 callers we fall through to the
+        // default-batch sizing as a conservative upper bound.
+        default_record_batch::size_in_bytes_simple(records)
+    } else {
+        default_record_batch::size_in_bytes_simple(records)
+    };
+    estimate_compressed_size_in_bytes(size, compression)
+}
+
+fn estimate_compressed_size_in_bytes(size: i32, compression: CompressionType) -> i32 {
+    if compression == CompressionType::None {
+        size
+    } else {
+        // Java: `Math.min(Math.max(size / 2, 1024), 1 << 16)`
+        (size / 2).clamp(1024, 1 << 16)
+    }
+}
+
+/// Internal iterator that flattens batches into records. Owns the current
+/// batch's record set as a `Vec<DefaultRecord>`; on each pull, advances
+/// inside the buffered records first, then loads the next batch.
+///
+/// We materialize each batch into a `Vec<DefaultRecord>` (rather than
+/// `Vec<Box<dyn Record>>`) so the records are owned and the batch can be
+/// dropped — the `DefaultRecord` struct stores `Option<Bytes>` + headers,
+/// none of which borrow from the source batch.
+struct BatchFlatIter<'a> {
+    batches: RecordBatchIterator<ByteBufferLogInputStream<'a>, DefaultRecordBatch>,
+    current: std::vec::IntoIter<DefaultRecord>,
+}
+
+impl<'a> Iterator for BatchFlatIter<'a> {
+    type Item = Box<dyn Record + 'a>;
 
     fn next(&mut self) -> Option<Self::Item> {
-        // Need at least LOG_OVERHEAD bytes to read base_offset + length
-        if self.pos + LOG_OVERHEAD > self.data.len() {
-            return None;
+        loop {
+            if let Some(rec) = self.current.next() {
+                return Some(Box::new(rec));
+            }
+            let next_batch = self.batches.next()?;
+            match next_batch {
+                Ok(batch) => {
+                    let owned = drain_batch_into_owned_records(&batch);
+                    self.current = owned.into_iter();
+                },
+                Err(_) => return None,
+            }
         }
-
-        // Read the batch length from the length field
-        let length_bytes = &self.data[self.pos + RecordBatch::LENGTH_OFFSET..self.pos + RecordBatch::LENGTH_OFFSET + 4];
-        let batch_length = i32::from_be_bytes(length_bytes.try_into().ok()?) as usize;
-        let total_batch_size = LOG_OVERHEAD + batch_length;
-
-        if self.pos + total_batch_size > self.data.len() {
-            return None;
-        }
-
-        let batch_data = self.data[self.pos..self.pos + total_batch_size].to_vec();
-        self.pos += total_batch_size;
-
-        Some(DefaultRecordBatch::new(batch_data))
     }
 }
 
-/// Get the current time in milliseconds since epoch.
-fn current_time_millis() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as i64
+/// Drain a batch's records into an owned `Vec<DefaultRecord>`. Stops at the
+/// first corrupt record (matching Java's "throw and stop" iterator).
+fn drain_batch_into_owned_records(batch: &DefaultRecordBatch) -> Vec<DefaultRecord> {
+    let mut out: Vec<DefaultRecord> = Vec::with_capacity(batch.count_or_null().unwrap_or(0).max(0) as usize);
+    for r in batch.iter() {
+        match r {
+            Ok(boxed) => match downcast_to_default_record(boxed) {
+                Some(d) => out.push(d),
+                None => break,
+            },
+            Err(_) => break,
+        }
+    }
+    out
+}
+
+/// Helper: pull the concrete `DefaultRecord` out of a `Box<dyn Record>`
+/// produced by `DefaultRecordBatch::iter`. The current `iter()` impl always
+/// yields `DefaultRecord`, but the trait erasure is lossy. We re-decode by
+/// copying out the public accessor results into a fresh `DefaultRecord`
+/// — at the cost of one allocation for `headers` and refcount bumps for
+/// `key`/`value`.
+fn downcast_to_default_record(record: Box<dyn Record + '_>) -> Option<DefaultRecord> {
+    use bytes::Bytes;
+
+    // Reconstruct a DefaultRecord from the public accessors. Header
+    // contents are cloned (one `Vec<RecordHeader>` allocation per record);
+    // key/value cross over via `Bytes::copy_from_slice` — this is a copy.
+    //
+    // To avoid the key/value copy, we'd need either:
+    // (a) Add a `as_any` / downcasting hook to the `Record` trait — not
+    //     present in Java and would force an API change.
+    // (b) Expose `DefaultRecordBatch::iter_default()` returning concrete
+    //     records — diverges from Java's `RecordBatch.iterator()` shape.
+    //
+    // For the consumer-side flat-records iterator (Phase 5+ broker /
+    // metrics path), the copy is acceptable. The producer-side hot path
+    // does NOT use `Records::records()` — it uses the typed
+    // `MemoryRecordsBuilder` (Phase 3d-4) and `DefaultRecordBatch::iter`
+    // directly, both of which preserve zero-copy.
+    let key = record.key().map(Bytes::copy_from_slice);
+    let value = record.value().map(Bytes::copy_from_slice);
+    let headers: Vec<crate::common::header::RecordHeader> = record.headers().to_vec();
+    // The v2 record `attributes` byte is unused (always 0 in current
+    // protocol); see `default_record::write_to`. Using 0 here matches the
+    // round-trip-decoded value.
+    Some(DefaultRecord::new(
+        record.size_in_bytes(),
+        0,
+        record.offset(),
+        record.timestamp(),
+        record.sequence(),
+        key,
+        value,
+        headers,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
+    //! Translation of the parts of `MemoryRecordsTest.java` that exercise the
+    //! read path.
+    //!
+    //! Deferred to Phase 6+ (need `filterTo`, control records, KRaft):
+    //! * `testFilterToPreservesPartitionLeaderEpoch` — needs `filterTo`
+    //! * `testFilterToEmptyBatchRetention` — needs `filterTo`
+    //! * `testEmptyBatchRetention` — needs `filterTo`
+    //! * `testEmptyBatchDeletion` — needs `filterTo`
+    //! * `testBuildEndTxnMarker` — needs `withEndTransactionMarker` (txn
+    //!   markers, deferred per PLAN.md scope)
+    //! * `testBaseTimestampToDeleteHorizonConversion` — needs `filterTo`
+    //! * `testBuildLeaderChangeMessage` — KRaft control records, out of
+    //!   scope (PLAN.md skips control records beyond the enum)
+    //! * `testFilterToBatchDiscard` — needs `filterTo`
+    //! * `testFilterToAlreadyCompactedLog` — needs `filterTo`
+    //! * `testFilterToPreservesProducerInfo` — needs `filterTo`
+    //! * `testFilterToWithUndersizedBuffer` — needs `filterTo`
+    //! * `testFilterTo` — needs `filterTo`
+    //! * `testFilterToPreservesLogAppendTime` — needs `filterTo`
+    //!
+    //! Translated in Phase 3d-3 (read-path coverage):
+    //! * `testNextBatchSize` (read-path subset — `firstBatchSize` semantics)
+    //! * `testSlice`
+    //! * `testSliceInvalidPosition`
+    //! * `testSliceInvalidSize`
+    //! * `testSliceEmptyRecords`
+    //! * `testSliceForAlreadySlicedMemoryRecords`
+    //!
+    //! Translated in Phase 3d-4 (in
+    //! `memory_records_builder.rs::tests` — they now build via the
+    //! builder):
+    //! * `testIterator` (v2 portion)
+    //! * `testHasRoomForMethod`
+    //! * `testHasRoomForMethodWithHeaders` (v2 only)
+    //! * `testChecksum` (uncompressed v2 byte-level lock)
+    //! * `testWithRecords`
+    //! * `testUnsupportedCompress`
+    //!
+    //! Plus Rust-only zero-copy and round-trip checks.
+
     use super::*;
-    use crate::common::header::internals::RecordHeader as HeaderImpl;
-    use crate::common::record::DefaultRecordBatch;
-    use crate::common::record::Record;
+    use crate::common::record::SimpleRecord;
+    use crate::common::record::default_record;
+    use crate::common::record::default_record_batch::{
+        ATTRIBUTES_OFFSET, BASE_OFFSET_OFFSET, BASE_SEQUENCE_OFFSET, BASE_TIMESTAMP_OFFSET, CRC_OFFSET,
+        LAST_OFFSET_DELTA_OFFSET, LENGTH_OFFSET, MAGIC_OFFSET, MAX_TIMESTAMP_OFFSET, PARTITION_LEADER_EPOCH_OFFSET,
+        PRODUCER_EPOCH_OFFSET, PRODUCER_ID_OFFSET, RECORD_BATCH_OVERHEAD, RECORDS_COUNT_OFFSET,
+    };
+    use crate::common::record::record_batch::{
+        CURRENT_MAGIC_VALUE, NO_PARTITION_LEADER_EPOCH, NO_PRODUCER_EPOCH, NO_PRODUCER_ID, NO_SEQUENCE, NO_TIMESTAMP,
+    };
+    use crate::common::record::records::{LOG_OVERHEAD, MAGIC_OFFSET as RECORDS_MAGIC_OFFSET, SIZE_OFFSET};
+    use bytes::Bytes;
 
-    /// All compression types to test with.
-    fn all_compressions() -> Vec<Compression> {
-        vec![
-            Compression::none(),
-            Compression::gzip(),
-            Compression::snappy(),
-            Compression::lz4(),
-            Compression::zstd(),
-        ]
-    }
-
-    /// Corresponds to Java's `MemoryRecordsTest.testIterator`.
-    #[test]
-    fn test_iterator() {
-        let log_append_time = current_time_millis();
-
-        for compression in all_compressions() {
-            let first_offset = 0_i64;
-            let pid = 134234_i64;
-            let epoch = 28_i16;
-            let first_sequence = 777_i32;
-            let partition_leader_epoch = 998;
-
-            let records = vec![
-                SimpleRecord::new_with_key_value(1, Some(b"a".to_vec()), Some(b"1".to_vec())),
-                SimpleRecord::new_with_key_value(2, Some(b"b".to_vec()), Some(b"2".to_vec())),
-                SimpleRecord::new_with_key_value(3, Some(b"c".to_vec()), Some(b"3".to_vec())),
-                SimpleRecord::new_with_key_value(4, None, Some(b"4".to_vec())),
-                SimpleRecord::new_with_key_value(5, Some(b"d".to_vec()), None),
-                SimpleRecord::new_with_key_value(6, None, None),
-            ];
-
-            let mut builder = MemoryRecordsBuilder::new_default(
-                Vec::with_capacity(1024),
-                0,
-                RecordBatch::MAGIC_VALUE_V2,
-                compression.clone(),
-                TimestampType::CreateTime,
-                first_offset,
-                log_append_time,
-                pid,
-                epoch,
-                first_sequence,
-                false,
-                false,
-                partition_leader_epoch,
-                1024,
-            );
-            for record in &records {
-                builder.append_simple(record);
-            }
-            let memory_records = builder.build();
-
-            // Iterate twice to verify idempotency
-            for _iteration in 0..2 {
-                let mut total = 0;
-                for batch in memory_records.batches() {
-                    assert!(batch.is_valid());
-                    assert_eq!(compression.compression_type(), batch.compression_type());
-                    assert_eq!(first_offset + total as i64, batch.base_offset());
-
-                    assert_eq!(pid, batch.producer_id());
-                    assert_eq!(epoch, batch.producer_epoch());
-                    assert_eq!(first_sequence + total as i32, batch.base_sequence());
-                    assert_eq!(partition_leader_epoch, batch.partition_leader_epoch());
-                    assert_eq!(Some(records.len() as i32), batch.count_or_null());
-                    assert_eq!(TimestampType::CreateTime, batch.timestamp_type());
-                    assert_eq!(records[records.len() - 1].timestamp(), batch.max_timestamp());
-
-                    let mut record_count = 0;
-                    for record in batch.iter_records().unwrap() {
-                        record.ensure_valid().unwrap();
-                        assert!(record.has_magic(batch.magic()));
-                        assert!(!record.is_compressed());
-                        assert_eq!(first_offset + total as i64, record.offset());
-                        assert_eq!(records[total].key(), record.key());
-                        assert_eq!(records[total].value(), record.value());
-                        assert_eq!(first_sequence + total as i32, record.sequence());
-                        assert!(!record.has_timestamp_type(TimestampType::LogAppendTime));
-                        assert_eq!(records[total].timestamp(), record.timestamp());
-                        assert!(!record.has_timestamp_type(TimestampType::NoTimestampType));
-                        // For v2, has_timestamp_type(CreateTime) returns false
-                        assert!(!record.has_timestamp_type(TimestampType::CreateTime));
-
-                        total += 1;
-                        record_count += 1;
-                    }
-
-                    assert_eq!(batch.base_offset() + record_count as i64 - 1, batch.last_offset());
-                }
-            }
+    /// Build an uncompressed v2 batch — the same helper used in
+    /// `default_record_batch::tests`, `byte_buffer_log_input_stream::tests`,
+    /// and `record_batch_iterator::tests`. Phase 3d-4 will replace these
+    /// duplicated helpers with `MemoryRecordsBuilder`.
+    fn build_batch(base_offset: i64, records: &[SimpleRecord]) -> Vec<u8> {
+        let mut buf = Vec::with_capacity(2048);
+        buf.resize(RECORD_BATCH_OVERHEAD, 0);
+        let base_timestamp = records.first().map(|r| r.timestamp()).unwrap_or(NO_TIMESTAMP);
+        let max_timestamp = records.iter().map(|r| r.timestamp()).max().unwrap_or(NO_TIMESTAMP);
+        let last_offset_delta = if records.is_empty() {
+            0
+        } else {
+            records.len() as i32 - 1
+        };
+        for (i, r) in records.iter().enumerate() {
+            let offset_delta = i as i32;
+            let timestamp_delta = r.timestamp() - base_timestamp;
+            default_record::write_to(&mut buf, offset_delta, timestamp_delta, r.key(), r.value(), r.headers()).unwrap();
         }
+        let size_in_bytes = buf.len() as i32;
+        buf[BASE_OFFSET_OFFSET..BASE_OFFSET_OFFSET + 8].copy_from_slice(&base_offset.to_be_bytes());
+        buf[LENGTH_OFFSET..LENGTH_OFFSET + 4].copy_from_slice(&(size_in_bytes - LOG_OVERHEAD as i32).to_be_bytes());
+        buf[PARTITION_LEADER_EPOCH_OFFSET..PARTITION_LEADER_EPOCH_OFFSET + 4]
+            .copy_from_slice(&NO_PARTITION_LEADER_EPOCH.to_be_bytes());
+        buf[MAGIC_OFFSET] = CURRENT_MAGIC_VALUE as u8;
+        buf[ATTRIBUTES_OFFSET..ATTRIBUTES_OFFSET + 2].copy_from_slice(&0i16.to_be_bytes());
+        buf[LAST_OFFSET_DELTA_OFFSET..LAST_OFFSET_DELTA_OFFSET + 4].copy_from_slice(&last_offset_delta.to_be_bytes());
+        buf[BASE_TIMESTAMP_OFFSET..BASE_TIMESTAMP_OFFSET + 8].copy_from_slice(&base_timestamp.to_be_bytes());
+        buf[MAX_TIMESTAMP_OFFSET..MAX_TIMESTAMP_OFFSET + 8].copy_from_slice(&max_timestamp.to_be_bytes());
+        buf[PRODUCER_ID_OFFSET..PRODUCER_ID_OFFSET + 8].copy_from_slice(&NO_PRODUCER_ID.to_be_bytes());
+        buf[PRODUCER_EPOCH_OFFSET..PRODUCER_EPOCH_OFFSET + 2].copy_from_slice(&NO_PRODUCER_EPOCH.to_be_bytes());
+        buf[BASE_SEQUENCE_OFFSET..BASE_SEQUENCE_OFFSET + 4].copy_from_slice(&NO_SEQUENCE.to_be_bytes());
+        buf[RECORDS_COUNT_OFFSET..RECORDS_COUNT_OFFSET + 4].copy_from_slice(&(records.len() as i32).to_be_bytes());
+        let crc = crc32c::crc32c(&buf[ATTRIBUTES_OFFSET..]);
+        buf[CRC_OFFSET..CRC_OFFSET + 4].copy_from_slice(&crc.to_be_bytes());
+        buf
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testHasRoomForMethod`.
-    #[test]
-    fn test_has_room_for_method() {
-        for compression in all_compressions() {
-            let mut builder = MemoryRecords::builder_with_magic(
-                1024,
-                RecordBatch::MAGIC_VALUE_V2,
-                compression.clone(),
-                TimestampType::CreateTime,
-                0,
-            );
-            builder.append_kv(0, Some(b"a"), Some(b"1"));
-            assert!(builder.has_room_for(1, Some(b"b"), Some(b"2"), RecordBatch::EMPTY_HEADERS));
-            builder.close();
-            assert!(!builder.has_room_for(1, Some(b"b"), Some(b"2"), RecordBatch::EMPTY_HEADERS));
-        }
+    fn three_batches() -> (Vec<u8>, Vec<usize>) {
+        // Three contiguous v2 batches at offsets 0, 6, 14, with 6, 8, 4
+        // records respectively. Returns (concatenated buffer, per-batch
+        // sizes).
+        let mut combined = Vec::new();
+        let mut sizes = Vec::new();
+
+        let r1: Vec<SimpleRecord> = (0..6)
+            .map(|i| {
+                SimpleRecord::new(
+                    100 + i,
+                    Some(Bytes::from(format!("k{i}"))),
+                    Some(Bytes::from(format!("v{i}"))),
+                    &[],
+                )
+            })
+            .collect();
+        let b1 = build_batch(0, &r1);
+        sizes.push(b1.len());
+        combined.extend_from_slice(&b1);
+
+        let r2: Vec<SimpleRecord> = (0..8)
+            .map(|i| {
+                SimpleRecord::new(
+                    200 + i,
+                    Some(Bytes::from(format!("kk{i}"))),
+                    Some(Bytes::from(format!("vv{i}"))),
+                    &[],
+                )
+            })
+            .collect();
+        let b2 = build_batch(6, &r2);
+        sizes.push(b2.len());
+        combined.extend_from_slice(&b2);
+
+        let r3: Vec<SimpleRecord> = (0..4)
+            .map(|i| {
+                SimpleRecord::new(
+                    300 + i,
+                    Some(Bytes::from(format!("kkk{i}"))),
+                    Some(Bytes::from(format!("vvv{i}"))),
+                    &[],
+                )
+            })
+            .collect();
+        let b3 = build_batch(14, &r3);
+        sizes.push(b3.len());
+        combined.extend_from_slice(&b3);
+
+        (combined, sizes)
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testHasRoomForMethodWithHeaders`.
+    /// Read-path coverage: empty `MemoryRecords` is well-formed.
     #[test]
-    fn test_has_room_for_method_with_headers() {
-        let log_append_time = current_time_millis();
-
-        for compression in all_compressions() {
-            let mut builder = MemoryRecords::builder_with_magic(
-                120,
-                RecordBatch::MAGIC_VALUE_V2,
-                compression.clone(),
-                TimestampType::CreateTime,
-                0,
-            );
-            builder.append_kv(log_append_time, Some(b"key"), Some(b"value"));
-
-            let mut headers = Vec::new();
-            for _ in 0..10 {
-                headers.push(HeaderImpl::new("hello".to_string(), Some(b"world.world".to_vec())));
-            }
-
-            // A record without headers should fit
-            assert!(builder.has_room_for(log_append_time, Some(b"key"), Some(b"value"), RecordBatch::EMPTY_HEADERS,));
-            // A record with many headers should not fit (for v2)
-            assert!(!builder.has_room_for(log_append_time, Some(b"key"), Some(b"value"), &headers));
-        }
+    fn empty_returns_zero_size_singleton() {
+        let e1 = MemoryRecords::empty();
+        let e2 = MemoryRecords::empty();
+        assert_eq!(e1.size_in_bytes(), 0);
+        assert!(std::ptr::eq(e1, e2));
+        assert_eq!(e1.batches().count(), 0);
+        assert_eq!(e1.records().count(), 0);
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testChecksum` (v2 only).
-    #[test]
-    fn test_checksum_v2() {
-        // We get reasonable coverage with uncompressed and one compression type
-        for (compression, expected_checksum) in &[
-            (Compression::none(), 3851219455_u32),
-            (Compression::lz4(), 2745969314_u32),
-        ] {
-            let records = vec![
-                SimpleRecord::new_with_key_value(283843, Some(b"key1".to_vec()), Some(b"value1".to_vec())),
-                SimpleRecord::new_with_key_value(1234, Some(b"key2".to_vec()), Some(b"value2".to_vec())),
-            ];
-            let mem_records =
-                MemoryRecords::with_records_magic(RecordBatch::MAGIC_VALUE_V2, compression.clone(), &records);
-            let batch = mem_records.batches().next().unwrap();
-            assert_eq!(
-                *expected_checksum,
-                batch.checksum(),
-                "Unexpected checksum for compression {:?}",
-                compression.compression_type()
-            );
-        }
+    /// Helper: collect batches, asserting all parsed successfully.
+    fn ok_batches(records: &MemoryRecords) -> Vec<Box<dyn RecordBatch + '_>> {
+        records.batches().map(|r| r.expect("batch should parse")).collect()
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testWithRecords`.
+    /// Translation of `testNextBatchSize` (read-path subset). Exercises the
+    /// `firstBatchSize` API directly from a hand-built batch.
     #[test]
-    fn test_with_records() {
-        for compression in all_compressions() {
-            let mem_records = MemoryRecords::with_records_magic(
-                RecordBatch::MAGIC_VALUE_V2,
-                compression.clone(),
-                &[SimpleRecord::new_with_key_value(
-                    10,
-                    Some(b"key1".to_vec()),
-                    Some(b"value1".to_vec()),
-                )],
-            );
-            let batch = mem_records.batches().next().unwrap();
-            let record = batch.iter_records().unwrap().into_iter().next().unwrap();
-            assert_eq!(Some(b"key1".as_slice()), record.key());
-        }
+    fn first_batch_size_returns_full_batch_size() {
+        let (combined, sizes) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        // First call returns the size of just the first batch.
+        assert_eq!(records.first_batch_size().unwrap(), Some(sizes[0] as i32));
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testNextBatchSize` (v2 only).
     #[test]
-    fn test_first_batch_size() {
-        let log_append_time = current_time_millis();
-
-        for compression in all_compressions() {
-            let mut builder = MemoryRecords::builder_with_log_append_time(
-                2048,
-                RecordBatch::MAGIC_VALUE_V2,
-                compression.clone(),
-                TimestampType::LogAppendTime,
-                0,
-                log_append_time,
-            );
-            builder.append_kv(10, None, Some(b"abc"));
-            let records = builder.build();
-
-            let size = records.size_in_bytes();
-            assert_eq!(Some(size), records.first_batch_size().unwrap());
-
-            // size not in buffer (only 1 byte)
-            let short_records = MemoryRecords::new(records.buffer()[..1].to_vec());
-            assert_eq!(None, short_records.first_batch_size().unwrap());
-
-            // magic not in buffer (only LOG_OVERHEAD bytes = 12)
-            let short_records = MemoryRecords::new(records.buffer()[..LOG_OVERHEAD].to_vec());
-            assert_eq!(None, short_records.first_batch_size().unwrap());
-
-            // payload not in buffer, but header up to magic is present
-            let short_records =
-                MemoryRecords::new(records.buffer()[..abstract_records::HEADER_SIZE_UP_TO_MAGIC].to_vec());
-            assert_eq!(Some(size), short_records.first_batch_size().unwrap());
-
-            // Invalid magic byte (10) should return CorruptMessage error
-            let mut corrupt_magic_buf = records.buffer().to_vec();
-            corrupt_magic_buf[RecordBatch::MAGIC_OFFSET] = 10;
-            let corrupt_records = MemoryRecords::new(corrupt_magic_buf);
-            let err = corrupt_records.first_batch_size().unwrap_err();
-            assert_eq!(err.error(), Errors::CorruptMessage);
-
-            // Invalid record size (set LSB of size field to 0, making it too small)
-            let mut corrupt_size_buf = records.buffer().to_vec();
-            corrupt_size_buf[RecordBatch::LENGTH_OFFSET + 3] = 0;
-            let corrupt_records = MemoryRecords::new(corrupt_size_buf);
-            let err = corrupt_records.first_batch_size().unwrap_err();
-            assert_eq!(err.error(), Errors::CorruptMessage);
-        }
+    fn first_batch_size_returns_none_when_buffer_truncated_before_size() {
+        // Buffer shorter than LOG_OVERHEAD: not enough to read SIZE field.
+        let truncated = vec![0u8; 1];
+        let records = MemoryRecords::readable_records_from_vec(truncated);
+        assert_eq!(records.first_batch_size().unwrap(), None);
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testSlice` (v2 only).
     #[test]
-    fn test_slice() {
-        for compression in all_compressions() {
-            // Create records with multiple batches
-            let mut buf = Vec::new();
-            for (offset, count) in &[(0_i64, 3_usize), (6_i64, 8_usize), (15_i64, 4_usize)] {
-                let mut builder = MemoryRecords::builder_with_magic(
-                    1024,
-                    RecordBatch::MAGIC_VALUE_V2,
-                    compression.clone(),
-                    TimestampType::CreateTime,
-                    *offset,
-                );
-                for i in 0..*count {
-                    builder.append_with_offset_bytes(
-                        *offset + i as i64,
-                        0,
-                        Some(format!("key{}", i).as_bytes()),
-                        Some(format!("val{}", i).as_bytes()),
-                    );
-                }
-                let batch_records = builder.build();
-                buf.extend_from_slice(batch_records.buffer());
-            }
-
-            let records = MemoryRecords::new(buf);
-
-            // Test slicing from start
-            let sliced = records.slice(0, records.size_in_bytes());
-            assert_eq!(records.size_in_bytes(), sliced.size_in_bytes());
-            assert_eq!(records.valid_bytes(), sliced.valid_bytes());
-
-            let items: Vec<_> = records.batches().collect();
-
-            // Test slicing past first batch
-            let first_size = items[0].size_in_bytes();
-            let sliced = records.slice(first_size, records.size_in_bytes() - first_size);
-            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
-
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(items.len() - 1, sliced_batches.len());
-            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
-
-            // Read from second message and size is past the end of the file
-            // (Java: records.slice(first.sizeInBytes(), records.sizeInBytes()))
-            let sliced = records.slice(first_size, records.size_in_bytes());
-            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(items.len() - 1, sliced_batches.len());
-            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
-
-            // Read from second message and position + size overflows
-            // (Java: records.slice(first.sizeInBytes(), Integer.MAX_VALUE))
-            let sliced = records.slice(first_size, usize::MAX);
-            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(items.len() - 1, sliced_batches.len());
-            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
-
-            // Read a single batch starting from second batch
-            let second_size = items[1].size_in_bytes();
-            let sliced = records.slice(first_size, second_size);
-            assert_eq!(second_size, sliced.size_in_bytes());
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(1, sliced_batches.len());
-
-            // Read from second message and size is past the end on an already-sliced view
-            // (Java: records.slice(1, records.sizeInBytes() - 1)
-            //               .slice(first.sizeInBytes() - 1, records.sizeInBytes()))
-            let sliced = records
-                .slice(1, records.size_in_bytes() - 1)
-                .slice(first_size - 1, records.size_in_bytes());
-            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(items.len() - 1, sliced_batches.len());
-            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
-
-            // Read from second message and position + size overflows on already-sliced view
-            // (Java: records.slice(1, records.sizeInBytes() - 1)
-            //               .slice(first.sizeInBytes() - 1, Integer.MAX_VALUE))
-            let sliced = records.slice(1, records.size_in_bytes() - 1).slice(first_size - 1, usize::MAX);
-            assert_eq!(records.size_in_bytes() - first_size, sliced.size_in_bytes());
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(items.len() - 1, sliced_batches.len());
-            assert!(sliced.valid_bytes() <= sliced.size_in_bytes());
-        }
+    fn first_batch_size_returns_none_when_buffer_truncated_before_magic() {
+        // Buffer >= LOG_OVERHEAD but < HEADER_SIZE_UP_TO_MAGIC: returns
+        // None per Java spec.
+        let mut truncated = vec![0u8; LOG_OVERHEAD];
+        // SIZE field must be valid (>= LEGACY_RECORD_OVERHEAD_V0 = 14) so
+        // we don't trigger the corrupt path before the magic check.
+        truncated[SIZE_OFFSET..SIZE_OFFSET + 4].copy_from_slice(&100i32.to_be_bytes());
+        let records = MemoryRecords::readable_records_from_vec(truncated);
+        assert_eq!(records.first_batch_size().unwrap(), None);
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testSliceEmptyRecords`.
+    /// Translation of Java `MemoryRecordsTest.testNextBatchSize` lines
+    /// 1056-1057: with `buffer.limit(Records.HEADER_SIZE_UP_TO_MAGIC)`
+    /// (i.e. exactly 17 bytes), `firstBatchSize()` returns the full
+    /// declared batch size — NOT null.
+    ///
+    /// Positive boundary test: at exactly `len == HEADER_SIZE_UP_TO_MAGIC`
+    /// the early-out (`<` not `<=`) does NOT fire, so the underlying
+    /// `next_batch_size` validates the SIZE and MAGIC fields and returns
+    /// `Some(LOG_OVERHEAD + declared_size)`.
     #[test]
-    fn test_slice_empty_records() {
-        let empty = MemoryRecords::empty();
-        let sliced = empty.slice(0, 0);
-        assert_eq!(0, sliced.size_in_bytes());
-        assert_eq!(0, sliced.batches().count());
-    }
+    fn first_batch_size_at_header_size_up_to_magic_boundary() {
+        use crate::common::record::records::HEADER_SIZE_UP_TO_MAGIC;
+        // Exactly 17 bytes: [base_offset(8)] [size(4)] [4 unspecified] [magic(1)].
+        let mut buf = vec![0u8; HEADER_SIZE_UP_TO_MAGIC];
+        // Declared batch length = 12345 bytes (the SIZE field; >=
+        // LEGACY_RECORD_OVERHEAD_V0=14 so it doesn't trigger corruption).
+        let declared_len = 12345i32;
+        buf[SIZE_OFFSET..SIZE_OFFSET + 4].copy_from_slice(&declared_len.to_be_bytes());
+        // Magic must be in the valid range [0, CURRENT_MAGIC_VALUE].
+        buf[RECORDS_MAGIC_OFFSET] = CURRENT_MAGIC_VALUE as u8;
 
-    /// Corresponds to Java's `MemoryRecordsTest.testSliceInvalidPosition`.
-    #[test]
-    #[should_panic(expected = "Slice from position")]
-    fn test_slice_invalid_position() {
-        let records = MemoryRecords::with_records(
-            Compression::none(),
-            &[SimpleRecord::new_with_key_value(
-                1,
-                Some(b"k".to_vec()),
-                Some(b"v".to_vec()),
-            )],
+        let records = MemoryRecords::readable_records_from_vec(buf);
+        // `first_batch_size` returns `LOG_OVERHEAD + declared_len`. The
+        // payload bytes are NOT required to be present — Java's
+        // `firstBatchSize()` validates only the header.
+        assert_eq!(
+            records.first_batch_size().unwrap(),
+            Some(LOG_OVERHEAD as i32 + declared_len),
+            "len == HEADER_SIZE_UP_TO_MAGIC must return the declared full size, not None"
         );
-        records.slice(records.size_in_bytes() + 1, records.size_in_bytes());
     }
 
-    /// Corresponds to Java's `MemoryRecordsTest.testSliceForAlreadySlicedMemoryRecords`.
     #[test]
-    fn test_slice_for_already_sliced_memory_records() {
-        for compression in all_compressions() {
-            // Create records with multiple batches
-            let mut buf = Vec::new();
-            for (offset, count) in &[
-                (0_i64, 5_usize),
-                (5_i64, 10_usize),
-                (15_i64, 12_usize),
-                (27_i64, 4_usize),
-            ] {
-                let mut builder = MemoryRecords::builder_with_magic(
-                    1024,
-                    RecordBatch::MAGIC_VALUE_V2,
-                    compression.clone(),
-                    TimestampType::CreateTime,
-                    *offset,
-                );
-                for i in 0..*count {
-                    builder.append_with_offset_bytes(
-                        *offset + i as i64,
-                        0,
-                        Some(format!("key{}", i).as_bytes()),
-                        Some(format!("val{}", i).as_bytes()),
-                    );
-                }
-                let batch_records = builder.build();
-                buf.extend_from_slice(batch_records.buffer());
-            }
-            let records = MemoryRecords::new(buf);
-
-            let items: Vec<DefaultRecordBatch> = records.batches().collect();
-
-            // Slice from third batch
-            let position: usize = items[0].size_in_bytes() + items[1].size_in_bytes();
-            let sliced = records.slice(position, records.size_in_bytes() - position);
-            assert_eq!(records.size_in_bytes() - position, sliced.size_in_bytes());
-            let sliced_batches: Vec<_> = sliced.batches().collect();
-            assert_eq!(items.len() - 2, sliced_batches.len());
-
-            // Further slice from fourth batch
-            let position2 = items[2].size_in_bytes();
-            let final_sliced = sliced.slice(position2, sliced.size_in_bytes() - position2);
-            assert_eq!(sliced.size_in_bytes() - position2, final_sliced.size_in_bytes());
-            let final_batches: Vec<_> = final_sliced.batches().collect();
-            assert_eq!(items.len() - 3, final_batches.len());
-        }
+    fn first_batch_size_raises_on_invalid_magic() {
+        let (mut combined, _) = three_batches();
+        // Corrupt the first batch's magic byte.
+        combined[RECORDS_MAGIC_OFFSET] = 10;
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        assert!(matches!(records.first_batch_size(), Err(KafkaError::CorruptRecord(_))));
     }
 
-    // Note: filterTo tests (testFilterToPreservesPartitionLeaderEpoch, testFilterToEmptyBatchRetention,
-    // testEmptyBatchRetention, testEmptyBatchDeletion, testBaseTimestampToDeleteHorizonConversion,
-    // testFilterToBatchDiscard, testFilterToAlreadyCompactedLog, testFilterToPreservesProducerInfo,
-    // testFilterToWithUndersizedBuffer, testFilterTo, testFilterToPreservesLogAppendTime) are
-    // skipped because filterTo is not implemented in the Rust version. The filterTo method is
-    // a server-side operation used for log compaction and not needed for the producer path.
+    #[test]
+    fn first_batch_size_raises_on_corrupt_size() {
+        let (mut combined, _) = three_batches();
+        // Corrupt the SIZE field to a value below the legacy v0 minimum
+        // (14 bytes) — Java's `assertThrows(CorruptRecordException...)`.
+        combined[SIZE_OFFSET..SIZE_OFFSET + 4].copy_from_slice(&5i32.to_be_bytes());
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        assert!(matches!(records.first_batch_size(), Err(KafkaError::CorruptRecord(_))));
+    }
 
-    // Note: testBuildEndTxnMarker and testBuildLeaderChangeMessage are skipped because
-    // EndTransactionMarker, ControlRecordType, and LeaderChangeMessage/ControlRecordUtils
-    // are not yet implemented.
+    /// Translation of `testSlice`. Slices a multi-batch `MemoryRecords` from
+    /// various positions and asserts both byte-length and batch-equivalence.
+    #[test]
+    fn slice_yields_zero_copy_views_at_batch_boundaries() {
+        let (combined, sizes) = three_batches();
+        let total = combined.len() as i32;
+        let records = MemoryRecords::readable_records_from_vec(combined);
 
-    // Note: testUnsupportedCompress is skipped because it tests magic v0/v1 which
-    // we do not support in the Rust producer path.
+        // Slice from start: identical to original.
+        let s0 = records.slice_inner(0, total).unwrap();
+        assert_eq!(s0.size_in_bytes(), total);
+        assert_eq!(s0.valid_bytes(), records.valid_bytes());
+
+        // Slice from after first batch.
+        let after_first = sizes[0] as i32;
+        let s1 = records.slice_inner(after_first, total - after_first).unwrap();
+        assert_eq!(s1.size_in_bytes(), total - after_first);
+        assert_eq!(ok_batches(&s1).len(), 2);
+
+        // Slice from after first, size > remaining: clamps to remaining.
+        let s2 = records.slice_inner(after_first, total).unwrap();
+        assert_eq!(s2.size_in_bytes(), total - after_first);
+
+        // Slice from after first, size = i32::MAX: clamps to remaining.
+        let s3 = records.slice_inner(after_first, i32::MAX).unwrap();
+        assert_eq!(s3.size_in_bytes(), total - after_first);
+
+        // Read a single batch starting at the second.
+        let second_size = sizes[1] as i32;
+        let s4 = records.slice_inner(after_first, second_size).unwrap();
+        assert_eq!(s4.size_in_bytes(), second_size);
+        assert_eq!(ok_batches(&s4).len(), 1);
+
+        // Slice of a slice: read from the third batch onward.
+        let after_second = (sizes[0] + sizes[1]) as i32;
+        let s5 = s1.slice_inner(second_size, total - after_second).expect("slice of slice");
+        assert_eq!(s5.size_in_bytes(), total - after_second);
+        assert_eq!(ok_batches(&s5).len(), 1);
+    }
+
+    /// Translation of `testSliceInvalidPosition`.
+    #[test]
+    fn slice_invalid_position_returns_err() {
+        let (combined, _) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        assert!(matches!(
+            records.slice_inner(-1, records.size_in_bytes()),
+            Err(KafkaError::IllegalArgument(_))
+        ));
+        assert!(matches!(
+            records.slice_inner(records.size_in_bytes() + 1, records.size_in_bytes()),
+            Err(KafkaError::IllegalArgument(_))
+        ));
+    }
+
+    /// Boundary: position == buffer.len() is allowed (Java accepts it,
+    /// only rejects strictly greater). Yields an empty slice.
+    #[test]
+    fn slice_at_end_position_returns_empty() {
+        let (combined, _) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        let total = records.size_in_bytes();
+        let sliced = records.slice_inner(total, 100).unwrap();
+        assert_eq!(sliced.size_in_bytes(), 0);
+    }
+
+    /// Translation of `testSliceInvalidSize`.
+    #[test]
+    fn slice_invalid_size_returns_err() {
+        let (combined, _) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        assert!(matches!(records.slice_inner(0, -1), Err(KafkaError::IllegalArgument(_))));
+    }
+
+    /// Translation of `testSliceEmptyRecords`.
+    #[test]
+    fn slice_empty_records_returns_empty() {
+        let empty = MemoryRecords::empty();
+        let sliced = empty.slice_inner(0, 0).unwrap();
+        assert_eq!(sliced.size_in_bytes(), 0);
+        assert_eq!(ok_batches(&sliced).len(), 0);
+    }
+
+    /// Translation of `testSliceForAlreadySlicedMemoryRecords`.
+    #[test]
+    fn slice_of_already_sliced_records() {
+        let (combined, sizes) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        // First, slice from the third batch onward.
+        let position = (sizes[0] + sizes[1]) as i32;
+        let sliced = records.slice_inner(position, records.size_in_bytes() - position).unwrap();
+        assert_eq!(sliced.size_in_bytes(), records.size_in_bytes() - position);
+        assert_eq!(ok_batches(&sliced).len(), 1);
+
+        // Slice the slice further: from beyond its end -> empty.
+        let further = sliced.slice_inner(sliced.size_in_bytes(), 0).unwrap();
+        assert_eq!(further.size_in_bytes(), 0);
+        assert_eq!(ok_batches(&further).len(), 0);
+    }
+
+    /// Zero-copy contract: `slice` must alias the original buffer.
+    #[test]
+    fn slice_is_zero_copy() {
+        let (combined, sizes) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        let after_first = sizes[0] as i32;
+        let sliced = records.slice_inner(after_first, records.size_in_bytes() - after_first).unwrap();
+
+        let p_orig = records.buffer().as_ptr();
+        let p_slice = sliced.buffer().as_ptr();
+        // The slice's pointer must lie *inside* the original buffer's range.
+        // (Bytes::slice shares the same backing allocation; the slice's
+        // start address is `p_orig + after_first`.)
+        let off = unsafe { p_slice.offset_from(p_orig) };
+        assert_eq!(off, after_first as isize, "slice must alias the same backing storage");
+    }
+
+    /// Records iteration spans multiple batches. Mirrors the
+    /// flat-records portion of `testIterator`.
+    #[test]
+    fn records_iterator_flattens_across_batches() {
+        let (combined, _) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        // Total: 6 + 8 + 4 = 18 records.
+        assert_eq!(records.records().count(), 18);
+    }
+
+    /// Batches iterator yields all three batches in order.
+    #[test]
+    fn batches_iterator_yields_all_batches() {
+        let (combined, _) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        let batches: Vec<_> = records.batches().map(|r| r.expect("clean batch parses")).collect();
+        assert_eq!(batches.len(), 3);
+        assert_eq!(batches[0].base_offset(), 0);
+        assert_eq!(batches[1].base_offset(), 6);
+        assert_eq!(batches[2].base_offset(), 14);
+    }
+
+    /// Translation of Java's `validBytes()` semantic.
+    #[test]
+    fn valid_bytes_sums_all_batches_when_clean() {
+        let (combined, sizes) = three_batches();
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        assert_eq!(records.valid_bytes(), sizes.iter().map(|&s| s as i32).sum::<i32>());
+    }
+
+    /// Trailing partial batch: `valid_bytes` returns only the complete
+    /// portion, mirroring Java's behavior (the partial trailing batch is
+    /// ignored).
+    #[test]
+    fn valid_bytes_excludes_trailing_partial_batch() {
+        let (mut combined, sizes) = three_batches();
+        // Drop the last 5 bytes of the last batch.
+        combined.truncate(combined.len() - 5);
+        let records = MemoryRecords::readable_records_from_vec(combined);
+        // Only the first two batches are complete.
+        assert_eq!(records.valid_bytes(), (sizes[0] + sizes[1]) as i32);
+    }
+
+    /// Display formatting matches Java's toString-like form.
+    #[test]
+    fn display_includes_size() {
+        let r = MemoryRecords::empty();
+        let s = format!("{r}");
+        assert!(s.starts_with("MemoryRecords(size=0"));
+    }
+
+    /// Equality is based on the buffer contents.
+    #[test]
+    fn equality_compares_buffer_contents() {
+        let (a, _) = three_batches();
+        let r1 = MemoryRecords::readable_records_from_vec(a.clone());
+        let r2 = MemoryRecords::readable_records_from_vec(a);
+        assert_eq!(r1, r2);
+
+        let r3 = MemoryRecords::readable_records_from_vec(vec![0u8; 4]);
+        assert_ne!(r1, r3);
+    }
+
+    /// Cloning shares the same backing storage (refcount bump).
+    #[test]
+    fn clone_shares_storage() {
+        let (a, _) = three_batches();
+        let r1 = MemoryRecords::readable_records_from_vec(a);
+        let r2 = r1.clone();
+        let p1 = r1.buffer().as_ptr();
+        let p2 = r2.buffer().as_ptr();
+        assert_eq!(p1, p2);
+    }
+
+    /// `to_send()` produces a `DefaultRecordsSend` sized to the record
+    /// set. Mirrors Java's `AbstractRecords#toSend()`.
+    #[test]
+    fn to_send_returns_default_records_send_sized_to_self() {
+        let (a, _) = three_batches();
+        let total = a.len() as i32;
+        let r = MemoryRecords::readable_records_from_vec(a);
+        let send = r.to_send();
+        assert_eq!(send.size(), total as i64);
+        assert_eq!(send.remaining(), total);
+        assert!(!send.completed());
+    }
+
+    /// Issue 18 fix: `Records::batches()` yields `Err` for a corrupt batch
+    /// at the same iteration step where Java raises
+    /// `CorruptRecordException`, then stops. Mirrors Java's
+    /// `MemoryRecordsBatchIterator` "throw and stop" semantic.
+    #[test]
+    fn batches_yields_err_on_corrupt_second_batch_then_stops() {
+        let (mut combined, sizes) = three_batches();
+        // Corrupt the second batch's magic byte.
+        let second_batch_offset = sizes[0];
+        combined[second_batch_offset + RECORDS_MAGIC_OFFSET] = 10;
+        let records = MemoryRecords::readable_records_from_vec(combined);
+
+        let mut it = records.batches();
+        // First batch parses cleanly.
+        let first = it.next().expect("first batch present");
+        let first = match first {
+            Ok(b) => b,
+            Err(e) => panic!("first batch should parse cleanly: {e:?}"),
+        };
+        assert_eq!(first.base_offset(), 0);
+
+        // Second batch surfaces the corruption error.
+        let second = it.next().expect("second batch present (as Err)");
+        match second {
+            Err(KafkaError::CorruptRecord(_)) => {},
+            Ok(_) => panic!("expected CorruptRecord error, got Ok"),
+            Err(e) => panic!("expected CorruptRecord error, got {e:?}"),
+        }
+
+        // Iterator stops — no more items, even though a third batch exists
+        // in the buffer (the underlying RecordBatchIterator is poisoned).
+        assert!(it.next().is_none(), "iterator must stop after first error");
+    }
+
+    /// Issue 21 fix: `with_records` with `TimestampType::LogAppendTime`
+    /// must populate the batch's `max_timestamp` (which records
+    /// `log_append_time` for v2 LogAppendTime batches) with the current
+    /// wall-clock time, mirroring Java's
+    /// `MemoryRecords.java:511-514` (`System.currentTimeMillis()`).
+    /// Previously both branches returned `NO_TIMESTAMP`.
+    #[test]
+    fn with_records_log_append_time_populates_max_timestamp() {
+        let before_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+        let records = MemoryRecords::with_records(
+            CURRENT_MAGIC_VALUE,
+            0,
+            CompressionType::None,
+            TimestampType::LogAppendTime,
+            NO_PRODUCER_ID,
+            NO_PRODUCER_EPOCH,
+            NO_SEQUENCE,
+            NO_PARTITION_LEADER_EPOCH,
+            false,
+            &[SimpleRecord::new(
+                100,
+                Some(Bytes::from_static(b"k")),
+                Some(Bytes::from_static(b"v")),
+                &[],
+            )],
+        )
+        .expect("with_records LogAppendTime succeeds");
+        let after_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64;
+
+        // The first (and only) batch's max_timestamp must record the
+        // wall-clock time captured during `with_records`.
+        let batches: Vec<_> = records.batches().map(|r| r.unwrap()).collect();
+        assert_eq!(batches.len(), 1);
+        let max_ts = batches[0].max_timestamp();
+        // Java sets logAppendTime = System.currentTimeMillis() at the
+        // moment of build, so max_ts must lie within the [before, after]
+        // window we captured (allowing ±1ms slop for clock granularity).
+        assert!(
+            max_ts >= before_ms - 1 && max_ts <= after_ms + 1,
+            "LogAppendTime max_timestamp {max_ts} not in window [{before_ms}, {after_ms}]"
+        );
+        assert_ne!(
+            max_ts, NO_TIMESTAMP,
+            "LogAppendTime must NOT silently downgrade to NO_TIMESTAMP"
+        );
+    }
 }

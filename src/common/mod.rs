@@ -12,19 +12,20 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Common types and utilities for Kafka (org.apache.kafka.common)
+//! Translation of `org.apache.kafka.common`.
 
 pub mod cluster;
 pub mod cluster_resource;
 pub mod cluster_resource_listener;
 pub mod compress;
 pub mod config;
+pub mod errors;
 pub mod feature;
 pub mod header;
-pub(crate) mod internals;
-pub mod kafka_error;
+pub mod internals;
+pub mod kafka_exception;
 pub mod kafka_future;
-pub mod memory;
+pub mod message;
 pub mod network;
 pub mod node;
 pub mod partition_info;
@@ -33,17 +34,23 @@ pub mod record;
 pub mod requests;
 pub mod security;
 pub mod serialization;
+pub mod topic_collection;
+pub mod topic_id_partition;
 pub mod topic_partition;
+pub mod topic_partition_info;
 pub mod utils;
 pub mod uuid;
 
 pub use cluster::Cluster;
 pub use cluster_resource::ClusterResource;
 pub use cluster_resource_listener::ClusterResourceListener;
-pub use kafka_error::{KafkaError, KafkaGenericError};
+pub use errors::KafkaError;
+pub use kafka_exception::KafkaException;
 pub use kafka_future::KafkaFuture;
 pub use node::Node;
 pub use partition_info::PartitionInfo;
-pub use protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable, Writable};
+pub use topic_collection::{TopicCollection, TopicIdCollection, TopicNameCollection};
+pub use topic_id_partition::TopicIdPartition;
 pub use topic_partition::TopicPartition;
+pub use topic_partition_info::TopicPartitionInfo;
 pub use uuid::Uuid;

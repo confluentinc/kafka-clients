@@ -12,171 +12,293 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! SASL handshake response handling.
-//!
-//! Corresponds to `org.apache.kafka.common.requests.SaslHandshakeResponse`.
-//!
-//! Response from SASL server which indicates if the client-chosen mechanism is enabled in the
-//! server. For error responses, the list of enabled mechanisms is included in the response.
+//! Translation of `org.apache.kafka.common.requests.SaslHandshakeResponse`.
 
 use std::collections::HashMap;
+use std::sync::OnceLock;
 
-use crate::common::protocol::{ApiKeys, Errors, Readable};
-use crate::sasl_handshake_response_data::SaslHandshakeResponseData;
+use crate::common::errors::KafkaError;
+use crate::common::message::sasl_handshake_response_data::SaslHandshakeResponseData;
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::{ApiKey, ApiKeys, Errors, Message};
+use crate::common::requests::AbstractRequestResponse;
+use crate::common::requests::AbstractResponse;
+use crate::common::requests::abstract_response;
 
-use super::abstract_response::DEFAULT_THROTTLE_TIME;
-
-/// Possible error codes:
-/// - [`Errors::UnsupportedSaslMechanism`] (33): Client mechanism not enabled in server
-/// - [`Errors::IllegalSaslState`] (34): Invalid request during SASL handshake
-#[derive(Debug, Clone)]
+/// Translation of `org.apache.kafka.common.requests.SaslHandshakeResponse`.
+///
+/// Response from SASL server which indicates if the client-chosen mechanism
+/// is enabled in the server. For error responses, the list of enabled
+/// mechanisms is included in the response.
 pub struct SaslHandshakeResponse {
     data: SaslHandshakeResponseData,
 }
 
 impl SaslHandshakeResponse {
-    /// Creates a new `SaslHandshakeResponse` from data.
+    /// Mirrors `new SaslHandshakeResponse(SaslHandshakeResponseData)`.
     pub fn new(data: SaslHandshakeResponseData) -> Self {
-        Self { data }
+        SaslHandshakeResponse { data }
     }
 
-    /// Returns a reference to the underlying data.
-    pub fn data(&self) -> &SaslHandshakeResponseData {
+    /// Mirrors `SaslHandshakeResponse.data()`.
+    pub fn response_data(&self) -> &SaslHandshakeResponseData {
         &self.data
     }
 
-    /// Returns the API key for this response.
-    pub fn api_key(&self) -> &'static ApiKeys {
-        &ApiKeys::SASL_HANDSHAKE
-    }
-
-    /// Returns the error from this response.
+    /// Mirrors `SaslHandshakeResponse.error()`.
+    ///
+    /// Possible error codes:
+    /// - `UNSUPPORTED_SASL_MECHANISM(33)`: Client mechanism not enabled in server
+    /// - `ILLEGAL_SASL_STATE(34)`: Invalid request during SASL handshake
     pub fn error(&self) -> Errors {
         Errors::for_code(self.data.error_code)
     }
 
-    /// Returns the error counts for this response.
-    pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        super::abstract_response::single_error_count(Errors::for_code(self.data.error_code))
-    }
-
-    /// Returns the throttle time in milliseconds.
-    ///
-    /// Always returns [`DEFAULT_THROTTLE_TIME`] (0) because the SaslHandshake schema
-    /// does not support throttle time.
-    pub fn throttle_time_ms(&self) -> i32 {
-        DEFAULT_THROTTLE_TIME
-    }
-
-    /// No-op: the SaslHandshake schema does not support throttle time.
-    pub fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {
-        // Not supported by the response schema
-    }
-
-    /// Returns whether the client should throttle upon receiving this response.
-    ///
-    /// Always returns `false` for SASL handshake responses.
-    pub fn should_client_throttle(&self, _version: i16) -> bool {
-        false
-    }
-
-    /// Returns the list of mechanisms enabled in the server.
+    /// Mirrors `SaslHandshakeResponse.enabledMechanisms()`.
     pub fn enabled_mechanisms(&self) -> &[String] {
         &self.data.mechanisms
     }
 
-    /// Parses a `SaslHandshakeResponse` from a readable buffer at the given version.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if parsing fails.
-    pub fn parse(readable: &mut dyn Readable, version: i16) -> std::io::Result<Self> {
-        let data = SaslHandshakeResponseData::read(readable, version)?;
-        Ok(Self::new(data))
+    /// Mirrors `SaslHandshakeResponse.parse(Readable, short)`.
+    pub fn parse(accessor: &mut ByteBufferAccessor, version: i16) -> Result<Self, KafkaError> {
+        let data = SaslHandshakeResponseData::read(accessor, version)?;
+        Ok(SaslHandshakeResponse::new(data))
     }
 }
 
-impl std::fmt::Display for SaslHandshakeResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "SaslHandshakeResponse(data={:?})", self.data)
+impl AbstractRequestResponse for SaslHandshakeResponse {
+    fn data(&self) -> &dyn Message {
+        &self.data
+    }
+}
+
+impl AbstractResponse for SaslHandshakeResponse {
+    fn api_key(&self) -> &'static ApiKey {
+        static SASL_HANDSHAKE: OnceLock<&'static ApiKey> = OnceLock::new();
+        SASL_HANDSHAKE
+            .get_or_init(|| ApiKeys::for_id(17).expect("SASL_HANDSHAKE api_key always present in ALL_API_KEYS"))
+    }
+
+    fn error_counts(&self) -> HashMap<Errors, i32> {
+        abstract_response::error_counts_one(Errors::for_code(self.data.error_code))
+    }
+
+    fn throttle_time_ms(&self) -> i32 {
+        // Java: `return DEFAULT_THROTTLE_TIME;` — `SaslHandshakeResponse`
+        // schema has no `throttle_time_ms` field.
+        abstract_response::DEFAULT_THROTTLE_TIME
+    }
+
+    fn maybe_set_throttle_time_ms(&mut self, _throttle_time_ms: i32) {
+        // Not supported by the response schema (matches Java's no-op).
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::requests::ConcreteResponse;
 
+    /// Round-trip at v0: matches Java `createSaslHandshakeResponse()` from
+    /// `RequestResponseTest.java` (errorCode = NONE, mechanisms = ["GSSAPI"]).
     #[test]
-    fn test_error() {
-        let mut data = SaslHandshakeResponseData::new();
-        data.set_error_code(Errors::UnsupportedSaslMechanism.code());
-        let response = SaslHandshakeResponse::new(data);
-        assert_eq!(response.error(), Errors::UnsupportedSaslMechanism);
+    fn round_trip_v0_kafka_request_response_test_fixture() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["GSSAPI".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 0).expect("serialize");
+        let parsed = SaslHandshakeResponse::parse(&mut serialized, 0).expect("parse");
+        assert_eq!(parsed.error(), Errors::None);
+        assert_eq!(parsed.enabled_mechanisms(), &["GSSAPI".to_owned()]);
     }
 
+    /// Round-trip at v1: spec annotates "Version 1 is the same as version 0".
     #[test]
-    fn test_error_counts() {
-        let mut data = SaslHandshakeResponseData::new();
-        data.set_error_code(Errors::IllegalSaslState.code());
-        let response = SaslHandshakeResponse::new(data);
-        let counts = response.error_counts();
-        assert_eq!(counts.get(&Errors::IllegalSaslState), Some(&1));
+    fn round_trip_v1_plain_only() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["PLAIN".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 1).expect("serialize");
+        let parsed = SaslHandshakeResponse::parse(&mut serialized, 1).expect("parse");
+        assert_eq!(parsed.error(), Errors::None);
+        assert_eq!(parsed.enabled_mechanisms(), &["PLAIN".to_owned()]);
     }
 
+    /// Multiple-mechanism array shape.
     #[test]
-    fn test_throttle_time_ms() {
-        let data = SaslHandshakeResponseData::new();
-        let response = SaslHandshakeResponse::new(data);
-        assert_eq!(response.throttle_time_ms(), DEFAULT_THROTTLE_TIME);
+    fn round_trip_multiple_mechanisms() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec![
+                "PLAIN".to_owned(),
+                "SCRAM-SHA-256".to_owned(),
+                "SCRAM-SHA-512".to_owned(),
+                "OAUTHBEARER".to_owned(),
+            ],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 1).expect("serialize");
+        let parsed = SaslHandshakeResponse::parse(&mut serialized, 1).expect("parse");
+        assert_eq!(parsed.enabled_mechanisms().len(), 4);
+        assert_eq!(parsed.enabled_mechanisms()[0], "PLAIN");
+        assert_eq!(parsed.enabled_mechanisms()[3], "OAUTHBEARER");
     }
 
+    /// Error-path: broker rejected the chosen mechanism. Error code 33 is
+    /// `UNSUPPORTED_SASL_MECHANISM`. The response should still parse.
     #[test]
-    fn test_maybe_set_throttle_time_ms_is_noop() {
-        let data = SaslHandshakeResponseData::new();
-        let mut response = SaslHandshakeResponse::new(data);
-        response.maybe_set_throttle_time_ms(100);
-        // Should still be 0 since it's a no-op
-        assert_eq!(response.throttle_time_ms(), DEFAULT_THROTTLE_TIME);
+    fn round_trip_unsupported_sasl_mechanism_error() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::UnsupportedSaslMechanism.code(),
+            mechanisms: vec!["PLAIN".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let mut serialized = AbstractResponse::serialize(&resp, 1).expect("serialize");
+        let parsed = SaslHandshakeResponse::parse(&mut serialized, 1).expect("parse");
+        assert_eq!(parsed.error(), Errors::UnsupportedSaslMechanism);
+        assert_eq!(parsed.error_counts().get(&Errors::UnsupportedSaslMechanism), Some(&1));
     }
 
+    /// Translation of Java `RequestResponseTest.testErrorCountsIncludesNone`
+    /// (`RequestResponseTest.java:976-977`):
+    /// `assertEquals(1, createSaslHandshakeResponse().errorCounts().get(Errors.NONE));`
+    /// Pins the success-path branch of `error_counts()`: a success
+    /// response surfaces a single `Errors::None` entry with count 1.
+    /// Critic 9 Phase 9.0 Suggestion 3.
     #[test]
-    fn test_should_client_throttle() {
-        let data = SaslHandshakeResponseData::new();
-        let response = SaslHandshakeResponse::new(data);
-        for version in
-            SaslHandshakeResponseData::LOWEST_SUPPORTED_VERSION..=SaslHandshakeResponseData::HIGHEST_SUPPORTED_VERSION
-        {
-            assert!(!response.should_client_throttle(version));
-        }
+    fn success_response_error_counts_includes_none() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["PLAIN".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let counts = resp.error_counts();
+        assert_eq!(counts.get(&Errors::None), Some(&1));
+        assert_eq!(counts.values().sum::<i32>(), 1, "success response surfaces exactly one entry");
     }
 
+    /// Throttle-time getter is the constant `DEFAULT_THROTTLE_TIME` (0)
+    /// because the response schema has no throttle_time field.
     #[test]
-    fn test_enabled_mechanisms() {
-        let mut data = SaslHandshakeResponseData::new();
-        data.set_mechanisms(vec!["PLAIN".to_string(), "SCRAM-SHA-256".to_string()]);
-        let response = SaslHandshakeResponse::new(data);
+    fn throttle_time_is_default() {
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData::new());
+        assert_eq!(resp.throttle_time_ms(), 0);
+    }
+
+    /// `maybeSetThrottleTimeMs` is a no-op (Java parity).
+    #[test]
+    fn maybe_set_throttle_time_ms_no_op() {
+        let mut resp = SaslHandshakeResponse::new(SaslHandshakeResponseData::new());
+        resp.maybe_set_throttle_time_ms(42);
+        assert_eq!(resp.throttle_time_ms(), 0);
+    }
+
+    /// Hex fixture: SaslHandshakeResponse v0 body — `errorCode=NONE`,
+    /// `mechanisms=["GSSAPI"]`. Mirrors the
+    /// `createSaslHandshakeResponse()` fixture in Java's
+    /// `RequestResponseTest.java`.
+    ///
+    /// **Fixture provenance**: hand-derived from `SaslHandshakeResponse.json`
+    /// (apiKey 17, `flexibleVersions: "none"`); cross-verified by
+    /// Phase 9d integration test (`producer_smoke_sasl_plaintext_1000
+    /// _records` in `tests/integration/producer_smoke_test.rs`) — a
+    /// successful PLAIN handshake confirms that Rust **decodes** the
+    /// broker's `SaslHandshakeResponse` byte stream correctly (the
+    /// broker is the encoder, Rust is the decoder, on the response
+    /// side). The encoder-side bytes asserted by this fixture remain
+    /// hand-derived against the spec's non-flexible encoding rules for
+    /// `int16` and `[]string` and pinned by round-trip with the
+    /// decoder — production code never encodes `SaslHandshakeResponse`,
+    /// so the integration test does not exercise this encoder path.
+    ///
+    /// Wire layout:
+    /// - `00 00` — error_code (i16) = 0
+    /// - `00 00 00 01` — array length (i32) = 1
+    /// - `00 06` — mechanism string length (i16) = 6
+    /// - 6 bytes — "GSSAPI"
+    ///
+    /// Total: 14 bytes.
+    #[test]
+    fn hex_fixture_v0_gssapi_only() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0x00, 0x00, 0x00, 0x01, // array length = 1
+            0x00, 0x06, // mechanism length = 6
+            b'G', b'S', b'S', b'A', b'P', b'I', // "GSSAPI"
+        ];
+
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["GSSAPI".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 0).expect("serialize v0");
         assert_eq!(
-            response.enabled_mechanisms(),
-            &["PLAIN".to_string(), "SCRAM-SHA-256".to_string()]
+            serialized.buffer(),
+            EXPECTED,
+            "SaslHandshakeResponse v0 (mechanisms=[GSSAPI]) bytes diverged from the hex fixture"
         );
     }
 
+    /// Hex fixture: SaslHandshakeResponse v1 body — same shape as v0
+    /// (spec annotates v1 as identical to v0). Mechanism list is
+    /// `["PLAIN"]` here for variety.
+    ///
+    /// **Fixture provenance**: hand-derived.
+    ///
+    /// Wire layout:
+    /// - `00 00` — error_code = 0
+    /// - `00 00 00 01` — array length = 1
+    /// - `00 05` — mechanism length = 5
+    /// - 5 bytes — "PLAIN"
     #[test]
-    fn test_parse_roundtrip() {
-        for version in
-            SaslHandshakeResponseData::LOWEST_SUPPORTED_VERSION..=SaslHandshakeResponseData::HIGHEST_SUPPORTED_VERSION
-        {
-            let mut data = SaslHandshakeResponseData::new();
-            data.set_error_code(Errors::None.code());
-            data.set_mechanisms(vec!["PLAIN".to_string()]);
-            let original = SaslHandshakeResponse::new(data);
+    fn hex_fixture_v1_plain_only() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x00, // error_code = 0
+            0x00, 0x00, 0x00, 0x01, // array length = 1
+            0x00, 0x05, // mechanism length = 5
+            b'P', b'L', b'A', b'I', b'N',
+        ];
 
-            let serialized = ConcreteResponse::SaslHandshake(original.clone()).serialize(version).unwrap();
-            let mut buf = serialized;
-            let parsed = SaslHandshakeResponse::parse(&mut buf, version).unwrap();
-            assert_eq!(original.data().error_code, parsed.data().error_code);
-            assert_eq!(original.data().mechanisms, parsed.data().mechanisms);
-        }
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::None.code(),
+            mechanisms: vec!["PLAIN".to_owned()],
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 1).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
+    }
+
+    /// Hex fixture: SaslHandshakeResponse v1 body for an error case —
+    /// `errorCode=UNSUPPORTED_SASL_MECHANISM (33)`, `mechanisms=[]`
+    /// (broker rejected, no mechanisms enabled — atypical, but used to
+    /// pin the i32(0) empty-array encoding).
+    ///
+    /// **Fixture provenance**: hand-derived.
+    ///
+    /// Wire layout:
+    /// - `00 21` — error_code = 33 (UNSUPPORTED_SASL_MECHANISM)
+    /// - `00 00 00 00` — array length = 0
+    #[test]
+    fn hex_fixture_v1_error_empty_mechanisms() {
+        const EXPECTED: &[u8] = &[
+            0x00, 0x21, // error_code = 33
+            0x00, 0x00, 0x00, 0x00, // array length = 0
+        ];
+
+        let resp = SaslHandshakeResponse::new(SaslHandshakeResponseData {
+            error_code: Errors::UnsupportedSaslMechanism.code(),
+            mechanisms: Vec::new(),
+            unknown_tagged_fields: Vec::new(),
+        });
+        let serialized = AbstractResponse::serialize(&resp, 1).expect("serialize v1");
+        assert_eq!(serialized.buffer(), EXPECTED);
     }
 }

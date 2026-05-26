@@ -12,44 +12,69 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! A topic name and partition number.
+//! Translation of `org.apache.kafka.common.TopicPartition`.
 
 use std::fmt;
+use std::sync::Arc;
 
 /// A topic name and partition number.
-#[derive(Clone, Debug, Eq)]
+///
+/// The topic name is stored as `Arc<str>` so cloning a `TopicPartition` —
+/// the producer's `RecordAccumulator` keys its per-partition deque map by
+/// `TopicPartition` and clones the key on every send — is a single atomic
+/// reference-count bump rather than a string copy. See CLAUDE.md rule 11
+/// (hot-path identifier interning).
+///
+/// Java accepted `null` for the topic name; this Rust translation does
+/// not. Producer call sites always have a real topic. Where a "no topic"
+/// placeholder is needed (e.g. the `TopicIdPartitionTest` cases that
+/// passed `null`), pass an empty `Arc::from("")`.
+#[derive(Clone, Debug)]
 pub struct TopicPartition {
+    topic: Arc<str>,
     partition: i32,
-    topic: String,
 }
 
 impl TopicPartition {
-    /// Creates a new `TopicPartition` with the given topic and partition.
-    pub fn new(topic: String, partition: i32) -> Self {
-        Self { partition, topic }
+    /// Create a new [`TopicPartition`]. Accepts any value cheaply convertible
+    /// to `Arc<str>` (`&str`, `String`, or an existing `Arc<str>`).
+    pub fn new(topic: impl Into<Arc<str>>, partition: i32) -> Self {
+        Self { topic: topic.into(), partition }
     }
 
-    /// Returns the partition number.
+    /// The partition id.
     pub fn partition(&self) -> i32 {
         self.partition
     }
 
-    /// Returns the topic name.
+    /// The topic name.
     pub fn topic(&self) -> &str {
+        &self.topic
+    }
+
+    /// Borrow the topic as the shared `Arc<str>` so callers building further
+    /// keyed structures can share the same allocation.
+    pub fn topic_arc(&self) -> &Arc<str> {
         &self.topic
     }
 }
 
 impl PartialEq for TopicPartition {
     fn eq(&self, other: &Self) -> bool {
-        self.partition == other.partition && self.topic == other.topic
+        self.partition == other.partition && *self.topic == *other.topic
     }
 }
 
+impl Eq for TopicPartition {}
+
 impl std::hash::Hash for TopicPartition {
     fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        // Hashing through `&str` gives content-based hashing (independent of
+        // the Arc's identity), so two `TopicPartition`s built from
+        // independently-allocated `Arc<str>` of equal content hash equal —
+        // matching `Hash`+`Eq` consistency.
+        (*self.topic).hash(state);
         self.partition.hash(state);
-        self.topic.hash(state);
     }
 }
 
@@ -62,41 +87,69 @@ impl fmt::Display for TopicPartition {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
 
-    #[test]
-    fn test_topic_partition_creation() {
-        let tp = TopicPartition::new("mytopic".to_string(), 5);
-        assert_eq!(tp.partition(), 5);
-        assert_eq!(tp.topic(), "mytopic");
+    fn hash_of<T: Hash>(v: &T) -> u64 {
+        let mut h = DefaultHasher::new();
+        v.hash(&mut h);
+        h.finish()
     }
 
     #[test]
-    fn test_topic_partition_equality() {
-        let tp1 = TopicPartition::new("test".to_string(), 0);
-        let tp2 = TopicPartition::new("test".to_string(), 0);
-        let tp3 = TopicPartition::new("test".to_string(), 1);
-        let tp4 = TopicPartition::new("other".to_string(), 0);
-
-        assert_eq!(tp1, tp2);
-        assert_ne!(tp1, tp3);
-        assert_ne!(tp1, tp4);
+    fn round_trip_values() {
+        // Translation of TopicPartitionTest.testSerializationRoundtrip:
+        // Java's Serializable round-trip is irrelevant in Rust, but the
+        // intent is to verify `topic()` and `partition()` accessors.
+        let topic = "mytopic";
+        let part = 5;
+        let tp = TopicPartition::new(topic, part);
+        assert_eq!(tp.partition(), part);
+        assert_eq!(tp.topic(), topic);
     }
 
     #[test]
-    fn test_topic_partition_hash() {
-        use std::collections::HashSet;
-        let mut set = HashSet::new();
-        set.insert(TopicPartition::new("test".to_string(), 0));
-        set.insert(TopicPartition::new("test".to_string(), 0));
-        assert_eq!(set.len(), 1);
-
-        set.insert(TopicPartition::new("test".to_string(), 1));
-        assert_eq!(set.len(), 2);
+    fn equal_when_topic_and_partition_match() {
+        let a = TopicPartition::new("foo", 3);
+        let b = TopicPartition::new(String::from("foo"), 3);
+        assert_eq!(a, b);
+        assert_eq!(hash_of(&a), hash_of(&b));
     }
 
     #[test]
-    fn test_topic_partition_display() {
-        let tp = TopicPartition::new("mytopic".to_string(), 5);
-        assert_eq!(tp.to_string(), "mytopic-5");
+    fn not_equal_when_topic_differs() {
+        let a = TopicPartition::new("foo", 3);
+        let b = TopicPartition::new("bar", 3);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn not_equal_when_partition_differs() {
+        let a = TopicPartition::new("foo", 3);
+        let b = TopicPartition::new("foo", 4);
+        assert_ne!(a, b);
+    }
+
+    #[test]
+    fn display_uses_dash_separator() {
+        let tp = TopicPartition::new("topicA", 7);
+        assert_eq!(tp.to_string(), "topicA-7");
+    }
+
+    #[test]
+    fn usable_as_hashmap_key() {
+        let mut m: HashMap<TopicPartition, i32> = HashMap::new();
+        m.insert(TopicPartition::new("a", 0), 100);
+        // Lookup with a freshly-allocated key of equal content.
+        assert_eq!(m.get(&TopicPartition::new(String::from("a"), 0)), Some(&100));
+    }
+
+    #[test]
+    fn cloning_shares_topic_arc() {
+        let a = TopicPartition::new("foo", 3);
+        let b = a.clone();
+        // Same underlying Arc<str> — clone is a refcount bump only.
+        assert!(Arc::ptr_eq(a.topic_arc(), b.topic_arc()));
     }
 }

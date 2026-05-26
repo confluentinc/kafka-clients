@@ -12,10 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Internal types (org.apache.kafka.common.internals)
+//! Translation of `org.apache.kafka.common.internals`.
 
-pub(crate) mod cluster_resource_listeners;
-pub(crate) mod topic;
-
-pub(crate) use cluster_resource_listeners::ClusterResourceListeners;
-pub(crate) use topic::Topic;
+pub mod cluster_resource_listeners;
+pub mod topic;

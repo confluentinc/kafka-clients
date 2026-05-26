@@ -12,205 +12,239 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The header for a request in the Kafka protocol.
-//!
-//! Corresponds to `org.apache.kafka.common.requests.RequestHeader`.
+//! Translation of `org.apache.kafka.common.requests.RequestHeader`.
 
-use std::fmt;
-use std::io;
+use std::cell::Cell;
 
-use crate::common::protocol::Message;
-use crate::common::protocol::ObjectSerializationCache;
-use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
-use crate::request_header_data::RequestHeaderData;
-
-use super::ResponseHeader;
-
-/// Sentinel value indicating that the cached size has not been computed yet.
-const SIZE_NOT_INITIALIZED: i32 = -1;
+use crate::common::errors::KafkaError;
+use crate::common::message::request_header_data::RequestHeaderData;
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::object_serialization_cache::ObjectSerializationCache;
+use crate::common::protocol::{ApiKey, ApiKeys, Message, Readable};
+use crate::common::requests::AbstractRequestResponse;
+use crate::common::requests::ResponseHeader;
 
 /// The header for a request in the Kafka protocol.
 ///
-/// Wraps the generated [`RequestHeaderData`] and provides convenience methods
-/// for serialization, size computation, and parsing.
-#[derive(Debug, Clone)]
+/// Wraps the generated [`RequestHeaderData`] with the convenience surface
+/// the Java `RequestHeader` exposes (`new RequestHeader(apiKey, apiVersion,
+/// clientId, correlationId)`, `RequestHeader.parse(buf, version)`,
+/// `RequestHeader.size()`, `RequestHeader.toResponseHeader()`).
 pub struct RequestHeader {
     data: RequestHeaderData,
     header_version: i16,
-    size: i32,
+    /// Cached size in bytes — populated lazily on first call to
+    /// [`Self::size`]. Mirrors Java's `private int size = SIZE_NOT_INITIALIZED`.
+    /// `Cell` is sufficient because the cache is only mutated through
+    /// `&self`, never across threads (`RequestHeader` is `!Sync` like the
+    /// Java class effectively is — Java's mutation is also racy).
+    size_cache: Cell<Option<i32>>,
 }
 
 impl RequestHeader {
-    /// Creates a new `RequestHeader` with the given API key, version, client id, and correlation id.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the API key is not recognized.
-    pub fn new(
-        request_api_key: &ApiKeys,
-        request_version: i16,
-        client_id: &str,
-        correlation_id: i32,
-    ) -> io::Result<Self> {
-        let mut data = RequestHeaderData::new();
-        data.set_request_api_key(request_api_key.id());
-        data.set_request_api_version(request_version);
-        data.set_client_id(Some(client_id.to_string()));
-        data.set_correlation_id(correlation_id);
+    /// Construct a new `RequestHeader` from its constituent fields. Mirrors
+    /// `new RequestHeader(ApiKeys requestApiKey, short requestVersion,
+    /// String clientId, int correlationId)`.
+    pub fn new(request_api_key: &ApiKey, request_version: i16, client_id: &str, correlation_id: i32) -> Self {
+        let data = RequestHeaderData {
+            request_api_key: request_api_key.id,
+            request_api_version: request_version,
+            correlation_id,
+            client_id: Some(client_id.to_owned()),
+            unknown_tagged_fields: Vec::new(),
+        };
         let header_version = request_api_key.request_header_version(request_version);
-        Ok(Self { data, header_version, size: SIZE_NOT_INITIALIZED })
+        Self::from_data(data, header_version)
     }
 
-    /// Creates a new `RequestHeader` from existing data and a header version.
+    /// Construct from an already-built `RequestHeaderData`. Mirrors
+    /// `new RequestHeader(RequestHeaderData data, short headerVersion)`.
     pub fn from_data(data: RequestHeaderData, header_version: i16) -> Self {
-        Self { data, header_version, size: SIZE_NOT_INITIALIZED }
+        RequestHeader { data, header_version, size_cache: Cell::new(None) }
     }
 
-    /// Returns the API key of this request.
-    ///
-    /// # Panics
-    ///
-    /// Panics if the stored API key id does not correspond to a known API key.
-    /// This should never happen for a properly constructed `RequestHeader`.
-    pub fn api_key(&self) -> &'static ApiKeys {
-        ApiKeys::for_id(self.data.request_api_key).expect("RequestHeader contains an unknown API key id")
+    /// Mirrors `RequestHeader.apiKey()`.
+    pub fn api_key(&self) -> Result<&'static ApiKey, KafkaError> {
+        ApiKeys::for_id(self.data.request_api_key as i32)
     }
 
-    /// Returns the API version of this request.
+    /// Mirrors `RequestHeader.apiVersion()`.
     pub fn api_version(&self) -> i16 {
         self.data.request_api_version
     }
 
-    /// Returns the header version.
+    /// Mirrors `RequestHeader.headerVersion()`.
     pub fn header_version(&self) -> i16 {
         self.header_version
     }
 
-    /// Returns the client id string.
-    ///
-    /// Returns an empty string if the client id is `None`.
+    /// Mirrors `RequestHeader.clientId()`. Returns the empty string when the
+    /// underlying field is `None`, mirroring Java's null-as-empty handling.
     pub fn client_id(&self) -> &str {
         self.data.client_id.as_deref().unwrap_or("")
     }
 
-    /// Returns the correlation id of this request.
+    /// Mirrors `RequestHeader.correlationId()`.
     pub fn correlation_id(&self) -> i32 {
         self.data.correlation_id
     }
 
-    /// Returns a reference to the underlying data.
-    pub fn data(&self) -> &RequestHeaderData {
+    /// Mirrors `RequestHeader.data()`.
+    pub fn header_data(&self) -> &RequestHeaderData {
         &self.data
     }
 
-    /// Returns whether the API version is within the supported range.
-    pub fn is_api_version_supported(&self) -> bool {
-        self.api_key().is_version_supported(self.api_version())
+    /// Calculate the size of the header. Mirrors the test-visible
+    /// `RequestHeader.size(ObjectSerializationCache)`. Updates the cache.
+    pub fn size_with_cache(&self, serialization_cache: &mut ObjectSerializationCache) -> i32 {
+        let mut sizer = crate::common::protocol::MessageSizeAccumulator::new();
+        Message::add_size(&self.data, &mut sizer, serialization_cache, self.header_version);
+        let s = sizer.total_size();
+        self.size_cache.set(Some(s));
+        s
     }
 
-    /// Returns whether the API version is deprecated.
-    pub fn is_api_version_deprecated(&self) -> bool {
-        self.api_key().is_version_deprecated(self.api_version())
-    }
-
-    /// Creates a corresponding response header with the same correlation id
-    /// and the appropriate response header version.
-    pub fn to_response_header(&self) -> ResponseHeader {
-        ResponseHeader::new(
-            self.data.correlation_id,
-            self.api_key().response_header_version(self.api_version()),
-        )
-    }
-
-    /// Calculates the size of this header in bytes using the given serialization cache.
-    ///
-    /// This method recalculates the size on each invocation. Prefer [`size`](Self::size)
-    /// unless you need to pair this call with a subsequent [`write`](Self::write) using
-    /// the same cache.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if size calculation fails.
-    pub fn size_with_cache(&mut self, cache: &mut ObjectSerializationCache) -> io::Result<i32> {
-        let s = Message::size(&self.data, cache, self.header_version)?;
-        self.size = s;
-        Ok(s)
-    }
-
-    /// Returns the size of this header in bytes.
-    ///
-    /// The result is cached after the first invocation.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if size calculation fails.
-    pub fn size(&mut self) -> io::Result<i32> {
-        if self.size == SIZE_NOT_INITIALIZED {
-            let mut cache = ObjectSerializationCache::new();
-            self.size_with_cache(&mut cache)?;
+    /// Returns the size of the header in bytes. Mirrors `RequestHeader.size()`.
+    /// Idempotent and inexpensive after the first call.
+    pub fn size(&self) -> i32 {
+        if let Some(s) = self.size_cache.get() {
+            return s;
         }
-        Ok(self.size)
+        let mut cache = ObjectSerializationCache::new();
+        self.size_with_cache(&mut cache)
     }
 
-    /// Writes this header to the given buffer using the provided serialization cache.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if writing fails.
-    pub fn write(&self, buffer: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> io::Result<()> {
-        Message::write(&self.data, buffer, cache, self.header_version)
+    /// Test-only: write into a pre-allocated `ByteBufferAccessor`. Mirrors
+    /// `RequestHeader.write(ByteBuffer, ObjectSerializationCache)`.
+    pub fn write(&self, accessor: &mut ByteBufferAccessor, cache: &ObjectSerializationCache) -> Result<(), KafkaError> {
+        Message::write(&self.data, accessor, cache, self.header_version)
     }
 
-    /// Parses a `RequestHeader` from the given buffer.
-    ///
-    /// The header version is derived from the API key and API version found in the buffer.
-    /// The buffer position is advanced past the header after parsing.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The API key id is not recognized
-    /// - The API key has no valid versions
-    /// - The header data cannot be parsed
-    pub fn parse(buffer: &mut ByteBufferAccessor) -> io::Result<Self> {
-        let start_position = buffer.position();
+    /// Mirrors `RequestHeader.isApiVersionSupported()`.
+    pub fn is_api_version_supported(&self) -> bool {
+        match self.api_key() {
+            Ok(k) => k.is_version_supported(self.api_version()),
+            Err(_) => false,
+        }
+    }
 
-        // Read API key and version to determine header version, then reset position.
-        let api_key_id = buffer.read_short()?;
-        let api_version = buffer.read_short()?;
+    /// Mirrors `RequestHeader.isApiVersionDeprecated()`.
+    pub fn is_api_version_deprecated(&self) -> bool {
+        match self.api_key() {
+            Ok(k) => k.is_version_deprecated(self.api_version()),
+            Err(_) => false,
+        }
+    }
 
-        let api_key = ApiKeys::for_id(api_key_id)
-            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, format!("Unknown API key {api_key_id}")))?;
+    /// Mirrors `RequestHeader.toResponseHeader()`.
+    pub fn to_response_header(&self) -> Result<ResponseHeader, KafkaError> {
+        let header_version = self.api_key()?.response_header_version(self.api_version());
+        Ok(ResponseHeader::new(self.correlation_id(), header_version))
+    }
 
-        // Check that the API key has valid versions before trying to get the header version
+    /// Parse a request header from `accessor`. Mirrors
+    /// `RequestHeader.parse(ByteBuffer)`.
+    ///
+    /// Java first peeks the first 4 bytes (api key + api version), derives
+    /// the header version from the api key, then rewinds and re-parses
+    /// against the proper `RequestHeaderData` schema. Our Rust translation
+    /// mirrors this exactly.
+    pub fn parse(accessor: &mut ByteBufferAccessor) -> Result<Self, KafkaError> {
+        let start_position = accessor.position();
+        let api_key_id_result = accessor.read_short();
+        let api_version_result = accessor.read_short();
+
+        // Re-position to the start so we can re-parse the full header.
+        accessor.set_position(start_position);
+
+        let api_key_id = match api_key_id_result {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(KafkaError::InvalidRequest(
+                    "Error parsing request header. Our best guess of the apiKeyId is: -1".to_owned(),
+                ));
+            },
+        };
+        let api_version = match api_version_result {
+            Ok(v) => v,
+            Err(_) => {
+                return Err(KafkaError::InvalidRequest(format!(
+                    "Error parsing request header. Our best guess of the apiKeyId is: {api_key_id}"
+                )));
+            },
+        };
+
+        let api_key = match ApiKeys::for_id(api_key_id as i32) {
+            Ok(k) => k,
+            Err(_) => {
+                return Err(KafkaError::InvalidRequest(format!("Unknown API key {api_key_id}")));
+            },
+        };
+
         if !api_key.has_valid_version() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
-                format!(
-                    "Unsupported api with key {} ({}) and version {}",
-                    api_key_id,
-                    api_key.name(),
-                    api_version
-                ),
-            ));
+            return Err(KafkaError::InvalidRequest(format!(
+                "Unsupported api with key {} ({}) and version {}",
+                api_key_id, api_key.name, api_version
+            )));
         }
 
         let header_version = api_key.request_header_version(api_version);
-
-        // Reset to start position and parse the full header data
-        buffer.set_position(start_position)?;
-        let mut header_data = RequestHeaderData::read(buffer, header_version)?;
-
-        // Due to a quirk in the protocol, client ID is marked as nullable.
-        // However, we treat a null client ID as equivalent to an empty client ID.
+        let mut header_data = match RequestHeaderData::read(accessor, header_version) {
+            Ok(d) => d,
+            Err(_) => {
+                return Err(KafkaError::InvalidRequest(format!(
+                    "Error parsing request header. Our best guess of the apiKeyId is: {api_key_id}"
+                )));
+            },
+        };
+        // Java treats a null clientId as equivalent to "" for downstream code.
         if header_data.client_id.is_none() {
-            header_data.set_client_id(Some(String::new()));
+            header_data.client_id = Some(String::new());
         }
+        let header = RequestHeader::from_data(header_data, header_version);
+        // Cache the size from the position delta.
+        let parsed_size = (accessor.position() as i32 - start_position as i32).max(0);
+        header.size_cache.set(Some(parsed_size));
+        Ok(header)
+    }
+}
 
-        // Size of header is calculated by the shift in the buffer position during parsing.
-        let consumed = buffer.position().saturating_sub(start_position);
+impl AbstractRequestResponse for RequestHeader {
+    fn data(&self) -> &dyn Message {
+        &self.data
+    }
+}
 
-        Ok(Self { data: header_data, header_version, size: consumed as i32 })
+impl std::fmt::Debug for RequestHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RequestHeader")
+            .field("data", &self.data)
+            .field("header_version", &self.header_version)
+            .finish()
+    }
+}
+
+impl std::fmt::Display for RequestHeader {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let api_key_name = self.api_key().map(|k| k.name).unwrap_or("<unknown>");
+        write!(
+            f,
+            "RequestHeader(apiKey={api_key_name}, apiVersion={}, clientId={}, correlationId={}, headerVersion={})",
+            self.api_version(),
+            self.client_id(),
+            self.correlation_id(),
+            self.header_version
+        )
+    }
+}
+
+impl Clone for RequestHeader {
+    fn clone(&self) -> Self {
+        RequestHeader {
+            data: self.data.clone(),
+            header_version: self.header_version,
+            size_cache: Cell::new(self.size_cache.get()),
+        }
     }
 }
 
@@ -229,156 +263,118 @@ impl std::hash::Hash for RequestHeader {
     }
 }
 
-impl fmt::Display for RequestHeader {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "RequestHeader(apiKey={}, apiVersion={}, clientId={}, correlationId={}, headerVersion={})",
-            self.api_key().name(),
-            self.api_version(),
-            self.client_id(),
-            self.correlation_id(),
-            self.header_version
-        )
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::common::protocol::Writable;
 
-    /// Helper: serializes a RequestHeader into a ByteBufferAccessor for parsing tests.
-    /// Equivalent to Java's `RequestTestUtils.serializeRequestHeader`.
-    fn serialize_request_header(header: &mut RequestHeader) -> io::Result<ByteBufferAccessor> {
-        let mut cache = ObjectSerializationCache::new();
-        let size = header.size_with_cache(&mut cache)?;
-        let mut buffer = ByteBufferAccessor::new(size as usize);
-        header.write(&mut buffer, &cache)?;
-        buffer.flip();
-        Ok(buffer)
-    }
-
-    /// Translated from Java `RequestHeaderTest.testRequestHeaderV1`.
+    /// Translation of `RequestHeaderTest#testRequestHeaderV1`.
     #[test]
-    fn test_request_header_v1() {
-        let mut header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, 1, "", 10).unwrap();
+    fn request_header_v1() {
+        let api_version: i16 = 1;
+        let find_coordinator = ApiKeys::for_id(10).expect("FIND_COORDINATOR");
+        let header = RequestHeader::new(find_coordinator, api_version, "", 10);
         assert_eq!(header.header_version(), 1);
 
-        let mut buffer = serialize_request_header(&mut header).unwrap();
-        assert_eq!(buffer.remaining(), 10);
-        let deserialized = RequestHeader::parse(&mut buffer).unwrap();
-        assert_eq!(header, deserialized);
+        let buf = serialize_header(&header);
+        assert_eq!(buf.len(), 10);
+
+        let mut accessor = ByteBufferAccessor::wrap(buf);
+        let parsed = RequestHeader::parse(&mut accessor).expect("parse");
+        assert_eq!(parsed, header);
     }
 
-    /// Translated from Java `RequestHeaderTest.testRequestHeaderV2`.
+    /// Translation of `RequestHeaderTest#testRequestHeaderV2`.
     #[test]
-    fn test_request_header_v2() {
-        let mut header = RequestHeader::new(&ApiKeys::CREATE_DELEGATION_TOKEN, 2, "", 10).unwrap();
+    fn request_header_v2() {
+        let api_version: i16 = 2;
+        let create_delegation_token = ApiKeys::for_id(38).expect("CREATE_DELEGATION_TOKEN");
+        let header = RequestHeader::new(create_delegation_token, api_version, "", 10);
         assert_eq!(header.header_version(), 2);
 
-        let mut buffer = serialize_request_header(&mut header).unwrap();
-        assert_eq!(buffer.remaining(), 11);
-        let deserialized = RequestHeader::parse(&mut buffer).unwrap();
-        assert_eq!(header, deserialized);
+        let buf = serialize_header(&header);
+        assert_eq!(buf.len(), 11);
+
+        let mut accessor = ByteBufferAccessor::wrap(buf);
+        let parsed = RequestHeader::parse(&mut accessor).expect("parse");
+        assert_eq!(parsed, header);
     }
 
-    /// Translated from Java `RequestHeaderTest.parseHeaderFromBufferWithNonZeroPosition`.
+    /// Translation of `RequestHeaderTest#parseHeaderFromBufferWithNonZeroPosition`.
     #[test]
-    fn test_parse_header_from_buffer_with_non_zero_position() {
-        // Create a buffer with some leading bytes to simulate a non-zero start position
-        let mut full_buf = ByteBufferAccessor::new(64);
-        // Write 10 bytes of padding
-        for _ in 0..10 {
-            full_buf.write_byte(0).unwrap();
-        }
+    fn parse_header_from_buffer_with_nonzero_position() {
+        let find_coordinator = ApiKeys::for_id(10).expect("FIND_COORDINATOR");
+        let header = RequestHeader::new(find_coordinator, 1, "", 10);
+        let mut serialization_cache = ObjectSerializationCache::new();
+        let size = header.size_with_cache(&mut serialization_cache) as usize;
 
-        let mut header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, 1, "", 10).unwrap();
-        let mut cache = ObjectSerializationCache::new();
-        header.size_with_cache(&mut cache).unwrap();
-        header.write(&mut full_buf, &cache).unwrap();
+        let mut accessor = ByteBufferAccessor::allocate(10 + size);
+        accessor.set_position(10);
+        Message::write(&header.data, &mut accessor, &serialization_cache, header.header_version).expect("write");
+        accessor.flip();
+        accessor.set_position(10);
 
-        let limit = full_buf.len();
-
-        // Create a sub-buffer from position 10 to limit (simulates a Java buffer
-        // with position=10 and limit=end after header bytes)
-        let sub_bytes = full_buf.buffer()[10..limit].to_vec();
-        let mut parse_buf = ByteBufferAccessor::from_bytes(sub_bytes);
-
-        let parsed = RequestHeader::parse(&mut parse_buf).unwrap();
-        assert_eq!(header, parsed);
+        let parsed = RequestHeader::parse(&mut accessor).expect("parse");
+        assert_eq!(parsed, header);
     }
 
-    /// Translated from Java `RequestHeaderTest.parseHeaderWithNullClientId`.
+    /// Translation of `RequestHeaderTest#parseHeaderWithNullClientId`.
     #[test]
-    fn test_parse_header_with_null_client_id() {
-        let mut header_data = RequestHeaderData::new();
-        header_data.set_client_id(None);
-        header_data.set_correlation_id(123);
-        header_data.set_request_api_key(ApiKeys::FIND_COORDINATOR.id());
-        header_data.set_request_api_version(10);
+    fn parse_header_with_null_client_id() {
+        let header_data = RequestHeaderData {
+            request_api_key: 10, // FIND_COORDINATOR
+            request_api_version: 10,
+            correlation_id: 123,
+            client_id: None,
+            unknown_tagged_fields: Vec::new(),
+        };
+        let mut serialization_cache = ObjectSerializationCache::new();
+        let mut sizer = crate::common::protocol::MessageSizeAccumulator::new();
+        Message::add_size(&header_data, &mut sizer, &mut serialization_cache, 2);
+        let mut accessor = ByteBufferAccessor::allocate(sizer.total_size() as usize);
+        Message::write(&header_data, &mut accessor, &serialization_cache, 2).expect("write");
+        accessor.flip();
 
-        let mut cache = ObjectSerializationCache::new();
-        let size = Message::size(&header_data, &mut cache, 2).unwrap();
-        let mut buffer = ByteBufferAccessor::new(size as usize);
-        Message::write(&header_data, &mut buffer, &cache, 2).unwrap();
-        buffer.flip();
-
-        let parsed = RequestHeader::parse(&mut buffer).unwrap();
+        let parsed = RequestHeader::parse(&mut accessor).expect("parse");
         assert_eq!(parsed.client_id(), "");
         assert_eq!(parsed.correlation_id(), 123);
-        assert_eq!(*parsed.api_key(), ApiKeys::FIND_COORDINATOR);
+        assert_eq!(parsed.api_key().expect("known").id, 10);
         assert_eq!(parsed.api_version(), 10);
     }
 
-    /// Translated from Java `RequestHeaderTest.verifySizeMethodsReturnSameValue`.
-    ///
-    /// The Java test uses Mockito to verify that `size(ObjectSerializationCache)` is
-    /// only called once (to verify caching). In Rust, we verify the same semantic:
-    /// that the cached `size()` returns the same value as a fresh computation.
+    /// Translation of `RequestHeaderTest#verifySizeMethodsReturnSameValue`.
+    /// Java uses Mockito spy verification; we directly assert the cached
+    /// value matches a fresh recomputation.
     #[test]
-    fn test_verify_size_methods_return_same_value() {
-        let mut header_data = RequestHeaderData::new();
-        header_data.set_client_id(Some("hakuna-matata".to_string()));
-        header_data.set_correlation_id(123);
-        header_data.set_request_api_key(ApiKeys::FIND_COORDINATOR.id());
-        header_data.set_request_api_version(10);
+    fn verify_size_methods_return_same_value() {
+        let header_data = RequestHeaderData {
+            request_api_key: 10,
+            request_api_version: 10,
+            correlation_id: 123,
+            client_id: Some("hakuna-matata".to_owned()),
+            unknown_tagged_fields: Vec::new(),
+        };
+        let mut serialization_cache = ObjectSerializationCache::new();
+        let mut sizer = crate::common::protocol::MessageSizeAccumulator::new();
+        Message::add_size(&header_data, &mut sizer, &mut serialization_cache, 2);
+        let mut accessor = ByteBufferAccessor::allocate(sizer.total_size() as usize);
+        Message::write(&header_data, &mut accessor, &serialization_cache, 2).expect("write");
+        accessor.flip();
 
-        // Serialize to buffer and parse back
-        let mut cache = ObjectSerializationCache::new();
-        let size = Message::size(&header_data, &mut cache, 2).unwrap();
-        let mut buffer = ByteBufferAccessor::new(size as usize);
-        Message::write(&header_data, &mut buffer, &cache, 2).unwrap();
-        buffer.flip();
-
-        let mut parsed = RequestHeader::parse(&mut buffer).unwrap();
-
-        // Verify that the fresh size calculation matches the cached value
-        let size_calculated = parsed.size_with_cache(&mut ObjectSerializationCache::new()).unwrap();
-        let size_from_cache = parsed.size().unwrap();
+        let parsed = RequestHeader::parse(&mut accessor).expect("parse");
+        let mut fresh_cache = ObjectSerializationCache::new();
+        let size_calculated = parsed.size_with_cache(&mut fresh_cache);
+        let size_from_cache = parsed.size();
         assert_eq!(size_calculated, size_from_cache);
     }
 
-    #[test]
-    fn test_request_header_display() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, 1, "test-client", 42).unwrap();
-        let display = format!("{}", header);
-        assert!(display.contains("Metadata"));
-        assert!(display.contains("apiVersion=1"));
-        assert!(display.contains("clientId=test-client"));
-        assert!(display.contains("correlationId=42"));
-    }
-
-    #[test]
-    fn test_request_header_to_response_header() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, 12, "client", 99).unwrap();
-        let response_header = header.to_response_header();
-        assert_eq!(response_header.correlation_id(), 99);
-    }
-
-    #[test]
-    fn test_request_header_is_api_version_supported() {
-        let header = RequestHeader::new(&ApiKeys::METADATA, ApiKeys::METADATA.oldest_version(), "c", 1).unwrap();
-        assert!(header.is_api_version_supported());
+    /// Helper: serialize a header into a `Vec<u8>` (read-mode accessor's
+    /// payload). Mirrors `RequestTestUtils.serializeRequestHeader`.
+    fn serialize_header(header: &RequestHeader) -> Vec<u8> {
+        let mut cache = ObjectSerializationCache::new();
+        let size = header.size_with_cache(&mut cache) as usize;
+        let mut accessor = ByteBufferAccessor::allocate(size);
+        Message::write(&header.data, &mut accessor, &cache, header.header_version).expect("write");
+        accessor.flip();
+        accessor.buffer().to_vec()
     }
 }

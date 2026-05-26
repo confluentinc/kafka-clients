@@ -12,43 +12,41 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The metadata for a record that has been acknowledged by the server.
-//!
-//! Translated from `org.apache.kafka.clients.producer.RecordMetadata`.
+//! Translation of `org.apache.kafka.clients.producer.RecordMetadata`.
 
 use std::fmt;
 
-use crate::common::TopicPartition;
-use crate::common::record::RecordBatch;
-
-/// Value used when the offset is unknown (i.e., `ProduceResponse.INVALID_OFFSET`).
-pub const INVALID_OFFSET: i64 = -1;
-
-/// Partition value for record without partition assigned.
-pub const UNKNOWN_PARTITION: i32 = -1;
+use crate::common::record::record_batch::NO_TIMESTAMP;
+use crate::common::requests::produce_response::ProduceResponse;
+use crate::common::topic_partition::TopicPartition;
 
 /// The metadata for a record that has been acknowledged by the server.
-#[derive(Clone, Debug)]
+///
+/// Returned to user-supplied [`Callback`](crate::producer::Callback)
+/// implementations and as the `Output` of a successful
+/// [`FutureRecordMetadata`](crate::producer::internals::FutureRecordMetadata).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RecordMetadata {
-    /// The offset of the record in the topic/partition.
     offset: i64,
     /// The timestamp of the message.
-    /// If LogAppendTime is used for the topic, the timestamp will be the timestamp returned
-    /// by the broker.
-    /// If CreateTime is used for the topic, the timestamp is the timestamp in the
-    /// corresponding ProducerRecord if the user provided one. Otherwise, it will be the
-    /// producer local time when the producer record was handed to the producer.
+    /// If `LogAppendTime` is used for the topic, the timestamp will be the
+    /// timestamp returned by the broker. If `CreateTime` is used, the
+    /// timestamp is the one in the corresponding `ProducerRecord` if the
+    /// user provided one, otherwise the producer-local time when the
+    /// record was handed to the producer.
     timestamp: i64,
-    /// The size of the serialized, uncompressed key in bytes. -1 if key is null.
     serialized_key_size: i32,
-    /// The size of the serialized, uncompressed value in bytes. -1 if value is null.
     serialized_value_size: i32,
-    /// The topic and partition the record was sent to.
     topic_partition: TopicPartition,
 }
 
 impl RecordMetadata {
-    /// Creates a new instance with the provided parameters.
+    /// Partition value used when no partition has been chosen.
+    /// Mirrors `RecordMetadata.UNKNOWN_PARTITION`.
+    pub const UNKNOWN_PARTITION: i32 = -1;
+
+    /// Create a new instance with the provided parameters. Mirrors the
+    /// 6-arg Java constructor.
     pub fn new(
         topic_partition: TopicPartition,
         base_offset: i64,
@@ -57,46 +55,46 @@ impl RecordMetadata {
         serialized_key_size: i32,
         serialized_value_size: i32,
     ) -> Self {
-        // Ignore the batch_index if the base offset is -1, since this indicates the offset
-        // is unknown
+        // ignore the batchIndex if the base offset is -1, since this
+        // indicates the offset is unknown.
         let offset = if base_offset == -1 {
             base_offset
         } else {
             base_offset + batch_index as i64
         };
-        Self { offset, timestamp, serialized_key_size, serialized_value_size, topic_partition }
+        RecordMetadata { offset, timestamp, serialized_key_size, serialized_value_size, topic_partition }
     }
 
     /// Indicates whether the record metadata includes the offset.
     pub fn has_offset(&self) -> bool {
-        self.offset != INVALID_OFFSET
+        self.offset != ProduceResponse::INVALID_OFFSET
     }
 
-    /// The offset of the record in the topic/partition.
-    /// Returns -1 if [`has_offset()`](Self::has_offset) returns false.
+    /// The offset of the record in the topic/partition, or -1 if
+    /// [`RecordMetadata::has_offset`] returns false.
     pub fn offset(&self) -> i64 {
         self.offset
     }
 
     /// Indicates whether the record metadata includes the timestamp.
     pub fn has_timestamp(&self) -> bool {
-        self.timestamp != RecordBatch::NO_TIMESTAMP
+        self.timestamp != NO_TIMESTAMP
     }
 
-    /// The timestamp of the record in the topic/partition.
-    /// Returns -1 if [`has_timestamp()`](Self::has_timestamp) returns false.
+    /// The timestamp of the record in the topic/partition, or -1 if
+    /// [`RecordMetadata::has_timestamp`] returns false.
     pub fn timestamp(&self) -> i64 {
         self.timestamp
     }
 
-    /// The size of the serialized, uncompressed key in bytes.
-    /// Returns -1 if key is null.
+    /// The size of the serialized, uncompressed key in bytes. If the key
+    /// is null, the returned size is -1.
     pub fn serialized_key_size(&self) -> i32 {
         self.serialized_key_size
     }
 
-    /// The size of the serialized, uncompressed value in bytes.
-    /// Returns -1 if value is null.
+    /// The size of the serialized, uncompressed value in bytes. If the
+    /// value is null, the returned size is -1.
     pub fn serialized_value_size(&self) -> i32 {
         self.serialized_value_size
     }
@@ -111,7 +109,7 @@ impl RecordMetadata {
         self.topic_partition.partition()
     }
 
-    /// The topic and partition the record was sent to.
+    /// The full topic-partition descriptor.
     pub fn topic_partition(&self) -> &TopicPartition {
         &self.topic_partition
     }
@@ -119,25 +117,28 @@ impl RecordMetadata {
 
 impl fmt::Display for RecordMetadata {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Mirrors Java's `topicPartition.toString() + "@" + offset`.
         write!(f, "{}@{}", self.topic_partition, self.offset)
     }
 }
 
 #[cfg(test)]
 mod tests {
+    //! Translation of `org.apache.kafka.clients.producer.RecordMetadataTest`.
+
     use super::*;
 
-    /// Translated from `RecordMetadataTest.testConstructionWithMissingBatchIndex`.
+    /// Java: `RecordMetadataTest#testConstructionWithMissingBatchIndex`.
     #[test]
     fn test_construction_with_missing_batch_index() {
-        let tp = TopicPartition::new("foo".to_string(), 0);
-        let timestamp = 2340234_i64;
-        let key_size = 3;
-        let value_size = 5;
+        let tp = TopicPartition::new("foo", 0);
+        let timestamp: i64 = 2_340_234;
+        let key_size: i32 = 3;
+        let value_size: i32 = 5;
 
-        let metadata = RecordMetadata::new(tp, -1, -1, timestamp, key_size, value_size);
-        assert_eq!("foo", metadata.topic());
-        assert_eq!(0, metadata.partition());
+        let metadata = RecordMetadata::new(tp.clone(), -1, -1, timestamp, key_size, value_size);
+        assert_eq!(tp.topic(), metadata.topic());
+        assert_eq!(tp.partition(), metadata.partition());
         assert_eq!(timestamp, metadata.timestamp());
         assert!(!metadata.has_offset());
         assert_eq!(-1, metadata.offset());
@@ -145,52 +146,22 @@ mod tests {
         assert_eq!(value_size, metadata.serialized_value_size());
     }
 
-    /// Translated from `RecordMetadataTest.testConstructionWithBatchIndexOffset`.
+    /// Java: `RecordMetadataTest#testConstructionWithBatchIndexOffset`.
     #[test]
     fn test_construction_with_batch_index_offset() {
-        let tp = TopicPartition::new("foo".to_string(), 0);
-        let timestamp = 2340234_i64;
-        let key_size = 3;
-        let value_size = 5;
-        let base_offset = 15_i64;
-        let batch_index = 3;
+        let tp = TopicPartition::new("foo", 0);
+        let timestamp: i64 = 2_340_234;
+        let key_size: i32 = 3;
+        let value_size: i32 = 5;
+        let base_offset: i64 = 15;
+        let batch_index: i32 = 3;
 
-        let metadata = RecordMetadata::new(tp, base_offset, batch_index, timestamp, key_size, value_size);
-        assert_eq!("foo", metadata.topic());
-        assert_eq!(0, metadata.partition());
+        let metadata = RecordMetadata::new(tp.clone(), base_offset, batch_index, timestamp, key_size, value_size);
+        assert_eq!(tp.topic(), metadata.topic());
+        assert_eq!(tp.partition(), metadata.partition());
         assert_eq!(timestamp, metadata.timestamp());
         assert_eq!(base_offset + batch_index as i64, metadata.offset());
         assert_eq!(key_size, metadata.serialized_key_size());
         assert_eq!(value_size, metadata.serialized_value_size());
-    }
-
-    #[test]
-    fn test_record_metadata_with_offset() {
-        let tp = TopicPartition::new("test-topic".to_string(), 0);
-        let metadata = RecordMetadata::new(tp, 100, 5, 1234567890, 10, 20);
-        assert!(metadata.has_offset());
-        assert_eq!(metadata.offset(), 105);
-        assert!(metadata.has_timestamp());
-        assert_eq!(metadata.timestamp(), 1234567890);
-        assert_eq!(metadata.serialized_key_size(), 10);
-        assert_eq!(metadata.serialized_value_size(), 20);
-        assert_eq!(metadata.topic(), "test-topic");
-        assert_eq!(metadata.partition(), 0);
-    }
-
-    #[test]
-    fn test_record_metadata_unknown_offset() {
-        let tp = TopicPartition::new("test-topic".to_string(), 0);
-        let metadata = RecordMetadata::new(tp, -1, 5, RecordBatch::NO_TIMESTAMP, -1, -1);
-        assert!(!metadata.has_offset());
-        assert_eq!(metadata.offset(), -1);
-        assert!(!metadata.has_timestamp());
-    }
-
-    #[test]
-    fn test_record_metadata_display() {
-        let tp = TopicPartition::new("test-topic".to_string(), 3);
-        let metadata = RecordMetadata::new(tp, 42, 0, 0, 0, 0);
-        assert_eq!(metadata.to_string(), "test-topic-3@42");
     }
 }

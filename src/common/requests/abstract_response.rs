@@ -12,280 +12,160 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Abstract response framework for Kafka protocol responses.
-//!
-//! Corresponds to `org.apache.kafka.common.requests.AbstractResponse`.
-//!
-//! Java uses an abstract class with per-type subclasses. In Rust we use an enum
-//! (`ConcreteResponse`) with a variant for each supported response type. Currently
-//! only ApiVersions and Metadata are supported; other variants will be added as
-//! their request/response types are translated.
+//! Translation of `org.apache.kafka.common.requests.AbstractResponse`.
 
 use std::collections::HashMap;
-use std::io;
 
-use crate::common::network::ByteBufferSend;
-use crate::common::protocol::Message;
-use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
+use crate::common::errors::KafkaError;
+use crate::common::protocol::ApiKey;
+use crate::common::protocol::Errors;
+use crate::common::protocol::byte_buffer_accessor::ByteBufferAccessor;
+use crate::common::protocol::message_util::to_byte_buffer_accessor;
+use crate::common::requests::AbstractRequestResponse;
+use crate::common::requests::CorrelationIdMismatchError;
+use crate::common::requests::RequestHeader;
+use crate::common::requests::ResponseHeader;
+use crate::common::requests::request_utils;
 
-use super::ApiVersionsResponse;
-use super::MetadataResponse;
-use super::ProduceResponse;
-use super::RequestHeader;
-use super::ResponseHeader;
-use super::SaslAuthenticateResponse;
-use super::SaslHandshakeResponse;
-use super::SendBuilder;
-
-/// Default throttle time in milliseconds.
+/// Mirrors `AbstractResponse.DEFAULT_THROTTLE_TIME = 0`.
 pub const DEFAULT_THROTTLE_TIME: i32 = 0;
 
-/// Enum dispatch for all supported Kafka response types.
+/// Translation of `org.apache.kafka.common.requests.AbstractResponse`.
 ///
-/// Each variant wraps a concrete response struct. Common methods are dispatched
-/// via `match` on the variant.
-///
-/// Variants will be added as response types are translated.
-#[derive(Debug, Clone)]
-pub enum ConcreteResponse {
-    /// An ApiVersions response.
-    ApiVersions(ApiVersionsResponse),
-    /// A Metadata response.
-    Metadata(MetadataResponse),
-    /// A Produce response.
-    Produce(ProduceResponse),
-    /// A SASL handshake response.
-    SaslHandshake(SaslHandshakeResponse),
-    /// A SASL authenticate response.
-    SaslAuthenticate(SaslAuthenticateResponse),
+/// In Java this is an abstract class with state (`apiKey`) and abstract
+/// methods (`data()`, `errorCounts()`, `throttleTimeMs()`,
+/// `maybeSetThrottleTimeMs(int)`). In Rust we model it as a trait whose
+/// state-bearing methods are required and helpers (`serialize`,
+/// `serialize_with_header`) are provided.
+pub trait AbstractResponse: AbstractRequestResponse + std::marker::Send + std::marker::Sync {
+    /// The API key of this response. Mirrors `AbstractResponse.apiKey()`.
+    fn api_key(&self) -> &'static ApiKey;
+
+    /// The number of each type of error in the response, including
+    /// [`Errors::None`]. Mirrors `AbstractResponse.errorCounts()`.
+    fn error_counts(&self) -> HashMap<Errors, i32>;
+
+    /// Returns the throttle time in milliseconds. Mirrors
+    /// `AbstractResponse.throttleTimeMs()`.
+    fn throttle_time_ms(&self) -> i32;
+
+    /// Set the throttle time on this response if the schema supports it.
+    /// Otherwise a no-op. Mirrors `AbstractResponse.maybeSetThrottleTimeMs(int)`.
+    fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32);
+
+    /// Mirrors `AbstractResponse.shouldClientThrottle(short version)`. The
+    /// default returns `false`; per-API responses override.
+    fn should_client_throttle(&self, _version: i16) -> bool {
+        false
+    }
+
+    /// Cast helper for callers that hold a `&dyn AbstractResponse` and
+    /// need to recover the concrete type. Java does this with a direct
+    /// `(ProduceResponse)` cast on a polymorphic `responseBody()`; the
+    /// Rust translation uses [`std::any::Any`] downcast.
+    ///
+    /// Default implementation returns `None`; concrete types override
+    /// to return `self`.
+    fn as_any(&self) -> &dyn std::any::Any;
+
+    /// Test-visible: serialize the response body. Mirrors
+    /// `AbstractResponse.serialize(short)`.
+    fn serialize(&self, version: i16) -> Result<ByteBufferAccessor, KafkaError> {
+        to_byte_buffer_accessor(self.data(), version)
+    }
+
+    /// Mirrors `AbstractResponse.serializeWithHeader(ResponseHeader, short)`.
+    /// Concatenates header+body bytes, no length prefix.
+    fn serialize_with_header(&self, header: &ResponseHeader, version: i16) -> Result<Vec<u8>, KafkaError> {
+        request_utils::serialize(header.header_data(), header.header_version(), self.data(), version)
+    }
 }
 
-impl ConcreteResponse {
-    /// Returns the API key for this response.
-    pub fn api_key(&self) -> &'static ApiKeys {
-        match self {
-            Self::ApiVersions(r) => r.api_key(),
-            Self::Metadata(r) => r.api_key(),
-            Self::Produce(r) => r.api_key(),
-            Self::SaslHandshake(r) => r.api_key(),
-            Self::SaslAuthenticate(r) => r.api_key(),
-        }
-    }
+/// Free function mirror of Java's static `AbstractResponse.parseResponse(
+/// ByteBuffer, RequestHeader)`.
+///
+/// Reads the [`ResponseHeader`] off the front of `accessor`, validates the
+/// correlation id matches, then dispatches to the per-API parser.
+///
+/// Phase 2e wires only the producer-relevant APIs (Produce, Metadata,
+/// ApiVersions). Other API keys return [`KafkaError::UnsupportedVersion`]
+/// — Phase 5+ will fill the rest in if needed.
+pub fn parse_response(
+    accessor: &mut ByteBufferAccessor,
+    request_header: &RequestHeader,
+) -> Result<Box<dyn AbstractResponse>, KafkaError> {
+    let api_key = request_header.api_key()?;
+    let api_version = request_header.api_version();
+    let response_header_version = api_key.response_header_version(api_version);
+    let response_header = ResponseHeader::parse(accessor, response_header_version)?;
 
-    /// Builds a size-prefixed [`ByteBufferSend`] for network transmission.
-    ///
-    /// Corresponds to `AbstractResponse.toSend` in Java.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization fails.
-    pub fn to_send(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferSend> {
-        match self {
-            Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::Metadata(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::Produce(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data(), version),
-        }
-    }
-
-    /// Serializes header and body without a size prefix.
-    ///
-    /// Corresponds to `AbstractResponse.serializeWithHeader` in Java.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization fails.
-    pub fn serialize_with_header(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferAccessor> {
-        match self {
-            Self::ApiVersions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
-            },
-            Self::Metadata(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
-            },
-            Self::Produce(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
-            },
-            Self::SaslHandshake(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
-            },
-            Self::SaslAuthenticate(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
-            },
-        }
-    }
-
-    /// Serializes just the response body (no header, no size prefix).
-    ///
-    /// Corresponds to `AbstractResponse.serialize` in Java (visible for testing).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if serialization fails.
-    pub fn serialize(&self, version: i16) -> io::Result<ByteBufferAccessor> {
-        match self {
-            Self::ApiVersions(r) => Self::serialize_body(r.data(), version),
-            Self::Metadata(r) => Self::serialize_body(r.data(), version),
-            Self::Produce(r) => Self::serialize_body(r.data(), version),
-            Self::SaslHandshake(r) => Self::serialize_body(r.data(), version),
-            Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), version),
-        }
-    }
-
-    /// Serializes a message body at a given version.
-    fn serialize_body(msg: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
-        let mut cache = crate::common::protocol::ObjectSerializationCache::new();
-        let size = Message::size(msg, &mut cache, version)?;
-        let mut buf = ByteBufferAccessor::new(size as usize);
-        Message::write(msg, &mut buf, &cache, version)?;
-        buf.flip();
-        Ok(buf)
-    }
-
-    /// Returns the error counts for this response.
-    pub fn error_counts(&self) -> HashMap<Errors, i32> {
-        match self {
-            Self::ApiVersions(r) => r.error_counts(),
-            Self::Metadata(r) => r.error_counts(),
-            Self::Produce(r) => r.error_counts(),
-            Self::SaslHandshake(r) => r.error_counts(),
-            Self::SaslAuthenticate(r) => r.error_counts(),
-        }
-    }
-
-    /// Returns the throttle time in milliseconds.
-    ///
-    /// Returns 0 if the response schema does not support this field.
-    pub fn throttle_time_ms(&self) -> i32 {
-        match self {
-            Self::ApiVersions(r) => r.throttle_time_ms(),
-            Self::Metadata(r) => r.throttle_time_ms(),
-            Self::Produce(r) => r.throttle_time_ms(),
-            Self::SaslHandshake(r) => r.throttle_time_ms(),
-            Self::SaslAuthenticate(r) => r.throttle_time_ms(),
-        }
-    }
-
-    /// Sets the throttle time in the response if the schema supports it.
-    /// Otherwise, this is a no-op.
-    pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
-        match self {
-            Self::ApiVersions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-            Self::Metadata(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-            Self::Produce(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-            Self::SaslHandshake(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-            Self::SaslAuthenticate(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-        }
-    }
-
-    /// Returns whether the client should throttle upon receiving this response.
-    pub fn should_client_throttle(&self, version: i16) -> bool {
-        match self {
-            Self::ApiVersions(r) => r.should_client_throttle(version),
-            Self::Metadata(r) => r.should_client_throttle(version),
-            Self::Produce(r) => r.should_client_throttle(version),
-            Self::SaslHandshake(r) => r.should_client_throttle(version),
-            Self::SaslAuthenticate(r) => r.should_client_throttle(version),
-        }
-    }
-
-    /// Parses a response from a buffer that contains both the response header and the
-    /// response body.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if:
-    /// - The response header cannot be parsed
-    /// - The correlation id in the response does not match the request
-    /// - The response body cannot be parsed
-    pub fn parse_response(
-        buffer: &mut crate::common::protocol::ByteBufferAccessor,
-        request_header: &RequestHeader,
-    ) -> io::Result<Self> {
-        let api_key = request_header.api_key();
-        let api_version = request_header.api_version();
-
-        let response_header = ResponseHeader::parse(buffer, api_key.response_header_version(api_version))?;
-
-        if request_header.correlation_id() != response_header.correlation_id() {
-            return Err(io::Error::new(
-                io::ErrorKind::InvalidData,
+    if request_header.correlation_id() != response_header.correlation_id() {
+        return Err(KafkaError::Generic(
+            CorrelationIdMismatchError::new(
                 format!(
-                    "Correlation id for response ({}) does not match request ({}), request header: {}",
+                    "Correlation id for response ({}) does not match request ({}), request header: {request_header}",
                     response_header.correlation_id(),
                     request_header.correlation_id(),
-                    request_header
                 ),
-            ));
-        }
-
-        Self::parse(api_key, buffer, api_version)
+                request_header.correlation_id(),
+                response_header.correlation_id(),
+            )
+            .to_string(),
+        ));
     }
 
-    /// Parses a response body from the buffer for the given API key and version.
-    ///
-    /// For ApiVersions, the readable must be a `ByteBufferAccessor` to support
-    /// the fallback-to-v0 parsing logic.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the API key is not supported or parsing fails.
-    pub fn parse(api_key: &ApiKeys, readable: &mut dyn Readable, version: i16) -> io::Result<Self> {
-        match *api_key {
-            ApiKeys::API_VERSIONS => {
-                // ApiVersionsResponse.parse requires a ByteBufferAccessor for snapshot_remaining
-                // Since we receive &mut dyn Readable, we read remaining bytes and construct one.
-                let remaining = readable.remaining();
-                let bytes = readable.read_array(remaining)?;
-                let mut buf = ByteBufferAccessor::from_bytes(bytes);
-                let response = ApiVersionsResponse::parse(&mut buf, version)?;
-                Ok(Self::ApiVersions(response))
-            },
-            ApiKeys::METADATA => {
-                let response = MetadataResponse::parse(readable, version)?;
-                Ok(Self::Metadata(response))
-            },
-            ApiKeys::PRODUCE => {
-                let response = ProduceResponse::parse(readable, version)?;
-                Ok(Self::Produce(response))
-            },
-            ApiKeys::SASL_HANDSHAKE => {
-                let response = SaslHandshakeResponse::parse(readable, version)?;
-                Ok(Self::SaslHandshake(response))
-            },
-            ApiKeys::SASL_AUTHENTICATE => {
-                let response = SaslAuthenticateResponse::parse(readable, version)?;
-                Ok(Self::SaslAuthenticate(response))
-            },
-            _ => Err(io::Error::new(
-                io::ErrorKind::Unsupported,
-                format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
-            )),
-        }
+    parse_response_body(api_key, accessor, api_version)
+}
+
+/// Mirror of Java's `AbstractResponse.parseResponse(ApiKeys, Readable, short)`.
+/// Translates only producer-relevant API keys; others return
+/// [`KafkaError::UnsupportedVersion`].
+pub fn parse_response_body(
+    api_key: &'static ApiKey,
+    accessor: &mut ByteBufferAccessor,
+    api_version: i16,
+) -> Result<Box<dyn AbstractResponse>, KafkaError> {
+    use crate::common::requests::{
+        ApiVersionsResponse, MetadataResponse, ProduceResponse, SaslAuthenticateResponse, SaslHandshakeResponse,
+    };
+    match api_key.id {
+        // PRODUCE = 0
+        0 => Ok(Box::new(ProduceResponse::parse(accessor, api_version)?)),
+        // METADATA = 3
+        3 => Ok(Box::new(MetadataResponse::parse(accessor, api_version)?)),
+        // SASL_HANDSHAKE = 17
+        17 => Ok(Box::new(SaslHandshakeResponse::parse(accessor, api_version)?)),
+        // API_VERSIONS = 18
+        18 => Ok(Box::new(ApiVersionsResponse::parse(accessor, api_version)?)),
+        // SASL_AUTHENTICATE = 36
+        36 => Ok(Box::new(SaslAuthenticateResponse::parse(accessor, api_version)?)),
+        _ => Err(KafkaError::UnsupportedVersion(format!(
+            "ApiKey {} ({}) is not currently handled in `parse_response`. Supported API keys: Produce(0), Metadata(3), SaslHandshake(17), ApiVersions(18), SaslAuthenticate(36).",
+            api_key.id, api_key.name,
+        ))),
     }
 }
 
-impl std::fmt::Display for ConcreteResponse {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::ApiVersions(r) => write!(f, "{r}"),
-            Self::Metadata(r) => write!(f, "{r}"),
-            Self::Produce(r) => write!(f, "{r}"),
-            Self::SaslHandshake(r) => write!(f, "{r}"),
-            Self::SaslAuthenticate(r) => write!(f, "{r}"),
-        }
-    }
-}
-
-/// Helper: counts a single error, returning a map with one entry.
-pub fn single_error_count(error: Errors) -> HashMap<Errors, i32> {
+/// Helper: produce an `errorCounts` map containing a single
+/// (error, 1) entry. Mirrors `AbstractResponse.errorCounts(Errors)`.
+pub fn error_counts_one(error: Errors) -> HashMap<Errors, i32> {
     let mut map = HashMap::new();
     map.insert(error, 1);
     map
 }
 
-/// Helper: increments the count for the given error in the map.
+/// Helper: produce an `errorCounts` map by counting occurrences of each
+/// error in `errors`. Mirrors `AbstractResponse.errorCounts(Collection<Errors>)`.
+pub fn error_counts_from_iter(errors: impl IntoIterator<Item = Errors>) -> HashMap<Errors, i32> {
+    let mut map = HashMap::new();
+    for e in errors {
+        *map.entry(e).or_insert(0) += 1;
+    }
+    map
+}
+
+/// Helper: increment `error` in `error_counts` by 1. Mirrors
+/// `AbstractResponse.updateErrorCounts(Map<Errors, Integer>, Errors)`.
 pub fn update_error_counts(error_counts: &mut HashMap<Errors, i32>, error: Errors) {
     *error_counts.entry(error).or_insert(0) += 1;
 }

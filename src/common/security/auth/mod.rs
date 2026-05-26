@@ -12,8 +12,10 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Security authentication types (org.apache.kafka.common.security.auth).
+//! Translation of `org.apache.kafka.common.security.auth`.
 
+pub mod kafka_principal;
 pub mod security_protocol;
 
+pub use kafka_principal::KafkaPrincipal;
 pub use security_protocol::SecurityProtocol;
