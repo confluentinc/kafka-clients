@@ -115,6 +115,25 @@ impl RequestManagers {
 
 #[cfg(test)]
 mod tests {
+    // Java `RequestManagersTest` cases deferred to Phase 10 with the
+    // supplier factory (PLAN.md "Out of scope"):
+    //
+    //   - testMemberStateListenerRegistered: exercises
+    //     `RequestManagers.supplier(...)` plumbing the `MemberStateListener`
+    //     into `ConsumerMembershipManager`. Requires
+    //     ConsumerHeartbeatRequestManager (Phase 8) + the supplier
+    //     factory (Phase 10).
+    //
+    //   - testStreamMemberStateListenerRegistered: same shape as above
+    //     but for the Streams variant. Streams support is out of
+    //     milestone scope per consumer-threading.md §20, so this test
+    //     will not be translated even after the supplier lands.
+    //
+    // The tests below are container-shape tests for the Phase-6
+    // skeleton — they have no Java analog because Java exposes the
+    // `Optional`s directly and `entries()` is a Rust-only helper that
+    // returns the registered managers in deterministic order.
+
     use super::*;
 
     fn coord_manager() -> CoordinatorRequestManager {
