@@ -28,7 +28,6 @@
 
 #![allow(dead_code)]
 
-use std::collections::VecDeque;
 use std::sync::{Arc, Mutex};
 
 use log::trace;
@@ -75,13 +74,13 @@ pub(crate) fn no_auth_failure() -> MaybeAuthFailureFn {
 pub(crate) struct FetchRequestManager {
     /// Shared state with the Phase 10 bg task (`AbstractFetch` from 7a).
     abstract_fetch: AbstractFetch,
-    /// Queue of pending fetch-request creation acks. FIFO. The Java
-    /// equivalent is a single `CompletableFuture<Void>` slot
-    /// (`pendingFetchRequestFuture`); the Rust port uses a `VecDeque` to
-    /// support multiple in-flight `CreateFetchRequestsEvent` enqueues
-    /// (Java chains them via `whenComplete`, the Rust port simply
-    /// processes them in order at the next `poll`).
-    pending_fetch_requests: VecDeque<oneshot::Sender<Result<(), KafkaError>>>,
+    /// Pending fetch-request creation acks. Matches Java's single
+    /// `CompletableFuture<Void> pendingFetchRequestFuture` semantics:
+    /// concurrent callers' acks accumulate in the same `Vec`, and ALL
+    /// are completed together on the next `pollInternal` (Java does
+    /// this via `whenComplete` chaining; Rust collects them in a single
+    /// slot and resolves them in one shot).
+    pending_fetch_requests: Option<Vec<oneshot::Sender<Result<(), KafkaError>>>>,
     /// Node-availability callbacks supplied by the consumer bg task. They
     /// are stored as `Arc<dyn Fn>` so the bg task can plug in
     /// [`crate::consumer::internals::network_client_delegate::NetworkClientDelegate`]
@@ -115,7 +114,7 @@ impl FetchRequestManager {
                 fetch_buffer,
                 decompression_buffer_supplier,
             ),
-            pending_fetch_requests: VecDeque::new(),
+            pending_fetch_requests: None,
             is_unavailable,
             maybe_throw_auth_failure,
         }
@@ -127,12 +126,15 @@ impl FetchRequestManager {
     /// Translates Java's
     /// `CompletableFuture<Void> createFetchRequests()`.
     ///
-    /// The Java code chains a single pending future via `whenComplete`;
-    /// the Rust port simply enqueues the ack on a FIFO. Both signal
-    /// "the next `poll` will produce requests".
+    /// Java chains a single `pendingFetchRequestFuture` via `whenComplete`
+    /// so concurrent callers all complete on ONE `pollInternal`. The
+    /// Rust port collects all acks in a single slot; the next `poll`
+    /// completes them together.
     pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), KafkaError>> {
         let (tx, rx) = oneshot::channel();
-        self.pending_fetch_requests.push_back(tx);
+        self.pending_fetch_requests
+            .get_or_insert_with(Vec::new)
+            .push(tx);
         rx
     }
 
@@ -140,11 +142,13 @@ impl FetchRequestManager {
     ///
     /// This is the Phase 10 wiring entry point — the bg task receives
     /// the event and immediately calls `enqueue_create_fetch_requests`
-    /// to enqueue the ack. The next `poll(current_time_ms)` either
-    /// completes it with `Ok(())` (requests are dispatched) or
-    /// `Err(err)` (no fetch-requestable partitions).
+    /// to enqueue the ack. The next `poll(current_time_ms)` completes
+    /// all accumulated acks together (Java's single-slot
+    /// `pendingFetchRequestFuture` semantics).
     pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), KafkaError>>) {
-        self.pending_fetch_requests.push_back(ack);
+        self.pending_fetch_requests
+            .get_or_insert_with(Vec::new)
+            .push(ack);
     }
 
     /// Borrowed access to the underlying `AbstractFetch`. Used by the bg
@@ -193,11 +197,14 @@ impl FetchRequestManager {
     /// `for_close = true` switches `prepare_fetch_requests` for
     /// `prepare_close_fetch_session_requests` (`poll_on_close` path).
     fn poll_internal(&mut self, current_time_ms: i64, for_close: bool) -> PollResult {
-        if self.pending_fetch_requests.is_empty() {
+        // Java's `pendingFetchRequestFuture` semantics: take the whole
+        // slot out atomically; all callers' acks resolve together with
+        // a single result.
+        let Some(pending_acks) = self.pending_fetch_requests.take() else {
             // No explicit request for creating fetch requests was issued
             // — short-circuit.
             return PollResult::empty();
-        }
+        };
 
         let prepared = if for_close {
             // Java's `pollOnClose` builds requests against the resolved
@@ -229,11 +236,14 @@ impl FetchRequestManager {
             ) {
                 Ok(map) => map,
                 Err(e) => {
-                    // Java: completes pending future exceptionally and
-                    // returns a "dummy" empty PollResult to avoid
-                    // interrupting other request managers.
-                    if let Some(tx) = self.pending_fetch_requests.pop_front() {
-                        let _ = tx.send(Err(e));
+                    // Java: completes ALL chained pendingFetchRequestFuture
+                    // callers exceptionally and returns a "dummy" empty
+                    // PollResult to avoid interrupting other request
+                    // managers.
+                    for tx in pending_acks {
+                        // Cheap KafkaError clone via String reformat.
+                        let cloned = KafkaError::illegal_state(e.message().to_string());
+                        let _ = tx.send(Err(cloned));
                     }
                     return PollResult::empty();
                 },
@@ -242,17 +252,18 @@ impl FetchRequestManager {
 
         if prepared.is_empty() {
             // No fetchable partitions: wake the buffer so a polling
-            // consumer doesn't wait needlessly, complete the next
-            // pending ack, and return empty.
+            // consumer doesn't wait needlessly, complete ALL pending
+            // acks with Ok(()), and return empty.
             self.abstract_fetch.fetch_buffer.wakeup();
-            if let Some(tx) = self.pending_fetch_requests.pop_front() {
+            for tx in pending_acks {
                 let _ = tx.send(Ok(()));
             }
             return PollResult::empty();
         }
 
-        // Build the per-node UnsentRequest list and ack the pending
-        // create-fetch-requests caller.
+        // Build the per-node UnsentRequest list and ack ALL pending
+        // create-fetch-requests callers together (Java's
+        // `pendingFetchRequestFuture` single-slot semantics).
         let mut requests: Vec<UnsentRequest> = Vec::with_capacity(prepared.len());
         for (_node_id, (target_node, request_data)) in prepared {
             let builder = self.abstract_fetch.create_fetch_request(&target_node, &request_data);
@@ -264,7 +275,7 @@ impl FetchRequestManager {
             requests.push(unsent);
         }
 
-        if let Some(tx) = self.pending_fetch_requests.pop_front() {
+        for tx in pending_acks {
             let _ = tx.send(Ok(()));
         }
         trace!("FetchRequestManager: produced {} fetch requests", requests.len());
@@ -288,7 +299,9 @@ impl RequestManager for FetchRequestManager {
         // Java's pollOnClose unconditionally enqueues a fresh ack so
         // pollInternal has something to satisfy.
         let (tx, _rx) = oneshot::channel();
-        self.pending_fetch_requests.push_back(tx);
+        self.pending_fetch_requests
+            .get_or_insert_with(Vec::new)
+            .push(tx);
         self.poll_internal(current_time_ms, true)
     }
 
@@ -302,10 +315,12 @@ impl Drop for FetchRequestManager {
     fn drop(&mut self) {
         // Fail any outstanding pending acks so callers don't hang on a
         // dropped receiver.
-        while let Some(tx) = self.pending_fetch_requests.pop_front() {
-            let _ = tx.send(Err(KafkaError::illegal_state(
-                "FetchRequestManager dropped with pending CreateFetchRequests ack",
-            )));
+        if let Some(pending) = self.pending_fetch_requests.take() {
+            for tx in pending {
+                let _ = tx.send(Err(KafkaError::illegal_state(
+                    "FetchRequestManager dropped with pending CreateFetchRequests ack",
+                )));
+            }
         }
     }
 }
@@ -392,18 +407,18 @@ mod tests {
     }
 
     /// `create_fetch_requests` and `enqueue_create_fetch_requests` both
-    /// add to the same FIFO; they ack in insertion order.
+    /// accumulate in the same pending slot; ONE poll satisfies ALL
+    /// pending acks together (Java's `pendingFetchRequestFuture` chain).
     #[tokio::test]
-    async fn test_create_fetch_requests_fifo() {
+    async fn test_create_fetch_requests_completes_all_pending_together() {
         let mut mgr = make_manager();
         let rx1 = mgr.create_fetch_requests();
         let (tx2, rx2) = oneshot::channel();
         mgr.enqueue_create_fetch_requests(tx2);
 
-        // First poll satisfies rx1, second satisfies rx2.
+        // ONE poll satisfies BOTH (Java's single-slot semantics).
         let _ = mgr.poll(0);
         assert!(rx1.await.unwrap().is_ok());
-        let _ = mgr.poll(0);
         assert!(rx2.await.unwrap().is_ok());
     }
 
