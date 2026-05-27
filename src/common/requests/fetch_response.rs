@@ -139,10 +139,15 @@ impl FetchResponse {
         out
     }
 
-    /// Returns the set of topic IDs reported in this response (versions 13+).
+    /// Returns the set of non-zero topic IDs reported in this response.
     ///
-    /// Excludes the zero UUID. Versions < 13 always return the empty set
-    /// (the zero UUID is reported for every topic in older versions).
+    /// The implementation does not gate on the protocol version — it
+    /// simply filters out the zero UUID. On v12 the broker writes
+    /// `Uuid::zero()` for every topic, so the resulting set is empty in
+    /// practice; on v13+ the broker populates topic IDs, so the
+    /// resulting set carries them. (A malformed v12 response that
+    /// included a non-zero topic ID would still be reported — mirrors
+    /// Java's behavior, which is also version-agnostic at this level.)
     ///
     /// Translates `FetchResponse.topicIds()`.
     pub fn topic_ids(&self) -> HashSet<Uuid> {
