@@ -876,8 +876,7 @@ mod tests {
     /// `(startsWithTopicIds, endsWithTopicIds)` ∈ {TT, TF, FT, FF}.
     #[test]
     fn test_topic_id_replaced() {
-        for (starts_with_topic_ids, ends_with_topic_ids) in
-            [(true, true), (true, false), (false, true), (false, false)]
+        for (starts_with_topic_ids, ends_with_topic_ids) in [(true, true), (true, false), (false, true), (false, false)]
         {
             let topic_partition = tp("foo", 0);
             let topic_id_1 = if starts_with_topic_ids {
@@ -892,8 +891,7 @@ mod tests {
             let d1 = handler.build_request(b1);
             assert!(d1.metadata.is_full(), "combo=({starts_with_topic_ids},{ends_with_topic_ids})");
             assert_eq!(
-                starts_with_topic_ids,
-                d1.can_use_topic_ids,
+                starts_with_topic_ids, d1.can_use_topic_ids,
                 "combo=({starts_with_topic_ids},{ends_with_topic_ids})"
             );
 
@@ -946,11 +944,14 @@ mod tests {
                 assert!(handler.session_topic_names().is_empty());
             }
 
-            assert_eq!(123, d2.metadata.session_id(), "combo=({starts_with_topic_ids},{ends_with_topic_ids})");
+            assert_eq!(
+                123,
+                d2.metadata.session_id(),
+                "combo=({starts_with_topic_ids},{ends_with_topic_ids})"
+            );
             assert_eq!(1, d2.metadata.epoch(), "combo=({starts_with_topic_ids},{ends_with_topic_ids})");
             assert_eq!(
-                ends_with_topic_ids,
-                d2.can_use_topic_ids,
+                ends_with_topic_ids, d2.can_use_topic_ids,
                 "combo=({starts_with_topic_ids},{ends_with_topic_ids})"
             );
         }
@@ -986,8 +987,7 @@ mod tests {
             let d1 = handler.build_request(b1);
             assert!(d1.metadata.is_full(), "starts_with_topic_ids={starts_with_topic_ids}");
             assert_eq!(
-                starts_with_topic_ids,
-                d1.can_use_topic_ids,
+                starts_with_topic_ids, d1.can_use_topic_ids,
                 "starts_with_topic_ids={starts_with_topic_ids}"
             );
 
@@ -1031,17 +1031,10 @@ mod tests {
             b1.add(tp("foo", 0), pd(topic_id, 0, 100, 200));
             let d1 = handler.build_request(b1);
             assert!(d1.metadata.is_full(), "use_topic_ids={use_topic_ids}");
-            assert_eq!(
-                use_topic_ids,
-                d1.can_use_topic_ids,
-                "use_topic_ids={use_topic_ids}"
-            );
+            assert_eq!(use_topic_ids, d1.can_use_topic_ids, "use_topic_ids={use_topic_ids}");
 
             let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), topic_id, 0, 0)]);
-            assert!(
-                handler.handle_response(&r1, response_version),
-                "use_topic_ids={use_topic_ids}"
-            );
+            assert!(handler.handle_response(&r1, response_version), "use_topic_ids={use_topic_ids}");
 
             // Remove the partition from the session.
             let b2 = handler.new_builder();
@@ -1051,11 +1044,7 @@ mod tests {
             assert_eq!(tp("foo", 0), *d2.to_forget[0].topic_partition());
             assert_eq!(123, d2.metadata.session_id(), "use_topic_ids={use_topic_ids}");
             assert_eq!(1, d2.metadata.epoch(), "use_topic_ids={use_topic_ids}");
-            assert_eq!(
-                use_topic_ids,
-                d2.can_use_topic_ids,
-                "use_topic_ids={use_topic_ids}"
-            );
+            assert_eq!(use_topic_ids, d2.can_use_topic_ids, "use_topic_ids={use_topic_ids}");
         }
     }
 
