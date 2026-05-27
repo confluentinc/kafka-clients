@@ -20,7 +20,14 @@
 
 pub(crate) mod internals;
 
-use internals::RecordHeader;
+// Re-export the canonical `RecordHeader` and `RecordHeaders` implementations
+// for external users. In Java these live in
+// `org.apache.kafka.common.header.internals` as `public class` declarations
+// — they are part of the public API surface despite being in an `internals`
+// package. CLAUDE.md §2 keeps the `internals` Rust module `pub(crate)`, so
+// we re-export the public types at the `common::header` level to make them
+// reachable from external code (matching Java's effective visibility).
+pub use internals::{RecordHeader, RecordHeaders};
 
 /// A header is a key-value pair.
 ///

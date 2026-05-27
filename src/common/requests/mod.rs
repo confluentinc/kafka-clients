@@ -22,6 +22,8 @@ pub mod abstract_request;
 pub mod abstract_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
+pub mod find_coordinator_request;
+pub mod find_coordinator_response;
 pub mod metadata_request;
 pub mod metadata_response;
 pub mod produce_request;
@@ -41,6 +43,10 @@ pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
+pub use find_coordinator_request::{
+    CoordinatorType, FindCoordinatorRequest, FindCoordinatorRequestBuilder, MIN_BATCHED_VERSION,
+};
+pub use find_coordinator_response::FindCoordinatorResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
 pub use produce_request::{ProduceRequest, ProduceRequestBuilder};

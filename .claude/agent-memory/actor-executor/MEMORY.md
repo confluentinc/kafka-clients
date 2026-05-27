@@ -1,5 +1,12 @@
+- [Phase 1 foundation types](phase1_design_notes.md) — Milestone-8 Phase 1: ConsumerRecord Arc<str>, header re-exports, ConsumerError enum, ISO-8601 parser, default group.protocol=classic
+- [Phase 2 trait surface](phase2_design_notes.md) — Milestone-8 Phase 2: Clone on ConsumerRecord/Records for panic recovery, inline tests for pub(crate), 'static bounds on containers with catch_unwind Drop, Arc<State> in tests
+- [Phase 4 SubscriptionState + ConsumerMetadata](phase4_design_notes.md) — Milestone-8 Phase 4: PartitionStates, MetadataOverrides extension, regex full-match semantics, group_subscribe direction
+- [Phase 3 MockConsumer](phase3_design_notes.md) — Milestone-8 Phase 3: KafkaError::Wakeup variant, plain SubscriptionState field, PollTask alias, async rebalance, dropped null-input assertions
+- [Phase 5 event layer](phase5_design_notes.md) — Milestone-8 Phase 5: CompletableApplicationEvent mapping, AsyncPollState, MetadataErrorNotifiable dispatch, erased-handle identity via inner_id(), reaper Java contract
+- [Phase 6 network/request manager scaffolding](phase6_design_notes.md) — NetworkClientDelegate generic over K, FutureCompletionHandler::on_complete_ref bridge, MockClient now>0 edge, Phase 7-9 extension checklist
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
 - [SSL/TLS Transport](ssl_tls_transport.md) — rustls patterns, ChannelBuilder refactor, NoHostnameVerifier, Box<TlsStream> for enum size
 - [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN goes INTERMEDIATE->COMPLETE directly, CLIENT_COMPLETE is for SCRAM only
+- [tokio watch send vs send_replace](tokio_watch_send_vs_send_replace.md) — watch::Sender::send drops value when no receivers; use send_replace

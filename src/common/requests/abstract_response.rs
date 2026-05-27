@@ -29,6 +29,7 @@ use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
 use super::ApiVersionsResponse;
+use super::FindCoordinatorResponse;
 use super::MetadataResponse;
 use super::ProduceResponse;
 use super::RequestHeader;
@@ -58,6 +59,8 @@ pub enum ConcreteResponse {
     SaslHandshake(SaslHandshakeResponse),
     /// A SASL authenticate response.
     SaslAuthenticate(SaslAuthenticateResponse),
+    /// A FindCoordinator response.
+    FindCoordinator(FindCoordinatorResponse),
 }
 
 impl ConcreteResponse {
@@ -69,6 +72,7 @@ impl ConcreteResponse {
             Self::Produce(r) => r.api_key(),
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
+            Self::FindCoordinator(r) => r.api_key(),
         }
     }
 
@@ -86,6 +90,7 @@ impl ConcreteResponse {
             Self::Produce(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::FindCoordinator(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -113,6 +118,9 @@ impl ConcreteResponse {
             Self::SaslAuthenticate(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
             },
+            Self::FindCoordinator(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -130,6 +138,7 @@ impl ConcreteResponse {
             Self::Produce(r) => Self::serialize_body(r.data(), version),
             Self::SaslHandshake(r) => Self::serialize_body(r.data(), version),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), version),
+            Self::FindCoordinator(r) => Self::serialize_body(r.data(), version),
         }
     }
 
@@ -151,6 +160,7 @@ impl ConcreteResponse {
             Self::Produce(r) => r.error_counts(),
             Self::SaslHandshake(r) => r.error_counts(),
             Self::SaslAuthenticate(r) => r.error_counts(),
+            Self::FindCoordinator(r) => r.error_counts(),
         }
     }
 
@@ -164,6 +174,7 @@ impl ConcreteResponse {
             Self::Produce(r) => r.throttle_time_ms(),
             Self::SaslHandshake(r) => r.throttle_time_ms(),
             Self::SaslAuthenticate(r) => r.throttle_time_ms(),
+            Self::FindCoordinator(r) => r.throttle_time_ms(),
         }
     }
 
@@ -176,6 +187,7 @@ impl ConcreteResponse {
             Self::Produce(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::SaslHandshake(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::SaslAuthenticate(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::FindCoordinator(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -187,6 +199,7 @@ impl ConcreteResponse {
             Self::Produce(r) => r.should_client_throttle(version),
             Self::SaslHandshake(r) => r.should_client_throttle(version),
             Self::SaslAuthenticate(r) => r.should_client_throttle(version),
+            Self::FindCoordinator(r) => r.should_client_throttle(version),
         }
     }
 
@@ -258,6 +271,10 @@ impl ConcreteResponse {
                 let response = SaslAuthenticateResponse::parse(readable, version)?;
                 Ok(Self::SaslAuthenticate(response))
             },
+            ApiKeys::FIND_COORDINATOR => {
+                let response = FindCoordinatorResponse::parse(readable, version)?;
+                Ok(Self::FindCoordinator(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -274,6 +291,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::Produce(r) => write!(f, "{r}"),
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
+            Self::FindCoordinator(r) => write!(f, "{r}"),
         }
     }
 }

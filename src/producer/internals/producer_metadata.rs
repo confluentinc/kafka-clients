@@ -152,6 +152,7 @@ impl ProducerMetadata {
             cluster_resource_listeners,
             crate::metadata::MetadataOverrides {
                 retain_topic_fn: Some(retain_topic_fn),
+                retain_topic_with_id_fn: None,
                 enable_partial_updates: true,
                 request_builder_fn: Some(request_builder_fn),
                 new_topics_request_builder_fn: Some(new_topics_request_builder_fn),
