@@ -42,6 +42,7 @@
 
 use super::coordinator_request_manager::CoordinatorRequestManager;
 use super::request_manager::RequestManager;
+use super::topic_metadata_request_manager::TopicMetadataRequestManager;
 
 /// Container holding all consumer request managers. The bg task
 /// iterates over its [`Self::entries`] to poll each manager in
@@ -54,21 +55,28 @@ pub(crate) struct RequestManagers {
     /// path. Java: `public final Optional<CoordinatorRequestManager>
     /// coordinatorRequestManager`.
     pub(crate) coordinator: Option<CoordinatorRequestManager>,
+    /// Topic-metadata request manager — serves `list_topics()` and
+    /// `partitions_for(topic)` API calls. Java:
+    /// `final TopicMetadataRequestManager topicMetadataRequestManager`
+    /// (always present).
+    pub(crate) topic_metadata: Option<TopicMetadataRequestManager>,
     // Slots reserved for later phases (Option<_> with a phase-comment):
     // pub(crate) commit: Option<CommitRequestManager>,                                    // Phase 9
     // pub(crate) consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,             // Phase 8
     // pub(crate) consumer_membership: Option<ConsumerMembershipManager>,                  // Phase 8
-    // pub(crate) offsets: OffsetsRequestManager,                                          // Phase 7
-    // pub(crate) topic_metadata: TopicMetadataRequestManager,                             // Phase 7
-    // pub(crate) fetch: FetchRequestManager,                                              // Phase 7
+    // pub(crate) offsets: OffsetsRequestManager,                                          // Phase 7d
+    // pub(crate) fetch: FetchRequestManager,                                              // Phase 7b
     closed: bool,
 }
 
 impl RequestManagers {
-    /// Skeleton constructor for Phase 6. Phase 7-9 extend the signature
-    /// with additional managers as they land.
-    pub(crate) fn new(coordinator: Option<CoordinatorRequestManager>) -> Self {
-        Self { coordinator, closed: false }
+    /// Skeleton constructor. Each phase extends the signature with
+    /// additional managers as they land.
+    pub(crate) fn new(
+        coordinator: Option<CoordinatorRequestManager>,
+        topic_metadata: Option<TopicMetadataRequestManager>,
+    ) -> Self {
+        Self { coordinator, topic_metadata, closed: false }
     }
 
     /// Returns the managers in deterministic registration order
@@ -85,9 +93,15 @@ impl RequestManagers {
     ///
     /// [nomicon-borrow-splitting]: https://doc.rust-lang.org/nomicon/borrow-splitting.html
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
+        // Destructure so each `Option` is borrowed independently —
+        // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
+        let Self { coordinator, topic_metadata, closed: _ } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
-        if let Some(coordinator) = self.coordinator.as_mut() {
-            list.push(coordinator as &mut dyn RequestManager);
+        if let Some(c) = coordinator.as_mut() {
+            list.push(c as &mut dyn RequestManager);
+        }
+        if let Some(t) = topic_metadata.as_mut() {
+            list.push(t as &mut dyn RequestManager);
         }
         list
     }
@@ -140,18 +154,22 @@ mod tests {
         CoordinatorRequestManager::new(100, 1_000, "group-1")
     }
 
-    /// Verifies that `entries()` is empty when the optional manager
-    /// slot is `None`.
+    fn topic_metadata_manager() -> TopicMetadataRequestManager {
+        let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        TopicMetadataRequestManager::new(&config)
+    }
+
+    /// Verifies that `entries()` is empty when both manager slots are `None`.
     #[test]
-    fn entries_empty_when_no_coordinator() {
-        let mut rm = RequestManagers::new(None);
+    fn entries_empty_when_no_managers() {
+        let mut rm = RequestManagers::new(None, None);
         assert!(rm.entries().is_empty());
     }
 
     /// Verifies that `entries()` returns the coordinator when present.
     #[test]
     fn entries_includes_coordinator_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()));
+        let mut rm = RequestManagers::new(Some(coord_manager()), None);
         let entries = rm.entries();
         assert_eq!(1, entries.len());
         // We can call the trait method to confirm the upcast works.
@@ -159,11 +177,20 @@ mod tests {
         assert_eq!(i64::MAX, entries[0].maximum_time_to_wait(0));
     }
 
+    /// Verifies that `entries()` returns both managers in deterministic
+    /// registration order (coordinator → topic_metadata).
+    #[test]
+    fn entries_includes_topic_metadata_when_present() {
+        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()));
+        let entries = rm.entries();
+        assert_eq!(2, entries.len());
+    }
+
     /// Verifies that `close` is idempotent — only the first call flips
     /// the flag; subsequent calls are no-ops.
     #[test]
     fn close_is_idempotent() {
-        let mut rm = RequestManagers::new(Some(coord_manager()));
+        let mut rm = RequestManagers::new(Some(coord_manager()), None);
         assert!(!rm.is_closed());
         rm.close();
         assert!(rm.is_closed());
@@ -176,7 +203,7 @@ mod tests {
     /// repeated calls, regardless of `Option` field shuffling.
     #[test]
     fn entries_order_is_deterministic() {
-        let mut rm = RequestManagers::new(Some(coord_manager()));
+        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()));
         let names_round_one: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         let names_round_two: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         assert_eq!(names_round_one, names_round_two);
