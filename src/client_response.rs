@@ -189,6 +189,13 @@ impl ClientResponse {
         self.response_body.as_ref()
     }
 
+    /// Takes the response body out of this response, leaving `None` in its
+    /// place. Used by callbacks that need owned access to the body when
+    /// the [`ClientResponse`] itself is only available by `&mut`.
+    pub fn take_response_body(&mut self) -> Option<ConcreteResponse> {
+        self.response_body.take()
+    }
+
     /// Returns whether this response has a body.
     pub fn has_response(&self) -> bool {
         self.response_body.is_some()

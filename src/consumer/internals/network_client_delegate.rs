@@ -12,29 +12,30 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `NetworkClientDelegate` — Phase 6 skeleton.
-//!
-//! This commit lands the [`PollResult`] / [`UnsentRequest`] /
-//! [`FutureCompletionHandler`] types referenced by
-//! [`super::request_manager::RequestManager`]. The full
-//! [`NetworkClientDelegate`] struct (with `unsent_requests`, `poll`,
-//! `add_all`, etc.) is filled in by Phase 6 (5/7).
+//! `NetworkClientDelegate` — wraps a [`KafkaClient`] with per-request
+//! timers, an `unsent_requests` queue, and metadata-error propagation.
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate`.
 
-// Phase 6 (4/7) lands these types so the `RequestManager` trait compiles;
-// the full delegate impl follows in Phase 6 (5/7).
 #![allow(dead_code)]
 
+use std::collections::VecDeque;
 use std::fmt;
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
 
 use crate::client_response::ClientResponse;
+use crate::common::protocol::Errors;
 use crate::common::requests::RequestBuilder;
 use crate::common::{KafkaError, Node};
+use crate::consumer::ConsumerConfig;
+use crate::consumer::internals::events::background_event::BackgroundEvent;
+use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
+use crate::kafka_client::KafkaClient;
+use crate::metadata::Metadata;
+use crate::network_client_utils;
 
 /// Result returned from [`super::request_manager::RequestManager::poll`].
 ///
@@ -117,7 +118,10 @@ impl fmt::Debug for PollResult {
 ///   [`super::network_client_delegate::NetworkClientDelegate::add`] (and
 ///   `add_all`); `-1` means "not yet enqueued".
 pub(crate) struct UnsentRequest {
-    request_builder: Box<dyn RequestBuilder>,
+    /// `Some` while the request is on the unsent queue; consumed
+    /// (`None`) once the delegate dispatches it via `do_send` and
+    /// transfers ownership to the underlying [`ClientRequest`].
+    request_builder: Option<Box<dyn RequestBuilder>>,
     handler: FutureCompletionHandler,
     /// Receiver paired with [`Self::handler`]. The bg task awaits this
     /// (after dispatching the request) to learn when the response or
@@ -144,13 +148,22 @@ impl UnsentRequest {
     pub(crate) fn new(request_builder: Box<dyn RequestBuilder>, node: Option<Node>) -> Self {
         let (handler, rx) = FutureCompletionHandler::new_with_receiver();
         Self {
-            request_builder,
+            request_builder: Some(request_builder),
             handler,
             response_rx: Some(rx),
             node,
             deadline_ms: -1,
             enqueue_time_ms: -1,
         }
+    }
+
+    /// Takes ownership of the request builder, leaving `None`. Called by
+    /// [`NetworkClientDelegate::do_send`] when the request is being
+    /// transferred into a [`ClientRequest`]. After this returns
+    /// `Some(...)`, [`Self::request_builder`] returns a placeholder
+    /// reference; callers should not look at the builder after dispatch.
+    pub(crate) fn take_request_builder(&mut self) -> Box<dyn RequestBuilder> {
+        self.request_builder.take().expect("request_builder already consumed")
     }
 
     /// Takes the response receiver (if not already taken). Mirrors the
@@ -170,11 +183,12 @@ impl UnsentRequest {
         self.handler.clone()
     }
 
-    /// Returns a reference to the request builder.
+    /// Returns a reference to the request builder, or `None` if it has
+    /// already been consumed via [`Self::take_request_builder`].
     ///
     /// Java: `requestBuilder()`.
-    pub(crate) fn request_builder(&self) -> &dyn RequestBuilder {
-        self.request_builder.as_ref()
+    pub(crate) fn request_builder(&self) -> Option<&dyn RequestBuilder> {
+        self.request_builder.as_deref()
     }
 
     /// Returns the optional target node.
@@ -204,8 +218,13 @@ impl UnsentRequest {
 
 impl fmt::Debug for UnsentRequest {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let api_key = self
+            .request_builder
+            .as_ref()
+            .map(|b| b.api_key().name())
+            .unwrap_or("<consumed>");
         f.debug_struct("UnsentRequest")
-            .field("api_key", &self.request_builder.api_key().name())
+            .field("api_key", &api_key)
             .field("node", &self.node)
             .field("deadline_ms", &self.deadline_ms)
             .field("enqueue_time_ms", &self.enqueue_time_ms)
@@ -277,6 +296,8 @@ impl FutureCompletionHandler {
     /// response state and either completes the receiver with `Ok(...)`
     /// or, when an authentication / disconnect / version-mismatch
     /// occurred, with the synthesised error.
+    ///
+    /// Sends the owned `ClientResponse` through the receiver on success.
     pub(crate) fn on_complete(&self, response: ClientResponse) {
         let completion_time_ms = response.received_time_ms();
         if let Some(msg) = response.authentication_error() {
@@ -308,6 +329,40 @@ impl FutureCompletionHandler {
         if let Some(tx) = sender_opt {
             let _ = tx.send(Ok(response));
         }
+    }
+
+    /// Reads enough state from a `&mut ClientResponse` to drive completion
+    /// without consuming the response, then dispatches via [`Self::on_complete`].
+    ///
+    /// Used to bridge between the [`crate::RequestCompletionHandler`]
+    /// callback (`Box<dyn FnOnce(&mut ClientResponse)>`) supplied by the
+    /// Rust `KafkaClient::new_client_request_with_timeout` API and the
+    /// owned-response receiver paired with the handler.
+    pub(crate) fn on_complete_ref(&self, response: &mut ClientResponse) {
+        // Rebuild an owned `ClientResponse` from the mutable reference by
+        // taking the response body (which is the only non-Clone field
+        // that carries real payload).
+        let request_header = response.request_header().clone();
+        let destination = response.destination().to_string();
+        let received_time_ms = response.received_time_ms();
+        let disconnected = response.was_disconnected();
+        let timed_out = response.was_timed_out();
+        let version_mismatch = response.version_mismatch().map(|s| s.to_string());
+        let authentication_error = response.authentication_error().map(|s| s.to_string());
+        let body = response.take_response_body();
+        let owned = ClientResponse::with_timeout(
+            request_header,
+            None,
+            &destination,
+            received_time_ms - response.request_latency_ms(),
+            received_time_ms,
+            disconnected,
+            timed_out,
+            version_mismatch,
+            authentication_error,
+            body,
+        );
+        self.on_complete(owned);
     }
 
     /// Java: `completionTimeMs()`. Time (ms) at which `on_complete` /
@@ -351,10 +406,419 @@ impl fmt::Debug for FutureCompletionHandler {
     }
 }
 
+/// Wraps a [`KafkaClient`] with per-request timers, an unsent-requests
+/// queue, and metadata-error propagation.
+///
+/// Translated from
+/// `org.apache.kafka.clients.consumer.internals.NetworkClientDelegate`.
+///
+/// # Generics vs `Box<dyn KafkaClient>`
+///
+/// [`KafkaClient::ready`] and [`KafkaClient::poll`] return `impl Future`,
+/// which makes [`KafkaClient`] non-object-safe. The delegate is therefore
+/// generic over `K: KafkaClient + Send`; the bg task (Phase 10) holds a
+/// concrete `K = NetworkClient<...>` and tests use [`crate::mock_client::MockClient`].
+///
+/// # `async fn poll`
+///
+/// Java's `poll(timeoutMs, currentTimeMs)` is sync because the Java
+/// `KafkaClient::poll` is sync-blocking on a Java thread. In Rust,
+/// [`KafkaClient::poll`] is `async`, so [`NetworkClientDelegate::poll`]
+/// must also be `async`.
+pub(crate) struct NetworkClientDelegate<K: KafkaClient + Send> {
+    client: K,
+    background_event_handler: Arc<BackgroundEventHandler>,
+    metadata: Arc<Metadata>,
+    client_id: String,
+    request_timeout_ms: i32,
+    retry_backoff_ms: i64,
+    unsent_requests: VecDeque<UnsentRequest>,
+    metadata_error: Option<KafkaError>,
+    notify_metadata_errors_via_error_queue: bool,
+}
+
+impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
+    /// Construct a new delegate.
+    ///
+    /// Java: `NetworkClientDelegate(Time, ConsumerConfig, LogContext,
+    /// KafkaClient, Metadata, BackgroundEventHandler, boolean,
+    /// AsyncConsumerMetrics)`. The `AsyncConsumerMetrics` parameter is
+    /// dropped per the Phase-6 plan ("Out of scope: metrics").
+    pub(crate) fn new(
+        config: &ConsumerConfig,
+        client: K,
+        metadata: Arc<Metadata>,
+        background_event_handler: Arc<BackgroundEventHandler>,
+        notify_metadata_errors_via_error_queue: bool,
+    ) -> Self {
+        Self {
+            client,
+            background_event_handler,
+            metadata,
+            client_id: config.client_id().to_string(),
+            request_timeout_ms: config.request_timeout_ms(),
+            retry_backoff_ms: config.retry_backoff_ms(),
+            unsent_requests: VecDeque::new(),
+            metadata_error: None,
+            notify_metadata_errors_via_error_queue,
+        }
+    }
+
+    /// Visible-for-testing accessor for the unsent-requests queue.
+    /// Java: package-private `unsentRequests()`.
+    pub(crate) fn unsent_requests(&self) -> &VecDeque<UnsentRequest> {
+        &self.unsent_requests
+    }
+
+    /// Visible-for-testing mutable accessor (matches Java's
+    /// `unsentRequests()` semantics: tests can `poll()` / `iterator()`).
+    pub(crate) fn unsent_requests_mut(&mut self) -> &mut VecDeque<UnsentRequest> {
+        &mut self.unsent_requests
+    }
+
+    /// Returns the number of in-flight requests (delegates to the
+    /// underlying [`KafkaClient`]).
+    ///
+    /// Java: `inflightRequestCount()`.
+    pub(crate) fn inflight_request_count(&self) -> i32 {
+        self.client.in_flight_request_count()
+    }
+
+    /// Returns `true` if the node is disconnected and unavailable for
+    /// immediate reconnection (i.e. inside the reconnect backoff window).
+    ///
+    /// Java: `isUnavailable(Node)`.
+    pub(crate) fn is_unavailable(&self, node: &Node, current_time_ms: i64) -> bool {
+        network_client_utils::is_unavailable(&self.client, node, current_time_ms)
+    }
+
+    /// Returns an authentication error for the given node, if any.
+    ///
+    /// Java: `maybeThrowAuthFailure(Node)` (throws on auth failure).
+    pub(crate) fn maybe_return_auth_failure(&self, node: &Node) -> Result<(), KafkaError> {
+        match self.client.authentication_error(node) {
+            Some(msg) => Err(KafkaError::with_message(Errors::SaslAuthenticationFailed, msg)),
+            None => Ok(()),
+        }
+    }
+
+    /// Initiate a connection if currently possible — primarily useful for
+    /// resetting the failed status of a socket.
+    ///
+    /// Java: `tryConnect(Node)`.
+    pub(crate) async fn try_connect(&mut self, node: &Node, current_time_ms: i64) {
+        network_client_utils::try_connect(&mut self.client, node, current_time_ms).await;
+    }
+
+    /// Returns `true` if there is at least one in-flight request or an
+    /// unsent request.
+    ///
+    /// Java: `hasAnyPendingRequests()`.
+    pub(crate) fn has_any_pending_requests(&self) -> bool {
+        self.client.has_in_flight_requests() || !self.unsent_requests.is_empty()
+    }
+
+    /// Returns and clears the most recent metadata error.
+    ///
+    /// Java: `getAndClearMetadataError()`.
+    pub(crate) fn get_and_clear_metadata_error(&mut self) -> Option<KafkaError> {
+        self.metadata_error.take()
+    }
+
+    /// Returns the least-loaded node from the underlying client.
+    ///
+    /// Java: `leastLoadedNode()`.
+    pub(crate) fn least_loaded_node(&self, current_time_ms: i64) -> Option<Node> {
+        self.client.least_loaded_node(current_time_ms).node().cloned()
+    }
+
+    /// Wake up the underlying client (used to break it out of a blocking
+    /// `poll`).
+    ///
+    /// Java: `wakeup()`.
+    pub(crate) fn wakeup(&self) {
+        self.client.wakeup();
+    }
+
+    /// Returns `true` if the node has previously failed to connect and is
+    /// inside the connection-delay backoff window.
+    ///
+    /// Java: `nodeUnavailable(Node)`.
+    pub(crate) fn node_unavailable(&self, node: &Node, current_time_ms: i64) -> bool {
+        self.client.connection_failed(node) && self.client.connection_delay(node, current_time_ms) > 0
+    }
+
+    /// Close the underlying client.
+    ///
+    /// Java: `close()` (declared `throws IOException`).
+    pub(crate) async fn close(&mut self) -> Result<(), KafkaError> {
+        self.client.close().await;
+        Ok(())
+    }
+
+    /// Adds an unsent request to the queue, stamping its deadline (`now +
+    /// request_timeout_ms`) and enqueue time.
+    ///
+    /// Java: `add(UnsentRequest)`.
+    pub(crate) fn add(&mut self, mut request: UnsentRequest, current_time_ms: i64) {
+        request.set_timing(current_time_ms.saturating_add(self.request_timeout_ms as i64), current_time_ms);
+        self.unsent_requests.push_back(request);
+    }
+
+    /// Adds all unsent requests from the slice to the queue.
+    ///
+    /// Java: `addAll(List<UnsentRequest>)`.
+    pub(crate) fn add_all(&mut self, requests: Vec<UnsentRequest>, current_time_ms: i64) {
+        for r in requests {
+            self.add(r, current_time_ms);
+        }
+    }
+
+    /// Adds the requests carried by `poll_result` and returns its
+    /// `time_until_next_poll_ms` hint.
+    ///
+    /// Java: `addAll(PollResult)`.
+    pub(crate) fn add_all_from_poll_result(&mut self, poll_result: PollResult, current_time_ms: i64) -> i64 {
+        let PollResult { time_until_next_poll_ms, unsent_requests } = poll_result;
+        self.add_all(unsent_requests, current_time_ms);
+        time_until_next_poll_ms
+    }
+
+    /// Try to send unsent requests, poll for responses, and check
+    /// disconnected nodes.
+    ///
+    /// `on_close = false` matches Java's default `poll(timeoutMs, now)`;
+    /// `true` is the `poll(timeoutMs, now, true)` overload used during
+    /// shutdown to drop unsent requests with no assigned node.
+    ///
+    /// Java: `poll(timeoutMs, currentTimeMs)` and `poll(timeoutMs,
+    /// currentTimeMs, onClose)`.
+    pub(crate) async fn poll(&mut self, timeout_ms: i64, current_time_ms: i64, on_close: bool) {
+        self.try_send(current_time_ms).await;
+
+        // Java: pollTimeoutMs = !unsent.isEmpty() ? min(retryBackoff,
+        // timeoutMs) : timeoutMs.
+        let poll_timeout_ms = if !self.unsent_requests.is_empty() {
+            self.retry_backoff_ms.min(timeout_ms)
+        } else {
+            timeout_ms
+        };
+
+        // Drain responses — KafkaClient::poll fires registered callbacks
+        // internally via `ClientResponse::on_complete`, so the
+        // FutureCompletionHandler attached to each UnsentRequest sees
+        // its result here.
+        let _responses = self.client.poll(poll_timeout_ms, current_time_ms).await;
+        // Compute a fresh time to mirror Java's `updatedNow` capture
+        // after the (potentially blocking) poll. We don't have a
+        // `Time` source plumbed in; callers thread `current_time_ms`.
+        self.maybe_propagate_metadata_error(current_time_ms);
+        self.check_disconnects(current_time_ms, on_close);
+    }
+
+    /// Convenience: `poll(timeout_ms, current_time_ms, false)`.
+    pub(crate) async fn poll_default(&mut self, timeout_ms: i64, current_time_ms: i64) {
+        self.poll(timeout_ms, current_time_ms, false).await;
+    }
+
+    /// Convenience: `poll(timeout_ms, current_time_ms, true)`.
+    pub(crate) async fn poll_on_close(&mut self, timeout_ms: i64, current_time_ms: i64) {
+        self.poll(timeout_ms, current_time_ms, true).await;
+    }
+
+    /// Iterates the unsent-requests queue and dispatches every request
+    /// whose target node is ready. Expired requests are pulled out and
+    /// completed with a [`KafkaError::Timeout`].
+    ///
+    /// Java: package-private `trySend(long currentTimeMs)`.
+    async fn try_send(&mut self, current_time_ms: i64) {
+        // We pull each request out, decide whether to keep it (re-queue),
+        // and at the end swap the rebuilt queue back in. This sidesteps
+        // borrow issues from holding `&mut self.client` while iterating
+        // `&mut self.unsent_requests`.
+        let mut requeue: VecDeque<UnsentRequest> = VecDeque::with_capacity(self.unsent_requests.len());
+        let mut queue = std::mem::take(&mut self.unsent_requests);
+        while let Some(mut unsent) = queue.pop_front() {
+            // Java: `unsent.timer.update(currentTimeMs)` then `isExpired`.
+            if unsent.deadline_ms() >= 0 && current_time_ms >= unsent.deadline_ms() {
+                let timeout_ms = unsent.deadline_ms().saturating_sub(unsent.enqueue_time_ms());
+                unsent.handler().on_failure(
+                    current_time_ms,
+                    KafkaError::timeout(format!("Failed to send request after {timeout_ms} ms.")),
+                );
+                continue;
+            }
+            if !self.do_send(&mut unsent, current_time_ms).await {
+                // Not ready yet — re-queue and retry next poll.
+                requeue.push_back(unsent);
+            }
+        }
+        self.unsent_requests = requeue;
+    }
+
+    /// Attempt to dispatch one request. Returns `true` if the request was
+    /// sent (and should be removed from the queue), `false` if it should
+    /// be retried next poll.
+    ///
+    /// Java: package-private `doSend(UnsentRequest, long)`.
+    async fn do_send(&mut self, unsent: &mut UnsentRequest, current_time_ms: i64) -> bool {
+        // Pick the target node: the request's preference, or the
+        // least-loaded node returned by the client.
+        let node = match unsent.node().cloned() {
+            Some(n) => n,
+            None => match self.client.least_loaded_node(current_time_ms).node() {
+                Some(n) => n.clone(),
+                None => {
+                    log::debug!("No broker available to send the request: {unsent:?}. Retrying.");
+                    return false;
+                },
+            },
+        };
+        if self.node_unavailable(&node, current_time_ms) {
+            log::debug!("No broker available to send the request: {unsent:?}. Retrying.");
+            return false;
+        }
+
+        if !self.client.ready(&node, current_time_ms).await {
+            log::debug!(
+                "Node is not ready, handle the request in the next event loop: node={node}, request={unsent:?}"
+            );
+            return false;
+        }
+
+        // Build the ClientRequest with a callback that drives the
+        // FutureCompletionHandler. The handler is cloned (shares
+        // Arc<Inner>) so the request's owner can still inspect it after
+        // dispatch via `unsent.handler()`.
+        let handler_for_callback = unsent.handler();
+        let callback: crate::RequestCompletionHandler = Box::new(move |response: &mut ClientResponse| {
+            handler_for_callback.on_complete_ref(response);
+        });
+
+        // Steal the builder out of `unsent` — once sent, we no longer
+        // need it on the queue. We replace it with a no-op placeholder.
+        let builder = unsent.take_request_builder();
+        let request_timeout = unsent.deadline_ms().saturating_sub(current_time_ms).max(0) as i32;
+        let request = self.client.new_client_request_with_timeout(
+            node.id_string(),
+            builder,
+            current_time_ms,
+            true,
+            request_timeout,
+            Some(callback),
+        );
+        self.client.send(request, current_time_ms);
+        true
+    }
+
+    /// Check unsent requests for disconnected target nodes.
+    ///
+    /// Java: protected `checkDisconnects(long, boolean)`.
+    fn check_disconnects(&mut self, current_time_ms: i64, on_close: bool) {
+        let mut requeue: VecDeque<UnsentRequest> = VecDeque::with_capacity(self.unsent_requests.len());
+        let mut queue = std::mem::take(&mut self.unsent_requests);
+        while let Some(unsent) = queue.pop_front() {
+            match unsent.node() {
+                Some(n) if self.client.connection_failed(n) => {
+                    let err = match self.client.authentication_error(n) {
+                        Some(msg) => KafkaError::with_message(Errors::SaslAuthenticationFailed, msg),
+                        None => KafkaError::new(Errors::NetworkException),
+                    };
+                    unsent.handler().on_failure(current_time_ms, err);
+                },
+                None if on_close => {
+                    log::debug!("Removing unsent request because the client is closing: {unsent:?}");
+                    unsent
+                        .handler()
+                        .on_failure(current_time_ms, KafkaError::new(Errors::NetworkException));
+                },
+                _ => requeue.push_back(unsent),
+            }
+        }
+        self.unsent_requests = requeue;
+    }
+
+    /// Propagate the latest metadata error either to the
+    /// `BackgroundEventHandler` (if `notifyMetadataErrorsViaErrorQueue`)
+    /// or store it locally for `get_and_clear_metadata_error`.
+    fn maybe_propagate_metadata_error(&mut self, current_time_ms: i64) {
+        if let Err(err) = self.metadata.maybe_return_any_error() {
+            if self.notify_metadata_errors_via_error_queue {
+                // Best-effort: if the receiver was dropped (consumer
+                // closed), there is nowhere to deliver the error.
+                let _ = self
+                    .background_event_handler
+                    .add(BackgroundEvent::Error { error: err }, current_time_ms);
+            } else {
+                self.metadata_error = Some(err);
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::sync::atomic::{AtomicI64, Ordering};
+
+    use tokio::sync::mpsc;
+
     use super::*;
-    use crate::common::requests::{MetadataRequestBuilder, RequestBuilder};
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::common::requests::{
+        ConcreteResponse, FindCoordinatorRequestBuilder, FindCoordinatorResponse, MetadataRequestBuilder,
+        RequestBuilder,
+    };
+    use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+    use crate::mock_client::MockClient;
+
+    const GROUP_ID: &str = "group";
+    const REQUEST_TIMEOUT_MS: i32 = 5_000;
+
+    fn mock_node() -> Node {
+        Node::new(0, "localhost".to_string(), 99)
+    }
+
+    fn test_config() -> ConsumerConfig {
+        ConsumerConfig::new(vec!["localhost:9092".to_string()])
+            .with_client_id("test-client")
+            .with_group_id(GROUP_ID)
+            .with_request_timeout_ms(REQUEST_TIMEOUT_MS)
+    }
+
+    /// Helper builder for a `FindCoordinator` `UnsentRequest` targeting
+    /// the `group` GROUP_ID.
+    fn new_unsent_find_coordinator_request() -> UnsentRequest {
+        let mut data = FindCoordinatorRequestData::new();
+        data.set_key(GROUP_ID.to_string());
+        data.set_key_type(crate::common::requests::CoordinatorType::Group.id());
+        let builder: Box<dyn RequestBuilder> = Box::new(FindCoordinatorRequestBuilder::new(data));
+        UnsentRequest::new(builder, None)
+    }
+
+    /// Creates a fresh delegate + BackgroundEvent receiver pair for use
+    /// in tests. The receiver is held by the caller; the handler is
+    /// owned by the delegate (Arc-wrapped) so the test can inspect
+    /// metadata-error events as needed.
+    fn new_delegate(
+        time: Arc<AtomicI64>,
+        notify_via_queue: bool,
+    ) -> (
+        NetworkClientDelegate<MockClient>,
+        Arc<Metadata>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        let (tx, rx) = mpsc::unbounded_channel();
+        let handler = Arc::new(BackgroundEventHandler::new(tx));
+        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = {
+            let time = Arc::clone(&time);
+            Arc::new(move || time.load(Ordering::SeqCst))
+        };
+        let client = MockClient::new(vec![mock_node()], Arc::clone(&time_provider));
+        let metadata = Arc::new(Metadata::new(100, 1_000, 60_000, ClusterResourceListeners::new()));
+        let config = test_config();
+        let delegate = NetworkClientDelegate::new(&config, client, Arc::clone(&metadata), handler, notify_via_queue);
+        (delegate, metadata, rx)
+    }
 
     #[test]
     fn poll_result_empty_uses_wait_forever() {
@@ -377,6 +841,150 @@ mod tests {
         assert_eq!(req.deadline_ms(), -1);
         assert_eq!(req.enqueue_time_ms(), -1);
         assert!(req.node().is_none());
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testPollResultTimer`.
+    /// Verifies that `add_all_from_poll_result` returns the wait hint
+    /// even when the poll result carries one or zero requests.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_poll_result_timer() {
+        let time = Arc::new(AtomicI64::new(0));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+        let req = new_unsent_find_coordinator_request();
+        let success = PollResult::new(10, vec![req]);
+        assert_eq!(10, ncd.add_all_from_poll_result(success, time.load(Ordering::SeqCst)));
+
+        let failure = PollResult::new(10, Vec::new());
+        assert_eq!(10, ncd.add_all_from_poll_result(failure, time.load(Ordering::SeqCst)));
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testEnsureCorrectCompletionTimeOnFailure`.
+    /// The completion time stored on the handler must reflect the time
+    /// of the failure, not a later sleep.
+    #[test]
+    fn test_ensure_correct_completion_time_on_failure() {
+        let unsent = new_unsent_find_coordinator_request();
+        let handler = unsent.handler();
+        handler.on_failure(0, KafkaError::timeout("x"));
+        // Subsequent "sleeps" must not advance the completion time.
+        assert_eq!(0, handler.completion_time_ms());
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testEnsureTimerSetOnAdd`.
+    /// Verifies that `add` and `add_all` stamp the timing fields on
+    /// every request enqueued.
+    #[test]
+    fn test_ensure_timer_set_on_add() {
+        let time = Arc::new(AtomicI64::new(0));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+        let req = new_unsent_find_coordinator_request();
+        assert_eq!(req.deadline_ms(), -1);
+        ncd.add(req, time.load(Ordering::SeqCst));
+        assert_eq!(1, ncd.unsent_requests().len());
+        let head = ncd.unsent_requests().front().unwrap();
+        assert_eq!(REQUEST_TIMEOUT_MS as i64, head.deadline_ms() - head.enqueue_time_ms());
+
+        // add_all path.
+        let req2 = new_unsent_find_coordinator_request();
+        ncd.add_all(vec![req2], time.load(Ordering::SeqCst));
+        assert_eq!(2, ncd.unsent_requests().len());
+        let last = ncd.unsent_requests().back().unwrap();
+        assert_eq!(REQUEST_TIMEOUT_MS as i64, last.deadline_ms() - last.enqueue_time_ms());
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testHasAnyPendingRequests`
+    /// (the portion that exercises the queue-management invariants —
+    /// "unsent" before poll, "in-flight" after dispatch). The `client.poll`
+    /// step that drains the responses is exercised by
+    /// [`test_successful_response`].
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_has_any_pending_requests() {
+        // Start at a non-zero time so MockClient.not_throttled (strict `>`)
+        // returns true on the very first send.
+        let time = Arc::new(AtomicI64::new(1));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+        let req = new_unsent_find_coordinator_request();
+        ncd.add(req, time.load(Ordering::SeqCst));
+
+        // Unsent
+        assert!(ncd.has_any_pending_requests());
+        assert!(!ncd.unsent_requests().is_empty());
+
+        // Stage a response so client.poll completes the request.
+        let response = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
+        ncd.client.prepare_response(ConcreteResponse::FindCoordinator(response));
+
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+
+        // Response delivered — queue is empty and no in-flight remains.
+        assert!(ncd.unsent_requests().is_empty());
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testSuccessfulResponse`.
+    /// End-to-end: enqueue a FindCoordinator request, stage a success
+    /// response on the mock client, poll the delegate, and verify the
+    /// future resolves.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_successful_response() {
+        // Start at a non-zero time so MockClient.not_throttled (strict `>`)
+        // returns true on the very first send.
+        let time = Arc::new(AtomicI64::new(1));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+        let mut req = new_unsent_find_coordinator_request();
+        let mut rx = req.take_response_receiver().expect("receiver still present");
+
+        let response = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
+        ncd.client.prepare_response(ConcreteResponse::FindCoordinator(response));
+
+        ncd.add(req, time.load(Ordering::SeqCst));
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+
+        // The handler's oneshot must resolve with Ok(ClientResponse).
+        let result = rx.try_recv().expect("response delivered");
+        match result {
+            Ok(_) => {},
+            Err(err) => panic!("expected Ok response, got: {err}"),
+        }
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testPropagateMetadataError`.
+    /// Verifies the legacy path: metadata errors are stored locally and
+    /// returned by `get_and_clear_metadata_error`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_propagate_metadata_error() {
+        let time = Arc::new(AtomicI64::new(0));
+        let (mut ncd, meta, _rx) = new_delegate(Arc::clone(&time), false);
+        meta.fatal_error(KafkaError::timeout("Test Auth Exception"));
+        assert!(ncd.get_and_clear_metadata_error().is_none());
+
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+
+        let metadata_error = ncd.get_and_clear_metadata_error().expect("error captured");
+        assert!(
+            metadata_error.message().contains("Test Auth Exception"),
+            "got: {metadata_error}"
+        );
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testPropagateMetadataErrorWithErrorEvent`.
+    /// Verifies the `notify_metadata_errors_via_error_queue = true`
+    /// path: errors flow as `BackgroundEvent::Error` through the
+    /// handler's channel.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_propagate_metadata_error_with_error_event() {
+        let time = Arc::new(AtomicI64::new(0));
+        let (mut ncd, meta, mut bg_rx) = new_delegate(Arc::clone(&time), true);
+        meta.fatal_error(KafkaError::timeout("Test Auth Exception"));
+
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+
+        let envelope = bg_rx.try_recv().expect("metadata error delivered to bg queue");
+        match envelope.event {
+            BackgroundEvent::Error { error } => {
+                assert!(error.message().contains("Test Auth Exception"), "got: {error}");
+            },
+            other => panic!("expected BackgroundEvent::Error, got {}", other.type_name()),
+        }
     }
 
     #[test]

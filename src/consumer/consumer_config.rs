@@ -488,6 +488,18 @@ impl ConsumerConfig {
     pub fn throw_on_fetch_stable_offset_unsupported(&self) -> bool {
         self.throw_on_fetch_stable_offset_unsupported
     }
+    /// `request.timeout.ms`.
+    pub fn request_timeout_ms(&self) -> i32 {
+        self.request_timeout_ms
+    }
+    /// `retry.backoff.ms`.
+    pub fn retry_backoff_ms(&self) -> i64 {
+        self.retry_backoff_ms
+    }
+    /// `retry.backoff.max.ms`.
+    pub fn retry_backoff_max_ms(&self) -> i64 {
+        self.retry_backoff_max_ms
+    }
 
     // -------- Fluent setters --------
 
@@ -529,6 +541,18 @@ impl ConsumerConfig {
     /// Set `value.deserializer`.
     pub fn with_value_deserializer_class(mut self, class: impl Into<String>) -> Self {
         self.value_deserializer_class = Some(class.into());
+        self
+    }
+
+    /// Set `request.timeout.ms`.
+    pub fn with_request_timeout_ms(mut self, value: i32) -> Self {
+        self.request_timeout_ms = value;
+        self
+    }
+
+    /// Set `retry.backoff.ms`.
+    pub fn with_retry_backoff_ms(mut self, value: i64) -> Self {
+        self.retry_backoff_ms = value;
         self
     }
 
