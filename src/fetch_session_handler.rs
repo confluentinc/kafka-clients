@@ -60,20 +60,24 @@ use crate::common::requests::fetch_response::FetchResponse;
 /// Mirrors Java's `FetchSessionHandler.FetchRequestData` (the inner class is
 /// renamed here to `FetchSessionRequestData` to avoid collision with the
 /// auto-generated [`crate::fetch_request_data::FetchRequestData`]).
+///
+/// `pub(crate)` to match Java's package-private visibility — only
+/// `AbstractFetch` and Phase 7b's `FetchRequestManager` consume this
+/// internally.
 #[derive(Clone, Debug)]
-pub struct FetchSessionRequestData {
+pub(crate) struct FetchSessionRequestData {
     /// Partitions to send in the fetch request.
-    pub to_send: IndexMap<TopicPartition, PartitionData>,
+    pub(crate) to_send: IndexMap<TopicPartition, PartitionData>,
     /// Partitions in the request's `forget` list.
-    pub to_forget: Vec<TopicIdPartition>,
+    pub(crate) to_forget: Vec<TopicIdPartition>,
     /// Partitions in the request's `replaced` list (v13+).
-    pub to_replace: Vec<TopicIdPartition>,
+    pub(crate) to_replace: Vec<TopicIdPartition>,
     /// All partitions in the fetch session.
-    pub session_partitions: IndexMap<TopicPartition, PartitionData>,
+    pub(crate) session_partitions: IndexMap<TopicPartition, PartitionData>,
     /// Fetch metadata (session id + epoch) for this request.
-    pub metadata: FetchMetadata,
+    pub(crate) metadata: FetchMetadata,
     /// True if every topic involved in the request carries a topic ID.
-    pub can_use_topic_ids: bool,
+    pub(crate) can_use_topic_ids: bool,
 }
 
 /// Per-node fetch session handler.
@@ -131,11 +135,26 @@ impl FetchSessionHandler {
 
     /// Creates a builder pre-sized for the given number of partitions.
     ///
-    /// `copy_session_partitions` is preserved for parity with Java; in the
-    /// Rust translation the `to_send` map is always disjoint from
-    /// `session_partitions` (the latter belongs to the handler), so the flag
-    /// is effectively ignored.
-    pub fn new_builder_sized(&self, initial_size: usize, _copy_session_partitions: bool) -> Builder {
+    /// # Divergence from Java
+    ///
+    /// Java's `newBuilder(int initialSize, boolean copySessionPartitions)`
+    /// accepts a flag that, when `true`, pre-populates the builder's `next`
+    /// map with the current `sessionPartitions`. The Rust translation drops
+    /// that parameter because:
+    ///
+    /// - The Rust `build_request` consumes the builder's `next` map directly
+    ///   and diffs it against `self.session_partitions` (the handler owns
+    ///   the latter). The `next` map is always disjoint from
+    ///   `session_partitions`, so pre-populating would only cause a
+    ///   downstream `IndexMap::swap_remove` to immediately discard each
+    ///   pre-populated entry.
+    /// - No call site in Phase 7a passes `true` and `prepareFetchRequests`
+    ///   in Java always passes `false`.
+    ///
+    /// If a future caller needs the `true` behavior, the right place to
+    /// implement it is in `build_request`'s diff loop (so we can compute the
+    /// diff without forcing the caller to pre-populate).
+    pub fn new_builder_sized(&self, initial_size: usize) -> Builder {
         Builder { next: IndexMap::with_capacity(initial_size), ..Builder::default() }
     }
 
@@ -241,7 +260,11 @@ impl FetchSessionHandler {
 
     /// Builds the request data from the given builder, advancing the
     /// session state. Consumes the builder so it cannot be reused.
-    pub fn build_request(&mut self, mut builder: Builder) -> FetchSessionRequestData {
+    ///
+    /// `pub(crate)` because the return type
+    /// [`FetchSessionRequestData`] is internal — match Java's
+    /// package-private `FetchSessionHandler.Builder.build()` visibility.
+    pub(crate) fn build_request(&mut self, mut builder: Builder) -> FetchSessionRequestData {
         let can_use_topic_ids_input = builder.partitions_without_topic_ids == 0;
 
         if self.next_metadata.is_full() {
@@ -815,112 +838,225 @@ mod tests {
         assert!(!d2.can_use_topic_ids);
     }
 
-    /// Translated from `testIdUsageRevokedOnIdDowngrade` (partition=0 case).
+    /// Translated from `testIdUsageRevokedOnIdDowngrade`.
+    ///
+    /// Java loops over `partitions = [0, 1]`: partition=0 is the
+    /// "updating an existing partition" case; partition=1 is the
+    /// "adding a brand-new partition" case. Both expect the same
+    /// outcome: `canUseTopicIds = false` because at least one partition
+    /// in the session no longer carries a topic ID.
     #[test]
-    fn test_id_usage_revoked_on_id_downgrade_update_existing() {
-        let foo_id = Uuid::random_uuid();
-        let mut handler = FetchSessionHandler::new(1);
-        let mut b1 = handler.new_builder();
-        b1.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
-        let d1 = handler.build_request(b1);
-        assert!(d1.metadata.is_full());
-        assert!(d1.can_use_topic_ids);
+    fn test_id_usage_revoked_on_id_downgrade() {
+        for partition in [0i32, 1i32] {
+            let foo_id = Uuid::random_uuid();
+            let mut handler = FetchSessionHandler::new(1);
+            let mut b1 = handler.new_builder();
+            b1.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
+            let d1 = handler.build_request(b1);
+            assert!(d1.metadata.is_full(), "partition={partition}");
+            assert!(d1.can_use_topic_ids, "partition={partition}");
 
-        let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), foo_id, 0, 0)]);
-        assert!(handler.handle_response(&r1, ApiKeys::FETCH.latest_version()));
+            let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), foo_id, 0, 0)]);
+            assert!(handler.handle_response(&r1, ApiKeys::FETCH.latest_version()));
 
-        // Strip the topic id from foo/0.
-        let mut b2 = handler.new_builder();
-        b2.add(tp("foo", 0), pd(Uuid::zero(), 10, 110, 210));
-        let d2 = handler.build_request(b2);
-        assert_eq!(123, d2.metadata.session_id());
-        assert_eq!(1, d2.metadata.epoch());
-        assert!(!d2.can_use_topic_ids);
+            // partition=0: strip topic id from existing partition.
+            // partition=1: add a brand-new partition without an id.
+            let mut b2 = handler.new_builder();
+            b2.add(tp("foo", partition), pd(Uuid::zero(), 10, 110, 210));
+            let d2 = handler.build_request(b2);
+            assert_eq!(123, d2.metadata.session_id(), "partition={partition}");
+            assert_eq!(1, d2.metadata.epoch(), "partition={partition}");
+            assert!(!d2.can_use_topic_ids, "partition={partition}");
+        }
     }
 
-    /// Translated from
-    /// `FetchSessionHandlerTest.testTopicIdReplaced` (the
-    /// startsWithTopicIds=true, endsWithTopicIds=true case).
+    /// Translated from `FetchSessionHandlerTest.testTopicIdReplaced`.
+    ///
+    /// Loops over Java's `idUsageCombinations` —
+    /// `(startsWithTopicIds, endsWithTopicIds)` ∈ {TT, TF, FT, FF}.
     #[test]
-    fn test_topic_id_replaced_round_trip_with_ids() {
-        let topic_id_1 = Uuid::random_uuid();
-        let mut handler = FetchSessionHandler::new(1);
-        let mut b1 = handler.new_builder();
-        b1.add(tp("foo", 0), pd(topic_id_1, 0, 100, 200));
-        let d1 = handler.build_request(b1);
-        assert!(d1.metadata.is_full());
-        assert!(d1.can_use_topic_ids);
+    fn test_topic_id_replaced() {
+        for (starts_with_topic_ids, ends_with_topic_ids) in
+            [(true, true), (true, false), (false, true), (false, false)]
+        {
+            let topic_partition = tp("foo", 0);
+            let topic_id_1 = if starts_with_topic_ids {
+                Uuid::random_uuid()
+            } else {
+                Uuid::zero()
+            };
 
-        let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), topic_id_1, 0, 0)]);
-        assert!(handler.handle_response(&r1, ApiKeys::FETCH.latest_version()));
+            let mut handler = FetchSessionHandler::new(1);
+            let mut b1 = handler.new_builder();
+            b1.add(topic_partition.clone(), pd(topic_id_1, 0, 100, 200));
+            let d1 = handler.build_request(b1);
+            assert!(d1.metadata.is_full(), "combo=({starts_with_topic_ids},{ends_with_topic_ids})");
+            assert_eq!(
+                starts_with_topic_ids,
+                d1.can_use_topic_ids,
+                "combo=({starts_with_topic_ids},{ends_with_topic_ids})"
+            );
 
-        let topic_id_2 = Uuid::random_uuid();
-        let mut b2 = handler.new_builder();
-        b2.add(tp("foo", 0), pd(topic_id_2, 0, 100, 200));
-        let d2 = handler.build_request(b2);
-        // The old topic id should be in `to_replace`; new one in `to_send`.
-        assert_eq!(1, d2.to_replace.len());
-        assert_eq!(topic_id_1, d2.to_replace[0].topic_id());
-        assert_eq!(1, d2.to_send.len());
-        // sessionTopicNames should contain only the second topic ID.
-        assert_eq!(1, handler.session_topic_names().len());
-        assert!(handler.session_topic_names().contains_key(&topic_id_2));
-        assert_eq!(123, d2.metadata.session_id());
-        assert_eq!(1, d2.metadata.epoch());
-        assert!(d2.can_use_topic_ids);
+            let response_version = if starts_with_topic_ids {
+                ApiKeys::FETCH.latest_version()
+            } else {
+                12
+            };
+            let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), topic_id_1, 0, 0)]);
+            assert!(
+                handler.handle_response(&r1, response_version),
+                "combo=({starts_with_topic_ids},{ends_with_topic_ids})"
+            );
+
+            // Try to add a new topic ID (zero if endsWithTopicIds=false).
+            let topic_id_2 = if ends_with_topic_ids {
+                Uuid::random_uuid()
+            } else {
+                Uuid::zero()
+            };
+            let mut b2 = handler.new_builder();
+            b2.add(topic_partition.clone(), pd(topic_id_2, 0, 100, 200));
+            let d2 = handler.build_request(b2);
+
+            // Java case analysis on `(startsWithTopicIds, endsWithTopicIds)`:
+            if starts_with_topic_ids && ends_with_topic_ids {
+                // Both true: the old topic id goes into to_replace, the
+                // new one into to_send. sessionTopicNames carries the new.
+                assert_eq!(1, d2.to_replace.len());
+                assert_eq!(topic_id_1, d2.to_replace[0].topic_id());
+                assert_eq!(1, d2.to_send.len());
+                assert_eq!(1, handler.session_topic_names().len());
+                assert!(handler.session_topic_names().contains_key(&topic_id_2));
+            } else if starts_with_topic_ids || ends_with_topic_ids {
+                // Downgrade or upgrade: nothing in to_replace; the new
+                // partition data is in to_send. `to_replace` is reserved
+                // for the v13+ same-partition-different-id case.
+                assert_eq!(0, d2.to_replace.len());
+                assert_eq!(1, d2.to_send.len());
+                if ends_with_topic_ids {
+                    assert_eq!(1, handler.session_topic_names().len());
+                    assert!(handler.session_topic_names().contains_key(&topic_id_2));
+                } else {
+                    assert!(handler.session_topic_names().is_empty());
+                }
+            } else {
+                // Both false: identical payload, nothing to send/replace.
+                assert!(d2.to_replace.is_empty());
+                assert!(d2.to_send.is_empty());
+                assert!(handler.session_topic_names().is_empty());
+            }
+
+            assert_eq!(123, d2.metadata.session_id(), "combo=({starts_with_topic_ids},{ends_with_topic_ids})");
+            assert_eq!(1, d2.metadata.epoch(), "combo=({starts_with_topic_ids},{ends_with_topic_ids})");
+            assert_eq!(
+                ends_with_topic_ids,
+                d2.can_use_topic_ids,
+                "combo=({starts_with_topic_ids},{ends_with_topic_ids})"
+            );
+        }
     }
 
-    /// Translated from `testSessionEpochWhenMixedUsageOfTopicIDs` with
-    /// `startsWithTopicIds=true`.
+    /// Translated from `testSessionEpochWhenMixedUsageOfTopicIDs`.
+    ///
+    /// Java loops over `startsWithTopicIds = {true, false}`. In both
+    /// cases the second build mixes a partition with an id and one
+    /// without, and the handler must report `canUseTopicIds = false`.
     #[test]
-    fn test_session_epoch_when_mixed_usage_of_topic_ids_starts_with_ids() {
-        let foo_id = Uuid::random_uuid();
-        let bar_id = Uuid::zero();
+    fn test_session_epoch_when_mixed_usage_of_topic_ids() {
+        for starts_with_topic_ids in [true, false] {
+            let foo_id = if starts_with_topic_ids {
+                Uuid::random_uuid()
+            } else {
+                Uuid::zero()
+            };
+            let bar_id = if starts_with_topic_ids {
+                Uuid::zero()
+            } else {
+                Uuid::random_uuid()
+            };
+            let response_version = if starts_with_topic_ids {
+                ApiKeys::FETCH.latest_version()
+            } else {
+                12
+            };
 
-        let mut handler = FetchSessionHandler::new(1);
-        let mut b1 = handler.new_builder();
-        b1.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
-        let d1 = handler.build_request(b1);
-        assert!(d1.metadata.is_full());
-        assert!(d1.can_use_topic_ids);
+            let mut handler = FetchSessionHandler::new(1);
+            let mut b1 = handler.new_builder();
+            b1.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
+            let d1 = handler.build_request(b1);
+            assert!(d1.metadata.is_full(), "starts_with_topic_ids={starts_with_topic_ids}");
+            assert_eq!(
+                starts_with_topic_ids,
+                d1.can_use_topic_ids,
+                "starts_with_topic_ids={starts_with_topic_ids}"
+            );
 
-        let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), foo_id, 0, 0)]);
-        assert!(handler.handle_response(&r1, ApiKeys::FETCH.latest_version()));
+            let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), foo_id, 0, 0)]);
+            assert!(
+                handler.handle_response(&r1, response_version),
+                "starts_with_topic_ids={starts_with_topic_ids}"
+            );
 
-        // Re-add foo/0 + add bar/1 without an id.
-        let mut b2 = handler.new_builder();
-        b2.add(tp("foo", 0), pd(foo_id, 10, 110, 210));
-        b2.add(tp("bar", 1), pd(bar_id, 0, 100, 200));
-        let d2 = handler.build_request(b2);
-        assert_eq!(123, d2.metadata.session_id());
-        assert_eq!(1, d2.metadata.epoch());
-        assert!(!d2.can_use_topic_ids);
+            // Re-add foo/0 + add a partition with the opposite id usage.
+            let mut b2 = handler.new_builder();
+            b2.add(tp("foo", 0), pd(foo_id, 10, 110, 210));
+            b2.add(tp("bar", 1), pd(bar_id, 0, 100, 200));
+            let d2 = handler.build_request(b2);
+            assert_eq!(123, d2.metadata.session_id(), "starts_with_topic_ids={starts_with_topic_ids}");
+            assert_eq!(1, d2.metadata.epoch(), "starts_with_topic_ids={starts_with_topic_ids}");
+            assert!(!d2.can_use_topic_ids, "starts_with_topic_ids={starts_with_topic_ids}");
+        }
     }
 
-    /// Translated from `testIdUsageWithAllForgottenPartitions` with
-    /// `useTopicIds=true`.
+    /// Translated from `testIdUsageWithAllForgottenPartitions`.
+    ///
+    /// Java loops over `useTopicIds = {true, false}` — the test is
+    /// the same except for the topic id value and the response version.
     #[test]
-    fn test_id_usage_with_all_forgotten_partitions_with_ids() {
-        let topic_id = Uuid::random_uuid();
-        let mut handler = FetchSessionHandler::new(1);
-        let mut b1 = handler.new_builder();
-        b1.add(tp("foo", 0), pd(topic_id, 0, 100, 200));
-        let d1 = handler.build_request(b1);
-        assert!(d1.metadata.is_full());
-        assert!(d1.can_use_topic_ids);
+    fn test_id_usage_with_all_forgotten_partitions() {
+        for use_topic_ids in [true, false] {
+            let topic_id = if use_topic_ids {
+                Uuid::random_uuid()
+            } else {
+                Uuid::zero()
+            };
+            let response_version = if use_topic_ids {
+                ApiKeys::FETCH.latest_version()
+            } else {
+                12
+            };
 
-        let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), topic_id, 0, 0)]);
-        assert!(handler.handle_response(&r1, ApiKeys::FETCH.latest_version()));
+            let mut handler = FetchSessionHandler::new(1);
+            let mut b1 = handler.new_builder();
+            b1.add(tp("foo", 0), pd(topic_id, 0, 100, 200));
+            let d1 = handler.build_request(b1);
+            assert!(d1.metadata.is_full(), "use_topic_ids={use_topic_ids}");
+            assert_eq!(
+                use_topic_ids,
+                d1.can_use_topic_ids,
+                "use_topic_ids={use_topic_ids}"
+            );
 
-        // Remove the partition from the session.
-        let b2 = handler.new_builder();
-        let d2 = handler.build_request(b2);
-        assert_eq!(1, d2.to_forget.len());
-        assert_eq!(topic_id, d2.to_forget[0].topic_id());
-        assert_eq!(tp("foo", 0), *d2.to_forget[0].topic_partition());
-        assert_eq!(123, d2.metadata.session_id());
-        assert_eq!(1, d2.metadata.epoch());
-        assert!(d2.can_use_topic_ids);
+            let r1 = build_response(Errors::None, 123, 0, &[("foo".to_string(), topic_id, 0, 0)]);
+            assert!(
+                handler.handle_response(&r1, response_version),
+                "use_topic_ids={use_topic_ids}"
+            );
+
+            // Remove the partition from the session.
+            let b2 = handler.new_builder();
+            let d2 = handler.build_request(b2);
+            assert_eq!(1, d2.to_forget.len(), "use_topic_ids={use_topic_ids}");
+            assert_eq!(topic_id, d2.to_forget[0].topic_id(), "use_topic_ids={use_topic_ids}");
+            assert_eq!(tp("foo", 0), *d2.to_forget[0].topic_partition());
+            assert_eq!(123, d2.metadata.session_id(), "use_topic_ids={use_topic_ids}");
+            assert_eq!(1, d2.metadata.epoch(), "use_topic_ids={use_topic_ids}");
+            assert_eq!(
+                use_topic_ids,
+                d2.can_use_topic_ids,
+                "use_topic_ids={use_topic_ids}"
+            );
+        }
     }
 
     /// Translated from `testOkToAddNewIdAfterTopicRemovedFromSession`.
@@ -1028,6 +1164,88 @@ mod tests {
             assert!(issue3.contains("omittedPartitions="));
             assert!(!issue3.contains("extraPartitions="));
         }
+    }
+
+    /// Translated from
+    /// `FetchSessionHandlerTest.testVerifyFullFetchResponsePartitionsWithTopicIds`.
+    ///
+    /// Exercises the v13+ `extraIds` reporting branch in
+    /// `verifyFullFetchResponsePartitions`: a response that carries a
+    /// topic id (`extra2`) not in the session must produce an
+    /// `extraPartitions=` + `extraIds=` issue string.
+    #[test]
+    fn test_verify_full_fetch_response_partitions_with_topic_ids() {
+        let mut topic_ids = HashMap::new();
+        let mut topic_names = HashMap::new();
+        let version = ApiKeys::FETCH.latest_version();
+        add_topic_id(&mut topic_ids, &mut topic_names, "foo", version);
+        add_topic_id(&mut topic_ids, &mut topic_names, "bar", version);
+        add_topic_id(&mut topic_ids, &mut topic_names, "extra2", version);
+        let foo_id = topic_ids["foo"];
+        let bar_id = topic_ids["bar"];
+        let extra2_id = topic_ids["extra2"];
+
+        let mut handler = FetchSessionHandler::new(1);
+
+        // Before any session — every partition (including extra2) is
+        // "extra".
+        let resp1 = build_response(
+            Errors::None,
+            INVALID_SESSION_ID,
+            0,
+            &[
+                ("foo".to_string(), foo_id, 0, 0),
+                ("extra2".to_string(), extra2_id, 1, 0),
+                ("bar".to_string(), bar_id, 0, 0),
+            ],
+        );
+        let r1_partitions: HashSet<TopicPartition> =
+            resp1.response_data(&topic_names, version).keys().cloned().collect();
+        let issue = handler
+            .verify_full_fetch_response_partitions(&r1_partitions, &resp1.topic_ids(), version)
+            .unwrap();
+        assert!(issue.contains("extraPartitions="), "{issue}");
+        assert!(!issue.contains("omittedPartitions="), "{issue}");
+
+        // Seed the session with foo/0 and bar/0; do NOT include extra2.
+        let mut b = handler.new_builder();
+        b.add(tp("foo", 0), pd(foo_id, 0, 100, 200));
+        b.add(tp("bar", 0), pd(bar_id, 20, 120, 220));
+        handler.build_request(b);
+
+        // Response still includes extra2 → extraIds should be reported.
+        let resp2 = build_response(
+            Errors::None,
+            INVALID_SESSION_ID,
+            0,
+            &[
+                ("foo".to_string(), foo_id, 0, 0),
+                ("extra2".to_string(), extra2_id, 1, 0),
+                ("bar".to_string(), bar_id, 0, 0),
+            ],
+        );
+        let r2_partitions: HashSet<TopicPartition> =
+            resp2.response_data(&topic_names, version).keys().cloned().collect();
+        let issue2 = handler
+            .verify_full_fetch_response_partitions(&r2_partitions, &resp2.topic_ids(), version)
+            .unwrap();
+        assert!(issue2.contains("extraPartitions="), "{issue2}");
+        assert!(!issue2.contains("omittedPartitions="), "{issue2}");
+
+        // Response without extra2 → no issue.
+        let resp3 = build_response(
+            Errors::None,
+            INVALID_SESSION_ID,
+            0,
+            &[("foo".to_string(), foo_id, 0, 0), ("bar".to_string(), bar_id, 0, 0)],
+        );
+        let r3_partitions: HashSet<TopicPartition> =
+            resp3.response_data(&topic_names, version).keys().cloned().collect();
+        assert!(
+            handler
+                .verify_full_fetch_response_partitions(&r3_partitions, &resp3.topic_ids(), version)
+                .is_none()
+        );
     }
 
     /// Translated from `testTopLevelErrorResetsMetadata`.
