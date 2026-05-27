@@ -3170,10 +3170,7 @@ mod tests {
 
         // Attempt to validate with older API version: do nothing.
         let old_apis = ApiVersionsType::new();
-        old_apis.update(
-            "1",
-            NodeApiVersions::create_single(ApiKeys::OFFSET_FOR_LEADER_EPOCH.id(), 0, 2),
-        );
+        old_apis.update("1", NodeApiVersions::create_single(ApiKeys::OFFSET_FOR_LEADER_EPOCH.id(), 0, 2));
         assert!(!state.maybe_validate_position_for_current_leader(
             &old_apis,
             &tp_test_0(),

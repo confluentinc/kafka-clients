@@ -535,9 +535,11 @@ mod tests {
     /// Verifies that `topics_for_partitions` collects topic names.
     #[test]
     fn topics_for_partitions_collects_unique_names() {
-        let parts = [TopicPartition::new("a".to_string(), 0),
+        let parts = [
+            TopicPartition::new("a".to_string(), 0),
             TopicPartition::new("a".to_string(), 1),
-            TopicPartition::new("b".to_string(), 0)];
+            TopicPartition::new("b".to_string(), 0),
+        ];
         let topics = topics_for_partitions(parts.iter());
         assert_eq!(topics.len(), 2);
         assert!(topics.contains("a"));
