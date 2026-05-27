@@ -24,4 +24,5 @@ pub(crate) mod deserializers;
 pub(crate) mod events;
 pub(crate) mod request_state;
 pub(crate) mod subscription_state;
+pub(crate) mod timed_request_state;
 pub(crate) mod wakeup_trigger;
