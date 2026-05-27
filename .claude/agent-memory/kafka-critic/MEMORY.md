@@ -26,3 +26,5 @@
 - [M8 Phase 4 patterns](review_m8_phase4_patterns.md) — debug_assert masks IllegalStateException in release; Display format divergence from Java toString; HashSet from BTreeSet loses ordering
 - [M8 Phase 3 patterns](review_m8_phase3_patterns.md) — MockConsumer: &self-vs-mutating-position shape mismatch; listener inline invocation; map+iter+mutate translation
 - [M8 Phase 5 patterns](review_m8_phase5_patterns.md) — Event-layer: CompletableApplicationEvent<T> must yield CompletableEventHandle<T>; AsyncPoll non-completable; Arc::ptr_eq vs Java identity; marker-interface translation
+- [M8 Phase 6 patterns](review_m8_phase6_patterns.md) — KafkaError::Timeout not retriable in Rust (RetriableException mismatch); NetworkClientDelegate expiry/onClose test gaps; trivial log-capture tests
+- [M8 Phase 6 fix-cycle](review_m8_phase6_fix_cycle.md) — Audit is_retriable side-effects by receiver type not textual matches; inline mod-tests sees private fields
