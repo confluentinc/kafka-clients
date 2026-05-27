@@ -874,4 +874,46 @@ mod tests {
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
     }
+
+    /// `prepare_fetch_requests` returns an empty map when no partitions
+    /// are assigned (nothing to fetch). Mirrors the short-circuit at
+    /// Java `AbstractFetch.java:430-432`.
+    #[test]
+    fn test_prepare_fetch_requests_empty_assignment_returns_empty_map() {
+        let mut af = make_abstract_fetch();
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(result.unwrap().is_empty());
+    }
+
+    /// `prepare_fetch_requests` returns an empty map when every
+    /// fetchable partition's leader is already in
+    /// `nodes_with_pending_fetch_requests`. The closure is called for
+    /// each fetchable partition's resolved node; if it's pending, the
+    /// partition is skipped. Verified indirectly via the empty-fetchable
+    /// path here — Phase 10's FetchRequestManagerTest with MockClient
+    /// will cover the rich cluster-aware cases.
+    #[test]
+    fn test_prepare_fetch_requests_returns_empty_when_nothing_fetchable() {
+        // With no fetchable partitions, the pending-set should be
+        // untouched and the result empty regardless of closure behavior.
+        let mut af = make_abstract_fetch();
+        af.nodes_with_pending_fetch_requests.insert(42);
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(result.unwrap().is_empty());
+        // Pending-set untouched.
+        assert!(af.pending_fetch_node_ids().contains(&42));
+    }
+
+    /// `compute_buffered_nodes` returns an empty set when the buffered
+    /// set is empty (smoke test against the cluster-snapshot path).
+    #[test]
+    fn test_compute_buffered_nodes_empty_set() {
+        let af = make_abstract_fetch();
+        let result = af.compute_buffered_nodes(&HashSet::new(), 0);
+        assert!(result.is_empty());
+    }
 }
