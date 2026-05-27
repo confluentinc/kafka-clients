@@ -21,21 +21,52 @@
 //!
 //! Per-record allocation budget (expected, asserted in Phase 7b's
 //! `FetchCollector` allocation test): only the user-supplied
-//! `Deserializer<T>` allocations for the key and value `T`. Specifically
-//! preserved here:
+//! `Deserializer<T>` allocations for the key and value `T`, plus the
+//! `RecordHeaders` clone (which §27 explicitly allows in Milestone-8).
+//! Specifically preserved here:
 //!
 //! - `partition_data.records: Option<Vec<u8>>` is the canonical owner of
 //!   the fetch payload. We never call `.clone()` or `Bytes::copy_from_slice`
 //!   on it. `MemoryRecords::readable_records` is called once at first
 //!   batch access; the resulting `MemoryRecords` borrows from the
 //!   underlying buffer (Java's `recordsOrFail` is the analog).
-//! - `topic: Arc<str>` is cloned cheaply per `ConsumerRecord` — no
-//!   `String::from_utf8` per record.
-//! - Headers are owned per the milestone-8 §27 ruling (`Headers` cloned
+//! - `topic_arc: Arc<str>` is allocated ONCE per `CompletedFetch` from
+//!   `partition.topic()` and cloned cheaply per `ConsumerRecord` — no
+//!   `String::from_utf8` or `Arc::from(&str)` per record.
+//! - Per-record reads of `DefaultRecord` go through `peek_current_record`
+//!   which returns `&DefaultRecord`. We never `.clone()` a `DefaultRecord`
+//!   on the happy path; the only deep copy of record payload is whatever
+//!   the user's `Deserializer<T>` does internally.
+//! - Headers are owned per the milestone-8 §27 ruling (`Headers` built
 //!   from `DefaultRecord::headers()`); a future revisit may borrow.
 //! - No per-record `tokio::spawn`. The whole struct is sync.
 //! - Iteration is lazy via a `BatchCursor`: at most one batch's records
-//!   are materialized at a time, not the full fetch.
+//!   are materialized at a time, not the full fetch. **Known limitation
+//!   (tracked for Phase 7b/c):** within a single batch, `iter_records()`
+//!   returns `Vec<DefaultRecord>` eagerly — to fully realize §27's
+//!   "one batch at a time" intent down to the record granularity, the
+//!   underlying `DefaultRecordBatch` needs a streaming iterator. The
+//!   cross-batch lazy property is preserved; within-batch eager
+//!   materialization is acceptable for Milestone-8.
+//!
+//! # READ_COMMITTED limitations
+//!
+//! `containsAbortMarker` is NOT translated in Phase 7a because
+//! `ControlRecordType::parse_key` is not yet implemented (Phase 7b/c
+//! picks this up). The current implementation:
+//!
+//! - Correctly skips aborted-transaction batches the first time their
+//!   producer ID appears in the response's `aborted_transactions` list.
+//! - Returns `KafkaError::unsupported_version` when it encounters a
+//!   control batch under READ_COMMITTED, since we cannot distinguish
+//!   COMMIT markers from ABORT markers without `ControlRecordType`.
+//!   This is conservative; production readers will hit it only if their
+//!   producers reuse producer IDs after an abort, which is rare.
+//!
+//! Tracking note: Phase 7b/c must translate `ControlRecordType` AND
+//! re-enable the `containsAbortMarker` branch so the `aborted_producer_ids`
+//! set drops the producer ID on observing the ABORT marker (so a fresh
+//! transaction from the same producer is not skipped).
 
 #![allow(dead_code)]
 
@@ -106,6 +137,10 @@ struct BatchMetadata {
 pub(crate) struct CompletedFetch {
     /// The partition this batch belongs to.
     pub(crate) partition: TopicPartition,
+    /// Topic name as `Arc<str>` — allocated once at construction time
+    /// from `partition.topic()` and cloned cheaply (atomic pointer bump)
+    /// per emitted `ConsumerRecord`. Mirrors `consumer-threading.md` §27.
+    topic_arc: Arc<str>,
     /// Raw response data — owns the byte buffer. Borrowed by the cursor.
     pub(crate) partition_data: PartitionData,
 
@@ -193,8 +228,10 @@ impl CompletedFetch {
         fetch_offset: i64,
     ) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
+        let topic_arc: Arc<str> = Arc::from(partition.topic());
         Self {
             partition,
+            topic_arc,
             partition_data,
             subscriptions: Some(subscriptions),
             decompression_buffer_supplier: Some(decompression_buffer_supplier),
@@ -216,8 +253,10 @@ impl CompletedFetch {
     /// subscription state and buffer supplier are not yet wired.
     pub(crate) fn new(partition: TopicPartition, partition_data: PartitionData) -> Self {
         let aborted_transactions = build_aborted_transactions(&partition_data);
+        let topic_arc: Arc<str> = Arc::from(partition.topic());
         Self {
             partition,
+            topic_arc,
             partition_data,
             subscriptions: None,
             decompression_buffer_supplier: None,
@@ -356,53 +395,65 @@ impl CompletedFetch {
             // Only advance to the next record if there was no cached
             // exception. Otherwise re-deserialize the last one so the
             // user can retry after fixing whatever state they like.
-            let raw_record_opt: Option<(DefaultRecord, BatchMetadata)>;
             if self.cached_record_exception.is_none() {
                 self.corrupt_last_record = true;
-                raw_record_opt = self.next_fetched_record(config)?;
+                let has_next = self.advance_to_next_fetched_record(config)?;
                 self.corrupt_last_record = false;
-            } else {
-                // Re-use the last record by re-loading from the current
-                // cursor position (we don't advance `record_index` until
-                // we successfully decode).
-                raw_record_opt = self.peek_last_fetched_record();
+                if !has_next {
+                    break;
+                }
+            } else if self.peek_current_record().is_none() {
+                break;
             }
 
-            let (record, batch_meta) = match raw_record_opt {
-                Some(t) => t,
-                None => break,
-            };
-
-            // Deserialize key + value.
-            let topic_str = self.partition.topic();
-            let headers_owned = RecordHeaders::from_slice(record.headers());
-            let key_result = match record.key() {
-                None => Ok(None),
-                Some(key_bytes) => key_deserializer
-                    .deserialize_with_headers(topic_str, &headers_owned, key_bytes)
-                    .map(Some),
-            };
-            let value_result = match record.value() {
-                None => Ok(None),
-                Some(value_bytes) => value_deserializer
-                    .deserialize_with_headers(topic_str, &headers_owned, value_bytes)
-                    .map(Some),
-            };
+            // §27: read DefaultRecord / batch metadata via shared
+            // borrows — no clones. We deserialize while holding the
+            // borrow, then mutate self.cursor.record_index AFTER the
+            // borrow is dropped.
+            let key_result;
+            let value_result;
+            let leader_epoch;
+            let timestamp_type;
+            let key_size;
+            let value_size;
+            let offset;
+            let timestamp;
+            let record_size_in_bytes;
+            let headers_owned;
+            {
+                let (record, batch_meta) = self.peek_current_record().expect("verified non-empty above");
+                let topic_str: &str = &self.topic_arc;
+                headers_owned = RecordHeaders::from_slice(record.headers());
+                key_result = match record.key() {
+                    None => Ok(None),
+                    Some(key_bytes) => key_deserializer
+                        .deserialize_with_headers(topic_str, &headers_owned, key_bytes)
+                        .map(Some),
+                };
+                value_result = match record.value() {
+                    None => Ok(None),
+                    Some(value_bytes) => value_deserializer
+                        .deserialize_with_headers(topic_str, &headers_owned, value_bytes)
+                        .map(Some),
+                };
+                leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
+                timestamp_type = batch_meta.timestamp_type;
+                key_size = record.key_size();
+                value_size = record.value_size();
+                offset = record.offset();
+                timestamp = record.timestamp();
+                record_size_in_bytes = record.size_in_bytes();
+            }
 
             let key = match key_result {
                 Ok(k) => k,
                 Err(e) => {
-                    let err =
-                        wrap_deserialization_error(DeserializationOrigin::Key, &self.partition, record.offset(), e);
+                    let err = wrap_deserialization_error(DeserializationOrigin::Key, &self.partition, offset, e);
                     self.cached_record_exception = Some(err.clone());
                     if out.is_empty() {
                         return Err(err);
                     }
-                    error!(
-                        "Key deserialization failed for {} at offset {}",
-                        self.partition,
-                        record.offset()
-                    );
+                    error!("Key deserialization failed for {} at offset {}", self.partition, offset);
                     // Stop on the failed record — Java keeps `cachedRecordException` and returns
                     // already-decoded records.
                     break;
@@ -411,29 +462,18 @@ impl CompletedFetch {
             let value = match value_result {
                 Ok(v) => v,
                 Err(e) => {
-                    let err =
-                        wrap_deserialization_error(DeserializationOrigin::Value, &self.partition, record.offset(), e);
+                    let err = wrap_deserialization_error(DeserializationOrigin::Value, &self.partition, offset, e);
                     self.cached_record_exception = Some(err.clone());
                     if out.is_empty() {
                         return Err(err);
                     }
-                    error!(
-                        "Value deserialization failed for {} at offset {}",
-                        self.partition,
-                        record.offset()
-                    );
+                    error!("Value deserialization failed for {} at offset {}", self.partition, offset);
                     break;
                 },
             };
 
-            let leader_epoch = maybe_leader_epoch(batch_meta.partition_leader_epoch);
-            let timestamp_type = batch_meta.timestamp_type;
-            let key_size = record.key_size();
-            let value_size = record.value_size();
-            let offset = record.offset();
-            let timestamp = record.timestamp();
-            // Topic name as Arc<str> — single clone per record per §27.
-            let topic_arc: std::sync::Arc<str> = std::sync::Arc::from(topic_str);
+            // §27: cheap Arc clone — atomic pointer bump, no UTF-8 copy.
+            let topic_arc = Arc::clone(&self.topic_arc);
             let consumer_record = ConsumerRecord::with_headers(
                 topic_arc,
                 self.partition.partition(),
@@ -448,8 +488,8 @@ impl CompletedFetch {
                 leader_epoch,
             );
             self.records_read += 1;
-            self.bytes_read += record.size_in_bytes();
-            self.next_fetch_offset = record.offset() + 1;
+            self.bytes_read += record_size_in_bytes;
+            self.next_fetch_offset = offset + 1;
             self.cached_record_exception = None;
             out.push(consumer_record);
             // Advance the record cursor — we successfully consumed this record.
@@ -461,15 +501,23 @@ impl CompletedFetch {
         Ok(out)
     }
 
-    /// Pulls the next record that should be returned to the user,
-    /// skipping aborted-transaction batches and control batches per
-    /// READ_COMMITTED semantics. Returns `None` when iteration is
-    /// exhausted; in that case the cursor is drained and
-    /// `next_fetch_offset` is advanced to the end of the last batch.
-    fn next_fetched_record(
-        &mut self,
-        config: &FetchConfig,
-    ) -> Result<Option<(DefaultRecord, BatchMetadata)>, KafkaError> {
+    /// Advances the cursor to the next record that should be returned
+    /// to the user, skipping out-of-range, aborted-transaction, and
+    /// control batches per READ_COMMITTED semantics.
+    ///
+    /// Returns `Ok(true)` if a record is positioned at the cursor and
+    /// ready to be read via [`Self::peek_current_record`]. Returns
+    /// `Ok(false)` when iteration is exhausted; in that case the cursor
+    /// is drained and `next_fetch_offset` is advanced to the end of the
+    /// last batch.
+    ///
+    /// §27 zero-copy note: the previous version returned an owned
+    /// `(DefaultRecord, BatchMetadata)` tuple, which forced a deep clone
+    /// of the record's key + value bytes on every iteration. The current
+    /// version returns a boolean and leaves the record in
+    /// `cursor.current_records[cursor.record_index]`; callers use
+    /// [`Self::peek_current_record`] to read it by reference.
+    fn advance_to_next_fetched_record(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
         loop {
             // Reload current batch if exhausted.
             let needs_new_batch = match &self.cursor {
@@ -486,7 +534,7 @@ impl CompletedFetch {
                         self.next_fetch_offset = batch_meta.next_offset;
                     }
                     self.drain();
-                    return Ok(None);
+                    return Ok(false);
                 }
                 // load_next_batch may have skipped the batch entirely for
                 // aborted transactions; try again from the top.
@@ -495,10 +543,23 @@ impl CompletedFetch {
 
             // Pull next record from current batch — peek-style; we don't
             // advance until the caller decodes it successfully.
-            let (record, batch_meta) = self.peek_last_fetched_record().expect("cursor verified non-empty above");
-            // Skip out-of-range and control records.
-            if record.offset() < self.next_fetch_offset {
-                // Skip this record (advance the cursor).
+            //
+            // Scope the borrow so the early-skip mutations below can
+            // touch the cursor freely.
+            let (record_offset, is_control_batch, crc_validation_err) = {
+                let (record, batch_meta) = self.peek_current_record().expect("cursor verified non-empty above");
+                let offset = record.offset();
+                let is_control = batch_meta.is_control_batch;
+                let crc_err = if config.check_crcs {
+                    record.ensure_valid().err()
+                } else {
+                    None
+                };
+                (offset, is_control, crc_err)
+            };
+
+            // Skip out-of-range records.
+            if record_offset < self.next_fetch_offset {
                 if let Some(cursor) = &mut self.cursor {
                     cursor.record_index += 1;
                 }
@@ -506,39 +567,39 @@ impl CompletedFetch {
             }
 
             // CRC validation if configured.
-            if config.check_crcs
-                && let Err(e) = record.ensure_valid()
-            {
+            if let Some(e) = crc_validation_err {
                 return Err(KafkaError::illegal_state(format!(
                     "Record for partition {} at offset {} is invalid, cause: {}",
-                    self.partition,
-                    record.offset(),
-                    e
+                    self.partition, record_offset, e
                 )));
             }
 
-            if batch_meta.is_control_batch {
+            if is_control_batch {
                 // Control records are not returned to the user — advance
                 // nextFetchOffset and skip.
-                self.next_fetch_offset = record.offset() + 1;
+                self.next_fetch_offset = record_offset + 1;
                 if let Some(cursor) = &mut self.cursor {
                     cursor.record_index += 1;
                 }
                 continue;
             }
-            return Ok(Some((record, batch_meta)));
+            return Ok(true);
         }
     }
 
-    /// Returns the current record (the one at `cursor.record_index`)
-    /// without advancing. Returns `None` if no current record.
-    fn peek_last_fetched_record(&self) -> Option<(DefaultRecord, BatchMetadata)> {
+    /// Returns the current record (the one at `cursor.record_index`) and
+    /// its enclosing batch metadata, both by reference. Returns `None`
+    /// if no current record.
+    ///
+    /// §27 zero-copy note: never `.clone()`s a `DefaultRecord` — that
+    /// would deep-copy key + value + headers per call.
+    fn peek_current_record(&self) -> Option<(&DefaultRecord, &BatchMetadata)> {
         let cursor = self.cursor.as_ref()?;
         if cursor.record_index >= cursor.current_records.len() {
             return None;
         }
-        let record = cursor.current_records[cursor.record_index].clone();
-        let batch_meta = cursor.current_batch.clone()?;
+        let record = &cursor.current_records[cursor.record_index];
+        let batch_meta = cursor.current_batch.as_ref()?;
         Some((record, batch_meta))
     }
 
@@ -620,7 +681,31 @@ impl CompletedFetch {
 
             if config.isolation_level == IsolationLevel::ReadCommitted && batch_meta.has_producer_id {
                 self.consume_aborted_transactions_up_to(batch_meta.last_offset);
-                if !batch_meta.is_control_batch && self.aborted_producer_ids.contains(&batch_meta.producer_id) {
+                // Java's `containsAbortMarker` branch is NOT translated
+                // here (see module docstring): we don't yet have
+                // `ControlRecordType::parse_key`, so we cannot decide
+                // whether a control batch is COMMIT vs ABORT. If we ever
+                // encounter a control batch from a producer whose ID is
+                // in `aborted_producer_ids`, we cannot safely continue —
+                // the producer ID might have been reused for a fresh,
+                // committed transaction. Fail loudly rather than silently
+                // skip records.
+                if batch_meta.is_control_batch && self.aborted_producer_ids.contains(&batch_meta.producer_id) {
+                    return Err(KafkaError::unsupported_version(format!(
+                        "READ_COMMITTED with a control batch from a previously aborted \
+                         producer ID ({}) on partition {} requires translating \
+                         ControlRecordType to distinguish ABORT vs COMMIT markers, \
+                         which is not yet implemented (tracked for Phase 7b/c).",
+                        batch_meta.producer_id, self.partition
+                    )));
+                }
+                // The skip path mirrors Java's `isBatchAborted`, which
+                // gates on `isTransactional()` — a non-transactional
+                // batch with a producer ID is never aborted.
+                if batch_meta.is_transactional
+                    && !batch_meta.is_control_batch
+                    && self.aborted_producer_ids.contains(&batch_meta.producer_id)
+                {
                     debug!(
                         "Skipping aborted record batch from partition {} with producerId {} and offsets {} to {}",
                         self.partition, batch_meta.producer_id, batch_meta.base_offset, batch_meta.last_offset
@@ -751,6 +836,51 @@ mod tests {
         }
     }
 
+    /// Marks which side (KEY or VALUE) of the deserialization is
+    /// expected to fail for [`MaybeFailingDeserializer`].
+    #[derive(Clone, Copy)]
+    enum DeserializationOriginFlag {
+        Key,
+        Value,
+    }
+
+    /// Deserializer that succeeds on most records but fails on a single
+    /// configured offset, identified by parsing the
+    /// [`new_records_with_keyed_offsets`] fixture's `"key-N"` / `"value-N"`
+    /// encoding. Used to exercise the cached-exception re-raise path
+    /// (`CompletedFetchTest.testCorruptedMessage`).
+    struct MaybeFailingDeserializer {
+        side: DeserializationOriginFlag,
+        fail_on_offset: i64,
+    }
+    impl MaybeFailingDeserializer {
+        fn new(side: DeserializationOriginFlag, fail_on_offset: i64) -> Self {
+            Self { side, fail_on_offset }
+        }
+        /// Returns the offset embedded in a `"key-N"` / `"value-N"`
+        /// fixture string. Returns `None` if the prefix doesn't match.
+        fn parse_offset(bytes: &[u8], expected_prefix: &str) -> Option<i64> {
+            let s = std::str::from_utf8(bytes).ok()?;
+            s.strip_prefix(expected_prefix).and_then(|n| n.parse::<i64>().ok())
+        }
+    }
+    impl Deserializer<String> for MaybeFailingDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+            let (prefix, origin_label) = match self.side {
+                DeserializationOriginFlag::Key => ("key-", "key"),
+                DeserializationOriginFlag::Value => ("value-", "value"),
+            };
+            if let Some(n) = Self::parse_offset(data, prefix)
+                && n == self.fail_on_offset
+            {
+                return Err(KafkaError::serialization(format!(
+                    "simulated {origin_label} failure at offset {n}"
+                )));
+            }
+            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+        }
+    }
+
     fn make_fetch_config(isolation_level: IsolationLevel, check_crcs: bool) -> FetchConfig {
         FetchConfig::new(1, 50 * 1024 * 1024, 500, 1024 * 1024, 500, check_crcs, "", isolation_level)
     }
@@ -764,6 +894,30 @@ mod tests {
             .map(|i| {
                 let value = format!("value-{}", first_message_id + i as i64);
                 SimpleRecord::new(0, Some("key".as_bytes().to_vec()), Some(value.into_bytes()), vec![])
+            })
+            .collect();
+        let records = MemoryRecords::with_records_at_offset(
+            2,
+            base_offset,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &simple_records,
+        );
+        records.buffer().to_vec()
+    }
+
+    /// Fixture that uses `"key-{offset}"`/`"value-{offset}"` so each
+    /// record's bytes embed its (synthetic) offset. Used by the
+    /// corrupted-message tests, which need a way to fail a SPECIFIC
+    /// record (rather than the Nth call across many records) without
+    /// pulling in additional dependencies.
+    fn new_records_with_keyed_offsets(base_offset: i64, count: i32, first_message_id: i64) -> Vec<u8> {
+        let simple_records: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                let n = first_message_id + i as i64;
+                let key = format!("key-{n}");
+                let value = format!("value-{n}");
+                SimpleRecord::new(0, Some(key.into_bytes()), Some(value.into_bytes()), vec![])
             })
             .collect();
         let records = MemoryRecords::with_records_at_offset(
@@ -880,6 +1034,80 @@ mod tests {
         // The cached path returns the cached error, which embeds the
         // same "Error deserializing KEY" prefix.
         assert!(err2.message().contains("KEY"), "{}", err2.message());
+    }
+
+    /// Translated from `CompletedFetchTest.testCorruptedMessage`.
+    ///
+    /// The Java test asserts the structured fields on
+    /// `RecordDeserializationException` (origin, offset, key/value buffers,
+    /// headers). The Rust port uses the collapsed
+    /// `KafkaError::Serialization(String)` form, so it asserts the same
+    /// behavior at the granularity Rust can express: which call raises,
+    /// the error message identifies KEY vs VALUE, the offset is embedded
+    /// in the message, and the cached-exception re-raise path triggers
+    /// on subsequent calls.
+    ///
+    /// The Java test's `KEY` case fails on the SECOND record after the
+    /// first one decodes successfully. The Rust port models this with a
+    /// `MaybeFailingDeserializer` that fails on a specific offset.
+    #[test]
+    fn test_corrupted_message_key_fails_after_valid_record() {
+        // Three records: offsets 0, 1, 2. Key deserializer fails on
+        // offset 1; the first record at offset 0 should decode
+        // successfully and be returned, then the second call should
+        // re-raise the cached exception with KEY origin (the cached
+        // record is re-deserialized; same offset bytes ⇒ same failure).
+        let bytes = new_records_with_keyed_offsets(0, 3, 0);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, false);
+        let key_de = MaybeFailingDeserializer::new(DeserializationOriginFlag::Key, 1);
+        let value_de = StringDeserializer;
+
+        // First call: offset 0 decodes; offset 1 fails and is cached.
+        // Since `out` is non-empty, the call returns the prefix [0] and
+        // does NOT propagate the error.
+        let first = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(1, first.len(), "expected one valid record before the failure");
+        assert_eq!(0, first[0].offset());
+
+        // Second call: cached exception re-raises with KEY origin and
+        // the failed offset (1) in the message.
+        let err = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("KEY"), "expected KEY origin: {msg}");
+        assert!(msg.contains(" 1"), "expected failed offset 1 in message: {msg}");
+        assert!(msg.contains("test-0"), "expected partition string: {msg}");
+    }
+
+    /// Mirrors `CompletedFetchTest.testCorruptedMessage`'s VALUE case
+    /// (different `CompletedFetch` instance, value deserializer fails on
+    /// offset 3).
+    #[test]
+    fn test_corrupted_message_value_fails_after_valid_record() {
+        // Same fixture, different fetch-offset (2) so the cursor sees
+        // offsets 2..=4 and the value deserializer fails on offset 3.
+        let bytes = new_records_with_keyed_offsets(0, 5, 0);
+        let mut cf = new_completed_fetch(2, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, false);
+        let key_de = StringDeserializer;
+        let value_de = MaybeFailingDeserializer::new(DeserializationOriginFlag::Value, 3);
+
+        let first = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(1, first.len(), "expected one valid record before the failure");
+        assert_eq!(2, first[0].offset());
+
+        let err = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap_err();
+        let msg = err.message();
+        assert!(msg.contains("VALUE"), "expected VALUE origin: {msg}");
+        assert!(msg.contains(" 3"), "expected failed offset 3 in message: {msg}");
     }
 
     /// `drain` is idempotent and clears the consumed state.
