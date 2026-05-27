@@ -302,10 +302,17 @@ where
             fetch_buffer.add_all(paused_completed_fetches);
         }
 
-        if let Some(e) = deferred_error
-            && records_by_partition.is_empty()
-        {
-            return Err(e);
+        // Java's outer `catch (KafkaException e)` swallows the error when
+        // we have records in hand (`!fetch.isEmpty()`). But Java's
+        // `IllegalStateException` is NOT a `KafkaException` — it escapes
+        // the catch unconditionally. Mirror that here: an
+        // `IllegalState` error always propagates, even if we have
+        // already-decoded records buffered.
+        if let Some(e) = deferred_error {
+            let is_illegal_state = matches!(&e, KafkaError::IllegalState(_));
+            if is_illegal_state || records_by_partition.is_empty() {
+                return Err(e);
+            }
         }
 
         Ok(ConsumerRecords::new(records_by_partition, next_offsets))
