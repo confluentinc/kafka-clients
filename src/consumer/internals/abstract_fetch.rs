@@ -118,23 +118,31 @@ impl AbstractFetch {
     ///
     /// Translates Java's
     /// `AbstractFetch(LogContext, ConsumerMetadata, SubscriptionState,
-    ///   FetchConfig, FetchBuffer, FetchMetricsManager, Time, ApiVersions)`.
-    /// Drops the `LogContext` (we use the `log` crate), `FetchMetricsManager`
-    /// (no Rust metrics framework), `Time` (Phase 7b will plumb a clock if
-    /// needed for read-replica leasing), and `ApiVersions` (negotiation
-    /// lives in Phase 7b alongside `RequestManager::poll`).
+    ///   FetchConfig, FetchBuffer, FetchMetricsManager, Time, ApiVersions,
+    ///   BufferSupplier)`. Drops the `LogContext` (we use the `log` crate),
+    /// `FetchMetricsManager` (no Rust metrics framework), `Time` (Phase 7b
+    /// will plumb a clock if needed for read-replica leasing), and
+    /// `ApiVersions` (negotiation lives in Phase 7b alongside
+    /// `RequestManager::poll`).
+    ///
+    /// The `decompression_buffer_supplier` is shared with the consumer's
+    /// other decompression call sites (Java's `KafkaConsumer` creates a
+    /// single supplier and passes it both here and into ad-hoc
+    /// decompression). Callers that don't need sharing can pass
+    /// `Arc::new(BufferSupplier::create())`.
     pub(crate) fn new(
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         fetch_config: FetchConfig,
         fetch_buffer: Arc<FetchBuffer>,
+        decompression_buffer_supplier: Arc<BufferSupplier>,
     ) -> Self {
         Self {
             metadata,
             subscriptions,
             fetch_config,
             fetch_buffer,
-            decompression_buffer_supplier: Arc::new(BufferSupplier::create()),
+            decompression_buffer_supplier,
             nodes_with_pending_fetch_requests: HashSet::new(),
             closed: false,
             session_handlers: HashMap::new(),
@@ -368,6 +376,48 @@ impl AbstractFetch {
         self.remove_pending_fetch_request(fetch_target, session_id);
     }
 
+    /// Handles a successful close-fetch-session response from `fetch_target`.
+    ///
+    /// Translates `protected void handleCloseFetchSessionSuccess(Node,
+    /// FetchSessionHandler.FetchRequestData, ClientResponse)`. Drops the
+    /// node from the pending-fetch set and logs at debug.
+    pub(crate) fn handle_close_fetch_session_success(
+        &mut self,
+        fetch_target: &Node,
+        request_data: &FetchSessionRequestData,
+    ) {
+        let session_id = request_data.metadata.session_id();
+        self.remove_pending_fetch_request(fetch_target, session_id);
+        debug!(
+            "Successfully sent a close message for fetch session: {} to node: {}",
+            session_id,
+            fetch_target.id()
+        );
+    }
+
+    /// Handles a failed close-fetch-session response from `fetch_target`.
+    ///
+    /// Translates `public void handleCloseFetchSessionFailure(Node,
+    /// FetchSessionHandler.FetchRequestData, Throwable)`. Drops the node
+    /// from the pending-fetch set and logs at debug (Java logs the
+    /// throwable; we log the `KafkaError` message).
+    pub(crate) fn handle_close_fetch_session_failure(
+        &mut self,
+        fetch_target: &Node,
+        request_data: &FetchSessionRequestData,
+        error: &crate::common::KafkaError,
+    ) {
+        let session_id = request_data.metadata.session_id();
+        self.remove_pending_fetch_request(fetch_target, session_id);
+        debug!(
+            "Unable to send a close message for fetch session: {} to node: {}. \
+             This may result in unnecessary fetch sessions at the broker. Cause: {}",
+            session_id,
+            fetch_target.id(),
+            error.message(),
+        );
+    }
+
     /// Handles a fetch-request failure.
     ///
     /// Translates `protected void handleFetchFailure(Node, FetchRequestData, Throwable)`.
@@ -470,7 +520,13 @@ mod tests {
     fn make_abstract_fetch() -> AbstractFetch {
         let subs = make_subscriptions();
         let metadata = make_consumer_metadata(subs.clone());
-        AbstractFetch::new(metadata, subs, make_fetch_config(), Arc::new(FetchBuffer::new()))
+        AbstractFetch::new(
+            metadata,
+            subs,
+            make_fetch_config(),
+            Arc::new(FetchBuffer::new()),
+            Arc::new(BufferSupplier::create()),
+        )
     }
 
     #[test]
@@ -556,5 +612,38 @@ mod tests {
         af.close();
         assert!(af.closed);
         af.close(); // no panic
+    }
+
+    /// `handle_close_fetch_session_success` removes the node from the
+    /// pending-fetch set.
+    #[test]
+    fn test_handle_close_fetch_session_success_drops_pending() {
+        let mut af = make_abstract_fetch();
+        af.nodes_with_pending_fetch_requests.insert(5);
+        let _ = af.session_handler_or_create(5);
+        let handler = af.session_handler_mut(5).expect("handler");
+        let builder = handler.new_builder();
+        let request_data = handler.build_request(builder);
+
+        let node = Node::new(5, "host".to_string(), 9092);
+        af.handle_close_fetch_session_success(&node, &request_data);
+        assert!(!af.pending_fetch_node_ids().contains(&5));
+    }
+
+    /// `handle_close_fetch_session_failure` removes the node from the
+    /// pending-fetch set.
+    #[test]
+    fn test_handle_close_fetch_session_failure_drops_pending() {
+        let mut af = make_abstract_fetch();
+        af.nodes_with_pending_fetch_requests.insert(6);
+        let _ = af.session_handler_or_create(6);
+        let handler = af.session_handler_mut(6).expect("handler");
+        let builder = handler.new_builder();
+        let request_data = handler.build_request(builder);
+
+        let node = Node::new(6, "host".to_string(), 9092);
+        let err = crate::common::KafkaError::illegal_state("simulated");
+        af.handle_close_fetch_session_failure(&node, &request_data, &err);
+        assert!(!af.pending_fetch_node_ids().contains(&6));
     }
 }
