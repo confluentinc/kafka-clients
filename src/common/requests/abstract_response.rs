@@ -30,7 +30,9 @@ use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Errors, Readable};
 
 use super::ApiVersionsResponse;
 use super::FindCoordinatorResponse;
+use super::ListOffsetsResponse;
 use super::MetadataResponse;
+use super::OffsetsForLeaderEpochResponse;
 use super::ProduceResponse;
 use super::RequestHeader;
 use super::ResponseHeader;
@@ -61,6 +63,10 @@ pub enum ConcreteResponse {
     SaslAuthenticate(SaslAuthenticateResponse),
     /// A FindCoordinator response.
     FindCoordinator(FindCoordinatorResponse),
+    /// A ListOffsets response.
+    ListOffsets(ListOffsetsResponse),
+    /// An OffsetsForLeaderEpoch response.
+    OffsetsForLeaderEpoch(OffsetsForLeaderEpochResponse),
 }
 
 impl ConcreteResponse {
@@ -73,6 +79,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
             Self::FindCoordinator(r) => r.api_key(),
+            Self::ListOffsets(r) => r.api_key(),
+            Self::OffsetsForLeaderEpoch(r) => r.api_key(),
         }
     }
 
@@ -91,6 +99,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::FindCoordinator(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::ListOffsets(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -121,6 +131,12 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
             },
+            Self::ListOffsets(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
+            Self::OffsetsForLeaderEpoch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -139,6 +155,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => Self::serialize_body(r.data(), version),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), version),
             Self::FindCoordinator(r) => Self::serialize_body(r.data(), version),
+            Self::ListOffsets(r) => Self::serialize_body(r.data(), version),
+            Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), version),
         }
     }
 
@@ -161,6 +179,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.error_counts(),
             Self::SaslAuthenticate(r) => r.error_counts(),
             Self::FindCoordinator(r) => r.error_counts(),
+            Self::ListOffsets(r) => r.error_counts(),
+            Self::OffsetsForLeaderEpoch(r) => r.error_counts(),
         }
     }
 
@@ -175,6 +195,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.throttle_time_ms(),
             Self::SaslAuthenticate(r) => r.throttle_time_ms(),
             Self::FindCoordinator(r) => r.throttle_time_ms(),
+            Self::ListOffsets(r) => r.throttle_time_ms(),
+            Self::OffsetsForLeaderEpoch(r) => r.throttle_time_ms(),
         }
     }
 
@@ -188,6 +210,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::SaslAuthenticate(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::FindCoordinator(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::ListOffsets(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::OffsetsForLeaderEpoch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -200,6 +224,8 @@ impl ConcreteResponse {
             Self::SaslHandshake(r) => r.should_client_throttle(version),
             Self::SaslAuthenticate(r) => r.should_client_throttle(version),
             Self::FindCoordinator(r) => r.should_client_throttle(version),
+            Self::ListOffsets(r) => r.should_client_throttle(version),
+            Self::OffsetsForLeaderEpoch(r) => r.should_client_throttle(version),
         }
     }
 
@@ -275,6 +301,14 @@ impl ConcreteResponse {
                 let response = FindCoordinatorResponse::parse(readable, version)?;
                 Ok(Self::FindCoordinator(response))
             },
+            ApiKeys::LIST_OFFSETS => {
+                let response = ListOffsetsResponse::parse(readable, version)?;
+                Ok(Self::ListOffsets(response))
+            },
+            ApiKeys::OFFSET_FOR_LEADER_EPOCH => {
+                let response = OffsetsForLeaderEpochResponse::parse(readable, version)?;
+                Ok(Self::OffsetsForLeaderEpoch(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -292,6 +326,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
             Self::FindCoordinator(r) => write!(f, "{r}"),
+            Self::ListOffsets(r) => write!(f, "{r}"),
+            Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
         }
     }
 }

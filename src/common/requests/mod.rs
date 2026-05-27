@@ -27,8 +27,12 @@ pub mod fetch_request;
 pub mod fetch_response;
 pub mod find_coordinator_request;
 pub mod find_coordinator_response;
+pub mod list_offsets_request;
+pub mod list_offsets_response;
 pub mod metadata_request;
 pub mod metadata_response;
+pub mod offsets_for_leader_epoch_request;
+pub mod offsets_for_leader_epoch_response;
 pub mod produce_request;
 pub mod produce_response;
 pub mod request_and_size;
@@ -50,8 +54,12 @@ pub use find_coordinator_request::{
     CoordinatorType, FindCoordinatorRequest, FindCoordinatorRequestBuilder, MIN_BATCHED_VERSION,
 };
 pub use find_coordinator_response::FindCoordinatorResponse;
+pub use list_offsets_request::{ListOffsetsRequest, ListOffsetsRequestBuilder};
+pub use list_offsets_response::ListOffsetsResponse;
 pub use metadata_request::{MetadataRequest, MetadataRequestBuilder};
 pub use metadata_response::{MetadataResponse, PartitionMetadata, TopicMetadata};
+pub use offsets_for_leader_epoch_request::{OffsetsForLeaderEpochRequest, OffsetsForLeaderEpochRequestBuilder};
+pub use offsets_for_leader_epoch_response::OffsetsForLeaderEpochResponse;
 pub use produce_request::{ProduceRequest, ProduceRequestBuilder};
 pub use produce_response::{PartitionResponse, ProduceResponse, RecordError};
 pub use request_and_size::RequestAndSize;
