@@ -166,9 +166,18 @@ impl FetchBuffer {
 
     /// Sets the next-in-line fetch. Pass `None` to clear it.
     ///
+    /// If a previous next-in-line was set, it is `drain()`ed before the
+    /// new value replaces it (mirrors Java's
+    /// `FetchBuffer.close()`/`retainAll(...)` semantics, which drain the
+    /// outgoing next-in-line so the `bytes_read > 0` →
+    /// `move_partition_to_end` SubscriptionState nudge fires).
+    ///
     /// Translates `void setNextInLineFetch(CompletedFetch)`.
     pub(crate) fn set_next_in_line_fetch(&self, fetch: Option<CompletedFetch>) {
         let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        if let Some(prev) = guard.next_in_line_fetch.as_mut() {
+            prev.drain();
+        }
         guard.next_in_line_fetch = fetch;
     }
 
@@ -180,15 +189,35 @@ impl FetchBuffer {
     /// Rust port instead relies on tokio task cancellation propagating
     /// through the caller's wakeup token (consumer-threading.md §11) —
     /// the buffer's only job is to surface the data-arrived signal.
+    ///
+    /// # Race-free registration
+    ///
+    /// `tokio::sync::Notify::notified()` only registers a waiter on the
+    /// first poll (or via `enable()` on a pinned reference). To avoid
+    /// losing a `notify_waiters` that arrives between our pre-check and
+    /// the timeout's first poll, we:
+    /// 1. Construct the `Notified` future,
+    /// 2. Pin and `enable()` it — registers us as a waiter,
+    /// 3. Re-check the woken flag (any add/wakeup between step 1 and
+    ///    step 3 either set the flag, or fired `notify_waiters` which we
+    ///    now hold a permit for),
+    /// 4. Race the (already-registered) future against the timeout.
     pub(crate) async fn await_wakeup(&self, timeout: Duration) {
-        // Check / clear the woken flag first — if it was already set, the
-        // wakeup happened before we got here and we can return
-        // immediately without waiting.
+        // Check / clear the woken flag first — short-circuit if a
+        // wakeup happened before we got here.
         if self.wokenup.swap(false, Ordering::SeqCst) {
             return;
         }
         let notified = self.notify.notified();
-        // Race the notify against the timeout.
+        tokio::pin!(notified);
+        // Register as a waiter BEFORE the second flag check, so any
+        // concurrent `notify_waiters` after our first check still
+        // finds us registered.
+        notified.as_mut().enable();
+        if self.wokenup.swap(false, Ordering::SeqCst) {
+            return;
+        }
+        // Race the (registered) notify against the timeout.
         let _ = tokio::time::timeout(timeout, notified).await;
         // Clear the woken flag (per Java's compareAndSet(true, false)
         // loop). It's fine if the timeout fired without a notification —
@@ -451,6 +480,45 @@ mod tests {
         buffer.close();
         buffer.close(); // no panic
         assert!(buffer.is_empty());
+    }
+
+    /// `set_next_in_line_fetch(None)` drains the previous next-in-line
+    /// (mirrors Java's `retainAll`/`close` semantics).
+    #[test]
+    fn test_set_next_in_line_fetch_drains_previous() {
+        let buffer = FetchBuffer::new();
+        let cf_a = cf("topic-a", 0);
+        buffer.set_next_in_line_fetch(Some(cf_a));
+        assert!(buffer.has_next_in_line_fetch());
+        // Replace with None — previous must be drained (no panic + slot empty).
+        buffer.set_next_in_line_fetch(None);
+        assert!(!buffer.has_next_in_line_fetch());
+
+        // Replace with Some, then Some again — previous drained.
+        buffer.set_next_in_line_fetch(Some(cf("topic-a", 1)));
+        buffer.set_next_in_line_fetch(Some(cf("topic-b", 0)));
+        // The slot now holds topic-b; topic-a was drained.
+        let partitions = buffer.buffered_partitions();
+        assert!(partitions.contains(&tp("topic-b", 0)));
+        assert!(!partitions.contains(&tp("topic-a", 1)));
+    }
+
+    /// `await_wakeup` does NOT lose a wakeup that races our flag check.
+    /// Hammers the race window with a tokio task that wakes up after
+    /// `yield_now`; the awaiter must observe the wakeup promptly.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_await_wakeup_does_not_lose_race() {
+        let buffer = Arc::new(FetchBuffer::new());
+        let buffer_for_task = Arc::clone(&buffer);
+        let task = tokio::spawn(async move {
+            // Long timeout — must not be hit.
+            buffer_for_task.await_wakeup(Duration::from_secs(30)).await;
+        });
+        // Yield once so the task enters await_wakeup before we wake it.
+        tokio::task::yield_now().await;
+        buffer.wakeup();
+        let join_result = tokio::time::timeout(Duration::from_secs(5), task).await;
+        assert!(join_result.is_ok(), "wakeup race lost: awaiter did not return");
     }
 
     /// `has_completed_fetches` predicate filters correctly.
