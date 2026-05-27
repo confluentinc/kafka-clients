@@ -96,6 +96,59 @@ For each new manager:
 
 - Baseline: 1057 lib + 36 consumer integration
 - After Phase 6: 1107 lib (+50) + 36 consumer integration (unchanged)
+- After Phase 6 critic-fix round (N=1): 1113 lib (+6) — 5 new in NetworkClientDelegate
+  (test_timeout_before_send, test_timeout_after_send, test_ensure_correct_completion_time_on_complete,
+  test_poll_with_on_close, test_check_disconnects_with_on_close) + 1 new in
+  CoordinatorRequestManager (test_on_failed_response_timeout_is_retriable_not_fatal).
+
+## Critic-fix round lessons (N=1, COMMENTS.1.md #1-5)
+
+1. **`KafkaError::Timeout::is_retriable()` was `false`** — because the variant
+   has no embedded `Errors` code, `kafka_error().is_some_and(...)` returned
+   `None`. Java's `TimeoutException extends RetriableException` is retriable.
+   Fix: special-case `matches!(self, Self::Timeout(_)) || ...` in
+   `src/common/kafka_error.rs:is_retriable()`. Without this fix, Phase 10
+   would route timeouts as fatal errors through every request manager's
+   `on_failed_response`. Phase 7+ must double-check the same shape on any
+   new `KafkaError` variants that don't carry an `Errors` code.
+
+2. **MockClient::set_unreachable behavior** — `set_unreachable(node, ms)`
+   marks `unreachable_until_ms` AND calls `disconnect_node` (which moves
+   in-flight requests to `responses` as disconnect responses). The
+   subsequent `do_send` sees `state=Disconnected`, `is_unreachable=true`,
+   so `ready()` sets `backing_off_until_ms = now + 100` and returns false.
+   This makes `node_unavailable` true on the NEXT poll. Subtle ordering:
+   first poll fails on unreachable; second poll fails on backoff.
+
+3. **MockClient::poll timeout handling** — `MockClient::poll` checks
+   in-flight `elapsed >= request_timeout_ms` and calls `disconnect_node`.
+   That puts a `disconnected=true` `ClientResponse` on `responses`, which
+   poll then drains, firing the callback. The callback's path is:
+   `client.poll` → `response.on_complete()` → callback → `handler.on_complete_ref`
+   → sees `was_disconnected=true` → `on_failure(NetworkException)`.
+
+4. **Test-the-internal-state pattern for log-output tests** — Java tests
+   that use `LogCaptureAppender` to assert warnings translate to direct
+   internal-state assertions in Rust (since we have no equivalent log
+   capture). Tests in the same file as the struct can read private
+   fields directly — no `pub(crate)` relaxation needed.
+
+5. **Deferred-test rationale comments** — DoD §3 requires explaining why
+   each skipped Java test is skipped. The PLAN.md may say it, but the
+   test module should also have a comment block listing the deferred
+   test names with one-line reasons. Pattern for `RequestManagers`:
+   inline-comment block at top of `mod tests` listing both
+   `testMemberStateListenerRegistered` (Phase 10 supplier) and
+   `testStreamMemberStateListenerRegistered` (Streams out of scope per §20).
+
+6. **`prepare_response` vs `respond`** — `MockClient::prepare_response(...)`
+   pushes onto `future_responses` which is consumed by the NEXT `send()`.
+   `MockClient::respond(...)` takes from `requests` (already-sent) and
+   pushes a `ClientResponse` onto `responses` (drained by `poll`).
+   For tests where the request was sent in a prior `poll()`, use
+   `respond` to deliver the response. For tests where the request hasn't
+   been sent yet but you want to stage the response in advance, use
+   `prepare_response`.
 
 ## Pre-existing `cargo doc --no-deps` failure (11 errors)
 
