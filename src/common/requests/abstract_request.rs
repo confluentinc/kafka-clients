@@ -27,6 +27,7 @@ use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
@@ -34,6 +35,7 @@ use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
+use super::FindCoordinatorRequest;
 use super::MetadataRequest;
 use super::ProduceRequest;
 use super::RequestAndSize;
@@ -92,6 +94,8 @@ pub enum ConcreteRequest {
     SaslHandshake(SaslHandshakeRequest),
     /// A SASL authenticate request.
     SaslAuthenticate(SaslAuthenticateRequest),
+    /// A FindCoordinator request.
+    FindCoordinator(FindCoordinatorRequest),
 }
 
 impl ConcreteRequest {
@@ -103,6 +107,7 @@ impl ConcreteRequest {
             Self::Produce(r) => r.version(),
             Self::SaslHandshake(r) => r.version(),
             Self::SaslAuthenticate(r) => r.version(),
+            Self::FindCoordinator(r) => r.version(),
         }
     }
 
@@ -114,6 +119,7 @@ impl ConcreteRequest {
             Self::Produce(r) => r.api_key(),
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
+            Self::FindCoordinator(r) => r.api_key(),
         }
     }
 
@@ -131,6 +137,7 @@ impl ConcreteRequest {
             Self::Produce(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::FindCoordinator(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -179,6 +186,9 @@ impl ConcreteRequest {
             Self::SaslAuthenticate(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::FindCoordinator(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -196,6 +206,7 @@ impl ConcreteRequest {
             Self::Produce(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslHandshake(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), r.version()),
+            Self::FindCoordinator(r) => Self::serialize_body(r.data(), r.version()),
         }
     }
 
@@ -225,6 +236,7 @@ impl ConcreteRequest {
             Self::Produce(r) => r.get_error_response(throttle_time_ms, error),
             Self::SaslHandshake(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::SaslAuthenticate(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::FindCoordinator(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -265,6 +277,10 @@ impl ConcreteRequest {
                 let data = SaslAuthenticateRequestData::read(readable, api_version)?;
                 Ok(Self::SaslAuthenticate(SaslAuthenticateRequest::new(data, api_version)))
             },
+            ApiKeys::FIND_COORDINATOR => {
+                let data = FindCoordinatorRequestData::read(readable, api_version)?;
+                Ok(Self::FindCoordinator(FindCoordinatorRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -281,6 +297,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::Produce(r) => write!(f, "{r}"),
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
+            Self::FindCoordinator(r) => write!(f, "{r}"),
         }
     }
 }
