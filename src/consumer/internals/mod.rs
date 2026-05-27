@@ -33,4 +33,5 @@ pub(crate) mod request_managers;
 pub(crate) mod request_state;
 pub(crate) mod subscription_state;
 pub(crate) mod timed_request_state;
+pub(crate) mod topic_metadata_request_manager;
 pub(crate) mod wakeup_trigger;
