@@ -1009,4 +1009,202 @@ mod tests {
             Ok(_) => panic!("expected error variant, got Ok"),
         }
     }
+
+    /// Translated from `NetworkClientDelegateTest.testEnsureCorrectCompletionTimeOnComplete`.
+    /// Sibling of `testEnsureCorrectCompletionTimeOnFailure`: on the
+    /// success path (`on_complete`), the handler's completion-time
+    /// records the response's `received_time_ms`, not any later time.
+    #[test]
+    fn test_ensure_correct_completion_time_on_complete() {
+        let unsent = new_unsent_find_coordinator_request();
+        let handler = unsent.handler();
+        let received_time_ms = 1_234_i64;
+
+        // Build a synthetic, non-disconnected response carrying a
+        // FindCoordinator body. The handler's on_complete pulls
+        // `received_time_ms` off the response and stores it.
+        let header = crate::common::requests::RequestHeader::new(
+            &crate::common::protocol::ApiKeys::FIND_COORDINATOR,
+            0,
+            "",
+            1,
+        )
+        .expect("header ok");
+        let body = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
+        let response = ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            received_time_ms,
+            received_time_ms,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::FindCoordinator(body)),
+        );
+
+        handler.on_complete(response);
+        assert_eq!(received_time_ms, handler.completion_time_ms());
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testTimeoutBeforeSend`.
+    /// Marks the only node unreachable so `do_send` never succeeds, then
+    /// advances time past `request_timeout_ms`; the expiry branch of
+    /// `try_send` fires `on_failure(KafkaError::Timeout)` and the
+    /// receiver resolves with that error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_timeout_before_send() {
+        // Start at a non-zero time so MockClient.not_throttled (strict
+        // `>`) returns true on the first send attempt — though for this
+        // test the request never actually sends.
+        let time = Arc::new(AtomicI64::new(1));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+
+        // Mark the sole node unreachable for the full request timeout
+        // window. `set_unreachable` also disconnects the connection.
+        ncd.client.set_unreachable(&mock_node(), REQUEST_TIMEOUT_MS as i64);
+
+        let mut req = new_unsent_find_coordinator_request();
+        let mut rx = req.take_response_receiver().expect("receiver still present");
+        ncd.add(req, time.load(Ordering::SeqCst));
+
+        // First poll: do_send returns false because the node is
+        // unreachable. Request stays on the unsent queue.
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        assert!(!ncd.unsent_requests().is_empty());
+
+        // Advance past the request's deadline.
+        time.fetch_add(REQUEST_TIMEOUT_MS as i64, Ordering::SeqCst);
+
+        // Second poll: try_send sees `current_time_ms >= deadline_ms`
+        // and fires `on_failure(KafkaError::timeout(...))`.
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        assert!(ncd.unsent_requests().is_empty(), "expired request was removed");
+
+        let received = rx.try_recv().expect("response delivered");
+        match received {
+            Err(KafkaError::Timeout(_)) => {},
+            Err(other) => panic!("expected Timeout, got: {other}"),
+            Ok(_) => panic!("expected error variant, got Ok"),
+        }
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testTimeoutAfterSend`.
+    /// Sends a request successfully, then advances time past
+    /// `request_timeout_ms` so the underlying `MockClient::poll` times
+    /// the in-flight request out (Java: `DisconnectException`; Rust:
+    /// `KafkaError` carrying `Errors::NetworkException`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_timeout_after_send() {
+        let time = Arc::new(AtomicI64::new(1));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+
+        let mut req = new_unsent_find_coordinator_request();
+        let mut rx = req.take_response_receiver().expect("receiver still present");
+        ncd.add(req, time.load(Ordering::SeqCst));
+
+        // First poll dispatches the request successfully — node is
+        // reachable, so `do_send` puts it into `client.requests`.
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        assert!(ncd.unsent_requests().is_empty(), "request was sent");
+        assert!(ncd.client.has_in_flight_requests(), "request is in-flight");
+
+        // Advance past the request's timeout. `MockClient::poll` will
+        // detect the expired in-flight request, disconnect the node,
+        // and synthesise a `disconnected=true` `ClientResponse` — the
+        // FutureCompletionHandler then routes that to
+        // `on_failure(KafkaError::new(Errors::NetworkException))`.
+        time.fetch_add(REQUEST_TIMEOUT_MS as i64, Ordering::SeqCst);
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+
+        let received = rx.try_recv().expect("response delivered");
+        match received {
+            Err(err) => {
+                assert_eq!(
+                    Errors::NetworkException,
+                    err.error(),
+                    "expected NetworkException (Java DisconnectException), got: {err}"
+                );
+            },
+            Ok(_) => panic!("expected disconnect error, got Ok"),
+        }
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testPollWithOnClose`.
+    /// Exercises the `on_close = true` overload via
+    /// `poll_on_close`: the poll still drains responses, but `check_disconnects`
+    /// also drops unsent requests with no assigned node. Here the
+    /// request has the node resolved via `least_loaded_node` (not stored
+    /// on `UnsentRequest`), so the in-flight survives onClose; the
+    /// final poll respond-and-drain empties the queue.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_poll_with_on_close() {
+        let time = Arc::new(AtomicI64::new(1));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+
+        let req = new_unsent_find_coordinator_request();
+        ncd.add(req, time.load(Ordering::SeqCst));
+
+        // First poll (on_close=false): request dispatches successfully.
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        assert!(ncd.has_any_pending_requests(), "in-flight after dispatch");
+
+        // Poll on close: the in-flight has no `node` on `UnsentRequest`
+        // (it was resolved via least_loaded_node inside do_send, never
+        // written back), so `check_disconnects` does not affect the
+        // in-flight. The MockClient retains the in-flight request.
+        ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
+        assert!(ncd.has_any_pending_requests(), "still pending after on-close poll");
+
+        // Respond to the in-flight request (Java: `client.respond(...)`),
+        // then poll-on-close again to drain.
+        let response = FindCoordinatorResponse::prepare_response(Errors::None, GROUP_ID, &mock_node());
+        ncd.client.respond(ConcreteResponse::FindCoordinator(response));
+        ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
+        assert!(!ncd.has_any_pending_requests(), "drained after response");
+    }
+
+    /// Translated from `NetworkClientDelegateTest.testCheckDisconnectsWithOnClose`.
+    /// The `node == None && on_close` branch in `check_disconnects`:
+    /// requests that were never sent (because the only node was
+    /// unreachable) are removed and completed with `NetworkException`
+    /// when the delegate polls on close.
+    #[tokio::test(flavor = "current_thread")]
+    async fn test_check_disconnects_with_on_close() {
+        let time = Arc::new(AtomicI64::new(1));
+        let (mut ncd, _meta, _rx) = new_delegate(Arc::clone(&time), false);
+
+        let mut req = new_unsent_find_coordinator_request();
+        let mut rx = req.take_response_receiver().expect("receiver still present");
+        ncd.add(req, time.load(Ordering::SeqCst));
+
+        // Mark the sole node unreachable so `do_send` cannot succeed.
+        // `set_unreachable` also calls `disconnect_node`, which would
+        // surface as `connection_failed` on a subsequent poll once
+        // `backing_off_until_ms` is set by `ready()`.
+        ncd.client.set_unreachable(&mock_node(), REQUEST_TIMEOUT_MS as i64);
+
+        // Poll with on_close = false: do_send fails (unreachable), so
+        // the request stays in the unsent queue.
+        ncd.poll(0, time.load(Ordering::SeqCst), false).await;
+        assert!(ncd.has_any_pending_requests());
+
+        // Poll with on_close = true: `check_disconnects` matches
+        // `None if on_close` (the unsent never had a node assigned to
+        // its `UnsentRequest` field) and fires
+        // `on_failure(KafkaError::new(Errors::NetworkException))`.
+        ncd.poll_on_close(0, time.load(Ordering::SeqCst)).await;
+        assert!(!ncd.has_any_pending_requests(), "unsent dropped on close");
+
+        let received = rx.try_recv().expect("response delivered");
+        match received {
+            Err(err) => assert_eq!(
+                Errors::NetworkException,
+                err.error(),
+                "expected NetworkException (Java DisconnectException), got: {err}"
+            ),
+            Ok(_) => panic!("expected error, got Ok"),
+        }
+    }
 }
