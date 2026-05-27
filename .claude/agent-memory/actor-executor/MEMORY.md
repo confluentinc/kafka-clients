@@ -4,6 +4,7 @@
 - [Phase 3 MockConsumer](phase3_design_notes.md) — Milestone-8 Phase 3: KafkaError::Wakeup variant, plain SubscriptionState field, PollTask alias, async rebalance, dropped null-input assertions
 - [Phase 5 event layer](phase5_design_notes.md) — Milestone-8 Phase 5: CompletableApplicationEvent mapping, AsyncPollState, MetadataErrorNotifiable dispatch, erased-handle identity via inner_id(), reaper Java contract
 - [Phase 6 network/request manager scaffolding](phase6_design_notes.md) — NetworkClientDelegate generic over K, FutureCompletionHandler::on_complete_ref bridge, MockClient now>0 edge, Phase 7-9 extension checklist
+- [Phase 7a receive-path foundation](phase7a_design_notes.md) — Milestone-8 Phase 7a: TopicIdPartition, FetchRequest/Response wrappers, FetchSessionHandler API shape, AbstractFetch concrete struct, §27 zero-copy lazy iteration
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
