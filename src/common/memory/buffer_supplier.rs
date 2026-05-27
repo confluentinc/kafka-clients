@@ -92,10 +92,27 @@ impl BufferSupplier {
 
     /// Supplies a buffer with at least the requested capacity.
     ///
-    /// The returned `Vec<u8>` has `len == 0`; callers may extend it up to the
-    /// reported capacity (and beyond if they wish to reallocate). For
-    /// [`BufferSupplier::create`], the returned buffer's capacity is exactly
-    /// `size`; for [`BufferSupplier::growable`], it is `>= size`.
+    /// # Java divergence
+    ///
+    /// Java's `ByteBuffer get(int size)` returns
+    /// `(len=size, position=0, limit=size)` with the backing memory zeroed
+    /// on a fresh allocation (Java's `ByteBuffer.allocate(size)` zeros).
+    /// On a recycled buffer, Java's `clear()` resets `position`/`limit`
+    /// but does NOT zero the backing memory.
+    ///
+    /// The Rust port returns `Vec<u8>` with `len == 0` and the requested
+    /// `capacity` (or larger for `Growable`). Callers MUST use
+    /// `extend_from_slice`, `push`, or `resize` to grow the `len` before
+    /// indexing — `buf[i]` for `i >= buf.len()` panics on the length check.
+    ///
+    /// This means:
+    /// - A caller that writes via `extend_from_slice(decompressed_bytes)`
+    ///   behaves identically to Java (the buffer's logical size matches
+    ///   what was written).
+    /// - A caller that uses `unsafe { buf.set_len(size) }` will read
+    ///   the previous occupant's bytes from a recycled buffer in
+    ///   `Mode::Default`/`Mode::Growable` — same info-leak surface as
+    ///   Java's `clear()`-without-zeroing semantic.
     ///
     /// Translates Java's `ByteBuffer get(int size)`.
     pub(crate) fn get(&self, size: usize) -> Vec<u8> {
