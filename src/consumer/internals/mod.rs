@@ -22,5 +22,6 @@ pub(crate) mod consumer_interceptors;
 pub(crate) mod consumer_metadata;
 pub(crate) mod deserializers;
 pub(crate) mod events;
+pub(crate) mod request_state;
 pub(crate) mod subscription_state;
 pub(crate) mod wakeup_trigger;
