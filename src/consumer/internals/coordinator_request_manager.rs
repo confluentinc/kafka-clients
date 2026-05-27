@@ -369,6 +369,39 @@ mod tests {
         manager.mark_coordinator_unknown("test", 2 * one_minute);
     }
 
+    /// Regression test for Finding 1 (COMMENTS.1.md): a `KafkaError::Timeout`
+    /// routed through `on_failed_response` must NOT be classified as
+    /// fatal. Mirrors Java's `TimeoutException extends RetriableException`
+    /// hierarchy: the retriable branch is taken, the coordinator is
+    /// marked unknown, and no fatal error is recorded.
+    #[test]
+    fn test_on_failed_response_timeout_is_retriable_not_fatal() {
+        let mut manager = setup_manager();
+        // Pre-condition: no coordinator, no fatal error, never marked
+        // unknown.
+        assert!(manager.coordinator().is_none());
+        assert!(manager.fatal_error().is_none());
+        assert_eq!(-1, manager.time_marked_unknown_ms);
+
+        let now = 1_000_i64;
+        manager.on_failed_response(now, KafkaError::timeout("request timed out"));
+
+        // Java's TimeoutException is retriable, so:
+        //   1. `mark_coordinator_unknown` is called: coordinator stays
+        //      None and time_marked_unknown_ms is set to `now`.
+        //   2. The retriable branch is taken: NO fatal error recorded.
+        //   3. `total_disconnected_min` stays 0 (duration was 0).
+        assert_eq!(now, manager.time_marked_unknown_ms, "mark_coordinator_unknown ran");
+        assert_eq!(0, manager.total_disconnected_min);
+        assert!(manager.coordinator().is_none(), "coordinator stays unknown");
+        assert!(
+            manager.fatal_error().is_none(),
+            "Timeout must not be classified as fatal: it extends RetriableException in Java"
+        );
+        // Sanity: KafkaError::is_retriable() agrees.
+        assert!(KafkaError::timeout("x").is_retriable());
+    }
+
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknown`.
     #[test]
     fn test_mark_coordinator_unknown() {

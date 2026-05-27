@@ -419,8 +419,13 @@ impl KafkaError {
     ///
     /// [`IllegalArgument`](Self::IllegalArgument) and
     /// [`IllegalState`](Self::IllegalState) are never retriable.
+    ///
+    /// [`Timeout`](Self::Timeout) is retriable: Java's `TimeoutException`
+    /// extends `RetriableException` extends `ApiException`, so timeouts are
+    /// transient by definition. Special-cased here because `Timeout` has no
+    /// embedded `Errors` code and would otherwise fall through to `false`.
     pub fn is_retriable(&self) -> bool {
-        self.kafka_error().is_some_and(|e| e.is_retriable())
+        matches!(self, Self::Timeout(_)) || self.kafka_error().is_some_and(|e| e.is_retriable())
     }
 
     /// Whether this error is fatal.
