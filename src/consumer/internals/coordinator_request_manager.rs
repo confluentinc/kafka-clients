@@ -345,28 +345,45 @@ mod tests {
     }
 
     /// Translated from `CoordinatorRequestManagerTest.testMarkCoordinatorUnknownLoggingAccuracy`.
-    /// We don't capture log output here; instead we exercise the timing
-    /// invariants (the `total_disconnected_min` and `time_marked_unknown_ms`
-    /// transitions that drive the logging cadence) by calling
-    /// `mark_coordinator_unknown` repeatedly and checking the internal
-    /// state via the public accessors.
+    /// Java uses a `LogCaptureAppender` to assert the warning is logged
+    /// at minute boundaries. We don't have a log-capture crate here, so
+    /// instead we assert the underlying state transitions that gate the
+    /// warning: `time_marked_unknown_ms` (anchor) and
+    /// `total_disconnected_min` (rate-limit counter). The tests are in
+    /// the same file as the struct definition, so they can read the
+    /// private fields directly — no visibility relaxation is required.
     #[test]
     fn test_mark_coordinator_unknown_logging_accuracy() {
-        let one_minute = 60_000_i64;
+        let one_minute = COORDINATOR_DISCONNECT_LOGGING_INTERVAL_MS;
         let mut manager = setup_manager();
         assert!(manager.coordinator().is_none());
 
-        // Step 1: mark unknown immediately. No log (would-be) — the
-        // duration is 0 < 60_000, so total_disconnected_min stays at 0.
+        // Initial state: never marked unknown.
+        assert_eq!(-1, manager.time_marked_unknown_ms);
+        assert_eq!(0, manager.total_disconnected_min);
+
+        // Step 1: mark unknown immediately. `time_marked_unknown_ms`
+        // becomes 0 (the anchor); duration is 0 < 60_000 so
+        // `total_disconnected_min` stays at 0 (no warning would be
+        // logged).
         manager.mark_coordinator_unknown("test", 0);
+        assert_eq!(0, manager.time_marked_unknown_ms);
+        assert_eq!(0, manager.total_disconnected_min);
 
-        // Step 2: one minute later, mark unknown again. duration =
-        // 60_000; curr_disconnect_min = 1; would log once.
+        // Step 2: one minute later. duration = 60_000;
+        // curr_disconnect_min = 1 > 0, so `total_disconnected_min`
+        // advances to 1 (one warning would be logged). The anchor
+        // does NOT move — it only moves on a fresh "coordinator was
+        // known" → unknown transition.
         manager.mark_coordinator_unknown("test", one_minute);
+        assert_eq!(0, manager.time_marked_unknown_ms, "anchor unchanged across subsequent calls");
+        assert_eq!(1, manager.total_disconnected_min);
 
-        // Step 3: another minute. duration = 120_000; curr = 2; would
-        // log again.
+        // Step 3: two minutes total. duration = 120_000; curr = 2 > 1,
+        // so `total_disconnected_min` advances to 2 (another warning).
         manager.mark_coordinator_unknown("test", 2 * one_minute);
+        assert_eq!(0, manager.time_marked_unknown_ms);
+        assert_eq!(2, manager.total_disconnected_min);
     }
 
     /// Regression test for Finding 1 (COMMENTS.1.md): a `KafkaError::Timeout`
