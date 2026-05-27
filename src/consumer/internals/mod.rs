@@ -18,11 +18,13 @@
 //! Stable user-facing re-exports live in `crate::consumer`.
 
 pub(crate) mod auto_offset_reset_strategy;
+pub(crate) mod completed_fetch;
 pub(crate) mod consumer_interceptors;
 pub(crate) mod consumer_metadata;
 pub(crate) mod coordinator_request_manager;
 pub(crate) mod deserializers;
 pub(crate) mod events;
+pub(crate) mod fetch_buffer;
 pub(crate) mod fetch_config;
 pub(crate) mod network_client_delegate;
 pub(crate) mod request_manager;
