@@ -196,7 +196,7 @@ impl ConcreteResponse {
             Self::ApiVersions(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::Metadata(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::Produce(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
-            Self::Fetch(r) => r.set_throttle_time_ms(throttle_time_ms),
+            Self::Fetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::SaslHandshake(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::SaslAuthenticate(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::FindCoordinator(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),

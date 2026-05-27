@@ -152,6 +152,18 @@ where
     /// - Other [`KafkaError`]s for corrupt records, unexpected error
     ///   codes, or deserialization failures (when no records have been
     ///   decoded yet).
+    ///
+    /// # Take-then-restore invariant on `next_in_line_fetch`
+    ///
+    /// This function calls `fetch_buffer.take_next_in_line_fetch()` at
+    /// the top of each iteration (destructive read). Java's
+    /// `FetchCollector.collectFetch` uses `nextInLineFetch()` (non-
+    /// destructive). Any future modification that returns `Err`
+    /// mid-iteration with an in-progress `next_in_line_fetch` MUST call
+    /// `fetch_buffer.set_next_in_line_fetch(Some(fetch))` before
+    /// returning, otherwise the buffer slot will be permanently empty.
+    /// The current implementation restores on every Err-path that took
+    /// ownership; preserve this invariant.
     pub(crate) fn collect_fetch(&self, fetch_buffer: &FetchBuffer) -> Result<ConsumerRecords<K, V>, KafkaError> {
         let mut records_by_partition: IndexMap<TopicPartition, Vec<ConsumerRecord<K, V>>> = IndexMap::new();
         let mut next_offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();

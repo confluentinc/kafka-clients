@@ -152,14 +152,6 @@ impl FetchBuffer {
     /// Runs `f` on the front of the queue without removing it. Returns
     /// `None` if the queue is empty, otherwise `Some(f(&CompletedFetch))`.
     ///
-    /// Translates Java's `fetchBuffer.peek()` borrowed-access pattern in
-    /// `FetchCollector.collectFetch` — used when the caller needs to read
-    /// a few fields without taking ownership (records size, partition).
-    pub(crate) fn with_first<R>(&self, f: impl FnOnce(&CompletedFetch) -> R) -> Option<R> {
-        let guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
-        guard.completed_fetches.front().map(f)
-    }
-
     /// Pushes a completed fetch back to the FRONT of the queue.
     ///
     /// This has no direct Java analog because Java's `FetchCollector.collectFetch`

@@ -516,7 +516,7 @@ impl AbstractFetch {
 
         // Compute the set of nodes for which we have buffered data —
         // skip these so we don't evict the broker's fetch session cache.
-        let buffered_nodes: HashSet<i32> = self.compute_buffered_nodes(&buffered, current_time_ms, &is_unavailable);
+        let buffered_nodes: HashSet<i32> = self.compute_buffered_nodes(&buffered, current_time_ms);
 
         // For each unbuffered partition, find the target node and add the
         // partition to that node's session-handler builder.
@@ -665,12 +665,9 @@ impl AbstractFetch {
     }
 
     /// Java's `Set<Integer> bufferedNodes(Set<TopicPartition>, long)`.
-    fn compute_buffered_nodes(
-        &self,
-        buffered: &HashSet<TopicPartition>,
-        current_time_ms: i64,
-        _is_unavailable: &impl Fn(&Node) -> bool,
-    ) -> HashSet<i32> {
+    /// Java does not pass `isUnavailable` here either — callers check
+    /// availability at the outer prepare-step.
+    fn compute_buffered_nodes(&self, buffered: &HashSet<TopicPartition>, current_time_ms: i64) -> HashSet<i32> {
         let mut ids: HashSet<i32> = HashSet::new();
         let cluster = self.metadata.metadata_arc().fetch();
         for partition in buffered {

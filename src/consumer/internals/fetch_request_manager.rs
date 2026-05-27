@@ -132,9 +132,7 @@ impl FetchRequestManager {
     /// completes them together.
     pub(crate) fn create_fetch_requests(&mut self) -> oneshot::Receiver<Result<(), KafkaError>> {
         let (tx, rx) = oneshot::channel();
-        self.pending_fetch_requests
-            .get_or_insert_with(Vec::new)
-            .push(tx);
+        self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
         rx
     }
 
@@ -146,9 +144,7 @@ impl FetchRequestManager {
     /// all accumulated acks together (Java's single-slot
     /// `pendingFetchRequestFuture` semantics).
     pub(crate) fn enqueue_create_fetch_requests(&mut self, ack: oneshot::Sender<Result<(), KafkaError>>) {
-        self.pending_fetch_requests
-            .get_or_insert_with(Vec::new)
-            .push(ack);
+        self.pending_fetch_requests.get_or_insert_with(Vec::new).push(ack);
     }
 
     /// Borrowed access to the underlying `AbstractFetch`. Used by the bg
@@ -299,9 +295,7 @@ impl RequestManager for FetchRequestManager {
         // Java's pollOnClose unconditionally enqueues a fresh ack so
         // pollInternal has something to satisfy.
         let (tx, _rx) = oneshot::channel();
-        self.pending_fetch_requests
-            .get_or_insert_with(Vec::new)
-            .push(tx);
+        self.pending_fetch_requests.get_or_insert_with(Vec::new).push(tx);
         self.poll_internal(current_time_ms, true)
     }
 

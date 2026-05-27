@@ -202,10 +202,14 @@ impl FetchRequest {
     /// Returns an error response with the top-level error code set.
     ///
     /// Translates Java's `getErrorResponse(int throttleTimeMs, Throwable e)`.
-    /// The Java implementation walks the per-partition data and assigns
-    /// the error to each — `ConcreteResponse::get_error_response` callers
-    /// generally only need the top-level code, which mirrors how a
-    /// transport error would surface.
+    /// The Java implementation also walks per-topic per-partition data
+    /// and stamps the error code on each entry for v<13 (see
+    /// `FetchRequest.java:342-380`). This Rust translation only sets the
+    /// top-level error/session-id because the KIP-848 consumer always
+    /// negotiates v12+ where the per-partition stamping is redundant
+    /// (the per-partition status is already absent on the wire). If a
+    /// caller ever needs to construct error responses for v<13 wire,
+    /// translate the per-partition walk at that point.
     pub fn get_error_response(
         &self,
         throttle_time_ms: i32,
