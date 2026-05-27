@@ -260,17 +260,29 @@ mod tests {
         let _ = ptr_a;
     }
 
-    /// `close` empties the pool — a subsequent `get` allocates fresh.
+    /// `close` empties the pool — the internal map has no entries for any
+    /// capacity after `close`. Pointer-equality is not a reliable behavioral
+    /// test because the system allocator is free to hand out the same
+    /// address to a fresh allocation.
     #[test]
     fn test_close_drops_pooled_buffers() {
         let supplier = BufferSupplier::create();
         let buffer = supplier.get(1024);
-        let original_ptr = buffer.as_ptr();
         supplier.release(buffer);
+        // Sanity: before `close`, the pool has a buffer queued for cap=1024.
+        if let Mode::Default(map) = &supplier.mode {
+            let guard = map.lock().unwrap();
+            assert_eq!(1, guard.get(&1024).map(VecDeque::len).unwrap_or(0));
+        } else {
+            unreachable!();
+        }
         supplier.close();
-
-        let fresh = supplier.get(1024);
-        assert_ne!(original_ptr, fresh.as_ptr());
+        if let Mode::Default(map) = &supplier.mode {
+            let guard = map.lock().unwrap();
+            assert!(guard.is_empty());
+        } else {
+            unreachable!();
+        }
     }
 
     /// The supplier may be shared across threads via `Arc`.

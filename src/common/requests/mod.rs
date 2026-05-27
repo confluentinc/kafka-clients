@@ -22,6 +22,8 @@ pub mod abstract_request;
 pub mod abstract_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
+pub mod fetch_metadata;
+pub mod fetch_request;
 pub mod find_coordinator_request;
 pub mod find_coordinator_response;
 pub mod metadata_request;
