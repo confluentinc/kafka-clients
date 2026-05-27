@@ -442,6 +442,66 @@ the per-record allocation count matches the user-deserializer budget;
 specifically, no allocations attributable to topic name, key/value bytes
 on the buffer, or batch traversal.
 
+## 28. Event variants: mirror Java's `CompletableApplicationEvent<T>` hierarchy
+
+When translating `consumer/internals/events/*.java` to Rust enum
+variants, the **default** is to mirror Java's class hierarchy in the
+variant shape:
+
+  - Each Java class extending `CompletableApplicationEvent<T>` (or
+    `CompletableBackgroundEvent<T>`) becomes a Rust variant carrying
+    a `handle: CompletableEventHandle<T>` field (plus its other payload
+    fields). The app side awaits the matching `oneshot::Receiver` for
+    `T`; the bg task completes via the handle.
+  - Each Java class extending the bare `ApplicationEvent` (or
+    `BackgroundEvent`) is non-completable and has no `handle` field —
+    it's pure data passed to the bg task, no acknowledgement expected.
+  - Each Java field on the abstract base or subclass (`offsetsReady`,
+    `currentTimeMs`, `membershipOperation`, `isolationLevel`,
+    `pollTimeMs`, etc.) gets a Rust counterpart on the variant.
+
+**Why:** The completable-vs-bare distinction in Java is wire-level —
+it determines whether the app side blocks on a future. Translating a
+`CompletableApplicationEvent<T>` subclass as a non-completable Rust
+variant makes the app-side `addAndGet` wait unrepresentable; the
+Phase-10 event processor will fail to wire it.
+
+**Deviations are allowed**, but each one needs an explicit rationale —
+in a code comment on the variant, in the phase PLAN.md, or in a
+COMMENTS.DONE entry. Examples of legitimate deviations:
+
+  - Folding two Java events into one Rust variant (e.g. for
+    de-duplication when the bg-side handling is identical).
+  - Deferring a variant to a later phase because its dependencies
+    aren't in scope yet.
+  - An out-of-scope event family (Streams, Share per §20) — skipped
+    entirely, not silently included as non-completable.
+  - A custom payload shape because Java uses its own state-machine
+    inside the event (`AsyncPollEvent` is the precedent: bare
+    `ApplicationEvent` carrying an explicit `error / isComplete /
+    isValidatePositionsComplete` triple instead of a handle).
+
+**How to apply:**
+
+  - When in doubt, open the Java file and check `extends`.
+  - A subclass that does NOT extend either `CompletableApplicationEvent`
+    or `CompletableBackgroundEvent` is non-completable — note this
+    even when the class name sounds completable (`AsyncPollEvent` is
+    bare, not completable).
+  - Don't invent fictional fields (e.g. `reason: String`) for
+    convenience; don't drop fields that Java carries.
+
+**Anti-patterns to flag in review:**
+
+  - A Rust variant for a Java `CompletableApplicationEvent<T>` subclass
+    without a `handle: CompletableEventHandle<T>` field, with no
+    rationale.
+  - A handle typed as `CompletableEventHandle<()>` when Java's generic
+    parameter is `T != Void`.
+  - Fictional fields not present in the Java source.
+  - Missing fields that Java carries (especially `currentTimeMs`,
+    `isolationLevel`, `offsetsReady`, `pollTimeMs`).
+
 ## 31. `ConsumerRebalanceListener` & `OffsetCommitCallback` invocation thread
 
 Listener callbacks (`ConsumerRebalanceListener::on_partitions_revoked`,
