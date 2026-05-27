@@ -20,6 +20,7 @@
 pub(crate) mod auto_offset_reset_strategy;
 pub(crate) mod consumer_interceptors;
 pub(crate) mod consumer_metadata;
+pub(crate) mod coordinator_request_manager;
 pub(crate) mod deserializers;
 pub(crate) mod events;
 pub(crate) mod network_client_delegate;
