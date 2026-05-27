@@ -6,6 +6,7 @@
 - [Phase 6 network/request manager scaffolding](phase6_design_notes.md) — NetworkClientDelegate generic over K, FutureCompletionHandler::on_complete_ref bridge, MockClient now>0 edge, Phase 7-9 extension checklist
 - [Phase 7a receive-path foundation](phase7a_design_notes.md) — Milestone-8 Phase 7a: TopicIdPartition, FetchRequest/Response wrappers, FetchSessionHandler API shape, AbstractFetch concrete struct, §27 zero-copy lazy iteration
 - [Phase 7a critic-fix patterns](phase7a_critic_fix_notes.md) — Arc<str> per-instance vs per-record, peek-by-ref, Notify race, parameterized test loops, unsupported_version for missing branches, pub(crate) for Java package-private
+- [Phase 7d offsets + validation methods](phase7d_design_notes.md) — Milestone-8 Phase 7d: submodule init, OffsetFetcherUtils + PositionsValidator merge, ClusterResourceListener stateless handle, pending-completion mpsc channel, deferred fetch_offsets/CommitRequestManager work
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement
