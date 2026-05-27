@@ -24,6 +24,7 @@ pub mod common;
 pub(crate) mod common_client_configs;
 pub mod connection_state;
 pub mod consumer;
+pub mod fetch_session_handler;
 pub mod host_resolver;
 pub mod in_flight_requests;
 pub mod kafka_client;
