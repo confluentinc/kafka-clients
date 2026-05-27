@@ -561,4 +561,33 @@ mod tests {
         assert!(result.is_ok());
         assert_eq!(RequestManager::poll(&mut mgr, 0).unsent_requests.len(), 0);
     }
+
+    /// Behavior-equivalent of Java's
+    /// `testResetPositionsSendNoRequestIfNoPartitionsNeedingReset` — no
+    /// partition needs reset, so no requests are enqueued.
+    ///
+    /// Java uses a Mockito stub on `subscriptionState.partitionsNeedingReset`
+    /// to return an empty set; the Rust translation uses the real
+    /// `SubscriptionState` and gets the same outcome by not assigning
+    /// any partitions awaiting reset.
+    #[tokio::test]
+    async fn reset_positions_send_no_request_if_no_partitions_needing_reset() {
+        let mut mgr = new_manager();
+        // No partitions are assigned, so partitions_needing_reset returns an empty set.
+        mgr.reset_positions_if_needed(0).expect("ok");
+        assert_eq!(RequestManager::poll(&mut mgr, 0).unsent_requests.len(), 0);
+    }
+
+    /// Verifies `signal_close` flips the `closing` flag so subsequent
+    /// `poll` calls can choose to short-circuit. Java does not have a
+    /// direct test for this — it's exercised implicitly through the bg
+    /// task shutdown path — but pinning the behaviour here protects the
+    /// translation contract.
+    #[tokio::test]
+    async fn signal_close_sets_closing_flag() {
+        let mut mgr = new_manager();
+        assert!(!mgr.closing);
+        RequestManager::signal_close(&mut mgr);
+        assert!(mgr.closing);
+    }
 }
