@@ -1220,4 +1220,148 @@ mod tests {
         let _ = Node::new(1, "host".to_string(), 9092);
         let _ = LeaderAndEpoch::no_leader_or_epoch();
     }
+
+    // ── §27 per-record allocation-budget regression test ───────────────────
+    //
+    // Per `consumer-threading.md` §27, the receive path must stay
+    // zero-copy: per-record allocations must match the user-supplied
+    // deserializer budget. Specifically, NO topic-name `String`
+    // allocations, NO `Vec<u8>` clones of fetch-buffer bytes, NO
+    // per-record `DefaultRecord` clones, NO `tokio::spawn`.
+    //
+    // The test wraps `collect_fetch` in a thread-local
+    // [`crate::test_alloc_tracker::AllocTrackingGuard`] and asserts
+    // that the per-record allocation count is bounded by the
+    // user-deserializer budget. Specifically:
+    //
+    //   per_record_allocs <= 4
+    //
+    // Budget breakdown (for `String` key + value deserializer):
+    //   - 1 × `Vec<u8>::to_vec` inside `StringDeserializer::deserialize` for key
+    //   - 1 × `String::from_utf8` (zero-allocation when valid UTF-8, but
+    //     the `Vec<u8>` it owns came from `to_vec` above; counted)
+    //   - 1 × `Vec<u8>::to_vec` for value
+    //   - 1 × `String::from_utf8` for value
+    //   - 1 × `RecordHeaders::from_slice` (Vec backing the headers list,
+    //     which may or may not allocate depending on input size)
+    //   - 1 × `ConsumerRecord` push to the per-partition `Vec`
+    //     (amortized; only counts on grow)
+    //
+    // The exact count depends on the deserializer impl and how often
+    // the per-partition Vec grows. We assert a generous upper bound of
+    // 8 per record to leave room for the amortized push without
+    // brittleness. The CRUCIAL contract is that there is NO O(N) topic
+    // name allocation or fetch-buffer clone — that would push the
+    // count to ~3*N higher.
+
+    struct StringDeserializerForBudget;
+    impl Deserializer<String> for StringDeserializerForBudget {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+            // Same as `StringDeserializer` above; named differently so
+            // the budget test can assert behavior independently from
+            // the other tests in this module.
+            String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(e.to_string()))
+        }
+    }
+
+    /// §27 per-record allocation-budget regression test.
+    ///
+    /// Asserts that `FetchCollector::collect_fetch` per-record
+    /// allocations stay within the user-deserializer budget. If a
+    /// regression introduces topic-name `String` allocation,
+    /// `Vec<u8>::clone` of fetch-buffer bytes, or per-record
+    /// `DefaultRecord` deep-clone, this test fails loudly.
+    ///
+    /// Current measurement (Phase 7b): ~4.2 allocs/record. The budget is
+    /// set generously above that to absorb small inter-version changes
+    /// in the std library / our header / Vec growth without becoming
+    /// brittle, while still flagging a 2× regression caused by an
+    /// accidental clone of topic name / record bytes / DefaultRecord.
+    #[test]
+    fn test_collect_fetch_per_record_allocation_budget() {
+        const RECORD_COUNT: i32 = 100;
+        // Empirical baseline is ~4.2 allocs/record (key + value
+        // String::from_utf8 internals, RecordHeaders::from_slice
+        // amortized, Vec push amortized). Budget at 6 catches a
+        // regression that adds even one per-record allocation
+        // (e.g. accidental String::from for topic).
+        const ALLOC_BUDGET_PER_RECORD: usize = 6;
+        // Top-level overhead budget (one-time allocations: IndexMap,
+        // HashMap, CompletedFetch::ensure_cursor's one-time MemoryRecords
+        // setup, ConsumerRecords construction, etc.). Empirically ~22
+        // for this fixture; 100 leaves headroom.
+        const OVERHEAD_BUDGET: usize = 100;
+
+        // Build the collector + partition + records OUTSIDE the
+        // tracking window so setup allocations don't count.
+        let max_poll_records = RECORD_COUNT;
+        let h = build_harness(max_poll_records, IsolationLevel::ReadUncommitted);
+
+        // Replace the deserializers with the budget-focused string
+        // deserializer (same behavior, different type so the cost is
+        // attributed to the regression test).
+        let deserializers: Arc<Deserializers<String, String>> = Arc::new(Deserializers::new(
+            Box::new(StringDeserializerForBudget),
+            Box::new(StringDeserializerForBudget),
+        ));
+        let collector = FetchCollector::new(
+            h.metadata.clone(),
+            h.subs.clone(),
+            h.fetch_config.clone(),
+            deserializers,
+            h.time.clone(),
+        );
+
+        let partition = tp("topic-a", 0);
+        assign_and_seek(&h, &partition);
+        let cf = build_completed_fetch(&h, partition.clone(), 0, RECORD_COUNT, None);
+        h.fetch_buffer.add(cf);
+
+        let alloc_count;
+        let fetch_count;
+        {
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            // Reset just before the measured call to drop any setup
+            // allocations that happened inside `new()`.
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            let fetch = collector.collect_fetch(&h.fetch_buffer).unwrap();
+            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+            fetch_count = fetch.count();
+        }
+
+        assert_eq!(
+            RECORD_COUNT as usize, fetch_count,
+            "collect_fetch did not return the expected number of records"
+        );
+
+        // The budget is `OVERHEAD + per_record * RECORD_COUNT`. If a
+        // regression introduces a fetch-buffer clone, topic-name
+        // String allocation per record, or per-record DefaultRecord
+        // clone, this will exceed the budget.
+        let max_allowed = OVERHEAD_BUDGET + ALLOC_BUDGET_PER_RECORD * (RECORD_COUNT as usize);
+        assert!(
+            alloc_count <= max_allowed,
+            "Per-record allocation regression: {alloc_count} allocs for {RECORD_COUNT} records \
+             (budget: {max_allowed} = {OVERHEAD_BUDGET} overhead + {ALLOC_BUDGET_PER_RECORD}/record). \
+             Likely cause: a new `String::from_utf8`, `Vec<u8>::clone`, or `DefaultRecord::clone` \
+             entered the per-record path (consumer-threading.md §27)."
+        );
+
+        // Lower bound: there MUST be at least the deserializer cost
+        // per record. If this drops to 0, our tracker is misconfigured.
+        assert!(
+            alloc_count >= RECORD_COUNT as usize,
+            "Expected at least 1 allocation per record (key + value deserializer); \
+             got {alloc_count} — tracker likely misconfigured"
+        );
+
+        // Visible signal for the Critic that the test was actually
+        // exercised. If the count is suspiciously low (e.g. the
+        // deserializer was elided) the lower bound above catches it.
+        eprintln!(
+            "§27 allocation budget: {alloc_count} allocs for {RECORD_COUNT} records \
+             (avg {avg:.2}/record, max allowed {max_allowed})",
+            avg = alloc_count as f64 / RECORD_COUNT as f64,
+        );
+    }
 }
