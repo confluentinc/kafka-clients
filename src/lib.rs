@@ -39,6 +39,8 @@ pub(crate) mod network_client;
 pub(crate) mod network_client_utils;
 pub mod node_api_versions;
 pub mod producer;
+#[cfg(test)]
+pub(crate) mod test_alloc_tracker;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;

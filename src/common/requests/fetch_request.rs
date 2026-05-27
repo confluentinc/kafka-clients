@@ -198,6 +198,29 @@ impl FetchRequest {
     pub fn rack_id(&self) -> &str {
         &self.data.rack_id
     }
+
+    /// Returns an error response with the top-level error code set.
+    ///
+    /// Translates Java's `getErrorResponse(int throttleTimeMs, Throwable e)`.
+    /// The Java implementation also walks per-topic per-partition data
+    /// and stamps the error code on each entry for v<13 (see
+    /// `FetchRequest.java:342-380`). This Rust translation only sets the
+    /// top-level error/session-id because the KIP-848 consumer always
+    /// negotiates v12+ where the per-partition stamping is redundant
+    /// (the per-partition status is already absent on the wire). If a
+    /// caller ever needs to construct error responses for v<13 wire,
+    /// translate the per-partition walk at that point.
+    pub fn get_error_response(
+        &self,
+        throttle_time_ms: i32,
+        error: &crate::common::protocol::Errors,
+    ) -> crate::common::requests::ConcreteResponse {
+        let mut data = crate::fetch_response_data::FetchResponseData::new();
+        data.set_throttle_time_ms(throttle_time_ms);
+        data.set_error_code(error.code());
+        data.set_session_id(self.metadata.session_id());
+        crate::common::requests::ConcreteResponse::Fetch(crate::common::requests::FetchResponse::new(data))
+    }
 }
 
 impl std::fmt::Display for FetchRequest {
@@ -484,6 +507,24 @@ pub fn fetch_data_from(
 
 fn optional_epoch(raw: i32) -> Option<i32> {
     if raw < 0 { None } else { Some(raw) }
+}
+
+impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
+    fn api_key(&self) -> &'static ApiKeys {
+        &ApiKeys::FETCH
+    }
+
+    fn oldest_allowed_version(&self) -> i16 {
+        self.oldest_allowed_version
+    }
+
+    fn latest_allowed_version(&self) -> i16 {
+        self.latest_allowed_version
+    }
+
+    fn build_version(&self, version: i16) -> std::io::Result<crate::common::requests::ConcreteRequest> {
+        Ok(crate::common::requests::ConcreteRequest::Fetch(self.build_version(version)))
+    }
 }
 
 #[cfg(test)]

@@ -464,6 +464,234 @@ impl AbstractFetch {
             .or_insert_with(|| FetchSessionHandler::new(node_id))
     }
 
+    /// Returns the IDs of nodes for which we currently hold a fetch
+    /// session handler. Used by
+    /// [`crate::consumer::internals::fetch_request_manager::FetchRequestManager::poll_on_close`]
+    /// to resolve the per-node `Node` map for close-session requests.
+    pub(crate) fn session_handler_ids(&self) -> Vec<i32> {
+        self.session_handlers.keys().copied().collect()
+    }
+
+    /// Create fetch requests for all nodes for which we have assigned
+    /// partitions that have no existing requests in flight.
+    ///
+    /// Translates `Map<Node, FetchSessionHandler.FetchRequestData>
+    /// prepareFetchRequests()`.
+    ///
+    /// The caller supplies:
+    /// - `is_unavailable`: Java's abstract `isUnavailable(Node)` — `true`
+    ///   if the node is inside the reconnect backoff window.
+    /// - `maybe_throw_auth_failure`: Java's abstract
+    ///   `maybeThrowAuthFailure(Node)` — returns `Err` if the node has
+    ///   an unresolved authentication failure.
+    /// - `current_time_ms`: Java reads `time.milliseconds()` once at the
+    ///   start; the caller does the same and passes it in.
+    ///
+    /// The closures avoid coupling `AbstractFetch` to
+    /// `NetworkClientDelegate` (which it does not own — Phase 7b's
+    /// `FetchRequestManager` owns the delegate and supplies the
+    /// closures).
+    pub(crate) fn prepare_fetch_requests(
+        &mut self,
+        current_time_ms: i64,
+        is_unavailable: impl Fn(&Node) -> bool,
+        maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
+    ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
+        let topic_ids = self.metadata.metadata_arc().topic_ids();
+        let cluster = self.metadata.metadata_arc().fetch();
+
+        // Snapshot the buffered-partitions and fetchable-partitions sets
+        // under the SubscriptionState lock.
+        let buffered = self.fetch_buffer.buffered_partitions();
+
+        let buffered_clone = buffered.clone();
+        let unbuffered: Vec<TopicPartition> = {
+            let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+            guard.fetchable_partitions(|tp| !buffered_clone.contains(tp))
+        };
+
+        if unbuffered.is_empty() {
+            return Ok(HashMap::new());
+        }
+
+        // Compute the set of nodes for which we have buffered data —
+        // skip these so we don't evict the broker's fetch session cache.
+        let buffered_nodes: HashSet<i32> = self.compute_buffered_nodes(&buffered, current_time_ms);
+
+        // For each unbuffered partition, find the target node and add the
+        // partition to that node's session-handler builder.
+        let mut node_targets: HashMap<i32, Node> = HashMap::new();
+        let mut fetchable_partitions_by_node: HashMap<i32, IndexMap<TopicPartition, PartitionData>> = HashMap::new();
+
+        for partition in unbuffered {
+            // Get position; bail out the whole call if the position is
+            // unexpectedly missing (Java throws IllegalStateException).
+            let position = {
+                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                match guard.position(&partition) {
+                    Ok(Some(p)) => p.clone(),
+                    Ok(None) => {
+                        return Err(crate::common::KafkaError::illegal_state(format!(
+                            "Missing position for fetchable partition {partition}"
+                        )));
+                    },
+                    Err(e) => return Err(e),
+                }
+            };
+
+            // Resolve the read-replica or leader node for this partition.
+            let node = match self.maybe_node_for_position(&partition, &position, current_time_ms, &cluster) {
+                Some(n) => n,
+                None => continue, // No leader yet — Java requests metadata update inside maybe_node_for_position.
+            };
+
+            if is_unavailable(&node) {
+                maybe_throw_auth_failure(&node)?;
+                trace!(
+                    "Skipping fetch for partition {partition} because node {} is awaiting reconnect backoff",
+                    node.id()
+                );
+                continue;
+            }
+            if self.nodes_with_pending_fetch_requests.contains(&node.id()) {
+                trace!(
+                    "Skipping fetch for partition {partition} because previous request to {} has not been processed",
+                    node.id()
+                );
+                continue;
+            }
+            if buffered_nodes.contains(&node.id()) {
+                trace!(
+                    "Skipping fetch for partition {partition} because its leader node {} hosts buffered partitions",
+                    node.id()
+                );
+                continue;
+            }
+
+            // Add to the node's per-fetch partition map.
+            node_targets.entry(node.id()).or_insert(node.clone());
+            let topic_id = topic_ids
+                .get(partition.topic())
+                .copied()
+                .unwrap_or(crate::common::Uuid::ZERO_UUID);
+            let partition_data = PartitionData::new(
+                topic_id,
+                position.offset,
+                INVALID_LOG_START_OFFSET,
+                self.fetch_config.fetch_size,
+                position.current_leader.epoch,
+            );
+            fetchable_partitions_by_node
+                .entry(node.id())
+                .or_default()
+                .insert(partition.clone(), partition_data);
+
+            debug!(
+                "Added {} fetch request for partition {partition} at position {position} to node {}",
+                self.fetch_config.isolation_level,
+                node.id()
+            );
+        }
+
+        // Now build the session-handler builders from the per-node
+        // partition maps and produce the final `FetchSessionRequestData`.
+        let mut out: HashMap<i32, (Node, FetchSessionRequestData)> = HashMap::new();
+        for (node_id, partitions) in fetchable_partitions_by_node {
+            let node = node_targets
+                .remove(&node_id)
+                .expect("node was inserted alongside the partition map");
+            let handler = self.session_handler_or_create(node_id);
+            let mut builder = handler.new_builder();
+            for (tp, pd) in partitions {
+                builder.add(tp, pd);
+            }
+            let request_data = handler.build_request(builder);
+            out.insert(node_id, (node, request_data));
+        }
+        Ok(out)
+    }
+
+    /// Java's `Optional<Node> maybeNodeForPosition(TopicPartition,
+    /// FetchPosition, long)`. Returns `None` if the position's leader is
+    /// empty (and triggers a metadata update); otherwise returns the
+    /// read-replica or leader node.
+    fn maybe_node_for_position(
+        &self,
+        partition: &TopicPartition,
+        position: &crate::consumer::internals::subscription_state::FetchPosition,
+        current_time_ms: i64,
+        cluster: &crate::common::Cluster,
+    ) -> Option<Node> {
+        let leader_opt = position.current_leader.leader.clone();
+        let Some(leader) = leader_opt else {
+            debug!(
+                "Requesting metadata update for partition {partition} since the position {position} is missing the current leader node"
+            );
+            self.metadata.metadata_arc().request_update(false);
+            return None;
+        };
+        Some(self.select_read_replica(partition, leader, current_time_ms, cluster))
+    }
+
+    /// Java's `Node selectReadReplica(TopicPartition, Node, long)`.
+    fn select_read_replica(
+        &self,
+        partition: &TopicPartition,
+        leader_replica: Node,
+        current_time_ms: i64,
+        cluster: &crate::common::Cluster,
+    ) -> Node {
+        let preferred = {
+            let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+            guard.preferred_read_replica(partition, current_time_ms)
+        };
+        if let Some(replica_id) = preferred {
+            if let Some(node) = cluster.node_if_online(partition, replica_id) {
+                return node.clone();
+            } else {
+                trace!(
+                    "Not fetching from {replica_id} for partition {partition} since it is marked offline or is missing from our metadata, using the leader instead"
+                );
+                // Stale metadata — clear preferred replica and request refresh.
+                crate::consumer::internals::fetch_utils::request_metadata_update(
+                    &self.metadata,
+                    &self.subscriptions,
+                    partition,
+                );
+                return leader_replica;
+            }
+        }
+        leader_replica
+    }
+
+    /// Java's `Set<Integer> bufferedNodes(Set<TopicPartition>, long)`.
+    /// Java does not pass `isUnavailable` here either — callers check
+    /// availability at the outer prepare-step.
+    fn compute_buffered_nodes(&self, buffered: &HashSet<TopicPartition>, current_time_ms: i64) -> HashSet<i32> {
+        let mut ids: HashSet<i32> = HashSet::new();
+        let cluster = self.metadata.metadata_arc().fetch();
+        for partition in buffered {
+            let is_fetchable = {
+                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                guard.is_fetchable(partition)
+            };
+            if !is_fetchable {
+                continue;
+            }
+            let position = {
+                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+                match guard.position(partition) {
+                    Ok(Some(p)) => p.clone(),
+                    _ => continue,
+                }
+            };
+            if let Some(node) = self.maybe_node_for_position(partition, &position, current_time_ms, &cluster) {
+                ids.insert(node.id());
+            }
+        }
+        ids
+    }
+
     /// Drains the pending-fetch set for testing visibility.
     #[cfg(test)]
     pub(crate) fn pending_fetch_node_ids(&self) -> HashSet<i32> {
@@ -645,5 +873,47 @@ mod tests {
         let err = crate::common::KafkaError::illegal_state("simulated");
         af.handle_close_fetch_session_failure(&node, &request_data, &err);
         assert!(!af.pending_fetch_node_ids().contains(&6));
+    }
+
+    /// `prepare_fetch_requests` returns an empty map when no partitions
+    /// are assigned (nothing to fetch). Mirrors the short-circuit at
+    /// Java `AbstractFetch.java:430-432`.
+    #[test]
+    fn test_prepare_fetch_requests_empty_assignment_returns_empty_map() {
+        let mut af = make_abstract_fetch();
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(result.unwrap().is_empty());
+    }
+
+    /// `prepare_fetch_requests` returns an empty map when every
+    /// fetchable partition's leader is already in
+    /// `nodes_with_pending_fetch_requests`. The closure is called for
+    /// each fetchable partition's resolved node; if it's pending, the
+    /// partition is skipped. Verified indirectly via the empty-fetchable
+    /// path here — Phase 10's FetchRequestManagerTest with MockClient
+    /// will cover the rich cluster-aware cases.
+    #[test]
+    fn test_prepare_fetch_requests_returns_empty_when_nothing_fetchable() {
+        // With no fetchable partitions, the pending-set should be
+        // untouched and the result empty regardless of closure behavior.
+        let mut af = make_abstract_fetch();
+        af.nodes_with_pending_fetch_requests.insert(42);
+        let always_available = |_: &Node| false;
+        let no_auth_err = |_: &Node| Ok(());
+        let result = af.prepare_fetch_requests(100, always_available, no_auth_err);
+        assert!(result.unwrap().is_empty());
+        // Pending-set untouched.
+        assert!(af.pending_fetch_node_ids().contains(&42));
+    }
+
+    /// `compute_buffered_nodes` returns an empty set when the buffered
+    /// set is empty (smoke test against the cluster-snapshot path).
+    #[test]
+    fn test_compute_buffered_nodes_empty_set() {
+        let af = make_abstract_fetch();
+        let result = af.compute_buffered_nodes(&HashSet::new(), 0);
+        assert!(result.is_empty());
     }
 }

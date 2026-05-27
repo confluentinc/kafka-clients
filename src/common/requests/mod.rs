@@ -46,6 +46,8 @@ pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
+pub use fetch_request::{FetchRequest, FetchRequestBuilder};
+pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{
     CoordinatorType, FindCoordinatorRequest, FindCoordinatorRequestBuilder, MIN_BATCHED_VERSION,
 };

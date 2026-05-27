@@ -1049,7 +1049,7 @@ impl SubscriptionState {
     }
 
     /// Translates Java's `hasDefaultOffsetResetPolicy()` (package-private).
-    fn has_default_offset_reset_policy(&self) -> bool {
+    pub(crate) fn has_default_offset_reset_policy(&self) -> bool {
         self.default_reset_strategy != AutoOffsetResetStrategy::NONE
     }
 

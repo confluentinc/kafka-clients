@@ -95,8 +95,11 @@ impl FetchResponse {
     }
 
     /// Sets the throttle time the broker recommends the client back off
-    /// for. Server-side helper; included for parity.
-    pub fn set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
+    /// for. Server-side helper; included for parity. Named
+    /// `maybe_set_throttle_time_ms` to match Java's
+    /// `FetchResponse.maybeSetThrottleTimeMs` and the rest of the
+    /// `ConcreteResponse` dispatch surface.
+    pub fn maybe_set_throttle_time_ms(&mut self, throttle_time_ms: i32) {
         self.data.set_throttle_time_ms(throttle_time_ms);
     }
 
@@ -172,6 +175,18 @@ impl FetchResponse {
             }
         }
         counts
+    }
+}
+
+impl std::fmt::Display for FetchResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FetchResponse(error={:?}, sessionId={}, throttleTimeMs={})",
+            self.error(),
+            self.session_id(),
+            self.throttle_time_ms()
+        )
     }
 }
 
@@ -271,7 +286,7 @@ mod tests {
     #[test]
     fn test_throttle_time_setter() {
         let mut r = make_response(Errors::None, 5, 0);
-        r.set_throttle_time_ms(42);
+        r.maybe_set_throttle_time_ms(42);
         assert_eq!(42, r.throttle_time_ms());
     }
 
