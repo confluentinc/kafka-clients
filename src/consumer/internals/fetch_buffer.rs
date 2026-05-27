@@ -140,6 +140,40 @@ impl FetchBuffer {
         guard.completed_fetches.pop_front()
     }
 
+    /// Returns whether the front of the queue is initialized (peek view).
+    /// `None` if the queue is empty. Translates Java's
+    /// `fetchBuffer.peek().isInitialized()` access pattern from
+    /// `FetchCollector.collectFetch`.
+    pub(crate) fn peek_initialized(&self) -> Option<bool> {
+        let guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        guard.completed_fetches.front().map(|cf| cf.is_initialized())
+    }
+
+    /// Runs `f` on the front of the queue without removing it. Returns
+    /// `None` if the queue is empty, otherwise `Some(f(&CompletedFetch))`.
+    ///
+    /// Translates Java's `fetchBuffer.peek()` borrowed-access pattern in
+    /// `FetchCollector.collectFetch` — used when the caller needs to read
+    /// a few fields without taking ownership (records size, partition).
+    pub(crate) fn with_first<R>(&self, f: impl FnOnce(&CompletedFetch) -> R) -> Option<R> {
+        let guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        guard.completed_fetches.front().map(f)
+    }
+
+    /// Pushes a completed fetch back to the FRONT of the queue.
+    ///
+    /// This has no direct Java analog because Java's `FetchCollector.collectFetch`
+    /// uses `peek()` (non-destructive) before deciding whether to `poll()`.
+    /// The Rust collector instead `poll()`s up front (taking ownership) and
+    /// uses `push_front` to restore the entry when initialization fails and
+    /// the entry must be left on the queue for the next collect_fetch call.
+    /// This preserves the Java behavior exactly: an entry is removed iff the
+    /// Java code would have polled it.
+    pub(crate) fn push_front(&self, completed_fetch: CompletedFetch) {
+        let mut guard = self.inner.lock().expect("FetchBuffer mutex poisoned");
+        guard.completed_fetches.push_front(completed_fetch);
+    }
+
     /// Returns the next-in-line fetch (the one currently being iterated
     /// by `FetchCollector`).
     ///

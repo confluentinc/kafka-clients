@@ -27,6 +27,7 @@ pub(crate) mod deserializers;
 pub(crate) mod events;
 pub(crate) mod fetch_buffer;
 pub(crate) mod fetch_config;
+pub(crate) mod fetch_utils;
 pub(crate) mod network_client_delegate;
 pub(crate) mod request_manager;
 pub(crate) mod request_managers;
