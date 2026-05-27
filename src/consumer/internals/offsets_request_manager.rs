@@ -62,7 +62,7 @@ use crate::common::requests::{
     ConcreteResponse, ListOffsetsRequestBuilder, OffsetsForLeaderEpochResponse,
     list_offsets_request::CONSUMER_REPLICA_ID,
 };
-use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition};
+use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::list_offsets_request_data::ListOffsetsPartition;
 
 use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
@@ -285,7 +285,7 @@ impl OffsetsRequestManager {
         let regrouped = regroup_fetch_positions_by_leader(&partitions_to_validate);
 
         for (node, fetch_positions) in regrouped {
-            if Node::is_empty(&node) {
+            if node.is_empty() {
                 self.metadata.metadata_arc().request_update(true);
                 continue;
             }
@@ -343,9 +343,14 @@ impl OffsetsRequestManager {
                             if let Some(list_offsets_response) = downcast_list_offsets(&client_response) {
                                 match self.offset_fetcher_utils.handle_list_offset_response(list_offsets_response) {
                                     Ok(result) => {
-                                        // Apply HW / LSO updates first.
-                                        self.offset_fetcher_utils
-                                            .update_subscription_state(&result.fetched_offsets, self.isolation_level)?;
+                                        // Reset-path: do NOT call update_subscription_state.
+                                        // The fetched offsets are EARLIEST/LATEST per the reset
+                                        // strategy, NOT HW/LSO — using them to update HW/LSO
+                                        // would corrupt the lag metric. Java's reset path
+                                        // (OffsetsRequestManager.java:613-650) does not call
+                                        // updateSubscriptionState either; that's only for the
+                                        // multi-node fetchOffsets flow (Java:570-573), which
+                                        // is currently deferred.
                                         self.offset_fetcher_utils.on_successful_response_for_resetting_positions(
                                             &result,
                                             &partition_strategies,
@@ -485,21 +490,9 @@ impl ClusterResourceListener for OffsetsClusterListener {
     fn on_update(&self, _cluster_resource: &ClusterResource) {
         // No-op: the deferred-request replay logic from Java's
         // `onUpdate` lives on the `requests_to_retry` queue, which this
-        // translation does not yet model.
-    }
-}
-
-/// Helper extension on `Node`: empty-node check used by Java's
-/// `Node.isEmpty()`.
-trait NodeIsEmptyExt {
-    fn is_empty(node: &Self) -> bool;
-}
-
-impl NodeIsEmptyExt for Node {
-    fn is_empty(node: &Self) -> bool {
-        // Java's `Node.isEmpty()` returns true for the sentinel
-        // `Node.noNode()` which has id == -1 and an empty host.
-        node.id() < 0
+        // translation does not yet model. Once `fetch_offsets` (Phase
+        // 8+) lands and starts producing retry entries, this listener
+        // MUST drain them and re-prepare requests.
     }
 }
 
