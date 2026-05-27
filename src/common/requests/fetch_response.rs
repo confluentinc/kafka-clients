@@ -175,6 +175,18 @@ impl FetchResponse {
     }
 }
 
+impl std::fmt::Display for FetchResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "FetchResponse(error={:?}, sessionId={}, throttleTimeMs={})",
+            self.error(),
+            self.session_id(),
+            self.throttle_time_ms()
+        )
+    }
+}
+
 /// Returns the records buffer from a [`PartitionData`], borrowing the
 /// underlying bytes — no copy.
 ///
