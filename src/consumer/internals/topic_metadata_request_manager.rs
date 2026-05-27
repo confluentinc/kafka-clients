@@ -63,7 +63,6 @@ pub(crate) struct TopicMetadataRequestManager {
     retry_backoff_ms: i64,
     /// Mirrors Java's `long retryBackoffMaxMs`.
     retry_backoff_max_ms: i64,
-    closing: bool,
     /// Monotonically-increasing id assigned to every new
     /// [`TopicMetadataRequestState`]. Replaces Java's `this`-reference
     /// identity for matching responses back to their pending request.
@@ -137,7 +136,6 @@ impl TopicMetadataRequestManager {
             allow_auto_topic_creation: config.allow_auto_create_topics,
             retry_backoff_ms: config.retry_backoff_ms(),
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
-            closing: false,
             next_request_id: 0,
         }
     }
@@ -279,9 +277,10 @@ impl TopicMetadataRequestManager {
                 continue;
             }
             if error == Errors::InvalidTopicException {
-                let mut invalid = std::collections::HashSet::new();
-                invalid.insert(topic);
-                return Err(KafkaError::invalid_topics(invalid));
+                return Err(KafkaError::with_message(
+                    Errors::InvalidTopicException,
+                    format!("Topic '{topic}' is invalid"),
+                ));
             }
             // Java: `error.exception() instanceof RetriableException` →
             // throw the exception (retriable, so callers retry).
@@ -312,16 +311,6 @@ impl RequestManager for TopicMetadataRequestManager {
     ///
     /// Java: `poll(long currentTimeMs)`.
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
-        // Once the manager is closing, do not emit new outbound
-        // metadata fetches. Java does not gate `poll` on a closing flag
-        // (its `signalClose` is a no-op), but Phase 6's
-        // `CoordinatorRequestManager` does — adopting the same shape
-        // here keeps the manager-set behaviour consistent across the
-        // crate and matches the bg-task expectation that `poll_on_close`
-        // only emits final shutdown traffic.
-        if self.closing {
-            return PollResult::empty();
-        }
         // First pass: expire stale requests (mirrors Java's
         // `requestStateIterator.remove()` for `requestState.isExpired()`).
         // Walk from the tail so removals don't shift indices we still
@@ -362,9 +351,8 @@ impl RequestManager for TopicMetadataRequestManager {
         }
     }
 
-    fn signal_close(&mut self) {
-        self.closing = true;
-    }
+    // No `signal_close` override — Java's TopicMetadataRequestManager
+    // does not override it either (inherits the no-op default).
 }
 
 #[cfg(test)]
@@ -699,24 +687,6 @@ mod tests {
         let request_id = manager.inflight_requests()[0].id();
         manager.on_response(request_id, now, &response);
         assert!(manager.inflight_requests().is_empty());
-    }
-
-    /// After `signal_close`, the manager stops emitting new outbound
-    /// metadata fetches. Matches Phase 6's
-    /// [`super::coordinator_request_manager::CoordinatorRequestManager`]
-    /// behaviour even though Java's `signalClose` is a no-op.
-    #[test]
-    fn test_signal_close_stops_polls() {
-        let mut manager = setup_manager();
-        let _rx = manager.request_topic_metadata("hello".to_string(), i64::MAX);
-        // Before close: a poll emits a request.
-        assert_eq!(1, manager.poll(0).unsent_requests.len());
-
-        manager.signal_close();
-        // After close: no requests emitted.
-        let res = manager.poll(100);
-        assert!(res.unsent_requests.is_empty());
-        assert_eq!(PollResult::WAIT_FOREVER, res.time_until_next_poll_ms);
     }
 
     /// Regression test: when the response carries `TopicAuthorizationFailed`,
