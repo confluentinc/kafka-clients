@@ -223,9 +223,8 @@ impl std::fmt::Display for FetchPosition {
 /// `OffsetForLeaderEpoch` reply.
 ///
 /// Translated from `SubscriptionState.LogTruncation`. The
-/// `maybe_complete_validation` method itself is deferred to Phase 7
-/// (depends on `EpochEndOffset` and `OffsetsForLeaderEpoch` request
-/// translation). The struct lives here so Phase 7 doesn't have to move
+/// `maybe_complete_validation` method itself is translated below; the
+/// struct lives here alongside the rest of `SubscriptionState`'s public
 /// types.
 #[derive(Clone, Debug)]
 pub(crate) struct LogTruncation {
@@ -380,6 +379,45 @@ impl TopicPartitionState {
     pub(crate) fn complete_validation(&mut self) {
         if self.has_position() {
             self.transition_state(FetchStates::Fetching, |this| this.next_retry_time_ms = None);
+        }
+    }
+
+    /// Re-enter position validation if the leader has changed.
+    ///
+    /// Translates Java's private
+    /// `TopicPartitionState.maybeValidatePosition(LeaderAndEpoch)`.
+    /// Returns `true` if the partition is now awaiting validation.
+    fn maybe_validate_position(&mut self, current_leader_and_epoch: &LeaderAndEpoch) -> bool {
+        if self.fetch_state == FetchStates::AwaitReset {
+            return false;
+        }
+        if current_leader_and_epoch.leader.is_none() {
+            return false;
+        }
+        if let Some(position) = &self.position
+            && &position.current_leader != current_leader_and_epoch
+        {
+            let new_position =
+                FetchPosition::with_leader(position.offset, position.offset_epoch, current_leader_and_epoch.clone());
+            self.validate_position(new_position);
+            self.preferred_read_replica = None;
+        }
+        self.fetch_state == FetchStates::AwaitValidation
+    }
+
+    /// For older versions of the API, we cannot perform offset validation
+    /// so we simply transition directly to FETCHING.
+    ///
+    /// Translates Java's private
+    /// `TopicPartitionState.updatePositionLeaderNoValidation(LeaderAndEpoch)`.
+    fn update_position_leader_no_validation(&mut self, current_leader_and_epoch: &LeaderAndEpoch) {
+        if let Some(position) = self.position.clone() {
+            let new_position =
+                FetchPosition::with_leader(position.offset, position.offset_epoch, current_leader_and_epoch.clone());
+            self.transition_state(FetchStates::Fetching, |this| {
+                this.position = Some(new_position);
+                this.next_retry_time_ms = None;
+            });
         }
     }
 
@@ -981,6 +1019,153 @@ impl SubscriptionState {
     pub(crate) fn complete_validation(&mut self, tp: &TopicPartition) -> Result<(), KafkaError> {
         self.assigned_state_mut(tp)?.complete_validation();
         Ok(())
+    }
+
+    /// Enter the offset validation state if the leader for this partition
+    /// is known to support a usable version of the `OffsetsForLeaderEpoch`
+    /// API. If the leader node does not support the API, simply complete
+    /// the offset validation.
+    ///
+    /// Translates Java's
+    /// `SubscriptionState.maybeValidatePositionForCurrentLeader(
+    /// ApiVersions, TopicPartition, LeaderAndEpoch)`. Returns `true` if
+    /// the partition is now awaiting validation.
+    pub(crate) fn maybe_validate_position_for_current_leader(
+        &mut self,
+        api_versions: &crate::api_versions::ApiVersions,
+        tp: &TopicPartition,
+        leader_and_epoch: &LeaderAndEpoch,
+    ) -> bool {
+        let Some(state) = self.assigned_state_or_null_mut(tp) else {
+            debug!("Skipping validating position for partition {tp} which is not currently assigned.");
+            return false;
+        };
+
+        if let Some(leader) = leader_and_epoch.leader.as_ref() {
+            let node_api_versions = api_versions.get(leader.id_string());
+            match node_api_versions {
+                None => state.maybe_validate_position(leader_and_epoch),
+                Some(versions) => {
+                    if crate::consumer::internals::offset_fetcher_utils::has_usable_offset_for_leader_epoch_version(
+                        &versions,
+                    ) {
+                        state.maybe_validate_position(leader_and_epoch)
+                    } else {
+                        // If the broker does not support a newer version of
+                        // OffsetsForLeaderEpoch, we skip validation.
+                        state.update_position_leader_no_validation(leader_and_epoch);
+                        false
+                    }
+                },
+            }
+        } else {
+            state.maybe_validate_position(leader_and_epoch)
+        }
+    }
+
+    /// Attempt to complete validation with the end offset returned from the
+    /// `OffsetsForLeaderEpoch` request.
+    ///
+    /// Translates Java's
+    /// `SubscriptionState.maybeCompleteValidation(TopicPartition,
+    /// FetchPosition, EpochEndOffset)`.
+    ///
+    /// Returns `Some(LogTruncation)` when truncation is detected and no
+    /// reset policy is defined; otherwise `None` (the side effect is
+    /// either a `request_offset_reset` call or a `seek_validated` to the
+    /// epoch's end offset).
+    pub(crate) fn maybe_complete_validation(
+        &mut self,
+        tp: &TopicPartition,
+        request_position: &FetchPosition,
+        epoch_end_offset: &crate::offset_for_leader_epoch_response_data::EpochEndOffset,
+    ) -> Option<LogTruncation> {
+        let has_default_reset = self.has_default_offset_reset_policy();
+        // Capture without holding any later mutable borrows.
+        let Some(state) = self.assigned_state_or_null_mut(tp) else {
+            debug!("Skipping completed validation for partition {tp} which is not currently assigned.");
+            return None;
+        };
+        if !state.awaiting_validation() {
+            debug!("Skipping completed validation for partition {tp} which is no longer expecting validation.");
+            return None;
+        }
+
+        let current_position = match &state.position {
+            Some(p) => p.clone(),
+            None => return None,
+        };
+        if &current_position != request_position {
+            debug!(
+                "Skipping completed validation for partition {tp} since the current position {current_position} \
+                 no longer matches the position {request_position} when the request was sent"
+            );
+            return None;
+        }
+
+        let undefined_epoch_offset = crate::common::requests::offsets_for_leader_epoch_response::UNDEFINED_EPOCH_OFFSET;
+        let undefined_epoch = crate::common::requests::offsets_for_leader_epoch_response::UNDEFINED_EPOCH;
+
+        if epoch_end_offset.end_offset == undefined_epoch_offset || epoch_end_offset.leader_epoch == undefined_epoch {
+            if has_default_reset {
+                log::info!("Truncation detected for partition {tp} at offset {current_position}, resetting offset");
+                // request_offset_reset borrows self mutably — drop state borrow first by re-acquiring.
+                let _ = state; // explicit drop of the local borrow before next call
+                self.request_offset_reset_default(tp).ok();
+                return None;
+            } else {
+                log::warn!(
+                    "Truncation detected for partition {tp} at offset {current_position}, but no reset policy is set"
+                );
+                return Some(LogTruncation {
+                    topic_partition: tp.clone(),
+                    fetch_position: request_position.clone(),
+                    divergent_offset_opt: None,
+                });
+            }
+        }
+
+        if epoch_end_offset.end_offset < current_position.offset {
+            if has_default_reset {
+                let new_position = FetchPosition::with_leader(
+                    epoch_end_offset.end_offset,
+                    Some(epoch_end_offset.leader_epoch),
+                    current_position.current_leader.clone(),
+                );
+                log::info!(
+                    "Truncation detected for partition {tp} at offset {current_position}, resetting offset to \
+                     the first offset known to diverge {new_position}"
+                );
+                state.seek_validated(new_position);
+                return None;
+            } else {
+                // Java passes `null` for metadata; Rust represents that as
+                // the empty string. The constructor only errors on negative
+                // offsets, and we've already excluded UNDEFINED_EPOCH_OFFSET
+                // above — so this `ok()` collapses an impossible Err to
+                // `None`, which is treated identically to "no divergent
+                // offset known".
+                let divergent_offset = crate::consumer::OffsetAndMetadata::with_leader_epoch(
+                    epoch_end_offset.end_offset,
+                    Some(epoch_end_offset.leader_epoch),
+                    "",
+                )
+                .ok();
+                log::warn!(
+                    "Truncation detected for partition {tp} at offset {current_position} (the end offset from the \
+                     broker is {}), but no reset policy is set",
+                    epoch_end_offset.end_offset,
+                );
+                return Some(LogTruncation {
+                    topic_partition: tp.clone(),
+                    fetch_position: request_position.clone(),
+                    divergent_offset_opt: divergent_offset,
+                });
+            }
+        }
+
+        state.complete_validation();
+        None
     }
 
     /// Translates Java's `hasValidPosition(TopicPartition)`.
@@ -1671,22 +1856,9 @@ mod tests {
     //
     // Translated from `org.apache.kafka.clients.consumer.internals.SubscriptionStateTest`.
     //
-    // Tests using `maybeValidatePositionForCurrentLeader` /
-    // `maybeCompleteValidation` are deferred to Phase 7 alongside those
-    // methods (depend on `EpochEndOffset` / `OffsetForLeaderEpoch`):
-    // - `testMaybeCompleteValidation`
-    // - `testMaybeCompleteValidationAfterPositionChange`
-    // - `testMaybeCompleteValidationAfterOffsetReset`
-    // - `testMaybeValidatePositionForCurrentLeader`
-    // - `testTruncationDetectionWithResetPolicy`
-    // - `testTruncationDetectionWithoutResetPolicy`
-    // - `testTruncationDetectionUnknownDivergentOffsetWithResetPolicy`
-    // - `testTruncationDetectionUnknownDivergentOffsetWithoutResetPolicy`
-    // - `resetOffsetNoValidation`
-    // See `design/history/Milestone-8/Phase-4/PLAN.md` "Out of scope".
-    // The simpler validation-state tests (`testSeekUnvalidatedWithNoOffsetEpoch`,
-    // etc.) ARE translated because they only call `seek_unvalidated` /
-    // `seek_validated` / `complete_validation` / `awaiting_validation`.
+    // All Phase-7d-deferred tests are now translated (see the
+    // `test_maybe_*_validation`, `test_truncation_detection_*`, and
+    // `reset_offset_no_validation` tests at the end of this module).
 
     use regex::Regex;
 
@@ -2374,8 +2546,9 @@ mod tests {
         assert!(state.preferred_read_replica(&tp_test_0(), 31).is_none());
     }
 
-    /// Translated from `testSeekUnvalidatedWithNoOffsetEpoch` (local-state half;
-    /// `maybeValidatePositionForCurrentLeader` half deferred to Phase 7).
+    /// Translated from `testSeekUnvalidatedWithNoOffsetEpoch`. The
+    /// `maybeValidatePositionForCurrentLeader` half is covered by
+    /// [`test_maybe_validate_position_for_current_leader`].
     #[test]
     fn test_subscription_state_seek_unvalidated_with_no_offset_epoch() {
         let mut state = new_state();
@@ -2420,8 +2593,9 @@ mod tests {
         assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
     }
 
-    /// Translated from `testSeekUnvalidatedWithOffsetEpoch` (local-state half;
-    /// `maybeValidatePositionForCurrentLeader` half deferred to Phase 7).
+    /// Translated from `testSeekUnvalidatedWithOffsetEpoch`. The
+    /// `maybeValidatePositionForCurrentLeader` half is covered by
+    /// [`test_maybe_validate_position_for_current_leader`].
     #[test]
     fn test_subscription_state_seek_unvalidated_with_offset_epoch_enters_validation() {
         let mut state = new_state();
@@ -2671,5 +2845,380 @@ mod tests {
         });
         assert!(predicate_evaluated.load(Ordering::SeqCst));
         assert_eq!(fetchable[0], tp_test_0());
+    }
+
+    // ─── Phase 7d: maybe_validate_position_for_current_leader /
+    // maybe_complete_validation translation ─────────────────────────
+
+    use crate::api_versions::ApiVersions as ApiVersionsType;
+    use crate::common::protocol::ApiKeys;
+    use crate::node_api_versions::NodeApiVersions;
+    use crate::offset_for_leader_epoch_response_data::EpochEndOffset;
+
+    fn epoch_end_offset(leader_epoch: i32, end_offset: i64) -> EpochEndOffset {
+        let mut e = EpochEndOffset::new();
+        e.set_leader_epoch(leader_epoch);
+        e.set_end_offset(end_offset);
+        e
+    }
+
+    /// Translated from `testMaybeCompleteValidation`.
+    #[test]
+    fn test_maybe_complete_validation() {
+        let mut state = new_state();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(initial_offset_epoch, initial_offset + 5),
+        );
+        assert!(truncation_opt.is_none());
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert_eq!(state.position(&tp_test_0()).unwrap(), Some(&initial_position));
+    }
+
+    /// Translated from `testMaybeValidatePositionForCurrentLeader`.
+    #[test]
+    fn test_maybe_validate_position_for_current_leader() {
+        let mut state = new_state();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        // Old API: skip validation.
+        let api_versions = ApiVersionsType::new();
+        let old_apis = NodeApiVersions::create_single(ApiKeys::OFFSET_FOR_LEADER_EPOCH.id(), 0, 2);
+        api_versions.update("1", old_apis);
+
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(10, Some(5), LeaderAndEpoch::new(Some(broker1.clone()), Some(10))),
+            )
+            .unwrap();
+
+        assert!(!state.maybe_validate_position_for_current_leader(
+            &api_versions,
+            &tp_test_0(),
+            &LeaderAndEpoch::new(Some(broker1.clone()), Some(10)),
+        ));
+        assert!(state.has_valid_position(&tp_test_0()));
+
+        // New API: enter validation.
+        api_versions.update("1", NodeApiVersions::create());
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(10, Some(5), LeaderAndEpoch::new(Some(broker1.clone()), Some(10))),
+            )
+            .unwrap();
+        // The Java test asserts true here because after the second
+        // seek_unvalidated the partition is in AWAIT_VALIDATION; with a
+        // new-API broker the maybe-validate call either re-validates or
+        // sees `position.current_leader == new_leader_and_epoch` and
+        // leaves AWAIT_VALIDATION as-is — so the helper returns true.
+        assert!(state.maybe_validate_position_for_current_leader(
+            &api_versions,
+            &tp_test_0(),
+            &LeaderAndEpoch::new(Some(broker1.clone()), Some(10)),
+        ));
+        assert!(!state.has_valid_position(&tp_test_0()));
+
+        // tp_test_1 isn't assigned: skip.
+        assert!(!state.maybe_validate_position_for_current_leader(
+            &api_versions,
+            &tp_test_1(),
+            &LeaderAndEpoch::new(Some(broker1.clone()), Some(10)),
+        ));
+        assert!(!state.assigned_partitions().contains(&tp_test_1()));
+    }
+
+    /// Translated from `testMaybeCompleteValidationAfterPositionChange`.
+    #[test]
+    fn test_maybe_complete_validation_after_position_change() {
+        let mut state = new_state();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+        let update_offset = 20;
+        let update_offset_epoch = 8;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let update_position = FetchPosition::with_leader(
+            update_offset,
+            Some(update_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), update_position.clone()).unwrap();
+
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(initial_offset_epoch, initial_offset + 5),
+        );
+        assert!(truncation_opt.is_none());
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+        assert_eq!(state.position(&tp_test_0()).unwrap(), Some(&update_position));
+    }
+
+    /// Translated from `testMaybeCompleteValidationAfterOffsetReset`.
+    #[test]
+    fn test_maybe_complete_validation_after_offset_reset() {
+        let mut state = new_state();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        state.request_offset_reset_default(&tp_test_0()).unwrap();
+
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(initial_offset_epoch, initial_offset + 5),
+        );
+        assert!(truncation_opt.is_none());
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(state.is_offset_reset_needed(&tp_test_0()).unwrap());
+        // Java asserts position is null after reset.
+        assert!(state.position(&tp_test_0()).unwrap().is_none());
+    }
+
+    /// Translated from `testTruncationDetectionWithResetPolicy`.
+    #[test]
+    fn test_truncation_detection_with_reset_policy() {
+        let mut state = new_state(); // EARLIEST policy.
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+        let divergent_offset = 5;
+        let divergent_offset_epoch = 7;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(divergent_offset_epoch, divergent_offset),
+        );
+        assert!(truncation_opt.is_none());
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let updated_position = FetchPosition::with_leader(
+            divergent_offset,
+            Some(divergent_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        assert_eq!(state.position(&tp_test_0()).unwrap(), Some(&updated_position));
+    }
+
+    /// Translated from `testTruncationDetectionWithoutResetPolicy`.
+    #[test]
+    fn test_truncation_detection_without_reset_policy() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::NONE);
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+        let divergent_offset = 5;
+        let divergent_offset_epoch = 7;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(divergent_offset_epoch, divergent_offset),
+        );
+        let truncation = truncation_opt.expect("truncation must be reported");
+        let expected_divergent =
+            crate::consumer::OffsetAndMetadata::with_leader_epoch(divergent_offset, Some(divergent_offset_epoch), "")
+                .unwrap();
+        assert_eq!(truncation.divergent_offset_opt, Some(expected_divergent));
+        assert_eq!(truncation.fetch_position, initial_position);
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `testTruncationDetectionUnknownDivergentOffsetWithResetPolicy`.
+    #[test]
+    fn test_truncation_detection_unknown_divergent_offset_with_reset_policy() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::EARLIEST);
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let undefined_epoch = crate::common::requests::offsets_for_leader_epoch_response::UNDEFINED_EPOCH;
+        let undefined_epoch_offset = crate::common::requests::offsets_for_leader_epoch_response::UNDEFINED_EPOCH_OFFSET;
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(undefined_epoch, undefined_epoch_offset),
+        );
+        assert!(truncation_opt.is_none());
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(state.is_offset_reset_needed(&tp_test_0()).unwrap());
+        assert_eq!(
+            state.reset_strategy(&tp_test_0()).unwrap(),
+            Some(AutoOffsetResetStrategy::EARLIEST)
+        );
+    }
+
+    /// Translated from `testTruncationDetectionUnknownDivergentOffsetWithoutResetPolicy`.
+    #[test]
+    fn test_truncation_detection_unknown_divergent_offset_without_reset_policy() {
+        let mut state = SubscriptionState::new(AutoOffsetResetStrategy::NONE);
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        let current_epoch = 10;
+        let initial_offset = 10;
+        let initial_offset_epoch = 5;
+
+        let initial_position = FetchPosition::with_leader(
+            initial_offset,
+            Some(initial_offset_epoch),
+            LeaderAndEpoch::new(Some(broker1.clone()), Some(current_epoch)),
+        );
+        state.seek_unvalidated(&tp_test_0(), initial_position.clone()).unwrap();
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+
+        let undefined_epoch = crate::common::requests::offsets_for_leader_epoch_response::UNDEFINED_EPOCH;
+        let undefined_epoch_offset = crate::common::requests::offsets_for_leader_epoch_response::UNDEFINED_EPOCH_OFFSET;
+        let truncation_opt = state.maybe_complete_validation(
+            &tp_test_0(),
+            &initial_position,
+            &epoch_end_offset(undefined_epoch, undefined_epoch_offset),
+        );
+        let truncation = truncation_opt.expect("truncation must be reported");
+        assert!(truncation.divergent_offset_opt.is_none());
+        assert_eq!(truncation.fetch_position, initial_position);
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+    }
+
+    /// Translated from `resetOffsetNoValidation`.
+    #[test]
+    fn reset_offset_no_validation() {
+        let mut state = new_state();
+        let broker1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        state.assign_from_user(HashSet::from([tp_test_0()])).unwrap();
+
+        // Reset offsets.
+        state
+            .request_offset_reset(&tp_test_0(), AutoOffsetResetStrategy::EARLIEST)
+            .unwrap();
+
+        // Attempt to validate with older API version: do nothing.
+        let old_apis = ApiVersionsType::new();
+        old_apis.update("1", NodeApiVersions::create_single(ApiKeys::OFFSET_FOR_LEADER_EPOCH.id(), 0, 2));
+        assert!(!state.maybe_validate_position_for_current_leader(
+            &old_apis,
+            &tp_test_0(),
+            &LeaderAndEpoch::new(Some(broker1.clone()), None),
+        ));
+        assert!(!state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(state.is_offset_reset_needed(&tp_test_0()).unwrap());
+
+        // Complete the reset via unvalidated seek.
+        state.seek_unvalidated(&tp_test_0(), FetchPosition::new(10)).unwrap();
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
+
+        // Next call to validate offsets does nothing.
+        assert!(!state.maybe_validate_position_for_current_leader(
+            &old_apis,
+            &tp_test_0(),
+            &LeaderAndEpoch::new(Some(broker1.clone()), None),
+        ));
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
+
+        // Reset again, complete with a seek that requires validation.
+        state
+            .request_offset_reset(&tp_test_0(), AutoOffsetResetStrategy::EARLIEST)
+            .unwrap();
+        state
+            .seek_unvalidated(
+                &tp_test_0(),
+                FetchPosition::with_leader(10, Some(10), LeaderAndEpoch::new(Some(broker1.clone()), Some(2))),
+            )
+            .unwrap();
+        // AWAIT_VALIDATION state.
+        assert!(!state.has_valid_position(&tp_test_0()));
+        assert!(state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
+
+        // Next call to validate clears the validation state.
+        assert!(!state.maybe_validate_position_for_current_leader(
+            &old_apis,
+            &tp_test_0(),
+            &LeaderAndEpoch::new(Some(broker1.clone()), Some(2)),
+        ));
+        assert!(state.has_valid_position(&tp_test_0()));
+        assert!(!state.awaiting_validation(&tp_test_0()).unwrap());
+        assert!(!state.is_offset_reset_needed(&tp_test_0()).unwrap());
     }
 }

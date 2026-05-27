@@ -29,7 +29,9 @@ use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
+use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
 use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
@@ -38,7 +40,9 @@ use super::ApiVersionsRequest;
 use super::ConcreteResponse;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
+use super::ListOffsetsRequest;
 use super::MetadataRequest;
+use super::OffsetsForLeaderEpochRequest;
 use super::ProduceRequest;
 use super::RequestAndSize;
 use super::RequestHeader;
@@ -100,6 +104,10 @@ pub enum ConcreteRequest {
     SaslAuthenticate(SaslAuthenticateRequest),
     /// A FindCoordinator request.
     FindCoordinator(FindCoordinatorRequest),
+    /// A ListOffsets request.
+    ListOffsets(ListOffsetsRequest),
+    /// An OffsetsForLeaderEpoch request.
+    OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest),
 }
 
 impl ConcreteRequest {
@@ -113,6 +121,8 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => r.version(),
             Self::SaslAuthenticate(r) => r.version(),
             Self::FindCoordinator(r) => r.version(),
+            Self::ListOffsets(r) => r.version(),
+            Self::OffsetsForLeaderEpoch(r) => r.version(),
         }
     }
 
@@ -126,6 +136,8 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
             Self::FindCoordinator(r) => r.api_key(),
+            Self::ListOffsets(r) => r.api_key(),
+            Self::OffsetsForLeaderEpoch(r) => r.api_key(),
         }
     }
 
@@ -145,6 +157,8 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data()),
             Self::FindCoordinator(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::ListOffsets(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -199,6 +213,12 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::ListOffsets(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::OffsetsForLeaderEpoch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -218,6 +238,8 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), r.version()),
             Self::FindCoordinator(r) => Self::serialize_body(r.data(), r.version()),
+            Self::ListOffsets(r) => Self::serialize_body(r.data(), r.version()),
+            Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), r.version()),
         }
     }
 
@@ -249,6 +271,8 @@ impl ConcreteRequest {
             Self::SaslHandshake(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::SaslAuthenticate(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::FindCoordinator(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -297,6 +321,17 @@ impl ConcreteRequest {
                 let data = FindCoordinatorRequestData::read(readable, api_version)?;
                 Ok(Self::FindCoordinator(FindCoordinatorRequest::new(data, api_version)))
             },
+            ApiKeys::LIST_OFFSETS => {
+                let data = ListOffsetsRequestData::read(readable, api_version)?;
+                Ok(Self::ListOffsets(ListOffsetsRequest::new(data, api_version)))
+            },
+            ApiKeys::OFFSET_FOR_LEADER_EPOCH => {
+                let data = OffsetForLeaderEpochRequestData::read(readable, api_version)?;
+                Ok(Self::OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -315,6 +350,8 @@ impl std::fmt::Display for ConcreteRequest {
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
             Self::FindCoordinator(r) => write!(f, "{r}"),
+            Self::ListOffsets(r) => write!(f, "{r}"),
+            Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
         }
     }
 }
