@@ -527,10 +527,17 @@ impl ConsumerMembershipManager {
         // 5. Auto-commit-before-reconciliation. Java's
         // `signalReconciliationStarted()` calls
         // `commitRequestManager.maybeAutoCommitSyncBeforeRebalance(...)`.
-        // Phase 8b's CommitRequestManager (Phase 9) does not yet
-        // expose this hook (deferred to Phase 10's supplier wiring);
-        // we log and proceed, mirroring Java's
-        // `commitResult.whenComplete` error branch.
+        // Phase 10 (commit 2.5/N) supplied the
+        // `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
+        // method. Wiring this `reconcile` body to actually invoke it
+        // requires the `AsyncKafkaConsumer` poll-path scaffolding so the
+        // returned `oneshot::Receiver` can be awaited inside the rebalance
+        // sequence — that's a Phase 11 concern. For now, log and proceed,
+        // mirroring Java's `commitResult.whenComplete` error branch.
+        //
+        // TODO: Phase 11 wires the invocation:
+        // `self.commit_request_manager.maybe_auto_commit_sync_before_rebalance(
+        //     deadline_ms, now_ms).await?` at this site.
         if self.commit_request_manager.is_some() {
             let auto_commit = {
                 let guard = match self.abstract_mm.inner.lock() {
@@ -540,7 +547,9 @@ impl ConsumerMembershipManager {
                 guard.auto_commit_enabled
             };
             if auto_commit {
-                log::debug!("Auto-commit-before-rebalance not wired yet (Phase 10); proceeding with reconciliation.");
+                log::debug!(
+                    "Auto-commit-before-rebalance invocation deferred to Phase 11; proceeding with reconciliation."
+                );
             }
         }
 
@@ -993,10 +1002,13 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 /// 2. **Commit-request-manager auto-commit interaction** (~12 cases):
 ///    `testCommitOffsetsBeforeRebalance*`, `testAutoCommitBeforeRebalance*`,
 ///    `testCommitErrorDoesNotBlockReconcile*`. The
-///    `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance` hook
-///    is wired only in Phase 10 (per the deferral note inside
-///    `reconcile`). Until that lands, these tests have nothing to
-///    verify behaviourally on the Rust side. Deferred to Phase 10.
+///    `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
+///    method itself lives on the commit manager (Phase 10, commit 2.5/N).
+///    The *call site* inside `reconcile` is still a no-op log — Phase 11
+///    wires the actual invocation as part of the AsyncKafkaConsumer
+///    poll-path scaffolding. Until that wiring lands, these tests have
+///    nothing to verify behaviourally on the Rust side. Deferred to
+///    Phase 11.
 ///
 /// 3. **Streams / Share manager** (~6 cases): `testStreams*`,
 ///    `testShare*`. Out of scope per `consumer-threading.md` §20.

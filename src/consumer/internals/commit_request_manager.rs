@@ -34,9 +34,14 @@
 //!
 //! # Deferred wiring
 //!
-//! - `MemberStateListener` impl is deferred to Phase 11, when the
-//!   `AsyncKafkaConsumer` integration lands. The Phase-8 trait will be
-//!   wired into a free-standing `on_member_epoch_updated` method here.
+//! - `MemberStateListener` impl is supplied (Phase 10, commit 2.5/N).
+//!   The membership manager registers the commit manager as a listener;
+//!   the registration call site itself lands with the
+//!   `AsyncKafkaConsumer` integration in Phase 11.
+//! - `maybe_auto_commit_sync_before_rebalance` is supplied (Phase 10,
+//!   commit 2.5/N). The reconciliation pipeline's invocation of this
+//!   method is deferred to Phase 11 because awaiting the returned
+//!   `oneshot::Receiver` requires the consumer poll-path scaffolding.
 //! - `init_with_committed_offsets_if_needed` is the integration point for
 //!   Phase 7d's deferred `update_fetch_positions` work — it accepts the
 //!   initializing partitions and a deadline, calls [`Self::fetch_offsets`],
@@ -69,9 +74,11 @@ use crate::offset_fetch_request_data::{OffsetFetchRequestData, OffsetFetchReques
 
 use super::consumer_metadata::ConsumerMetadata;
 use super::coordinator_request_manager::CoordinatorRequestManager;
+use super::member_state_listener::MemberStateListener;
 use super::network_client_delegate::{PollResult, UnsentRequest};
 use super::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
 use super::request_manager::RequestManager;
+use super::subscription_state::SubscriptionState;
 use super::timed_request_state::TimedRequestState;
 
 // =========================================================================
@@ -169,6 +176,11 @@ type CommitFutureTx = Arc<Mutex<Option<oneshot::Sender<CommitResult>>>>;
 type FetchResult = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, KafkaError>;
 /// Idempotent fetch-future sender slot.
 type FetchFutureTx = Arc<Mutex<Option<oneshot::Sender<FetchResult>>>>;
+
+/// Idempotent sender slot for the rebalance-flush future used by
+/// [`CommitRequestManager::maybe_auto_commit_sync_before_rebalance`].
+/// Mirrors Java's `CompletableFuture<Void>` return type.
+type RebalanceFlushTx = Arc<Mutex<Option<oneshot::Sender<Result<(), KafkaError>>>>>;
 
 // =========================================================================
 //             OffsetCommitRequestState / OffsetFetchRequestState
@@ -370,6 +382,10 @@ struct CommitRequestManagerInner {
     retry_backoff_max_ms: i64,
     throw_on_fetch_stable_offset_unsupported: bool,
     metadata: Arc<ConsumerMetadata>,
+    /// Java: `SubscriptionState subscriptions`. Used by `maybeAutoCommitAsync`
+    /// and `maybeAutoCommitSyncBeforeRebalance` to snapshot
+    /// `subscriptions.allConsumed()` at commit time.
+    subscriptions: Arc<Mutex<SubscriptionState>>,
     /// Tracks whether `signal_close()` has fired.
     closing: Mutex<bool>,
     /// Monotonic counter handing out per-request identifiers for
@@ -424,6 +440,7 @@ impl CommitRequestManager {
     pub(crate) fn new(
         config: &ConsumerConfig,
         metadata: Arc<ConsumerMetadata>,
+        subscriptions: Arc<Mutex<SubscriptionState>>,
         group_id: impl Into<String>,
         group_instance_id: Option<String>,
         now_ms: i64,
@@ -446,6 +463,7 @@ impl CommitRequestManager {
             retry_backoff_max_ms: config.retry_backoff_max_ms(),
             throw_on_fetch_stable_offset_unsupported: config.throw_on_fetch_stable_offset_unsupported(),
             metadata,
+            subscriptions,
             closing: Mutex::new(false),
             next_request_id: AtomicU64::new(0),
             state: Mutex::new(state),
@@ -504,15 +522,10 @@ impl CommitRequestManager {
     //                       MemberStateListener wiring
     // ---------------------------------------------------------------------
 
-    // TODO(Phase 11 merge): impl MemberStateListener for CommitRequestManager.
-    //
-    // Phase 8 ships the `MemberStateListener` trait in
-    // `src/consumer/internals/member_state_listener.rs`. Phase 11 wires the
-    // membership manager → commit manager handshake by adding the trait
-    // impl that delegates to [`Self::on_member_epoch_updated`] below.
-    //
-    // Until then, this method is callable directly for unit tests and
-    // for future wiring.
+    // Java: `public class CommitRequestManager implements RequestManager,
+    // MemberStateListener`. The trait impl lives at the bottom of this
+    // module ([`impl MemberStateListener for CommitRequestManager`]) and
+    // delegates to the inherent `on_member_epoch_updated` method below.
 
     /// Update the latest member epoch and id. Mirrors Java's
     /// `onMemberEpochUpdated(Optional<Integer>, String)`.
@@ -595,6 +608,100 @@ impl CommitRequestManager {
         // `tokio::spawn` reading the internal `oneshot::Receiver`.
         tokio::spawn(async move {
             commit_sync_with_retries(
+                inner,
+                request_rx,
+                result_tx,
+                offsets_for_retry,
+                member_info,
+                deadline_ms,
+                now_ms,
+            )
+            .await;
+        });
+        rx
+    }
+
+    // ---------------------------------------------------------------------
+    //                maybe_auto_commit_sync_before_rebalance
+    // ---------------------------------------------------------------------
+
+    /// Commit `subscriptions.allConsumed()` synchronously if auto-commit is
+    /// enabled, retrying on retriable errors until `deadline_ms`. Mirrors
+    /// Java's
+    /// `CommitRequestManager.maybeAutoCommitSyncBeforeRebalance(deadlineMs)`.
+    ///
+    /// Used by the membership reconciliation pipeline to flush pending
+    /// offsets before partitions are reassigned. Behaviour:
+    ///
+    /// - If auto-commit is disabled, resolves immediately to `Ok(())`.
+    /// - If auto-commit is enabled, captures
+    ///   `subscriptions.allConsumed()` and drives the commit with retry.
+    /// - Considers [`Errors::StaleMemberEpoch`] retriable (mirrors Java's
+    ///   `isStaleEpochErrorAndValidEpochAvailable`).
+    /// - Considers [`Errors::UnknownTopicOrPartition`] **fatal** (early
+    ///   exit), even though the error otherwise extends `RetriableError`.
+    ///   Rationale (Java doc):  if a topic or partition is deleted, the
+    ///   rebalance wouldn't finish in time since the auto commit would
+    ///   keep retrying.
+    /// - On deadline expiry after a retriable error, wraps the final
+    ///   error as a [`KafkaError::timeout`] (Java:
+    ///   `maybeWrapAsTimeoutException`).
+    ///
+    /// Returns a `oneshot::Receiver` resolving to `Ok(())` on success or
+    /// the surfaced [`KafkaError`] on failure. Callers `.await` it.
+    pub(crate) fn maybe_auto_commit_sync_before_rebalance(
+        &self,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> oneshot::Receiver<Result<(), KafkaError>> {
+        let (tx, rx) = oneshot::channel();
+        // Java: `if (!autoCommitEnabled()) return CompletableFuture.completedFuture(null);`
+        if !self.auto_commit_enabled() {
+            let _ = tx.send(Ok(()));
+            return rx;
+        }
+        // Snapshot `subscriptions.allConsumed()` exactly as Java's
+        // `createOffsetCommitRequest(subscriptions.allConsumed(), deadlineMs)`.
+        let offsets = {
+            let guard = self.inner.subscriptions.lock().expect("subscriptions poisoned");
+            guard.all_consumed()
+        };
+        if offsets.is_empty() {
+            // Java's `requestAutoCommit` resolves the future immediately
+            // when there are no offsets to commit.
+            let _ = tx.send(Ok(()));
+            return rx;
+        }
+        self.maybe_update_last_seen_epoch_if_newer(&offsets);
+        let member_info = {
+            let guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.member_info.clone()
+        };
+        // Track inflight (Java's `requestAutoCommit` flips the
+        // `inflightCommit` flag via the auto-commit state).
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            if let Some(ac) = guard.auto_commit.as_mut() {
+                ac.set_inflight_commit_status(true);
+            }
+        }
+        let offsets_for_retry = offsets.clone();
+        let (request, request_rx) = OffsetCommitRequestState::new(
+            offsets,
+            member_info.clone(),
+            self.inner.retry_backoff_ms,
+            self.inner.retry_backoff_max_ms,
+            deadline_ms,
+            now_ms,
+        );
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.pending.unsent_offset_commits.push_back(request);
+        }
+        let result_tx = Arc::new(Mutex::new(Some(tx)));
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            auto_commit_sync_before_rebalance_with_retries(
                 inner,
                 request_rx,
                 result_tx,
@@ -1000,6 +1107,28 @@ impl RequestManager for CommitRequestManager {
     fn signal_close(&mut self) {
         let mut guard = self.inner.closing.lock().expect("commit manager closing flag poisoned");
         *guard = true;
+    }
+}
+
+// =========================================================================
+//                       MemberStateListener impl
+// =========================================================================
+
+/// Mirrors Java's `class CommitRequestManager implements RequestManager,
+/// MemberStateListener`. The listener body is a thin forward to the
+/// inherent `on_member_epoch_updated` method (which carries the
+/// "log + write to `MemberInfo`" implementation).
+///
+/// `on_group_assignment_updated` is left to the trait's default no-op
+/// because Java does not override it on `CommitRequestManager`
+/// (`CommitRequestManager.java:597-606` only implements
+/// `onMemberEpochUpdated`).
+impl MemberStateListener for CommitRequestManager {
+    fn on_member_epoch_updated(&self, member_epoch: Option<i32>, member_id: &str) {
+        // Forward to the inherent method which holds the existing
+        // log + state-mutation logic. `String::from` matches the inherent
+        // signature; the trait borrows the id, the inherent takes owned.
+        CommitRequestManager::on_member_epoch_updated(self, member_epoch, String::from(member_id));
     }
 }
 
@@ -1485,6 +1614,113 @@ async fn commit_sync_with_retries(
     }
 }
 
+/// Drives [`CommitRequestManager::maybe_auto_commit_sync_before_rebalance`].
+///
+/// Mirrors Java's `autoCommitSyncBeforeRebalanceWithRetries`
+/// (`CommitRequestManager.java:342`). On retriable errors:
+/// - if deadline expired → surface as [`KafkaError::timeout`] (Java's
+///   `maybeWrapAsTimeoutException`);
+/// - if [`Errors::UnknownTopicOrPartition`] → fatal (early-exit retries
+///   despite the error otherwise being retriable);
+/// - otherwise re-snapshot `subscriptions.allConsumed()` and re-enqueue.
+///
+/// Always clears the auto-commit inflight flag when the driver exits, so a
+/// later interval-based auto-commit can fire.
+#[allow(clippy::too_many_arguments)]
+async fn auto_commit_sync_before_rebalance_with_retries(
+    inner: Arc<CommitRequestManagerInner>,
+    initial_request_rx: oneshot::Receiver<CommitResult>,
+    result_tx: RebalanceFlushTx,
+    initial_offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    member_info: MemberInfo,
+    deadline_ms: i64,
+    now_ms: i64,
+) {
+    let mut request_rx = initial_request_rx;
+    let mut current_time_ms = now_ms;
+    let mut attempts: i32 = 0;
+    // Hold onto the most recent offsets so we can refresh from
+    // `subscriptions.allConsumed()` on retry — Java does this via
+    // `requestAttempt.offsets = subscriptions.allConsumed();` before
+    // recursing. Initial value is preserved for the no-mutation path.
+    let _last_offsets = initial_offsets;
+    let outcome: Result<(), KafkaError> = loop {
+        match request_rx.await {
+            Ok(Ok(_committed)) => break Ok(()),
+            Ok(Err(err)) => {
+                let is_retriable_for_rebalance = err.is_retriable() || err.error() == Errors::StaleMemberEpoch;
+                if !is_retriable_for_rebalance {
+                    log::debug!("Auto-commit sync before rebalance failed with non-retriable error: {err}");
+                    break Err(err);
+                }
+                // Java treats UNKNOWN_TOPIC_OR_PARTITION as fatal here
+                // (`CommitRequestManager.java:353-355`) even though it's
+                // otherwise retriable.
+                if err.error() == Errors::UnknownTopicOrPartition {
+                    log::debug!("Auto-commit sync before rebalance failed because topic or partition were deleted");
+                    break Err(err);
+                }
+                // Advance the local "now" by the configured retry backoff
+                // and check the deadline.
+                let backoff = inner.retry_backoff_ms.max(0);
+                current_time_ms = current_time_ms.saturating_add(backoff);
+                attempts += 1;
+                if current_time_ms >= deadline_ms {
+                    log::debug!("Auto-commit sync before rebalance timed out and won't be retried anymore");
+                    break Err(KafkaError::timeout(format!(
+                        "Failed to commit offsets within the deadline: {}",
+                        err.error().message()
+                    )));
+                }
+                // Re-snapshot `subscriptions.allConsumed()` for the retry
+                // (Java: `requestAttempt.offsets = subscriptions.allConsumed();`).
+                let refreshed = {
+                    let guard = inner.subscriptions.lock().expect("subscriptions poisoned");
+                    guard.all_consumed()
+                };
+                if refreshed.is_empty() {
+                    // Nothing left to commit — Java would still enqueue an
+                    // empty request and short-circuit on `requestAutoCommit`.
+                    // We replicate by resolving Ok here.
+                    break Ok(());
+                }
+                log::debug!(
+                    "Member {} will retry auto-commit of latest offsets after receiving retriable error {}",
+                    member_info.member_id,
+                    err.error().message()
+                );
+                let (mut retry_request, retry_rx) = OffsetCommitRequestState::new(
+                    refreshed,
+                    member_info.clone(),
+                    inner.retry_backoff_ms,
+                    inner.retry_backoff_max_ms,
+                    deadline_ms,
+                    current_time_ms,
+                );
+                retry_request.seed_failed_attempts(attempts, current_time_ms);
+                {
+                    let mut guard = inner.state.lock().expect("commit manager state poisoned");
+                    guard.pending.unsent_offset_commits.push_back(retry_request);
+                }
+                request_rx = retry_rx;
+            },
+            Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
+        }
+    };
+    // Clear the inflight flag regardless of outcome (Java:
+    // `autoCommitCallback` BiConsumer in `requestAutoCommit`).
+    {
+        let mut guard = inner.state.lock().expect("commit manager state poisoned");
+        if let Some(ac) = guard.auto_commit.as_mut() {
+            ac.set_inflight_commit_status(false);
+        }
+    }
+    let mut guard = result_tx.lock().expect("auto-commit-sync tx poisoned");
+    if let Some(tx) = guard.take() {
+        let _ = tx.send(outcome);
+    }
+}
+
 async fn fetch_offsets_with_retries(
     _inner: Arc<CommitRequestManagerInner>,
     request_rx: oneshot::Receiver<FetchResult>,
@@ -1551,8 +1787,33 @@ mod tests {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(
             crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
         )));
-        let metadata = Arc::new(ConsumerMetadata::from_config(&cfg, subs, ClusterResourceListeners::new()));
-        CommitRequestManager::new(&cfg, metadata, GROUP_ID, None, now_ms)
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &cfg,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        CommitRequestManager::new(&cfg, metadata, subs, GROUP_ID, None, now_ms)
+    }
+
+    /// Variant of `make_manager` that returns the manager along with the
+    /// `Arc<Mutex<SubscriptionState>>` so the test can seed
+    /// `subscriptions.allConsumed()` before invoking
+    /// `maybe_auto_commit_sync_before_rebalance`.
+    fn make_manager_with_subs(
+        now_ms: i64,
+        enable_auto_commit: bool,
+    ) -> (CommitRequestManager, Arc<Mutex<SubscriptionState>>) {
+        let cfg = test_config(enable_auto_commit);
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &cfg,
+            Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        let mgr = CommitRequestManager::new(&cfg, metadata, Arc::clone(&subs), GROUP_ID, None, now_ms);
+        (mgr, subs)
     }
 
     fn singleton_offset(tp: TopicPartition, offset: i64) -> HashMap<TopicPartition, OffsetAndMetadata> {
@@ -1921,5 +2182,173 @@ mod tests {
         state.seed_failed_attempts(3, 0);
         assert_eq!(state.state.num_attempts(), 3);
         assert_eq!(state.commit_sync_attempts, 3);
+    }
+
+    // ---------------------------------------------------------------------
+    //   Phase 10 (commit 2.5/N): MemberStateListener + auto-commit-sync-
+    //   before-rebalance tests.
+    // ---------------------------------------------------------------------
+
+    /// Phase 10 (commit 2.5/N): the trait-object upcast routes
+    /// `on_member_epoch_updated` through to the inherent method that writes
+    /// `MemberInfo`. Java:
+    /// `CommitRequestManager implements MemberStateListener`.
+    #[test]
+    fn member_state_listener_forwards_epoch_update() {
+        let manager = make_manager(0, false);
+        // Upcast to the trait object so we exercise the impl, not the
+        // inherent method directly.
+        let listener: &dyn MemberStateListener = &manager;
+        listener.on_member_epoch_updated(Some(13), "member-X");
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.member_info.member_id, "member-X");
+        assert_eq!(guard.member_info.member_epoch, Some(13));
+    }
+
+    /// Phase 10 (commit 2.5/N): the trait default for
+    /// `on_group_assignment_updated` is a no-op on `CommitRequestManager`
+    /// because Java does not override it (`CommitRequestManager.java:597`
+    /// implements only `onMemberEpochUpdated`).
+    #[test]
+    fn member_state_listener_on_group_assignment_updated_is_noop() {
+        let manager = make_manager(0, false);
+        let listener: &dyn MemberStateListener = &manager;
+        let mut tps = HashSet::new();
+        tps.insert(TopicPartition::new("t".to_string(), 0));
+        listener.on_group_assignment_updated(&tps); // must not panic
+        // Member info untouched by this trait method.
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.member_info.member_id, "");
+        assert_eq!(guard.member_info.member_epoch, None);
+    }
+
+    /// Phase 10 (commit 2.5/N): with auto-commit disabled,
+    /// `maybe_auto_commit_sync_before_rebalance` resolves immediately to
+    /// `Ok(())` and enqueues no request. Java:
+    /// `if (!autoCommitEnabled()) return CompletableFuture.completedFuture(null);`
+    #[tokio::test(flavor = "current_thread")]
+    async fn maybe_auto_commit_sync_before_rebalance_noop_when_disabled() {
+        let manager = make_manager(0, false);
+        let rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+        let result = rx.await.expect("sender alive");
+        assert!(result.is_ok(), "expected immediate Ok(()) when auto-commit disabled");
+        let guard = manager.inner.state.lock().unwrap();
+        assert!(
+            guard.pending.unsent_offset_commits.is_empty(),
+            "no commit request should be enqueued when auto-commit is disabled"
+        );
+    }
+
+    /// Phase 10 (commit 2.5/N): with auto-commit enabled but
+    /// `subscriptions.allConsumed()` empty (no assigned partitions with
+    /// valid positions), `maybe_auto_commit_sync_before_rebalance` resolves
+    /// immediately to `Ok(())` and enqueues no request. Java:
+    /// `requestAutoCommit` short-circuits on empty offsets.
+    #[tokio::test(flavor = "current_thread")]
+    async fn maybe_auto_commit_sync_before_rebalance_noop_when_no_consumed_offsets() {
+        let (manager, _subs) = make_manager_with_subs(0, true);
+        let rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+        let result = rx.await.expect("sender alive");
+        assert!(result.is_ok(), "expected immediate Ok(()) when no offsets to commit");
+        let guard = manager.inner.state.lock().unwrap();
+        assert!(guard.pending.unsent_offset_commits.is_empty());
+    }
+
+    /// Phase 10 (commit 2.5/N): with auto-commit enabled and
+    /// `subscriptions.allConsumed()` non-empty,
+    /// `maybe_auto_commit_sync_before_rebalance` enqueues an
+    /// `OffsetCommitRequestState` with the snapshotted offsets and resolves
+    /// `Ok(())` once a successful response is driven through the test seam.
+    #[tokio::test(flavor = "current_thread")]
+    async fn maybe_auto_commit_sync_before_rebalance_flushes_offsets() {
+        use crate::common::Node;
+        use crate::common::requests::ConcreteResponse;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+        let (manager, subs) = make_manager_with_subs(0, true);
+        // Seed `subscriptions.allConsumed()`: assign one partition and
+        // seek-validate so it has a valid position.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut partitions = HashSet::new();
+            partitions.insert(tp.clone());
+            s.assign_from_user(partitions).expect("assign_from_user");
+            s.seek(&tp, 100).expect("seek");
+        }
+        // Sanity-check: subscription state now reports an entry for `tp`.
+        {
+            let s = subs.lock().unwrap();
+            let consumed = s.all_consumed();
+            assert_eq!(consumed.len(), 1, "expected one all-consumed entry");
+            assert!(consumed.contains_key(&tp));
+        }
+
+        // Fire the method under test. The driver enqueues an
+        // `OffsetCommitRequestState` and spawns a retry loop awaiting its
+        // future.
+        let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+
+        // Ship the request via `poll_with_coordinator` to move the unsent
+        // entry to the network client, exposing its completion handler.
+        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let mut manager = manager;
+        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        assert_eq!(
+            poll_result.unsent_requests.len(),
+            1,
+            "expected exactly one unsent request enqueued by the rebalance flush"
+        );
+
+        // Synthesise a successful (all-zero error-code) OffsetCommitResponse
+        // and drive it into the request's completion handler.
+        let mut unsent_requests = poll_result.unsent_requests;
+        let unsent = unsent_requests.remove(0);
+        let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
+        response_data.insert(tp.clone(), Errors::None);
+        let response = ConcreteResponse::OffsetCommit(
+            crate::common::requests::OffsetCommitResponse::from_response_data(0, &response_data),
+        );
+        let header = crate::common::requests::RequestHeader::new(
+            &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
+            0,
+            "test-client",
+            0,
+        )
+        .expect("request header");
+        let client_response = crate::client_response::ClientResponse::new(
+            header,
+            None,
+            "localhost:9092",
+            0,
+            1,
+            false,
+            None,
+            None,
+            Some(response),
+        );
+        unsent.handler().on_complete(client_response);
+
+        // Drive the runtime so the spawned response handler runs and
+        // resolves the public future. Cap the loop so the test cannot
+        // hang on a regression.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            match public_rx.try_recv() {
+                Ok(Ok(())) => {
+                    // Inflight commit flag must be cleared so the next
+                    // interval-based auto-commit can fire.
+                    let guard = manager.inner.state.lock().unwrap();
+                    let inflight = guard.auto_commit.as_ref().map(|ac| ac.has_inflight_commit).unwrap_or(true);
+                    assert!(!inflight, "has_inflight_commit flag must be cleared on success");
+                    return;
+                },
+                Ok(Err(e)) => panic!("expected Ok(()) flush outcome, got {e:?}"),
+                Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
+                Err(oneshot::error::TryRecvError::Empty) => {},
+            }
+        }
+        panic!("maybe_auto_commit_sync_before_rebalance future did not resolve after 32 yields");
     }
 }

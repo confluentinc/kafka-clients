@@ -256,9 +256,12 @@ mod tests {
     fn commit_manager() -> CommitRequestManager {
         let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
-        let metadata =
-            std::sync::Arc::new(ConsumerMetadata::from_config(&config, subs, ClusterResourceListeners::new()));
-        CommitRequestManager::new(&config, metadata, "g", None, 0)
+        let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
+            &config,
+            std::sync::Arc::clone(&subs),
+            ClusterResourceListeners::new(),
+        ));
+        CommitRequestManager::new(&config, metadata, subs, "g", None, 0)
     }
 
     fn offsets_manager() -> OffsetsRequestManager {
