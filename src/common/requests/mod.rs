@@ -22,6 +22,8 @@ pub mod abstract_request;
 pub mod abstract_response;
 pub mod api_versions_request;
 pub mod api_versions_response;
+pub mod consumer_group_heartbeat_request;
+pub mod consumer_group_heartbeat_response;
 pub mod fetch_metadata;
 pub mod fetch_request;
 pub mod fetch_response;
@@ -50,6 +52,12 @@ pub use abstract_request::{ConcreteRequest, RequestBuilder};
 pub use abstract_response::ConcreteResponse;
 pub use api_versions_request::{ApiVersionsRequest, ApiVersionsRequestBuilder};
 pub use api_versions_response::{ApiVersionsResponse, ApiVersionsResponseBuilder};
+pub use consumer_group_heartbeat_request::{
+    CONSUMER_GENERATED_MEMBER_ID_REQUIRED_VERSION, ConsumerGroupHeartbeatRequest, ConsumerGroupHeartbeatRequestBuilder,
+    JOIN_GROUP_MEMBER_EPOCH, LEAVE_GROUP_MEMBER_EPOCH, LEAVE_GROUP_STATIC_MEMBER_EPOCH,
+    REGEX_RESOLUTION_NOT_SUPPORTED_MSG,
+};
+pub use consumer_group_heartbeat_response::ConsumerGroupHeartbeatResponse;
 pub use fetch_request::{FetchRequest, FetchRequestBuilder};
 pub use fetch_response::FetchResponse;
 pub use find_coordinator_request::{

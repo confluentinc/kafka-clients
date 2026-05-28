@@ -27,6 +27,7 @@ use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
 use crate::fetch_request_data::FetchRequestData;
 use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
@@ -38,6 +39,7 @@ use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
+use super::ConsumerGroupHeartbeatRequest;
 use super::FetchRequest;
 use super::FindCoordinatorRequest;
 use super::ListOffsetsRequest;
@@ -108,6 +110,8 @@ pub enum ConcreteRequest {
     ListOffsets(ListOffsetsRequest),
     /// An OffsetsForLeaderEpoch request.
     OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest),
+    /// A ConsumerGroupHeartbeat request (KIP-848).
+    ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest),
 }
 
 impl ConcreteRequest {
@@ -123,6 +127,7 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => r.version(),
             Self::ListOffsets(r) => r.version(),
             Self::OffsetsForLeaderEpoch(r) => r.version(),
+            Self::ConsumerGroupHeartbeat(r) => r.version(),
         }
     }
 
@@ -138,6 +143,7 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => r.api_key(),
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
+            Self::ConsumerGroupHeartbeat(r) => r.api_key(),
         }
     }
 
@@ -159,6 +165,7 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => SendBuilder::build_request_send(header, r.data()),
             Self::ListOffsets(r) => SendBuilder::build_request_send(header, r.data()),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -219,6 +226,9 @@ impl ConcreteRequest {
             Self::OffsetsForLeaderEpoch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::ConsumerGroupHeartbeat(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -240,6 +250,7 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => Self::serialize_body(r.data(), r.version()),
             Self::ListOffsets(r) => Self::serialize_body(r.data(), r.version()),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), r.version()),
+            Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data(), r.version()),
         }
     }
 
@@ -273,6 +284,7 @@ impl ConcreteRequest {
             Self::FindCoordinator(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::ListOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -332,6 +344,13 @@ impl ConcreteRequest {
                     api_version,
                 )))
             },
+            ApiKeys::CONSUMER_GROUP_HEARTBEAT => {
+                let data = ConsumerGroupHeartbeatRequestData::read(readable, api_version)?;
+                Ok(Self::ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -352,6 +371,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::FindCoordinator(r) => write!(f, "{r}"),
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
+            Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
         }
     }
 }
