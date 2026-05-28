@@ -18,6 +18,7 @@
 //! Stable user-facing re-exports live in `crate::consumer`.
 
 pub(crate) mod abstract_fetch;
+pub(crate) mod abstract_heartbeat_request_manager;
 pub(crate) mod auto_offset_reset_strategy;
 pub(crate) mod commit_request_manager;
 pub(crate) mod completed_fetch;
