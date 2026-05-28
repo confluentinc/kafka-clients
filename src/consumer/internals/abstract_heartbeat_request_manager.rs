@@ -55,8 +55,7 @@ pub(crate) const RETRY_BACKOFF_JITTER: f64 = 0.2;
 /// `ConsumerGroupHeartbeat` API.
 ///
 /// Java: `AbstractHeartbeatRequestManager.CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG`.
-pub(crate) const CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG: &str =
-    "The cluster does not support the new CONSUMER group protocol. \
+pub(crate) const CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG: &str = "The cluster does not support the new CONSUMER group protocol. \
      Set group.protocol=classic on the consumer configs to revert to the CLASSIC protocol \
      until the cluster is upgraded.";
 
@@ -214,7 +213,12 @@ impl AbstractHeartbeatRequestManager {
     /// splits the "advise the membership manager" half off because the
     /// abstract layer cannot mutate the membership state directly
     /// (the membership manager is held by the composing consumer).
-    pub(crate) fn classify_response_error(&mut self, error: Errors, error_message: &str, current_time_ms: i64) -> HeartbeatErrorAction {
+    pub(crate) fn classify_response_error(
+        &mut self,
+        error: Errors,
+        error_message: &str,
+        current_time_ms: i64,
+    ) -> HeartbeatErrorAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
         match error {
             Errors::NotCoordinator => {
@@ -254,9 +258,7 @@ impl AbstractHeartbeatRequestManager {
                 // stays in its current state to allow recovery if ACLs
                 // are added.
                 let _ = self.background_event_handler.add(
-                    BackgroundEvent::Error {
-                        error: KafkaError::with_message(error, error_message.to_string()),
-                    },
+                    BackgroundEvent::Error { error: KafkaError::with_message(error, error_message.to_string()) },
                     current_time_ms,
                 );
                 HeartbeatErrorAction::Handled
@@ -271,9 +273,7 @@ impl AbstractHeartbeatRequestManager {
             },
             Errors::InvalidRegularExpression => HeartbeatErrorAction::Fatal(KafkaError::with_message(
                 Errors::InvalidRegularExpression,
-                format!(
-                    "Invalid RE2J SubscriptionPattern provided in the call to subscribe. {error_message}"
-                ),
+                format!("Invalid RE2J SubscriptionPattern provided in the call to subscribe. {error_message}"),
             )),
             _ => HeartbeatErrorAction::DelegateToSpecific,
         }

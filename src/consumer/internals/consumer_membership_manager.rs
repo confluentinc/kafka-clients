@@ -27,12 +27,12 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 use std::sync::Mutex;
 
-use crate::common::{KafkaError, TopicPartition, Uuid};
+use crate::common::protocol::Errors;
+use crate::common::requests::ConsumerGroupHeartbeatResponse;
 use crate::common::requests::consumer_group_heartbeat_request::{
     JOIN_GROUP_MEMBER_EPOCH, LEAVE_GROUP_MEMBER_EPOCH, LEAVE_GROUP_STATIC_MEMBER_EPOCH,
 };
-use crate::common::requests::ConsumerGroupHeartbeatResponse;
-use crate::common::protocol::Errors;
+use crate::common::{KafkaError, TopicPartition, Uuid};
 use crate::consumer::close_options::GroupMembershipOperation;
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::events::background_event::BackgroundEvent;
@@ -222,11 +222,9 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `transitionToSendingLeaveGroup(boolean dueToExpiredPollTimer)`.
-    pub(crate) fn transition_to_sending_leave_group(
-        &self,
-        due_to_expired_poll_timer: bool,
-    ) -> Result<(), KafkaError> {
-        self.abstract_mm.transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
+    pub(crate) fn transition_to_sending_leave_group(&self, due_to_expired_poll_timer: bool) -> Result<(), KafkaError> {
+        self.abstract_mm
+            .transition_to_sending_leave_group(self.leave_group_epoch(), due_to_expired_poll_timer)
     }
 
     /// Java: `onHeartbeatSuccess(ConsumerGroupHeartbeatResponse)`.
@@ -234,10 +232,7 @@ impl ConsumerMembershipManager {
     ///
     /// Returns `Err(KafkaError)` for unexpected errors in the response
     /// body — Java throws `IllegalArgumentException`.
-    pub(crate) fn on_heartbeat_success(
-        &self,
-        response: &ConsumerGroupHeartbeatResponse,
-    ) -> Result<(), KafkaError> {
+    pub(crate) fn on_heartbeat_success(&self, response: &ConsumerGroupHeartbeatResponse) -> Result<(), KafkaError> {
         let data = response.data();
         if data.error_code != Errors::None.code() {
             return Err(KafkaError::illegal_argument(format!(
@@ -292,14 +287,12 @@ impl ConsumerMembershipManager {
 
         // Assignment field is only populated when there's a new target
         // assignment for the member.
-        if data.assignment.is_some() {
-            if !state.can_handle_new_assignment() {
-                log::debug!(
-                    "Ignoring new assignment received from server because member is in {} state.",
-                    state
-                );
-                return Ok(());
-            }
+        if data.assignment.is_some() && !state.can_handle_new_assignment() {
+            log::debug!(
+                "Ignoring new assignment received from server because member is in {} state.",
+                state
+            );
+            return Ok(());
         }
 
         // Build the new assignment from the response (release the
@@ -349,8 +342,8 @@ impl ConsumerMembershipManager {
             };
             subs.assigned_partitions().into_iter().collect::<Vec<_>>()
         };
-        if !partitions.is_empty() {
-            if let Err(e) = self
+        if !partitions.is_empty()
+            && let Err(e) = self
                 .abstract_mm
                 .invoke_rebalance_callback(
                     ConsumerRebalanceListenerMethodName::OnPartitionsLost,
@@ -358,12 +351,11 @@ impl ConsumerMembershipManager {
                     current_time_ms,
                 )
                 .await
-            {
-                log::error!(
-                    "onPartitionsLost callback invocation failed while releasing assignment after member failed with fatal error: {}",
-                    e
-                );
-            }
+        {
+            log::error!(
+                "onPartitionsLost callback invocation failed while releasing assignment after member failed with fatal error: {}",
+                e
+            );
         }
         self.abstract_mm.clear_assignment();
         Ok(())
@@ -426,8 +418,8 @@ impl ConsumerMembershipManager {
             };
             subs.assigned_partitions().into_iter().collect::<Vec<_>>()
         };
-        if !partitions.is_empty() {
-            if let Err(e) = self
+        if !partitions.is_empty()
+            && let Err(e) = self
                 .abstract_mm
                 .invoke_rebalance_callback(
                     ConsumerRebalanceListenerMethodName::OnPartitionsLost,
@@ -435,12 +427,11 @@ impl ConsumerMembershipManager {
                     current_time_ms,
                 )
                 .await
-            {
-                log::error!(
-                    "onPartitionsLost callback invocation failed while releasing assignment after member got fenced. Member will rejoin the group anyways. {}",
-                    e
-                );
-            }
+        {
+            log::error!(
+                "onPartitionsLost callback invocation failed while releasing assignment after member got fenced. Member will rejoin the group anyways. {}",
+                e
+            );
         }
         self.abstract_mm.clear_assignment();
 
@@ -512,8 +503,7 @@ impl ConsumerMembershipManager {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            !guard.current_assignment.is_none()
-                && resolved_assignment.partitions == guard.current_assignment.partitions
+            !guard.current_assignment.is_none() && resolved_assignment.partitions == guard.current_assignment.partitions
         };
         if short_circuit {
             let mut guard = match self.abstract_mm.inner.lock() {
@@ -541,9 +531,7 @@ impl ConsumerMembershipManager {
                 guard.auto_commit_enabled
             };
             if auto_commit {
-                log::debug!(
-                    "Auto-commit-before-rebalance not wired yet (Phase 10); proceeding with reconciliation."
-                );
+                log::debug!("Auto-commit-before-rebalance not wired yet (Phase 10); proceeding with reconciliation.");
             }
         }
 
@@ -720,8 +708,10 @@ impl ConsumerMembershipManager {
         }
         let state = self.state();
         let is_leaving_state = matches!(state, MemberState::PrepareLeaving | MemberState::Leaving);
-        let has_leave_operation = matches!(leave_op, GroupMembershipOperation::Default | GroupMembershipOperation::LeaveGroup)
-            || self.group_instance_id.is_some();
+        let has_leave_operation = matches!(
+            leave_op,
+            GroupMembershipOperation::Default | GroupMembershipOperation::LeaveGroup
+        ) || self.group_instance_id.is_some();
         is_leaving_state && has_leave_operation
     }
 
@@ -799,7 +789,11 @@ mod tests {
     ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(&config, subs.clone(), ClusterResourceListeners::new()));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
         let (tx, rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let mgr = ConsumerMembershipManager::new(

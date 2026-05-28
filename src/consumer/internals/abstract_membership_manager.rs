@@ -316,10 +316,7 @@ impl AbstractMembershipManager {
     /// `RECONCILING` or `JOINING`.
     ///
     /// Java: `processAssignmentReceived(Map<Uuid, SortedSet<Integer>>)`.
-    pub(crate) fn process_assignment_received(
-        &self,
-        assignment: HashMap<Uuid, Vec<i32>>,
-    ) -> Result<(), KafkaError> {
+    pub(crate) fn process_assignment_received(&self, assignment: HashMap<Uuid, Vec<i32>>) -> Result<(), KafkaError> {
         // Compute new target & whether we transition to RECONCILING.
         let (assigned_topic_ids, must_reconcile, state_after) = {
             let mut guard = match self.inner.lock() {
@@ -337,7 +334,12 @@ impl AbstractMembershipManager {
             let must_reconcile = !guard.target_assignment_reconciled();
             let state_after = guard.state;
             (
-                guard.current_target_assignment.partitions.keys().copied().collect::<HashSet<Uuid>>(),
+                guard
+                    .current_target_assignment
+                    .partitions
+                    .keys()
+                    .copied()
+                    .collect::<HashSet<Uuid>>(),
                 must_reconcile,
                 state_after,
             )
@@ -426,9 +428,7 @@ impl AbstractMembershipManager {
         }
 
         if unresolved_count > 0 {
-            log::debug!(
-                "Topic IDs in target assignment were not found in metadata; requesting an update."
-            );
+            log::debug!("Topic IDs in target assignment were not found in metadata; requesting an update.");
             self.metadata.metadata_arc().request_update(true);
         }
         resolved
@@ -461,13 +461,15 @@ impl AbstractMembershipManager {
             Ok(g) => g,
             Err(p) => p.into_inner(),
         };
-        let should_abort =
-            guard.state != MemberState::Reconciling || guard.rejoined_while_reconciliation_in_progress;
+        let should_abort = guard.state != MemberState::Reconciling || guard.rejoined_while_reconciliation_in_progress;
         if should_abort {
             let reason = if guard.rejoined_while_reconciliation_in_progress {
                 "the member has re-joined the group".to_string()
             } else {
-                format!("the member already transitioned out of the reconciling state into {}", guard.state)
+                format!(
+                    "the member already transitioned out of the reconciling state into {}",
+                    guard.state
+                )
             };
             log::info!("Interrupting reconciliation that is not relevant anymore because {}", reason);
             guard.reconciliation_in_progress = false;
@@ -712,11 +714,8 @@ impl AbstractMembershipManager {
         current_time_ms: i64,
     ) -> Result<(), KafkaError> {
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
-        let event = BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
-            method_name: method,
-            partitions,
-            ack: ack_tx,
-        };
+        let event =
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name: method, partitions, ack: ack_tx };
         // Enqueue. If the receiver is gone (consumer shutting down) we
         // surface the error like Java would on a closed queue.
         self.background_event_handler.add(event, current_time_ms)?;
@@ -734,10 +733,7 @@ impl AbstractMembershipManager {
                 // translation surfaces the error to the caller so they
                 // can choose to log + continue (state machine still
                 // advances).
-                log::warn!(
-                    "Rebalance listener callback returned error: {} (continuing rebalance)",
-                    e
-                );
+                log::warn!("Rebalance listener callback returned error: {} (continuing rebalance)", e);
                 Err(e)
             },
             Err(_recv_err) => {
@@ -759,10 +755,19 @@ mod tests {
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use tokio::sync::mpsc;
 
-    fn setup() -> (Arc<Mutex<SubscriptionState>>, Arc<ConsumerMetadata>, Arc<BackgroundEventHandler>, mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>) {
+    fn setup() -> (
+        Arc<Mutex<SubscriptionState>>,
+        Arc<ConsumerMetadata>,
+        Arc<BackgroundEventHandler>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let metadata = Arc::new(ConsumerMetadata::from_config(&config, subs.clone(), ClusterResourceListeners::new()));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
         let (tx, rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         (subs, metadata, beh, rx)
@@ -871,11 +876,7 @@ mod tests {
         let mgr_clone = mgr_for_bg.clone();
         let bg = tokio::spawn(async move {
             mgr_clone
-                .invoke_rebalance_callback(
-                    ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
-                    vec![],
-                    0,
-                )
+                .invoke_rebalance_callback(ConsumerRebalanceListenerMethodName::OnPartitionsAssigned, vec![], 0)
                 .await
         });
 
@@ -904,11 +905,7 @@ mod tests {
         let mgr_clone = mgr_for_bg.clone();
         let bg = tokio::spawn(async move {
             mgr_clone
-                .invoke_rebalance_callback(
-                    ConsumerRebalanceListenerMethodName::OnPartitionsLost,
-                    vec![],
-                    0,
-                )
+                .invoke_rebalance_callback(ConsumerRebalanceListenerMethodName::OnPartitionsLost, vec![], 0)
                 .await
         });
 

@@ -40,7 +40,11 @@
 
 #![allow(dead_code)]
 
+use std::sync::Arc;
+
 use super::commit_request_manager::CommitRequestManager;
+use super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
+use super::consumer_membership_manager::ConsumerMembershipManager;
 use super::coordinator_request_manager::CoordinatorRequestManager;
 use super::request_manager::RequestManager;
 use super::topic_metadata_request_manager::TopicMetadataRequestManager;
@@ -65,9 +69,18 @@ pub(crate) struct RequestManagers {
     /// configured. Java: `Optional<CommitRequestManager>
     /// commitRequestManager`.
     pub(crate) commit: Option<CommitRequestManager>,
+    /// KIP-848 consumer-group heartbeat manager — `Some` when a
+    /// consumer-protocol group is configured. Java:
+    /// `Optional<ConsumerHeartbeatRequestManager>`.
+    pub(crate) consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,
+    /// KIP-848 consumer-group membership manager — `Some` when a
+    /// consumer-protocol group is configured. Java:
+    /// `Optional<ConsumerMembershipManager>`. Held as `Arc` because
+    /// [`ConsumerHeartbeatRequestManager`] also holds a reference to
+    /// it; both managers share the same state via `Arc<Mutex<...>>`
+    /// inside the membership manager.
+    pub(crate) consumer_membership: Option<Arc<ConsumerMembershipManager>>,
     // Slots reserved for later phases (Option<_> with a phase-comment):
-    // pub(crate) consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,             // Phase 8
-    // pub(crate) consumer_membership: Option<ConsumerMembershipManager>,                  // Phase 8
     // pub(crate) offsets: OffsetsRequestManager,                                          // Phase 7d
     // pub(crate) fetch: FetchRequestManager,                                              // Phase 7b
     closed: bool,
@@ -80,8 +93,17 @@ impl RequestManagers {
         coordinator: Option<CoordinatorRequestManager>,
         topic_metadata: Option<TopicMetadataRequestManager>,
         commit: Option<CommitRequestManager>,
+        consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,
+        consumer_membership: Option<Arc<ConsumerMembershipManager>>,
     ) -> Self {
-        Self { coordinator, topic_metadata, commit, closed: false }
+        Self {
+            coordinator,
+            topic_metadata,
+            commit,
+            consumer_heartbeat,
+            consumer_membership,
+            closed: false,
+        }
     }
 
     /// Returns the managers in deterministic registration order
@@ -100,15 +122,37 @@ impl RequestManagers {
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
-        let Self { coordinator, topic_metadata, commit, closed: _ } = self;
+        //
+        // `consumer_membership` is held as `Arc<...>` (it's shared with
+        // `consumer_heartbeat`) so we cannot produce a `&mut dyn
+        // RequestManager` from it for inclusion here. This is fine:
+        // Java's `AbstractMembershipManager.poll(...)` returns
+        // `PollResult.EMPTY` and only calls `maybeReconcile(false)` as
+        // a side effect. The Rust translation moves the reconcile
+        // driver out of the sync `entries()` loop and into the bg
+        // task (Phase 10), which can `.await` the async
+        // `ConsumerMembershipManager::reconcile`. Skipping the
+        // membership manager from `entries()` does not lose any
+        // request-emitting work.
+        let Self {
+            coordinator,
+            topic_metadata,
+            commit,
+            consumer_heartbeat,
+            consumer_membership: _,
+            closed: _,
+        } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
-        // Order matches Java's constructor: coordinator → commit → ... →
-        // topic_metadata → fetch. Other slots land in later phases.
+        // Order matches Java's constructor: coordinator → commit →
+        // heartbeat → (membership skipped) → topic_metadata → fetch.
         if let Some(c) = coordinator.as_mut() {
             list.push(c as &mut dyn RequestManager);
         }
         if let Some(c) = commit.as_mut() {
             list.push(c as &mut dyn RequestManager);
+        }
+        if let Some(h) = consumer_heartbeat.as_mut() {
+            list.push(h as &mut dyn RequestManager);
         }
         if let Some(t) = topic_metadata.as_mut() {
             list.push(t as &mut dyn RequestManager);
@@ -187,14 +231,14 @@ mod tests {
     /// Verifies that `entries()` is empty when both manager slots are `None`.
     #[test]
     fn entries_empty_when_no_managers() {
-        let mut rm = RequestManagers::new(None, None, None);
+        let mut rm = RequestManagers::new(None, None, None, None, None);
         assert!(rm.entries().is_empty());
     }
 
     /// Verifies that `entries()` returns the coordinator when present.
     #[test]
     fn entries_includes_coordinator_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None, None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None);
         let entries = rm.entries();
         assert_eq!(1, entries.len());
         // We can call the trait method to confirm the upcast works.
@@ -206,7 +250,7 @@ mod tests {
     /// registration order (coordinator → topic_metadata).
     #[test]
     fn entries_includes_topic_metadata_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None, None, None);
         let entries = rm.entries();
         assert_eq!(2, entries.len());
     }
@@ -215,7 +259,7 @@ mod tests {
     /// the flag; subsequent calls are no-ops.
     #[test]
     fn close_is_idempotent() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None, None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None);
         assert!(!rm.is_closed());
         rm.close();
         assert!(rm.is_closed());
@@ -228,7 +272,7 @@ mod tests {
     /// repeated calls, regardless of `Option` field shuffling.
     #[test]
     fn entries_order_is_deterministic() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None, None, None);
         let names_round_one: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         let names_round_two: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         assert_eq!(names_round_one, names_round_two);
@@ -238,7 +282,7 @@ mod tests {
     /// in registration order (coordinator → commit → topic_metadata).
     #[test]
     fn entries_includes_commit_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None, Some(commit_manager()));
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, Some(commit_manager()), None, None);
         let entries = rm.entries();
         assert_eq!(2, entries.len());
     }
