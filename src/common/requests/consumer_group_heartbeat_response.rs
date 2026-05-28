@@ -77,8 +77,11 @@ impl ConsumerGroupHeartbeatResponse {
     }
 
     /// Returns whether the client should throttle upon receiving this response.
+    /// Java's `ConsumerGroupHeartbeatResponse` does NOT override
+    /// `shouldClientThrottle`; it inherits the `AbstractResponse` default
+    /// which returns `false`. Heartbeat responses are not throttled.
     pub fn should_client_throttle(&self, _version: i16) -> bool {
-        true
+        false
     }
 
     /// Returns error counts by [`Errors`].
@@ -146,6 +149,18 @@ mod tests {
         let resp = ConsumerGroupHeartbeatResponse::new(data);
         let counts = resp.error_counts();
         assert_eq!(counts.get(&Errors::FencedMemberEpoch).copied().unwrap_or(0), 1);
+    }
+
+    /// Verifies `should_client_throttle` returns `false` for every supported
+    /// version. Java's `ConsumerGroupHeartbeatResponse` does NOT override
+    /// `shouldClientThrottle` (inherits `AbstractResponse` default = false).
+    #[test]
+    fn test_should_client_throttle_is_false_for_every_version() {
+        let data = ConsumerGroupHeartbeatResponseData::new();
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        for v in 0i16..=4 {
+            assert!(!resp.should_client_throttle(v), "v{v} should NOT be throttled");
+        }
     }
 
     /// Verifies `throttle_time_ms()` and `maybe_set_throttle_time_ms()`.

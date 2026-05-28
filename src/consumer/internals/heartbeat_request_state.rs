@@ -145,18 +145,28 @@ impl HeartbeatRequestState {
     }
 
     /// Update the heartbeat interval. If the interval hasn't changed, this
-    /// is a no-op; otherwise the timer is updated and reset to the new
-    /// interval (Java's `Timer.updateAndReset(intervalMs)`).
+    /// is a no-op; otherwise the timer is refreshed to `current_time_ms`
+    /// and reset to fire after `heartbeat_interval_ms` from that moment.
+    /// Mirrors Java's `Timer.updateAndReset(intervalMs)` which calls
+    /// `update()` internally to snap `currentTimeMs` to `time.milliseconds()`
+    /// before computing the new deadline.
+    ///
+    /// **Signature deviation from Java**: Java's `Timer` owns a `Time`
+    /// reference and self-updates inside `updateAndReset`. Rust does not
+    /// thread a `Time` into `HeartbeatRequestState`; callers (notably
+    /// `AbstractHeartbeatRequestManager.onResponse`) pass `current_time_ms`
+    /// explicitly so the timer baseline matches Java's self-update.
     ///
     /// Java: `updateHeartbeatIntervalMs(long heartbeatIntervalMs)`.
-    pub(crate) fn update_heartbeat_interval_ms(&mut self, heartbeat_interval_ms: i64) {
+    pub(crate) fn update_heartbeat_interval_ms(&mut self, current_time_ms: i64, heartbeat_interval_ms: i64) {
         if self.heartbeat_interval_ms == heartbeat_interval_ms {
             return;
         }
         self.heartbeat_interval_ms = heartbeat_interval_ms;
-        // Timer.updateAndReset(intervalMs): refresh current time observation,
-        // then reset to start a fresh interval window from "now".
-        self.timer_expires_at_ms = self.timer_last_update_ms + heartbeat_interval_ms;
+        // Java's Timer.updateAndReset: snap currentTimeMs first, then
+        // compute the new deadline from there.
+        self.timer_last_update_ms = current_time_ms;
+        self.timer_expires_at_ms = current_time_ms + heartbeat_interval_ms;
     }
 
     /// Forwards to the inner [`RequestState`].
@@ -188,11 +198,12 @@ impl HeartbeatRequestState {
 impl fmt::Display for HeartbeatRequestState {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Java: super.toStringBase() + ", remainingMs=" + remainingMs + ", heartbeatIntervalMs="
+        // Java's Timer.remainingMs() clamps at 0; mirror that.
         write!(
             f,
             "HeartbeatRequestState{{{}, remainingMs={}, heartbeatIntervalMs={}}}",
             self.request_state.to_string_base(),
-            self.timer_expires_at_ms - self.timer_last_update_ms,
+            (self.timer_expires_at_ms - self.timer_last_update_ms).max(0),
             self.heartbeat_interval_ms
         )
     }
@@ -250,6 +261,10 @@ mod tests {
     }
 
     /// Translated from `HeartbeatRequestStateTest#testUpdateHeartbeatIntervalMs`.
+    /// Java: at t=1100, calls `updateHeartbeatIntervalMs(2 * HEARTBEAT_INTERVAL_MS)`
+    /// directly. Java's `Timer.updateAndReset` self-updates from `time.milliseconds()`
+    /// so the deadline becomes `1100 + 2000 = 3100`, and
+    /// `timeToNextHeartbeatMs(1100) == 2000`.
     #[test]
     fn test_update_heartbeat_interval_ms() {
         let mut now = 0i64;
@@ -257,11 +272,9 @@ mod tests {
         let updated_interval = 2 * HEARTBEAT_INTERVAL_MS;
 
         now += HEARTBEAT_INTERVAL_MS + 100;
-        // Java calls update() inside can_send_request — refresh the timer's
-        // "now" first by calling `can_send_request` (so the subsequent
-        // `update_heartbeat_interval_ms` resets relative to the right baseline).
-        let _ = state.can_send_request(now);
-        state.update_heartbeat_interval_ms(updated_interval);
+        // No prior refresh — pass current_time_ms explicitly to mirror Java's
+        // Timer.updateAndReset self-update.
+        state.update_heartbeat_interval_ms(now, updated_interval);
 
         assert!(!state.can_send_request(now));
         assert_eq!(2 * HEARTBEAT_INTERVAL_MS, state.time_to_next_heartbeat_ms(now));
@@ -275,9 +288,7 @@ mod tests {
         let mut state = make_state(now);
 
         now += HEARTBEAT_INTERVAL_MS + 100;
-        // Refresh the timer's "now" observation, then update with the same value.
-        let _ = state.can_send_request(now);
-        state.update_heartbeat_interval_ms(HEARTBEAT_INTERVAL_MS);
+        state.update_heartbeat_interval_ms(now, HEARTBEAT_INTERVAL_MS);
 
         assert_eq!(HEARTBEAT_INTERVAL_MS, state.heartbeat_interval_ms());
         assert!(state.can_send_request(now));
