@@ -19,6 +19,7 @@
 
 pub(crate) mod abstract_fetch;
 pub(crate) mod auto_offset_reset_strategy;
+pub(crate) mod commit_request_manager;
 pub(crate) mod completed_fetch;
 pub(crate) mod consumer_interceptors;
 pub(crate) mod consumer_metadata;
