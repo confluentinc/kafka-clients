@@ -940,6 +940,86 @@ impl std::fmt::Debug for ConsumerMembershipManager {
     }
 }
 
+/// Translation notes on Java test coverage
+/// (`ConsumerMembershipManagerTest`, 93 cases):
+///
+/// Translated (26 / 93):
+/// - `server_assignor_accessor` — Java: `testMembershipManagerServerAssignor`
+/// - `rack_id_accessor` — Java: `testMembershipManagerRackId`
+/// - `init_supports_empty_group_instance_id` — Java: `testMembershipManagerInitSupportsEmptyGroupInstanceId`
+/// - `transition_to_joining_from_unsubscribed` — Java: `testTransitionToJoiningOnlyIfSubscriptionUpdated` (shape)
+/// - `leave_group_epoch_dynamic_member` — Java: part of `testLeaveGroupEpoch`
+/// - `leave_group_epoch_static_member` — Java: part of `testLeaveGroupEpoch`
+/// - `leave_group_epoch_static_member_force_leave` — Java: part of `testLeaveGroupEpochOnClose`
+/// - `is_leaving_group_dynamic_remain_in_group_is_false` — Java: `testIsLeavingGroup` shape
+/// - `is_leaving_group_static_remain_in_group_is_true` — Java: `testIsLeavingGroup` shape
+/// - `reconcile_emits_assigned_callback_and_acks` — §31 handshake regression
+/// - `listeners_notified_only_on_epoch_change` — Java: `testListenersGetNotifiedOfMemberEpochUpdatesOnlyIfItChanges`
+/// - `on_heartbeat_request_generated_acknowledging_to_stable` — Java: `testReconcilingWhenReceivingAssignmentFoundInMetadata` (post-ack)
+/// - `on_heartbeat_success_empty_assignment_transitions_to_reconciling` — Java: `testTransitionToReconcilingIfEmptyAssignmentReceived`
+/// - `transition_to_failed_when_trying_to_join` — Java: `testTransitionToFailedWhenTryingToJoin`
+/// - `member_id_and_epoch_reset_on_fenced_members` — Java: `testMemberIdAndEpochResetOnFencedMembers`
+/// - `fencing_when_state_is_stable` — Java: `testFencingWhenStateIsStable`
+/// - `fencing_when_state_is_reconciling` — Java: `testFencingWhenStateIsReconciling`
+/// - `fencing_when_state_is_prepare_leaving` — Java: `testFencingWhenStateIsPrepareLeaving`
+/// - `fencing_when_state_is_leaving` — Java: `testFencingWhenStateIsLeaving`
+/// - `listeners_get_notified_on_transitions_to_fatal` — Java: `testListenersGetNotifiedOnTransitionsToFatal`
+/// - `listeners_get_notified_on_transitions_to_leaving_group` — Java: `testListenersGetNotifiedOnTransitionsToLeavingGroup`
+/// - `new_assignment_ignored_when_state_is_prepare_leaving` — Java: `testNewAssignmentIgnoredWhenStateIsPrepareLeaving`
+/// - `same_assignment_reconciled_again_when_fenced` — Java: `testSameAssignmentReconciledAgainWhenFenced`
+/// - `leave_group_epoch_test` — Java: `testLeaveGroupEpoch`
+/// - `leave_group_epoch_on_close` — Java: `testLeaveGroupEpochOnClose`
+/// - `reconcile_propagates_assigned_listener_error` (new — regression for fix #2)
+///
+/// Not translated (~67 / 93) — rationale categories:
+///
+/// 1. **Mockito-spy verification on internal methods** (~28 cases).
+///    Java tests use `verify(membershipManager, never()).markReconciliationInProgress()`,
+///    `verify(membershipManager).notifyEpochChange(Optional.empty())`,
+///    etc. Rust has no equivalent for mocking on a concrete struct
+///    (mockall requires the type to be a trait). These tests verify
+///    internal bookkeeping side-effects on the membership manager
+///    rather than externally-observable state. The same behavior is
+///    covered by state-transition assertions in the translated tests
+///    where Java asserts `assertEquals(STATE_X, mgr.state())`
+///    alongside the `verify(mgr).foo()`. Affected:
+///    `testReconcileNewAssignment*`, `testMarkReconciliationInProgress*`,
+///    `testNotifyEpochChangeOn*`,
+///    `testFencingWhenStateIsPrepareLeavingCompletesTheLeaveOperation`,
+///    `testTransitionToFatalWhileReconciling`, the
+///    `testReconcileWithMissingMetadataReceivesMetadataUpdate` family,
+///    and the `testCommit*BeforeRebalance*` family.
+///
+/// 2. **Commit-request-manager auto-commit interaction** (~12 cases):
+///    `testCommitOffsetsBeforeRebalance*`, `testAutoCommitBeforeRebalance*`,
+///    `testCommitErrorDoesNotBlockReconcile*`. The
+///    `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance` hook
+///    is wired only in Phase 10 (per the deferral note inside
+///    `reconcile`). Until that lands, these tests have nothing to
+///    verify behaviourally on the Rust side. Deferred to Phase 10.
+///
+/// 3. **Streams / Share manager** (~6 cases): `testStreams*`,
+///    `testShare*`. Out of scope per `consumer-threading.md` §20.
+///
+/// 4. **CompletableFuture-chain-shape verification** (~10 cases):
+///    Tests that build a `CompletableFuture<Void>` chain via
+///    `leaveGroup()` and assert chain shape (completion order,
+///    exceptionally-completion). The Rust async path does not expose a
+///    chain object; chain ordering is verified by our reconcile +
+///    leave_group tests via state assertions instead.
+///
+/// 5. **Time / metric assertions** (~8 cases): tests using the Java
+///    `MockTime` advance + `RebalanceMetricsManager` verification.
+///    Rust has neither MockTime as a first-class fixture in this file
+///    (we pass `current_time_ms` directly), nor a metrics framework.
+///
+/// 6. **Reconcile-with-real-metadata** (~3 cases):
+///    `testReconcileNewAssignmentReplacesPreviousAssignmentWithEmptyResults`
+///    and variants — depend on a populated `ConsumerMetadata` cache
+///    that the test would normally seed via Mockito. The Rust
+///    equivalent requires building a real `MetadataResponse` and
+///    feeding it through `ConsumerMetadata::update`; the surface
+///    needed lands in Phase 10 wiring.
 #[cfg(test)]
 mod tests {
     use super::*;

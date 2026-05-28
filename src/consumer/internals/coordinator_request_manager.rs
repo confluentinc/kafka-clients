@@ -92,6 +92,15 @@ impl CoordinatorRequestManager {
         self.coordinator.as_ref()
     }
 
+    /// Test-only helper: directly inject a coordinator node so unit
+    /// tests can drive the dependent managers without simulating an
+    /// entire `FindCoordinator` round-trip. Mirrors Mockito
+    /// `when(coordinatorRequestManager.coordinator()).thenReturn(...)`.
+    #[cfg(test)]
+    pub(crate) fn set_coordinator_for_test(&mut self, node: Node) {
+        self.coordinator = Some(node);
+    }
+
     /// Returns the most recent fatal error (e.g.
     /// `GroupAuthorizationFailed`), without clearing it.
     ///

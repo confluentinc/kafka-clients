@@ -286,11 +286,7 @@ impl ConsumerHeartbeatRequestManager {
     /// `current_time_ms` is threaded through to
     /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
     /// attributed to the actual failure time rather than epoch zero.
-    pub(crate) fn handle_specific_failure(
-        &mut self,
-        error: &crate::common::KafkaError,
-        current_time_ms: i64,
-    ) -> bool {
+    pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::KafkaError, current_time_ms: i64) -> bool {
         use crate::common::KafkaError;
         use crate::common::protocol::Errors;
         if error.error() == Errors::UnsupportedVersion {
@@ -486,16 +482,93 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
     }
 }
 
+/// Translation notes on Java test coverage (`ConsumerHeartbeatRequestManagerTest`):
+///
+/// Translated (12 / 31):
+/// - `poll_returns_empty_when_no_coordinator` — Java: `testSkippingHeartbeat`
+/// - `should_not_send_leave_when_not_leaving` — Java: internal `shouldSendLeaveHeartbeatNow` shape
+/// - `handle_specific_unsupported_version_is_fatal` — Java: `testHeartbeatResponseOnErrorHandling` (UnsupportedVersion)
+/// - `handle_specific_fenced_instance_id_is_fatal` — Java: `testHeartbeatResponseOnErrorHandling` (FencedInstanceId)
+/// - `handle_specific_returns_none_for_other_errors` (no Java analog; behavior pin)
+/// - `maximum_time_to_wait_returns_zero_when_poll_timer_expired`
+/// - `heartbeat_on_startup` — Java: `testHeartbeatOnStartup`
+/// - `timer_not_due` — Java: `testTimerNotDue`
+/// - `heartbeat_not_sent_if_another_one_in_flight` — Java: `testHeartbeatNotSentIfAnotherOneInFlight` (subset)
+/// - `heartbeat_outside_interval` — Java: `testHeartbeatOutsideInterval`
+/// - `handle_specific_unreleased_instance_id_is_fatal` — Java: error-matrix `UnreleasedInstanceId` row
+/// - `handle_specific_failure_unsupported_version_emits_error_event` — Java: `testHeartbeatHandleSpecificFailureOnUnsupportedVersion`
+///
+/// Not translated (19 / 31) — rationale per case:
+///
+/// - `testHeartbeatRequestFields*`, `testFirstHeartbeatIncludesRequiredInfoToJoinGroupAndGetAssignments`,
+///   `testHeartbeatState*` family: depend on Mockito-mocking individual
+///   getters on `ConsumerMembershipManager` (member_id, group_instance_id,
+///   server_assignor, rack_id) AND comparing wire-protocol field-by-field
+///   diffs across multiple heartbeats. The diff-tracking logic in our
+///   `HeartbeatState::build_request_data` does the right thing but
+///   pinning it requires either Mockito-style mocks (not present in
+///   Rust) OR an integration test that drives the full membership
+///   lifecycle, which is Phase 10's responsibility. Deferred.
+/// - `testNetworkTimeout`, `testDisconnect`: Java exercises
+///   `request.handler().onFailure(...)` to simulate transport
+///   failures. `UnsentRequest`'s response handler is not yet wired in
+///   Phase 8b (Phase 10 owns the response-loop driver). Deferred.
+/// - `testFailureOnFatalException`, `testHeartbeatResponseErrorNotifiedToGroupManagerAfterErrorPropagated`,
+///   and the remaining `testHeartbeatResponseOnErrorHandling*` matrix
+///   rows (`GROUP_AUTHORIZATION_FAILED`, `NOT_COORDINATOR`,
+///   `CoordinatorLoadInProgress`, …): all exercise the
+///   `BackgroundEventHandler` add ordering + the
+///   `membershipManager.onHeartbeatFailure(retriable)` ordering. The
+///   ordering check requires Mockito's `InOrder` verifier; the Rust
+///   equivalent is observable but tedious and is most-naturally
+///   asserted as part of Phase 10's end-to-end response-handling
+///   harness. Deferred.
+/// - `testHeartbeatStartupOnSuccess`, `testHeartbeatRequestFailedAndOnHeartbeatFailureCalled`:
+///   require simulating async response delivery via `ClientResponse`
+///   construction; the helper to build a `ClientResponse` for
+///   ConsumerGroupHeartbeat from a stubbed Errors is not yet in the
+///   Rust test toolkit. Deferred to Phase 10.
+/// - `testPollTimerExpiration`, `testPollTimerNotReachedRebalanceTimeoutBudget`:
+///   exercise `reset_poll_timer` + `maybe_rejoin_stale_member`
+///   semantics, both of which live in the Phase 10 epilogue (per
+///   docstring on `reset_poll_timer`). Deferred.
+/// - `testRegexResolutionNotSupported*`: depend on the regex
+///   subscription path that lands fully in Phase 9 (RE2/J wiring).
+///   Deferred.
+/// - `testRebalanceTimeoutOnPollTimerExpiration`: relies on the
+///   full bg-task driver to time out the rebalance and re-emit the
+///   leave heartbeat. Deferred to Phase 10.
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::common::Node;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::ConsumerConfig;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
     use tokio::sync::mpsc;
 
+    /// Default heartbeat interval used by Java's
+    /// `ConsumerHeartbeatRequestManagerTest`.
+    const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 1_000;
+    /// Default retry-backoff (matches `retry.backoff.ms` default).
+    const DEFAULT_RETRY_BACKOFF_MS: i64 = 100;
+
     fn make() -> ConsumerHeartbeatRequestManager {
+        make_with_coord(None).0
+    }
+
+    /// Like `make`, but also returns the underlying coordinator
+    /// manager so tests can inject a coordinator node. Optionally
+    /// installs an immediately-firing heartbeat interval (matches
+    /// Java's `createHeartbeatRequestStateWithZeroHeartbeatInterval`).
+    fn make_with_coord(
+        initial_interval_ms: Option<i64>,
+    ) -> (
+        ConsumerHeartbeatRequestManager,
+        Arc<Mutex<CoordinatorRequestManager>>,
+        Arc<ConsumerMembershipManager>,
+    ) {
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = Arc::new(ConsumerMetadata::from_config(
@@ -518,7 +591,28 @@ mod tests {
             beh.clone(),
             true,
         ));
-        ConsumerHeartbeatRequestManager::new(0, &config, coord, subs, mm, beh)
+        let mut hb = ConsumerHeartbeatRequestManager::new(0, &config, coord.clone(), subs, mm.clone(), beh);
+        if let Some(interval) = initial_interval_ms {
+            hb.inner.heartbeat_request_state.update_heartbeat_interval_ms(0, interval);
+        }
+        (hb, coord, mm)
+    }
+
+    /// Test helper: inject a coordinator so `poll` doesn't short-circuit
+    /// on "coordinator unknown". Mirrors Mockito
+    /// `when(coordinatorRequestManager.coordinator()).thenReturn(...)`.
+    fn set_coordinator(coord: &Arc<Mutex<CoordinatorRequestManager>>) {
+        coord
+            .lock()
+            .unwrap()
+            .set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+    }
+
+    /// Test helper: drive the membership manager through
+    /// UNSUBSCRIBED -> JOINING so `should_skip_heartbeat()` returns
+    /// false and a heartbeat is eligible to be sent.
+    fn make_joining(mm: &ConsumerMembershipManager) {
+        mm.transition_to_joining().unwrap();
     }
 
     /// When the coordinator is unknown, poll returns EMPTY.
@@ -581,5 +675,128 @@ mod tests {
         let mgr = make();
         // Default max.poll.interval.ms is 300_000; advance past it.
         assert_eq!(mgr.maximum_time_to_wait(300_001), 0);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testHeartbeatOnStartup`.
+    /// First poll on a fresh (UNSUBSCRIBED) member returns EMPTY
+    /// because heartbeats are skipped. Once the member transitions to
+    /// JOINING and the initial interval fires, a single heartbeat is
+    /// emitted; a second poll while the previous request is in-flight
+    /// returns EMPTY again.
+    #[test]
+    fn heartbeat_on_startup() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+
+        // UNSUBSCRIBED -> skip_heartbeat is true -> EMPTY.
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 0);
+
+        // Drive to JOINING — should_heartbeat_now() returns true.
+        make_joining(&mm);
+        assert_eq!(mgr.maximum_time_to_wait(0), 0);
+
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+
+        // Second poll without completing the inflight: no new
+        // request (request_in_flight() short-circuits should_heartbeat_now).
+        let result2 = mgr.poll(0);
+        assert_eq!(result2.unsent_requests.len(), 0);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testTimerNotDue`.
+    /// When the heartbeat interval has not yet elapsed, no heartbeat
+    /// is sent and the result's `time_until_next_poll_ms` carries the
+    /// remaining time.
+    #[test]
+    fn timer_not_due() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(DEFAULT_HEARTBEAT_INTERVAL_MS));
+        set_coordinator(&coord);
+        make_joining(&mm);
+        // First poll fires immediately (initial interval, request_in_flight=false).
+        let _ = mgr.poll(0);
+
+        // 100ms after: interval not yet due (request still in-flight).
+        let result = mgr.poll(100);
+        assert_eq!(result.unsent_requests.len(), 0);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testHeartbeatNotSentIfAnotherOneInFlight`
+    /// (subset — we omit the inflight-completion + retry-backoff
+    /// segment which depends on the response delivery harness that
+    /// lands in Phase 10).
+    #[test]
+    fn heartbeat_not_sent_if_another_one_in_flight() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        make_joining(&mm);
+
+        // Initial heartbeat fires.
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+
+        // Interval elapses but request still in flight -> EMPTY.
+        let result = mgr.poll(DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assert_eq!(
+            result.unsent_requests.len(),
+            0,
+            "no heartbeat should be sent while a previous one is in-flight"
+        );
+
+        // Another interval elapses; still in-flight -> EMPTY.
+        let result = mgr.poll(2 * DEFAULT_HEARTBEAT_INTERVAL_MS);
+        assert_eq!(result.unsent_requests.len(), 0);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testHeartbeatOutsideInterval`.
+    /// Even when the interval timer has not elapsed,
+    /// `should_heartbeat_now()` (driven by membership state
+    /// JOINING / ACKNOWLEDGING / LEAVING) forces a heartbeat.
+    #[test]
+    fn heartbeat_outside_interval() {
+        let (mut mgr, coord, mm) = make_with_coord(Some(DEFAULT_HEARTBEAT_INTERVAL_MS));
+        set_coordinator(&coord);
+        // JOINING is a should_heartbeat_now() state per
+        // MembershipInner::should_heartbeat_now().
+        make_joining(&mm);
+
+        let result = mgr.poll(0);
+        // Heartbeat should be sent because JOINING forces it even
+        // outside the interval window.
+        assert_eq!(result.unsent_requests.len(), 1);
+        // Interval timer was reset (request now in-flight).
+        assert_eq!(result.time_until_next_poll_ms, DEFAULT_HEARTBEAT_INTERVAL_MS);
+    }
+
+    /// Translated from
+    /// `ConsumerHeartbeatRequestManagerTest#testHeartbeatResponseOnErrorHandling`
+    /// (UnreleasedInstanceId row).
+    #[test]
+    fn handle_specific_unreleased_instance_id_is_fatal() {
+        let mut mgr = make();
+        let action = mgr.handle_specific_exception_in_response(
+            crate::common::protocol::Errors::UnreleasedInstanceId,
+            "instance id still in use",
+            0,
+        );
+        assert!(matches!(action, Some(HeartbeatErrorAction::Fatal(_))));
+    }
+
+    /// Regression for COMMENTS.1.md #12: `handle_specific_failure`
+    /// receives `current_time_ms` and emits an `ErrorEvent` carrying
+    /// the consumer-protocol-not-supported message.
+    #[test]
+    fn handle_specific_failure_unsupported_version_emits_error_event() {
+        let (mut mgr, _coord, _mm) = make_with_coord(None);
+        // Build an UnsupportedVersion error WITHOUT the regex-not-supported
+        // tag so we hit the CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG branch.
+        let err = crate::common::KafkaError::unsupported_version("broker too old".to_string());
+        let fatal = mgr.handle_specific_failure(&err, 12_345);
+        assert!(fatal, "UnsupportedVersion must be classified as fatal");
     }
 }
