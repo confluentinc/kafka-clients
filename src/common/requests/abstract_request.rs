@@ -32,6 +32,7 @@ use crate::find_coordinator_request_data::FindCoordinatorRequestData;
 use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
 use crate::offset_commit_request_data::OffsetCommitRequestData;
+use crate::offset_fetch_request_data::OffsetFetchRequestData;
 use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
 use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
@@ -44,6 +45,7 @@ use super::FindCoordinatorRequest;
 use super::ListOffsetsRequest;
 use super::MetadataRequest;
 use super::OffsetCommitRequest;
+use super::OffsetFetchRequest;
 use super::OffsetsForLeaderEpochRequest;
 use super::ProduceRequest;
 use super::RequestAndSize;
@@ -112,6 +114,8 @@ pub enum ConcreteRequest {
     OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest),
     /// An OffsetCommit request.
     OffsetCommit(OffsetCommitRequest),
+    /// An OffsetFetch request.
+    OffsetFetch(OffsetFetchRequest),
 }
 
 impl ConcreteRequest {
@@ -128,6 +132,7 @@ impl ConcreteRequest {
             Self::ListOffsets(r) => r.version(),
             Self::OffsetsForLeaderEpoch(r) => r.version(),
             Self::OffsetCommit(r) => r.version(),
+            Self::OffsetFetch(r) => r.version(),
         }
     }
 
@@ -144,6 +149,7 @@ impl ConcreteRequest {
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::OffsetCommit(r) => r.api_key(),
+            Self::OffsetFetch(r) => r.api_key(),
         }
     }
 
@@ -166,6 +172,7 @@ impl ConcreteRequest {
             Self::ListOffsets(r) => SendBuilder::build_request_send(header, r.data()),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data()),
             Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -229,6 +236,9 @@ impl ConcreteRequest {
             Self::OffsetCommit(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::OffsetFetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
         }
     }
 
@@ -251,6 +261,7 @@ impl ConcreteRequest {
             Self::ListOffsets(r) => Self::serialize_body(r.data(), r.version()),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), r.version()),
             Self::OffsetCommit(r) => Self::serialize_body(r.data(), r.version()),
+            Self::OffsetFetch(r) => Self::serialize_body(r.data(), r.version()),
         }
     }
 
@@ -285,6 +296,7 @@ impl ConcreteRequest {
             Self::ListOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -348,6 +360,10 @@ impl ConcreteRequest {
                 let data = OffsetCommitRequestData::read(readable, api_version)?;
                 Ok(Self::OffsetCommit(OffsetCommitRequest::new(data, api_version)))
             },
+            ApiKeys::OFFSET_FETCH => {
+                let data = OffsetFetchRequestData::read(readable, api_version)?;
+                Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_request", api_key.name()),
@@ -369,6 +385,7 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::OffsetCommit(r) => write!(f, "{r}"),
+            Self::OffsetFetch(r) => write!(f, "{r}"),
         }
     }
 }
