@@ -30,6 +30,8 @@ pub(crate) mod fetch_collector;
 pub(crate) mod fetch_config;
 pub(crate) mod fetch_request_manager;
 pub(crate) mod fetch_utils;
+pub(crate) mod member_state;
+pub(crate) mod member_state_listener;
 pub(crate) mod network_client_delegate;
 pub(crate) mod offset_fetcher_utils;
 pub(crate) mod offsets_for_leader_epoch_client;
