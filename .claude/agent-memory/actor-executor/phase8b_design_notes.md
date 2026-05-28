@@ -94,3 +94,69 @@ listener notification, §31 reconcile correctness) + 6 tests on
 `AbstractMembershipManager` + 9 tests on
 `AbstractHeartbeatRequestManager` = 37 new tests. Baseline: 1376;
 final: 1413 lib + 36 integration tests.
+
+## Critic-round-1 fix patterns (COMMENTS.1.md, resolved on consumer-impl)
+
+After Phase 8b landed, the critic returned 13 findings. Patterns
+worth remembering:
+
+**§31 listener-presence short-circuit is mandatory** — Java's
+`invokeOnPartitions{Revoked,Assigned,Lost}Callback` all guard on
+`subscriptions.rebalanceListener().isPresent()` before enqueueing.
+Without this guard, the bg-task `.await ack_rx` hangs forever when no
+listener is registered (the app side has nothing to invoke and no one
+sends the ack). Fix: read `subscriptions.rebalance_listener().is_some()`
+under a short lock at the top of `invoke_rebalance_callback`, return
+`Ok(())` immediately if `None`.
+
+**Propagate listener errors from reconcile, don't swallow** — Initial
+Phase 8b returned `Ok(())` from reconcile after logging a listener
+error. Java propagates via CompletableFuture's `whenComplete`. Rust
+equivalent: `return Err(e)` after `mark_reconciliation_completed`.
+Lets Phase 10 bg task decide log+continue vs escalate.
+
+**`leave_group` translation: collapsed runCallbacks + signalMemberLeavingGroup** —
+Java has `leaveGroup()` -> `leaveGroup(true)` and
+`leaveGroupOnClose(op)` -> `leaveGroup(false)`. The runCallbacks=true
+branch chains `signalMemberLeavingGroup()` (which dispatches between
+onPartitionsRevoked and onPartitionsLost based on memberEpoch > 0).
+Rust async version is a single `leave_group_inner(run_callbacks: bool)`
+method that `.await`s `signal_member_leaving_group(now)` when
+`run_callbacks=true`. Don't try to model the CompletableFuture chain
+directly.
+
+**`unsafe impl Send` is almost always wrong** — If you reach for
+`unsafe impl Send for X {}`, the type is probably already auto-Send
+via its fields and the impl is redundant. If it's NOT auto-Send,
+there's a specific `!Send` field whose `Send`-ness needs to be
+attested in the unsafe block's comment. Remove the impl; `cargo build`
+tells you instantly if it was needed.
+
+**`#[cfg(test)] use ...` for test-only imports** — better than a
+`_force_used()` dummy function. If a downstream module uses an enum's
+variant only in tests, gate the import to test builds.
+
+**Hardcoding `current_time_ms = 0` is a smell** — when an event needs
+a timestamp, take it as a parameter from the caller. The composing
+`RequestManager::poll` already has `current_time_ms`; thread it
+through to handlers that emit events.
+
+**Test helpers: `set_X_for_test` (cfg(test)) over Mockito-style mocks** —
+Adding `pub(crate) fn set_coordinator_for_test(&mut self, node: Node)`
+gated on `#[cfg(test)]` is cleaner than constructing a FindCoordinator
+round-trip in every test. Mirrors `when(mock.coordinator()).thenReturn(...)`.
+
+**Test rationale docstrings satisfy DoD §3** — When deferring Java
+tests, a category-based rationale on the test module docstring
+(naming each Java test family and why it's deferred — Mockito
+verification on internals, Phase 10 wiring, Streams/Share out of
+scope, MockTime/metrics, etc.) is sufficient. The bar is "every
+un-translated test has a one-line rationale," and grouping by
+category is the natural way to satisfy that without writing 67
+identical "Mockito-heavy" notes.
+
+Final counts after fixup commits (2be008a, f353024, 9b057fe):
+- ConsumerMembershipManagerTest: 13 -> 26 of 93
+- ConsumerHeartbeatRequestManagerTest: 6 -> 12 of 31
+- lib tests: 1413 -> 1433 (+20)
+- consumer integration: 36 (unchanged)
