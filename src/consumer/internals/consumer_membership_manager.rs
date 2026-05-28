@@ -35,6 +35,7 @@ use crate::common::requests::consumer_group_heartbeat_request::{
 use crate::common::{KafkaError, TopicPartition, Uuid};
 use crate::consumer::close_options::GroupMembershipOperation;
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+#[cfg(test)]
 use crate::consumer::internals::events::background_event::BackgroundEvent;
 use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 
@@ -313,12 +314,20 @@ impl ConsumerMembershipManager {
     }
 
     /// Java: `transitionToFatal()` (override that wires Consumer-specific
-    /// follow-on actions). For Phase 8b we do not invoke the
-    /// `onPartitionsLost` callback here because the Consumer thread
-    /// will drive that on its next `poll()` via the rebalance-listener
-    /// event channel. This matches Java's contract: transition first,
-    /// then enqueue the lost-callback event; the actual listener runs
-    /// on the app thread.
+    /// follow-on actions). The flow mirrors Java exactly:
+    ///
+    /// 1. Transition to `FATAL` on the abstract membership state (this
+    ///    runs `notifyEpochChange(Optional.empty())` and logs).
+    /// 2. If the previous state was already out of the group
+    ///    (`UNSUBSCRIBED`, `PREPARE_LEAVING`, `LEAVING`), skip the
+    ///    `onPartitionsLost` callback — Java's `transitionToFatal`
+    ///    early-returns in that case because there's nothing to
+    ///    release.
+    /// 3. Otherwise invoke `onPartitionsLost` via the §31 handshake to
+    ///    release the assignment. The actual listener executes on the
+    ///    application task per §31; this `.await` returns once the app
+    ///    side has acknowledged completion.
+    /// 4. Clear the assignment (Java: `clearAssignment()`).
     pub(crate) async fn transition_to_fatal(&self, current_time_ms: i64) -> Result<(), KafkaError> {
         let previous_state = self.abstract_mm.transition_to_fatal()?;
 
@@ -596,9 +605,14 @@ impl ConsumerMembershipManager {
             {
                 log::error!("onPartitionsRevoked callback failed: {}", e);
                 // Java: leaves the member in RECONCILING state after
-                // callbacks fail. We mirror.
+                // callbacks fail (broker will eventually kick the
+                // member out via the reconciliation commit timeout).
+                // Per COMMENTS.1.md fix #2 we surface the error to the
+                // caller (Phase 10 bg task) so the failure is
+                // observable — Java's CompletableFuture chain does the
+                // same via `revocationResult.completeExceptionally`.
                 self.abstract_mm.mark_reconciliation_completed();
-                return Ok(());
+                return Err(e);
             }
         }
 
@@ -660,8 +674,12 @@ impl ConsumerMembershipManager {
                     added,
                     e
                 );
+                // Per COMMENTS.1.md fix #2: surface listener failure so
+                // the caller (Phase 10 bg task) can observe it. Java's
+                // CompletableFuture chain propagates the error via
+                // `reconciliationResult.whenComplete(error, ...)`.
                 self.abstract_mm.mark_reconciliation_completed();
-                return Ok(());
+                return Err(e);
             },
         }
 
@@ -715,6 +733,169 @@ impl ConsumerMembershipManager {
         is_leaving_state && has_leave_operation
     }
 
+    /// Java: `ConsumerMembershipManager.invokeOnPartitionsRevokedOrLostToReleaseAssignment()`.
+    ///
+    /// Choose between `onPartitionsRevoked` and `onPartitionsLost`
+    /// based on the current member epoch. From Java:
+    ///
+    /// > If the member is part of the group (epoch > 0), this will
+    /// > invoke onPartitionsRevoked. ... If the member is not part of
+    /// > the group anymore (epoch <= 0), this will invoke
+    /// > onPartitionsLost.
+    ///
+    /// Translated as `pub(crate)` because the Java method is
+    /// `protected`-on-subclass and the test module reaches into it via
+    /// the §31 event channel.
+    pub(crate) async fn signal_member_leaving_group(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+        // Snapshot the dropped partitions + epoch under a single short
+        // lock; drop both guards before any .await.
+        let (dropped_partitions, member_epoch) = {
+            let subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            let partitions = subs.assigned_partitions().into_iter().collect::<Vec<_>>();
+            drop(subs);
+            let inner = match self.abstract_mm.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            (partitions, inner.member_epoch)
+        };
+
+        log::info!(
+            "Member {} is triggering callbacks to release assignment {:?} and leave group",
+            self.member_id(),
+            dropped_partitions
+        );
+
+        if dropped_partitions.is_empty() {
+            return Ok(());
+        }
+
+        let method = if member_epoch > 0 {
+            ConsumerRebalanceListenerMethodName::OnPartitionsRevoked
+        } else {
+            ConsumerRebalanceListenerMethodName::OnPartitionsLost
+        };
+        self.abstract_mm
+            .invoke_rebalance_callback(method, dropped_partitions, current_time_ms)
+            .await
+    }
+
+    /// Java: `AbstractMembershipManager.leaveGroupOnClose(GroupMembershipOperation)`.
+    /// Invoked by `Consumer::close(...)`. Records the membership
+    /// operation and delegates to `leave_group(run_callbacks=false)`.
+    pub(crate) async fn leave_group_on_close(
+        &self,
+        membership_operation: GroupMembershipOperation,
+        current_time_ms: i64,
+    ) -> Result<(), KafkaError> {
+        self.set_leave_group_operation(membership_operation);
+        self.leave_group_inner(false, current_time_ms).await
+    }
+
+    /// Java: `AbstractMembershipManager.leaveGroup()`. Invoked by
+    /// `Consumer::unsubscribe()`. Runs callbacks during the leave.
+    pub(crate) async fn leave_group(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+        self.leave_group_inner(true, current_time_ms).await
+    }
+
+    /// Java: `AbstractMembershipManager.leaveGroup(boolean runCallbacks)`.
+    /// The shared body of `leave_group` / `leave_group_on_close`.
+    ///
+    /// Mirrors Java's flow phase-for-phase:
+    ///
+    /// 1. If already out of group: clear & unsubscribe (no heartbeat
+    ///    needed). `FENCED` is reset to `UNSUBSCRIBED` after clearing
+    ///    the assignment.
+    /// 2. If already leaving: no-op.
+    /// 3. Transition to `PREPARE_LEAVING`. If `run_callbacks=true`,
+    ///    invoke the rebalance-listener handshake via
+    ///    [`signal_member_leaving_group`]; listener errors are logged
+    ///    but the leave proceeds regardless (Java's `whenComplete`
+    ///    semantics).
+    /// 4. Unsubscribe + clear assignment.
+    /// 5. Transition to `LEAVING` so the next heartbeat sends the
+    ///    leave-group request.
+    async fn leave_group_inner(&self, run_callbacks: bool, current_time_ms: i64) -> Result<(), KafkaError> {
+        // Step 1: already-out-of-group fast path.
+        let pre_state = {
+            let guard = match self.abstract_mm.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.state
+        };
+        if matches!(
+            pre_state,
+            MemberState::Unsubscribed | MemberState::Fenced | MemberState::Fatal | MemberState::Stale
+        ) {
+            if pre_state == MemberState::Fenced {
+                self.abstract_mm.clear_assignment();
+                let mut guard = match self.abstract_mm.inner.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.transition_to(MemberState::Unsubscribed)?;
+            }
+            {
+                let mut subs = match self.abstract_mm.subscriptions.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                subs.unsubscribe();
+            }
+            {
+                let guard = match self.abstract_mm.inner.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                guard.notify_assignment_change(&std::collections::HashSet::new());
+            }
+            return Ok(());
+        }
+
+        // Step 2: already-leaving short-circuit. Java returns the
+        // existing in-flight future; our async equivalent is a no-op
+        // because the in-flight `leave_group` call will return when
+        // the rebalance completes.
+        if matches!(pre_state, MemberState::PrepareLeaving | MemberState::Leaving) {
+            log::debug!("Leave group operation already in progress for member {}", self.member_id());
+            return Ok(());
+        }
+
+        // Step 3: PREPARE_LEAVING + optional rebalance-callback step.
+        {
+            let mut guard = match self.abstract_mm.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.transition_to(MemberState::PrepareLeaving)?;
+        }
+
+        if run_callbacks && let Err(e) = self.signal_member_leaving_group(current_time_ms).await {
+            log::error!(
+                "Member {} callback to release assignment failed. It will proceed to clear its \
+                 assignment and send a leave group heartbeat: {}",
+                self.member_id(),
+                e
+            );
+        }
+
+        // Step 4 + 5: clearAssignmentAndLeaveGroup().
+        {
+            let mut subs = match self.abstract_mm.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.unsubscribe();
+        }
+        self.abstract_mm.clear_assignment();
+        self.transition_to_sending_leave_group(false)?;
+        Ok(())
+    }
+
     /// Java: `onHeartbeatFailure(boolean retriable)`.
     pub(crate) fn on_heartbeat_failure(&self, retriable: bool) {
         let was_unsubscribed = self.abstract_mm.on_heartbeat_failure(retriable);
@@ -759,25 +940,30 @@ impl std::fmt::Debug for ConsumerMembershipManager {
     }
 }
 
-// Send required so RequestManagers::entries can put us in a
-// `Vec<&mut dyn RequestManager>` and the bg task can own us.
-unsafe impl Send for ConsumerMembershipManager {}
-
-// Suppress unused-emit warnings on the BackgroundEvent re-export from
-// the §31 path — used only inside reconcile (typed module path).
-#[doc(hidden)]
-#[allow(dead_code)]
-fn _force_used() {
-    let _ = std::mem::size_of::<BackgroundEvent>();
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::ConsumerConfig;
+    use crate::consumer::ConsumerRebalanceListener;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use async_trait::async_trait;
+    use std::collections::HashSet;
     use tokio::sync::mpsc;
+
+    /// Test-only no-op rebalance listener. Registered by default in
+    /// `make()` so the §31 listener-presence short-circuit (introduced
+    /// per COMMENTS.1.md fix #1) does not silently drop events.
+    struct NoopListener;
+    #[async_trait]
+    impl ConsumerRebalanceListener for NoopListener {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+            Ok(())
+        }
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+            Ok(())
+        }
+    }
 
     fn make(
         group_instance_id: Option<String>,
@@ -787,7 +973,38 @@ mod tests {
         ConsumerMembershipManager,
         mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
     ) {
+        make_inner(group_instance_id, server_assignor, rack_id, true)
+    }
+
+    /// Variant of [`make`] that omits the rebalance listener — used to
+    /// exercise the §31 short-circuit path.
+    fn make_without_listener(
+        group_instance_id: Option<String>,
+        server_assignor: Option<String>,
+        rack_id: Option<String>,
+    ) -> (
+        ConsumerMembershipManager,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        make_inner(group_instance_id, server_assignor, rack_id, false)
+    }
+
+    fn make_inner(
+        group_instance_id: Option<String>,
+        server_assignor: Option<String>,
+        rack_id: Option<String>,
+        with_listener: bool,
+    ) -> (
+        ConsumerMembershipManager,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        if with_listener {
+            subs.lock()
+                .unwrap()
+                .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let metadata = Arc::new(ConsumerMetadata::from_config(
             &config,
@@ -1030,6 +1247,330 @@ mod tests {
         // STABLE (target == current).
         mgr_arc.abstract_mm.on_heartbeat_request_generated().unwrap();
         assert_eq!(mgr_arc.state(), MemberState::Stable);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToFailedWhenTryingToJoin`.
+    /// Transitioning to FATAL while JOINING is valid and parks the
+    /// member in FATAL.
+    #[tokio::test]
+    async fn transition_to_failed_when_trying_to_join() {
+        let (mgr, _rx) = make(None, None, None);
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        mgr.transition_to_joining().unwrap();
+        // No assigned partitions, so transition_to_fatal short-circuits
+        // the §31 handshake (empty partitions branch).
+        mgr.transition_to_fatal(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testMemberIdAndEpochResetOnFencedMembers`.
+    /// Transitioning to FENCED resets the member epoch to 0 (the
+    /// join-group epoch).
+    #[tokio::test]
+    async fn member_id_and_epoch_reset_on_fenced_members() {
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        // Apply an epoch via on_heartbeat_success to mimic STABLE.
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(7);
+        }
+        let original_member_id = mgr.member_id();
+        assert!(!original_member_id.is_empty());
+        assert_eq!(mgr.member_epoch(), 7);
+
+        mgr.transition_to_fenced(0).await.unwrap();
+        // After fencing the member should rejoin (state=JOINING) with
+        // epoch reset to JOIN_GROUP_MEMBER_EPOCH (0).
+        assert_eq!(mgr.member_epoch(), 0);
+        // Java: memberId is NOT cleared on fence — only the epoch.
+        assert_eq!(mgr.member_id(), original_member_id);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFencingWhenStateIsStable`.
+    /// A STABLE member that gets fenced transitions to JOINING after
+    /// the §31 release handshake completes.
+    #[tokio::test]
+    async fn fencing_when_state_is_stable() {
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.transition_to(MemberState::Reconciling).unwrap();
+            guard.transition_to(MemberState::Acknowledging).unwrap();
+            guard.transition_to(MemberState::Stable).unwrap();
+        }
+        assert_eq!(mgr.state(), MemberState::Stable);
+
+        // No assigned partitions in subscriptions -> §31 short-circuit.
+        mgr.transition_to_fenced(0).await.unwrap();
+        // Fenced -> JOINING (rejoin) when assignment is empty.
+        assert_eq!(mgr.state(), MemberState::Joining);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFencingWhenStateIsReconciling`.
+    /// A RECONCILING member that gets fenced transitions to JOINING.
+    #[tokio::test]
+    async fn fencing_when_state_is_reconciling() {
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.transition_to(MemberState::Reconciling).unwrap();
+        }
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+        mgr.transition_to_fenced(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFencingWhenStateIsPrepareLeaving`.
+    /// A PREPARE_LEAVING member that gets fenced goes through LEAVING
+    /// to UNSUBSCRIBED (no callback, no rejoin) per
+    /// `transition_to_fenced`'s short-circuit.
+    #[tokio::test]
+    async fn fencing_when_state_is_prepare_leaving() {
+        let (mgr, _rx) = make(None, None, None);
+        force_into_prepare_leaving(&mgr);
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+        mgr.transition_to_fenced(0).await.unwrap();
+        // The Java contract puts us in UNSUBSCRIBED after the
+        // PREPARE_LEAVING -> LEAVING -> UNSUBSCRIBED dance.
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+        assert!(mgr.abstract_mm.inner.lock().unwrap().should_skip_heartbeat());
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testFencingWhenStateIsLeaving`.
+    /// A LEAVING member that gets fenced transitions to UNSUBSCRIBED
+    /// (no callback, no last HB).
+    #[tokio::test]
+    async fn fencing_when_state_is_leaving() {
+        let (mgr, _rx) = make(None, None, None);
+        force_into_prepare_leaving(&mgr);
+        mgr.transition_to_sending_leave_group(false).unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        mgr.transition_to_fenced(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Unsubscribed);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testListenersGetNotifiedOnTransitionsToFatal`.
+    /// `MemberStateListener::on_member_epoch_updated` is invoked with
+    /// `None` when the manager transitions to FATAL.
+    #[tokio::test]
+    async fn listeners_get_notified_on_transitions_to_fatal() {
+        use crate::consumer::internals::member_state_listener::MemberStateListener;
+        use std::sync::Mutex as StdMutex;
+        #[derive(Default)]
+        struct Recorder {
+            calls: StdMutex<Vec<Option<i32>>>,
+        }
+        impl MemberStateListener for Recorder {
+            fn on_member_epoch_updated(&self, epoch: Option<i32>, _member_id: &str) {
+                self.calls.lock().unwrap().push(epoch);
+            }
+        }
+
+        let (mgr, _rx) = make(None, None, None);
+        let listener = Arc::new(Recorder::default());
+        mgr.abstract_mm.register_state_listener(listener.clone());
+        mgr.transition_to_joining().unwrap();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(5);
+        }
+        // Clear initial notifications.
+        listener.calls.lock().unwrap().clear();
+
+        mgr.transition_to_fatal(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Fatal);
+        let calls = listener.calls.lock().unwrap();
+        // FATAL transition emits `notify_epoch_change(None)`.
+        assert!(calls.contains(&None));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testListenersGetNotifiedOnTransitionsToLeavingGroup`.
+    /// `leave_group()` clears the member's epoch and notifies listeners
+    /// with `None` via the leave-epoch path.
+    #[tokio::test]
+    async fn listeners_get_notified_on_transitions_to_leaving_group() {
+        use crate::consumer::internals::member_state_listener::MemberStateListener;
+        use std::sync::Mutex as StdMutex;
+        #[derive(Default)]
+        struct Recorder {
+            calls: StdMutex<Vec<Option<i32>>>,
+        }
+        impl MemberStateListener for Recorder {
+            fn on_member_epoch_updated(&self, epoch: Option<i32>, _member_id: &str) {
+                self.calls.lock().unwrap().push(epoch);
+            }
+        }
+
+        let (mgr, _rx) = make(None, None, None);
+        let listener = Arc::new(Recorder::default());
+        mgr.abstract_mm.register_state_listener(listener.clone());
+        mgr.transition_to_joining().unwrap();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(5);
+        }
+        listener.calls.lock().unwrap().clear();
+
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        let calls = listener.calls.lock().unwrap();
+        // The leave_group_epoch (LEAVE_GROUP_MEMBER_EPOCH=-1) was
+        // negative so notify_epoch_change is invoked with None.
+        assert!(calls.contains(&None));
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testNewAssignmentIgnoredWhenStateIsPrepareLeaving`.
+    /// Receiving a new assignment while in PREPARE_LEAVING does not
+    /// cause a state transition.
+    #[test]
+    fn new_assignment_ignored_when_state_is_prepare_leaving() {
+        let (mgr, _rx) = make(None, None, None);
+        force_into_prepare_leaving(&mgr);
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+
+        // Java's onHeartbeatSuccess in PREPARE_LEAVING state is a no-op
+        // for new assignments. We invoke it on the response path.
+        use crate::consumer_group_heartbeat_response_data::{
+            Assignment, ConsumerGroupHeartbeatResponseData, TopicPartitions,
+        };
+        let topic_id = Uuid::random_uuid();
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(mgr.member_id());
+        data.member_epoch = 1;
+        data.heartbeat_interval_ms = 5000;
+        data.assignment = Some(Assignment {
+            topic_partitions: vec![TopicPartitions { topic_id, partitions: vec![0], unknown_tagged_fields: vec![] }],
+            unknown_tagged_fields: vec![],
+        });
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        mgr.on_heartbeat_success(&resp).unwrap();
+        // Member stays in PREPARE_LEAVING; the new assignment is
+        // ignored because the state can't accept new assignments.
+        assert_eq!(mgr.state(), MemberState::PrepareLeaving);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testSameAssignmentReconciledAgainWhenFenced`.
+    /// After a fence, receiving the same target assignment again must
+    /// re-trigger reconciliation (state goes to RECONCILING) because
+    /// the local epoch was lost.
+    #[tokio::test]
+    async fn same_assignment_reconciled_again_when_fenced() {
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+
+        // Pre-populate the local cache so reconcile can resolve.
+        let topic_id = Uuid::random_uuid();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.assigned_topic_names_cache.insert(topic_id, "t1".to_string());
+        }
+
+        let mut assignment = HashMap::new();
+        assignment.insert(topic_id, vec![0, 1, 2]);
+        mgr.abstract_mm.process_assignment_received(assignment.clone()).unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // Get fenced (no assigned partitions, so §31 short-circuits).
+        mgr.transition_to_fenced(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+        // current_assignment was cleared.
+        assert!(mgr.current_assignment().is_none());
+
+        // Receive the same assignment again.
+        mgr.abstract_mm.process_assignment_received(assignment).unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupEpoch`.
+    /// `leave_group()` sets the epoch to -2 for static members and -1
+    /// for dynamic.
+    #[tokio::test]
+    async fn leave_group_epoch_test() {
+        // Static member -> -2 with default operation.
+        let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
+        mgr.transition_to_joining().unwrap();
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_STATIC_MEMBER_EPOCH);
+
+        // Dynamic member -> -1.
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        mgr.leave_group(0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testLeaveGroupEpochOnClose`.
+    /// `leave_group_on_close()` honors the supplied membership
+    /// operation when computing the leave epoch.
+    #[tokio::test]
+    async fn leave_group_epoch_on_close() {
+        // Static member with DEFAULT -> -2.
+        let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
+        mgr.transition_to_joining().unwrap();
+        mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_STATIC_MEMBER_EPOCH);
+
+        // Static member with LEAVE_GROUP -> -1.
+        let (mgr, _rx) = make(Some("instance1".to_string()), None, None);
+        mgr.transition_to_joining().unwrap();
+        mgr.leave_group_on_close(GroupMembershipOperation::LeaveGroup, 0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+
+        // Dynamic member with DEFAULT -> -1.
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        mgr.leave_group_on_close(GroupMembershipOperation::Default, 0).await.unwrap();
+        assert_eq!(mgr.state(), MemberState::Leaving);
+        assert_eq!(mgr.member_epoch(), LEAVE_GROUP_MEMBER_EPOCH);
+    }
+
+    /// Regression: reconcile returns Err when the rebalance listener
+    /// returns Err on the onPartitionsAssigned callback (COMMENTS.1.md
+    /// fix #2).
+    #[tokio::test]
+    async fn reconcile_propagates_assigned_listener_error() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        let topic_id = Uuid::random_uuid();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.assigned_topic_names_cache.insert(topic_id, "t1".to_string());
+        }
+        let mut new_assignment = HashMap::new();
+        new_assignment.insert(topic_id, vec![0]);
+        mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr_arc = Arc::new(mgr);
+        let mgr_clone = mgr_arc.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0).await });
+
+        let env = rx.recv().await.expect("event");
+        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } = env.event {
+            ack.send(Err(KafkaError::timeout("listener error"))).unwrap();
+        }
+        let result = bg.await.unwrap();
+        assert!(result.is_err());
     }
 
     /// Translated from

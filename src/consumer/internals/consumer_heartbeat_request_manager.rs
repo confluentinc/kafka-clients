@@ -282,7 +282,15 @@ impl ConsumerHeartbeatRequestManager {
     /// variant maps `UnsupportedVersionException` carrying the regex
     /// resolution message to a fatal failure with the special-cased
     /// message.
-    pub(crate) fn handle_specific_failure(&mut self, error: &crate::common::KafkaError) -> bool {
+    ///
+    /// `current_time_ms` is threaded through to
+    /// [`BackgroundEventHandler::add`] so the resulting `ErrorEvent` is
+    /// attributed to the actual failure time rather than epoch zero.
+    pub(crate) fn handle_specific_failure(
+        &mut self,
+        error: &crate::common::KafkaError,
+        current_time_ms: i64,
+    ) -> bool {
         use crate::common::KafkaError;
         use crate::common::protocol::Errors;
         if error.error() == Errors::UnsupportedVersion {
@@ -297,7 +305,7 @@ impl ConsumerHeartbeatRequestManager {
                 crate::consumer::internals::events::background_event::BackgroundEvent::Error {
                     error: KafkaError::unsupported_version(message.to_string()),
                 },
-                0,
+                current_time_ms,
             );
             return true;
         }
@@ -400,8 +408,10 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
             return PollResult::empty();
         }
 
-        // 2. Poll-timer-expired stale path.
-        self.inner.update_poll_timer(current_time_ms);
+        // 2. Poll-timer-expired stale path. Java calls
+        // `pollTimer.update(currentTimeMs)` here; the Rust deadline-based
+        // timer doesn't need the update — `poll_timer_is_expired` reads
+        // `current_time_ms` directly.
         if self.inner.poll_timer_is_expired(current_time_ms) && !self.membership_manager.is_leaving_group() {
             log::warn!(
                 "Consumer poll timeout has expired. This means the time between subsequent calls to poll() was longer than the configured max.poll.interval.ms."

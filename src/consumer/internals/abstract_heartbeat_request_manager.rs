@@ -82,8 +82,6 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// Java models this with a `Timer`; Rust stores the deadline
     /// directly (mirroring [`HeartbeatRequestState`]).
     poll_timer_expires_at_ms: i64,
-    /// Last observed time the poll timer was refreshed against.
-    poll_timer_last_update_ms: i64,
 }
 
 impl AbstractHeartbeatRequestManager {
@@ -121,7 +119,6 @@ impl AbstractHeartbeatRequestManager {
             heartbeat_request_state,
             background_event_handler,
             poll_timer_expires_at_ms: current_time_ms + i64::from(max_poll_interval_ms),
-            poll_timer_last_update_ms: current_time_ms,
         }
     }
 
@@ -142,13 +139,7 @@ impl AbstractHeartbeatRequestManager {
             heartbeat_request_state,
             background_event_handler,
             poll_timer_expires_at_ms: current_time_ms + i64::from(max_poll_interval_ms),
-            poll_timer_last_update_ms: current_time_ms,
         }
-    }
-
-    /// Updates the poll timer's "now" reference. Java's `Timer.update(now)`.
-    pub(crate) fn update_poll_timer(&mut self, current_time_ms: i64) {
-        self.poll_timer_last_update_ms = current_time_ms;
     }
 
     /// Returns `true` if the poll timer has expired at `current_time_ms`.
@@ -170,8 +161,22 @@ impl AbstractHeartbeatRequestManager {
     /// Resets the poll timer so it expires `max_poll_interval_ms` from
     /// `current_time_ms`. Java's `Timer.reset(maxPollIntervalMs)` (which
     /// internally snaps `now` from `Time.milliseconds()`).
+    ///
+    /// **Phase 10 carry-over**: Java's `resetPollTimer(pollMs)` also
+    /// checks `pollTimer.isExpired()` and calls
+    /// `membershipManager().maybeRejoinStaleMember()` when expired (see
+    /// `AbstractHeartbeatRequestManager.java:265-274`). The abstract
+    /// layer here lacks a back-reference to the membership manager, so
+    /// the expiry-then-rejoin step must be performed by Phase 10's
+    /// `consumer.poll()` epilogue after invoking `reset_poll_timer`:
+    ///
+    /// ```ignore
+    /// hb.reset_poll_timer(now);
+    /// if hb.poll_timer_is_expired(now) {
+    ///     membership_manager.maybe_rejoin_stale_member();
+    /// }
+    /// ```
     pub(crate) fn reset_poll_timer(&mut self, current_time_ms: i64) {
-        self.poll_timer_last_update_ms = current_time_ms;
         self.poll_timer_expires_at_ms = current_time_ms + i64::from(self.max_poll_interval_ms);
     }
 
@@ -389,9 +394,7 @@ mod tests {
     /// Poll timer starts running on construction.
     #[test]
     fn poll_timer_starts_running() {
-        let mut mgr = make_state(0);
-        assert!(!mgr.poll_timer_is_expired(0));
-        mgr.update_poll_timer(0);
+        let mgr = make_state(0);
         assert!(!mgr.poll_timer_is_expired(0));
         // Default max.poll.interval.ms is 300_000.
         assert!(mgr.poll_timer_is_expired(300_000));

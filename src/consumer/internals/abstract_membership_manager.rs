@@ -696,13 +696,23 @@ impl AbstractMembershipManager {
     /// Invokes a rebalance listener callback per §31.
     ///
     /// Mechanism:
-    /// 1. Create a fresh `oneshot::channel`.
-    /// 2. Enqueue a [`BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded`]
+    /// 1. Short-circuit if no [`ConsumerRebalanceListener`] is
+    ///    registered on the subscription state. Java's
+    ///    `invokeOnPartitions{Revoked,Assigned,Lost}Callback` all check
+    ///    `subscriptions.rebalanceListener().isPresent()` and return a
+    ///    completed future without enqueueing anything. Without this
+    ///    guard the bg task would hang forever awaiting an ack that no
+    ///    one will send (Phase 10's app-side drain only invokes the
+    ///    listener when one exists). See `ConsumerMembershipManager.java:352-383`.
+    /// 2. Create a fresh `oneshot::channel`.
+    /// 3. Enqueue a [`BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded`]
     ///    carrying the sender half.
-    /// 3. **Await** the receiver. The membership state machine does NOT
+    /// 4. **Await** the receiver. The membership state machine does NOT
     ///    advance until this resolves.
     ///
     /// `MutexGuard`s are NEVER held across this `.await`.
+    ///
+    /// [`ConsumerRebalanceListener`]: crate::consumer::ConsumerRebalanceListener
     ///
     /// Java: `enqueueConsumerRebalanceListenerCallback(methodName, partitions)`
     /// (defined on `ConsumerMembershipManager`, but the contract is
@@ -713,6 +723,20 @@ impl AbstractMembershipManager {
         partitions: Vec<TopicPartition>,
         current_time_ms: i64,
     ) -> Result<(), KafkaError> {
+        // Step 1: listener-presence short-circuit, matching Java's
+        // `subscriptions.rebalanceListener().isPresent()` guard. Drop
+        // the guard immediately to satisfy §16.
+        let listener_present = {
+            let subs = match self.subscriptions.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            subs.rebalance_listener().is_some()
+        };
+        if !listener_present {
+            return Ok(());
+        }
+
         let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
         let event =
             BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name: method, partitions, ack: ack_tx };
@@ -752,8 +776,24 @@ mod tests {
     use super::*;
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::ConsumerConfig;
+    use crate::consumer::ConsumerRebalanceListener;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use async_trait::async_trait;
+    use std::collections::HashSet;
     use tokio::sync::mpsc;
+
+    /// Test-only no-op rebalance listener so the §31 short-circuit
+    /// (added in COMMENTS.1.md fix #1) lets the handshake proceed.
+    struct NoopListener;
+    #[async_trait]
+    impl ConsumerRebalanceListener for NoopListener {
+        async fn on_partitions_revoked(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+            Ok(())
+        }
+        async fn on_partitions_assigned(&self, _partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+            Ok(())
+        }
+    }
 
     fn setup() -> (
         Arc<Mutex<SubscriptionState>>,
@@ -762,6 +802,12 @@ mod tests {
         mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
     ) {
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        // Register a no-op listener so the §31 short-circuit allows
+        // the handshake to enqueue an event in these tests.
+        subs.lock()
+            .unwrap()
+            .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+            .unwrap();
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let metadata = Arc::new(ConsumerMetadata::from_config(
             &config,
@@ -891,6 +937,38 @@ mod tests {
 
         let result = bg.await.unwrap();
         assert!(matches!(result, Err(KafkaError::IllegalState(_))));
+    }
+
+    /// §31 short-circuit (COMMENTS.1.md fix #1): when no rebalance
+    /// listener is registered, `invoke_rebalance_callback` returns
+    /// `Ok(())` immediately without enqueueing — mirrors Java's
+    /// `subscriptions.rebalanceListener().isPresent()` guard.
+    #[tokio::test]
+    async fn invoke_rebalance_callback_no_listener_short_circuits() {
+        // Build a subscription state WITHOUT a registered listener.
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(tx));
+        let mgr = AbstractMembershipManager::new("g", subs, metadata, beh, true);
+
+        // Without a listener, the handshake must complete immediately
+        // and emit no event — otherwise the bg task would hang in
+        // Phase 10 when no listener is registered.
+        let result = mgr
+            .invoke_rebalance_callback(
+                ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                vec![TopicPartition::new("t".to_string(), 0)],
+                0,
+            )
+            .await;
+        assert!(result.is_ok());
+        assert!(rx.try_recv().is_err(), "no event should be enqueued when listener is absent");
     }
 
     /// §31 handshake: if the app-side reports an error, the bg call
