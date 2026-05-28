@@ -947,4 +947,114 @@ mod tests {
         bg.await.unwrap().unwrap();
         assert_eq!(mgr_arc.state(), MemberState::Acknowledging);
     }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testListenersGetNotifiedOfMemberEpochUpdatesOnlyIfItChanges`.
+    /// Verifies that registered listeners only see epoch-update calls
+    /// when the epoch actually changed.
+    #[test]
+    fn listeners_notified_only_on_epoch_change() {
+        use crate::consumer::internals::member_state_listener::MemberStateListener;
+        use std::sync::Mutex as StdMutex;
+
+        #[derive(Default)]
+        struct Recorder {
+            calls: StdMutex<Vec<(Option<i32>, String)>>,
+        }
+        impl MemberStateListener for Recorder {
+            fn on_member_epoch_updated(&self, epoch: Option<i32>, member_id: &str) {
+                self.calls.lock().unwrap().push((epoch, member_id.to_string()));
+            }
+        }
+
+        let (mgr, _rx) = make(None, None, None);
+        let listener = Arc::new(Recorder::default());
+        mgr.abstract_mm.register_state_listener(listener.clone());
+        mgr.transition_to_joining().unwrap();
+
+        // Apply epoch=5 via update_member_epoch — listeners should fire.
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(5);
+        }
+        let calls = listener.calls.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].0, Some(5));
+        drop(calls);
+
+        // Re-applying the same epoch should NOT fire again.
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(5);
+        }
+        assert_eq!(listener.calls.lock().unwrap().len(), 1);
+
+        // Changing the epoch fires again.
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.update_member_epoch(6);
+        }
+        assert_eq!(listener.calls.lock().unwrap().len(), 2);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testReconcilingWhenReceivingAssignmentFoundInMetadata`
+    /// (the post-ack STABLE transition specifically).
+    #[tokio::test]
+    async fn on_heartbeat_request_generated_acknowledging_to_stable() {
+        let (mgr, mut rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+
+        // Pre-fill topic cache so reconcile succeeds.
+        let topic_id = Uuid::random_uuid();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.assigned_topic_names_cache.insert(topic_id, "t1".to_string());
+        }
+        let mut new_assignment = HashMap::new();
+        new_assignment.insert(topic_id, vec![0]);
+        mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
+
+        let mgr_arc = Arc::new(mgr);
+        let mgr_clone = mgr_arc.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0).await });
+
+        let env = rx.recv().await.expect("event");
+        if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } = env.event {
+            ack.send(Ok(())).unwrap();
+        }
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr_arc.state(), MemberState::Acknowledging);
+
+        // When the ack heartbeat is sent the member should go back to
+        // STABLE (target == current).
+        mgr_arc.abstract_mm.on_heartbeat_request_generated().unwrap();
+        assert_eq!(mgr_arc.state(), MemberState::Stable);
+    }
+
+    /// Translated from
+    /// `ConsumerMembershipManagerTest#testTransitionToReconcilingIfEmptyAssignmentReceived`.
+    /// An empty assignment with a new epoch keeps us in RECONCILING.
+    #[test]
+    fn on_heartbeat_success_empty_assignment_transitions_to_reconciling() {
+        use crate::consumer_group_heartbeat_response_data::{Assignment, ConsumerGroupHeartbeatResponseData};
+
+        let (mgr, _rx) = make(None, None, None);
+        mgr.transition_to_joining().unwrap();
+        assert_eq!(mgr.state(), MemberState::Joining);
+
+        // Build a response with an empty assignment (Some<Assignment>
+        // with empty topic_partitions).
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::None.code();
+        data.member_id = Some(mgr.member_id());
+        data.member_epoch = 1;
+        data.heartbeat_interval_ms = 5000;
+        data.assignment = Some(Assignment { topic_partitions: vec![], unknown_tagged_fields: vec![] });
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+        mgr.on_heartbeat_success(&resp).unwrap();
+        // Empty assignment for a JOINING member: target changes (epoch
+        // bumps via update_with), so we transition to RECONCILING.
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+    }
 }
