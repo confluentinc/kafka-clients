@@ -28,3 +28,6 @@
 - [M8 Phase 5 patterns](review_m8_phase5_patterns.md) — Event-layer: CompletableApplicationEvent<T> must yield CompletableEventHandle<T>; AsyncPoll non-completable; Arc::ptr_eq vs Java identity; marker-interface translation
 - [M8 Phase 6 patterns](review_m8_phase6_patterns.md) — KafkaError::Timeout not retriable in Rust (RetriableException mismatch); NetworkClientDelegate expiry/onClose test gaps; trivial log-capture tests
 - [M8 Phase 6 fix-cycle](review_m8_phase6_fix_cycle.md) — Audit is_retriable side-effects by receiver type not textual matches; inline mod-tests sees private fields
+- [M8 Phase 7a patterns](review_m8_phase7a_patterns.md) — §27 receive-path: per-record Arc<str> alloc + DefaultRecord clone violate zero-copy; Notify race; transactional code path partially missing
+- [M8 Phase 7a fix-cycle](review_m8_phase7a_fix_cycle.md) — §27 fix verification grep patterns; Notify pin+enable; ControlRecordType fail-loud divergence
+- [M8 Phase 7b patterns](review_m8_phase7b_patterns.md) — CompletableFuture single-slot vs Rust queue; IllegalStateException scope; new-method-no-test pattern; §27 audit heuristics

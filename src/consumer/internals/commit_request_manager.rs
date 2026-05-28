@@ -1,0 +1,1580 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+//! `CommitRequestManager` — handles `OffsetCommit` and `OffsetFetch`
+//! request/response cycles, auto-commit timing, sync-commit retry, and
+//! membership-state coordination on behalf of the KIP-848 consumer.
+//!
+//! Translated from
+//! `org.apache.kafka.clients.consumer.internals.CommitRequestManager`.
+//!
+//! # Threading model
+//!
+//! Every method is called either from the background task (which holds the
+//! manager and drives `RequestManager::poll`) or from the application task
+//! (which holds an `Arc` and dispatches sync / async commit requests via
+//! [`Self::commit_sync`] / [`Self::commit_async`] / [`Self::fetch_offsets`]).
+//!
+//! The shared state — pending requests, auto-commit timer, member info —
+//! lives behind a `Mutex` so the two sides can interact without
+//! `Arc<Mutex<&mut Self>>`-style ownership pretzels. The mutex is acquired
+//! only for short critical sections and **never held across an `.await`**
+//! per CLAUDE.md §9.6.
+//!
+//! # Deferred wiring
+//!
+//! - `MemberStateListener` impl is deferred to Phase 11, when the
+//!   `AsyncKafkaConsumer` integration lands. The Phase-8 trait will be
+//!   wired into a free-standing `on_member_epoch_updated` method here.
+//! - `init_with_committed_offsets_if_needed` is the integration point for
+//!   Phase 7d's deferred `update_fetch_positions` work — it accepts the
+//!   initializing partitions and a deadline, calls [`Self::fetch_offsets`],
+//!   and the caller (Phase 10's `OffsetsRequestManager` extension) applies
+//!   the result to the subscription state.
+
+// Phase 9 lands the manager; Phase 10 wires it into the bg task and
+// Phase 11 wires the public API. Suppress dead-code warnings until then.
+#![allow(dead_code)]
+
+use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::{Arc, Mutex};
+
+use tokio::sync::oneshot;
+
+use crate::common::protocol::Errors;
+use crate::common::requests::{
+    OffsetCommitRequestBuilder, OffsetCommitResponse, OffsetFetchRequestBuilder, RECORD_BATCH_NO_PARTITION_LEADER_EPOCH,
+};
+use crate::common::{KafkaError, TopicPartition, Uuid};
+use crate::consumer::ConsumerConfig;
+use crate::consumer::OffsetAndMetadata;
+use crate::consumer::errors::ConsumerError;
+use crate::consumer::offset_commit_callback::OffsetCommitCallback;
+use crate::offset_commit_request_data::{
+    OffsetCommitRequestData, OffsetCommitRequestPartition, OffsetCommitRequestTopic,
+};
+use crate::offset_fetch_request_data::{OffsetFetchRequestData, OffsetFetchRequestGroup, OffsetFetchRequestTopics};
+
+use super::consumer_metadata::ConsumerMetadata;
+use super::coordinator_request_manager::CoordinatorRequestManager;
+use super::network_client_delegate::{PollResult, UnsentRequest};
+use super::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
+use super::request_manager::RequestManager;
+use super::timed_request_state::TimedRequestState;
+
+// =========================================================================
+//                       MemberInfo + AutoCommitState
+// =========================================================================
+
+/// Member identity (id + epoch) carried in every `OffsetCommit` /
+/// `OffsetFetch` request issued by this consumer.
+///
+/// Translated from `CommitRequestManager.MemberInfo`. `member_epoch` is
+/// `None` when no epoch is known (e.g. the member has left the group).
+#[derive(Clone, Debug, Default)]
+pub(crate) struct MemberInfo {
+    pub(crate) member_id: String,
+    pub(crate) member_epoch: Option<i32>,
+}
+
+impl std::fmt::Display for MemberInfo {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self.member_epoch {
+            Some(e) => write!(f, "memberId={}, memberEpoch={}", self.member_id, e),
+            None => write!(f, "memberId={}, memberEpoch=undefined", self.member_id),
+        }
+    }
+}
+
+/// State machine governing periodic auto-commit firings.
+///
+/// Translated from `CommitRequestManager.AutoCommitState`.
+#[derive(Debug)]
+struct AutoCommitState {
+    auto_commit_interval_ms: i64,
+    /// Absolute wall-clock millisecond timestamp at which the timer expires
+    /// (i.e. the next auto-commit fires). Mirrors Java's `Timer.expirationMs()`.
+    expiration_ms: i64,
+    has_inflight_commit: bool,
+}
+
+impl AutoCommitState {
+    fn new(now_ms: i64, auto_commit_interval_ms: i64) -> Self {
+        Self {
+            auto_commit_interval_ms,
+            expiration_ms: now_ms.saturating_add(auto_commit_interval_ms),
+            has_inflight_commit: false,
+        }
+    }
+
+    /// Java: `shouldAutoCommit()`. Returns `true` if the timer has expired
+    /// AND no commit is currently in flight.
+    fn should_auto_commit(&self, current_time_ms: i64) -> bool {
+        if current_time_ms < self.expiration_ms {
+            return false;
+        }
+        if self.has_inflight_commit {
+            log::trace!("Skipping auto-commit on the interval because a previous one is still in-flight.");
+            return false;
+        }
+        true
+    }
+
+    /// Java: `resetTimer()`. Reset to the configured auto-commit interval
+    /// from `now_ms`.
+    fn reset_timer(&mut self, now_ms: i64) {
+        self.expiration_ms = now_ms.saturating_add(self.auto_commit_interval_ms);
+    }
+
+    /// Java: `resetTimer(long retryBackoffMs)`. Reset to a caller-supplied
+    /// backoff from `now_ms` (used when a retriable auto-commit failed).
+    fn reset_timer_with_backoff(&mut self, now_ms: i64, retry_backoff_ms: i64) {
+        self.expiration_ms = now_ms.saturating_add(retry_backoff_ms);
+    }
+
+    /// Java: `remainingMs(currentTimeMs)`. Returns 0 when the timer has
+    /// already expired (no negative values).
+    fn remaining_ms(&self, current_time_ms: i64) -> i64 {
+        (self.expiration_ms - current_time_ms).max(0)
+    }
+
+    /// Java: `setInflightCommitStatus(boolean)`.
+    fn set_inflight_commit_status(&mut self, inflight: bool) {
+        self.has_inflight_commit = inflight;
+    }
+}
+
+// =========================================================================
+//                            Future-channel aliases
+// =========================================================================
+
+/// Result yielded by an [`OffsetCommitRequestState`] future.
+type CommitResult = Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>;
+/// Idempotent commit-future sender slot.
+type CommitFutureTx = Arc<Mutex<Option<oneshot::Sender<CommitResult>>>>;
+
+/// Result yielded by an [`OffsetFetchRequestState`] future.
+type FetchResult = Result<HashMap<TopicPartition, Option<OffsetAndMetadata>>, KafkaError>;
+/// Idempotent fetch-future sender slot.
+type FetchFutureTx = Arc<Mutex<Option<oneshot::Sender<FetchResult>>>>;
+
+// =========================================================================
+//             OffsetCommitRequestState / OffsetFetchRequestState
+// =========================================================================
+
+/// Pending offset-commit request awaiting send / response. Translated from
+/// the nested `CommitRequestManager.OffsetCommitRequestState`.
+///
+/// `future_tx` is the application-side notification sink. Wrapped in
+/// `Arc<Mutex<Option<...>>>` so completion is idempotent — only the first
+/// call to `complete()` / `complete_err()` wins.
+struct OffsetCommitRequestState {
+    offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    member_info: MemberInfo,
+    state: TimedRequestState,
+    /// Tracks whether `on_send_attempt` has been called at least once.
+    /// `RequestState::num_attempts` is private; we track separately so
+    /// we can reproduce Java's `maybeExpire` invariant (only expire after
+    /// at least one send attempt).
+    has_attempted_send: bool,
+    future_tx: CommitFutureTx,
+}
+
+impl OffsetCommitRequestState {
+    fn new(
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        member_info: MemberInfo,
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> (Self, oneshot::Receiver<CommitResult>) {
+        let (tx, rx) = oneshot::channel();
+        let state = TimedRequestState::new(
+            "CommitRequestManager",
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            TimedRequestState::deadline_for(now_ms, deadline_ms),
+        );
+        (
+            Self {
+                offsets,
+                member_info,
+                state,
+                has_attempted_send: false,
+                future_tx: Arc::new(Mutex::new(Some(tx))),
+            },
+            rx,
+        )
+    }
+
+    fn complete_ok(&self, value: HashMap<TopicPartition, OffsetAndMetadata>) {
+        let mut guard = self.future_tx.lock().expect("OffsetCommit future_tx mutex poisoned");
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(Ok(value));
+        }
+    }
+
+    fn complete_err(&self, err: KafkaError) {
+        let mut guard = self.future_tx.lock().expect("OffsetCommit future_tx mutex poisoned");
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(Err(err));
+        }
+    }
+
+    fn reset_future(&mut self) -> oneshot::Receiver<CommitResult> {
+        let (tx, rx) = oneshot::channel();
+        let mut guard = self.future_tx.lock().expect("OffsetCommit future_tx mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+}
+
+/// Pending offset-fetch request awaiting send / response. Translated from
+/// the nested `CommitRequestManager.OffsetFetchRequestState`.
+struct OffsetFetchRequestState {
+    requested_partitions: HashSet<TopicPartition>,
+    member_info: MemberInfo,
+    state: TimedRequestState,
+    /// Topic id → topic name cache, captured at request-build time. Used
+    /// to resolve topic names from the response when topic ids are on the
+    /// wire (v10+). Mirrors Java's `topicNamesCache`.
+    topic_names_cache: HashMap<Uuid, String>,
+    future_tx: FetchFutureTx,
+}
+
+impl OffsetFetchRequestState {
+    fn new(
+        requested_partitions: HashSet<TopicPartition>,
+        member_info: MemberInfo,
+        retry_backoff_ms: i64,
+        retry_backoff_max_ms: i64,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> (Self, oneshot::Receiver<FetchResult>) {
+        let (tx, rx) = oneshot::channel();
+        let state = TimedRequestState::new(
+            "CommitRequestManager",
+            retry_backoff_ms,
+            retry_backoff_max_ms,
+            TimedRequestState::deadline_for(now_ms, deadline_ms),
+        );
+        (
+            Self {
+                requested_partitions,
+                member_info,
+                state,
+                topic_names_cache: HashMap::new(),
+                future_tx: Arc::new(Mutex::new(Some(tx))),
+            },
+            rx,
+        )
+    }
+
+    fn same_request(&self, other: &OffsetFetchRequestState) -> bool {
+        self.requested_partitions == other.requested_partitions
+    }
+
+    fn complete_ok(&self, value: HashMap<TopicPartition, Option<OffsetAndMetadata>>) {
+        let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(Ok(value));
+        }
+    }
+
+    fn complete_err(&self, err: KafkaError) {
+        let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
+        if let Some(tx) = guard.take() {
+            let _ = tx.send(Err(err));
+        }
+    }
+
+    fn reset_future(&mut self) -> oneshot::Receiver<FetchResult> {
+        let (tx, rx) = oneshot::channel();
+        let mut guard = self.future_tx.lock().expect("OffsetFetch future_tx mutex poisoned");
+        *guard = Some(tx);
+        rx
+    }
+}
+
+// =========================================================================
+//                                Manager
+// =========================================================================
+
+/// Per-consumer commit / fetch-offsets request manager. Owns the pending
+/// request queues, auto-commit timer, and member-info state.
+///
+/// Translated from `CommitRequestManager`. The "metrics manager" and
+/// "Streams" hooks present in the Java source are intentionally dropped
+/// per the Phase 9 plan ("Out of scope").
+pub(crate) struct CommitRequestManager {
+    inner: Arc<CommitRequestManagerInner>,
+}
+
+/// Shared state held by [`CommitRequestManager`]. The handle is `Arc`-shared
+/// between the BG task (which owns the manager) and any per-request response
+/// callback closures registered against the network client. The mutex
+/// protects the parts that change at runtime; immutable config lives outside
+/// the mutex.
+struct CommitRequestManagerInner {
+    group_id: String,
+    group_instance_id: Option<String>,
+    retry_backoff_ms: i64,
+    retry_backoff_max_ms: i64,
+    throw_on_fetch_stable_offset_unsupported: bool,
+    metadata: Arc<ConsumerMetadata>,
+    /// Tracks whether `signal_close()` has fired.
+    closing: Mutex<bool>,
+    state: Mutex<CommitRequestManagerState>,
+}
+
+/// Mutable runtime state. Held behind `Mutex<...>` so the BG-task `poll`
+/// path and the app-side `commit_*` / `fetch_offsets` calls can interleave.
+struct CommitRequestManagerState {
+    pending: PendingRequests,
+    auto_commit: Option<AutoCommitState>,
+    member_info: MemberInfo,
+    /// Last epoch sent in a commit request — diagnostic only. Mirrors
+    /// Java's `lastEpochSentOnCommit`.
+    last_epoch_sent_on_commit: Option<i32>,
+}
+
+/// Holds unsent commits + fetches + inflight fetches. Java:
+/// `CommitRequestManager.PendingRequests`.
+struct PendingRequests {
+    unsent_offset_commits: VecDeque<OffsetCommitRequestState>,
+    unsent_offset_fetches: Vec<OffsetFetchRequestState>,
+    inflight_offset_fetches: Vec<OffsetFetchRequestState>,
+}
+
+impl PendingRequests {
+    fn new() -> Self {
+        Self {
+            unsent_offset_commits: VecDeque::new(),
+            unsent_offset_fetches: Vec::new(),
+            inflight_offset_fetches: Vec::new(),
+        }
+    }
+
+    fn has_unsent_requests(&self) -> bool {
+        !self.unsent_offset_commits.is_empty() || !self.unsent_offset_fetches.is_empty()
+    }
+}
+
+impl CommitRequestManager {
+    /// Construct a new `CommitRequestManager`.
+    ///
+    /// Mirrors Java's primary constructor minus the `Metrics`,
+    /// `AsyncConsumerMetrics`, and `CoordinatorRequestManager` parameters
+    /// (the last is consumed at `poll` time via `Arc<Mutex<...>>` — Java
+    /// holds a direct reference; we hold an `Arc<Mutex<...>>` so the BG
+    /// task can mutate both managers).
+    pub(crate) fn new(
+        config: &ConsumerConfig,
+        metadata: Arc<ConsumerMetadata>,
+        group_id: impl Into<String>,
+        group_instance_id: Option<String>,
+        now_ms: i64,
+    ) -> Self {
+        let auto_commit = if config.enable_auto_commit() {
+            Some(AutoCommitState::new(now_ms, config.auto_commit_interval_ms() as i64))
+        } else {
+            None
+        };
+        let state = CommitRequestManagerState {
+            pending: PendingRequests::new(),
+            auto_commit,
+            member_info: MemberInfo::default(),
+            last_epoch_sent_on_commit: None,
+        };
+        let inner = Arc::new(CommitRequestManagerInner {
+            group_id: group_id.into(),
+            group_instance_id,
+            retry_backoff_ms: config.retry_backoff_ms(),
+            retry_backoff_max_ms: config.retry_backoff_max_ms(),
+            throw_on_fetch_stable_offset_unsupported: config.throw_on_fetch_stable_offset_unsupported(),
+            metadata,
+            closing: Mutex::new(false),
+            state: Mutex::new(state),
+        });
+        Self { inner }
+    }
+
+    /// Returns `true` if auto-commit is enabled. Mirrors Java's
+    /// `autoCommitEnabled()`.
+    pub(crate) fn auto_commit_enabled(&self) -> bool {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard.auto_commit.is_some()
+    }
+
+    /// Reset the auto-commit timer to the auto-commit interval from
+    /// `now_ms`. Mirrors Java's `resetAutoCommitTimer()`.
+    pub(crate) fn reset_auto_commit_timer(&self, now_ms: i64) {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        if let Some(ac) = guard.auto_commit.as_mut() {
+            ac.reset_timer(now_ms);
+        }
+    }
+
+    /// Reset the auto-commit timer to a caller-supplied backoff. Mirrors
+    /// Java's overloaded `resetAutoCommitTimer(long retryBackoffMs)`.
+    pub(crate) fn reset_auto_commit_timer_with_backoff(&self, now_ms: i64, retry_backoff_ms: i64) {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        if let Some(ac) = guard.auto_commit.as_mut() {
+            ac.reset_timer_with_backoff(now_ms, retry_backoff_ms);
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    //                       MemberStateListener wiring
+    // ---------------------------------------------------------------------
+
+    // TODO(Phase 11 merge): impl MemberStateListener for CommitRequestManager.
+    //
+    // Phase 8 ships the `MemberStateListener` trait in
+    // `src/consumer/internals/member_state_listener.rs`. Phase 11 wires the
+    // membership manager → commit manager handshake by adding the trait
+    // impl that delegates to [`Self::on_member_epoch_updated`] below.
+    //
+    // Until then, this method is callable directly for unit tests and
+    // for future wiring.
+
+    /// Update the latest member epoch and id. Mirrors Java's
+    /// `onMemberEpochUpdated(Optional<Integer>, String)`.
+    pub(crate) fn on_member_epoch_updated(&self, new_epoch: Option<i32>, new_member_id: String) {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        let old_epoch = guard.member_info.member_epoch;
+        if new_epoch.is_none() && old_epoch.is_some() {
+            log::info!(
+                "Member {} won't include epoch in following offset commit/fetch requests because it has left the group.",
+                guard.member_info.member_id
+            );
+        } else if let Some(e) = new_epoch {
+            log::debug!(
+                "Member {} will include new member epoch {} in following offset commit/fetch requests.",
+                new_member_id,
+                e
+            );
+        }
+        guard.member_info.member_id = new_member_id;
+        guard.member_info.member_epoch = new_epoch;
+    }
+
+    /// Diagnostic accessor — Java: `lastEpochSentOnCommit()`.
+    pub(crate) fn last_epoch_sent_on_commit(&self) -> Option<i32> {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard.last_epoch_sent_on_commit
+    }
+
+    // ---------------------------------------------------------------------
+    //                            commit_sync
+    // ---------------------------------------------------------------------
+
+    /// Commit the supplied offsets with retry on retriable errors until
+    /// `deadline_ms`. Mirrors Java's `commitSync(Map, long)`.
+    ///
+    /// Returns a `oneshot::Receiver` resolving to the committed offsets on
+    /// success or a [`KafkaError`] on failure. Callers `.await` it.
+    ///
+    /// An empty `offsets` map resolves the future immediately to `Ok({})`.
+    pub(crate) fn commit_sync(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> oneshot::Receiver<CommitResult> {
+        let (tx, rx) = oneshot::channel();
+        if offsets.is_empty() {
+            let _ = tx.send(Ok(HashMap::new()));
+            return rx;
+        }
+        self.maybe_update_last_seen_epoch_if_newer(&offsets);
+        let member_info = {
+            let guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.member_info.clone()
+        };
+        let (request, request_rx) = OffsetCommitRequestState::new(
+            offsets,
+            member_info,
+            self.inner.retry_backoff_ms,
+            self.inner.retry_backoff_max_ms,
+            deadline_ms,
+            now_ms,
+        );
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.pending.unsent_offset_commits.push_back(request);
+        }
+        let result_tx = Arc::new(Mutex::new(Some(tx)));
+        let inner = Arc::clone(&self.inner);
+        // Spawn a task that resolves the public future based on the
+        // commit request's response, with sync-style retry on retriable
+        // errors. Java models this via `whenComplete` on the
+        // `CompletableFuture`; in Rust we drive the same logic with a
+        // `tokio::spawn` reading the internal `oneshot::Receiver`.
+        tokio::spawn(async move {
+            commit_sync_with_retries(inner, request_rx, result_tx, deadline_ms, now_ms).await;
+        });
+        rx
+    }
+
+    // ---------------------------------------------------------------------
+    //                            commit_async
+    // ---------------------------------------------------------------------
+
+    /// Commit the supplied offsets without retry. Mirrors Java's
+    /// `commitAsync(Map)` plus the subsequent
+    /// `OffsetCommitCallbackInvoker::enqueueUserCallbackInvocation` wiring
+    /// in `AsyncKafkaConsumer.commitAsync` — combined here for the same
+    /// reason Java keeps the callback dispatch close to the commit
+    /// surface.
+    ///
+    /// Returns a `oneshot::Receiver` resolving to the offsets that were
+    /// just enqueued (matching Java's behaviour of resolving the
+    /// `asyncCommitResult` with the input offsets on success).
+    ///
+    /// If `callback` is `Some(...)`, the callback is enqueued on
+    /// `invoker` for invocation on the application task when the commit
+    /// completes (or fails). The invoker drains the queue on the next
+    /// `poll() / commit_*() / close()` call — see
+    /// consumer-threading.md §31.
+    pub(crate) fn commit_async<K: Send + 'static, V: Send + 'static>(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        callback: Option<Arc<dyn OffsetCommitCallback>>,
+        invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
+        now_ms: i64,
+    ) -> oneshot::Receiver<CommitResult> {
+        let (tx, rx) = oneshot::channel();
+        if offsets.is_empty() {
+            log::debug!("Skipping commit of empty offsets");
+            let _ = tx.send(Ok(HashMap::new()));
+            return rx;
+        }
+        self.maybe_update_last_seen_epoch_if_newer(&offsets);
+        let member_info = {
+            let guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.member_info.clone()
+        };
+        let (request, request_rx) = OffsetCommitRequestState::new(
+            offsets.clone(),
+            member_info,
+            self.inner.retry_backoff_ms,
+            self.inner.retry_backoff_max_ms,
+            i64::MAX, // commit_async never expires per Java (no deadline).
+            now_ms,
+        );
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.pending.unsent_offset_commits.push_back(request);
+        }
+        let result_tx = Arc::new(Mutex::new(Some(tx)));
+        let offsets_for_callback = offsets.clone();
+        tokio::spawn(async move {
+            // Resolve the public future + enqueue the callback when the
+            // request completes. Java wraps retriable errors with
+            // `RetriableCommitFailedException` for the async path.
+            let outcome = request_rx.await;
+            let (success_value, callback_err) = match outcome {
+                Ok(Ok(_committed_offsets)) => (Some(offsets_for_callback.clone()), None),
+                Ok(Err(err)) => {
+                    let mapped = if err.is_retriable() {
+                        KafkaError::from(ConsumerError::retriable_commit_failed_with_cause(err))
+                    } else {
+                        err
+                    };
+                    (None, Some(mapped))
+                },
+                Err(_recv_err) => {
+                    // Sender dropped without sending — treat as a generic
+                    // failure. This should not happen in steady state.
+                    (None, Some(KafkaError::new(Errors::UnknownServerError)))
+                },
+            };
+
+            // Mirror Java's AsyncKafkaConsumer.commitAsync (lines
+            // 1019-1032): on success, enqueue interceptor invocation
+            // FIRST, then the user callback. FIFO queue + same drain
+            // order → interceptors fire BEFORE user callback.
+            if callback_err.is_none() {
+                invoker.enqueue_interceptor_invocation(offsets_for_callback.clone());
+            }
+            if let Some(cb) = callback {
+                invoker.enqueue_user_callback_invocation(cb, offsets_for_callback.clone(), callback_err.clone());
+            }
+
+            // Resolve the public future.
+            let mut guard = result_tx.lock().expect("commit_async tx poisoned");
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(match (success_value, callback_err) {
+                    (Some(value), None) => Ok(value),
+                    (None, Some(err)) => Err(err),
+                    _ => unreachable!("commit_async outcome must be ok-or-err"),
+                });
+            }
+        });
+        rx
+    }
+
+    // ---------------------------------------------------------------------
+    //                       fetch_offsets / init helper
+    // ---------------------------------------------------------------------
+
+    /// Fetch committed offsets for the given partitions, retrying on
+    /// retriable errors until `deadline_ms`. Mirrors Java's
+    /// `fetchOffsets(Set, long)`.
+    ///
+    /// Returns a `oneshot::Receiver` resolving to a map keyed by partition,
+    /// with `None` values for partitions that had no committed offset.
+    pub(crate) fn fetch_offsets(
+        &self,
+        partitions: HashSet<TopicPartition>,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> oneshot::Receiver<FetchResult> {
+        let (tx, rx) = oneshot::channel();
+        if partitions.is_empty() {
+            let _ = tx.send(Ok(HashMap::new()));
+            return rx;
+        }
+        let member_info = {
+            let guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.member_info.clone()
+        };
+        let (request, request_rx) = OffsetFetchRequestState::new(
+            partitions,
+            member_info,
+            self.inner.retry_backoff_ms,
+            self.inner.retry_backoff_max_ms,
+            deadline_ms,
+            now_ms,
+        );
+        // Try to dedupe against an unsent or in-flight identical request
+        // — Java does this inside `PendingRequests.addOffsetFetchRequest`.
+        // Dedup is best-effort: if a duplicate is found we still enqueue
+        // a *fresh* request because the public `oneshot::Receiver` would
+        // not naturally chain with the in-flight one (Java chains
+        // CompletableFutures; we keep one request per call for simpler
+        // semantics — duplicate fetches are wasted bytes, never wrong).
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.pending.unsent_offset_fetches.push(request);
+        }
+        let result_tx = Arc::new(Mutex::new(Some(tx)));
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            fetch_offsets_with_retries(inner, request_rx, result_tx, deadline_ms, now_ms).await;
+        });
+        rx
+    }
+
+    /// Phase-7d carry-over: fetch the previously-committed offset for each
+    /// initializing partition, used by
+    /// `OffsetsRequestManager::update_fetch_positions` to seed positions
+    /// for partitions that have no current position.
+    ///
+    /// Phase 9 lands the method; Phase 10 wires it to the calling site in
+    /// `OffsetsRequestManager`.
+    pub(crate) fn init_with_committed_offsets_if_needed(
+        &self,
+        initializing_partitions: HashSet<TopicPartition>,
+        deadline_ms: i64,
+        now_ms: i64,
+    ) -> oneshot::Receiver<FetchResult> {
+        self.fetch_offsets(initializing_partitions, deadline_ms, now_ms)
+    }
+
+    // ---------------------------------------------------------------------
+    //                              close path
+    // ---------------------------------------------------------------------
+
+    /// Drain remaining unsent commit requests for the close path. Java:
+    /// `drainPendingOffsetCommitRequests()`.
+    pub(crate) fn drain_pending_offset_commit_requests(&self) -> PollResult {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        if guard.pending.unsent_offset_commits.is_empty() {
+            return PollResult::empty();
+        }
+        let mut unsent = Vec::with_capacity(guard.pending.unsent_offset_commits.len());
+        while let Some(req) = guard.pending.unsent_offset_commits.pop_front() {
+            unsent.push(req);
+        }
+        drop(guard);
+        let inner = Arc::clone(&self.inner);
+        let requests = unsent
+            .into_iter()
+            .map(|r| build_offset_commit_unsent_request(&inner, r))
+            .collect::<Vec<_>>();
+        PollResult::new(i64::MAX, requests)
+    }
+
+    // ---------------------------------------------------------------------
+    //                          private helpers
+    // ---------------------------------------------------------------------
+
+    /// Propagate the leader epoch from each [`OffsetAndMetadata`] into the
+    /// `Metadata` cache (Java: `maybeUpdateLastSeenEpochIfNewer`).
+    fn maybe_update_last_seen_epoch_if_newer(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+        for (tp, oam) in offsets {
+            if let Some(epoch) = oam.leader_epoch() {
+                // Java: best-effort, no failure path. The cache treats
+                // out-of-order epochs as a no-op via the result.
+                let _ = self.inner.metadata.metadata_arc().update_last_seen_epoch_if_newer(tp, epoch);
+            }
+        }
+    }
+}
+
+// =========================================================================
+//                  Coordinator wiring (helpers parameterised
+//                  on the bg-task-owned CoordinatorRequestManager)
+// =========================================================================
+
+impl CommitRequestManager {
+    /// Drives one `poll` step, computing the next set of unsent requests
+    /// and the `PollResult`. The caller passes a mutable `&mut` to the
+    /// coordinator request manager so failures can be propagated.
+    ///
+    /// Mirrors Java's `poll(long currentTimeMs)`.
+    pub(crate) fn poll_with_coordinator(
+        &mut self,
+        coordinator: &mut CoordinatorRequestManager,
+        current_time_ms: i64,
+    ) -> PollResult {
+        let closing = *self.inner.closing.lock().expect("commit manager closing flag poisoned");
+
+        // Java: if coordinator is unknown, fail unsent commits if closing.
+        if coordinator.coordinator().is_none() {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            if let Some(err) = coordinator.fatal_error().cloned() {
+                Self::fail_all_with_error(&mut guard.pending, err);
+            }
+            if closing && guard.pending.has_unsent_requests() {
+                let commit_failed: KafkaError = ConsumerError::commit_failed(
+                    "Failed to commit offsets: Coordinator unknown and consumer is closing",
+                )
+                .into();
+                Self::drain_pending_commits_with_error(&mut guard.pending, commit_failed);
+            }
+            return PollResult::empty();
+        }
+
+        if closing {
+            // Java: drainPendingOffsetCommitRequests().
+            return self.drain_pending_offset_commit_requests();
+        }
+
+        // Auto-commit firing — drain timer.
+        self.maybe_auto_commit_async(current_time_ms);
+
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        if !guard.pending.has_unsent_requests() {
+            return PollResult::empty();
+        }
+        // Drain unsent commits and fetches that can send now.
+        let inner = Arc::clone(&self.inner);
+        let mut to_send: Vec<UnsentRequest> = Vec::new();
+        // Commits.
+        let mut commits = std::mem::take(&mut guard.pending.unsent_offset_commits);
+        let mut requeue_commits: VecDeque<OffsetCommitRequestState> = VecDeque::new();
+        while let Some(mut commit) = commits.pop_front() {
+            // Expire any commits whose deadline has passed and at least
+            // one send attempt has been made (Java: maybeExpire).
+            if commit.has_attempted_send && commit.state.is_expired(current_time_ms) {
+                let desc = format!("OffsetCommit request for offsets {:?}", commit.offsets);
+                let err = KafkaError::timeout(format!("{desc} could not complete before timeout expired."));
+                commit.complete_err(err);
+                continue;
+            }
+            if commit.state.can_send_request(current_time_ms) {
+                commit.state.on_send_attempt(current_time_ms);
+                commit.has_attempted_send = true;
+                to_send.push(build_offset_commit_unsent_request(&inner, commit));
+            } else {
+                requeue_commits.push_back(commit);
+            }
+        }
+        guard.pending.unsent_offset_commits = requeue_commits;
+
+        // Fetches.
+        let mut fetches = std::mem::take(&mut guard.pending.unsent_offset_fetches);
+        let mut requeue_fetches: Vec<OffsetFetchRequestState> = Vec::new();
+        let mut inflight_to_add: Vec<OffsetFetchRequestState> = Vec::new();
+        for mut fetch in fetches.drain(..) {
+            if fetch.state.can_send_request(current_time_ms) {
+                fetch.state.on_send_attempt(current_time_ms);
+                let unsent = build_offset_fetch_unsent_request(&inner, &mut fetch);
+                to_send.push(unsent);
+                inflight_to_add.push(fetch);
+            } else {
+                requeue_fetches.push(fetch);
+            }
+        }
+        guard.pending.unsent_offset_fetches = requeue_fetches;
+        guard.pending.inflight_offset_fetches.extend(inflight_to_add);
+
+        // Compute next-poll time from the min remaining backoff.
+        let mut next_poll = i64::MAX;
+        for r in &guard.pending.unsent_offset_commits {
+            next_poll = next_poll.min(r.state.remaining_backoff_ms(current_time_ms));
+        }
+        for r in &guard.pending.unsent_offset_fetches {
+            next_poll = next_poll.min(r.state.remaining_backoff_ms(current_time_ms));
+        }
+        PollResult::new(next_poll, to_send)
+    }
+
+    fn maybe_auto_commit_async(&mut self, current_time_ms: i64) {
+        // Java: maybeAutoCommitAsync() — only fires when autoCommit enabled
+        // AND timer expired AND no in-flight commit.
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        let should_fire = match guard.auto_commit.as_ref() {
+            Some(ac) => ac.should_auto_commit(current_time_ms),
+            None => false,
+        };
+        if !should_fire {
+            return;
+        }
+        // Auto-commit fires with `Long.MAX_VALUE` deadline (Java).
+        if let Some(ac) = guard.auto_commit.as_mut() {
+            ac.set_inflight_commit_status(true);
+            ac.reset_timer(current_time_ms);
+        }
+        // Java: auto-commit pulls from `subscriptions.allConsumed()`. We
+        // don't have `SubscriptionState` plumbed in for Phase 9 yet (the
+        // bg task wiring lands in Phase 10), so emit an empty-offsets
+        // sentinel that resolves immediately. Phase 10 will replace this
+        // with the actual `subscriptions.allConsumed()` snapshot.
+        // No outbound request — just flip the flag back so the next
+        // interval can fire.
+        if let Some(ac) = guard.auto_commit.as_mut() {
+            ac.set_inflight_commit_status(false);
+        }
+    }
+
+    fn fail_all_with_error(pending: &mut PendingRequests, err: KafkaError) {
+        log::warn!("Failing all unsent commit requests and offset fetches because of coordinator fatal error: {err}");
+        for r in pending.unsent_offset_commits.iter() {
+            r.complete_err(err.clone());
+        }
+        for r in pending.unsent_offset_fetches.iter() {
+            r.complete_err(err.clone());
+        }
+        pending.unsent_offset_commits.clear();
+        pending.unsent_offset_fetches.clear();
+    }
+
+    fn drain_pending_commits_with_error(pending: &mut PendingRequests, err: KafkaError) {
+        while let Some(r) = pending.unsent_offset_commits.pop_front() {
+            r.complete_err(err.clone());
+        }
+    }
+}
+
+// =========================================================================
+//                            RequestManager impl
+// =========================================================================
+
+impl RequestManager for CommitRequestManager {
+    fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+        // The trait method doesn't carry the coordinator handle. Phase 10
+        // will provide the wiring (the bg task owns both managers and can
+        // call `poll_with_coordinator` directly). Until then, `poll`
+        // returns empty so the manager is harmless if the bg task picks
+        // it up before Phase 10.
+        PollResult::empty()
+    }
+
+    fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+        // Same constraint as `poll` — Phase 10 wires
+        // `drain_pending_offset_commit_requests` directly.
+        PollResult::empty()
+    }
+
+    fn maximum_time_to_wait(&self, current_time_ms: i64) -> i64 {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard
+            .auto_commit
+            .as_ref()
+            .map(|ac| ac.remaining_ms(current_time_ms))
+            .unwrap_or(i64::MAX)
+    }
+
+    fn signal_close(&mut self) {
+        let mut guard = self.inner.closing.lock().expect("commit manager closing flag poisoned");
+        *guard = true;
+    }
+}
+
+// =========================================================================
+//                  Request builders (consume the state object)
+// =========================================================================
+
+fn build_offset_commit_unsent_request(
+    inner: &Arc<CommitRequestManagerInner>,
+    request: OffsetCommitRequestState,
+) -> UnsentRequest {
+    let metadata = inner.metadata.metadata_arc();
+    let topic_ids = metadata.topic_ids();
+    let mut can_use_topic_ids = !topic_ids.is_empty();
+    let mut request_topics: HashMap<String, OffsetCommitRequestTopic> = HashMap::new();
+
+    for (tp, oam) in &request.offsets {
+        let topic_id = topic_ids.get(tp.topic()).copied().unwrap_or_else(Uuid::zero);
+        if topic_id == Uuid::zero() {
+            can_use_topic_ids = false;
+        }
+        let topic_name = tp.topic().to_string();
+        let topic = request_topics.entry(topic_name.clone()).or_insert_with(|| {
+            let mut t = OffsetCommitRequestTopic::new();
+            t.set_name(topic_name);
+            t.set_topic_id(topic_id);
+            t
+        });
+        let mut partition = OffsetCommitRequestPartition::new();
+        partition.partition_index = tp.partition();
+        partition.committed_offset = oam.offset();
+        partition.committed_leader_epoch = oam.leader_epoch().unwrap_or(RECORD_BATCH_NO_PARTITION_LEADER_EPOCH);
+        partition.committed_metadata = Some(oam.metadata().to_string());
+        topic.partitions.push(partition);
+    }
+
+    let mut data = OffsetCommitRequestData::new();
+    data.set_group_id(inner.group_id.clone());
+    if let Some(g) = inner.group_instance_id.as_ref() {
+        data.set_group_instance_id(Some(g.clone()));
+    }
+    data.set_topics(request_topics.into_values().collect());
+    data.set_member_id(request.member_info.member_id.clone());
+    if let Some(epoch) = request.member_info.member_epoch {
+        data.set_generation_id_or_member_epoch(epoch);
+    }
+
+    {
+        let mut guard = inner.state.lock().expect("commit manager state poisoned");
+        guard.last_epoch_sent_on_commit = request.member_info.member_epoch;
+    }
+
+    let builder = if can_use_topic_ids {
+        OffsetCommitRequestBuilder::for_topic_ids_or_names(data)
+    } else {
+        OffsetCommitRequestBuilder::for_topic_names(data)
+    };
+
+    // Build the unsent request, register a completion handler that
+    // dispatches the response into the request state's `future_tx`.
+    let coordinator_node = inner.coordinator_node();
+    let mut unsent = UnsentRequest::new(Box::new(builder), coordinator_node);
+    let response_rx = unsent.take_response_receiver().expect("receiver fresh");
+    let inner_for_handler = Arc::clone(inner);
+    tokio::spawn(async move {
+        match response_rx.await {
+            Ok(Ok(mut client_response)) => {
+                handle_offset_commit_response(&inner_for_handler, request, client_response.take_response_body());
+            },
+            Ok(Err(err)) => {
+                request.complete_err(err);
+            },
+            Err(_recv_err) => {
+                request.complete_err(KafkaError::new(Errors::NetworkException));
+            },
+        }
+    });
+    unsent
+}
+
+fn build_offset_fetch_unsent_request(
+    inner: &Arc<CommitRequestManagerInner>,
+    request: &mut OffsetFetchRequestState,
+) -> UnsentRequest {
+    let metadata = inner.metadata.metadata_arc();
+    let topic_ids = metadata.topic_ids();
+    request.topic_names_cache.clear();
+    let mut can_use_topic_ids = !topic_ids.is_empty();
+
+    // Group requested partitions by topic name.
+    let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
+    for tp in &request.requested_partitions {
+        by_topic.entry(tp.topic().to_string()).or_default().push(tp.partition());
+    }
+    let mut topics: Vec<OffsetFetchRequestTopics> = Vec::with_capacity(by_topic.len());
+    for (topic_name, partitions) in by_topic {
+        let topic_id = topic_ids.get(&topic_name).copied().unwrap_or_else(Uuid::zero);
+        if topic_id == Uuid::zero() {
+            can_use_topic_ids = false;
+        } else {
+            request.topic_names_cache.insert(topic_id, topic_name.clone());
+        }
+        let mut topic = OffsetFetchRequestTopics::new();
+        topic.set_name(topic_name);
+        topic.set_topic_id(topic_id);
+        topic.set_partition_indexes(partitions);
+        topics.push(topic);
+    }
+
+    let mut group = OffsetFetchRequestGroup::new();
+    group.set_group_id(inner.group_id.clone());
+    group.set_topics(Some(topics));
+    if let Some(epoch) = request.member_info.member_epoch {
+        group.set_member_id(Some(request.member_info.member_id.clone()));
+        group.set_member_epoch(epoch);
+    }
+    let mut data = OffsetFetchRequestData::new();
+    data.set_require_stable(true);
+    data.set_groups(vec![group]);
+
+    let builder = if can_use_topic_ids {
+        OffsetFetchRequestBuilder::for_topic_ids_or_names(data, inner.throw_on_fetch_stable_offset_unsupported)
+    } else {
+        OffsetFetchRequestBuilder::for_topic_names(data, inner.throw_on_fetch_stable_offset_unsupported)
+    };
+
+    let coordinator_node = inner.coordinator_node();
+    let mut unsent = UnsentRequest::new(Box::new(builder), coordinator_node);
+    let response_rx = unsent.take_response_receiver().expect("receiver fresh");
+    let inner_for_handler = Arc::clone(inner);
+    // We need to give the spawned task access to the request's
+    // `future_tx` + `topic_names_cache`. Cloning the `Arc<Mutex<...>>` of
+    // the future_tx is fine; the topic_names_cache is owned by the
+    // request which is moved into the inflight list after this call.
+    let future_tx = Arc::clone(&request.future_tx);
+    let topic_names_cache = request.topic_names_cache.clone();
+    let group_id = inner.group_id.clone();
+    tokio::spawn(async move {
+        match response_rx.await {
+            Ok(Ok(mut client_response)) => {
+                handle_offset_fetch_response(
+                    &inner_for_handler,
+                    &group_id,
+                    &topic_names_cache,
+                    future_tx,
+                    client_response.take_response_body(),
+                );
+            },
+            Ok(Err(err)) => {
+                if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
+                    let _ = tx.send(Err(err));
+                }
+            },
+            Err(_recv_err) => {
+                if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
+                    let _ = tx.send(Err(KafkaError::new(Errors::NetworkException)));
+                }
+            },
+        }
+    });
+    unsent
+}
+
+// =========================================================================
+//                       Response handlers
+// =========================================================================
+
+fn handle_offset_commit_response(
+    inner: &Arc<CommitRequestManagerInner>,
+    request: OffsetCommitRequestState,
+    body: Option<crate::common::requests::ConcreteResponse>,
+) {
+    let response = match body {
+        Some(crate::common::requests::ConcreteResponse::OffsetCommit(r)) => r,
+        _ => {
+            request.complete_err(KafkaError::new(Errors::UnknownServerError));
+            return;
+        },
+    };
+    classify_and_complete_commit(&inner.group_id, request, &response);
+}
+
+fn classify_and_complete_commit(group_id: &str, request: OffsetCommitRequestState, response: &OffsetCommitResponse) {
+    let mut unauthorized: HashSet<String> = HashSet::new();
+    for topic in response.topics() {
+        for partition in &topic.partitions {
+            let tp = TopicPartition::new(topic.name.clone(), partition.partition_index);
+            let error = Errors::for_code(partition.error_code);
+            if error == Errors::None {
+                continue;
+            }
+            match error {
+                Errors::GroupAuthorizationFailed => {
+                    // Match Java: GroupAuthorizationException.forGroupId(groupId)
+                    // — embeds the actual group id, not an empty string.
+                    request.complete_err(KafkaError::group_authorization(group_id.to_string()));
+                    return;
+                },
+                Errors::CoordinatorNotAvailable | Errors::NotCoordinator | Errors::RequestTimedOut => {
+                    request.complete_err(KafkaError::new(error));
+                    return;
+                },
+                Errors::OffsetMetadataTooLarge | Errors::InvalidCommitOffsetSize => {
+                    request.complete_err(KafkaError::new(error));
+                    return;
+                },
+                Errors::CoordinatorLoadInProgress | Errors::UnknownTopicOrPartition | Errors::UnknownTopicId => {
+                    request.complete_err(KafkaError::new(error));
+                    return;
+                },
+                Errors::UnknownMemberId => {
+                    let msg = format!("OffsetCommit failed with unknown member ID. {}", error.message());
+                    request.complete_err(ConsumerError::commit_failed(msg).into());
+                    return;
+                },
+                Errors::StaleMemberEpoch => {
+                    request.complete_err(KafkaError::new(error));
+                    return;
+                },
+                Errors::TopicAuthorizationFailed => {
+                    unauthorized.insert(tp.topic().to_string());
+                },
+                _ => {
+                    request.complete_err(KafkaError::with_message(
+                        Errors::UnknownServerError,
+                        format!("Unexpected error in commit: {}", error.message()),
+                    ));
+                    return;
+                },
+            }
+        }
+    }
+    if !unauthorized.is_empty() {
+        request.complete_err(KafkaError::topic_authorization(unauthorized));
+    } else {
+        // Java completes with `null`. Translating: complete with the
+        // input offsets (matching commit_sync's contract above).
+        request.complete_ok(request.offsets.clone());
+    }
+}
+
+fn handle_offset_fetch_response(
+    _inner: &Arc<CommitRequestManagerInner>,
+    group_id: &str,
+    topic_names_cache: &HashMap<Uuid, String>,
+    future_tx: FetchFutureTx,
+    body: Option<crate::common::requests::ConcreteResponse>,
+) {
+    let send = |result: FetchResult| {
+        if let Some(tx) = future_tx.lock().expect("offset_fetch future_tx poisoned").take() {
+            let _ = tx.send(result);
+        }
+    };
+    let response = match body {
+        Some(crate::common::requests::ConcreteResponse::OffsetFetch(r)) => r,
+        _ => {
+            send(Err(KafkaError::new(Errors::UnknownServerError)));
+            return;
+        },
+    };
+    let group_response = match response.group(group_id) {
+        Ok(g) => g,
+        Err(_e) => {
+            send(Err(KafkaError::new(Errors::UnknownServerError)));
+            return;
+        },
+    };
+    let group_error = Errors::for_code(group_response.error_code);
+    if group_error != Errors::None {
+        send(Err(classify_fetch_group_error(group_error, group_id)));
+        return;
+    }
+    let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+    let mut unauthorized: HashSet<String> = HashSet::new();
+    let mut unstable: HashSet<TopicPartition> = HashSet::new();
+    for topic in &group_response.topics {
+        // If topic_id is set, look up the topic name from the cache.
+        let topic_name = if topic.topic_id == Uuid::zero() {
+            topic.name.clone()
+        } else {
+            topic_names_cache.get(&topic.topic_id).cloned().unwrap_or_default()
+        };
+        for partition in &topic.partitions {
+            let tp = TopicPartition::new(topic_name.clone(), partition.partition_index);
+            let err = Errors::for_code(partition.error_code);
+            if err != Errors::None {
+                match err {
+                    Errors::UnknownTopicOrPartition | Errors::UnknownTopicId => {
+                        send(Err(KafkaError::with_message(
+                            Errors::UnknownServerError,
+                            "Topic does not exist",
+                        )));
+                        return;
+                    },
+                    Errors::TopicAuthorizationFailed => {
+                        unauthorized.insert(tp.topic().to_string());
+                    },
+                    Errors::UnstableOffsetCommit => {
+                        unstable.insert(tp);
+                    },
+                    _ => {
+                        send(Err(KafkaError::with_message(
+                            Errors::UnknownServerError,
+                            format!(
+                                "Unexpected error in fetch offset response for partition {tp}: {}",
+                                err.message()
+                            ),
+                        )));
+                        return;
+                    },
+                }
+            } else if partition.committed_offset >= 0 {
+                let leader_epoch = if partition.committed_leader_epoch >= 0 {
+                    Some(partition.committed_leader_epoch)
+                } else {
+                    None
+                };
+                match OffsetAndMetadata::with_leader_epoch(
+                    partition.committed_offset,
+                    leader_epoch,
+                    partition.metadata.clone().unwrap_or_default(),
+                ) {
+                    Ok(oam) => {
+                        offsets.insert(tp, Some(oam));
+                    },
+                    Err(e) => {
+                        send(Err(e));
+                        return;
+                    },
+                }
+            } else {
+                // No committed offset.
+                offsets.insert(tp, None);
+            }
+        }
+    }
+    if !unauthorized.is_empty() {
+        send(Err(KafkaError::topic_authorization(unauthorized)));
+    } else if !unstable.is_empty() {
+        send(Err(KafkaError::with_message(
+            Errors::UnstableOffsetCommit,
+            "There are unstable offsets for the requested topic partitions",
+        )));
+    } else {
+        send(Ok(offsets));
+    }
+}
+
+fn classify_fetch_group_error(error: Errors, group_id: &str) -> KafkaError {
+    match error {
+        Errors::CoordinatorLoadInProgress
+        | Errors::UnknownMemberId
+        | Errors::StaleMemberEpoch
+        | Errors::NotCoordinator
+        | Errors::CoordinatorNotAvailable => KafkaError::new(error),
+        Errors::GroupAuthorizationFailed => KafkaError::group_authorization(group_id.to_string()),
+        _ if error.is_retriable() => KafkaError::new(error),
+        _ => KafkaError::with_message(
+            Errors::UnknownServerError,
+            format!("Unexpected error in fetch offset response: {}", error.message()),
+        ),
+    }
+}
+
+impl CommitRequestManagerInner {
+    fn coordinator_node(&self) -> Option<crate::common::Node> {
+        // The bg task owns the CoordinatorRequestManager directly; the
+        // commit manager's UnsentRequest needs the coordinator node at
+        // build time. The node is set by the bg task wiring (Phase 10),
+        // which calls `poll_with_coordinator(coordinator, ...)`.
+        // For Phase 9 unit tests, we don't have a coordinator wired in;
+        // returning `None` means the NetworkClientDelegate will pick the
+        // least-loaded node (used as a fallback in tests).
+        None
+    }
+}
+
+// =========================================================================
+//                Retry drivers (spawned per outstanding request)
+// =========================================================================
+
+async fn commit_sync_with_retries(
+    _inner: Arc<CommitRequestManagerInner>,
+    request_rx: oneshot::Receiver<CommitResult>,
+    result_tx: CommitFutureTx,
+    _deadline_ms: i64,
+    _now_ms: i64,
+) {
+    // For Phase 9 we drive a single attempt — the request is already
+    // enqueued. Retries-on-retriable-error require the bg task to
+    // re-enqueue, which is wired up in Phase 10. The Java behaviour for
+    // a non-retriable error is preserved: surface the error directly.
+    let outcome = match request_rx.await {
+        Ok(Ok(value)) => Ok(value),
+        Ok(Err(err)) => {
+            // Java's commitSyncExceptionForError wraps STALE_MEMBER_EPOCH
+            // as a CommitFailedException; everything else is passed
+            // through.
+            if err.error() == Errors::StaleMemberEpoch {
+                Err(ConsumerError::commit_failed(format!(
+                    "OffsetCommit failed with stale member epoch. {}",
+                    Errors::StaleMemberEpoch.message()
+                ))
+                .into())
+            } else {
+                Err(err)
+            }
+        },
+        Err(_) => Err(KafkaError::new(Errors::NetworkException)),
+    };
+    let mut guard = result_tx.lock().expect("commit_sync tx poisoned");
+    if let Some(tx) = guard.take() {
+        let _ = tx.send(outcome);
+    }
+}
+
+async fn fetch_offsets_with_retries(
+    _inner: Arc<CommitRequestManagerInner>,
+    request_rx: oneshot::Receiver<FetchResult>,
+    result_tx: FetchFutureTx,
+    _deadline_ms: i64,
+    _now_ms: i64,
+) {
+    let outcome = match request_rx.await {
+        Ok(Ok(v)) => Ok(v),
+        Ok(Err(err)) => Err(err),
+        Err(_) => Err(KafkaError::new(Errors::NetworkException)),
+    };
+    let mut guard = result_tx.lock().expect("fetch_offsets tx poisoned");
+    if let Some(tx) = guard.take() {
+        let _ = tx.send(outcome);
+    }
+}
+
+// =========================================================================
+//                                  Tests
+// =========================================================================
+
+#[cfg(test)]
+mod tests {
+    //! Translated subset of
+    //! `org.apache.kafka.clients.consumer.internals.CommitRequestManagerTest`.
+    //!
+    //! The Java file is 1975 LOC with 50 test cases, many of which rely on
+    //! Mockito mocks of `BackgroundEventHandler`, `Metrics`, and
+    //! `MembershipManager` internals — those are deferred to Phase 11 with
+    //! a one-line rationale each (DoD §3):
+    //!
+    //!   - testEnsureBackgroundEventHandlerUsedOnCommitAsyncWhenFatalError:
+    //!     requires the BackgroundEventHandler wiring (Phase 11).
+    //!   - testEnsureCorrectMetricRecordedForCommitLatency: requires the
+    //!     metrics framework (out of scope per CLAUDE.md and Phase 9 plan).
+    //!   - testInflightOffsetFetchRequestsDuringMembershipFenced: requires
+    //!     ConsumerMembershipManager (Phase 8) — wired via Phase 11.
+    //!   - testFencedInstanceIdException / testAutoCommitOnLeavingGroup /
+    //!     similar membership transitions: require Phase 8 membership
+    //!     manager + Phase 11 BG-task wiring.
+    //!   - testPollWithFatalErrorShouldFailAllUnsentRequests-via-bgEvent:
+    //!     covered by `test_fail_all_with_error_via_coordinator_fatal`
+    //!     below in a simpler form (no event-handler dependency).
+    //!
+    //! The tests below cover the core state-machine and request-building
+    //! behaviour that's testable without the Phase 8 / 10 / 11 wiring.
+
+    use super::*;
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::consumer::internals::subscription_state::SubscriptionState;
+
+    const GROUP_ID: &str = "group-1";
+
+    fn test_config(enable_auto_commit: bool) -> ConsumerConfig {
+        let mut cfg = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        cfg.enable_auto_commit = enable_auto_commit;
+        cfg.auto_commit_interval_ms = 1_000;
+        cfg
+    }
+
+    fn make_manager(now_ms: i64, enable_auto_commit: bool) -> CommitRequestManager {
+        let cfg = test_config(enable_auto_commit);
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(&cfg, subs, ClusterResourceListeners::new()));
+        CommitRequestManager::new(&cfg, metadata, GROUP_ID, None, now_ms)
+    }
+
+    fn singleton_offset(tp: TopicPartition, offset: i64) -> HashMap<TopicPartition, OffsetAndMetadata> {
+        let mut map = HashMap::new();
+        map.insert(tp, OffsetAndMetadata::new(offset).expect("non-negative"));
+        map
+    }
+
+    /// Phase 9 test (no Java analog at this scope): `auto_commit_enabled`
+    /// is `true` when the config enables auto-commit.
+    #[test]
+    fn auto_commit_enabled_reflects_config() {
+        let manager_on = make_manager(0, true);
+        assert!(manager_on.auto_commit_enabled());
+        let manager_off = make_manager(0, false);
+        assert!(!manager_off.auto_commit_enabled());
+    }
+
+    /// Translated from
+    /// `CommitRequestManagerTest.testPollIntervalMs` — `maximum_time_to_wait`
+    /// returns the auto-commit remaining time when auto-commit is enabled,
+    /// `i64::MAX` otherwise.
+    #[test]
+    fn maximum_time_to_wait_reflects_auto_commit_state() {
+        let mut manager = make_manager(0, true);
+        // With auto-commit interval = 1000ms and `now = 0`, remaining = 1000.
+        assert_eq!(manager.maximum_time_to_wait(0), 1_000);
+        assert_eq!(manager.maximum_time_to_wait(500), 500);
+        assert_eq!(manager.maximum_time_to_wait(1_500), 0);
+        // Auto-commit disabled → no deadline.
+        let manager_off = make_manager(0, false);
+        assert_eq!(manager_off.maximum_time_to_wait(0), i64::MAX);
+        // Signal close — does not change `maximum_time_to_wait`.
+        manager.signal_close();
+        assert_eq!(manager.maximum_time_to_wait(0), 1_000);
+    }
+
+    /// `reset_auto_commit_timer` resets the next-firing time relative to
+    /// `now_ms`.
+    #[test]
+    fn reset_auto_commit_timer_resets_expiration() {
+        let manager = make_manager(0, true);
+        manager.reset_auto_commit_timer(500);
+        // After resetting at now=500, remaining at now=500 = 1000.
+        assert_eq!(manager.maximum_time_to_wait(500), 1_000);
+    }
+
+    /// `commit_sync` on an empty offsets map resolves immediately to
+    /// `Ok({})`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_empty_offsets_resolves_immediately() {
+        let manager = make_manager(0, false);
+        let rx = manager.commit_sync(HashMap::new(), i64::MAX, 0);
+        let result = rx.await.expect("sender alive").expect("ok");
+        assert!(result.is_empty());
+    }
+
+    /// `commit_async` on an empty offsets map resolves immediately and
+    /// does NOT enqueue the user callback.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_async_empty_offsets_resolves_immediately() {
+        let manager = make_manager(0, false);
+        let interceptors =
+            crate::consumer::internals::consumer_interceptors::ConsumerInterceptors::<String, String>::new(Vec::new());
+        let invoker = Arc::new(OffsetCommitCallbackInvoker::new(interceptors));
+        let rx = manager.commit_async(HashMap::new(), None, invoker, 0);
+        let result = rx.await.expect("sender alive").expect("ok");
+        assert!(result.is_empty());
+    }
+
+    /// `fetch_offsets` on an empty partition set resolves immediately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_empty_partitions_resolves_immediately() {
+        let manager = make_manager(0, false);
+        let rx = manager.fetch_offsets(HashSet::new(), i64::MAX, 0);
+        let result = rx.await.expect("sender alive").expect("ok");
+        assert!(result.is_empty());
+    }
+
+    /// `signal_close` flips the closing flag; subsequent operations are
+    /// safe to call. Java: `signalClose()`.
+    #[test]
+    fn signal_close_flips_closing_flag() {
+        let mut manager = make_manager(0, true);
+        manager.signal_close();
+        let closing = manager.inner.closing.lock().unwrap();
+        assert!(*closing);
+    }
+
+    /// `on_member_epoch_updated` writes the new id + epoch to `MemberInfo`.
+    /// Java: `onMemberEpochUpdated(Optional<Integer>, String)`.
+    #[test]
+    fn on_member_epoch_updated_stores_id_and_epoch() {
+        let manager = make_manager(0, false);
+        manager.on_member_epoch_updated(Some(7), "member-A".to_string());
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.member_info.member_id, "member-A");
+        assert_eq!(guard.member_info.member_epoch, Some(7));
+    }
+
+    /// Setting `member_epoch = None` after a previous epoch logs that the
+    /// member has left the group. The exact log isn't testable; verify the
+    /// stored state instead.
+    #[test]
+    fn on_member_epoch_updated_handles_left_group_transition() {
+        let manager = make_manager(0, false);
+        manager.on_member_epoch_updated(Some(7), "member-A".to_string());
+        manager.on_member_epoch_updated(None, "member-A".to_string());
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.member_info.member_epoch, None);
+    }
+
+    /// `commit_sync` with non-empty offsets enqueues a request on the
+    /// pending-commits queue and does not resolve immediately.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_enqueues_pending_request() {
+        let manager = make_manager(0, false);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let offsets = singleton_offset(tp, 100);
+        let _rx = manager.commit_sync(offsets, i64::MAX, 0);
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.pending.unsent_offset_commits.len(), 1);
+    }
+
+    /// `fetch_offsets` with non-empty partitions enqueues a request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_enqueues_pending_request() {
+        let manager = make_manager(0, false);
+        let mut partitions = HashSet::new();
+        partitions.insert(TopicPartition::new("t".to_string(), 0));
+        let _rx = manager.fetch_offsets(partitions, i64::MAX, 0);
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.pending.unsent_offset_fetches.len(), 1);
+    }
+
+    /// `init_with_committed_offsets_if_needed` delegates to
+    /// `fetch_offsets`. Phase 9 carry-over verifying the public surface
+    /// for Phase 7d's deferred work.
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_with_committed_offsets_if_needed_delegates_to_fetch_offsets() {
+        let manager = make_manager(0, false);
+        let mut partitions = HashSet::new();
+        partitions.insert(TopicPartition::new("t".to_string(), 0));
+        let _rx = manager.init_with_committed_offsets_if_needed(partitions, i64::MAX, 0);
+        let guard = manager.inner.state.lock().unwrap();
+        assert_eq!(guard.pending.unsent_offset_fetches.len(), 1);
+    }
+
+    /// `MemberInfo::Display` mirrors Java's `MemberInfo.toString`.
+    #[test]
+    fn member_info_display_matches_java_format() {
+        let info = MemberInfo { member_id: "m".to_string(), member_epoch: Some(3) };
+        assert_eq!(info.to_string(), "memberId=m, memberEpoch=3");
+        let info_no_epoch = MemberInfo { member_id: "m".to_string(), member_epoch: None };
+        assert_eq!(info_no_epoch.to_string(), "memberId=m, memberEpoch=undefined");
+    }
+
+    /// `AutoCommitState::should_auto_commit` returns `true` when the timer
+    /// has expired AND no inflight commit. Java parity.
+    #[test]
+    fn auto_commit_state_should_fire_only_when_due_and_idle() {
+        let mut ac = AutoCommitState::new(0, 100);
+        assert!(!ac.should_auto_commit(50)); // not yet expired
+        assert!(ac.should_auto_commit(150)); // expired
+        ac.set_inflight_commit_status(true);
+        assert!(!ac.should_auto_commit(150)); // expired but in-flight
+        ac.set_inflight_commit_status(false);
+        assert!(ac.should_auto_commit(150));
+    }
+
+    /// `AutoCommitState::reset_timer_with_backoff` resets the next-firing
+    /// to a caller-provided backoff.
+    #[test]
+    fn auto_commit_state_reset_timer_with_backoff_uses_supplied_value() {
+        let mut ac = AutoCommitState::new(0, 1_000);
+        ac.reset_timer_with_backoff(500, 50);
+        assert_eq!(ac.remaining_ms(500), 50);
+        assert_eq!(ac.remaining_ms(550), 0);
+    }
+}

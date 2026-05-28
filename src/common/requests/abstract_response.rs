@@ -34,6 +34,8 @@ use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::ListOffsetsResponse;
 use super::MetadataResponse;
+use super::OffsetCommitResponse;
+use super::OffsetFetchResponse;
 use super::OffsetsForLeaderEpochResponse;
 use super::ProduceResponse;
 use super::RequestHeader;
@@ -73,6 +75,10 @@ pub enum ConcreteResponse {
     OffsetsForLeaderEpoch(OffsetsForLeaderEpochResponse),
     /// A ConsumerGroupHeartbeat response (KIP-848).
     ConsumerGroupHeartbeat(ConsumerGroupHeartbeatResponse),
+    /// An OffsetCommit response.
+    OffsetCommit(OffsetCommitResponse),
+    /// An OffsetFetch response.
+    OffsetFetch(OffsetFetchResponse),
 }
 
 impl ConcreteResponse {
@@ -89,6 +95,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
             Self::ConsumerGroupHeartbeat(r) => r.api_key(),
+            Self::OffsetCommit(r) => r.api_key(),
+            Self::OffsetFetch(r) => r.api_key(),
         }
     }
 
@@ -111,6 +119,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -153,6 +163,12 @@ impl ConcreteResponse {
             Self::ConsumerGroupHeartbeat(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
             },
+            Self::OffsetCommit(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
+            Self::OffsetFetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -175,6 +191,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => Self::serialize_body(r.data(), version),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), version),
             Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data(), version),
+            Self::OffsetCommit(r) => Self::serialize_body(r.data(), version),
+            Self::OffsetFetch(r) => Self::serialize_body(r.data(), version),
         }
     }
 
@@ -201,6 +219,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => r.error_counts(),
             Self::OffsetsForLeaderEpoch(r) => r.error_counts(),
             Self::ConsumerGroupHeartbeat(r) => r.error_counts(),
+            Self::OffsetCommit(r) => r.error_counts(),
+            Self::OffsetFetch(r) => r.error_counts(),
         }
     }
 
@@ -219,6 +239,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => r.throttle_time_ms(),
             Self::OffsetsForLeaderEpoch(r) => r.throttle_time_ms(),
             Self::ConsumerGroupHeartbeat(r) => r.throttle_time_ms(),
+            Self::OffsetCommit(r) => r.throttle_time_ms(),
+            Self::OffsetFetch(r) => r.throttle_time_ms(),
         }
     }
 
@@ -236,6 +258,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetsForLeaderEpoch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ConsumerGroupHeartbeat(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::OffsetFetch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -252,6 +276,8 @@ impl ConcreteResponse {
             Self::ListOffsets(r) => r.should_client_throttle(version),
             Self::OffsetsForLeaderEpoch(r) => r.should_client_throttle(version),
             Self::ConsumerGroupHeartbeat(r) => r.should_client_throttle(version),
+            Self::OffsetCommit(r) => r.should_client_throttle(version),
+            Self::OffsetFetch(r) => r.should_client_throttle(version),
         }
     }
 
@@ -343,6 +369,14 @@ impl ConcreteResponse {
                 let response = ConsumerGroupHeartbeatResponse::parse(readable, version)?;
                 Ok(Self::ConsumerGroupHeartbeat(response))
             },
+            ApiKeys::OFFSET_COMMIT => {
+                let response = OffsetCommitResponse::parse(readable, version)?;
+                Ok(Self::OffsetCommit(response))
+            },
+            ApiKeys::OFFSET_FETCH => {
+                let response = OffsetFetchResponse::parse(readable, version)?;
+                Ok(Self::OffsetFetch(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -364,6 +398,8 @@ impl std::fmt::Display for ConcreteResponse {
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
             Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
+            Self::OffsetCommit(r) => write!(f, "{r}"),
+            Self::OffsetFetch(r) => write!(f, "{r}"),
         }
     }
 }
