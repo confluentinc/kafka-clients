@@ -48,6 +48,7 @@
 #![allow(dead_code)]
 
 use std::collections::{HashMap, HashSet, VecDeque};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use tokio::sync::oneshot;
@@ -188,6 +189,20 @@ struct OffsetCommitRequestState {
     /// we can reproduce Java's `maybeExpire` invariant (only expire after
     /// at least one send attempt).
     has_attempted_send: bool,
+    /// Number of prior retriable failures for this `commit_sync` flow.
+    /// Java tracks this via the inherited `RequestState.numAttempts` field,
+    /// which carries across `resetFuture()` calls because Java keeps the
+    /// SAME `OffsetCommitRequestState` instance. In Rust the network send
+    /// path consumes the state, so each retry creates a fresh state and
+    /// this counter carries continuity across retries (seeded into
+    /// `state.num_attempts` via [`Self::seed_failed_attempts`] so the
+    /// exponential backoff in `RequestState` ramps up correctly).
+    ///
+    /// Mirrors Java `RequestState.numAttempts`, surfaced here per Phase 10
+    /// wire-prereq #9 so the `commit_sync` retry path can decide between
+    /// retry and surface-to-caller using both the deadline (`isExpired`)
+    /// AND the per-attempt backoff bookkeeping.
+    commit_sync_attempts: i32,
     future_tx: CommitFutureTx,
 }
 
@@ -213,10 +228,23 @@ impl OffsetCommitRequestState {
                 member_info,
                 state,
                 has_attempted_send: false,
+                commit_sync_attempts: 0,
                 future_tx: Arc::new(Mutex::new(Some(tx))),
             },
             rx,
         )
+    }
+
+    /// Seed the inner [`RequestState`]'s `num_attempts` counter to `n` by
+    /// invoking `on_failed_attempt(now_ms)` `n` times. Used by the
+    /// `commit_sync` retry driver to carry exponential-backoff continuity
+    /// across retry attempts (each retry creates a fresh state instance
+    /// because the original is consumed by the send path).
+    fn seed_failed_attempts(&mut self, n: i32, now_ms: i64) {
+        for _ in 0..n {
+            self.state.on_failed_attempt(now_ms);
+        }
+        self.commit_sync_attempts = n;
     }
 
     fn complete_ok(&self, value: HashMap<TopicPartition, OffsetAndMetadata>) {
@@ -244,6 +272,12 @@ impl OffsetCommitRequestState {
 /// Pending offset-fetch request awaiting send / response. Translated from
 /// the nested `CommitRequestManager.OffsetFetchRequestState`.
 struct OffsetFetchRequestState {
+    /// Monotonic per-manager identifier. Java uses object identity
+    /// (`.remove(fetchRequest)` is reference-equality) to find the matching
+    /// entry in `inflightOffsetFetches` on completion; Rust uses an explicit
+    /// `u64` because we cannot rely on heap-address identity (the value is
+    /// owned by the `Vec` and may move).
+    request_id: u64,
     requested_partitions: HashSet<TopicPartition>,
     member_info: MemberInfo,
     state: TimedRequestState,
@@ -256,6 +290,7 @@ struct OffsetFetchRequestState {
 
 impl OffsetFetchRequestState {
     fn new(
+        request_id: u64,
         requested_partitions: HashSet<TopicPartition>,
         member_info: MemberInfo,
         retry_backoff_ms: i64,
@@ -272,6 +307,7 @@ impl OffsetFetchRequestState {
         );
         (
             Self {
+                request_id,
                 requested_partitions,
                 member_info,
                 state,
@@ -336,6 +372,11 @@ struct CommitRequestManagerInner {
     metadata: Arc<ConsumerMetadata>,
     /// Tracks whether `signal_close()` has fired.
     closing: Mutex<bool>,
+    /// Monotonic counter handing out per-request identifiers for
+    /// `OffsetFetchRequestState` instances so the spawned response handler
+    /// can locate the matching entry in `inflightOffsetFetches`. Java uses
+    /// object identity; the Rust translation needs an explicit id.
+    next_request_id: AtomicU64,
     state: Mutex<CommitRequestManagerState>,
 }
 
@@ -406,6 +447,7 @@ impl CommitRequestManager {
             throw_on_fetch_stable_offset_unsupported: config.throw_on_fetch_stable_offset_unsupported(),
             metadata,
             closing: Mutex::new(false),
+            next_request_id: AtomicU64::new(0),
             state: Mutex::new(state),
         });
         Self { inner }
@@ -434,6 +476,28 @@ impl CommitRequestManager {
         if let Some(ac) = guard.auto_commit.as_mut() {
             ac.reset_timer_with_backoff(now_ms, retry_backoff_ms);
         }
+    }
+
+    /// Refreshes the auto-commit interval timer with the current time and
+    /// fires an auto-commit if the timer has expired and no commit is
+    /// in-flight. Mirrors Java's
+    /// [`CommitRequestManager.updateTimerAndMaybeCommit`].
+    ///
+    /// Java calls `updateAutoCommitTimer(currentTimeMs)` followed by
+    /// `maybeAutoCommitAsync()`. In the Rust translation the timer-refresh
+    /// step is implicit: every query method ([`Self::maximum_time_to_wait`],
+    /// [`AutoCommitState::should_auto_commit`], etc.) takes
+    /// `current_time_ms` as an explicit parameter, so there is no stateful
+    /// `Timer.update(...)` call to make. This method is therefore a thin
+    /// pass-through to the existing `maybe_auto_commit_async` driver.
+    ///
+    /// Used by `ApplicationEventProcessor` for `AsyncPoll` and
+    /// `AssignmentChange` events so the auto-commit interval is honoured at
+    /// event-dispatch time rather than only inside the bg-task `poll`.
+    pub(crate) fn update_timer_and_maybe_commit(&mut self, current_time_ms: i64) {
+        // Java: updateTimerAndMaybeCommit — ensures the auto-commit timer
+        // reflects the latest poll/event tick before potentially firing.
+        self.maybe_auto_commit_async(current_time_ms);
     }
 
     // ---------------------------------------------------------------------
@@ -504,9 +568,15 @@ impl CommitRequestManager {
             let guard = self.inner.state.lock().expect("commit manager state poisoned");
             guard.member_info.clone()
         };
+        // Clone the offsets so the retry driver can recreate the request
+        // state on retriable failures. Java's `commitSyncWithRetries`
+        // reuses the same `OffsetCommitRequestState` via `resetFuture()`;
+        // in Rust the network send path consumes the state, so we keep
+        // a canonical copy here for retries.
+        let offsets_for_retry = offsets.clone();
         let (request, request_rx) = OffsetCommitRequestState::new(
             offsets,
-            member_info,
+            member_info.clone(),
             self.inner.retry_backoff_ms,
             self.inner.retry_backoff_max_ms,
             deadline_ms,
@@ -524,7 +594,16 @@ impl CommitRequestManager {
         // `CompletableFuture`; in Rust we drive the same logic with a
         // `tokio::spawn` reading the internal `oneshot::Receiver`.
         tokio::spawn(async move {
-            commit_sync_with_retries(inner, request_rx, result_tx, deadline_ms, now_ms).await;
+            commit_sync_with_retries(
+                inner,
+                request_rx,
+                result_tx,
+                offsets_for_retry,
+                member_info,
+                deadline_ms,
+                now_ms,
+            )
+            .await;
         });
         rx
     }
@@ -652,7 +731,9 @@ impl CommitRequestManager {
             let guard = self.inner.state.lock().expect("commit manager state poisoned");
             guard.member_info.clone()
         };
+        let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
         let (request, request_rx) = OffsetFetchRequestState::new(
+            request_id,
             partitions,
             member_info,
             self.inner.retry_backoff_ms,
@@ -800,6 +881,11 @@ impl CommitRequestManager {
             if commit.state.can_send_request(current_time_ms) {
                 commit.state.on_send_attempt(current_time_ms);
                 commit.has_attempted_send = true;
+                // Mirrors Java's `lastEpochSentOnCommit = memberInfo.memberEpoch`
+                // writeback inside `createOffsetCommitRequest`. Done here
+                // because `build_offset_commit_unsent_request` cannot
+                // re-acquire the state lock (non-reentrant).
+                guard.last_epoch_sent_on_commit = commit.member_info.member_epoch;
                 to_send.push(build_offset_commit_unsent_request(&inner, commit));
             } else {
                 requeue_commits.push_back(commit);
@@ -961,10 +1047,12 @@ fn build_offset_commit_unsent_request(
         data.set_generation_id_or_member_epoch(epoch);
     }
 
-    {
-        let mut guard = inner.state.lock().expect("commit manager state poisoned");
-        guard.last_epoch_sent_on_commit = request.member_info.member_epoch;
-    }
+    // `last_epoch_sent_on_commit` writeback is intentionally NOT performed
+    // here: this helper runs from inside `poll_with_coordinator` while the
+    // bg-task already holds `inner.state.lock()`. Locking it again would
+    // deadlock (`std::sync::Mutex` is non-reentrant). The caller writes
+    // the epoch back inside its own critical section — see
+    // `poll_with_coordinator`.
 
     let builder = if can_use_topic_ids {
         OffsetCommitRequestBuilder::for_topic_ids_or_names(data)
@@ -1051,6 +1139,7 @@ fn build_offset_fetch_unsent_request(
     let future_tx = Arc::clone(&request.future_tx);
     let topic_names_cache = request.topic_names_cache.clone();
     let group_id = inner.group_id.clone();
+    let request_id = request.request_id;
     tokio::spawn(async move {
         match response_rx.await {
             Ok(Ok(mut client_response)) => {
@@ -1072,6 +1161,19 @@ fn build_offset_fetch_unsent_request(
                     let _ = tx.send(Err(KafkaError::new(Errors::NetworkException)));
                 }
             },
+        }
+        // Drain the matching entry from `inflight_offset_fetches`.
+        // Mirrors Java's `pendingRequests.inflightOffsetFetches.remove(fetchRequest)`
+        // inside `fetchOffsetsWithRetries.whenComplete`. Phase 9 leaked
+        // these entries because the completion path did not remove them.
+        let mut state_guard = inner_for_handler.state.lock().expect("commit manager state poisoned");
+        let inflight = &mut state_guard.pending.inflight_offset_fetches;
+        if let Some(pos) = inflight.iter().position(|r| r.request_id == request_id) {
+            inflight.swap_remove(pos);
+        } else {
+            log::warn!(
+                "A duplicated, inflight, request was identified, but unable to find it in the outbound buffer: request_id={request_id}"
+            );
         }
     });
     unsent
@@ -1296,33 +1398,86 @@ impl CommitRequestManagerInner {
 // =========================================================================
 
 async fn commit_sync_with_retries(
-    _inner: Arc<CommitRequestManagerInner>,
-    request_rx: oneshot::Receiver<CommitResult>,
+    inner: Arc<CommitRequestManagerInner>,
+    initial_request_rx: oneshot::Receiver<CommitResult>,
     result_tx: CommitFutureTx,
-    _deadline_ms: i64,
-    _now_ms: i64,
+    offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    member_info: MemberInfo,
+    deadline_ms: i64,
+    now_ms: i64,
 ) {
-    // For Phase 9 we drive a single attempt — the request is already
-    // enqueued. Retries-on-retriable-error require the bg task to
-    // re-enqueue, which is wired up in Phase 10. The Java behaviour for
-    // a non-retriable error is preserved: surface the error directly.
-    let outcome = match request_rx.await {
-        Ok(Ok(value)) => Ok(value),
-        Ok(Err(err)) => {
-            // Java's commitSyncExceptionForError wraps STALE_MEMBER_EPOCH
-            // as a CommitFailedException; everything else is passed
-            // through.
-            if err.error() == Errors::StaleMemberEpoch {
-                Err(ConsumerError::commit_failed(format!(
-                    "OffsetCommit failed with stale member epoch. {}",
-                    Errors::StaleMemberEpoch.message()
-                ))
-                .into())
-            } else {
-                Err(err)
-            }
-        },
-        Err(_) => Err(KafkaError::new(Errors::NetworkException)),
+    // Java: `commitSyncWithRetries` recurses on retriable errors using the
+    // same `OffsetCommitRequestState` instance (`requestAttempt.resetFuture()`
+    // + recurse). In Rust the send path consumes the state, so each retry
+    // creates a fresh `OffsetCommitRequestState` and carries the
+    // `commit_sync_attempts` counter forward via
+    // [`OffsetCommitRequestState::seed_failed_attempts`] so the underlying
+    // `RequestState.num_attempts` (used by `ExponentialBackoff`) ramps up
+    // correctly across retries.
+    //
+    // The retry decision gate is the deadline (`is_expired`) — Java does
+    // not cap retries by attempt count for `commit_sync`, only by
+    // deadline. On deadline expiry after a retriable error the final
+    // error is wrapped as a `TimeoutException`
+    // (Java: `maybeWrapAsTimeoutException`). Non-retriable errors are
+    // surfaced via `commitSyncExceptionForError` (StaleMemberEpoch
+    // → `CommitFailedException`; else pass-through).
+    let mut request_rx = initial_request_rx;
+    let mut commit_sync_attempts: i32 = 0;
+    let mut current_time_ms = now_ms;
+    let outcome = loop {
+        match request_rx.await {
+            Ok(Ok(value)) => break Ok(value),
+            Ok(Err(err)) => {
+                let retriable = err.is_retriable();
+                if !retriable {
+                    // Java's commitSyncExceptionForError wraps
+                    // STALE_MEMBER_EPOCH as a CommitFailedException;
+                    // everything else passes through.
+                    if err.error() == Errors::StaleMemberEpoch {
+                        break Err(ConsumerError::commit_failed(format!(
+                            "OffsetCommit failed with stale member epoch. {}",
+                            Errors::StaleMemberEpoch.message()
+                        ))
+                        .into());
+                    }
+                    break Err(err);
+                }
+                // Retriable error. Advance the local "now" by the
+                // configured retry backoff (mirrors Java's bg-task tick
+                // which would only re-poll the request once the
+                // exponential-backoff window elapsed). Then check the
+                // deadline: if expired, surface a TimeoutException
+                // wrapping the original error message.
+                let backoff = inner.retry_backoff_ms.max(0);
+                current_time_ms = current_time_ms.saturating_add(backoff);
+                commit_sync_attempts += 1;
+                if current_time_ms >= deadline_ms {
+                    log::info!("OffsetCommit timeout expired so it won't be retried anymore");
+                    break Err(KafkaError::timeout(format!(
+                        "Failed to commit offsets within the deadline: {}",
+                        err.error().message()
+                    )));
+                }
+                // Re-enqueue a fresh request with continuity in the
+                // backoff counter.
+                let (mut retry_request, retry_rx) = OffsetCommitRequestState::new(
+                    offsets.clone(),
+                    member_info.clone(),
+                    inner.retry_backoff_ms,
+                    inner.retry_backoff_max_ms,
+                    deadline_ms,
+                    current_time_ms,
+                );
+                retry_request.seed_failed_attempts(commit_sync_attempts, current_time_ms);
+                {
+                    let mut guard = inner.state.lock().expect("commit manager state poisoned");
+                    guard.pending.unsent_offset_commits.push_back(retry_request);
+                }
+                request_rx = retry_rx;
+            },
+            Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
+        }
     };
     let mut guard = result_tx.lock().expect("commit_sync tx poisoned");
     if let Some(tx) = guard.take() {
@@ -1576,5 +1731,195 @@ mod tests {
         ac.reset_timer_with_backoff(500, 50);
         assert_eq!(ac.remaining_ms(500), 50);
         assert_eq!(ac.remaining_ms(550), 0);
+    }
+
+    // ---------------------------------------------------------------------
+    //                       Phase 10 wire-prereqs
+    // ---------------------------------------------------------------------
+
+    /// Phase 10 wire-prereq #6:
+    /// [`CommitRequestManager::update_timer_and_maybe_commit`] is the
+    /// processor-side entry point that ensures the auto-commit timer is
+    /// honoured at event-dispatch time. With auto-commit enabled and the
+    /// timer past its expiration, calling the hook should fire the
+    /// auto-commit path — observable via the timer being reset back to a
+    /// fresh interval (the `maybe_auto_commit_async` driver always resets
+    /// the timer when it fires).
+    #[test]
+    fn update_timer_and_maybe_commit_fires_when_timer_expired() {
+        let mut manager = make_manager(0, true);
+        // Advance past the auto-commit interval (1000ms — configured in
+        // `test_config`) and call the hook.
+        let after_expiry_ms = 2_000;
+        manager.update_timer_and_maybe_commit(after_expiry_ms);
+        // The auto-commit driver should have reset the timer to a fresh
+        // interval, so `maximum_time_to_wait(after_expiry_ms)` should be
+        // back to the full interval (1000ms).
+        assert_eq!(manager.maximum_time_to_wait(after_expiry_ms), 1_000);
+    }
+
+    /// With auto-commit DISABLED, the hook is a no-op (Java:
+    /// `maybeAutoCommitAsync` returns early when `autoCommitEnabled()`
+    /// is false).
+    #[test]
+    fn update_timer_and_maybe_commit_is_noop_without_auto_commit() {
+        let mut manager = make_manager(0, false);
+        // Calling the hook should not panic and `maximum_time_to_wait`
+        // remains `i64::MAX` since no auto-commit timer exists.
+        manager.update_timer_and_maybe_commit(5_000);
+        assert_eq!(manager.maximum_time_to_wait(5_000), i64::MAX);
+    }
+
+    /// Phase 10 wire-prereq #8:
+    /// [`PendingRequests::inflight_offset_fetches`] must drain when an
+    /// offset-fetch response (success or failure) is delivered. Phase 9
+    /// leaked these entries because the completion path did not remove
+    /// them. The test drives a `fetch_offsets` request through
+    /// `poll_with_coordinator` to move it into the inflight vec, then
+    /// completes the underlying network handler with a synthetic error
+    /// and asserts the inflight vec is drained.
+    #[tokio::test(flavor = "current_thread")]
+    async fn inflight_offset_fetches_drained_on_response() {
+        use crate::common::Node;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+        let manager = make_manager(0, false);
+        let mut partitions = HashSet::new();
+        partitions.insert(TopicPartition::new("t".to_string(), 0));
+        let _public_rx = manager.fetch_offsets(partitions, i64::MAX, 0);
+        // Pre-condition: enqueued but not yet inflight.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert_eq!(guard.pending.unsent_offset_fetches.len(), 1);
+            assert!(guard.pending.inflight_offset_fetches.is_empty());
+        }
+
+        // Drive `poll_with_coordinator` to ship the request.
+        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let mut manager = manager;
+        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        assert_eq!(poll_result.unsent_requests.len(), 1);
+
+        // Inflight has the request now, unsent is empty.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert!(guard.pending.unsent_offset_fetches.is_empty());
+            assert_eq!(guard.pending.inflight_offset_fetches.len(), 1);
+        }
+
+        // Synthesise a response failure via the request's completion
+        // handler. The spawned response handler awaits this and must
+        // drain the inflight entry.
+        let mut unsent_requests = poll_result.unsent_requests;
+        let unsent = unsent_requests.remove(0);
+        unsent
+            .handler()
+            .on_failure(1, KafkaError::new(Errors::CoordinatorLoadInProgress));
+
+        // Yield until the spawned task observes the failure and drains.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            let guard = manager.inner.state.lock().unwrap();
+            if guard.pending.inflight_offset_fetches.is_empty() {
+                return;
+            }
+        }
+        let guard = manager.inner.state.lock().unwrap();
+        panic!(
+            "inflight_offset_fetches not drained on response (len={})",
+            guard.pending.inflight_offset_fetches.len()
+        );
+    }
+
+    /// Phase 10 wire-prereq #9:
+    /// [`CommitRequestManager::commit_sync`] retries on retriable errors
+    /// until the deadline expires, then surfaces a `TimeoutException`
+    /// wrapping the last retriable error (Java:
+    /// `maybeWrapAsTimeoutException` inside `commitSyncWithRetries`).
+    ///
+    /// Note: the user prompt suggested `RetriableCommitFailedError` as the
+    /// expected surface error; Java actually surfaces `TimeoutException`
+    /// from `commit_sync` and reserves `RetriableCommitFailedException`
+    /// for the `commit_async` path (`commitAsyncExceptionForError`). We
+    /// match Java's behaviour.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn commit_sync_surfaces_timeout_error_after_deadline_expiry() {
+        use crate::common::Node;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+        let mut manager = make_manager(0, false);
+        // Short deadline so a small number of retriable failures trips
+        // it. The retry driver advances its local `current_time_ms` by
+        // `retry_backoff_ms` per retriable error; once that local clock
+        // crosses `deadline_ms`, the driver surfaces a TimeoutException.
+        let retry_backoff_ms = manager.inner.retry_backoff_ms;
+        let deadline_ms = retry_backoff_ms.saturating_mul(2) + 1;
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let public_rx = manager.commit_sync(singleton_offset(tp.clone(), 100), deadline_ms, 0);
+
+        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+
+        // Drive enough send / fail cycles to trip the deadline. The poll
+        // time has to advance well beyond the retry-driver's local
+        // `current_time_ms` so the re-enqueued request's exponential
+        // backoff (seeded via `seed_failed_attempts`) is guaranteed to
+        // have elapsed by the time the next `poll_with_coordinator` runs.
+        // We use a poll-time step of `retry_backoff_max_ms * 2` to dwarf
+        // both the configured backoff and its jitter band.
+        let retry_backoff_max_ms = manager.inner.retry_backoff_max_ms;
+        let poll_time_step = retry_backoff_max_ms.saturating_mul(2).max(retry_backoff_ms * 4);
+        let mut poll_time_ms: i64 = 0;
+        let mut public_rx = public_rx;
+        let mut iters = 0;
+        let outcome = loop {
+            iters += 1;
+            // Probe the public future without blocking.
+            match public_rx.try_recv() {
+                Ok(result) => break result,
+                Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
+                Err(oneshot::error::TryRecvError::Empty) => {},
+            }
+            let poll_result = manager.poll_with_coordinator(&mut coordinator, poll_time_ms);
+            if let Some(unsent) = poll_result.unsent_requests.into_iter().next() {
+                unsent
+                    .handler()
+                    .on_failure(poll_time_ms, KafkaError::new(Errors::CoordinatorLoadInProgress));
+            }
+            // Yield so the spawned response handler runs and the retry
+            // driver enqueues the next attempt — even when the poll
+            // didn't ship a request (the retry driver may still be
+            // observing the prior completion). Use a short real-time
+            // sleep so the multi-thread runtime has a chance to schedule
+            // the spawned task on the other worker before the next probe.
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            poll_time_ms = poll_time_ms.saturating_add(poll_time_step);
+            // Defensive cap to prevent test-loop runaway.
+            if iters > 200 {
+                panic!("retry driver failed to surface a Timeout within 200 iterations");
+            }
+        };
+
+        // The outcome must now be a Timeout error
+        // (Java: `maybeWrapAsTimeoutException`).
+        let err = outcome.expect_err("commit_sync must surface error after deadline expiry");
+        assert!(
+            matches!(err, KafkaError::Timeout(_)),
+            "expected wrapped TimeoutException, got {err:?}",
+        );
+    }
+
+    /// `OffsetCommitRequestState::seed_failed_attempts` seeds the inner
+    /// `RequestState.num_attempts` counter so exponential backoff ramps
+    /// across retry attempts.
+    #[test]
+    fn offset_commit_request_state_seed_failed_attempts_increments_counter() {
+        let member_info = MemberInfo::default();
+        let (mut state, _rx) = OffsetCommitRequestState::new(HashMap::new(), member_info, 100, 1_000, i64::MAX, 0);
+        assert_eq!(state.state.num_attempts(), 0);
+        state.seed_failed_attempts(3, 0);
+        assert_eq!(state.state.num_attempts(), 3);
+        assert_eq!(state.commit_sync_attempts, 3);
     }
 }

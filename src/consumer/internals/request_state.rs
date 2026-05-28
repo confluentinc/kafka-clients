@@ -179,6 +179,15 @@ impl RequestState {
         self.num_attempts += 1;
     }
 
+    /// Returns the number of consecutive failed attempts since the last
+    /// successful send (or construction). Mirrors Java's
+    /// `protected int numAttempts` — exposed as a read-only accessor so
+    /// retry-driver code can decide between retry and surface-to-caller
+    /// based on accumulated attempts.
+    pub(crate) fn num_attempts(&self) -> i32 {
+        self.num_attempts
+    }
+
     /// Returns the number of milliseconds remaining before the next send
     /// is allowed, given the current time.
     ///
