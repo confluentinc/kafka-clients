@@ -33,6 +33,7 @@ use super::FetchResponse;
 use super::FindCoordinatorResponse;
 use super::ListOffsetsResponse;
 use super::MetadataResponse;
+use super::OffsetCommitResponse;
 use super::OffsetsForLeaderEpochResponse;
 use super::ProduceResponse;
 use super::RequestHeader;
@@ -70,6 +71,8 @@ pub enum ConcreteResponse {
     ListOffsets(ListOffsetsResponse),
     /// An OffsetsForLeaderEpoch response.
     OffsetsForLeaderEpoch(OffsetsForLeaderEpochResponse),
+    /// An OffsetCommit response.
+    OffsetCommit(OffsetCommitResponse),
 }
 
 impl ConcreteResponse {
@@ -85,6 +88,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => r.api_key(),
             Self::ListOffsets(r) => r.api_key(),
             Self::OffsetsForLeaderEpoch(r) => r.api_key(),
+            Self::OffsetCommit(r) => r.api_key(),
         }
     }
 
@@ -106,6 +110,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::ListOffsets(r) => SendBuilder::build_response_send(header, r.data(), version),
             Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data(), version),
         }
     }
 
@@ -145,6 +150,9 @@ impl ConcreteResponse {
             Self::OffsetsForLeaderEpoch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
             },
+            Self::OffsetCommit(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+            },
         }
     }
 
@@ -166,6 +174,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => Self::serialize_body(r.data(), version),
             Self::ListOffsets(r) => Self::serialize_body(r.data(), version),
             Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), version),
+            Self::OffsetCommit(r) => Self::serialize_body(r.data(), version),
         }
     }
 
@@ -191,6 +200,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => r.error_counts(),
             Self::ListOffsets(r) => r.error_counts(),
             Self::OffsetsForLeaderEpoch(r) => r.error_counts(),
+            Self::OffsetCommit(r) => r.error_counts(),
         }
     }
 
@@ -208,6 +218,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => r.throttle_time_ms(),
             Self::ListOffsets(r) => r.throttle_time_ms(),
             Self::OffsetsForLeaderEpoch(r) => r.throttle_time_ms(),
+            Self::OffsetCommit(r) => r.throttle_time_ms(),
         }
     }
 
@@ -224,6 +235,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::ListOffsets(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
             Self::OffsetsForLeaderEpoch(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
+            Self::OffsetCommit(r) => r.maybe_set_throttle_time_ms(throttle_time_ms),
         }
     }
 
@@ -239,6 +251,7 @@ impl ConcreteResponse {
             Self::FindCoordinator(r) => r.should_client_throttle(version),
             Self::ListOffsets(r) => r.should_client_throttle(version),
             Self::OffsetsForLeaderEpoch(r) => r.should_client_throttle(version),
+            Self::OffsetCommit(r) => r.should_client_throttle(version),
         }
     }
 
@@ -326,6 +339,10 @@ impl ConcreteResponse {
                 let response = OffsetsForLeaderEpochResponse::parse(readable, version)?;
                 Ok(Self::OffsetsForLeaderEpoch(response))
             },
+            ApiKeys::OFFSET_COMMIT => {
+                let response = OffsetCommitResponse::parse(readable, version)?;
+                Ok(Self::OffsetCommit(response))
+            },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
                 format!("ApiKey {} is not currently handled in parse_response", api_key.name()),
@@ -346,6 +363,7 @@ impl std::fmt::Display for ConcreteResponse {
             Self::FindCoordinator(r) => write!(f, "{r}"),
             Self::ListOffsets(r) => write!(f, "{r}"),
             Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
+            Self::OffsetCommit(r) => write!(f, "{r}"),
         }
     }
 }
