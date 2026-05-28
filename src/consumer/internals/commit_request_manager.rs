@@ -603,14 +603,15 @@ impl CommitRequestManager {
                 },
             };
 
-            // Enqueue the user callback on the invoker. The interceptor
-            // chain receives the success invocation; user callback always
-            // fires once.
-            if let Some(cb) = callback {
-                invoker.enqueue_user_callback_invocation(cb, offsets_for_callback.clone(), callback_err.clone());
-            }
+            // Mirror Java's AsyncKafkaConsumer.commitAsync (lines
+            // 1019-1032): on success, enqueue interceptor invocation
+            // FIRST, then the user callback. FIFO queue + same drain
+            // order → interceptors fire BEFORE user callback.
             if callback_err.is_none() {
                 invoker.enqueue_interceptor_invocation(offsets_for_callback.clone());
+            }
+            if let Some(cb) = callback {
+                invoker.enqueue_user_callback_invocation(cb, offsets_for_callback.clone(), callback_err.clone());
             }
 
             // Resolve the public future.
@@ -1081,7 +1082,7 @@ fn build_offset_fetch_unsent_request(
 // =========================================================================
 
 fn handle_offset_commit_response(
-    _inner: &Arc<CommitRequestManagerInner>,
+    inner: &Arc<CommitRequestManagerInner>,
     request: OffsetCommitRequestState,
     body: Option<crate::common::requests::ConcreteResponse>,
 ) {
@@ -1092,10 +1093,10 @@ fn handle_offset_commit_response(
             return;
         },
     };
-    classify_and_complete_commit(request, &response);
+    classify_and_complete_commit(&inner.group_id, request, &response);
 }
 
-fn classify_and_complete_commit(request: OffsetCommitRequestState, response: &OffsetCommitResponse) {
+fn classify_and_complete_commit(group_id: &str, request: OffsetCommitRequestState, response: &OffsetCommitResponse) {
     let mut unauthorized: HashSet<String> = HashSet::new();
     for topic in response.topics() {
         for partition in &topic.partitions {
@@ -1106,7 +1107,9 @@ fn classify_and_complete_commit(request: OffsetCommitRequestState, response: &Of
             }
             match error {
                 Errors::GroupAuthorizationFailed => {
-                    request.complete_err(KafkaError::group_authorization(_borrow_group_id_or_default(&request)));
+                    // Match Java: GroupAuthorizationException.forGroupId(groupId)
+                    // — embeds the actual group id, not an empty string.
+                    request.complete_err(KafkaError::group_authorization(group_id.to_string()));
                     return;
                 },
                 Errors::CoordinatorNotAvailable | Errors::NotCoordinator | Errors::RequestTimedOut => {
@@ -1150,15 +1153,6 @@ fn classify_and_complete_commit(request: OffsetCommitRequestState, response: &Of
         // input offsets (matching commit_sync's contract above).
         request.complete_ok(request.offsets.clone());
     }
-}
-
-/// Helper used by `classify_and_complete_commit` for the
-/// `GroupAuthorizationFailed` branch. We don't carry the group id on the
-/// per-request state; thread an empty string through which is overwritten
-/// by the outer error chain. The exact group id is irrelevant to the
-/// Rust-side enum dispatch; Java carries it via the exception object.
-fn _borrow_group_id_or_default(_request: &OffsetCommitRequestState) -> String {
-    String::new()
 }
 
 fn handle_offset_fetch_response(

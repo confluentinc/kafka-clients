@@ -303,20 +303,39 @@ mod tests {
     /// Translated from
     /// `OffsetCommitCallbackInvokerTest.testNoOnCommitOnEmptyInterceptors`.
     /// `enqueue_interceptor_invocation` is a no-op when the chain is empty.
+    ///
+    /// Java: `verify(consumerInterceptors, never()).onCommit(any())`.
+    /// Rust: the empty interceptor list has no `on_commit` to verify
+    /// against, so we instead enqueue interceptor invocations AND a
+    /// user callback, drain, and observe (a) the user callback fires
+    /// (proves the queue made progress past the no-op interceptor
+    /// entries) and (b) re-draining produces no more invocations
+    /// (proves no stale interceptor tasks were retained).
     #[tokio::test(flavor = "current_thread")]
     async fn test_no_on_commit_on_empty_interceptors() {
         let tp = TopicPartition::new("t0".to_string(), 2);
         let offsets1 = singleton_offset(tp.clone(), 10);
-        let offsets2 = singleton_offset(tp, 20);
+        let offsets2 = singleton_offset(tp.clone(), 20);
         let interceptors: ConsumerInterceptors<String, String> = ConsumerInterceptors::new(Vec::new());
         let invoker = OffsetCommitCallbackInvoker::new(interceptors);
 
         invoker.enqueue_interceptor_invocation(offsets1);
         invoker.enqueue_interceptor_invocation(offsets2);
+
+        // Enqueue a user callback AFTER the no-op interceptor entries.
+        // It should fire on drain, proving the queue moves past them.
+        let cb = Arc::new(RecordingCallback::new());
+        invoker.enqueue_user_callback_invocation(cb.clone(), singleton_offset(tp, 30), None);
+
         invoker.invoke_pending_callbacks().await;
-        // Empty chain: nothing recorded, and the queue ends empty.
-        // Verify by enqueueing a follow-up user callback and observing it
-        // fires (which it wouldn't if a stale interceptor task remained).
+        // User callback fired exactly once after passing through the
+        // no-op interceptor entries.
+        assert_eq!(cb.invocations(), 1);
+
+        // Re-draining should produce no additional invocations — the
+        // empty-interceptor entries did not leave stale work behind.
+        invoker.invoke_pending_callbacks().await;
+        assert_eq!(cb.invocations(), 1);
     }
 
     /// Translated from
