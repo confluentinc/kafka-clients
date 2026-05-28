@@ -40,6 +40,7 @@
 
 #![allow(dead_code)]
 
+use super::commit_request_manager::CommitRequestManager;
 use super::coordinator_request_manager::CoordinatorRequestManager;
 use super::request_manager::RequestManager;
 use super::topic_metadata_request_manager::TopicMetadataRequestManager;
@@ -60,8 +61,11 @@ pub(crate) struct RequestManagers {
     /// `final TopicMetadataRequestManager topicMetadataRequestManager`
     /// (always present).
     pub(crate) topic_metadata: Option<TopicMetadataRequestManager>,
+    /// Commit / offset-fetch request manager — `Some` when a group is
+    /// configured. Java: `Optional<CommitRequestManager>
+    /// commitRequestManager`.
+    pub(crate) commit: Option<CommitRequestManager>,
     // Slots reserved for later phases (Option<_> with a phase-comment):
-    // pub(crate) commit: Option<CommitRequestManager>,                                    // Phase 9
     // pub(crate) consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,             // Phase 8
     // pub(crate) consumer_membership: Option<ConsumerMembershipManager>,                  // Phase 8
     // pub(crate) offsets: OffsetsRequestManager,                                          // Phase 7d
@@ -75,8 +79,9 @@ impl RequestManagers {
     pub(crate) fn new(
         coordinator: Option<CoordinatorRequestManager>,
         topic_metadata: Option<TopicMetadataRequestManager>,
+        commit: Option<CommitRequestManager>,
     ) -> Self {
-        Self { coordinator, topic_metadata, closed: false }
+        Self { coordinator, topic_metadata, commit, closed: false }
     }
 
     /// Returns the managers in deterministic registration order
@@ -95,9 +100,14 @@ impl RequestManagers {
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
-        let Self { coordinator, topic_metadata, closed: _ } = self;
+        let Self { coordinator, topic_metadata, commit, closed: _ } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
+        // Order matches Java's constructor: coordinator → commit → ... →
+        // topic_metadata → fetch. Other slots land in later phases.
         if let Some(c) = coordinator.as_mut() {
+            list.push(c as &mut dyn RequestManager);
+        }
+        if let Some(c) = commit.as_mut() {
             list.push(c as &mut dyn RequestManager);
         }
         if let Some(t) = topic_metadata.as_mut() {
@@ -159,17 +169,32 @@ mod tests {
         TopicMetadataRequestManager::new(&config)
     }
 
+    fn commit_manager() -> CommitRequestManager {
+        let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(
+            crate::consumer::internals::subscription_state::SubscriptionState::new(
+                crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
+            ),
+        ));
+        let metadata = std::sync::Arc::new(super::super::consumer_metadata::ConsumerMetadata::from_config(
+            &config,
+            subs,
+            crate::common::internals::ClusterResourceListeners::new(),
+        ));
+        CommitRequestManager::new(&config, metadata, "g", None, 0)
+    }
+
     /// Verifies that `entries()` is empty when both manager slots are `None`.
     #[test]
     fn entries_empty_when_no_managers() {
-        let mut rm = RequestManagers::new(None, None);
+        let mut rm = RequestManagers::new(None, None, None);
         assert!(rm.entries().is_empty());
     }
 
     /// Verifies that `entries()` returns the coordinator when present.
     #[test]
     fn entries_includes_coordinator_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None);
         let entries = rm.entries();
         assert_eq!(1, entries.len());
         // We can call the trait method to confirm the upcast works.
@@ -181,7 +206,7 @@ mod tests {
     /// registration order (coordinator → topic_metadata).
     #[test]
     fn entries_includes_topic_metadata_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()));
+        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None);
         let entries = rm.entries();
         assert_eq!(2, entries.len());
     }
@@ -190,7 +215,7 @@ mod tests {
     /// the flag; subsequent calls are no-ops.
     #[test]
     fn close_is_idempotent() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None);
         assert!(!rm.is_closed());
         rm.close();
         assert!(rm.is_closed());
@@ -203,9 +228,18 @@ mod tests {
     /// repeated calls, regardless of `Option` field shuffling.
     #[test]
     fn entries_order_is_deterministic() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()));
+        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None);
         let names_round_one: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         let names_round_two: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         assert_eq!(names_round_one, names_round_two);
+    }
+
+    /// Phase 9: verifies that the commit slot is wired into `entries()`
+    /// in registration order (coordinator → commit → topic_metadata).
+    #[test]
+    fn entries_includes_commit_when_present() {
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, Some(commit_manager()));
+        let entries = rm.entries();
+        assert_eq!(2, entries.len());
     }
 }
