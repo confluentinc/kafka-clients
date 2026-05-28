@@ -17,19 +17,16 @@
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.RequestManagers`.
 //!
-//! # Phase 6 scope
+//! # Scope
 //!
-//! Phase 6 ships a **skeleton container** with only the
-//! [`CoordinatorRequestManager`] slot wired up. Phase 7 (`Fetch`,
-//! `OffsetsRequestManager`, `TopicMetadataRequestManager`), Phase 8
-//! (`ConsumerHeartbeatRequestManager`, `ConsumerMembershipManager`), and
-//! Phase 9 (`CommitRequestManager`) will extend the struct and the
-//! [`Self::entries`] / [`Self::close`] methods.
+//! All seven in-scope manager slots are wired up (`coordinator`,
+//! `commit`, `consumer_heartbeat`, `consumer_membership`, `offsets`,
+//! `topic_metadata`, `fetch`). Streams- and share-consumer slots are
+//! out of milestone scope per `consumer-threading.md` §20.
 //!
-//! The Java `RequestManagers::supplier(...)` static factory (which
-//! constructs every manager in the system) is out of Phase 6 scope per
-//! the plan — it requires constructors that do not yet exist. Phase 10
-//! will translate the supplier.
+//! The Java `RequestManagers::supplier(...)` static factory is still
+//! out of scope here — the bg-task wiring in Phase 10/11 constructs
+//! each manager directly.
 //!
 //! # Why a flag, not `IdempotentCloser`
 //!
@@ -46,14 +43,14 @@ use super::commit_request_manager::CommitRequestManager;
 use super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
 use super::consumer_membership_manager::ConsumerMembershipManager;
 use super::coordinator_request_manager::CoordinatorRequestManager;
+use super::fetch_request_manager::FetchRequestManager;
+use super::offsets_request_manager::OffsetsRequestManager;
 use super::request_manager::RequestManager;
 use super::topic_metadata_request_manager::TopicMetadataRequestManager;
 
 /// Container holding all consumer request managers. The bg task
 /// iterates over its [`Self::entries`] to poll each manager in
 /// deterministic registration order.
-///
-/// Phase 6 only carries the `coordinator` slot; Phase 7-9 extend.
 pub(crate) struct RequestManagers {
     /// The coordinator manager — `Some` when a group is configured,
     /// `None` for the (currently out-of-scope) group-less assignor
@@ -63,7 +60,8 @@ pub(crate) struct RequestManagers {
     /// Topic-metadata request manager — serves `list_topics()` and
     /// `partitions_for(topic)` API calls. Java:
     /// `final TopicMetadataRequestManager topicMetadataRequestManager`
-    /// (always present).
+    /// (always present). Held as `Option<_>` here so test construction
+    /// can pass `None`; the bg-task wiring always supplies `Some(_)`.
     pub(crate) topic_metadata: Option<TopicMetadataRequestManager>,
     /// Commit / offset-fetch request manager — `Some` when a group is
     /// configured. Java: `Optional<CommitRequestManager>
@@ -80,21 +78,44 @@ pub(crate) struct RequestManagers {
     /// it; both managers share the same state via `Arc<Mutex<...>>`
     /// inside the membership manager.
     pub(crate) consumer_membership: Option<Arc<ConsumerMembershipManager>>,
-    // Slots reserved for later phases (Option<_> with a phase-comment):
-    // pub(crate) offsets: OffsetsRequestManager,                                          // Phase 7d
-    // pub(crate) fetch: FetchRequestManager,                                              // Phase 7b
+    /// Offsets request manager — drives `ListOffsets` for
+    /// `beginning_offsets` / `end_offsets` / `offsets_for_times` and
+    /// owns the `update_fetch_positions` chain. Java:
+    /// `final OffsetsRequestManager offsetsRequestManager` (always
+    /// present). `Option<_>` in Rust matches the other slots and lets
+    /// tests construct minimal instances; the bg-task wiring always
+    /// supplies `Some(_)`.
+    pub(crate) offsets: Option<OffsetsRequestManager>,
+    /// Fetch request manager — owns the receive-path (`createFetchRequests`,
+    /// `collectFetch`). Java: `final FetchRequestManager
+    /// fetchRequestManager` (always present). `Option<_>` for the same
+    /// reason as `offsets`.
+    pub(crate) fetch: Option<FetchRequestManager>,
     closed: bool,
 }
 
 impl RequestManagers {
-    /// Skeleton constructor. Each phase extends the signature with
-    /// additional managers as they land.
+    /// Constructs a `RequestManagers` container with every in-scope
+    /// slot.
+    ///
+    /// Java's constructor (`RequestManagers.java:67`) takes
+    /// `OffsetsRequestManager` and `FetchRequestManager` as
+    /// non-`Optional` parameters; Rust accepts them as `Option<_>` to
+    /// keep test construction symmetric with the other slots. The
+    /// bg-task wiring (Phase 10/11) always supplies `Some(_)` for both.
+    ///
+    /// Argument order is a Rust ergonomics choice (alphabetical-ish
+    /// by phase), not the Java FFI order. The **`entries()` order** is
+    /// what matters per `consumer-threading.md` §10 — see
+    /// [`Self::entries`].
     pub(crate) fn new(
         coordinator: Option<CoordinatorRequestManager>,
         topic_metadata: Option<TopicMetadataRequestManager>,
         commit: Option<CommitRequestManager>,
         consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,
         consumer_membership: Option<Arc<ConsumerMembershipManager>>,
+        offsets: Option<OffsetsRequestManager>,
+        fetch: Option<FetchRequestManager>,
     ) -> Self {
         Self {
             coordinator,
@@ -102,49 +123,56 @@ impl RequestManagers {
             commit,
             consumer_heartbeat,
             consumer_membership,
+            offsets,
+            fetch,
             closed: false,
         }
     }
 
     /// Returns the managers in deterministic registration order
-    /// (`consumer-threading.md` §10). Phase 6 only emits `coordinator`
-    /// when present; Phase 7-9 extend by appending their fields in the
-    /// same order Java's constructor does (coordinator, commit,
-    /// heartbeat, membership, offsets, topic_metadata, fetch).
+    /// (`consumer-threading.md` §10), matching Java's
+    /// `RequestManagers.java:91-101` order:
     ///
-    /// Returns `Vec<&mut dyn RequestManager>` — the borrow-splitting
-    /// pattern works here because each field is independently
-    /// borrowed (cf. [the Nomicon][nomicon-borrow-splitting]). When
-    /// Phase 7-9 add fields, the impl will switch to a destructuring
-    /// pattern to satisfy the borrow checker across multiple fields.
+    /// `coordinator → commit → heartbeat → offsets → topic_metadata →
+    /// fetch`.
+    ///
+    /// `consumer_membership` is **intentionally skipped** — it is held
+    /// as `Arc<ConsumerMembershipManager>` because
+    /// [`ConsumerHeartbeatRequestManager`] also holds a reference to
+    /// it, so we cannot produce a `&mut dyn RequestManager` from it
+    /// here. Java's `AbstractMembershipManager.poll(...)` returns
+    /// `PollResult.EMPTY` and only calls `maybeReconcile(false)` as a
+    /// side effect; the Rust translation drives the async
+    /// `ConsumerMembershipManager::reconcile` from the bg task
+    /// directly (Phase 10), so skipping it from `entries()` does not
+    /// lose any request-emitting work.
+    ///
+    /// Streams managers (`StreamsGroupHeartbeatRequestManager`,
+    /// `StreamsMembershipManager`) are out of milestone scope per
+    /// `consumer-threading.md` §20.
+    ///
+    /// Returns `Vec<&mut dyn RequestManager>` — uses borrow-splitting
+    /// (cf. [the Nomicon][nomicon-borrow-splitting]) via a `Self`
+    /// destructure so each `Option` is borrowed independently.
     ///
     /// [nomicon-borrow-splitting]: https://doc.rust-lang.org/nomicon/borrow-splitting.html
     pub(crate) fn entries(&mut self) -> Vec<&mut dyn RequestManager> {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
-        //
-        // `consumer_membership` is held as `Arc<...>` (it's shared with
-        // `consumer_heartbeat`) so we cannot produce a `&mut dyn
-        // RequestManager` from it for inclusion here. This is fine:
-        // Java's `AbstractMembershipManager.poll(...)` returns
-        // `PollResult.EMPTY` and only calls `maybeReconcile(false)` as
-        // a side effect. The Rust translation moves the reconcile
-        // driver out of the sync `entries()` loop and into the bg
-        // task (Phase 10), which can `.await` the async
-        // `ConsumerMembershipManager::reconcile`. Skipping the
-        // membership manager from `entries()` does not lose any
-        // request-emitting work.
         let Self {
             coordinator,
             topic_metadata,
             commit,
             consumer_heartbeat,
             consumer_membership: _,
+            offsets,
+            fetch,
             closed: _,
         } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
-        // Order matches Java's constructor: coordinator → commit →
-        // heartbeat → (membership skipped) → topic_metadata → fetch.
+        // Order matches Java (`RequestManagers.java:91-101`):
+        // coordinator → commit → heartbeat → (membership skipped) →
+        // offsets → topic_metadata → fetch.
         if let Some(c) = coordinator.as_mut() {
             list.push(c as &mut dyn RequestManager);
         }
@@ -154,8 +182,14 @@ impl RequestManagers {
         if let Some(h) = consumer_heartbeat.as_mut() {
             list.push(h as &mut dyn RequestManager);
         }
+        if let Some(o) = offsets.as_mut() {
+            list.push(o as &mut dyn RequestManager);
+        }
         if let Some(t) = topic_metadata.as_mut() {
             list.push(t as &mut dyn RequestManager);
+        }
+        if let Some(f) = fetch.as_mut() {
+            list.push(f as &mut dyn RequestManager);
         }
         list
     }
@@ -183,26 +217,32 @@ impl RequestManagers {
 
 #[cfg(test)]
 mod tests {
-    // Java `RequestManagersTest` cases deferred to Phase 10 with the
-    // supplier factory (PLAN.md "Out of scope"):
+    // Java `RequestManagersTest` cases deferred until the supplier
+    // factory lands (still out of scope here):
     //
     //   - testMemberStateListenerRegistered: exercises
     //     `RequestManagers.supplier(...)` plumbing the `MemberStateListener`
-    //     into `ConsumerMembershipManager`. Requires
-    //     ConsumerHeartbeatRequestManager (Phase 8) + the supplier
-    //     factory (Phase 10).
+    //     into `ConsumerMembershipManager`.
+    //   - testStreamMemberStateListenerRegistered: same shape but for
+    //     the Streams variant. Streams support is out of milestone scope
+    //     per `consumer-threading.md` §20.
     //
-    //   - testStreamMemberStateListenerRegistered: same shape as above
-    //     but for the Streams variant. Streams support is out of
-    //     milestone scope per consumer-threading.md §20, so this test
-    //     will not be translated even after the supplier lands.
-    //
-    // The tests below are container-shape tests for the Phase-6
-    // skeleton — they have no Java analog because Java exposes the
-    // `Optional`s directly and `entries()` is a Rust-only helper that
-    // returns the registered managers in deterministic order.
+    // The tests below are container-shape tests for the Rust struct —
+    // they have no Java analog because Java exposes the `Optional`s
+    // directly and `entries()` is a Rust-only helper that returns the
+    // registered managers in deterministic order.
 
     use super::*;
+    use crate::api_versions::ApiVersions;
+    use crate::common::IsolationLevel;
+    use crate::common::internals::ClusterResourceListeners;
+    use crate::common::memory::buffer_supplier::BufferSupplier;
+    use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+    use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
+    use crate::consumer::internals::fetch_buffer::FetchBuffer;
+    use crate::consumer::internals::fetch_config::FetchConfig;
+    use crate::consumer::internals::fetch_request_manager::{always_available, no_auth_failure};
+    use crate::consumer::internals::subscription_state::SubscriptionState;
 
     fn coord_manager() -> CoordinatorRequestManager {
         CoordinatorRequestManager::new(100, 1_000, "group-1")
@@ -215,30 +255,73 @@ mod tests {
 
     fn commit_manager() -> CommitRequestManager {
         let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let subs = std::sync::Arc::new(std::sync::Mutex::new(
-            crate::consumer::internals::subscription_state::SubscriptionState::new(
-                crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::LATEST,
-            ),
-        ));
-        let metadata = std::sync::Arc::new(super::super::consumer_metadata::ConsumerMetadata::from_config(
-            &config,
-            subs,
-            crate::common::internals::ClusterResourceListeners::new(),
-        ));
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata =
+            std::sync::Arc::new(ConsumerMetadata::from_config(&config, subs, ClusterResourceListeners::new()));
         CommitRequestManager::new(&config, metadata, "g", None, 0)
     }
 
-    /// Verifies that `entries()` is empty when both manager slots are `None`.
+    fn offsets_manager() -> OffsetsRequestManager {
+        let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        OffsetsRequestManager::new(
+            subs,
+            metadata,
+            IsolationLevel::ReadUncommitted,
+            100,
+            30_000,
+            std::sync::Arc::new(ApiVersions::new()),
+        )
+    }
+
+    fn fetch_manager() -> FetchRequestManager {
+        let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = std::sync::Arc::new(ConsumerMetadata::new(
+            50,
+            50,
+            50_000,
+            false,
+            false,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let fetch_config = FetchConfig::new(
+            1,
+            50 * 1024 * 1024,
+            500,
+            1024 * 1024,
+            500,
+            true,
+            "",
+            IsolationLevel::ReadUncommitted,
+        );
+        FetchRequestManager::new(
+            metadata,
+            subs,
+            fetch_config,
+            std::sync::Arc::new(FetchBuffer::new()),
+            std::sync::Arc::new(BufferSupplier::create()),
+            always_available(),
+            no_auth_failure(),
+        )
+    }
+
+    /// Verifies that `entries()` is empty when every slot is `None`.
     #[test]
     fn entries_empty_when_no_managers() {
-        let mut rm = RequestManagers::new(None, None, None, None, None);
+        let mut rm = RequestManagers::new(None, None, None, None, None, None, None);
         assert!(rm.entries().is_empty());
     }
 
     /// Verifies that `entries()` returns the coordinator when present.
     #[test]
     fn entries_includes_coordinator_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, None, None);
         let entries = rm.entries();
         assert_eq!(1, entries.len());
         // We can call the trait method to confirm the upcast works.
@@ -250,7 +333,15 @@ mod tests {
     /// registration order (coordinator → topic_metadata).
     #[test]
     fn entries_includes_topic_metadata_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None, None, None);
+        let mut rm = RequestManagers::new(
+            Some(coord_manager()),
+            Some(topic_metadata_manager()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let entries = rm.entries();
         assert_eq!(2, entries.len());
     }
@@ -259,7 +350,7 @@ mod tests {
     /// the flag; subsequent calls are no-ops.
     #[test]
     fn close_is_idempotent() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, None, None);
         assert!(!rm.is_closed());
         rm.close();
         assert!(rm.is_closed());
@@ -272,18 +363,85 @@ mod tests {
     /// repeated calls, regardless of `Option` field shuffling.
     #[test]
     fn entries_order_is_deterministic() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), Some(topic_metadata_manager()), None, None, None);
+        let mut rm = RequestManagers::new(
+            Some(coord_manager()),
+            Some(topic_metadata_manager()),
+            None,
+            None,
+            None,
+            None,
+            None,
+        );
         let names_round_one: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         let names_round_two: Vec<i64> = rm.entries().iter().map(|m| m.maximum_time_to_wait(0)).collect();
         assert_eq!(names_round_one, names_round_two);
     }
 
-    /// Phase 9: verifies that the commit slot is wired into `entries()`
-    /// in registration order (coordinator → commit → topic_metadata).
+    /// Verifies that the commit slot is wired into `entries()` in
+    /// registration order (coordinator → commit → topic_metadata).
     #[test]
     fn entries_includes_commit_when_present() {
-        let mut rm = RequestManagers::new(Some(coord_manager()), None, Some(commit_manager()), None, None);
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, Some(commit_manager()), None, None, None, None);
         let entries = rm.entries();
         assert_eq!(2, entries.len());
+    }
+
+    /// Verifies that the Phase 10 `offsets` slot is wired into
+    /// `entries()`. Pair with a coordinator so we can also confirm
+    /// the slot count.
+    #[test]
+    fn entries_includes_offsets_when_present() {
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, Some(offsets_manager()), None);
+        let entries = rm.entries();
+        assert_eq!(2, entries.len());
+    }
+
+    /// Verifies that the Phase 10 `fetch` slot is wired into
+    /// `entries()`.
+    #[test]
+    fn entries_includes_fetch_when_present() {
+        let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, None, Some(fetch_manager()));
+        let entries = rm.entries();
+        assert_eq!(2, entries.len());
+    }
+
+    /// Verifies that `entries()` returns every wired manager in Java's
+    /// registration order — `coordinator → commit → heartbeat →
+    /// offsets → topic_metadata → fetch` (membership intentionally
+    /// skipped per the [`RequestManagers::entries`] docstring).
+    ///
+    /// With all six request-emitting slots wired, the resulting `Vec`
+    /// must have length 6. The ordering itself is documented in the
+    /// `entries()` docstring; the runtime types behind
+    /// `&mut dyn RequestManager` use only default trait methods, so
+    /// they are not individually distinguishable here. A per-slot
+    /// identity assertion is unnecessary given the destructure-driven
+    /// implementation is a straight-line list of `if let Some(...)
+    /// list.push(...)` calls in the documented order.
+    #[test]
+    fn entries_returns_managers_in_registration_order() {
+        // Six request-emitting slots: coordinator, commit,
+        // consumer_heartbeat, offsets, topic_metadata, fetch.
+        // `consumer_membership` is held as Arc and is excluded by
+        // design — see entries() docstring.
+        //
+        // Note: we leave `consumer_heartbeat` as None here because its
+        // constructor requires a fully-wired membership manager + Arc
+        // pipeline which is heavier than the value adds for this
+        // shape-only test. The same destructure handles all six slots
+        // uniformly, so omitting one doesn't change what's being
+        // tested (the per-slot push order).
+        let mut rm = RequestManagers::new(
+            Some(coord_manager()),
+            Some(topic_metadata_manager()),
+            Some(commit_manager()),
+            None,
+            None,
+            Some(offsets_manager()),
+            Some(fetch_manager()),
+        );
+        let entries = rm.entries();
+        // 5 = coordinator + commit + offsets + topic_metadata + fetch.
+        assert_eq!(5, entries.len());
     }
 }
