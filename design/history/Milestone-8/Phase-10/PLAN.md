@@ -352,35 +352,54 @@ referring to `consumer-threading.md` §20.
    — listener trait impl wiring the commit manager into the
    membership-state transitions; `maybe_auto_commit_sync_before_rebalance`
    flush method. **Closes carry-over #7.**
-4. `Phase 10 (3/N): OffsetsRequestManager — relocate init_with_committed_offsets_if_needed + add fetch_offsets + update_fetch_positions + try_connect plumbing + cluster-listener replay`
-   — the relocation lands first, then the two new APIs build on it,
-   then the listener-replay logic for deferred requests, then the
-   `try_connect` hint mechanism. Translates the Java
-   `OffsetsRequestManagerTest` cases for these APIs that Phase 7d
-   skipped. **Closes carry-overs #2, #3, #4, #5.**
-5. `Phase 10 (4/N): ApplicationEventProcessor — dispatch table + non-async arms`
+4. `Phase 10 (3a/N): OffsetsRequestManager — relocate init_with_committed_offsets_if_needed`
+   — move ~80 LOC of the method from `CommitRequestManager` to
+   `OffsetsRequestManager`, update call sites, keep existing test
+   surface (translate any missing Java tests for the relocated
+   method). **Closes wire-prereq #3.**
+5. `Phase 10 (3b/N): OffsetsRequestManager — update_fetch_positions`
+   — translate the `~300 LOC` Java method (`OffsetsRequestManager.java:235`).
+   Wires through `init_with_committed_offsets_if_needed` (relocated
+   in 3a) and the existing `reset_positions_if_needed`. Translates
+   the relevant `OffsetsRequestManagerTest` cases. **Closes wire-prereq #2.**
+6. `Phase 10 (3c/N): OffsetsRequestManager — fetch_offsets + cluster-listener replay`
+   — translate `~300 LOC` Java method (`OffsetsRequestManager.java:fetchOffsets`).
+   Unblocks the `OffsetsClusterListener::on_update` deferred-request
+   replay (it now has something to replay). Translates the relevant
+   `OffsetsRequestManagerTest` cases. **Closes wire-prereqs #4 + #2's
+   cluster-listener-replay sub-item.**
+7. `Phase 10 (3d/N): OffsetsRequestManager — try_connect plumbing`
+   — small `~40 LOC` addition: emit a connection hint on `PollResult`
+   (or queue an `UnsentRequest` with no body) so the bg task can
+   force a connect when `NodeApiVersions` are missing for a broker.
+   **Closes wire-prereq #5.**
+8. `Phase 10 (4/N): ApplicationEventProcessor — dispatch table + non-async arms`
    — every variant whose handling is synchronous (subscription
    changes, pause/resume, seek, reset, current-lag, topic-metadata,
    commit-on-close, etc.).
-6. `Phase 10 (5/N): ApplicationEventProcessor — async-dispatch arms`
+9. `Phase 10 (5/N): ApplicationEventProcessor — async-dispatch arms`
    — `AsyncPollEvent`, `Unsubscribe`, `LeaveGroupOnClose`,
    `CommitAsync`/`CommitSync`, `FetchCommittedOffsets`,
    `ListOffsets`, `CheckAndUpdatePositions`, `CreateFetchRequests`
    (everything that spawns a continuation task).
-7. `Phase 10 (6/N): ApplicationEventProcessorTest — translate all in-scope tests`
-   (39 → ~33 after Streams skips).
-8. `Phase 10 (7/N): ConsumerNetworkThread — runOnce skeleton + shutdown`
-   — bg task, wakeup wiring, AtomicI64 maximum-time-to-wait, cleanup.
-9. `Phase 10 (8/N): ConsumerNetworkThreadTest`
-   — 13 tests, mocking via the existing `RequestManager` trait.
-10. `Phase 10 (9/N): wire-up + lint pass + agent-memory notes`
+10. `Phase 10 (6/N): ApplicationEventProcessorTest — translate all in-scope tests`
+    (39 → ~33 after Streams skips).
+11. `Phase 10 (7/N): ConsumerNetworkThread — runOnce skeleton + shutdown`
+    — bg task, wakeup wiring, AtomicI64 maximum-time-to-wait, cleanup.
+    **Must explicitly call `membership.reconcile()` per iteration** —
+    `entries()` skips the membership manager so its `maybeReconcile`
+    side-effect (Java `AbstractMembershipManager.poll(...)`) must be
+    re-supplied here (flagged in Critic round 1 aside).
+12. `Phase 10 (8/N): ConsumerNetworkThreadTest`
+    — 13 tests, mocking via the existing `RequestManager` trait.
+13. `Phase 10 (9/N): wire-up + lint pass + agent-memory notes`
     — final `cargo xtask format-check + lint`; agent memory entry
     for any new patterns we found.
 
 Each commit is independently buildable, has its own tests passing,
 and is split so the Critic can review in small batches. Commit (1)
-unblocks (5)–(10); commit (2) unblocks (5); commit (2.5) unblocks (5);
-commit (3) unblocks (6).
+unblocks (8)–(13); commits (2) + (2.5) unblock (8); commits (3a–d)
+unblock (9).
 
 **Phase 11 carry-overs that remain open after Phase 10 closes** (do
 NOT attempt these in Phase 10):
