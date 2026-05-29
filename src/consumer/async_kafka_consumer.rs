@@ -51,18 +51,20 @@
 //! `ClientTelemetryReporter` / `ClientTelemetryUtils` are NOT translated;
 //! the corresponding fields are `None`. Per Phase 11 PLAN.md deferral #6.
 
-#![allow(dead_code)] // Phase 11 commit (2/N): struct lands before its full method surface (commits 3-7).
+#![allow(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
 
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
 use regex::Regex;
 
-use crate::common::{KafkaError, TopicPartition};
+use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
+use crate::consumer::ConsumerRecords;
 use crate::consumer::SubscriptionPattern;
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
@@ -71,11 +73,13 @@ use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::consumer_network_thread::ThreadTime;
 use crate::consumer::internals::consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 use crate::consumer::internals::deserializers::Deserializers;
-use crate::consumer::internals::events::application_event::ApplicationEvent;
+use crate::consumer::internals::events::application_event::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::application_event_handler::ApplicationEventHandler;
 use crate::consumer::internals::events::background_event::{BackgroundEvent, BackgroundEventEnvelope};
 use crate::consumer::internals::events::completable_event::{calculate_deadline_ms, make_completable_event};
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
+use crate::consumer::internals::fetch_buffer::FetchBuffer;
+use crate::consumer::internals::fetch_collector::FetchCollector;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
 use crate::consumer::internals::request_managers::RequestManagers;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -161,8 +165,8 @@ impl NetworkThreadCloseHandle {
 /// (Phase 11 PLAN.md deferral #4).
 pub struct AsyncKafkaConsumer<K, V>
 where
-    K: Send + 'static,
-    V: Send + 'static,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
     // ── Shared with the bg task ────────────────────────────────────────
     /// Subscription / assignment state. Wrapped in `Arc<Mutex<…>>` per
@@ -191,6 +195,14 @@ where
     /// `JoinHandle` on consumer close (after `signal_close()` + the
     /// final `wakeup_trigger.wakeup()`).
     network_thread_close: NetworkThreadCloseHandle,
+    /// Per `consumer-threading.md` §27: the consumer owns one
+    /// `Arc<FetchBuffer>` shared with both the bg-side `FetchRequestManager`
+    /// (which `add`s `CompletedFetch`es as fetch responses land) and the
+    /// app-side [`FetchCollector`] (which drains them in `poll()`).
+    fetch_buffer: Arc<FetchBuffer>,
+    /// App-side fetch decoder. Owned by `Arc` so the consumer can hand a
+    /// shared reference to per-poll helpers without re-construction.
+    fetch_collector: Arc<FetchCollector<K, V>>,
 
     // ── App-side only ─────────────────────────────────────────────────
     /// `client.id`, as a cheap-to-clone `Arc<str>` per CLAUDE.md §11.
@@ -216,6 +228,15 @@ where
     auto_commit_enabled: bool,
     /// Cached `default.api.timeout.ms`.
     default_api_timeout_ms: i64,
+    /// Cached `retry.backoff.ms` — used by [`Self::poll_for_fetches`] to
+    /// throttle the poll wait when no positions are valid yet (Java
+    /// `AsyncKafkaConsumer.pollForFetches`).
+    retry_backoff_ms: i64,
+    /// Cached `isolation.level`. Currently used by the (Phase 11 commit
+    /// 6/N) `current_lag` event and reserved for future fetch-path
+    /// callers; kept on the consumer struct because Java reads it from
+    /// the same source.
+    isolation_level: IsolationLevel,
     /// `true` after [`Self::close`] has run. Subsequent calls return
     /// `KafkaError::illegal_state`.
     closed: AtomicBool,
@@ -224,11 +245,36 @@ where
     /// so it can be swapped without invalidating
     /// `&self.rebalance_listener_invoker` references.
     rebalance_listener: Mutex<Option<Arc<dyn ConsumerRebalanceListener>>>,
+    /// Java: `private AsyncPollEvent inflightPoll`.
+    ///
+    /// Stores the `Arc<AsyncPollState>` of the currently-inflight
+    /// `AsyncPoll` event (if any). Recycled across `poll()` calls per
+    /// Java semantics. Held in a plain `Option<...>` instead of
+    /// `Mutex<Option<...>>` because `poll()` takes `&mut self` and is the
+    /// only caller.
+    inflight_poll: Option<InflightPoll>,
     /// Cached `ConsumerConfig` for late-bound config lookups (e.g.
     /// inside `close`).
     config: ConsumerConfig,
     /// Time source used for `current_time_ms` arguments to events.
     time: Arc<dyn ThreadTime>,
+}
+
+/// Tracks the state of the currently-inflight `AsyncPoll` event.
+///
+/// Mirrors Java's `AsyncPollEvent` field: it carries the event's
+/// `deadline_ms` and the shared `Arc<AsyncPollState>` that the bg task
+/// completes asynchronously. Stored as a separate small struct so the
+/// `is_expired` check stays close to the data it operates on.
+pub(crate) struct InflightPoll {
+    deadline_ms: i64,
+    state: Arc<AsyncPollState>,
+}
+
+impl InflightPoll {
+    fn is_expired(&self, current_time_ms: i64) -> bool {
+        current_time_ms >= self.deadline_ms
+    }
 }
 
 /// Components handed to [`AsyncKafkaConsumer::new_with_thread`]: the
@@ -238,7 +284,7 @@ where
 ///
 /// Bundling these into a struct keeps the ctor signature manageable as
 /// the Java ctor has 14 already-constructed dependencies.
-pub(crate) struct AsyncKafkaConsumerComponents<K: Send + 'static, V: Send + 'static> {
+pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send + Sync + 'static> {
     pub config: ConsumerConfig,
     pub client_id: Arc<str>,
     pub group_id: Option<String>,
@@ -251,17 +297,20 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + 'static, V: Send + 'sta
     pub max_time_to_wait_ms: Arc<AtomicI64>,
     pub wakeup_trigger: WakeupTrigger,
     pub network_thread_close: NetworkThreadCloseHandle,
+    pub fetch_buffer: Arc<FetchBuffer>,
+    pub fetch_collector: Arc<FetchCollector<K, V>>,
     pub rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
+    pub isolation_level: IsolationLevel,
     pub time: Arc<dyn ThreadTime>,
 }
 
 impl<K, V> AsyncKafkaConsumer<K, V>
 where
-    K: Send + 'static,
-    V: Send + 'static,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
     /// Constructs an `AsyncKafkaConsumer` from pre-built components.
     ///
@@ -277,6 +326,7 @@ where
     pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
         let auto_commit_enabled = components.config.enable_auto_commit();
         let default_api_timeout_ms = components.config.default_api_timeout_ms as i64;
+        let retry_backoff_ms = components.config.retry_backoff_ms();
 
         Self {
             subscriptions: components.subscriptions,
@@ -288,6 +338,8 @@ where
             max_time_to_wait_ms: components.max_time_to_wait_ms,
             wakeup_trigger: components.wakeup_trigger,
             network_thread_close: components.network_thread_close,
+            fetch_buffer: components.fetch_buffer,
+            fetch_collector: components.fetch_collector,
             client_id: components.client_id,
             group_id: components.group_id,
             group_metadata: Arc::new(Mutex::new(None)),
@@ -297,8 +349,11 @@ where
             interceptors: components.interceptors,
             auto_commit_enabled,
             default_api_timeout_ms,
+            retry_backoff_ms,
+            isolation_level: components.isolation_level,
             closed: AtomicBool::new(false),
             rebalance_listener: Mutex::new(None),
+            inflight_poll: None,
             config: components.config,
             time: components.time,
         }
@@ -533,27 +588,32 @@ where
             }
         }
 
-        // Store the listener app-side so `process_background_events` can
-        // pick it up when the bg task posts a callback-needed event.
-        // Drop the guard immediately — listeners are read briefly per
-        // §16 lock discipline.
-        if let Some(l) = listener.as_ref() {
-            *self.rebalance_listener.lock().unwrap() = Some(Arc::clone(l));
-        }
-
         log::info!("Subscribed to topic(s): {}", topics.join(", "));
 
         let topics_set: std::collections::HashSet<String> = topics.into_iter().collect();
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        // Java passes the listener INSIDE the event so the bg task owns
+        // installation — the app side never registers the listener until
+        // the event has been accepted. Mirror this by sending the
+        // listener through the event AND only mirroring it into the
+        // app-side `rebalance_listener` slot AFTER `add_and_get`
+        // resolves Ok (so a failed submission does not leave the
+        // app-side slot pointing at a listener that never landed in
+        // `SubscriptionState`).
+        let listener_for_app_side = listener.as_ref().map(Arc::clone);
         self.application_event_handler
             .add_and_get::<()>(
                 ApplicationEvent::TopicSubscriptionChange { handle, topics: topics_set, listener },
                 receiver,
                 now_ms,
             )
-            .await
+            .await?;
+        if let Some(l) = listener_for_app_side {
+            *self.rebalance_listener.lock().unwrap() = Some(l);
+        }
+        Ok(())
     }
 
     /// Translates Java's `subscribeInternal(Pattern, Optional<ConsumerRebalanceListener>)`.
@@ -568,22 +628,25 @@ where
             return Err(KafkaError::illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
 
-        if let Some(l) = listener.as_ref() {
-            *self.rebalance_listener.lock().unwrap() = Some(Arc::clone(l));
-        }
-
         log::info!("Subscribed to pattern: '{pattern}'");
 
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        // See `subscribe_internal_topics` for why we store the listener
+        // only after `add_and_get` resolves Ok.
+        let listener_for_app_side = listener.as_ref().map(Arc::clone);
         self.application_event_handler
             .add_and_get::<()>(
                 ApplicationEvent::TopicPatternSubscriptionChange { handle, pattern, listener },
                 receiver,
                 now_ms,
             )
-            .await
+            .await?;
+        if let Some(l) = listener_for_app_side {
+            *self.rebalance_listener.lock().unwrap() = Some(l);
+        }
+        Ok(())
     }
 
     /// Translates Java's `subscribeToRegex(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`.
@@ -598,42 +661,44 @@ where
             return Err(KafkaError::illegal_argument("Topic pattern to subscribe to cannot be empty"));
         }
 
-        if let Some(l) = listener.as_ref() {
-            *self.rebalance_listener.lock().unwrap() = Some(Arc::clone(l));
-        }
-
         log::info!("Subscribing to regular expression {}", pattern.pattern());
 
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        // See `subscribe_internal_topics` for why we store the listener
+        // only after `add_and_get` resolves Ok.
+        let listener_for_app_side = listener.as_ref().map(Arc::clone);
         self.application_event_handler
             .add_and_get::<()>(
                 ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, pattern, listener },
                 receiver,
                 now_ms,
             )
-            .await
+            .await?;
+        if let Some(l) = listener_for_app_side {
+            *self.rebalance_listener.lock().unwrap() = Some(l);
+        }
+        Ok(())
     }
 
     /// Java: `void unsubscribe()`.
     ///
     /// Unsubscribes from all topics / patterns and clears the assignment.
     /// Java enqueues an `UnsubscribeEvent` and then loops
-    /// `processBackgroundEvents(future, timer, ignoreErrorPredicate)` to
-    /// drive any rebalance-listener callbacks that arrive during the
-    /// teardown. The Phase 11 commit (3/N) version drains pending
-    /// background events ONCE via `process_background_events` and awaits
-    /// the completable handle — the iterative draining loop lands in
-    /// commit (4/N) along with `poll`.
+    /// `processBackgroundEvents(future, timer, ignoreErrorPredicate)` so
+    /// any rebalance-listener callbacks raised during the teardown can be
+    /// driven from the caller's task while the unsubscribe future is
+    /// outstanding (Java `AsyncKafkaConsumer.java:1830-1855`). The Rust
+    /// translation routes the handle's receiver through
+    /// [`Self::process_background_events_until`] so the same interleaved
+    /// drain happens — without it, the bg task would await the
+    /// listener-callback ack indefinitely while the app side blocks on
+    /// `add_and_get`.
     pub async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
         self.ensure_open()?;
 
-        // §31: drain any pending background events on the caller's task
-        // BEFORE issuing the unsubscribe. This is required because the
-        // bg task may have queued rebalance-listener callbacks that the
-        // teardown must observe.
-        self.process_background_events().await?;
+        self.fetch_buffer.retain_all(&std::collections::HashSet::new());
 
         let assigned_for_log = {
             let subs = self.subscriptions.lock().unwrap();
@@ -644,24 +709,40 @@ where
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        let result = self
-            .application_event_handler
-            .add_and_get::<()>(ApplicationEvent::Unsubscribe { handle }, receiver, now_ms)
-            .await;
+        // Enqueue the event without blocking on it — the iterative drain
+        // below polls the receiver.
+        self.application_event_handler
+            .add(ApplicationEvent::Unsubscribe { handle }, now_ms)?;
 
-        // Drain again so any rebalance-listener callbacks that the bg
-        // task posted during the unsubscribe rebalance are observed
-        // before returning to the user.
-        let drain_result = self.process_background_events().await;
+        // Java's `ignoreErrorEventException` predicate: swallow
+        // `GroupAuthorizationException` / `TopicAuthorizationException`
+        // surfaced as fatal background errors during unsubscribe so the
+        // unsubscribe still completes. Rust surfaces these as
+        // [`KafkaError::TopicAuthorization`] / [`KafkaError::GroupAuthorization`].
+        let ignore_predicate =
+            |err: &KafkaError| matches!(err, KafkaError::TopicAuthorization(_) | KafkaError::GroupAuthorization(_));
+
+        let result = self
+            .process_background_events_until::<()>(
+                receiver,
+                deadline_ms,
+                ignore_predicate,
+                "Failed while waiting for the unsubscribe event to complete",
+            )
+            .await;
 
         // Reset the listener field — the previous subscription is gone.
         *self.rebalance_listener.lock().unwrap() = None;
 
         match result {
-            Ok(()) => drain_result,
-            // Java logs and rethrows but the typed result already
-            // surfaces the failure. Drop the secondary drain error if the
-            // primary already failed.
+            Ok(()) => Ok(()),
+            Err(KafkaError::Timeout(msg)) => {
+                // Java logs an error and returns successfully (the
+                // unsubscribe event is "fire and forget" past the
+                // deadline): `log.error("Failed while waiting...")`.
+                log::error!("Failed while waiting for the unsubscribe event to complete: {msg}");
+                Ok(())
+            },
             Err(err) => Err(err),
         }
     }
@@ -686,11 +767,11 @@ where
             }
         }
 
-        // Java also invokes `fetchBuffer.retainAll(currentTopicPartitions)`
-        // here. That call is wired in commit (4/N) — see the section
-        // comment above.
-
         let partitions_set: std::collections::HashSet<TopicPartition> = partitions.into_iter().collect();
+        // Java line 1813: `fetchBuffer.retainAll(currentTopicPartitions)`
+        // — drop buffered fetches for partitions that are no longer
+        // assigned so the next poll() doesn't surface stale records.
+        self.fetch_buffer.retain_all(&partitions_set);
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
@@ -720,11 +801,21 @@ where
     /// on the caller's task. Mirrors Java's `boolean processBackgroundEvents()`.
     ///
     /// Returns:
-    ///   - `Ok(())` on success (no error events drained).
+    ///   - `Ok(had_events)` on success (no error events drained). The
+    ///     boolean reflects Java's return — `true` if any events were
+    ///     processed in this call, `false` otherwise. Used by
+    ///     [`Self::process_background_events_until`] to decide whether
+    ///     to keep spinning the drain loop or fall through to the
+    ///     bounded `pollInterval` wait (Java
+    ///     `AsyncKafkaConsumer.java:2287-2293`).
     ///   - `Err(KafkaError)` on the first error event drained. Subsequent
     ///     events are still processed (mirroring Java's
     ///     `firstError.compareAndSet`); the additional errors are logged
     ///     at `warn` level.
+    ///
+    /// Always invokes the background-event reaper at the end of the
+    /// drain (Java line 2222: `backgroundEventReaper.reap(time.milliseconds())`),
+    /// ensuring expired `CompletableEvent`s do not accumulate.
     ///
     /// # Lock discipline (§16)
     ///
@@ -732,8 +823,9 @@ where
     /// across the listener invocation. The implementation does not
     /// acquire the guard at all — the listener invoker reads paused
     /// partitions inside its own brief lock window.
-    pub(crate) async fn process_background_events(&mut self) -> Result<(), KafkaError> {
+    pub(crate) async fn process_background_events(&mut self) -> Result<bool, KafkaError> {
         let mut first_error: Option<KafkaError> = None;
+        let mut had_events = false;
 
         loop {
             let envelope = match self.background_event_rx.try_recv() {
@@ -742,12 +834,13 @@ where
                 Err(mpsc::error::TryRecvError::Disconnected) => {
                     // The bg task has shut down. Nothing more to drain;
                     // surface only if no other error has been recorded.
-                    if first_error.is_none() {
+                    if first_error.is_none() && !self.is_closed() {
                         first_error = Some(KafkaError::illegal_state("Consumer background task is no longer running."));
                     }
                     break;
                 },
             };
+            had_events = true;
 
             match envelope.event {
                 BackgroundEvent::Error { error } => {
@@ -806,10 +899,109 @@ where
             }
         }
 
+        // Java line 2222: reap expired completable events regardless of
+        // drain outcome. Done after the drain so events added by this
+        // tick get a chance to land before being reaped.
+        {
+            let now_ms = self.time.milliseconds();
+            let mut reaper = self.completable_event_reaper.lock().unwrap();
+            reaper.reap(now_ms);
+        }
+
         match first_error {
             Some(err) => Err(err),
-            None => Ok(()),
+            None => Ok(had_events),
         }
+    }
+
+    /// Iterative variant of [`Self::process_background_events`] used by
+    /// blocking-style APIs (`unsubscribe`, `commit_sync`, future
+    /// `poll`) that need to interleave bg-event draining with waiting on
+    /// a specific [`tokio::sync::oneshot::Receiver`].
+    ///
+    /// Mirrors Java's
+    /// `<T> T processBackgroundEvents(Future<T> future, Timer timer,
+    ///                                Predicate<Exception> ignoreErrorEventException)`
+    /// (`AsyncKafkaConsumer.java:2271`). Each iteration:
+    ///
+    /// 1. Drains the bg-event channel (invokes any pending listener
+    ///    callbacks on the caller's task).
+    /// 2. If the completion receiver has resolved, returns the value.
+    /// 3. Otherwise, races a 100ms bounded wait against the receiver.
+    /// 4. Loops while the absolute `deadline_ms` is not exceeded.
+    ///
+    /// Returns `Err(KafkaError::timeout(...))` when the deadline
+    /// expires without a completion.
+    pub(crate) async fn process_background_events_until<T: Send + 'static>(
+        &mut self,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        deadline_ms: i64,
+        ignore_error_predicate: impl Fn(&KafkaError) -> bool,
+        timeout_msg: impl AsRef<str>,
+    ) -> Result<T, KafkaError> {
+        let mut receiver = receiver;
+
+        loop {
+            let had_events = match self.process_background_events().await {
+                Ok(had) => had,
+                Err(err) => {
+                    if ignore_error_predicate(&err) {
+                        // Treat as if no events were processed (Java
+                        // swallows the matched exception inside the
+                        // try/catch at line 2274-2279).
+                        false
+                    } else {
+                        return Err(err);
+                    }
+                },
+            };
+
+            // Java line 2282: `if (future.isDone()) return getResult(future)`.
+            match receiver.try_recv() {
+                Ok(Ok(value)) => return Ok(value),
+                Ok(Err(err)) => return Err(err),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed) => {
+                    return Err(KafkaError::illegal_state(
+                        "Background task dropped the completion sender without completing it",
+                    ));
+                },
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty) => {
+                    // Java line 2287: if no events were processed this
+                    // tick, do a bounded wait (100ms) for the future or
+                    // for a new bg event.
+                    if !had_events {
+                        let remaining = self.remaining_ms(deadline_ms);
+                        if remaining <= 0 {
+                            return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
+                        }
+                        let wait = std::cmp::min(remaining, 100) as u64;
+                        match tokio::time::timeout(Duration::from_millis(wait), &mut receiver).await {
+                            Ok(Ok(Ok(value))) => return Ok(value),
+                            Ok(Ok(Err(err))) => return Err(err),
+                            Ok(Err(_recv_err)) => {
+                                return Err(KafkaError::illegal_state(
+                                    "Background task dropped the completion sender without completing it",
+                                ));
+                            },
+                            // Java's `swallow TimeoutException` — keep looping.
+                            Err(_elapsed) => {},
+                        }
+                    }
+                },
+            }
+
+            // Java line 2299: `while (timer.notExpired())`.
+            if self.remaining_ms(deadline_ms) <= 0 {
+                return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
+            }
+        }
+    }
+
+    /// Returns the milliseconds remaining until the supplied deadline,
+    /// saturating at zero.
+    fn remaining_ms(&self, deadline_ms: i64) -> i64 {
+        let now = self.time.milliseconds();
+        deadline_ms.saturating_sub(now).max(0)
     }
 
     /// Java: `firstError.compareAndSet(null, e)` — first error wins;
@@ -819,6 +1011,267 @@ where
             *slot = Some(err);
         } else {
             log::warn!("An error occurred when processing the background event: {err}");
+        }
+    }
+
+    // ── Poll ───────────────────────────────────────────────────────────
+    //
+    // Translates Java's `AsyncKafkaConsumer.poll(Duration timeout)` body
+    // (`AsyncKafkaConsumer.java:836-885`). The Java implementation drives a
+    // `do { } while (timer.notExpired())` loop with three stages:
+    //
+    //   1. `wakeupTrigger.maybeTriggerWakeup()` at the TOP of the loop —
+    //      observe a wakeup posted between polls.
+    //   2. `checkInflightPoll(timer, firstPass)` — start a new
+    //      `AsyncPollEvent` or evaluate whether the existing one has
+    //      finished. Also runs the per-iteration
+    //      `offsetCommitCallbackInvoker.executeCallbacks()` +
+    //      `processBackgroundEvents()` pair (§31 invocation thread).
+    //   3. `pollForFetches(timer)` — drain the fetch buffer via
+    //      `FetchCollector.collectFetch`.
+    //
+    // Records are returned as soon as the collector yields a non-empty
+    // fetch; otherwise the loop continues until `timer` expires, at which
+    // point we return `ConsumerRecords::empty()`.
+
+    /// Java: `ConsumerRecords<K, V> poll(Duration timeout)`.
+    ///
+    /// The translated body mirrors Java line-for-line; deviations are
+    /// limited to:
+    ///
+    ///   - `kafkaConsumerMetrics.record*` — NO-OPs (Phase 11 PLAN.md #1).
+    ///   - The `try/finally` in Java is a single function body in Rust;
+    ///     panic-safety is achieved via early returns instead.
+    ///   - `interceptors.onConsume(...)` mutates the records in place via
+    ///     `Mutex<ConsumerInterceptors>`.
+    pub async fn poll(&mut self, timeout: Duration) -> Result<ConsumerRecords<K, V>, KafkaError> {
+        self.ensure_open()?;
+
+        // Java: `subscriptions.hasNoSubscriptionOrUserAssignment()`.
+        {
+            let subs = self.subscriptions.lock().unwrap();
+            if subs.has_no_subscription_or_user_assignment() {
+                return Err(KafkaError::illegal_state(
+                    "Consumer is not subscribed to any topics or assigned any partitions",
+                ));
+            }
+        }
+
+        let start_ms = self.time.milliseconds();
+        let poll_deadline_ms = calculate_deadline_ms(start_ms, timeout.as_millis() as i64);
+        let mut first_pass = true;
+
+        loop {
+            // Stage 1: observe pending wakeup before doing any work.
+            if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                // Java throws WakeupException unconditionally; the Rust
+                // analog rotates the token AFTER raising so a subsequent
+                // poll() observes a fresh token (consumer-threading.md §11).
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
+
+            // Stage 2: drive the `AsyncPollEvent` lifecycle. This also
+            // executes pending OffsetCommitCallback invocations and drains
+            // background events for §31 listener callbacks.
+            self.check_inflight_poll(poll_deadline_ms, first_pass).await?;
+            first_pass = false;
+
+            // Stage 3: collect fetched records.
+            let mut records = self.poll_for_fetches();
+            if !records.is_empty() {
+                // Java: `sendPrefetches(timer)` — eagerly enqueue the next
+                // batch of fetches so the user's processing overlaps with
+                // the next request. In Rust this maps to a non-blocking
+                // `CreateFetchRequests` event.
+                self.send_prefetches();
+                // Java: `interceptors.onConsume(...)`.
+                {
+                    let chain = self.interceptors.lock().unwrap();
+                    chain.on_consume(&mut records);
+                }
+                return Ok(records);
+            }
+
+            // Java: `while (timer.notExpired())`.
+            if self.time.milliseconds() >= poll_deadline_ms {
+                break;
+            }
+        }
+
+        Ok(ConsumerRecords::empty())
+    }
+
+    /// Java: `private void checkInflightPoll(Timer timer, boolean firstPass)`
+    /// (`AsyncKafkaConsumer.java:893-928`).
+    ///
+    /// Drives the lifetime of the inflight [`ApplicationEvent::AsyncPoll`]
+    /// event. On the first pass of a `poll()` call it clears any leftover
+    /// event from the previous invocation. If no event is currently
+    /// inflight it submits a fresh one. The pending `OffsetCommitCallback`
+    /// queue is drained and `process_background_events` is invoked, so a
+    /// failed callback / fatal background error short-circuits with the
+    /// inflight event cleared (matching Java's `try { … } catch (Throwable t) { … }`).
+    async fn check_inflight_poll(&mut self, poll_deadline_ms: i64, first_pass: bool) -> Result<(), KafkaError> {
+        if first_pass && self.inflight_poll.is_some() {
+            self.maybe_clear_previous_inflight_poll()?;
+        }
+
+        let mut newly_submitted_event = false;
+        if self.inflight_poll.is_none() {
+            let state = Arc::new(AsyncPollState::new());
+            let now_ms = self.time.milliseconds();
+            let event = ApplicationEvent::AsyncPoll {
+                deadline_ms: poll_deadline_ms,
+                poll_time_ms: now_ms,
+                state: Arc::clone(&state),
+            };
+            log::trace!("Inflight event AsyncPoll(deadline={poll_deadline_ms}, time={now_ms}) submitted");
+            // `add` is non-blocking — bg task drives the state machine.
+            self.application_event_handler.add(event, now_ms)?;
+            self.inflight_poll = Some(InflightPoll { deadline_ms: poll_deadline_ms, state });
+            newly_submitted_event = true;
+        }
+
+        // Java: `offsetCommitCallbackInvoker.executeCallbacks();` +
+        //       `processBackgroundEvents();`.
+        //
+        // Both are user-supplied code paths — if either throws, we clear
+        // the inflight poll and propagate the error.
+        let invocation_result = self.run_check_inflight_drain().await;
+        if let Err(err) = invocation_result {
+            log::trace!("Inflight event AsyncPoll failed due to {err}, clearing");
+            self.inflight_poll = None;
+            return Err(err);
+        }
+
+        if self.inflight_poll.is_some() {
+            self.maybe_clear_current_inflight_poll(newly_submitted_event)?;
+        }
+
+        Ok(())
+    }
+
+    /// Drain pending OffsetCommitCallback invocations + bg-events.
+    ///
+    /// Pulled out of [`Self::check_inflight_poll`] so the `?`-based error
+    /// propagation can run inside a single try-block-equivalent body —
+    /// Java's `try { ... } catch (Throwable t)` semantics translate as
+    /// "run this helper, observe the result".
+    async fn run_check_inflight_drain(&mut self) -> Result<(), KafkaError> {
+        // Invoke any callbacks queued by previous async commits.
+        self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+        // Drain pending background events (rebalance-listener callbacks,
+        // fatal errors). §31: must run on the caller's task.
+        self.process_background_events().await?;
+        Ok(())
+    }
+
+    /// Java: `private void maybeClearPreviousInflightPoll()`
+    /// (`AsyncKafkaConsumer.java:930-963`).
+    fn maybe_clear_previous_inflight_poll(&mut self) -> Result<(), KafkaError> {
+        let inflight = match self.inflight_poll.as_ref() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        if inflight.state.is_complete() {
+            let err_opt = inflight.state.error();
+            if let Some(error) = err_opt {
+                log::trace!("Previous inflight event AsyncPoll completed with an error ({error}), clearing");
+                self.inflight_poll = None;
+                return Err(error);
+            }
+            // Successful case: check if the bg task populated the buffer.
+            if self.fetch_buffer.is_empty() {
+                log::trace!("Previous inflight event AsyncPoll completed without filling the buffer, clearing");
+                self.inflight_poll = None;
+            } else {
+                // Buffer is full — keep the event so the caller can drain
+                // the buffer before a fresh event is enqueued (Java's
+                // "0 timeout starvation" guard).
+                log::trace!("Previous inflight event AsyncPoll completed and filled the buffer, not clearing");
+            }
+            return Ok(());
+        }
+
+        // Java: `else if (inflightPoll.isExpired(time) && inflightPoll.isValidatePositionsComplete())`.
+        let now_ms = self.time.milliseconds();
+        if inflight.is_expired(now_ms) && inflight.state.is_validate_positions_complete() {
+            log::trace!("Previous inflight event AsyncPoll expired without completing, clearing");
+            self.inflight_poll = None;
+        }
+        Ok(())
+    }
+
+    /// Java: `private void maybeClearCurrentInflightPoll(boolean newlySubmittedEvent)`
+    /// (`AsyncKafkaConsumer.java:965-986`).
+    fn maybe_clear_current_inflight_poll(&mut self, newly_submitted_event: bool) -> Result<(), KafkaError> {
+        let inflight = match self.inflight_poll.as_ref() {
+            Some(i) => i,
+            None => return Ok(()),
+        };
+        if inflight.state.is_complete() {
+            let err_opt = inflight.state.error();
+            self.inflight_poll = None;
+            if let Some(error) = err_opt {
+                log::trace!("Inflight event AsyncPoll completed with an error ({error}), clearing");
+                return Err(error);
+            }
+            log::trace!("Inflight event AsyncPoll completed without error, clearing");
+            return Ok(());
+        }
+
+        if !newly_submitted_event {
+            let now_ms = self.time.milliseconds();
+            if inflight.is_expired(now_ms) && inflight.state.is_validate_positions_complete() {
+                log::trace!("Inflight event AsyncPoll expired without completing, clearing");
+                self.inflight_poll = None;
+            }
+        }
+        Ok(())
+    }
+
+    /// Java: `private Fetch<K, V> pollForFetches(Timer timer)`
+    /// (`AsyncKafkaConsumer.java:1872-1932`).
+    ///
+    /// In the Rust translation the buffer-drain is a pure CPU operation
+    /// (no broker round-trip); the `FetchCollector::collect_fetch` call
+    /// returns immediately. If decoding fails for any reason we surface an
+    /// empty fetch (Java's `Fetch.empty()` fallback) and rely on the bg
+    /// task to repopulate the buffer on the next AsyncPoll iteration.
+    fn poll_for_fetches(&self) -> ConsumerRecords<K, V> {
+        // Java holds a poll-fetch-spin lock that we elide here — the
+        // `FetchBuffer` is internally locked. On error we log + return
+        // empty so the outer `poll()` loop can retry on the next iteration.
+        match self.fetch_collector.collect_fetch(&self.fetch_buffer) {
+            Ok(records) => records,
+            Err(err) => {
+                log::warn!("collect_fetch returned an error: {err}");
+                ConsumerRecords::empty()
+            },
+        }
+    }
+
+    /// Java: `private void sendPrefetches(Timer timer)`
+    /// (`AsyncKafkaConsumer.java:1995-2003`).
+    ///
+    /// Submits a non-completable `CreateFetchRequests` event so the bg
+    /// task can pipeline the next fetch round-trip with the user's
+    /// per-record processing. Errors from a closed bg-task channel are
+    /// logged-and-swallowed (Java does the same).
+    fn send_prefetches(&self) {
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, _receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        // The event is `add`-ed (not `add_and_get`), so the receiver is
+        // dropped and the handle is fire-and-forget. The bg side's
+        // completion of the handle then resolves into the dropped
+        // receiver, which is a no-op.
+        if let Err(err) = self
+            .application_event_handler
+            .add(ApplicationEvent::CreateFetchRequests { handle }, now_ms)
+        {
+            log::warn!("send_prefetches: failed to enqueue CreateFetchRequests: {err}");
         }
     }
 }
@@ -937,6 +1390,25 @@ mod tests {
         ));
         let rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subs));
 
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+        let fetch_config = crate::consumer::internals::fetch_config::FetchConfig::new(
+            1,
+            50 * 1024 * 1024,
+            500,
+            1024 * 1024,
+            500,
+            true,
+            "",
+            IsolationLevel::ReadUncommitted,
+        );
+        let fetch_collector = Arc::new(FetchCollector::<Vec<u8>, Vec<u8>>::new(
+            Arc::clone(&metadata),
+            Arc::clone(&subs),
+            fetch_config,
+            Arc::clone(&deserializers),
+            Arc::new(crate::consumer::internals::fetch_collector::SystemFetchCollectorTime),
+        ));
+
         let components = AsyncKafkaConsumerComponents {
             config,
             client_id,
@@ -950,10 +1422,13 @@ mod tests {
             max_time_to_wait_ms: max_time,
             wakeup_trigger: wakeup,
             network_thread_close: close_handle,
+            fetch_buffer,
+            fetch_collector,
             rebalance_listener_invoker,
             offset_commit_callback_invoker,
             deserializers,
             interceptors,
+            isolation_level: IsolationLevel::ReadUncommitted,
             time: Arc::new(crate::consumer::internals::consumer_network_thread::SystemThreadTime),
         };
         (
@@ -1345,5 +1820,153 @@ mod tests {
     async fn process_background_events_on_empty_channel_is_ok() {
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.process_background_events().await.expect("ok");
+    }
+
+    // ─── Poll lifecycle tests (commit 4/N) ───
+    //
+    // Stand-ins for Java's `testWakeupBeforeCallingPoll`, `testWakeupAfterEmptyFetch`,
+    // `testClearWakeupTriggerAfterPoll`, the `checkInflightPoll` arms, and the
+    // "no subscription / no assignment" early-return arm.
+    //
+    // Skipped Java tests for this commit (each carries a one-line rationale):
+    //   - `testRecordBackgroundEventQueueSizeAndBackgroundEventQueueTime` —
+    //     `AsyncConsumerMetrics` deferred to a separate cross-cutting commit.
+    //   - `testReaperInvokedInPoll` — depends on the metrics observers that
+    //     would observe the reaper invocations. The `reap` call itself is
+    //     wired and unit-tested via the bg-events drain test in commit 3.
+
+    /// Java: `poll()` throws `IllegalStateException` when there is no
+    /// subscription or assignment.
+    #[tokio::test]
+    async fn poll_returns_illegal_state_without_subscription() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
+        assert!(
+            matches!(err, KafkaError::IllegalState(ref msg)
+                if msg == "Consumer is not subscribed to any topics or assigned any partitions"),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    /// Java: `testFailOnClosedConsumer` (the `poll` arm).
+    #[tokio::test]
+    async fn poll_on_closed_consumer_errors() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        consumer.closed.store(true, Ordering::Release);
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
+        assert!(
+            matches!(err, KafkaError::IllegalState(ref msg)
+                if msg.contains("already been closed")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    /// Java: `testWakeupBeforeCallingPoll` — `wakeup()` posted before
+    /// `poll()` must surface as `KafkaError::Wakeup`. After the error is
+    /// raised, a subsequent `poll()` must observe a fresh token (Java's
+    /// "clear the volatile flag after throwing WakeupException once").
+    #[tokio::test]
+    async fn poll_observes_pending_wakeup_and_rotates_token() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        // Pre-populate an assignment so `poll()` does not bail with the
+        // "not subscribed" error before reaching the wakeup check.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp.clone());
+            subs.assign_from_user(assigned).unwrap();
+        }
+
+        consumer.wakeup_trigger.wakeup();
+        let pre_token = consumer.wakeup_trigger.current_token();
+        assert!(pre_token.is_cancelled(), "pre-condition: wakeup() cancelled the token");
+
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("wakeup err");
+        assert!(matches!(err, KafkaError::Wakeup(_)), "unexpected err: {err:?}");
+
+        // After raising the wakeup error the consumer must have rotated
+        // the token so the next poll observes a fresh one (§11).
+        let post_token = consumer.wakeup_trigger.current_token();
+        assert!(!post_token.is_cancelled(), "token must be rotated after Wakeup err");
+
+        drop(handles);
+    }
+
+    /// `checkInflightPoll` submits a fresh AsyncPollEvent when none is
+    /// in flight, and clears it on completion. Mirrors the Java unit-test
+    /// behavior in `testEnsurePollEventSentOnConsumerPoll`.
+    #[tokio::test]
+    async fn poll_enqueues_async_poll_event_and_clears_on_completion() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Pre-populate the assignment so `poll()` does not error early.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp.clone());
+            subs.assign_from_user(assigned).unwrap();
+        }
+
+        // First poll() — submits AsyncPoll, returns empty. We don't yet
+        // drain the event off the channel, so the inflight state is
+        // present and incomplete.
+        let records = consumer.poll(Duration::from_millis(0)).await.expect("poll ok");
+        assert!(records.is_empty(), "empty fetch buffer should yield empty records");
+        assert!(consumer.inflight_poll.is_some(), "first poll() submits an AsyncPoll event");
+
+        // Drain the envelope off the channel and synchronously mark the
+        // shared state complete (mirrors the bg task's behavior).
+        let env = handles.app_event_rx.try_recv().expect("AsyncPoll envelope must be on channel");
+        let async_poll_state = match env.event {
+            ApplicationEvent::AsyncPoll { state, .. } => state,
+            other => panic!("expected AsyncPoll, got {}", other.type_name()),
+        };
+        async_poll_state.complete_successfully();
+
+        // Second poll() drives `maybe_clear_previous_inflight_poll` over
+        // the now-completed state and clears the inflight slot. The bg
+        // task channel is still drained on each invocation; the new
+        // AsyncPoll for this iteration goes back onto the channel and we
+        // do not bother completing it.
+        let _ = consumer.poll(Duration::from_millis(0)).await.expect("second poll ok");
+        // Both the previously-completed event (cleared because complete)
+        // and the freshly-submitted one for this iteration are accounted
+        // for: after the second poll the inflight slot holds the new
+        // (incomplete) event because `maybe_clear_current_inflight_poll`
+        // is run with `newly_submitted_event=true`.
+        assert!(
+            consumer.inflight_poll.is_some(),
+            "second poll() submits a fresh AsyncPoll event"
+        );
+    }
+
+    /// A previous-iteration AsyncPoll event that completed with an error
+    /// is surfaced from the next `poll()` call (mirrors Java's
+    /// `maybeClearPreviousInflightPoll` error arm).
+    #[tokio::test]
+    async fn poll_surfaces_previous_inflight_poll_error() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp);
+            subs.assign_from_user(assigned).unwrap();
+        }
+        // Plant a previous inflight that already completed with an error.
+        let state = Arc::new(AsyncPollState::new());
+        state.complete_exceptionally(KafkaError::timeout("prior poll deadline"));
+        consumer.inflight_poll = Some(InflightPoll { deadline_ms: 0, state });
+
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("must err");
+        assert!(
+            matches!(err, KafkaError::Timeout(ref m) if m == "prior poll deadline"),
+            "unexpected err: {err:?}"
+        );
+        assert!(
+            consumer.inflight_poll.is_none(),
+            "previous inflight poll must be cleared after error"
+        );
     }
 }
