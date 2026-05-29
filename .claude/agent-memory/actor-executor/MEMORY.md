@@ -15,6 +15,7 @@
 - [Phase 10 Critic round-1 patterns](phase10_critic_round1_patterns.md) — five reusable fix patterns: stub-comment-as-bug-symptom, translate full predicate, preserve check-order in retry gates, test-name parity, unconditional side effects after early-returns
 - [Phase 10 (3a/N) commit notes](phase10_commit_3a_notes.md) — Milestone-8 Phase 10 (3a/N): OffsetsRequestManager relocate; CompletableFuture fan-out via oneshot waiters vec; inner_state_for_test pattern; Option<Arc<Dep>> for nullable Java deps; saturating_add for deadline math
 - [Phase 10 (3b/N) commit notes](phase10_commit_3b_notes.md) — Milestone-8 Phase 10 (3b/N): update_fetch_positions; defer &mut self work from spawned task via channel; capture initializing partitions at call entry; cache-on-error in BOTH sync and async paths; yield_until helper
+- [Phase 10 (3c/N) commit notes](phase10_commit_3c_notes.md) — Milestone-8 Phase 10 (3c/N): fetch_offsets + cluster-listener replay; Arc<Shared> pattern; AtomicBool defer to avoid metadata mutex re-entrancy deadlock; ConcreteRequest downcast for builder assertions
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement

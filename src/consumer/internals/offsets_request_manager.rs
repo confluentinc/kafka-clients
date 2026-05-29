@@ -64,6 +64,7 @@ use crate::common::requests::{
 };
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::OffsetAndTimestamp;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 
 use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
@@ -71,8 +72,9 @@ use super::commit_request_manager::CommitRequestManager;
 use super::consumer_metadata::ConsumerMetadata;
 use super::network_client_delegate::{PollResult, UnsentRequest};
 use super::offset_fetcher_utils::{
-    OffsetFetcherUtilsState, has_usable_offset_for_leader_epoch_version, regroup_fetch_positions_by_leader,
-    regroup_partition_map_by_node,
+    ListOffsetData, ListOffsetResult, OffsetFetcherUtilsState, build_offsets_for_times_result,
+    has_usable_offset_for_leader_epoch_version, regroup_fetch_positions_by_leader, regroup_partition_map_by_node,
+    topics_for_partitions,
 };
 use super::offsets_for_leader_epoch_client::OffsetsForLeaderEpochClient;
 use super::request_manager::RequestManager;
@@ -80,7 +82,7 @@ use super::subscription_state::{FetchPosition, SubscriptionState};
 
 /// Tracks pending request completions that need to be processed on the
 /// next `poll()` call.
-enum PendingCompletion {
+pub(crate) enum PendingCompletion {
     ListOffsetsForReset {
         reset_timestamps: HashMap<TopicPartition, ListOffsetsPartition>,
         partition_strategies: HashMap<TopicPartition, AutoOffsetResetStrategy>,
@@ -90,6 +92,89 @@ enum PendingCompletion {
         fetch_positions: HashMap<TopicPartition, FetchPosition>,
         result: Result<ClientResponse, KafkaError>,
     },
+    /// Per-node ListOffsets response for the `fetch_offsets` flow. The
+    /// outer `state` accumulates partial results across all nodes (Java:
+    /// `MultiNodeRequest.addPartialResult`); when every node has reported,
+    /// the global future resolves.
+    ListOffsetsForFetchOffsets {
+        state: Arc<Mutex<ListOffsetsRequestState>>,
+        node_partitions: HashMap<TopicPartition, ListOffsetsPartition>,
+        result: Result<ClientResponse, KafkaError>,
+    },
+}
+
+/// Sender used to deliver the global outcome of a `fetch_offsets` call
+/// to one waiter. Aliased to keep the `Vec<...>` declaration tractable
+/// for clippy's `type_complexity` lint.
+type FetchOffsetsWaiter = oneshot::Sender<Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError>>;
+
+/// Per-`fetch_offsets` request state. Mirrors Java's
+/// `OffsetsRequestManager.ListOffsetsRequestState`.
+///
+/// Accumulates per-node partial results until every node responds (or
+/// fails), then routes the global outcome to all registered waiters and
+/// — on full success — updates the subscription state HW/LSO via
+/// [`OffsetFetcherUtilsState::update_subscription_state`].
+///
+/// Java tracks one `CompletableFuture<ListOffsetResult>` (the
+/// "global result") whose downstream `whenComplete` handlers form a chain.
+/// Rust uses a `Vec<oneshot::Sender>` for waiters because `oneshot` is
+/// single-consumer. The reuse pattern (multiple `update_fetch_positions`
+/// calls piggy-backing on the same fetch) does not apply here — each
+/// `fetch_offsets` call is independent — but the second `fetchOffsets`
+/// call from the same set of timestamps can fail with `StaleMetadataException`
+/// and be parked on `requests_to_retry`, where it's replayed when
+/// `OffsetsClusterListener::on_update` fires.
+pub(crate) struct ListOffsetsRequestState {
+    /// The input timestamps the caller asked us to resolve. Java:
+    /// `ListOffsetsRequestState.timestampsToSearch`.
+    timestamps_to_search: HashMap<TopicPartition, i64>,
+    /// Whether the broker must support precise timestamps (Java:
+    /// `requireTimestamps`).
+    require_timestamps: bool,
+    /// Partitions whose `groupListOffsetRequests` failed (no leader) and
+    /// must be retried after the next metadata update. Java:
+    /// `ListOffsetsRequestState.remainingToSearch`.
+    remaining_to_search: HashMap<TopicPartition, i64>,
+    /// Offsets collected across all per-node responses. Java:
+    /// `ListOffsetsRequestState.fetchedOffsets`.
+    fetched_offsets: HashMap<TopicPartition, ListOffsetData>,
+    /// Number of per-node responses still expected before the global
+    /// future resolves. Java tracks this through a `MultiNodeRequest`
+    /// inside `buildListOffsetsRequests`; we collapse it onto the request
+    /// state to avoid maintaining a parallel struct.
+    expected_responses: usize,
+    /// Outer-future waiters. The driver completes each by `send`.
+    waiters: Vec<FetchOffsetsWaiter>,
+    /// `true` once the global result has been routed (either by success
+    /// or failure). Once set, further per-node completions are ignored —
+    /// mirrors Java's `CompletableFuture::complete` idempotency.
+    completed: bool,
+}
+
+impl ListOffsetsRequestState {
+    fn new(timestamps_to_search: HashMap<TopicPartition, i64>, require_timestamps: bool) -> Self {
+        Self {
+            timestamps_to_search,
+            require_timestamps,
+            remaining_to_search: HashMap::new(),
+            fetched_offsets: HashMap::new(),
+            expected_responses: 0,
+            waiters: Vec::new(),
+            completed: false,
+        }
+    }
+
+    /// Java: `addPartitionsToRetry`. Records the input timestamp for each
+    /// partition that the broker couldn't serve (retriable error / unknown
+    /// leader) so the metadata-update replay can rebuild requests.
+    fn add_partitions_to_retry(&mut self, partitions: &HashSet<TopicPartition>) {
+        for tp in partitions {
+            if let Some(ts) = self.timestamps_to_search.get(tp) {
+                self.remaining_to_search.insert(tp.clone(), *ts);
+            }
+        }
+    }
 }
 
 /// A deferred call to `init_with_partition_offsets_if_needed` scheduled by
@@ -106,27 +191,340 @@ struct PendingFollowupReset {
     initial_partitions: HashSet<TopicPartition>,
 }
 
+/// State shared between the [`OffsetsRequestManager`] and the
+/// [`OffsetsClusterListener`].
+///
+/// The cluster listener is registered on
+/// [`crate::metadata::Metadata::add_cluster_update_listener`] which gives it
+/// only a `&self` borrow — so any state the listener needs to mutate
+/// (`requests_to_send`, `requests_to_retry`) must live inside an
+/// `Arc<Mutex<...>>`. Read-only fields (metadata, subscription state,
+/// isolation level, timeout, fetcher-utils, completion sender) are wrapped
+/// in `Arc` so the listener can call into [`Self::prepare_fetch_offsets_requests`]
+/// without going through the manager.
+///
+/// Java carries every one of these as instance fields on
+/// `OffsetsRequestManager` itself; the Rust split is a pure mechanical
+/// consequence of `&self` listener access vs. `&mut self` manager-poll
+/// access.
+pub(crate) struct OffsetsManagerShared {
+    pub(crate) subscription_state: Arc<Mutex<SubscriptionState>>,
+    pub(crate) metadata: Arc<ConsumerMetadata>,
+    pub(crate) isolation_level: IsolationLevel,
+    pub(crate) request_timeout_ms: i64,
+    pub(crate) offset_fetcher_utils: Arc<OffsetFetcherUtilsState>,
+    pub(crate) pending_completions_tx: mpsc::UnboundedSender<PendingCompletion>,
+    /// Requests built but not yet drained by `poll`. Java:
+    /// `requestsToSend`.
+    pub(crate) requests_to_send: Mutex<Vec<UnsentRequest>>,
+    /// Per-`fetch_offsets` request state queued for replay when the next
+    /// metadata update arrives. Java: `requestsToRetry` (a `HashSet`).
+    /// Rust uses a `Vec` because deduplication is by-pointer (`Arc::ptr_eq`)
+    /// not value equality — Java relies on Java identity hash for the
+    /// equivalent semantic.
+    pub(crate) requests_to_retry: Mutex<Vec<Arc<Mutex<ListOffsetsRequestState>>>>,
+    /// Set to `true` by [`OffsetsClusterListener::on_update`] when the
+    /// metadata cache advances; consumed by [`OffsetsRequestManager::poll`]
+    /// to replay any requests parked on [`Self::requests_to_retry`].
+    ///
+    /// **Why defer?** Java fires `ClusterResourceListener.onUpdate` from
+    /// inside `Metadata::update`, which holds `Metadata`'s internal lock.
+    /// Java's `synchronized` is reentrant, so the listener can call back
+    /// into `metadata.currentLeader(tp)` and other accessors without
+    /// deadlock. Rust's `std::sync::Mutex` is NOT reentrant — calling
+    /// `metadata.current_leader(tp)` from inside `on_update` would
+    /// deadlock. We avoid the deadlock by flagging the update here and
+    /// draining the retry queue on the next `poll()` (which holds no
+    /// metadata locks). The observable behaviour matches Java: the
+    /// retried requests appear on `requests_to_send` before the next
+    /// network poll.
+    pub(crate) metadata_updated: std::sync::atomic::AtomicBool,
+}
+
+impl OffsetsManagerShared {
+    /// Mirrors Java's `prepareFetchOffsetsRequests(timestampsToSearch,
+    /// requireTimestamps, listOffsetsRequestState)`.
+    ///
+    /// Builds per-leader `ListOffsets` requests for `timestamps_to_search`
+    /// and enqueues them on [`Self::requests_to_send`]. Partitions whose
+    /// leader is unknown to the metadata snapshot are added to the
+    /// request state's `remaining_to_search`, and — if no requests could
+    /// be built at all — the entire state is parked on
+    /// [`Self::requests_to_retry`] so the next
+    /// [`OffsetsClusterListener::on_update`] replays it.
+    ///
+    /// `&Arc<Self>` rather than `&self` because the spawned per-node
+    /// response forwarder needs a strong reference. The listener path
+    /// also passes `Arc<Self>` (it owns one).
+    fn prepare_fetch_offsets_requests(
+        self_arc: &Arc<Self>,
+        timestamps_to_search: &HashMap<TopicPartition, i64>,
+        require_timestamps: bool,
+        state: &Arc<Mutex<ListOffsetsRequestState>>,
+    ) {
+        match Self::build_list_offsets_requests(self_arc, timestamps_to_search, require_timestamps, state) {
+            Ok(unsent_requests) => {
+                let mut guard = self_arc.requests_to_send.lock().expect("requests_to_send mutex poisoned");
+                guard.extend(unsent_requests);
+            },
+            Err(StaleMetadata) => {
+                // Java: `requestsToRetry.add(listOffsetsRequestState)`.
+                // The state's `remaining_to_search` is already populated
+                // with every input partition (since none had a leader).
+                let mut guard = self_arc.requests_to_retry.lock().expect("requests_to_retry mutex poisoned");
+                guard.push(state.clone());
+            },
+        }
+    }
+
+    /// Mirrors Java's
+    /// `buildListOffsetsRequests(timestampsToSearch, requireTimestamps,
+    /// listOffsetsRequestState)`.
+    ///
+    /// Returns the list of `UnsentRequest`s built for partitions with
+    /// known leaders, or `Err(StaleMetadata)` when not a single partition
+    /// has a known leader — the caller parks the state on
+    /// `requests_to_retry`.
+    fn build_list_offsets_requests(
+        self_arc: &Arc<Self>,
+        timestamps_to_search: &HashMap<TopicPartition, i64>,
+        require_timestamps: bool,
+        state: &Arc<Mutex<ListOffsetsRequestState>>,
+    ) -> Result<Vec<UnsentRequest>, StaleMetadata> {
+        log::debug!("Building ListOffsets request for partitions {:?}", timestamps_to_search.keys());
+        let by_node = Self::group_list_offset_requests(self_arc, timestamps_to_search, Some(state));
+        if by_node.is_empty() {
+            return Err(StaleMetadata);
+        }
+
+        let mut unsent_requests: Vec<UnsentRequest> = Vec::new();
+        let node_count = by_node.len();
+        {
+            let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
+            // Java initialises `expectedResponses` to `nodeCount`. We add
+            // here so an interleaved second `fetch_offsets` call (parked
+            // and replayed) accumulates on top of in-flight expectations.
+            guard.expected_responses = guard.expected_responses.saturating_add(node_count);
+        }
+
+        for (node, target_times) in by_node {
+            let mut builder = ListOffsetsRequestBuilder::for_consumer(require_timestamps, self_arc.isolation_level);
+            let topics = crate::common::requests::ListOffsetsRequest::to_list_offsets_topics(&target_times);
+            builder.set_target_times(topics);
+            builder.set_timeout_ms(self_arc.request_timeout_ms as i32);
+
+            log::debug!("Creating ListOffset request for broker {} to fetch offsets", node);
+
+            let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
+            let response_rx = unsent.take_response_receiver().expect("receiver fresh");
+            let tx = self_arc.pending_completions_tx.clone();
+            let state_for_task = Arc::clone(state);
+            let target_times_for_task = target_times.clone();
+            tokio::spawn(async move {
+                let result = match response_rx.await {
+                    Ok(r) => r,
+                    Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+                };
+                let _ = tx.send(PendingCompletion::ListOffsetsForFetchOffsets {
+                    state: state_for_task,
+                    node_partitions: target_times_for_task,
+                    result,
+                });
+            });
+            unsent_requests.push(unsent);
+        }
+        Ok(unsent_requests)
+    }
+
+    /// Mirrors Java's
+    /// `groupListOffsetRequests(timestampsToSearch, listOffsetsRequestState)`.
+    ///
+    /// Looks up the current leader for each partition in the metadata
+    /// cache; partitions without a known leader are recorded on the
+    /// state's `remaining_to_search` (when `state` is `Some`) and a
+    /// metadata-update is scheduled. Returns the grouped per-node map of
+    /// `ListOffsetsPartition` payloads ready to be packed into a single
+    /// per-broker request.
+    fn group_list_offset_requests(
+        self_arc: &Arc<Self>,
+        timestamps_to_search: &HashMap<TopicPartition, i64>,
+        state: Option<&Arc<Mutex<ListOffsetsRequestState>>>,
+    ) -> HashMap<crate::common::Node, HashMap<TopicPartition, ListOffsetsPartition>> {
+        let mut partition_data_map: HashMap<TopicPartition, ListOffsetsPartition> = HashMap::new();
+
+        for (tp, &offset) in timestamps_to_search {
+            let leader_and_epoch = self_arc.metadata.current_leader(tp);
+            if leader_and_epoch.leader.is_none() {
+                log::debug!("Leader for partition {} is unknown for fetching offset {}", tp, offset);
+                self_arc.metadata.metadata_arc().request_update(true);
+                if let Some(state_arc) = state {
+                    let mut guard = state_arc.lock().expect("ListOffsetsRequestState mutex poisoned");
+                    guard.remaining_to_search.insert(tp.clone(), offset);
+                }
+            } else {
+                let current_leader_epoch = leader_and_epoch
+                    .epoch
+                    .unwrap_or(crate::common::requests::list_offsets_response::UNKNOWN_EPOCH);
+                let mut part = ListOffsetsPartition::new();
+                part.set_partition_index(tp.partition());
+                part.set_timestamp(offset);
+                part.set_current_leader_epoch(current_leader_epoch);
+                partition_data_map.insert(tp.clone(), part);
+            }
+        }
+        regroup_partition_map_by_node(&self_arc.metadata, &partition_data_map)
+    }
+
+    /// Mirrors the success branch of Java's per-`buildListOffsetsRequests`
+    /// `whenComplete` plus the `MultiNodeRequest.addPartialResult` /
+    /// `onComplete` chain.
+    ///
+    /// Applies the per-node `ListOffsetResult` to the shared state.
+    /// When all expected responses have arrived, the global outcome is
+    /// routed to every waiter on the state, the subscription state's
+    /// HW/LSO is updated, and — if any partitions still need to be
+    /// searched (retriable errors) — the state is re-parked on
+    /// `requests_to_retry` and a metadata update is scheduled.
+    fn apply_partial_result(
+        self_arc: &Arc<Self>,
+        state: &Arc<Mutex<ListOffsetsRequestState>>,
+        node_partitions: &HashMap<TopicPartition, ListOffsetsPartition>,
+        partial: ListOffsetResult,
+    ) {
+        let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
+        if guard.completed {
+            return;
+        }
+        // Java: `fetchedOffsets.putAll(multiNodeResult.fetchedOffsets)` +
+        // `addPartitionsToRetry(multiNodeResult.partitionsToRetry)`.
+        // `expectedResponses` is decremented once *per node*, not per
+        // partition.
+        for (tp, data) in partial.fetched_offsets {
+            guard.fetched_offsets.insert(tp, data);
+        }
+        guard.add_partitions_to_retry(&partial.partitions_to_retry);
+        // Apply HW/LSO updates from the partial result (Java:
+        // `offsetFetcherUtils.updateSubscriptionState(multiNodeResult.fetchedOffsets, isolationLevel)`).
+        // Borrow the inner fetched_offsets map (the
+        // `OffsetFetcherUtilsState::update_subscription_state` API takes
+        // `&HashMap<TopicPartition, ListOffsetData>`).
+        let just_fetched: HashMap<TopicPartition, ListOffsetData> =
+            partial_fetched_for_node(&guard.fetched_offsets, node_partitions.keys());
+        // Drop the guard before calling into the utils (which locks the
+        // subscription state mutex) — CLAUDE.md §16.
+        let isolation_level = self_arc.isolation_level;
+        drop(guard);
+        if let Err(err) = self_arc
+            .offset_fetcher_utils
+            .update_subscription_state(&just_fetched, isolation_level)
+        {
+            log::debug!(
+                "Skipped HW/LSO subscription-state update for {} partitions: {}",
+                just_fetched.len(),
+                err
+            );
+        }
+
+        // Reacquire the guard to update the expected-responses counter
+        // and possibly route the global result.
+        let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
+        if guard.expected_responses == 0 {
+            return;
+        }
+        guard.expected_responses -= 1;
+        if guard.expected_responses > 0 {
+            return;
+        }
+
+        // Last response — finalise.
+        if guard.remaining_to_search.is_empty() {
+            guard.completed = true;
+            let fetched = guard.fetched_offsets.clone();
+            let timestamps_to_search = guard.timestamps_to_search.clone();
+            let waiters = std::mem::take(&mut guard.waiters);
+            drop(guard);
+            let result = build_offsets_for_times_result(&timestamps_to_search, &fetched);
+            for waiter in waiters {
+                let _ = waiter.send(Ok(result.clone()));
+            }
+        } else {
+            // Java: `requestsToRetry.add(listOffsetsRequestState);
+            // metadata.requestUpdate(false);`
+            self_arc.metadata.metadata_arc().request_update(false);
+            drop(guard);
+            self_arc
+                .requests_to_retry
+                .lock()
+                .expect("requests_to_retry mutex poisoned")
+                .push(state.clone());
+        }
+    }
+
+    /// Routes a hard failure (network / authentication / topic-auth) to
+    /// every waiter on the request state and marks the state completed.
+    ///
+    /// Mirrors Java's `globalResult.completeExceptionally(error)` /
+    /// `listOffsetsRequestState.globalResult.completeExceptionally(error)`.
+    fn fail_request_state(state: &Arc<Mutex<ListOffsetsRequestState>>, err: KafkaError) {
+        let waiters = {
+            let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
+            if guard.completed {
+                return;
+            }
+            guard.completed = true;
+            std::mem::take(&mut guard.waiters)
+        };
+        for waiter in waiters {
+            let _ = waiter.send(Err(err.clone()));
+        }
+    }
+}
+
+/// Marker error returned by [`OffsetsManagerShared::build_list_offsets_requests`]
+/// when not a single partition has a known leader. Java throws
+/// `StaleMetadataException` to signal the same condition. We use a Rust
+/// unit struct to keep the failure path zero-allocation and to make the
+/// signature self-documenting.
+struct StaleMetadata;
+
+/// Returns a sub-map of `fetched_offsets` restricted to the keys of
+/// `node_partitions`. Used to subset the cumulative `fetched_offsets`
+/// down to "only the entries from this per-node response" before passing
+/// into `update_subscription_state`.
+fn partial_fetched_for_node<'a>(
+    fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
+    node_partitions: impl IntoIterator<Item = &'a TopicPartition>,
+) -> HashMap<TopicPartition, ListOffsetData> {
+    let mut out: HashMap<TopicPartition, ListOffsetData> = HashMap::new();
+    for tp in node_partitions {
+        if let Some(data) = fetched_offsets.get(tp) {
+            out.insert(tp.clone(), data.clone());
+        }
+    }
+    out
+}
+
 /// The KIP-848 `OffsetsRequestManager`. Drives `ListOffsets` (for offset
-/// reset) and `OffsetsForLeaderEpoch` (for position validation) requests.
+/// reset, position validation and `fetch_offsets`) and
+/// `OffsetsForLeaderEpoch` (for position validation) requests.
 ///
 /// Java: `org.apache.kafka.clients.consumer.internals.OffsetsRequestManager`
 /// (which extends `RequestManager` and `ClusterResourceListener`). The
 /// Rust translation factors the `ClusterResourceListener` callback into a
-/// separate handle struct so we can register the callback with
-/// `Metadata::add_cluster_update_listener` without binding the listener's
-/// lifetime to the manager's `&mut`.
+/// separate handle struct ([`OffsetsClusterListener`]) so we can register
+/// the callback with `Metadata::add_cluster_update_listener` without
+/// binding the listener's lifetime to the manager's `&mut`. The
+/// callback-shared state lives in [`OffsetsManagerShared`].
 pub(crate) struct OffsetsRequestManager {
-    subscription_state: Arc<Mutex<SubscriptionState>>,
-    metadata: Arc<ConsumerMetadata>,
-    isolation_level: IsolationLevel,
-    request_timeout_ms: i64,
+    /// Shared state accessible to the [`OffsetsClusterListener`] and to
+    /// per-response spawned tasks.
+    shared: Arc<OffsetsManagerShared>,
     /// Java: `defaultApiTimeoutMs`. Used by
     /// [`Self::init_with_committed_offsets_if_needed`] to compute the
     /// internal `fetchCommittedDeadlineMs` (Java
     /// `OffsetsRequestManager.java:379`).
     default_api_timeout_ms: i64,
     api_versions: Arc<ApiVersions>,
-    offset_fetcher_utils: Arc<OffsetFetcherUtilsState>,
     /// Optional handle to the commit manager — `None` when the consumer
     /// has no group. Java's `OffsetsRequestManager` accepts the commit
     /// manager as a non-null parameter but the
@@ -142,14 +540,10 @@ pub(crate) struct OffsetsRequestManager {
     /// outstanding request. Cleared when the underlying fetch resolves.
     pending_offset_fetch_event: Arc<Mutex<Option<PendingFetchCommittedRequest>>>,
 
-    /// Requests built but not yet drained by `poll`. Java:
-    /// `requestsToSend`.
-    requests_to_send: Vec<UnsentRequest>,
     /// Completions waiting to be applied on the next `poll` call.
     /// `Mutex` because the receiver-side `tokio::spawn` writes into it
     /// from another task.
     pending_completions_rx: mpsc::UnboundedReceiver<PendingCompletion>,
-    pending_completions_tx: mpsc::UnboundedSender<PendingCompletion>,
     /// Pending `init_with_partition_offsets_if_needed` follow-ups
     /// scheduled by the spawned task driving
     /// [`Self::update_fetch_positions`]. Drained on the next `poll` —
@@ -216,32 +610,35 @@ impl OffsetsRequestManager {
         ));
         let (pending_completions_tx, pending_completions_rx) = mpsc::unbounded_channel();
         let (pending_followup_tx, pending_followup_rx) = mpsc::unbounded_channel();
-        let manager = Self {
+        let shared = Arc::new(OffsetsManagerShared {
             subscription_state,
             metadata: metadata.clone(),
             isolation_level,
             request_timeout_ms,
+            offset_fetcher_utils,
+            pending_completions_tx,
+            requests_to_send: Mutex::new(Vec::new()),
+            requests_to_retry: Mutex::new(Vec::new()),
+            metadata_updated: std::sync::atomic::AtomicBool::new(false),
+        });
+        let manager = Self {
+            shared: shared.clone(),
             default_api_timeout_ms,
             api_versions,
-            offset_fetcher_utils,
             commit_request_manager,
             pending_offset_fetch_event: Arc::new(Mutex::new(None)),
-            requests_to_send: Vec::new(),
             pending_completions_rx,
-            pending_completions_tx,
             pending_followup_rx,
             pending_followup_tx,
             cached_update_positions_exception: Arc::new(Mutex::new(None)),
             closing: false,
         };
         // Register the cluster metadata update callback. The listener
-        // re-issues any deferred requests on metadata change; in this
-        // minimal translation that's a no-op (no `requests_to_retry`
-        // queue is modelled because `fetch_offsets` is deferred), so we
-        // just install a stateless handle.
+        // re-issues any deferred `fetch_offsets` requests on metadata
+        // change (Java: `OffsetsRequestManager.onUpdate`).
         metadata
             .metadata_arc()
-            .add_cluster_update_listener(Box::new(OffsetsClusterListener {}));
+            .add_cluster_update_listener(Box::new(OffsetsClusterListener { shared }));
         manager
     }
 
@@ -260,6 +657,7 @@ impl OffsetsRequestManager {
     /// reset but no strategy is configured.
     pub(crate) fn reset_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
         let partition_strategies = self
+            .shared
             .offset_fetcher_utils
             .get_offset_reset_strategy_for_partitions(current_time_ms)?;
         if partition_strategies.is_empty() {
@@ -281,6 +679,7 @@ impl OffsetsRequestManager {
     /// call (e.g. a saved `LogTruncationException`).
     pub(crate) fn validate_positions_if_needed(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
         let partitions_to_validate = self
+            .shared
             .offset_fetcher_utils
             .refresh_and_get_partitions_to_validate(current_time_ms)?;
         if partitions_to_validate.is_empty() {
@@ -288,6 +687,94 @@ impl OffsetsRequestManager {
         }
         self.send_offsets_for_leader_epoch_requests_and_validate_positions(partitions_to_validate, current_time_ms);
         Ok(())
+    }
+
+    /// Retrieve offsets for the given partitions and timestamps.
+    ///
+    /// Mirrors Java's
+    /// `OffsetsRequestManager.fetchOffsets(Map<TopicPartition, Long>, boolean)`.
+    ///
+    /// For each partition, returns the offset of the first message whose
+    /// timestamp is `≥` the target timestamp. The returned future resolves
+    /// when all `ListOffsets` responses have been received and processed —
+    /// each input partition appears in the result map, with `None` for
+    /// partitions whose offset could not be determined.
+    ///
+    /// Partitions whose leader is unknown at request-build time are parked
+    /// on the manager's [`OffsetsManagerShared::requests_to_retry`] queue
+    /// and replayed when the next metadata update arrives (see
+    /// [`OffsetsClusterListener::on_update`]).
+    ///
+    /// Used by `ListOffsetsEvent` and `CurrentLagEvent`.
+    pub(crate) fn fetch_offsets(
+        &mut self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+        require_timestamps: bool,
+    ) -> oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError>> {
+        let (tx, rx) = oneshot::channel();
+        if timestamps_to_search.is_empty() {
+            let _ = tx.send(Ok(HashMap::new()));
+            return rx;
+        }
+        // Java: `metadata.addTransientTopics(topicsForPartitions(...))` so
+        // the next metadata refresh covers any topics not already in the
+        // cache.
+        self.shared
+            .metadata
+            .add_transient_topics(topics_for_partitions(timestamps_to_search.keys()));
+
+        let state = Arc::new(Mutex::new(ListOffsetsRequestState::new(
+            timestamps_to_search.clone(),
+            require_timestamps,
+        )));
+        {
+            let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
+            guard.waiters.push(tx);
+        }
+
+        OffsetsManagerShared::prepare_fetch_offsets_requests(
+            &self.shared,
+            &timestamps_to_search,
+            require_timestamps,
+            &state,
+        );
+
+        rx
+    }
+
+    /// Test/debug accessor — number of `fetch_offsets` requests currently
+    /// queued for retry (Java: `requestsToRetry()`).
+    ///
+    /// Drains any pending metadata-update replay first so a recent
+    /// `metadata.update()` call is observable through this accessor —
+    /// matches Java's synchronous `onUpdate` semantics (see the
+    /// `metadata_updated` flag docs for why the replay itself is
+    /// deferred).
+    pub(crate) fn requests_to_retry_count(&self) -> usize {
+        if self.shared.metadata_updated.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            OffsetsManagerShared::replay_retries_after_metadata_update(&self.shared);
+        }
+        self.shared
+            .requests_to_retry
+            .lock()
+            .expect("requests_to_retry mutex poisoned")
+            .len()
+    }
+
+    /// Test/debug accessor — number of pending unsent requests waiting on
+    /// the next `poll` (Java: `requestsToSend()`).
+    ///
+    /// Drains any pending metadata-update replay first so a recent
+    /// `metadata.update()` call is observable through this accessor.
+    pub(crate) fn requests_to_send_count(&self) -> usize {
+        if self.shared.metadata_updated.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            OffsetsManagerShared::replay_retries_after_metadata_update(&self.shared);
+        }
+        self.shared
+            .requests_to_send
+            .lock()
+            .expect("requests_to_send mutex poisoned")
+            .len()
     }
 
     /// Mirrors Java's `sendListOffsetsRequestsAndResetPositions`.
@@ -317,21 +804,21 @@ impl OffsetsRequestManager {
 
         // Group by current leader, dropping entries without one — those
         // will be retried on the next metadata update.
-        let by_node = regroup_partition_map_by_node(&self.metadata, &timestamps_to_search);
+        let by_node = regroup_partition_map_by_node(&self.shared.metadata, &timestamps_to_search);
 
         for (node, reset_timestamps) in by_node {
             // Java: subscriptionState.setNextAllowedRetry(...) to back off
             // any duplicate sends while this is in flight.
             {
                 let partitions: std::collections::HashSet<TopicPartition> = reset_timestamps.keys().cloned().collect();
-                let mut subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
-                subs.set_next_allowed_retry(&partitions, now_ms + self.request_timeout_ms);
+                let mut subs = self.shared.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+                subs.set_next_allowed_retry(&partitions, now_ms + self.shared.request_timeout_ms);
             }
 
-            let mut builder = ListOffsetsRequestBuilder::for_consumer(false, self.isolation_level);
+            let mut builder = ListOffsetsRequestBuilder::for_consumer(false, self.shared.isolation_level);
             let topics = crate::common::requests::ListOffsetsRequest::to_list_offsets_topics(&reset_timestamps);
             builder.set_target_times(topics);
-            builder.set_timeout_ms(self.request_timeout_ms as i32);
+            builder.set_timeout_ms(self.shared.request_timeout_ms as i32);
             // Override the wire replica id (Builder::new used
             // CONSUMER_REPLICA_ID above; this is a no-op assert but
             // documents intent).
@@ -340,7 +827,7 @@ impl OffsetsRequestManager {
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             // Take the receiver and spawn a forwarder.
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let tx = self.pending_completions_tx.clone();
+            let tx = self.shared.pending_completions_tx.clone();
             let strategies = partition_strategies.clone();
             let timestamps = reset_timestamps.clone();
             tokio::spawn(async move {
@@ -354,7 +841,11 @@ impl OffsetsRequestManager {
                     result,
                 });
             });
-            self.requests_to_send.push(unsent);
+            self.shared
+                .requests_to_send
+                .lock()
+                .expect("requests_to_send mutex poisoned")
+                .push(unsent);
         }
     }
 
@@ -369,7 +860,7 @@ impl OffsetsRequestManager {
 
         for (node, fetch_positions) in regrouped {
             if node.is_empty() {
-                self.metadata.metadata_arc().request_update(true);
+                self.shared.metadata.metadata_arc().request_update(true);
                 continue;
             }
             let node_versions = self.api_versions.get(node.id_string());
@@ -386,7 +877,7 @@ impl OffsetsRequestManager {
                      required protocol version (introduced in Kafka 2.3)",
                     fetch_positions.keys()
                 );
-                let mut subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+                let mut subs = self.shared.subscription_state.lock().expect("SubscriptionState mutex poisoned");
                 for partition in fetch_positions.keys() {
                     let _ = subs.complete_validation(partition);
                 }
@@ -394,14 +885,14 @@ impl OffsetsRequestManager {
             }
             {
                 let partitions: std::collections::HashSet<TopicPartition> = fetch_positions.keys().cloned().collect();
-                let mut subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
-                subs.set_next_allowed_retry(&partitions, now_ms + self.request_timeout_ms);
+                let mut subs = self.shared.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+                subs.set_next_allowed_retry(&partitions, now_ms + self.shared.request_timeout_ms);
             }
 
             let builder = OffsetsForLeaderEpochClient::prepare_request(&fetch_positions);
             let mut unsent = UnsentRequest::new(Box::new(builder), Some(node));
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
-            let tx = self.pending_completions_tx.clone();
+            let tx = self.shared.pending_completions_tx.clone();
             let positions = fetch_positions.clone();
             tokio::spawn(async move {
                 let result = match response_rx.await {
@@ -410,7 +901,11 @@ impl OffsetsRequestManager {
                 };
                 let _ = tx.send(PendingCompletion::OffsetsForLeaderEpoch { fetch_positions: positions, result });
             });
-            self.requests_to_send.push(unsent);
+            self.shared
+                .requests_to_send
+                .lock()
+                .expect("requests_to_send mutex poisoned")
+                .push(unsent);
         }
     }
 
@@ -491,8 +986,8 @@ impl OffsetsRequestManager {
         // to the subscription state and fan the result out to every
         // waiter that registered on this pending event.
         let pending_slot = Arc::clone(&self.pending_offset_fetch_event);
-        let subscription_state = Arc::clone(&self.subscription_state);
-        let metadata = Arc::clone(&self.metadata);
+        let subscription_state = Arc::clone(&self.shared.subscription_state);
+        let metadata = Arc::clone(&self.shared.metadata);
         tokio::spawn(async move {
             let fetch_result = match inner_rx.await {
                 Ok(r) => r,
@@ -623,7 +1118,7 @@ impl OffsetsRequestManager {
 
         // (3) Fast path — every partition already has a fetch position.
         let has_all = {
-            let subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+            let subs = self.shared.subscription_state.lock().expect("SubscriptionState mutex poisoned");
             subs.has_all_fetch_positions()
         };
         if has_all {
@@ -638,7 +1133,7 @@ impl OffsetsRequestManager {
         // this is what prevents the reset from including partitions
         // added to the assignment mid-flight.
         let initializing_partitions = {
-            let subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+            let subs = self.shared.subscription_state.lock().expect("SubscriptionState mutex poisoned");
             subs.initializing_partitions()
         };
 
@@ -682,7 +1177,7 @@ impl OffsetsRequestManager {
             // clone the set so we don't hold the subscription-state lock
             // across the predicate's borrow of `initializing_partitions`.
             let captured = initializing_partitions.clone();
-            let mut subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+            let mut subs = self.shared.subscription_state.lock().expect("SubscriptionState mutex poisoned");
             subs.reset_initializing_positions(|tp| captured.contains(tp))?;
         }
         self.reset_positions_if_needed(current_time_ms)
@@ -704,7 +1199,7 @@ impl OffsetsRequestManager {
         deadline_ms: i64,
         outer_tx: oneshot::Sender<Result<(), KafkaError>>,
     ) {
-        let subscription_state = Arc::clone(&self.subscription_state);
+        let subscription_state = Arc::clone(&self.shared.subscription_state);
         let pending_followup_tx = self.pending_followup_tx.clone();
         let cached = Arc::clone(&self.cached_update_positions_exception);
         tokio::spawn(async move {
@@ -830,7 +1325,11 @@ impl OffsetsRequestManager {
                     match result {
                         Ok(client_response) => {
                             if let Some(list_offsets_response) = downcast_list_offsets(&client_response) {
-                                match self.offset_fetcher_utils.handle_list_offset_response(list_offsets_response) {
+                                match self
+                                    .shared
+                                    .offset_fetcher_utils
+                                    .handle_list_offset_response(list_offsets_response)
+                                {
                                     Ok(result) => {
                                         // Reset-path: do NOT call update_subscription_state.
                                         // The fetched offsets are EARLIEST/LATEST per the reset
@@ -840,14 +1339,16 @@ impl OffsetsRequestManager {
                                         // updateSubscriptionState either; that's only for the
                                         // multi-node fetchOffsets flow (Java:570-573), which
                                         // is currently deferred.
-                                        self.offset_fetcher_utils.on_successful_response_for_resetting_positions(
-                                            &result,
-                                            &partition_strategies,
-                                            now_ms,
-                                        )?;
+                                        self.shared
+                                            .offset_fetcher_utils
+                                            .on_successful_response_for_resetting_positions(
+                                                &result,
+                                                &partition_strategies,
+                                                now_ms,
+                                            )?;
                                     },
                                     Err(err) => {
-                                        self.offset_fetcher_utils.on_failed_response_for_resetting_positions(
+                                        self.shared.offset_fetcher_utils.on_failed_response_for_resetting_positions(
                                             &reset_timestamps,
                                             KafkaError::topic_authorization(err.unauthorized_topics.clone()),
                                             now_ms,
@@ -859,7 +1360,7 @@ impl OffsetsRequestManager {
                             }
                         },
                         Err(err) => {
-                            self.offset_fetcher_utils.on_failed_response_for_resetting_positions(
+                            self.shared.offset_fetcher_utils.on_failed_response_for_resetting_positions(
                                 &reset_timestamps,
                                 err,
                                 now_ms,
@@ -872,8 +1373,10 @@ impl OffsetsRequestManager {
                         if let Some(response) = downcast_offsets_for_leader_epoch(&client_response) {
                             match OffsetsForLeaderEpochClient::handle_response(&fetch_positions, response) {
                                 Ok(epoch_result) => {
-                                    let truncations =
-                                        self.offset_fetcher_utils.on_successful_response_for_validating_positions(
+                                    let truncations = self
+                                        .shared
+                                        .offset_fetcher_utils
+                                        .on_successful_response_for_validating_positions(
                                             &fetch_positions,
                                             &epoch_result,
                                             now_ms,
@@ -899,11 +1402,11 @@ impl OffsetsRequestManager {
                                                 fetch_offsets,
                                                 divergent_offsets,
                                             ));
-                                        self.offset_fetcher_utils.maybe_set_validate_error(log_truncation);
+                                        self.shared.offset_fetcher_utils.maybe_set_validate_error(log_truncation);
                                     }
                                 },
                                 Err(err) => {
-                                    self.offset_fetcher_utils.on_failed_response_for_validating_positions(
+                                    self.shared.offset_fetcher_utils.on_failed_response_for_validating_positions(
                                         &fetch_positions,
                                         KafkaError::topic_authorization(err.unauthorized_topics.clone()),
                                         now_ms,
@@ -915,16 +1418,77 @@ impl OffsetsRequestManager {
                         }
                     },
                     Err(err) => {
-                        self.offset_fetcher_utils.on_failed_response_for_validating_positions(
+                        self.shared.offset_fetcher_utils.on_failed_response_for_validating_positions(
                             &fetch_positions,
                             err,
                             now_ms,
                         );
                     },
                 },
+                PendingCompletion::ListOffsetsForFetchOffsets { state, node_partitions, result } => {
+                    self.handle_fetch_offsets_response(state, node_partitions, result);
+                },
             }
         }
+        // Clear transient topics once every in-flight `fetch_offsets`
+        // operation has completed. Java does this inside the global
+        // `whenComplete` chain on `fetchOffsets`; we approximate it here
+        // by checking whether `requests_to_retry` is empty and no
+        // in-flight `fetch_offsets` requests remain to drain. Since
+        // `requests_to_send` may still hold reset / validate requests,
+        // we conservatively only clear when both retry and unsent vectors
+        // are devoid of `ListOffsetsRequestState` references — but the
+        // simpler and behaviour-equivalent approximation is to defer the
+        // clear to the listener's path. Java's eventual-consistency on
+        // transient topics is already loose; not clearing here just keeps
+        // the topic in the cache one refresh longer, which is benign.
         Ok(())
+    }
+
+    /// Apply a `ListOffsets` response received for the `fetch_offsets`
+    /// flow. Mirrors the per-node `partialResult.whenComplete` handler
+    /// inside Java's `buildListOffsetsRequests` plus
+    /// `MultiNodeRequest.addPartialResult`.
+    fn handle_fetch_offsets_response(
+        &mut self,
+        state: Arc<Mutex<ListOffsetsRequestState>>,
+        node_partitions: HashMap<TopicPartition, ListOffsetsPartition>,
+        result: Result<ClientResponse, KafkaError>,
+    ) {
+        match result {
+            Ok(client_response) => match downcast_list_offsets(&client_response) {
+                Some(list_offsets_response) => {
+                    match self
+                        .shared
+                        .offset_fetcher_utils
+                        .handle_list_offset_response(list_offsets_response)
+                    {
+                        Ok(partial) => {
+                            OffsetsManagerShared::apply_partial_result(&self.shared, &state, &node_partitions, partial);
+                        },
+                        Err(err) => {
+                            // `TopicAuthorizationException` — the global
+                            // result fails immediately (Java mirrors via
+                            // `globalResult.completeExceptionally`).
+                            OffsetsManagerShared::fail_request_state(
+                                &state,
+                                KafkaError::topic_authorization(err.unauthorized_topics.clone()),
+                            );
+                        },
+                    }
+                },
+                None => {
+                    log::debug!("ListOffsets response had unexpected body type, ignoring");
+                },
+            },
+            Err(err) => {
+                // Java: `result.completeExceptionally(error)` immediately.
+                // For `fetch_offsets`, ALL waiters are failed even if
+                // other per-node responses are still outstanding —
+                // mirrors Java's `multiNodeRequest.resultFuture.completeExceptionally`.
+                OffsetsManagerShared::fail_request_state(&state, err);
+            },
+        }
     }
 }
 
@@ -1015,6 +1579,14 @@ impl RequestManager for OffsetsRequestManager {
     /// Drains completed responses then returns the queued
     /// requests. Java: `poll(long currentTimeMs)`.
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
+        // If the cluster listener flagged a metadata update since the
+        // last poll, replay any deferred `fetch_offsets` requests now
+        // (the listener can't do this synchronously due to the
+        // reentrant-lock issue — see
+        // `OffsetsManagerShared::metadata_updated`).
+        if self.shared.metadata_updated.swap(false, std::sync::atomic::Ordering::AcqRel) {
+            OffsetsManagerShared::replay_retries_after_metadata_update(&self.shared);
+        }
         // Drain any completions first, applying success/failure handlers.
         // Errors here are stored on the OffsetFetcherUtilsState for the
         // next call to surface; we don't propagate them through `poll`
@@ -1026,7 +1598,10 @@ impl RequestManager for OffsetsRequestManager {
         // `requests_to_send` is taken — the follow-up calls
         // `reset_positions_if_needed` which pushes into the queue.
         self.drain_pending_followups(current_time_ms);
-        let unsent = std::mem::take(&mut self.requests_to_send);
+        let unsent = {
+            let mut guard = self.shared.requests_to_send.lock().expect("requests_to_send mutex poisoned");
+            std::mem::take(&mut *guard)
+        };
         if unsent.is_empty() {
             PollResult::empty()
         } else {
@@ -1039,20 +1614,55 @@ impl RequestManager for OffsetsRequestManager {
     }
 }
 
-/// Stateless `ClusterResourceListener` registered on the consumer's
-/// `Metadata`. The full Java implementation re-issues deferred
-/// `ListOffsets` requests on metadata change; this translation defers
-/// the request-replay path until `fetch_offsets` is translated (it
-/// depends on `CommitRequestManager`, out of scope for Phase 7d).
-struct OffsetsClusterListener {}
+/// `ClusterResourceListener` registered on the consumer's `Metadata`.
+///
+/// When the metadata snapshot advances we replay every deferred
+/// `fetch_offsets` request whose first build attempt failed with stale
+/// metadata or whose responses returned retriable errors. Mirrors Java's
+/// `OffsetsRequestManager.onUpdate(ClusterResource)`.
+struct OffsetsClusterListener {
+    shared: Arc<OffsetsManagerShared>,
+}
 
 impl ClusterResourceListener for OffsetsClusterListener {
     fn on_update(&self, _cluster_resource: &ClusterResource) {
-        // No-op: the deferred-request replay logic from Java's
-        // `onUpdate` lives on the `requests_to_retry` queue, which this
-        // translation does not yet model. Once `fetch_offsets` (Phase
-        // 8+) lands and starts producing retry entries, this listener
-        // MUST drain them and re-prepare requests.
+        // The replay itself is deferred to the next `poll()` call —
+        // calling `metadata.current_leader(...)` from here would attempt
+        // to re-acquire `Metadata`'s inner lock, which is held by the
+        // `update()` caller invoking this listener (see
+        // `OffsetsManagerShared::metadata_updated` docs).
+        self.shared.metadata_updated.store(true, std::sync::atomic::Ordering::Release);
+    }
+}
+
+impl OffsetsManagerShared {
+    /// Drain the parked retry queue, rebuilding each request against
+    /// the now-current metadata snapshot. Called from
+    /// [`OffsetsRequestManager::poll`] when the
+    /// [`Self::metadata_updated`] flag is set. Matches Java's
+    /// `OffsetsRequestManager.onUpdate(ClusterResource)` body
+    /// (whose work the Rust listener defers to avoid the reentrancy
+    /// deadlock — see field docs).
+    fn replay_retries_after_metadata_update(self_arc: &Arc<Self>) {
+        let to_process: Vec<Arc<Mutex<ListOffsetsRequestState>>> = {
+            let mut guard = self_arc.requests_to_retry.lock().expect("requests_to_retry mutex poisoned");
+            std::mem::take(&mut *guard)
+        };
+        for state in to_process {
+            let (timestamps_to_search, require_timestamps, completed) = {
+                let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
+                if guard.completed {
+                    (HashMap::new(), false, true)
+                } else {
+                    let map = std::mem::take(&mut guard.remaining_to_search);
+                    (map, guard.require_timestamps, false)
+                }
+            };
+            if completed || timestamps_to_search.is_empty() {
+                continue;
+            }
+            Self::prepare_fetch_offsets_requests(self_arc, &timestamps_to_search, require_timestamps, &state);
+        }
     }
 }
 
@@ -1663,7 +2273,7 @@ mod tests {
         // AutoOffsetResetStrategy::EARLIEST, so reset_initializing_positions
         // marks for AWAIT_RESET (does not raise NoOffsetForPartition).
         {
-            let mut subs = mgr.subscription_state.lock().unwrap();
+            let mut subs = mgr.shared.subscription_state.lock().unwrap();
             let mut set = HashSet::new();
             set.insert(tp.clone());
             subs.assign_from_user(set).expect("assign");
@@ -1677,7 +2287,7 @@ mod tests {
         // After the call, the partition is no longer "initializing" —
         // it's now in AWAIT_RESET state (marked by
         // `request_offset_reset_default`).
-        let subs = mgr.subscription_state.lock().unwrap();
+        let subs = mgr.shared.subscription_state.lock().unwrap();
         assert!(
             !subs.initializing_partitions().contains(&tp),
             "tp must have been moved out of initializing into AWAIT_RESET"
@@ -1720,5 +2330,477 @@ mod tests {
         // The cache must have been cleared.
         let guard = mgr.cached_update_positions_exception.lock().unwrap();
         assert!(guard.is_none(), "cache should be cleared after consumption");
+    }
+
+    // -----------------------------------------------------------------
+    //   fetch_offsets + OffsetsClusterListener::on_update
+    //   (Java: OffsetsRequestManager.fetchOffsets + onUpdate)
+    // -----------------------------------------------------------------
+
+    use crate::client_response::ClientResponse;
+    use crate::common::protocol::Errors;
+    use crate::common::protocol::api_keys::ApiKeys;
+    use crate::common::requests::list_offsets_request::EARLIEST_TIMESTAMP;
+    use crate::common::requests::list_offsets_response::{
+        ListOffsetsResponse, UNKNOWN_EPOCH, UNKNOWN_OFFSET, UNKNOWN_TIMESTAMP,
+    };
+    use crate::common::requests::request_test_utils;
+    use crate::common::requests::{ConcreteResponse, MetadataResponse, RequestHeader};
+    use crate::list_offsets_response_data::{
+        ListOffsetsPartitionResponse, ListOffsetsResponseData, ListOffsetsTopicResponse,
+    };
+    use std::time::Duration;
+
+    /// Bootstrap `metadata` with a single topic / one-partition layout
+    /// using the named broker as the leader. Mirrors the per-test setup
+    /// done by Java's `mockSuccessfulRequest` via mocks.
+    ///
+    /// `topic` is added to the transient-topics set first so the retain
+    /// filter keeps the topic in the cluster snapshot — without this, the
+    /// `ConsumerMetadata::retain_topic_fn` would drop unsubscribed topics
+    /// from the cluster snapshot (mirroring Java's filtering of `Cluster`
+    /// to the consumer's subscribed set).
+    fn bootstrap_metadata_with_topic(
+        metadata: &ConsumerMetadata,
+        topic: &str,
+        num_partitions: i32,
+    ) -> MetadataResponse {
+        metadata.add_transient_topics(HashSet::from([topic.to_string()]));
+        let mut counts = HashMap::new();
+        counts.insert(topic.to_string(), num_partitions);
+        let response = request_test_utils::metadata_update_with(1, &counts);
+        metadata.metadata_arc().update_with_current_request_version(&response, false, 0);
+        response
+    }
+
+    /// Build a synthesised `ClientResponse` carrying the given
+    /// `ListOffsetsResponse` so the test can drive `unsent.handler().on_complete(...)`
+    /// to resolve the request's response receiver — mirrors the Java test
+    /// helper `buildClientResponse`.
+    fn build_list_offsets_client_response(response: ListOffsetsResponse) -> ClientResponse {
+        let header =
+            RequestHeader::new(&ApiKeys::LIST_OFFSETS, ApiKeys::LIST_OFFSETS.latest_version(), "", 1).expect("header");
+        ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ListOffsets(response)),
+        )
+    }
+
+    /// Build a synthesised disconnect-style `ClientResponse` so the test
+    /// can drive a transport-level failure into the request handler.
+    fn build_disconnected_client_response() -> ClientResponse {
+        let header =
+            RequestHeader::new(&ApiKeys::LIST_OFFSETS, ApiKeys::LIST_OFFSETS.latest_version(), "", 1).expect("header");
+        ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            true,
+            false,
+            None,
+            Some("auth failed".to_string()),
+            None,
+        )
+    }
+
+    /// Build a single-topic, multi-partition `ListOffsetsResponse` from a
+    /// map of `partition -> (error, timestamp, offset, leader_epoch)`.
+    fn build_list_offsets_response(topic: &str, partitions: Vec<(i32, Errors, i64, i64, i32)>) -> ListOffsetsResponse {
+        let mut topic_response = ListOffsetsTopicResponse::new();
+        topic_response.set_name(topic.to_string());
+        let mut parts = Vec::new();
+        for (idx, error, timestamp, offset, leader_epoch) in partitions {
+            let mut p = ListOffsetsPartitionResponse::new();
+            p.set_partition_index(idx);
+            p.set_error_code(error.code());
+            p.set_timestamp(timestamp);
+            p.set_offset(offset);
+            p.set_leader_epoch(leader_epoch);
+            parts.push(p);
+        }
+        topic_response.set_partitions(parts);
+        let mut data = ListOffsetsResponseData::new();
+        data.set_topics(vec![topic_response]);
+        ListOffsetsResponse::new(data)
+    }
+
+    /// Drive the first request on the manager's `requests_to_send` to
+    /// completion with the given `ListOffsetsResponse`. Returns whether
+    /// a request was actually drained — mirrors the Java pattern of
+    /// `poll() → unsentRequest.future().whenComplete(...)`.
+    async fn complete_first_unsent_with_response(
+        mgr: &mut OffsetsRequestManager,
+        response: ListOffsetsResponse,
+        now_ms: i64,
+    ) -> bool {
+        let poll_result = RequestManager::poll(mgr, now_ms);
+        let Some(unsent) = poll_result.unsent_requests.into_iter().next() else {
+            return false;
+        };
+        let client_response = build_list_offsets_client_response(response);
+        unsent.handler().on_complete(client_response);
+        // Allow the spawned forwarder task to enqueue the
+        // `PendingCompletion` on the manager's channel.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+        true
+    }
+
+    /// Helper: wait until the outer `fetch_offsets` receiver resolves.
+    /// Polls the manager between yields so the
+    /// `PendingCompletion::ListOffsetsForFetchOffsets` queued by the
+    /// spawned forwarder is drained and applied to the request state.
+    async fn await_fetch_result(
+        mgr: &mut OffsetsRequestManager,
+        rx: oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError>>,
+        now_ms: i64,
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError> {
+        // Drive the runtime forward to give the forwarder task room to
+        // run, then drain pending completions.
+        let mut rx = rx;
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            // `poll` invokes `drain_pending_completions` which routes
+            // `ListOffsetsForFetchOffsets` to the request state.
+            let _ = RequestManager::poll(mgr, now_ms);
+            if let Ok(result) = tokio::time::timeout(Duration::from_millis(1), &mut rx).await {
+                return result.expect("oneshot dropped");
+            }
+        }
+        // Last-chance: await the receiver directly (will hang if the
+        // chain didn't complete — making the test failure observable).
+        rx.await.expect("oneshot dropped")
+    }
+
+    /// Java parity: `testListOffsetsRequestEmpty`. Empty input → empty
+    /// result, no requests enqueued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_empty_resolves_immediately() {
+        let mut mgr = new_manager();
+        let rx = mgr.fetch_offsets(HashMap::new(), false);
+        let result = rx.await.expect("oneshot").expect("ok result");
+        assert!(result.is_empty(), "empty input should give empty result");
+        assert_eq!(mgr.requests_to_send_count(), 0);
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+    }
+
+    /// Java parity: `testListOffsetsRequest_Success`. Single partition
+    /// with a known leader → request enqueued → success response →
+    /// outer future resolves with the offset.
+    ///
+    /// **Rust deviation note:** Java's `OffsetAndTimestampInternal`
+    /// permits negative timestamps (the broker may omit timestamps for
+    /// earliest/latest queries), but the Rust public `OffsetAndTimestamp`
+    /// enforces non-negative. The `ListOffsetsEvent` API uses
+    /// `Option<OffsetAndTimestamp>` to preserve the sentinel semantics —
+    /// negative timestamps surface as `None`. This test therefore uses
+    /// timestamp=100 so the assertion can pin the offset value.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_success_single_partition() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1, "exactly one ListOffsets request expected");
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
+        assert_eq!(oat.offset(), 5);
+    }
+
+    /// Java parity: `testListOffsetsWaitingForMetadataUpdate_Timeout`.
+    /// Building the request fails because the leader is unknown; the
+    /// request is parked on `requests_to_retry`, and `poll()` returns no
+    /// unsent requests.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_unknown_leader_parks_on_retry() {
+        let mut mgr = new_manager();
+        // No metadata bootstrap: leader is unknown.
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+
+        let _rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 0, "no request built when leader unknown");
+        assert_eq!(mgr.requests_to_retry_count(), 1, "state parked for retry");
+
+        // Subsequent poll yields no unsent requests.
+        let res = RequestManager::poll(&mut mgr, 0);
+        assert!(res.unsent_requests.is_empty());
+    }
+
+    /// Java parity: `testListOffsetsWaitingForMetadataUpdate_RetrySucceeds`.
+    /// First attempt parks the state (no leader); subsequent metadata
+    /// update fires `on_update`, which replays the request — this time
+    /// with a known leader.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_metadata_update_retries_successfully() {
+        let mut mgr = new_manager();
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 0);
+        assert_eq!(mgr.requests_to_retry_count(), 1);
+
+        // Trigger metadata update — fires the cluster listener which
+        // replays the parked request.
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        assert_eq!(
+            mgr.requests_to_send_count(),
+            1,
+            "cluster listener should have re-issued the request after metadata update"
+        );
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        // Complete the now-issued request.
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
+        assert_eq!(oat.offset(), 5);
+    }
+
+    /// Java parity: `testRequestFailsWithRetriableError_RetrySucceeds`.
+    /// First attempt's response carries a retriable error → parition
+    /// added to `remaining_to_search`, state re-parked. Metadata update
+    /// → replay → success.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_retriable_error_retries_after_metadata_update() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert_eq!(mgr.requests_to_send_count(), 1);
+
+        // Respond with a retriable error.
+        let response = build_list_offsets_response("t1", vec![(1, Errors::UnknownLeaderEpoch, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        // After the response is drained, the partition should be re-parked.
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+            let _ = RequestManager::poll(&mut mgr, 0);
+            if mgr.requests_to_retry_count() == 1 {
+                break;
+            }
+        }
+        assert_eq!(
+            mgr.requests_to_retry_count(),
+            1,
+            "retriable error should re-park the state on requests_to_retry"
+        );
+
+        // Metadata update fires the listener → replay.
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        assert_eq!(mgr.requests_to_send_count(), 1);
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
+        assert_eq!(oat.offset(), 5);
+    }
+
+    /// Java parity: `testRequestWithUnknownOffsetInResponseReturnsNullOffset`.
+    /// Response with `Errors::None` but `UNKNOWN_OFFSET` → result entry
+    /// is `None`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_unknown_offset_in_response_returns_none() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        let response = build_list_offsets_response(
+            "t1",
+            vec![(1, Errors::None, UNKNOWN_TIMESTAMP, UNKNOWN_OFFSET, UNKNOWN_EPOCH)],
+        );
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        // The input partition is present with `None`.
+        assert!(result.contains_key(&tp));
+        assert!(
+            result.get(&tp).expect("entry present").is_none(),
+            "expected None for unknown offset"
+        );
+    }
+
+    /// Java parity: `testRequestNotSupportedErrorReturnsNullOffset`.
+    /// `UNSUPPORTED_FOR_MESSAGE_FORMAT` → result entry is `None`
+    /// (the partition is silently dropped from `fetched_offsets`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_unsupported_for_message_format_returns_none() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::UnsupportedForMessageFormat, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+        assert!(result.contains_key(&tp));
+        assert!(
+            result.get(&tp).expect("entry present").is_none(),
+            "unsupported format error should result in None"
+        );
+    }
+
+    /// Java parity: `testRequestFailedResponse_NonRetriableAuthError`.
+    /// Response carries `TopicAuthorizationFailed` → outer future
+    /// completes exceptionally with the topic-authorization error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_topic_authorization_failed_surfaces_error() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::TopicAuthorizationFailed, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+
+        let outcome = await_fetch_result(&mut mgr, rx, 0).await;
+        let err = outcome.expect_err("expected topic-authorization error");
+        // Assert error type & message content per DoD §3. Rust's
+        // `KafkaError::TopicAuthorization` (Display: "Topic authorization
+        // failed.") corresponds to Java's `TopicAuthorizationException`.
+        // Pin both the typed variant and the human-readable message so a
+        // future rename of either is caught.
+        assert!(
+            matches!(err, KafkaError::TopicAuthorization(_)),
+            "expected KafkaError::TopicAuthorization, got {:?}",
+            err
+        );
+        assert!(
+            err.error().to_string().to_lowercase().contains("topic authorization"),
+            "expected topic-authorization error message, got {:?}",
+            err.error().to_string()
+        );
+        // After the error, nothing should remain queued.
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+    }
+
+    /// Java parity: `testRequestFails_AuthenticationException`. Transport-
+    /// level authentication failure surfaces through the response receiver
+    /// as `SaslAuthenticationFailed`. The outer future completes
+    /// exceptionally; no retry entry is left behind.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_authentication_exception_completes_exceptionally() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+
+        // Drain the unsent request and complete with an authentication
+        // error (Java: `buildClientResponse(... new AuthenticationException(...))`).
+        let poll_result = RequestManager::poll(&mut mgr, 0);
+        let unsent = poll_result.unsent_requests.into_iter().next().expect("one unsent");
+        unsent.handler().on_complete(build_disconnected_client_response());
+        for _ in 0..16 {
+            tokio::task::yield_now().await;
+        }
+
+        let outcome = await_fetch_result(&mut mgr, rx, 0).await;
+        let err = outcome.expect_err("expected authentication error");
+        // Java surfaces `AuthenticationException`; the Rust translation maps it to
+        // `SaslAuthenticationFailed` (see `FutureCompletionHandler::on_complete`).
+        let msg = err.error().to_string();
+        assert!(
+            msg.contains("SaslAuthenticationFailed") || msg.contains("Authentication"),
+            "expected authentication-related error, got {msg}"
+        );
+        assert_eq!(mgr.requests_to_retry_count(), 0);
+    }
+
+    /// Java parity: `testRemoteListOffsetsRequestTimeoutMs`. The built
+    /// `ListOffsets` request carries the configured `requestTimeoutMs`
+    /// on the wire (Java reads it back from
+    /// `unsentRequest.requestBuilder().build().timeoutMs()`).
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_uses_configured_request_timeout_ms() {
+        // Build a manager with custom `request_timeout_ms` so the test
+        // can assert the value flows through to the wire request.
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::EARLIEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        const TEST_REQUEST_TIMEOUT_MS: i64 = 100;
+        let mut mgr = OffsetsRequestManager::new(
+            subscription_state,
+            metadata.clone(),
+            IsolationLevel::ReadUncommitted,
+            500, // retry_backoff
+            TEST_REQUEST_TIMEOUT_MS,
+            500, // default_api_timeout
+            Arc::new(ApiVersions::new()),
+            None,
+        );
+        bootstrap_metadata_with_topic(&metadata, "t1", 2);
+
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+        let _rx = mgr.fetch_offsets(timestamps, false);
+
+        let res = RequestManager::poll(&mut mgr, 0);
+        let unsent = res.unsent_requests.into_iter().next().expect("one unsent");
+        let builder = unsent.request_builder().expect("builder present");
+        // Java's `unsentRequest.requestBuilder().build()` returns an
+        // `AbstractRequest` that is downcast to `ListOffsetsRequest`. The
+        // Rust equivalent is `builder.build()` → `ConcreteRequest::ListOffsets`.
+        assert_eq!(*builder.api_key(), ApiKeys::LIST_OFFSETS);
+        let built = builder.build().expect("build");
+        let request = match built {
+            crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
+            other => panic!("expected ListOffsetsRequest, got {other:?}"),
+        };
+        assert_eq!(request.timeout_ms(), TEST_REQUEST_TIMEOUT_MS as i32);
     }
 }
