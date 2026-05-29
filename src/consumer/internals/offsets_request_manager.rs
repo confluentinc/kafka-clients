@@ -455,9 +455,20 @@ impl OffsetsManagerShared {
             for waiter in waiters {
                 let _ = waiter.send(Ok(result.clone()));
             }
+            // Java: `listOffsetsRequestState.globalResult.whenComplete(...
+            // metadata.clearTransientTopics(); ...)`. The hook fires on
+            // BOTH success and failure paths
+            // (`OffsetsRequestManager.java:200-209`). Mirror it here on
+            // the success branch; `fail_request_state` handles the
+            // failure branch.
+            self_arc.metadata.clear_transient_topics();
         } else {
             // Java: `requestsToRetry.add(listOffsetsRequestState);
-            // metadata.requestUpdate(false);`
+            // metadata.requestUpdate(false);`. NOTE: the transient-topic
+            // hook does NOT fire here — the global result hasn't
+            // completed (the state is parked for retry). Java's
+            // `whenComplete` will fire on the eventual completion when
+            // the retry resolves it.
             self_arc.metadata.metadata_arc().request_update(false);
             drop(guard);
             self_arc
@@ -473,7 +484,9 @@ impl OffsetsManagerShared {
     ///
     /// Mirrors Java's `globalResult.completeExceptionally(error)` /
     /// `listOffsetsRequestState.globalResult.completeExceptionally(error)`.
-    fn fail_request_state(state: &Arc<Mutex<ListOffsetsRequestState>>, err: KafkaError) {
+    /// Also fires the `clearTransientTopics` hook because Java's
+    /// `whenComplete` runs on the failure branch too.
+    fn fail_request_state(self_arc: &Arc<Self>, state: &Arc<Mutex<ListOffsetsRequestState>>, err: KafkaError) {
         let waiters = {
             let mut guard = state.lock().expect("ListOffsetsRequestState mutex poisoned");
             if guard.completed {
@@ -485,6 +498,9 @@ impl OffsetsManagerShared {
         for waiter in waiters {
             let _ = waiter.send(Err(err.clone()));
         }
+        // Java parity (`OffsetsRequestManager.java:200-209` —
+        // `whenComplete` fires on success AND failure).
+        self_arc.metadata.clear_transient_topics();
     }
 }
 
@@ -1463,18 +1479,11 @@ impl OffsetsRequestManager {
                 },
             }
         }
-        // Clear transient topics once every in-flight `fetch_offsets`
-        // operation has completed. Java does this inside the global
-        // `whenComplete` chain on `fetchOffsets`; we approximate it here
-        // by checking whether `requests_to_retry` is empty and no
-        // in-flight `fetch_offsets` requests remain to drain. Since
-        // `requests_to_send` may still hold reset / validate requests,
-        // we conservatively only clear when both retry and unsent vectors
-        // are devoid of `ListOffsetsRequestState` references — but the
-        // simpler and behaviour-equivalent approximation is to defer the
-        // clear to the listener's path. Java's eventual-consistency on
-        // transient topics is already loose; not clearing here just keeps
-        // the topic in the cache one refresh longer, which is benign.
+        // `metadata.clear_transient_topics()` runs inside the global-result
+        // completion paths (`OffsetsManagerShared::apply_partial_result`
+        // final-response branch + `fail_request_state`), mirroring Java's
+        // `listOffsetsRequestState.globalResult.whenComplete(...)` hook at
+        // `OffsetsRequestManager.java:200-209`.
         Ok(())
     }
 
@@ -1504,6 +1513,7 @@ impl OffsetsRequestManager {
                             // result fails immediately (Java mirrors via
                             // `globalResult.completeExceptionally`).
                             OffsetsManagerShared::fail_request_state(
+                                &self.shared,
                                 &state,
                                 KafkaError::topic_authorization(err.unauthorized_topics.clone()),
                             );
@@ -1519,7 +1529,7 @@ impl OffsetsRequestManager {
                 // For `fetch_offsets`, ALL waiters are failed even if
                 // other per-node responses are still outstanding —
                 // mirrors Java's `multiNodeRequest.resultFuture.completeExceptionally`.
-                OffsetsManagerShared::fail_request_state(&state, err);
+                OffsetsManagerShared::fail_request_state(&self.shared, &state, err);
             },
         }
     }
@@ -2701,6 +2711,72 @@ mod tests {
         let result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
         let oat = result.get(&tp).expect("entry present").as_ref().expect("non-null offset");
         assert_eq!(oat.offset(), 5);
+    }
+
+    /// Regression for COMMENTS R2-4: `fetch_offsets` clears the
+    /// transient-topic registration on the global-result completion
+    /// path — Java does the same via
+    /// `listOffsetsRequestState.globalResult.whenComplete(...
+    ///   metadata.clearTransientTopics(); ...)` at
+    /// `OffsetsRequestManager.java:200-209`. Success branch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_clears_transient_topics_on_success() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp.clone(), EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        // `fetch_offsets` adds "t1" to the transient set before issuing
+        // the request — `add_transient_topics` is called inside the
+        // method.
+        assert!(
+            mgr.shared.metadata.transient_topics_snapshot_for_test().contains("t1"),
+            "fetch_offsets must add the topic to the transient set before issuing the request",
+        );
+
+        let response = build_list_offsets_response("t1", vec![(1, Errors::None, 100, 5, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let _result = await_fetch_result(&mut mgr, rx, 0).await.expect("ok");
+
+        // Java's `whenComplete` fires on success; the transient set
+        // must be cleared.
+        assert!(
+            !mgr.shared.metadata.transient_topics_snapshot_for_test().contains("t1"),
+            "transient_topics must be cleared on fetch_offsets success completion",
+        );
+    }
+
+    /// Regression for COMMENTS R2-4: failure branch — Java's
+    /// `whenComplete` fires on both success AND error. Use the
+    /// topic-authorization failure path which exercises
+    /// `fail_request_state`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_offsets_clears_transient_topics_on_failure() {
+        let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();
+        bootstrap_metadata_with_topic(&mgr.shared.metadata, "t1", 2);
+        let tp = TopicPartition::new("t1".to_string(), 1);
+        let mut timestamps = HashMap::new();
+        timestamps.insert(tp, EARLIEST_TIMESTAMP);
+
+        let rx = mgr.fetch_offsets(timestamps, false);
+        assert!(
+            mgr.shared.metadata.transient_topics_snapshot_for_test().contains("t1"),
+            "fetch_offsets must add the topic to the transient set",
+        );
+
+        let response =
+            build_list_offsets_response("t1", vec![(1, Errors::TopicAuthorizationFailed, -1, -1, UNKNOWN_EPOCH)]);
+        assert!(complete_first_unsent_with_response(&mut mgr, response, 0).await);
+        let outcome = await_fetch_result(&mut mgr, rx, 0).await;
+        outcome.expect_err("expected topic-authorization error");
+
+        // Java's `whenComplete` fires on the error branch too.
+        assert!(
+            !mgr.shared.metadata.transient_topics_snapshot_for_test().contains("t1"),
+            "transient_topics must be cleared on fetch_offsets error completion",
+        );
     }
 
     /// Java parity: `testListOffsetsWaitingForMetadataUpdate_Timeout`.

@@ -224,6 +224,16 @@ impl ConsumerMetadata {
         self.inner.lock().unwrap().transient_topics.clear();
     }
 
+    /// Test-only accessor for the transient-topics set. Used by
+    /// COMMENTS R2-4 regression to assert that
+    /// `OffsetsRequestManager::fetch_offsets` clears the set on the
+    /// global-result completion path (mirrors Java's
+    /// `metadata.clearTransientTopics()` `whenComplete` hook).
+    #[cfg(test)]
+    pub(crate) fn transient_topics_snapshot_for_test(&self) -> HashSet<String> {
+        self.inner.lock().unwrap().transient_topics.clone()
+    }
+
     /// Returns a shared reference to the underlying [`Metadata`] for sharing
     /// with `NetworkClient`. Mirrors `ProducerMetadata::metadata_arc`.
     pub(crate) fn metadata_arc(&self) -> Arc<Metadata> {

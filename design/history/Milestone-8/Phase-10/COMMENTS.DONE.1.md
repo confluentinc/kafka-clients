@@ -535,3 +535,56 @@ pre-seeds a validate error via
 `update_fetch_positions` with `current_time_ms == deadline_ms` (the
 exact condition that previously triggered the bug), asserts the error
 propagates AND `cached_update_positions_exception` stays empty.
+
+### Issue R2-4: `OffsetsRequestManager::fetch_offsets` never clears the transient-topic registration
+
+> - **File**: `src/consumer/internals/offsets_request_manager.rs:718-752`
+>   (no `metadata.clear_transient_topics()` call), plus the
+>   inline comment at `:1429-1442` acknowledging the deviation.
+> - **Commit**: `86e698d` Phase 10 (3c/N): `fetch_offsets`
+> - **Severity**: Behavior Mismatch
+> - **Java Reference**: `OffsetsRequestManager.java:200-209` —
+>   `listOffsetsRequestState.globalResult.whenComplete((result, error)
+>   -> { metadata.clearTransientTopics(); … });`.
+> - **Description**: Java registers a `whenComplete` on the global
+>   result that calls `metadata.clearTransientTopics()` on completion
+>   (success OR error). Rust skipped this entirely; topics
+>   accumulated across the lifetime of the consumer (every
+>   `list_offsets` / `current_lag` /
+>   `init_with_committed_offsets_if_needed` call that touched a topic
+>   not in the subscription set added it to `transientTopics`
+>   forever). Long-lived consumers issuing periodic `endOffsets`
+>   (current-lag) for ad-hoc partitions grow the topic set on every
+>   metadata request — both wire-size and broker-side filtering cost
+>   scale with this.
+> - **Expected**: Wire the clear into the global-result completion
+>   path — either inside `OffsetsManagerShared::apply_partial_result`
+>   on the final-response branch (after waiters are routed) and in
+>   `OffsetsManagerShared::fail_request_state`, or via a separate
+>   `on_completed` arm. Java's hook fires on both success and failure.
+> - **Actual**: Transient topics accumulate without bound across
+>   `fetch_offsets` calls.
+
+**Resolution**: Wired `metadata.clear_transient_topics()` into both
+global-result completion paths inside `OffsetsManagerShared`. The
+success branch in `apply_partial_result` fires the clear AFTER waiters
+have been routed (mirroring Java's `whenComplete` running after the
+result completes). `fail_request_state` gained a `self_arc: &Arc<Self>`
+parameter (it was previously a free `fn` taking just the state) so it
+can access `self_arc.metadata`; the clear fires after waiters have
+been failed. The two existing callers of `fail_request_state`
+(topic-authorization branch in `handle_fetch_offsets_response` and the
+transport-error branch in the same function) were updated to pass the
+`&self.shared`. The retry branch (parked on `requests_to_retry`) does
+NOT fire the clear because Java's `whenComplete` only runs on global
+completion — that fires later when the retry resolves. The stale
+inline comment at the bottom of `poll()` that rationalized "deferring
+the clear is benign" is replaced with a one-line pointer to the new
+completion-path hooks. Added
+`ConsumerMetadata::transient_topics_snapshot_for_test` (`#[cfg(test)]`)
+so tests can observe the set. Two regression tests:
+`fetch_offsets_clears_transient_topics_on_success` exercises the
+success path; `fetch_offsets_clears_transient_topics_on_failure`
+exercises the topic-authorization failure path. Both assert the
+topic is in the transient set BEFORE the response completes and
+absent AFTER.
