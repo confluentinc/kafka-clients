@@ -62,7 +62,7 @@ use crate::common::requests::{
     ConcreteResponse, ListOffsetsRequestBuilder, OffsetsForLeaderEpochResponse,
     list_offsets_request::CONSUMER_REPLICA_ID,
 };
-use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::OffsetAndTimestamp;
 use crate::list_offsets_request_data::ListOffsetsPartition;
@@ -239,6 +239,14 @@ pub(crate) struct OffsetsManagerShared {
     /// retried requests appear on `requests_to_send` before the next
     /// network poll.
     pub(crate) metadata_updated: std::sync::atomic::AtomicBool,
+    /// Nodes for which the manager wants the bg task to invoke
+    /// `NetworkClientDelegate::try_connect` on its next iteration. Mirrors
+    /// Java's `networkClientDelegate.tryConnect(node)` side effect inside
+    /// `sendOffsetsForLeaderEpochRequestsAndValidatePositions`.
+    ///
+    /// Drained by [`OffsetsRequestManager::poll`] into
+    /// [`PollResult::try_connect`].
+    pub(crate) try_connect_queue: Mutex<Vec<Node>>,
 }
 
 impl OffsetsManagerShared {
@@ -620,6 +628,7 @@ impl OffsetsRequestManager {
             requests_to_send: Mutex::new(Vec::new()),
             requests_to_retry: Mutex::new(Vec::new()),
             metadata_updated: std::sync::atomic::AtomicBool::new(false),
+            try_connect_queue: Mutex::new(Vec::new()),
         });
         let manager = Self {
             shared: shared.clone(),
@@ -865,10 +874,16 @@ impl OffsetsRequestManager {
             }
             let node_versions = self.api_versions.get(node.id_string());
             let Some(versions) = node_versions else {
-                // Java schedules a non-blocking try_connect. The bg task
-                // owns the network client; we emit a debug log to
-                // surface this and continue.
-                log::debug!("No API versions for node {}, deferring OffsetsForLeaderEpoch", node);
+                // Java: `networkClientDelegate.tryConnect(node)`. The
+                // Rust bg task (Phase 10 commit 7) owns the delegate;
+                // queue the node so the next bg-task iteration drains
+                // `PollResult::try_connect` into
+                // `NetworkClientDelegate::try_connect`.
+                self.shared
+                    .try_connect_queue
+                    .lock()
+                    .expect("try_connect_queue mutex poisoned")
+                    .push(node);
                 continue;
             };
             if !has_usable_offset_for_leader_epoch_version(&versions) {
@@ -1602,11 +1617,17 @@ impl RequestManager for OffsetsRequestManager {
             let mut guard = self.shared.requests_to_send.lock().expect("requests_to_send mutex poisoned");
             std::mem::take(&mut *guard)
         };
-        if unsent.is_empty() {
+        let try_connect = {
+            let mut guard = self.shared.try_connect_queue.lock().expect("try_connect_queue mutex poisoned");
+            std::mem::take(&mut *guard)
+        };
+        let mut result = if unsent.is_empty() {
             PollResult::empty()
         } else {
             PollResult::with_requests(unsent)
-        }
+        };
+        result.try_connect = try_connect;
+        result
     }
 
     fn signal_close(&mut self) {
@@ -1725,6 +1746,86 @@ mod tests {
         let result = mgr.validate_positions_if_needed(0);
         assert!(result.is_ok());
         assert_eq!(RequestManager::poll(&mut mgr, 0).unsent_requests.len(), 0);
+    }
+
+    /// Translated from
+    /// `OffsetsRequestManagerTest.testValidatePositionsAbortIfNoApiVersionsToCheckAgainstThenRecovers`.
+    ///
+    /// When `NodeApiVersions` for the leader are missing, the manager
+    /// MUST NOT enqueue an `OffsetsForLeaderEpoch` request — instead it
+    /// queues the node onto `PollResult::try_connect` (Java:
+    /// `networkClientDelegate.tryConnect(node)`). Once the API versions
+    /// land, the next `validate_positions_if_needed` produces the
+    /// expected request and the `try_connect` queue is empty.
+    #[tokio::test]
+    async fn test_validate_positions_abort_if_no_api_versions_to_check_against_then_recovers() {
+        // Build the manager around a controllable `ApiVersions` so the
+        // test can withhold/install entries; the rest of the wiring
+        // matches `new_manager`.
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::EARLIEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let api_versions = Arc::new(ApiVersions::new());
+        let mut mgr = OffsetsRequestManager::new(
+            subscription_state.clone(),
+            metadata,
+            IsolationLevel::ReadUncommitted,
+            100,
+            30_000,
+            60_000,
+            api_versions.clone(),
+            None,
+        );
+
+        // Set up a partition assigned to leader-1 with a position that
+        // is awaiting validation. Mirrors the Java fixture
+        // `subscriptionState.partitionsNeedingValidation(...)`.
+        let leader_1 = crate::common::Node::new(1, "localhost".to_string(), 9092);
+        let tp = TopicPartition::new("topic".to_string(), 0);
+        let leader_and_epoch = crate::metadata::LeaderAndEpoch::new(Some(leader_1.clone()), Some(3));
+        let position =
+            crate::consumer::internals::subscription_state::FetchPosition::with_leader(5, Some(10), leader_and_epoch);
+        {
+            let mut subs = subscription_state.lock().expect("subs");
+            subs.assign_from_user(std::collections::HashSet::from([tp.clone()]))
+                .expect("assign");
+            subs.seek_unvalidated(&tp, position).expect("seek_unvalidated");
+        }
+
+        // No api version info initially available — validation aborts.
+        // Java: `verify(subscriptionState, never()).setNextAllowedRetry(...)`
+        // and `assertEquals(0, requestManager.requestsToSend())`.
+        mgr.validate_positions_if_needed(0).expect("ok");
+        let result = RequestManager::poll(&mut mgr, 0);
+        assert_eq!(
+            result.unsent_requests.len(),
+            0,
+            "no OffsetsForLeaderEpoch request must be enqueued"
+        );
+        assert_eq!(result.try_connect.len(), 1, "leader node must be queued for try_connect");
+        assert_eq!(result.try_connect[0].id(), leader_1.id());
+
+        // Install API versions for the leader. The next call to
+        // `validate_positions_if_needed` should now build the request.
+        api_versions.update(leader_1.id_string(), crate::NodeApiVersions::create());
+        mgr.validate_positions_if_needed(0).expect("ok");
+        let result = RequestManager::poll(&mut mgr, 0);
+        assert_eq!(
+            result.unsent_requests.len(),
+            1,
+            "OffsetsForLeaderEpoch request must be enqueued"
+        );
+        assert!(result.try_connect.is_empty(), "try_connect queue must be empty after recovery");
     }
 
     /// Behavior-equivalent of Java's

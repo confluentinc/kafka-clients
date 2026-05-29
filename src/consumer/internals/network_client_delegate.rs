@@ -50,6 +50,24 @@ pub(crate) struct PollResult {
     pub time_until_next_poll_ms: i64,
     /// Requests the manager is ready to dispatch immediately.
     pub unsent_requests: Vec<UnsentRequest>,
+    /// Nodes for which the manager wants the bg task to call
+    /// [`NetworkClientDelegate::try_connect`].
+    ///
+    /// Java mirrors this by having request managers call
+    /// `networkClientDelegate.tryConnect(node)` directly from within their
+    /// `poll(...)` body (a `void` side effect). The Rust manager has no
+    /// handle on the delegate (the bg task owns it), so the manager
+    /// instead emits a hint on the `PollResult` and the bg task drains
+    /// `try_connect` and calls `NetworkClientDelegate::try_connect` for
+    /// each node before processing `unsent_requests`. The bg-task-side
+    /// consumer of this slot lands in Phase 10 commit 7
+    /// (ConsumerNetworkThread `runOnce`).
+    ///
+    /// Currently emitted only by
+    /// [`super::offsets_request_manager::OffsetsRequestManager`] when
+    /// `NodeApiVersions` are missing for a broker scheduled to receive an
+    /// `OffsetsForLeaderEpoch` request.
+    pub try_connect: Vec<Node>,
 }
 
 impl PollResult {
@@ -68,14 +86,18 @@ impl PollResult {
     ///
     /// Java: `new PollResult(long timeUntilNextPollMs)`.
     pub(crate) fn from_wait(time_until_next_poll_ms: i64) -> Self {
-        Self { time_until_next_poll_ms, unsent_requests: Vec::new() }
+        Self { time_until_next_poll_ms, unsent_requests: Vec::new(), try_connect: Vec::new() }
     }
 
     /// A result carrying the given requests and `WAIT_FOREVER` wait time.
     ///
     /// Java: `new PollResult(List<UnsentRequest>)`.
     pub(crate) fn with_requests(unsent_requests: Vec<UnsentRequest>) -> Self {
-        Self { time_until_next_poll_ms: Self::WAIT_FOREVER, unsent_requests }
+        Self {
+            time_until_next_poll_ms: Self::WAIT_FOREVER,
+            unsent_requests,
+            try_connect: Vec::new(),
+        }
     }
 
     /// A result carrying a single request.
@@ -89,7 +111,7 @@ impl PollResult {
     ///
     /// Java: `new PollResult(long timeUntilNextPollMs, List<UnsentRequest>)`.
     pub(crate) fn new(time_until_next_poll_ms: i64, unsent_requests: Vec<UnsentRequest>) -> Self {
-        Self { time_until_next_poll_ms, unsent_requests }
+        Self { time_until_next_poll_ms, unsent_requests, try_connect: Vec::new() }
     }
 }
 
@@ -98,6 +120,7 @@ impl fmt::Debug for PollResult {
         f.debug_struct("PollResult")
             .field("time_until_next_poll_ms", &self.time_until_next_poll_ms)
             .field("unsent_requests.len", &self.unsent_requests.len())
+            .field("try_connect.len", &self.try_connect.len())
             .finish()
     }
 }
@@ -579,7 +602,13 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
     ///
     /// Java: `addAll(PollResult)`.
     pub(crate) fn add_all_from_poll_result(&mut self, poll_result: PollResult, current_time_ms: i64) -> i64 {
-        let PollResult { time_until_next_poll_ms, unsent_requests } = poll_result;
+        let PollResult { time_until_next_poll_ms, unsent_requests, try_connect: _ } = poll_result;
+        // The `try_connect` slot is consumed by the bg task (Phase 10
+        // commit 7) — it loops `delegate.try_connect(node, now).await`
+        // BEFORE calling `add_all_from_poll_result`, so this helper
+        // simply drops the field. This keeps the
+        // `NetworkClientDelegate::add_all_from_poll_result` API
+        // behavior-faithful to Java's `addAll(PollResult)`.
         self.add_all(unsent_requests, current_time_ms);
         time_until_next_poll_ms
     }
