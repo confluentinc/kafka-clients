@@ -17,6 +17,7 @@
 - [Phase 10 (3b/N) commit notes](phase10_commit_3b_notes.md) — Milestone-8 Phase 10 (3b/N): update_fetch_positions; defer &mut self work from spawned task via channel; capture initializing partitions at call entry; cache-on-error in BOTH sync and async paths; yield_until helper
 - [Phase 10 (3c/N) commit notes](phase10_commit_3c_notes.md) — Milestone-8 Phase 10 (3c/N): fetch_offsets + cluster-listener replay; Arc<Shared> pattern; AtomicBool defer to avoid metadata mutex re-entrancy deadlock; ConcreteRequest downcast for builder assertions
 - [Phase 10 (3d/N) commit notes](phase10_commit_3d_notes.md) — Milestone-8 Phase 10 (3d/N): tryConnect plumbing via PollResult::try_connect; manager-owned Mutex<Vec<Node>> drained at poll(); bg task drains slot in commit 7
+- [Phase 10 (4/N) commit notes](phase10_commit_4_notes.md) — Milestone-8 Phase 10 (4/N): ApplicationEventProcessor sync arms; deferred-async-arm wiring via unsupported_version; Arc<Mutex<RequestManagers>> ownership; add missing Java fields (listener); is_closing() accessors
 - [Generator per-field flexibleVersions](generator_field_flex_versions.md) — field_flexible_versions() must be used instead of message-level flex versions
 - [MockSelector semantics](mock_selector_semantics.md) — Java vs Rust MockSelector differences that cause test failures (connected() one-shot, shared Send, time source)
 - [Integration test infrastructure](integration_test_infra.md) — testcontainers setup, shared cluster pool, feature gating, test file placement

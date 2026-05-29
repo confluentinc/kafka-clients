@@ -35,6 +35,7 @@ use std::sync::{Arc, Mutex};
 use regex::Regex;
 
 use crate::common::{IsolationLevel, KafkaError, PartitionInfo, TopicPartition};
+use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
 use crate::consumer::{GroupMembershipOperation, OffsetAndMetadata, OffsetAndTimestamp, SubscriptionPattern};
@@ -166,20 +167,32 @@ pub(crate) enum ApplicationEvent {
         handle: CompletableEventHandle<HashMap<String, Vec<PartitionInfo>>>,
     },
     /// `TopicSubscriptionChangeEvent` — concrete-topics subscribe.
+    ///
+    /// `listener` mirrors Java's `SubscriptionChangeEvent.listener` —
+    /// `Optional<ConsumerRebalanceListener>` carried so the bg-task
+    /// `subscribe_topics(...)` call can register it against
+    /// `SubscriptionState`.
     TopicSubscriptionChange {
         handle: CompletableEventHandle<()>,
         topics: HashSet<String>,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     },
     /// `TopicPatternSubscriptionChangeEvent` — client-side regex subscribe.
+    ///
+    /// `listener` mirrors Java's `SubscriptionChangeEvent.listener`.
     TopicPatternSubscriptionChange {
         handle: CompletableEventHandle<()>,
         pattern: Regex,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     },
     /// `TopicRe2JPatternSubscriptionChangeEvent` — server-side regex
     /// subscribe (KIP-848).
+    ///
+    /// `listener` mirrors Java's `SubscriptionChangeEvent.listener`.
     TopicRe2JPatternSubscriptionChange {
         handle: CompletableEventHandle<()>,
         pattern: SubscriptionPattern,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
     },
     /// `UnsubscribeEvent`.
     Unsubscribe { handle: CompletableEventHandle<()> },

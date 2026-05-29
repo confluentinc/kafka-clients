@@ -518,6 +518,14 @@ impl CommitRequestManager {
         self.maybe_auto_commit_async(current_time_ms);
     }
 
+    /// `true` after [`Self::signal_close`] has been called. Mirrors the
+    /// observable side of Java's `closing` flag. Used by
+    /// `ApplicationEventProcessor`'s tests to verify the `CommitOnClose`
+    /// arm signalled correctly.
+    pub(crate) fn is_closing(&self) -> bool {
+        *self.inner.closing.lock().expect("commit manager closing flag poisoned")
+    }
+
     // ---------------------------------------------------------------------
     //                       MemberStateListener wiring
     // ---------------------------------------------------------------------

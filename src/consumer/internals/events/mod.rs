@@ -33,6 +33,7 @@
 
 pub(crate) mod application_event;
 pub(crate) mod application_event_handler;
+pub(crate) mod application_event_processor;
 pub(crate) mod background_event;
 pub(crate) mod background_event_handler;
 pub(crate) mod completable_event;

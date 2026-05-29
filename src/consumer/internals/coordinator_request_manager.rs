@@ -269,6 +269,16 @@ impl RequestManager for CoordinatorRequestManager {
     }
 }
 
+impl CoordinatorRequestManager {
+    /// `true` after [`RequestManager::signal_close`] has been called.
+    /// Mirrors the observable side of Java's `closing` flag. Used by
+    /// `ApplicationEventProcessor`'s tests to verify the
+    /// `StopFindCoordinatorOnClose` arm signalled correctly.
+    pub(crate) fn is_closing(&self) -> bool {
+        self.closing
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
