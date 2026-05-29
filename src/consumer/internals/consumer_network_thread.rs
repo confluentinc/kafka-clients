@@ -78,13 +78,22 @@
 //! where `uncompletedEvents = applicationEventReaper.uncompletedEvents()`.
 //! The Rust reaper stores **erased** handles (`Arc<dyn
 //! CompletableEventErasedHandle>`), so it cannot match against
-//! `MetadataErrorNotifiableEvent` after the fact. The per-event
-//! check inside `process_application_events` (Java step 1's
-//! `maybeFailOnMetadataError(List.of(event))` arm) is still wired
-//! correctly; the post-poll variant is a narrower extra notification
-//! that is deferred to a follow-up commit. See module test
-//! `metadata_error_notification_per_event_arm_works` for the in-scope
-//! coverage.
+//! `MetadataErrorNotifiableEvent` after the fact.
+//!
+//! Phase 10 commit 8 adds a parallel list,
+//! [`ConsumerNetworkThread::notifiable_handles`], populated during
+//! `process_application_events` from
+//! [`ApplicationEvent::metadata_error_notifiable_handle`] (the
+//! intersection of `is_metadata_error_notifiable()` and
+//! `erased_handle().is_some()`). After Phase 6 (reap), Phase 7 runs
+//! [`ConsumerNetworkThread::maybe_fail_on_metadata_error_uncompleted`]
+//! which mirrors Java's `maybeFailOnMetadataError(uncompletedEvents)`:
+//! query the delegate for a pending metadata error and, if present,
+//! call `fail_with_timeout(err)` on every notifiable handle that is not
+//! yet done. The per-event arm inside
+//! [`ConsumerNetworkThread::process_application_events`] (Java step 1's
+//! `maybeFailOnMetadataError(List.of(event))` arm) covers "immediately
+//! completed events" — both arms are present and behavior-faithful.
 
 #![allow(dead_code)]
 
@@ -204,6 +213,13 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// `RequestManager`; the Rust `entries()` skips it (the same Arc is
     /// shared with the heartbeat manager) so we call `reconcile` here.
     membership: Option<Arc<ConsumerMembershipManager>>,
+    /// Erased handles for notifiable+completable events that may still
+    /// be in flight. Populated during `process_application_events`,
+    /// pruned by `is_done()` checks at the post-poll arm. Mirrors the
+    /// subset of `applicationEventReaper.uncompletedEvents()` that Java
+    /// passes to `maybeFailOnMetadataError(uncompletedEvents)` — see
+    /// the module docstring.
+    notifiable_handles: Vec<Arc<dyn super::events::completable_event::CompletableEventErasedHandle>>,
 }
 
 impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
@@ -237,6 +253,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             last_poll_time_ms: 0,
             time,
             membership,
+            notifiable_handles: Vec::new(),
         }
     }
 
@@ -414,6 +431,80 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         if expired > 0 {
             log::trace!("application-event-expired-size: {}", expired);
         }
+
+        // ──── Phase 7: maybeFailOnMetadataError(uncompletedEvents) ────
+        //
+        // Java: `List<CompletableEvent<?>> uncompletedEvents =
+        // applicationEventReaper.uncompletedEvents();
+        // maybeFailOnMetadataError(uncompletedEvents);`
+        //
+        // The Rust reaper holds erased handles only — we cannot match
+        // against `MetadataErrorNotifiableEvent` after the fact. Instead
+        // we track notifiable+completable events in `notifiable_handles`
+        // during `process_application_events` and iterate that list
+        // here. Done handles are pruned in-place. See module docstring.
+        self.maybe_fail_on_metadata_error_uncompleted();
+    }
+
+    /// Mirrors Java's `maybeFailOnMetadataError(List<?> events)` invoked
+    /// with `applicationEventReaper.uncompletedEvents()`. In Rust we
+    /// iterate the pre-filtered `notifiable_handles` list (intersection
+    /// of "notifiable" and "completable") and prune done entries.
+    ///
+    /// Behavior parity points with Java's `maybeFailOnMetadataError`:
+    ///
+    ///   - If the filtered list (here: live, not-done handles) is
+    ///     empty, do NOT consume the delegate's metadata error
+    ///     (`getAndClearMetadataError`). Java has the same "optimisation"
+    ///     guard.
+    ///   - If a metadata error IS present, call
+    ///     `fail_with_timeout(err)` on every live handle. Java calls
+    ///     `e.onMetadataError(metadataError.get())` which for these
+    ///     four variants resolves to `handle.completeExceptionally(...)`
+    ///     — exactly what `fail_with_timeout` does.
+    ///
+    /// Called by `run_once` after the reap step.
+    fn maybe_fail_on_metadata_error_uncompleted(&mut self) {
+        // Step 1: drop any handle that completed since the last call.
+        self.notifiable_handles.retain(|h| !h.is_done());
+        if self.notifiable_handles.is_empty() {
+            // Java: "Don't get-and-clear the metadata error if there are
+            // no events that will be notified." (ConsumerNetworkThread
+            // .java:447-449).
+            return;
+        }
+
+        // Step 2: query the delegate for a pending metadata error. The
+        // bg task is the sole holder of the delegate mutex; `try_lock`
+        // is safe (no contention).
+        let err_opt = {
+            let mut delegate_guard = self
+                .network_client_delegate
+                .try_lock()
+                .expect("delegate not contended on bg task");
+            delegate_guard.get_and_clear_metadata_error()
+        };
+
+        let Some(err) = err_opt else {
+            return;
+        };
+
+        // Step 3: notify every live handle. KafkaError is Clone so we
+        // can fan it out faithfully (Java passes the same exception
+        // instance to each `onMetadataError` call).
+        for handle in &self.notifiable_handles {
+            // Java: `e.onMetadataError(metadataError.get())` resolves
+            // to `handle.completeExceptionally(metadataError)` for each
+            // of the four notifiable+completable variants. Our erased
+            // handle's `fail_with_timeout(err)` calls
+            // `tx.send(Err(err))` on the inner oneshot — identical
+            // semantics. The method is misnamed in Rust for historical
+            // reasons (it was originally only used by the reaper); the
+            // generic implementation accepts any `KafkaError`.
+            handle.fail_with_timeout(err.clone());
+        }
+        // The handles will be pruned on the next iteration's
+        // `retain(!is_done)` pass.
     }
 
     /// Drain and dispatch every application event currently in the
@@ -450,6 +541,17 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 reaper.add(erased);
             }
 
+            // 1b. Track notifiable+completable events in the parallel
+            // list so the post-poll `maybeFailOnMetadataError` arm can
+            // observe them. Java derives this list from
+            // `applicationEventReaper.uncompletedEvents()` filtered for
+            // `MetadataErrorNotifiableEvent`; in Rust the reaper holds
+            // erased handles only so we keep a side list. See module
+            // docstring for the rationale.
+            if let Some(notifiable) = env.event.metadata_error_notifiable_handle() {
+                self.notifiable_handles.push(notifiable);
+            }
+
             // 2. Metadata-error short-circuit. Java's
             // `maybeFailOnMetadataError` queries the delegate's
             // `getAndClearMetadataError()`; we mirror that here so the
@@ -483,6 +585,19 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // surrounding tokio::spawn entry point owns the catch.
             self.application_event_processor.process(env.event);
         }
+    }
+
+    /// Test-only helper that pushes an erased handle directly onto
+    /// `notifiable_handles`, bypassing `process_application_events`.
+    /// Used to test the post-poll metadata-error arm in isolation
+    /// from AEP dispatch (which may synchronously complete the handle
+    /// in some variants).
+    #[cfg(test)]
+    pub(crate) fn push_notifiable_handle_for_test(
+        &mut self,
+        handle: Arc<dyn super::events::completable_event::CompletableEventErasedHandle>,
+    ) {
+        self.notifiable_handles.push(handle);
     }
 
     /// Mirror of Java's `cleanup()`. Runs the close-side request
@@ -605,8 +720,9 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashSet;
+    use std::collections::{HashSet, VecDeque};
     use std::sync::Mutex;
+    use std::sync::atomic::AtomicUsize;
     use std::time::Duration;
 
     use crate::api_versions::ApiVersions;
@@ -624,8 +740,9 @@ mod tests {
     use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
     use crate::consumer::internals::events::completable_event::make_completable_event;
     use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
-    use crate::consumer::internals::network_client_delegate::NetworkClientDelegate;
+    use crate::consumer::internals::network_client_delegate::{NetworkClientDelegate, PollResult};
     use crate::consumer::internals::offsets_request_manager::OffsetsRequestManager;
+    use crate::consumer::internals::request_manager::RequestManager;
     use crate::consumer::internals::request_managers::RequestManagers;
     use crate::consumer::internals::subscription_state::SubscriptionState;
     use crate::mock_client::MockClient;
@@ -651,6 +768,204 @@ mod tests {
         }
     }
 
+    /// `RequestManager` spy used to replace Mockito's
+    /// `mock(RequestManager.class)` in the Java tests. Counts calls and
+    /// returns scripted values for [`Self::poll`] and
+    /// [`Self::maximum_time_to_wait`].
+    ///
+    /// Designed so each instance can be passed via
+    /// [`RequestManagers::with_dyn_managers`] and inspected after a
+    /// `run_once` invocation via the shared `Arc<AtomicUsize>` counters
+    /// (cloned out of the spy before move-into-the-vec).
+    struct SpyRequestManager {
+        poll_calls: Arc<AtomicUsize>,
+        max_wait_calls: Arc<AtomicUsize>,
+        poll_on_close_calls: Arc<AtomicUsize>,
+        /// `time_until_next_poll_ms` returned from each `poll(...)` call.
+        poll_return_ms: i64,
+        /// `maximum_time_to_wait(...)` return value.
+        max_wait_return_ms: i64,
+    }
+
+    impl SpyRequestManager {
+        fn new(poll_return_ms: i64, max_wait_return_ms: i64) -> Self {
+            Self {
+                poll_calls: Arc::new(AtomicUsize::new(0)),
+                max_wait_calls: Arc::new(AtomicUsize::new(0)),
+                poll_on_close_calls: Arc::new(AtomicUsize::new(0)),
+                poll_return_ms,
+                max_wait_return_ms,
+            }
+        }
+
+        fn poll_calls(&self) -> Arc<AtomicUsize> {
+            self.poll_calls.clone()
+        }
+        fn max_wait_calls(&self) -> Arc<AtomicUsize> {
+            self.max_wait_calls.clone()
+        }
+        fn poll_on_close_calls(&self) -> Arc<AtomicUsize> {
+            self.poll_on_close_calls.clone()
+        }
+    }
+
+    impl RequestManager for SpyRequestManager {
+        fn poll(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::from_wait(self.poll_return_ms)
+        }
+
+        fn maximum_time_to_wait(&self, _current_time_ms: i64) -> i64 {
+            self.max_wait_calls.fetch_add(1, Ordering::SeqCst);
+            self.max_wait_return_ms
+        }
+
+        fn poll_on_close(&mut self, _current_time_ms: i64) -> PollResult {
+            self.poll_on_close_calls.fetch_add(1, Ordering::SeqCst);
+            PollResult::empty()
+        }
+    }
+
+    /// `KafkaClient` wrapper that delegates to an inner [`MockClient`]
+    /// and records observable side effects needed by translated Java
+    /// tests:
+    ///
+    /// - `poll_call_count`: how many times `poll(...)` was awaited
+    ///   (replaces Mockito's
+    ///   `verify(networkClientDelegate, times(N)).poll(...)`).
+    /// - `poll_timeouts`: the timeout argument passed to each `poll(...)`
+    ///   call. Mirrors Mockito's
+    ///   `verify(networkClientDelegate).poll(eq(Math.min(...)), ...)`.
+    /// - `has_in_flight_script`: a queue of return values for
+    ///   `has_in_flight_requests()` — once exhausted, falls back to the
+    ///   inner client's behavior. Mirrors Mockito's
+    ///   `when(...).thenReturn(true).thenReturn(true).thenReturn(false)`.
+    struct CountingClient {
+        inner: MockClient,
+        poll_call_count: Arc<AtomicUsize>,
+        poll_timeouts: Arc<Mutex<Vec<i64>>>,
+        has_in_flight_script: Arc<Mutex<VecDeque<bool>>>,
+    }
+
+    impl CountingClient {
+        fn new(inner: MockClient) -> Self {
+            Self {
+                inner,
+                poll_call_count: Arc::new(AtomicUsize::new(0)),
+                poll_timeouts: Arc::new(Mutex::new(Vec::new())),
+                has_in_flight_script: Arc::new(Mutex::new(VecDeque::new())),
+            }
+        }
+
+        fn poll_call_count(&self) -> Arc<AtomicUsize> {
+            self.poll_call_count.clone()
+        }
+        fn poll_timeouts(&self) -> Arc<Mutex<Vec<i64>>> {
+            self.poll_timeouts.clone()
+        }
+        fn has_in_flight_script(&self) -> Arc<Mutex<VecDeque<bool>>> {
+            self.has_in_flight_script.clone()
+        }
+    }
+
+    impl crate::KafkaClient for CountingClient {
+        fn is_ready(&self, node: &Node, now: i64) -> bool {
+            self.inner.is_ready(node, now)
+        }
+        async fn ready(&mut self, node: &Node, now: i64) -> bool {
+            self.inner.ready(node, now).await
+        }
+        fn connection_delay(&self, node: &Node, now: i64) -> i64 {
+            self.inner.connection_delay(node, now)
+        }
+        fn poll_delay_ms(&self, node: &Node, now: i64) -> i64 {
+            self.inner.poll_delay_ms(node, now)
+        }
+        fn connection_failed(&self, node: &Node) -> bool {
+            self.inner.connection_failed(node)
+        }
+        fn authentication_error(&self, node: &Node) -> Option<String> {
+            self.inner.authentication_error(node)
+        }
+        fn send(&mut self, request: crate::ClientRequest, now: i64) {
+            self.inner.send(request, now)
+        }
+        async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
+            self.poll_call_count.fetch_add(1, Ordering::SeqCst);
+            self.poll_timeouts.lock().unwrap().push(timeout);
+            self.inner.poll(timeout, now).await
+        }
+        async fn disconnect(&mut self, node_id: &str) {
+            self.inner.disconnect(node_id).await
+        }
+        async fn close_connection(&mut self, node_id: &str) {
+            self.inner.close_connection(node_id).await
+        }
+        fn least_loaded_node(&self, now: i64) -> crate::LeastLoadedNode {
+            self.inner.least_loaded_node(now)
+        }
+        fn in_flight_request_count(&self) -> i32 {
+            self.inner.in_flight_request_count()
+        }
+        fn has_in_flight_requests(&self) -> bool {
+            // Pop the next scripted value if any, else delegate.
+            let mut q = self.has_in_flight_script.lock().unwrap();
+            if let Some(v) = q.pop_front() {
+                return v;
+            }
+            self.inner.has_in_flight_requests()
+        }
+        fn in_flight_request_count_for_node(&self, node_id: &str) -> usize {
+            self.inner.in_flight_request_count_for_node(node_id)
+        }
+        fn has_in_flight_requests_for_node(&self, node_id: &str) -> bool {
+            self.inner.has_in_flight_requests_for_node(node_id)
+        }
+        fn has_ready_nodes(&self, now: i64) -> bool {
+            self.inner.has_ready_nodes(now)
+        }
+        fn wakeup(&self) {
+            self.inner.wakeup()
+        }
+        fn new_client_request(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn crate::common::requests::RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+        ) -> crate::ClientRequest {
+            self.inner
+                .new_client_request(node_id, request_builder, created_time_ms, expect_response)
+        }
+        fn new_client_request_with_timeout(
+            &mut self,
+            node_id: &str,
+            request_builder: Box<dyn crate::common::requests::RequestBuilder>,
+            created_time_ms: i64,
+            expect_response: bool,
+            request_timeout_ms: i32,
+            callback: Option<crate::RequestCompletionHandler>,
+        ) -> crate::ClientRequest {
+            self.inner.new_client_request_with_timeout(
+                node_id,
+                request_builder,
+                created_time_ms,
+                expect_response,
+                request_timeout_ms,
+                callback,
+            )
+        }
+        fn initiate_close(&self) {
+            self.inner.initiate_close()
+        }
+        fn active(&self) -> bool {
+            self.inner.active()
+        }
+        async fn close(&mut self) {
+            self.inner.close().await
+        }
+    }
+
     fn make_config() -> ConsumerConfig {
         ConsumerConfig::new(vec!["localhost:9092".to_string()])
     }
@@ -666,6 +981,75 @@ mod tests {
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let raw_metadata = metadata.metadata_arc();
         NetworkClientDelegate::new(config, client, raw_metadata, beh, false)
+    }
+
+    fn make_counting_delegate(
+        config: &ConsumerConfig,
+        metadata: Arc<ConsumerMetadata>,
+    ) -> NetworkClientDelegate<CountingClient> {
+        let time_provider: Arc<dyn Fn() -> i64 + Send + Sync> = Arc::new(|| 0);
+        let client = CountingClient::new(MockClient::new(Vec::<Node>::new(), time_provider));
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(tx));
+        let raw_metadata = metadata.metadata_arc();
+        NetworkClientDelegate::new(config, client, raw_metadata, beh, false)
+    }
+
+    /// Test-fixture for tests that need to inject spy `RequestManager`s
+    /// and observe `delegate.poll(...)` call counts. Mirrors Java's
+    /// constructor-time wiring with `mock(NetworkClientDelegate.class)`
+    /// and `mock(RequestManager.class)`.
+    struct CountingFixture {
+        thread: ConsumerNetworkThread<CountingClient>,
+        time: Arc<MockTime>,
+        delegate: Arc<AsyncMutex<NetworkClientDelegate<CountingClient>>>,
+        reaper: Arc<std::sync::Mutex<CompletableEventReaper>>,
+        tx: mpsc::UnboundedSender<ApplicationEventEnvelope>,
+        // Direct handles to the SpyRequestManagers' counters & client
+        // counters — populated by the caller via `with_spies(...)`.
+    }
+
+    /// Return value of [`make_thread_with_dyn_managers`]: fixture +
+    /// handles to the inner `CountingClient`'s `poll` counter, timeout
+    /// log, and `has_in_flight` script.
+    type DynFixture = (
+        CountingFixture,
+        Arc<AtomicUsize>,
+        Arc<Mutex<Vec<i64>>>,
+        Arc<Mutex<VecDeque<bool>>>,
+    );
+
+    fn make_thread_with_dyn_managers(dyn_managers: Vec<Box<dyn RequestManager>>) -> DynFixture {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::with_dyn_managers(dyn_managers)));
+        let counting_delegate = make_counting_delegate(&config, metadata.clone());
+        let poll_call_count = counting_delegate.client_for_test_ref().poll_call_count();
+        let poll_timeouts = counting_delegate.client_for_test_ref().poll_timeouts();
+        let has_in_flight_script = counting_delegate.client_for_test_ref().has_in_flight_script();
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn ThreadTime>,
+            rx,
+            reaper.clone(),
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            wakeup,
+        );
+        (
+            CountingFixture { thread, time, delegate, reaper, tx },
+            poll_call_count,
+            poll_timeouts,
+            has_in_flight_script,
+        )
     }
 
     fn make_offsets_manager(
@@ -781,32 +1165,309 @@ mod tests {
         (thread, membership)
     }
 
-    /// `is_running()` is true at construction and false after
-    /// `signal_close()` — matches Java's
-    /// `testEnsureCloseStopsRunningThread`.
+    // ─── Translated Java tests (Phase 10 commit 8/N) ───
+
+    /// Java: `testEnsureCloseStopsRunningThread`. Verifies `isRunning()`
+    /// returns true at construction and `false` after `close()`. The
+    /// Rust translation uses `signal_close()` because the spawn handle
+    /// is the caller's responsibility; the flag-flip semantics are
+    /// identical.
     #[tokio::test]
-    async fn signal_close_stops_running() {
+    async fn test_ensure_close_stops_running_thread() {
         let (thread, _tx, _reaper, _time, _rm) = make_thread_no_membership();
-        assert!(thread.is_running(), "thread should be running after construction");
+        assert!(thread.is_running(), "ConsumerNetworkThread should start running when created");
         thread.signal_close();
-        assert!(!thread.is_running(), "signal_close() flips the running flag");
+        assert!(
+            !thread.is_running(),
+            "close() should make consumerNetworkThread.running false by calling closeInternal(Duration timeout)"
+        );
     }
 
-    /// Happy-path: `run_once` completes a single iteration without
-    /// panicking. Java analog: `testRequestsTransferFromManagersToClientOnThreadRun`
-    /// (we don't have Mockito so we drive a real delegate; the assertion
-    /// is "runOnce did not panic and refreshed `maximum_time_to_wait`").
+    /// Java `testConsumerNetworkThreadPollTimeComputations` —
+    /// parameterised over `MAX_POLL_TIMEOUT_MS - 1`. The `@ValueSource`
+    /// triple is unrolled into three separate Rust tests so the test
+    /// names preserve the parameter labels (DoD §3).
+    ///
+    /// Coordinator manager returns `PollResult(example_time)` and
+    /// `maximumTimeToWait(t) = example_time`; heartbeat returns
+    /// `PollResult(example_time + 100)` and `maximumTimeToWait =
+    /// example_time + 100`. After `run_once`:
+    ///   - `delegate.poll(...)` must be called with `min(example_time,
+    ///     MAX_POLL_TIMEOUT_MS)`.
+    ///   - `maximum_time_to_wait()` returns `example_time` (the min of
+    ///     the two `maximumTimeToWait` returns).
     #[tokio::test]
-    async fn run_once_happy_path_refreshes_max_time_to_wait() {
-        let (mut thread, _tx, _reaper, _time, _rm) = make_thread_no_membership();
-        // Before any run_once, the cached value is MAX_POLL_TIMEOUT_MS.
-        assert_eq!(thread.maximum_time_to_wait(), MAX_POLL_TIMEOUT_MS);
-        thread.run_once().await;
-        // OffsetsRequestManager::maximum_time_to_wait returns i64::MAX
-        // when no work is pending, so after one runOnce the cached
-        // value must be i64::MAX (the only manager wired in).
-        assert_eq!(thread.maximum_time_to_wait(), i64::MAX);
+    async fn test_consumer_network_thread_poll_time_computations_below_max() {
+        run_poll_time_computations_case(MAX_POLL_TIMEOUT_MS - 1).await;
     }
+
+    #[tokio::test]
+    async fn test_consumer_network_thread_poll_time_computations_at_max() {
+        run_poll_time_computations_case(MAX_POLL_TIMEOUT_MS).await;
+    }
+
+    #[tokio::test]
+    async fn test_consumer_network_thread_poll_time_computations_above_max() {
+        run_poll_time_computations_case(MAX_POLL_TIMEOUT_MS + 1).await;
+    }
+
+    async fn run_poll_time_computations_case(example_time: i64) {
+        let coordinator_spy = SpyRequestManager::new(example_time, example_time);
+        let heartbeat_spy = SpyRequestManager::new(example_time + 100, example_time + 100);
+        let coord_poll_calls = coordinator_spy.poll_calls();
+        let hb_poll_calls = heartbeat_spy.poll_calls();
+        let coord_max_wait_calls = coordinator_spy.max_wait_calls();
+        let hb_max_wait_calls = heartbeat_spy.max_wait_calls();
+
+        let dyn_managers: Vec<Box<dyn RequestManager>> = vec![Box::new(coordinator_spy), Box::new(heartbeat_spy)];
+        let (mut fixture, _poll_call_count, poll_timeouts, _has_in_flight) =
+            make_thread_with_dyn_managers(dyn_managers);
+        fixture.thread.run_once().await;
+
+        // Verify `delegate.poll(min(exampleTime, MAX_POLL_TIMEOUT_MS), ...)`
+        // was called with the expected timeout. We assert the timeout
+        // passed to the FIRST poll call (run_once executes exactly one
+        // network poll per iteration).
+        let expected_timeout = example_time.min(MAX_POLL_TIMEOUT_MS);
+        let timeouts = poll_timeouts.lock().unwrap();
+        assert!(!timeouts.is_empty(), "delegate.poll(...) must be called at least once");
+        assert_eq!(
+            timeouts[0], expected_timeout,
+            "delegate.poll timeout = min(example_time, MAX_POLL_TIMEOUT_MS) = {}, got {}",
+            expected_timeout, timeouts[0]
+        );
+
+        // Verify maximumTimeToWait() returns example_time (the min of
+        // the two managers' returns).
+        assert_eq!(
+            fixture.thread.maximum_time_to_wait(),
+            example_time,
+            "cachedMaximumTimeToWait must be example_time after run_once"
+        );
+
+        // Each manager's poll and maximumTimeToWait was called exactly
+        // once during run_once (verify-then-pass equivalent of
+        // Mockito's `verify(rm).poll(...)`).
+        assert_eq!(coord_poll_calls.load(Ordering::SeqCst), 1, "coordinator.poll called once");
+        assert_eq!(hb_poll_calls.load(Ordering::SeqCst), 1, "heartbeat.poll called once");
+        assert_eq!(
+            coord_max_wait_calls.load(Ordering::SeqCst),
+            1,
+            "coordinator.maximumTimeToWait called once"
+        );
+        assert_eq!(
+            hb_max_wait_calls.load(Ordering::SeqCst),
+            1,
+            "heartbeat.maximumTimeToWait called once"
+        );
+    }
+
+    /// Java `testRequestsTransferFromManagersToClientOnThreadRun`.
+    /// Verifies every manager's `poll(...)` and
+    /// `maximumTimeToWait(...)` are called and the delegate's
+    /// `addAll(...)` + `poll(...)` are called.
+    ///
+    /// Mockito equivalent:
+    ///   `forEach(rm -> verify(rm).poll(anyLong()));`
+    ///   `forEach(rm -> verify(rm).maximumTimeToWait(anyLong()));`
+    ///   `verify(networkClientDelegate).addAll(...);`
+    ///   `verify(networkClientDelegate).poll(...)`.
+    #[tokio::test]
+    async fn test_requests_transfer_from_managers_to_client_on_thread_run() {
+        let coordinator_spy = SpyRequestManager::new(1_000, 1_000);
+        let heartbeat_spy = SpyRequestManager::new(2_000, 2_000);
+        let offsets_spy = SpyRequestManager::new(3_000, 3_000);
+        let coord_poll = coordinator_spy.poll_calls();
+        let coord_max_wait = coordinator_spy.max_wait_calls();
+        let hb_poll = heartbeat_spy.poll_calls();
+        let hb_max_wait = heartbeat_spy.max_wait_calls();
+        let off_poll = offsets_spy.poll_calls();
+        let off_max_wait = offsets_spy.max_wait_calls();
+
+        let dyn_managers: Vec<Box<dyn RequestManager>> = vec![
+            Box::new(coordinator_spy),
+            Box::new(heartbeat_spy),
+            Box::new(offsets_spy),
+        ];
+        let (mut fixture, poll_call_count, _poll_timeouts, _has_in_flight) =
+            make_thread_with_dyn_managers(dyn_managers);
+
+        fixture.thread.run_once().await;
+
+        // Every manager observed exactly one `poll` and one
+        // `maximumTimeToWait` call — the Mockito `forEach(rm ->
+        // verify(rm).poll(anyLong()))` equivalent.
+        assert_eq!(coord_poll.load(Ordering::SeqCst), 1, "coordinator.poll(now) called once");
+        assert_eq!(hb_poll.load(Ordering::SeqCst), 1, "heartbeat.poll(now) called once");
+        assert_eq!(off_poll.load(Ordering::SeqCst), 1, "offsets.poll(now) called once");
+        assert_eq!(
+            coord_max_wait.load(Ordering::SeqCst),
+            1,
+            "coordinator.maximumTimeToWait called once"
+        );
+        assert_eq!(hb_max_wait.load(Ordering::SeqCst), 1, "heartbeat.maximumTimeToWait called once");
+        assert_eq!(off_max_wait.load(Ordering::SeqCst), 1, "offsets.maximumTimeToWait called once");
+
+        // delegate.poll(...) was invoked. (Java:
+        // `verify(networkClientDelegate).poll(anyLong(), anyLong())`.)
+        // `addAll(...)` is verified implicitly: PollResult collection
+        // happens for every manager, and `add_all_from_poll_result`
+        // returns the timeout that feeds into `delegate.poll` — if it
+        // were not called we would not poll with the manager-supplied
+        // timeout.
+        assert_eq!(
+            poll_call_count.load(Ordering::SeqCst),
+            1,
+            "delegate.poll(timeout, now) must be called exactly once per run_once"
+        );
+    }
+
+    /// Java `testMaximumTimeToWait`. Verifies:
+    ///   1. The initial cached value is `MAX_POLL_TIMEOUT_MS` before
+    ///      `runOnce` is called.
+    ///   2. After `runOnce`, the value is the min of each registered
+    ///      manager's `maximumTimeToWait(now)`. With a single heartbeat
+    ///      spy returning 1_000, the cached value must be 1_000.
+    #[tokio::test]
+    async fn test_maximum_time_to_wait() {
+        const DEFAULT_HEARTBEAT_INTERVAL_MS: i64 = 1_000;
+
+        let heartbeat_spy = SpyRequestManager::new(MAX_POLL_TIMEOUT_MS, DEFAULT_HEARTBEAT_INTERVAL_MS);
+        let dyn_managers: Vec<Box<dyn RequestManager>> = vec![Box::new(heartbeat_spy)];
+        let (mut fixture, _poll, _to, _hi) = make_thread_with_dyn_managers(dyn_managers);
+
+        // Initial value before runOnce has been called.
+        assert_eq!(
+            fixture.thread.maximum_time_to_wait(),
+            MAX_POLL_TIMEOUT_MS,
+            "initial cached maximumTimeToWait must equal MAX_POLL_TIMEOUT_MS"
+        );
+
+        fixture.thread.run_once().await;
+
+        // After runOnce: the cached value is the heartbeat interval.
+        assert_eq!(
+            fixture.thread.maximum_time_to_wait(),
+            DEFAULT_HEARTBEAT_INTERVAL_MS,
+            "after runOnce, maximumTimeToWait reflects the heartbeat-interval min"
+        );
+    }
+
+    /// Java `testCleanupInvokesReaper`. Verifies `cleanup()` invokes
+    /// the reaper. Mockito: `verify(applicationEventReaper).reap(...)`.
+    /// Rust observes via a deadline-zero tracked event becoming
+    /// `Err(Timeout)` on its receiver.
+    #[tokio::test]
+    async fn test_cleanup_invokes_reaper() {
+        let (mut thread, _tx, reaper, _time, _rm) = make_thread_no_membership();
+        // Add a deadline-zero completable event so reap-on-close
+        // expires it.
+        let (_h, mut rx, erased) = make_completable_event::<()>(0);
+        reaper.lock().unwrap().add(erased);
+
+        thread.cleanup().await;
+
+        // The reaper observed the tracked event and timed it out —
+        // proves `reap_on_close(...)` was called inside `cleanup()`.
+        assert!(
+            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            "reaper.reap(...) must complete tracked event with Timeout"
+        );
+    }
+
+    /// Java `testRunOnceInvokesReaper`. Verifies `runOnce` invokes
+    /// the reaper. Mockito: `verify(applicationEventReaper).reap(any(Long.class))`.
+    /// Rust observes via a same-instant-deadline tracked event whose
+    /// receiver becomes `Err(Timeout)` after `runOnce`.
+    #[tokio::test]
+    async fn test_run_once_invokes_reaper() {
+        let (mut thread, _tx, reaper, time, _rm) = make_thread_no_membership();
+        // Register a deadline-zero event; clock starts at 1_000, so
+        // every reap iteration past-due will fire `Timeout` on rx.
+        let (_h, mut rx, erased) = make_completable_event::<()>(0);
+        reaper.lock().unwrap().add(erased);
+
+        // Drive a single iteration. The reap step at Phase 6 must
+        // observe the past-due deadline and fail the event.
+        let _ = time;
+        thread.run_once().await;
+
+        assert!(
+            matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))),
+            "runOnce must call reaper.reap(now) and expire the past-due event"
+        );
+    }
+
+    /// Java `testSendUnsentRequests`. Mockito drives
+    /// `hasAnyPendingRequests()` to return `true, true, false` so the
+    /// cleanup loop polls exactly twice. The Rust translation injects
+    /// that scripted return via `CountingClient::has_in_flight_script`.
+    /// Verifies `delegate.poll(..., onClose=true)` is called exactly
+    /// twice during cleanup.
+    #[tokio::test]
+    async fn test_send_unsent_requests() {
+        let (mut fixture, poll_call_count, _poll_timeouts, has_in_flight_script) =
+            make_thread_with_dyn_managers(Vec::new());
+
+        // Java: `when(hasAnyPendingRequests).thenReturn(true,true,false)`.
+        // Translating directly: the cleanup loop calls
+        // `has_any_pending_requests` once before entering the drain
+        // loop and once per iteration thereafter. Our delegate calls
+        // `client.has_in_flight_requests()` THROUGH the underlying
+        // `client` reference. The Rust cleanup body has TWO read
+        // sites of `has_any_pending_requests` per iteration:
+        // (a) the guard at the top, (b) the post-drain warning check
+        // outside the loop. To make poll fire exactly twice we push
+        // `[true, true, false, false]` (2 inside the loop guard +
+        // 2 outside warning check); the third+fourth `false` is the
+        // exit-condition + warning-log read.
+        //
+        // Java's `testSendUnsentRequests` only counts `poll` calls
+        // (twice). The script of three (true, true, false) is the
+        // minimum to produce two iterations; we emit four total to
+        // service both Rust call sites without underflow.
+        has_in_flight_script.lock().unwrap().extend([true, true, false, false]);
+
+        // Bump the close-timeout so the deadline isn't the early
+        // exit. Java's `timer.remainingMs()` is bounded by the same
+        // close timeout (`closeTimeout` defaults to 30s).
+        fixture.thread.set_close_timeout_ms(30_000);
+        fixture.thread.cleanup().await;
+
+        assert_eq!(
+            poll_call_count.load(Ordering::SeqCst),
+            2,
+            "delegate.poll(..., onClose=true) must be invoked twice during cleanup"
+        );
+    }
+
+    // ─── Java tests deliberately NOT translated in this commit ───
+    //
+    // - `testStartupAndTearDown`: exercises `Thread.start()`/
+    //   `isAlive()` to verify the background thread is genuinely
+    //   running. In Rust the bg task is
+    //   `tokio::spawn(thread.run().await)` driven by the consumer
+    //   constructor (Phase 11); the spawn/join semantics belong to
+    //   `AsyncKafkaConsumer`, not `ConsumerNetworkThread`. The
+    //   equivalent assertion (`run().await` returns cleanly after
+    //   `signal_close()`) belongs to the Phase-11 consumer-constructor
+    //   tests.
+    //
+    // - `testNetworkClientDelegateInitializeResourcesError`,
+    //   `testRequestManagersInitializeResourcesError`,
+    //   `testNetworkClientDelegateAndRequestManagersInitializeResourcesError`:
+    //   exercise Java's `Supplier<NetworkClientDelegate>` /
+    //   `Supplier<RequestManagers>` constructor indirection. The Rust
+    //   constructor takes already-constructed values (no `Supplier`),
+    //   so the initialize-error path lives at the call site (Phase 11
+    //   consumer constructor). Mirrors commit 7's deferral.
+    //
+    // - `testRunOnceRecordTimeBetweenNetworkThreadPoll` and
+    //   `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`:
+    //   assert against `AsyncConsumerMetrics` histogram values. That
+    //   class is not yet translated. The bg-task currently emits
+    //   `log::trace!` equivalents at the same call sites. When the
+    //   metrics framework lands these tests will be added alongside it.
 
     /// Drain-events path: an enqueued completable event is registered
     /// with the reaper during `process_application_events`. We call
@@ -903,18 +1564,142 @@ mod tests {
         thread.run_once().await;
     }
 
-    /// `cleanup()` does not panic when no requests are pending and the
-    /// channel is empty. Java analog: `testCleanupInvokesReaper`.
+    /// Post-poll `maybeFailOnMetadataError(uncompletedEvents)` arm
+    /// (added in Phase 10 commit 8 — see module docstring).
+    ///
+    /// Sequence under test:
+    ///   1. Build a thread with a metadata instance we hold a handle
+    ///      to. Push a notifiable+completable erased handle directly
+    ///      onto `notifiable_handles` (bypassing AEP dispatch, which
+    ///      would otherwise synchronously complete the handle in this
+    ///      minimal fixture).
+    ///   2. Plant a metadata error via `metadata.fatal_error(...)`.
+    ///      `delegate.poll(...)` inside `run_once` propagates it into
+    ///      `delegate.metadata_error`.
+    ///   3. `run_once`'s Phase-7 arm calls
+    ///      `maybe_fail_on_metadata_error_uncompleted`, which observes
+    ///      the live notifiable handle, consumes the delegate error,
+    ///      and `fail_with_timeout`s the inner oneshot.
+    ///   4. The app-side receiver sees the error variant intact (no
+    ///      `Timeout` wrap).
+    ///
+    /// Java analog: `ConsumerNetworkThread.runOnce()` ending with
+    /// `maybeFailOnMetadataError(applicationEventReaper.uncompletedEvents())`.
     #[tokio::test]
-    async fn cleanup_completes_cleanly_when_idle() {
-        let (mut thread, _tx, reaper, _time, _rm) = make_thread_no_membership();
-        // Add a completable event to the reaper so reap-on-close has
-        // something to expire.
-        let (_h, mut rx, erased) = make_completable_event::<()>(0);
-        reaper.lock().unwrap().add(erased);
-        thread.cleanup().await;
-        // The reap-on-close path must have expired the tracked event.
-        assert!(matches!(rx.try_recv().expect("sender used"), Err(KafkaError::Timeout(_))));
+    async fn maybe_fail_on_metadata_error_post_poll_fans_out_to_notifiable_events() {
+        // Build a fixture that exposes `metadata` so we can plant the
+        // fatal error on the SAME instance the thread's delegate holds.
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let mut thread = ConsumerNetworkThread::new(
+            time as Arc<dyn ThreadTime>,
+            rx,
+            reaper,
+            processor,
+            delegate,
+            request_managers,
+            None,
+            wakeup,
+        );
+
+        // 1. Notifiable handle with a large deadline so the reaper
+        // doesn't expire it before the metadata-error arm fires.
+        let (h, mut event_rx) =
+            crate::consumer::internals::events::completable_event::CompletableEventHandle::<()>::new(60_000);
+        thread.push_notifiable_handle_for_test(h.erased());
+
+        // 2. Plant the metadata error on the cluster.
+        metadata
+            .metadata_arc()
+            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
+                "t".to_string()
+            ])));
+
+        // 3. Drive one runOnce iteration.
+        thread.run_once().await;
+
+        // 4. The notifiable handle was completed exceptionally with
+        // the metadata error variant intact.
+        let received = event_rx.try_recv().expect("sender used");
+        let err = received.expect_err("post-poll arm must fail the handle");
+        assert!(
+            matches!(err, KafkaError::TopicAuthorization(_)),
+            "expected TopicAuthorization, got: {err:?}"
+        );
+    }
+
+    /// When NO notifiable handle is tracked, the post-poll arm must
+    /// NOT consume the delegate's metadata error — Java's
+    /// "Don't get-and-clear the metadata error if there are no events
+    /// that will be notified" optimisation
+    /// (`ConsumerNetworkThread.java:447-449`). Subsequent runOnce
+    /// iterations (which DO register a notifiable event later) must
+    /// still see the same metadata error.
+    #[tokio::test]
+    async fn maybe_fail_on_metadata_error_skips_delegate_when_no_notifiable_events() {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            None,
+            None,
+            None,
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let mut thread = ConsumerNetworkThread::new(
+            time as Arc<dyn ThreadTime>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            wakeup,
+        );
+
+        // Plant the metadata error.
+        metadata
+            .metadata_arc()
+            .fatal_error(KafkaError::topic_authorization(std::collections::HashSet::from([
+                "t".to_string()
+            ])));
+
+        // No notifiable handles tracked. run_once must NOT consume the
+        // delegate's metadata_error.
+        thread.run_once().await;
+
+        // Read the delegate's metadata_error: it must still be Some.
+        let mut delegate_guard = thread.network_client_delegate.lock().await;
+        let leftover = delegate_guard.get_and_clear_metadata_error();
+        assert!(
+            leftover.is_some(),
+            "without notifiable events, the post-poll arm must NOT consume the delegate's metadata_error"
+        );
     }
 
     /// `LeaveGroupOnClose` is a completable variant. Confirms the

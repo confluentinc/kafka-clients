@@ -91,6 +91,13 @@ pub(crate) struct RequestManagers {
     /// fetchRequestManager` (always present). `Option<_>` for the same
     /// reason as `offsets`.
     pub(crate) fetch: Option<FetchRequestManager>,
+    /// Auxiliary slot for dyn-dispatched managers — used by tests to
+    /// inject spy/fake managers without expanding the concrete-field
+    /// list. The production constructor `new(...)` leaves this empty;
+    /// tests use [`Self::with_dyn_managers`] to populate it. Iterated
+    /// last in `entries()` (after `fetch`) so the production order is
+    /// preserved.
+    dyn_managers: Vec<Box<dyn RequestManager>>,
     closed: bool,
 }
 
@@ -125,6 +132,27 @@ impl RequestManagers {
             consumer_membership,
             offsets,
             fetch,
+            dyn_managers: Vec::new(),
+            closed: false,
+        }
+    }
+
+    /// Constructs a `RequestManagers` populated only with dyn-dispatched
+    /// managers. Used by Phase-10 tests that need to inject spy / fake
+    /// `RequestManager` implementations (Mockito's role in Java). The
+    /// concrete slots are all `None`; managers iterate in
+    /// supplied-vec order from `entries()`.
+    #[cfg(test)]
+    pub(crate) fn with_dyn_managers(dyn_managers: Vec<Box<dyn RequestManager>>) -> Self {
+        Self {
+            coordinator: None,
+            topic_metadata: None,
+            commit: None,
+            consumer_heartbeat: None,
+            consumer_membership: None,
+            offsets: None,
+            fetch: None,
+            dyn_managers,
             closed: false,
         }
     }
@@ -167,6 +195,7 @@ impl RequestManagers {
             consumer_membership: _,
             offsets,
             fetch,
+            dyn_managers,
             closed: _,
         } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
@@ -190,6 +219,9 @@ impl RequestManagers {
         }
         if let Some(f) = fetch.as_mut() {
             list.push(f as &mut dyn RequestManager);
+        }
+        for m in dyn_managers.iter_mut() {
+            list.push(m.as_mut());
         }
         list
     }

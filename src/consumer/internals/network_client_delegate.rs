@@ -493,6 +493,16 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         &self.unsent_requests
     }
 
+    /// Visible-for-testing accessor for the underlying client.
+    ///
+    /// Used by Phase 10 commit 8 to read counters off `CountingClient`
+    /// — the test wrapper that records `delegate.poll(...)` call counts
+    /// (replacing Mockito's `verify(client).poll(...)` in Java tests).
+    #[cfg(test)]
+    pub(crate) fn client_for_test_ref(&self) -> &K {
+        &self.client
+    }
+
     /// Visible-for-testing mutable accessor (matches Java's
     /// `unsentRequests()` semantics: tests can `poll()` / `iterator()`).
     pub(crate) fn unsent_requests_mut(&mut self) -> &mut VecDeque<UnsentRequest> {

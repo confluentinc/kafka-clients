@@ -366,6 +366,38 @@ impl ApplicationEvent {
             | Self::AsyncPoll { .. } => None,
         }
     }
+
+    /// Returns the type-erased completable handle for variants that are
+    /// BOTH `is_metadata_error_notifiable()` AND extend
+    /// `CompletableApplicationEvent<T>` — i.e. would appear in Java's
+    /// `applicationEventReaper.uncompletedEvents()` filtered for
+    /// `instanceof MetadataErrorNotifiableEvent`.
+    ///
+    /// This is exactly the set used by Java's post-poll
+    /// `maybeFailOnMetadataError(uncompletedEvents)` arm. Note `AsyncPoll`
+    /// is `is_metadata_error_notifiable()` but is NOT a `CompletableEvent`
+    /// in Java — so it does NOT appear in `uncompletedEvents()` and is
+    /// correctly excluded here. The per-event arm inside
+    /// `processApplicationEvents` (which handles "immediately completed
+    /// events") still notifies `AsyncPoll` via `on_metadata_error`.
+    ///
+    /// Used by [`crate::consumer::internals::consumer_network_thread::ConsumerNetworkThread`]
+    /// to track in-flight notifiable events for the post-poll
+    /// `maybeFailOnMetadataError(uncompletedEvents)` arm.
+    pub(crate) fn metadata_error_notifiable_handle(
+        &self,
+    ) -> Option<std::sync::Arc<dyn super::completable_event::CompletableEventErasedHandle>> {
+        match self {
+            Self::CheckAndUpdatePositions { handle } => Some(handle.erased()),
+            Self::ListOffsets { handle, .. } => Some(handle.erased()),
+            Self::TopicMetadata { handle, .. } => Some(handle.erased()),
+            Self::AllTopicsMetadata { handle } => Some(handle.erased()),
+            // AsyncPoll is metadata-error-notifiable but is NOT a
+            // CompletableApplicationEvent in Java — so it never appears
+            // in `uncompletedEvents()`.
+            _ => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for ApplicationEvent {
@@ -699,6 +731,65 @@ mod tests {
         assert!(
             ev.erased_handle().is_none(),
             "AsyncPoll extends ApplicationEvent (not CompletableApplicationEvent) — must not register"
+        );
+    }
+
+    /// Verifies `metadata_error_notifiable_handle()` returns `Some` for
+    /// the intersection of `is_metadata_error_notifiable()` and
+    /// `erased_handle().is_some()`, and `None` everywhere else.
+    ///
+    /// Java analog: post-poll `maybeFailOnMetadataError(uncompletedEvents)`
+    /// iterates `applicationEventReaper.uncompletedEvents()` (which is the
+    /// `CompletableEvent` set) and filters for
+    /// `MetadataErrorNotifiableEvent`. The intersection is exactly the
+    /// 4 events: `CheckAndUpdatePositions`, `ListOffsets`,
+    /// `TopicMetadata`, `AllTopicsMetadata` — NOT `AsyncPoll` (which is
+    /// notifiable but not completable).
+    #[test]
+    fn metadata_error_notifiable_handle_returns_intersection() {
+        // CheckAndUpdatePositions — notifiable AND completable.
+        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let ev = ApplicationEvent::CheckAndUpdatePositions { handle: h };
+        assert!(ev.metadata_error_notifiable_handle().is_some());
+
+        // ListOffsets — notifiable AND completable.
+        let (h, _rx, _e) = make_completable_event(0);
+        let ev = ApplicationEvent::ListOffsets {
+            handle: h,
+            timestamps_to_search: HashMap::new(),
+            require_timestamps: false,
+        };
+        assert!(ev.metadata_error_notifiable_handle().is_some());
+
+        // TopicMetadata — notifiable AND completable.
+        let (h, _rx, _e) = make_completable_event(0);
+        let ev = ApplicationEvent::TopicMetadata { handle: h, topic: "t".to_string() };
+        assert!(ev.metadata_error_notifiable_handle().is_some());
+
+        // AllTopicsMetadata — notifiable AND completable.
+        let (h, _rx, _e) = make_completable_event(0);
+        let ev = ApplicationEvent::AllTopicsMetadata { handle: h };
+        assert!(ev.metadata_error_notifiable_handle().is_some());
+
+        // AsyncPoll — notifiable but NOT completable. Must return None.
+        let state = Arc::new(AsyncPollState::new());
+        let ev = ApplicationEvent::AsyncPoll { deadline_ms: 0, poll_time_ms: 0, state };
+        assert!(
+            ev.metadata_error_notifiable_handle().is_none(),
+            "AsyncPoll is notifiable but not CompletableEvent — must not appear in uncompletedEvents()"
+        );
+
+        // Completable but NOT notifiable — must return None.
+        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let ev = ApplicationEvent::AssignmentChange { handle: h, current_time_ms: 0, partitions: HashSet::new() };
+        assert!(ev.metadata_error_notifiable_handle().is_none());
+
+        // Neither notifiable nor completable.
+        assert!(ApplicationEvent::CommitOnClose.metadata_error_notifiable_handle().is_none());
+        assert!(
+            ApplicationEvent::NewTopicsMetadataUpdate
+                .metadata_error_notifiable_handle()
+                .is_none()
         );
     }
 
