@@ -1233,12 +1233,16 @@ impl ApplicationEventProcessor {
                 // mirrors Java's "do reconciliation work before moving
                 // on to update positions" sequencing.
                 //
-                // Pass `can_commit = true`: at this site Java passes
-                // `true` because `updateTimerAndMaybeCommit` will have
-                // run by the time the membership advances (step 2
-                // below). Java's `maybeReconcile(true)` lets the
-                // auto-commit-enabled path proceed because any pending
-                // offsets are already being flushed.
+                // Pass `can_commit = true`: this is the poll-time entry
+                // point, before any new fetching starts (Java
+                // `ApplicationEventProcessor.process(AsyncPollEvent)`
+                // line 715-718). At this site any pending offsets can
+                // be safely flushed via the commit manager's
+                // auto-commit-before-rebalance path inside
+                // `maybeReconcile`, so Java passes `true` to permit
+                // reconciliation that may commit. The per-iteration
+                // `entries()` walk passes `false` because that path
+                // cannot guarantee a safe commit point.
                 if let Err(err) = mm.reconcile(poll_time_ms, true).await
                     && !is_ignorable_async_poll_error(&err)
                 {

@@ -671,3 +671,29 @@ timeout error" contract while keeping Rust's reaper as the
 deadline-enforcement mechanism (Java uses a user-side `Timer`, Rust
 uses the bg-task reaper — both produce equivalent observable
 behavior).
+
+
+---
+
+## Round 3 doc nits — `maybeReconcile(true)` causality comments
+
+- **Files**:
+  - `application_event_processor.rs:1185-1192` (rationale on
+    `mm.reconcile(poll_time_ms, true)` inside `process_async_poll`)
+  - `consumer_membership_manager.rs:478-481` (rustdoc on
+    `reconcile(&self, current_time_ms, can_commit)`)
+- **Symptom**: The comments claimed Java passes `true` to
+  `maybeReconcile(boolean)` because `updateTimerAndMaybeCommit` will
+  have run by the time the membership advances. Java actually calls
+  `maybeReconcile(true)` BEFORE `updateTimerAndMaybeCommit` (see
+  Java `ApplicationEventProcessor.process(AsyncPollEvent)` line
+  717-718 versus line 722). The bool value passed is correct; the
+  rationale text was causally backwards.
+
+**Resolution**: Rewrote both comments to match Java's actual
+causality — the poll-time entry point passes `true` because any
+pending offsets can be safely flushed via the commit manager's
+auto-commit-before-rebalance path inside `maybeReconcile`, before any
+new fetching starts (Java line 715-716). The per-iteration
+`entries()` walk passes `false` because that path has no safe commit
+point. No behavior change; comments only.

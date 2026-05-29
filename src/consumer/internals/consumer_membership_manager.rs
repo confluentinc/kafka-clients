@@ -472,10 +472,15 @@ impl ConsumerMembershipManager {
     /// skipped because there is no safe opportunity to flush in-progress
     /// offsets before the assignment changes. Java passes `false` from
     /// `AbstractMembershipManager.poll(now)` (the per-iteration
-    /// `entries()` walk) and `true` from `ApplicationEventProcessor.process(AsyncPollEvent)`
-    /// (which has just run `updateTimerAndMaybeCommit`). The Rust
-    /// translation mirrors this through the bg-task call site (passes
-    /// `false`) and the `process_async_poll` arm (passes `true`).
+    /// `entries()` walk) and `true` from
+    /// `ApplicationEventProcessor.process(AsyncPollEvent)` (the
+    /// poll-time entry point, before any new fetching starts — see
+    /// Java line 715-718). The poll-time path passes `true` because
+    /// any pending offsets can be safely flushed via the commit
+    /// manager's auto-commit-before-rebalance path inside this method.
+    /// The Rust translation mirrors this through the bg-task call site
+    /// (passes `false`) and the `process_async_poll` arm (passes
+    /// `true`).
     ///
     /// Java: `maybeReconcile(boolean canCommit)`
     /// (`AbstractMembershipManager.java:824`).
