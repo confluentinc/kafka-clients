@@ -1296,6 +1296,22 @@ impl OffsetsRequestManager {
         guard.take()
     }
 
+    /// Test-only helper: pre-seed `cached_update_positions_exception` so
+    /// the NEXT [`Self::update_fetch_positions`] call surfaces the given
+    /// error. Used by sibling-module tests (e.g.
+    /// `ApplicationEventProcessorTest::refresh_committed_offsets_*`) to
+    /// drive the AsyncPoll failure path without standing up a full
+    /// network client — Java's equivalent stubs
+    /// `OffsetsRequestManager.updateFetchPositions` via Mockito.
+    #[cfg(test)]
+    pub(crate) fn set_cached_update_positions_exception_for_test(&self, err: KafkaError) {
+        let mut guard = self
+            .cached_update_positions_exception
+            .lock()
+            .expect("cached_update_positions_exception mutex poisoned");
+        *guard = Some(err);
+    }
+
     /// Cache the given error if `current_time_ms >= deadline_ms`. Java:
     /// `cacheExceptionIfEventExpired`. The cache is idempotent — only
     /// the first error in a contiguous run is stored.

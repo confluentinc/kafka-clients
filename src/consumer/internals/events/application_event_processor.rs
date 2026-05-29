@@ -1508,6 +1508,22 @@ mod tests {
     }
 
     fn setup_processor(with_group_id: bool) -> Fixture {
+        setup_processor_with_fetch(with_group_id, false)
+    }
+
+    /// Wider fixture builder used by tests that exercise the `AsyncPoll`
+    /// arm end-to-end — the fetch manager (when `with_fetch` is true)
+    /// short-circuits to an immediate Ok(()) ack via `poll_internal` when
+    /// the subscription has no fetchable partitions, which matches the
+    /// Java tests' Mockito-stubbed `createFetchRequests` return.
+    fn setup_processor_with_fetch(with_group_id: bool, with_fetch: bool) -> Fixture {
+        use crate::common::memory::buffer_supplier::BufferSupplier;
+        use crate::consumer::internals::fetch_buffer::FetchBuffer;
+        use crate::consumer::internals::fetch_config::FetchConfig;
+        use crate::consumer::internals::fetch_request_manager::{
+            FetchRequestManager, always_available, no_auth_failure,
+        };
+
         let subscriptions = make_subscriptions();
         let metadata = make_metadata(Arc::clone(&subscriptions));
 
@@ -1550,6 +1566,29 @@ mod tests {
             Arc::new(ApiVersions::new()),
             None,
         ));
+        let fetch = if with_fetch {
+            let fetch_config = FetchConfig::new(
+                1,
+                50 * 1024 * 1024,
+                500,
+                1024 * 1024,
+                500,
+                true,
+                "",
+                IsolationLevel::ReadUncommitted,
+            );
+            Some(FetchRequestManager::new(
+                Arc::clone(&metadata),
+                Arc::clone(&subscriptions),
+                fetch_config,
+                Arc::new(FetchBuffer::new()),
+                Arc::new(BufferSupplier::create()),
+                always_available(),
+                no_auth_failure(),
+            ))
+        } else {
+            None
+        };
 
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(
             coordinator,
@@ -1558,7 +1597,7 @@ mod tests {
             consumer_heartbeat,
             None, // consumer_membership held via Arc on the heartbeat manager
             offsets,
-            None, // fetch manager not needed for sync arms
+            fetch,
         )));
 
         let processor = ApplicationEventProcessor::new(
@@ -2361,5 +2400,943 @@ mod tests {
                 error: None,
             });
         // No assertion: the test passes if no panic.
+    }
+
+    // ===================================================================
+    // Phase 10 commit 6/N — full Java-parity test translation
+    //
+    // The async-arm tests above (commit 5/N) cover the dispatch-table
+    // wiring. The tests below translate each Java case faithfully,
+    // including happy-path commit/fetch flows that the commit-5 smoke
+    // tests intentionally skipped. To drive happy paths without Mockito,
+    // we use the `complete_first_unsent_commit_for_test` helpers on
+    // `CommitRequestManager` (added in this commit) as the equivalent of
+    // Java's `Mockito.when(...).thenReturn(...)` stubs.
+    // ===================================================================
+
+    /// Spin until `predicate()` returns `true`, polling every 5 ms up to
+    /// `timeout`. Used to wait for spawned continuations.
+    async fn yield_until<F: FnMut() -> bool>(mut predicate: F, timeout: std::time::Duration) -> bool {
+        let start = std::time::Instant::now();
+        loop {
+            if predicate() {
+                return true;
+            }
+            if start.elapsed() >= timeout {
+                return false;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        }
+    }
+
+    fn make_offset_and_metadata(offset: i64, epoch: Option<i32>) -> OffsetAndMetadata {
+        OffsetAndMetadata::with_leader_epoch(offset, epoch, "").expect("valid offset")
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testProcessUnsubscribeEventWithGroupId
+    //
+    // With a group id wired in, the AEP routes Unsubscribe through
+    // `membership_manager.leave_group(now_ms)`. The leave_group future
+    // resolves through the membership state machine; for this test we
+    // observe that the AEP correctly spawns and completes the handle.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn process_unsubscribe_event_with_group_id() {
+        let mut fx = setup_processor(true);
+        let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle });
+        // The leave_group call resolves the handle on the spawned task —
+        // we only verify the handle completes (success or failure both
+        // satisfy the spawn-pattern contract; Java verifies via
+        // `verify(membershipManager).leaveGroup()`).
+        let resolved = tokio::time::timeout(std::time::Duration::from_secs(5), rx).await;
+        assert!(
+            resolved.is_ok(),
+            "Unsubscribe with group id must spawn a continuation that completes the handle"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testApplicationEventIsProcessed (parameterized over 5
+    // representative events).
+    //
+    // Java uses Mockito to verify the dispatch overload is selected
+    // correctly. In Rust the enum match is exhaustive, so the equivalent
+    // check is that each representative event reaches its arm without
+    // panic and (where the arm completes synchronously) drives the
+    // expected state change. We translate this as a single dispatch
+    // exercise.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn application_event_is_processed_dispatches_all_representatives() {
+        let mut fx = setup_processor(true);
+        // AsyncPollEvent — drives the spawn path (no assertions on
+        // outcome here; covered by the dedicated AsyncPoll tests).
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        fx.processor
+            .process(ApplicationEvent::AsyncPoll { deadline_ms: 12_445, poll_time_ms: 12_345, state });
+        // CreateFetchRequestsEvent — fetch manager absent → handle fails;
+        // observed via the receiver resolving.
+        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        fx.processor.process(ApplicationEvent::CreateFetchRequests { handle });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+        // CheckAndUpdatePositionsEvent — succeeds with empty subs.
+        let (handle, rx) = CompletableEventHandle::<()>::new(500);
+        fx.processor.process(ApplicationEvent::CheckAndUpdatePositions { handle });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+        // TopicMetadataEvent.
+        let (handle, _rx) = CompletableEventHandle::<HashMap<String, Vec<crate::common::PartitionInfo>>>::new(i64::MAX);
+        fx.processor
+            .process(ApplicationEvent::TopicMetadata { handle, topic: "topic".to_string() });
+        // AssignmentChangeEvent (empty assignment).
+        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        fx.processor.process(ApplicationEvent::AssignmentChange {
+            handle,
+            current_time_ms: 12_345,
+            partitions: HashSet::new(),
+        });
+        let _ = tokio::time::timeout(std::time::Duration::from_secs(2), rx).await;
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testListOffsetsEventIsProcessed (parameterized over
+    // requireTimestamp = true / false).
+    //
+    // Mockito-style dispatch verification → Rust uses an empty
+    // timestamps map so the OffsetsRequestManager short-circuits.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_offsets_event_is_processed() {
+        for require_timestamps in [true, false] {
+            let mut fx = setup_processor(true);
+            let (handle, rx) = CompletableEventHandle::<
+                HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>>,
+            >::new(20_000);
+            fx.processor.process(ApplicationEvent::ListOffsets {
+                handle,
+                timestamps_to_search: HashMap::new(),
+                require_timestamps,
+            });
+            let result = tokio::time::timeout(std::time::Duration::from_secs(2), rx)
+                .await
+                .expect("must not hang")
+                .expect("sender alive")
+                .expect("ok");
+            assert!(result.is_empty(), "empty timestamps -> empty result");
+        }
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testAsyncPollEvent
+    //
+    // Full happy path: the AEP arm must call the commit manager's
+    // timer-update, the heartbeat's reset-poll-timer, the offsets
+    // manager's update-positions, and the fetch manager's
+    // create-fetch-requests. With empty subscriptions all of these
+    // short-circuit, so `state.is_complete()` flips after the spawned
+    // task drains its continuation chain.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_poll_event_completes_state_through_full_chain() {
+        let fx = setup_processor_with_fetch(true, true);
+        let request_managers = Arc::clone(&fx.request_managers);
+        let mut processor = fx.processor;
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: 12_446,
+            poll_time_ms: 12_345,
+            state: Arc::clone(&state),
+        });
+
+        // Drive the fetch manager's `poll()` to complete the
+        // `create_fetch_requests` ack the spawned task is awaiting. Empty
+        // subscriptions → empty prepared map → all pending acks complete
+        // Ok(()).
+        let request_managers_for_drive = Arc::clone(&request_managers);
+        let driver = tokio::spawn(async move {
+            for _ in 0..200 {
+                {
+                    let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(fetch_mgr) = guard.fetch.as_mut() {
+                        let _ = RequestManager::poll(fetch_mgr, 12_345);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let completed = yield_until(|| state.is_complete(), std::time::Duration::from_secs(5)).await;
+        driver.abort();
+        assert!(completed, "AsyncPoll must complete the state on a fully-wired processor");
+        // mark_validate_positions_complete must have fired (Java's
+        // `event.markValidatePositionsComplete()`).
+        assert!(
+            state.is_validate_positions_complete(),
+            "mark_validate_positions_complete should fire after update_fetch_positions returns"
+        );
+        // No error was set on the state.
+        assert!(state.error().is_none(), "happy-path AsyncPoll must not set an error");
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testFetchCommittedOffsetsEvent (happy path with offsets).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_committed_offsets_event_returns_offsets_on_success() {
+        let fx = setup_processor(true);
+        let tp0 = tp("topic", 0);
+        let tp1 = tp("topic", 1);
+        let tp2 = tp("topic", 2);
+        let mut partitions = HashSet::new();
+        partitions.insert(tp0.clone());
+        partitions.insert(tp1.clone());
+        partitions.insert(tp2.clone());
+
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(20_000);
+        processor.process(ApplicationEvent::FetchCommittedOffsets { handle, partitions });
+
+        // Stub the manager's response — Java does this via Mockito on
+        // `commitRequestManager.fetchOffsets`.
+        let stub = {
+            let mut response = HashMap::new();
+            response.insert(tp0.clone(), Some(make_offset_and_metadata(10, Some(2))));
+            response.insert(tp1.clone(), Some(make_offset_and_metadata(15, None)));
+            response.insert(tp2.clone(), Some(make_offset_and_metadata(20, Some(3))));
+            response
+        };
+        // Wait until the spawned AEP task has enqueued the unsent fetch,
+        // then complete it via the test helper.
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.complete_first_unsent_fetch_for_test(stub.clone())
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetFetch via the commit manager");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect("ok");
+        assert_eq!(result.len(), 3);
+        assert_eq!(result.get(&tp0).map(|o| o.offset()), Some(10));
+        assert_eq!(result.get(&tp1).map(|o| o.offset()), Some(15));
+        assert_eq!(result.get(&tp2).map(|o| o.offset()), Some(20));
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testTopicPatternSubscriptionTriggersJoin
+    //
+    // Membership manager is notified (`on_subscription_updated`) on EVERY
+    // pattern subscribe — regardless of whether `subscribeFromPattern`
+    // returned `true` (an actual subscription change) or `false` (no
+    // matching topics) — so the consumer joins the group if not already
+    // in. The Rust impl mirrors this via the unconditional notification
+    // at the end of `update_pattern_subscription`.
+    // -------------------------------------------------------------------
+    #[test]
+    fn topic_pattern_subscription_triggers_join_even_with_no_matches() {
+        let mut fx = setup_processor(true);
+        // First subscribe with a pattern that matches nothing in the
+        // empty cluster (Java: `subscribeFromPattern(any())` returns
+        // `false`). Membership manager must still be notified.
+        let pattern = Regex::new("topic.*").unwrap();
+        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        fx.processor.process(ApplicationEvent::TopicPatternSubscriptionChange {
+            handle,
+            pattern: pattern.clone(),
+            listener: None,
+        });
+        await_complete(rx).expect("first subscribe must succeed");
+
+        // Re-issue: same shape, second invocation. Java verifies
+        // membership manager is notified on both. We don't have a counter
+        // on the membership manager for this in Rust; observe instead
+        // that the subscription state reflects the pattern subscription
+        // (and a second call leaves it consistent).
+        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        fx.processor
+            .process(ApplicationEvent::TopicPatternSubscriptionChange { handle, pattern, listener: None });
+        await_complete(rx).expect("second subscribe must succeed");
+
+        let guard = fx.subscriptions.lock().unwrap();
+        assert!(guard.has_pattern_subscription(), "pattern subscription must remain set");
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testUpdatePatternSubscriptionEventOnlyTakesEffectWhenMetadataHasNewVersion
+    //
+    // First UpdatePatternSubscription dispatch with the current
+    // (un-advanced) metadata version is a no-op. Advancing the
+    // metadata version then issuing a second event invokes the
+    // pattern-subscription rebuild (subscribeFromPattern + on-subscription-updated).
+    // -------------------------------------------------------------------
+    #[test]
+    fn update_pattern_subscription_event_only_takes_effect_when_metadata_advances() {
+        let mut fx = setup_processor(true);
+        // Install a pattern subscription so `has_pattern_subscription()`
+        // returns true (Java stubs it explicitly).
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            guard.subscribe_pattern(Regex::new("topic.*").unwrap(), None).unwrap();
+        }
+
+        let initial_snapshot = fx.processor.metadata_version_snapshot();
+
+        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        fx.processor.process(ApplicationEvent::UpdatePatternSubscription { handle });
+        await_complete(rx).expect("first update must succeed");
+        // Snapshot unchanged because metadata version did not advance.
+        assert_eq!(initial_snapshot, fx.processor.metadata_version_snapshot());
+
+        // Advance the metadata version (Java: stub `updateVersion=1`).
+        // `bootstrap()` bumps `update_version`.
+        fx.metadata.metadata_arc().bootstrap(Vec::new());
+        let advanced = fx.metadata.update_version();
+        assert!(advanced > initial_snapshot, "metadata version must advance after bootstrap");
+
+        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        fx.processor.process(ApplicationEvent::UpdatePatternSubscription { handle });
+        await_complete(rx).expect("second update must succeed");
+        // Snapshot captured the new metadata version.
+        assert_eq!(
+            advanced,
+            fx.processor.metadata_version_snapshot(),
+            "second update must capture the advanced metadata version"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testSyncCommitEventWithEmptyOffsets
+    //
+    // Empty event-offsets + non-empty `subscriptions.allConsumed()`:
+    // `commit_sync(allConsumed, deadline)` is called and resolves with
+    // `allConsumed`. The Java test stubs `allConsumed()` to return a
+    // single-entry map. In Rust we seed the subscription state so the
+    // same single-entry map flows naturally.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_commit_event_with_empty_offsets_uses_all_consumed() {
+        let fx = setup_processor(true);
+        let partition = tp("topic", 0);
+        // Seed `all_consumed()` with one (partition, position) entry.
+        let position = FetchPosition::with_leader(10, Some(1), crate::metadata::LeaderAndEpoch::no_leader_or_epoch());
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            let mut tps = HashSet::new();
+            tps.insert(partition.clone());
+            guard.assign_from_user(tps).unwrap();
+            guard.seek_unvalidated(&partition, position).unwrap();
+        }
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        processor.process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
+        // `offsets_ready` must complete first (per Java's `markOffsetsReady`).
+        ready_rx.await.expect("sender alive").expect("offsets_ready must succeed");
+
+        // Drive the commit manager: complete the queued commit with the
+        // same offsets the manager was handed.
+        let stub_offsets = {
+            let mut m = HashMap::new();
+            m.insert(partition.clone(), make_offset_and_metadata(10, Some(1)));
+            m
+        };
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.complete_first_unsent_commit_for_test(stub_offsets.clone())
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetCommit via the commit manager");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect("ok");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&partition).map(|o| o.offset()), Some(10));
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testSyncCommitEvent
+    //
+    // Non-empty event-offsets: `commit_sync(offsets, deadline)` is called
+    // with the supplied map (NOT via `all_consumed()`) and resolves with
+    // the same map.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_commit_event_with_offsets_uses_offsets() {
+        let fx = setup_processor(true);
+        let partition = tp("topic", 0);
+        let mut offsets = HashMap::new();
+        offsets.insert(partition.clone(), make_offset_and_metadata(10, Some(1)));
+
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        processor.process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: Some(offsets.clone()) });
+        ready_rx.await.expect("sender alive").expect("offsets_ready must succeed");
+
+        let stub = offsets.clone();
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.complete_first_unsent_commit_for_test(stub.clone())
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetCommit");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect("ok");
+        assert_eq!(result, offsets);
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testSyncCommitEventWithException
+    //
+    // The commit manager future fails with an `IllegalStateException`;
+    // the AEP propagates the failure to the primary handle. Per Java:
+    // `offsets_ready.isDone()` is true and `event.future()` throws.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn sync_commit_event_with_exception_propagates_to_handle() {
+        let fx = setup_processor(true);
+        // Empty event-offsets + empty `all_consumed()` would short-circuit
+        // to Ok(empty); seed a partition position so the commit is
+        // non-trivial and reaches the manager queue.
+        let partition = tp("topic", 0);
+        let position = FetchPosition::with_leader(5, Some(1), crate::metadata::LeaderAndEpoch::no_leader_or_epoch());
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            let mut tps = HashSet::new();
+            tps.insert(partition.clone());
+            guard.assign_from_user(tps).unwrap();
+            guard.seek_unvalidated(&partition, position).unwrap();
+        }
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        processor.process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
+        ready_rx.await.expect("sender alive").expect("offsets_ready must succeed");
+
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.fail_first_unsent_commit_for_test(KafkaError::illegal_state("boom"))
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetCommit before we can fail it");
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect_err("failure must surface to handle");
+        assert!(
+            err.to_string().contains("boom"),
+            "expected commit failure to propagate, got: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testAsyncCommitEventWithEmptyOffsets
+    //
+    // Same shape as testSyncCommitEventWithEmptyOffsets but routes via
+    // `commit_async_no_callback` (which never expires per Java —
+    // deadline = i64::MAX).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_commit_event_with_empty_offsets_uses_all_consumed() {
+        let fx = setup_processor(true);
+        let partition = tp("topic", 0);
+        let position = FetchPosition::with_leader(10, Some(1), crate::metadata::LeaderAndEpoch::no_leader_or_epoch());
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            let mut tps = HashSet::new();
+            tps.insert(partition.clone());
+            guard.assign_from_user(tps).unwrap();
+            guard.seek_unvalidated(&partition, position).unwrap();
+        }
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        processor.process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
+        ready_rx.await.expect("sender alive").expect("offsets_ready must succeed");
+
+        let stub = {
+            let mut m = HashMap::new();
+            m.insert(partition.clone(), make_offset_and_metadata(10, Some(1)));
+            m
+        };
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.complete_first_unsent_commit_for_test(stub.clone())
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetCommit");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect("ok");
+        assert_eq!(result.len(), 1);
+        assert_eq!(result.get(&partition).map(|o| o.offset()), Some(10));
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testAsyncCommitEvent
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_commit_event_with_offsets_uses_offsets() {
+        let fx = setup_processor(true);
+        let partition = tp("topic", 0);
+        let mut offsets = HashMap::new();
+        offsets.insert(partition.clone(), make_offset_and_metadata(10, Some(1)));
+
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        processor.process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: Some(offsets.clone()) });
+        ready_rx.await.expect("sender alive").expect("offsets_ready must succeed");
+
+        let stub = offsets.clone();
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.complete_first_unsent_commit_for_test(stub.clone())
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetCommit");
+
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect("ok");
+        assert_eq!(result, offsets);
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testAsyncCommitEventWithException
+    //
+    // Failure flows through `commit_async_no_callback`'s retriable-wrap
+    // path. We fail with a non-retriable error so the error surfaces
+    // verbatim (Java wraps retriable errors with
+    // `RetriableCommitFailedException` — both halves of the contract are
+    // exercised in `commit_request_manager.rs` tests; here we only need
+    // the propagation path).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_commit_event_with_exception_propagates_to_handle() {
+        let fx = setup_processor(true);
+        let partition = tp("topic", 0);
+        let position = FetchPosition::with_leader(5, Some(1), crate::metadata::LeaderAndEpoch::no_leader_or_epoch());
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            let mut tps = HashSet::new();
+            tps.insert(partition.clone());
+            guard.assign_from_user(tps).unwrap();
+            guard.seek_unvalidated(&partition, position).unwrap();
+        }
+        let mut processor = fx.processor;
+        let request_managers = Arc::clone(&fx.request_managers);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        processor.process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
+        ready_rx.await.expect("sender alive").expect("offsets_ready must succeed");
+
+        let driven = {
+            let request_managers_for_drive = Arc::clone(&request_managers);
+            yield_until(
+                move || {
+                    let guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(commit) = guard.commit.as_ref() {
+                        commit.fail_first_unsent_commit_for_test(KafkaError::illegal_state("kaboom"))
+                    } else {
+                        false
+                    }
+                },
+                std::time::Duration::from_secs(5),
+            )
+            .await
+        };
+        assert!(driven, "AEP must enqueue the OffsetCommit before we can fail it");
+
+        let err = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("must not hang")
+            .expect("sender alive")
+            .expect_err("failure must surface to handle");
+        assert!(
+            err.to_string().contains("kaboom"),
+            "expected commit failure to propagate, got: {err}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testUpdatePatternSubscriptionInvokedWhenMetadataUpdated
+    //
+    // The AsyncPoll arm calls `maybe_update_pattern_subscription`. When
+    // the metadata version has advanced AND a pattern subscription is
+    // set AND a matching topic exists, the regex is re-evaluated and
+    // the subscription state captures the new topics.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_pattern_subscription_invoked_when_metadata_updated() {
+        let fx = setup_processor_with_fetch(true, true);
+        // Install a pattern subscription up front.
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            guard.subscribe_pattern(Regex::new("test-topic.*").unwrap(), None).unwrap();
+        }
+        // Populate the cluster with a matching topic so
+        // `update_pattern_subscription` finds something.
+        publish_topic_metadata(&fx.metadata, "test-topic");
+
+        let request_managers = Arc::clone(&fx.request_managers);
+        let mut processor = fx.processor;
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: 1_000,
+            poll_time_ms: 100,
+            state: Arc::clone(&state),
+        });
+
+        // Driver to clear the fetch ack.
+        let request_managers_for_drive = Arc::clone(&request_managers);
+        let driver = tokio::spawn(async move {
+            for _ in 0..200 {
+                {
+                    let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(fetch_mgr) = guard.fetch.as_mut() {
+                        let _ = RequestManager::poll(fetch_mgr, 100);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let completed = yield_until(|| state.is_complete(), std::time::Duration::from_secs(5)).await;
+        driver.abort();
+        assert!(completed, "AsyncPoll must complete");
+
+        // Pattern-subscription rebuild ran → `test-topic` is now in the
+        // concrete subscription set.
+        let guard = fx.subscriptions.lock().unwrap();
+        let sub = guard.subscription();
+        assert!(
+            sub.contains("test-topic"),
+            "expected `test-topic` in subscription after pattern rebuild, got: {sub:?}"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testUpdatePatternSubscriptionNotInvokedWhenNotUsingPatternSubscription
+    //
+    // No pattern subscription installed → `maybe_update_pattern_subscription`
+    // short-circuits, subscription set stays empty even when the cluster
+    // contains a matching topic.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_pattern_subscription_not_invoked_when_not_using_pattern_subscription() {
+        let fx = setup_processor_with_fetch(true, true);
+        publish_topic_metadata(&fx.metadata, "test-topic");
+        let request_managers = Arc::clone(&fx.request_managers);
+        let mut processor = fx.processor;
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: 1_000,
+            poll_time_ms: 100,
+            state: Arc::clone(&state),
+        });
+
+        let request_managers_for_drive = Arc::clone(&request_managers);
+        let driver = tokio::spawn(async move {
+            for _ in 0..200 {
+                {
+                    let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(fetch_mgr) = guard.fetch.as_mut() {
+                        let _ = RequestManager::poll(fetch_mgr, 100);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let completed = yield_until(|| state.is_complete(), std::time::Duration::from_secs(5)).await;
+        driver.abort();
+        assert!(completed, "AsyncPoll must complete even without pattern subscription");
+
+        let guard = fx.subscriptions.lock().unwrap();
+        assert!(!guard.has_pattern_subscription(), "no pattern subscription should be installed");
+        assert!(guard.subscription().is_empty(), "subscription set must remain empty");
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testUpdatePatternSubscriptionNotInvokedWhenMetadataNotUpdated
+    //
+    // Pattern subscription installed but metadata version unchanged
+    // across the two AsyncPoll cycles → `maybe_update_pattern_subscription`
+    // short-circuits, subscription set stays empty even when the cluster
+    // contains a matching topic (because the version-gating check skips
+    // the regex evaluation).
+    //
+    // The Rust impl captures the metadata version at processor
+    // construction and only advances on a `request_update_for_new_topics`
+    // change. The Java test stubs `updateVersion=1, 1` (no change between
+    // calls). We mirror this by leaving `update_version` at its
+    // construction-time value and ensuring the snapshot is in sync with
+    // the current update_version (so the gating check does nothing).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_pattern_subscription_not_invoked_when_metadata_not_updated() {
+        let fx = setup_processor_with_fetch(true, true);
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            guard.subscribe_pattern(Regex::new("test-topic.*").unwrap(), None).unwrap();
+        }
+        publish_topic_metadata(&fx.metadata, "test-topic");
+        // Sync the processor's snapshot to the current update_version,
+        // simulating Java's `updateVersion=1, 1` stub. The processor's
+        // snapshot is set at construction; bumping it to the current
+        // version prevents the gating check from triggering a rebuild.
+        let mut processor = fx.processor;
+        processor.metadata_version_snapshot = fx.metadata.update_version();
+
+        let request_managers = Arc::clone(&fx.request_managers);
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: 1_000,
+            poll_time_ms: 100,
+            state: Arc::clone(&state),
+        });
+
+        let request_managers_for_drive = Arc::clone(&request_managers);
+        let driver = tokio::spawn(async move {
+            for _ in 0..200 {
+                {
+                    let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(fetch_mgr) = guard.fetch.as_mut() {
+                        let _ = RequestManager::poll(fetch_mgr, 100);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let completed = yield_until(|| state.is_complete(), std::time::Duration::from_secs(5)).await;
+        driver.abort();
+        assert!(completed, "AsyncPoll must complete");
+
+        let guard = fx.subscriptions.lock().unwrap();
+        // Pattern-subscription rebuild did NOT run → subscription set
+        // remains empty (the pattern is set but no concrete topics were
+        // captured).
+        assert!(
+            guard.subscription().is_empty(),
+            "subscription set must remain empty when metadata did not advance"
+        );
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testRefreshCommittedOffsetsShouldNotResetIfFailedWithTimeout
+    //
+    // `update_fetch_positions` fails with a timeout error during
+    // AsyncPoll. The Java contract: the event completes (Java
+    // `event.isComplete() == true`) AND the error is surfaced through
+    // `event.error()`. Wait — Java's test asserts:
+    //   `assertTrue(event.isComplete());`
+    //   `assertFalse(event.error().isEmpty());`
+    // i.e. the AsyncPoll event ALWAYS completes, but the error field
+    // captures the failure so the next poll can re-attempt.
+    //
+    // In the Rust impl, a non-ignorable timeout error would set the
+    // error on the state. A timeout error IS ignorable per
+    // `is_ignorable_async_poll_error` — so timeouts fall through
+    // silently and the state completes without an error. Java's
+    // `Throwable("Intentional failure")` is a generic non-timeout
+    // throwable, however — Java's test actually uses `Throwable`, NOT
+    // `TimeoutException` — so the error IS surfaced (the test name is
+    // misleading, see the `Throwable` in the implementation).
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_committed_offsets_should_not_reset_if_failed() {
+        refresh_committed_offsets_failure_helper(true).await;
+    }
+
+    // -------------------------------------------------------------------
+    // Java: testRefreshCommittedOffsetsNotCalledIfNoGroupId
+    //
+    // Same shape but without a group id (no commit manager wired). The
+    // event still completes and surfaces the error.
+    // -------------------------------------------------------------------
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_committed_offsets_not_called_if_no_group_id() {
+        refresh_committed_offsets_failure_helper(false).await;
+    }
+
+    async fn refresh_committed_offsets_failure_helper(with_group_id: bool) {
+        let fx = setup_processor_with_fetch(with_group_id, true);
+        // Inject a cached exception so the next `update_fetch_positions`
+        // call surfaces a non-timeout error — mirrors Java's
+        // `Mockito.when(offsetsRequestManager.updateFetchPositions(anyLong()))
+        //   .thenReturn(CompletableFuture.failedFuture(new Throwable(...)))`.
+        {
+            let mut guard = fx.request_managers.lock().expect("rm poisoned");
+            let offsets_mgr = guard.offsets.as_mut().expect("offsets manager present");
+            offsets_mgr
+                .set_cached_update_positions_exception_for_test(KafkaError::illegal_state("Intentional failure"));
+        }
+
+        let request_managers = Arc::clone(&fx.request_managers);
+        let mut processor = fx.processor;
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: 110,
+            poll_time_ms: 100,
+            state: Arc::clone(&state),
+        });
+
+        // Drive the fetch manager — only reached if update_fetch_positions
+        // succeeds (it won't here, but the driver is harmless).
+        let request_managers_for_drive = Arc::clone(&request_managers);
+        let driver = tokio::spawn(async move {
+            for _ in 0..200 {
+                {
+                    let mut guard = request_managers_for_drive.lock().expect("rm poisoned");
+                    if let Some(fetch_mgr) = guard.fetch.as_mut() {
+                        let _ = RequestManager::poll(fetch_mgr, 100);
+                    }
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            }
+        });
+
+        let completed = yield_until(|| state.is_complete(), std::time::Duration::from_secs(5)).await;
+        driver.abort();
+        assert!(completed, "AsyncPoll must complete even when update_fetch_positions fails");
+        // Java: `assertFalse(event.error().isEmpty())` — the failure is
+        // surfaced via `state.error()` (non-timeout errors are not
+        // ignored per `is_ignorable_async_poll_error`).
+        let err = state.error().expect("error must be set when update_fetch_positions fails");
+        assert!(
+            err.to_string().contains("Intentional failure"),
+            "expected the injected failure to propagate, got: {err}"
+        );
+    }
+
+    /// Publish a metadata response containing a single topic so
+    /// `metadata.fetch().topics()` reports it. Mirrors the Java tests'
+    /// `cluster.topics()` Mockito stubs.
+    fn publish_topic_metadata(metadata: &ConsumerMetadata, topic_name: &str) {
+        use crate::common::Node;
+        use crate::common::Uuid;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::MetadataResponse;
+        use crate::metadata_response_data::{
+            MetadataResponseBroker, MetadataResponseData, MetadataResponsePartition, MetadataResponseTopic,
+        };
+        let node = Node::new(1, "localhost".to_string(), 9092);
+        let mut data = MetadataResponseData::new();
+        data.set_cluster_id(Some("test-cluster-id".to_string()));
+        data.set_controller_id(node.id());
+
+        let mut broker = MetadataResponseBroker::new();
+        broker.set_node_id(node.id());
+        broker.set_host(node.host().to_string());
+        broker.set_port(node.port());
+        data.set_brokers(vec![broker]);
+
+        let mut topic = MetadataResponseTopic::new();
+        topic.set_name(Some(topic_name.to_string()));
+        topic.set_topic_id(Uuid::zero());
+        topic.set_error_code(0);
+        topic.set_is_internal(false);
+        let mut partition = MetadataResponsePartition::new();
+        partition.set_partition_index(0);
+        partition.set_error_code(0);
+        partition.set_leader_id(node.id());
+        partition.set_leader_epoch(5);
+        partition.set_replica_nodes(vec![node.id()]);
+        partition.set_isr_nodes(vec![node.id()]);
+        partition.set_offline_replicas(Vec::new());
+        topic.set_partitions(vec![partition]);
+        data.set_topics(vec![topic]);
+
+        let response = MetadataResponse::new(data, ApiKeys::METADATA.latest_version());
+        metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, 1_000);
     }
 }

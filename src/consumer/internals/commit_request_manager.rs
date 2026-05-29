@@ -956,6 +956,44 @@ impl CommitRequestManager {
         true
     }
 
+    /// Test-only helper: pop the first unsent `OffsetCommit` request and
+    /// resolve its underlying `oneshot::Sender` with the given offset
+    /// map. Used by sibling-module tests
+    /// (e.g. `ApplicationEventProcessorTest` happy-path SyncCommit /
+    /// AsyncCommit translations) to drive the commit response without
+    /// standing up a full network client — Java's equivalent tests stub
+    /// `CommitRequestManager::commitSync` / `::commitAsync` via Mockito.
+    ///
+    /// Returns `true` if a pending commit was found and completed,
+    /// `false` if the queue was empty.
+    #[cfg(test)]
+    pub(crate) fn complete_first_unsent_commit_for_test(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+    ) -> bool {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        let Some(request) = guard.pending.unsent_offset_commits.pop_front() else {
+            return false;
+        };
+        drop(guard);
+        request.complete_ok(offsets);
+        true
+    }
+
+    /// Test-only helper: pop the first unsent `OffsetCommit` request and
+    /// fail its `oneshot::Sender` with the given error. Sibling to
+    /// [`Self::complete_first_unsent_commit_for_test`].
+    #[cfg(test)]
+    pub(crate) fn fail_first_unsent_commit_for_test(&self, err: KafkaError) -> bool {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        let Some(request) = guard.pending.unsent_offset_commits.pop_front() else {
+            return false;
+        };
+        drop(guard);
+        request.complete_err(err);
+        true
+    }
+
     // ---------------------------------------------------------------------
     //                              close path
     // ---------------------------------------------------------------------
