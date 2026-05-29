@@ -700,21 +700,19 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
                 drop(rm_guard);
-                let err = KafkaError::illegal_state(
+                // Java: `process(AsyncCommitEvent)` empty-manager branch
+                // only completes `event.future()` exceptionally; it does
+                // NOT mark / fail `offsetsReady`. The app-side
+                // `ConsumerUtils.getResult(offsetsReady, ...)` waits with
+                // `defaultApiTimeoutMs` and surfaces a TimeoutException.
+                // We mirror that contract so the secondary handle remains
+                // un-completed until its deadline elapses; the primary
+                // handle carries the IllegalState that the user observes
+                // directly from `commit_async()` / `commit_sync()`.
+                let _ = offsets_ready;
+                handle.complete_exceptionally(KafkaError::illegal_state(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
-                );
-                // Java's empty-manager branch completes only `event.future()`
-                // exceptionally and leaves `offsetsReady` un-completed; the
-                // app-side `ConsumerUtils.getResult(offsetsReady, ...)`
-                // surfaces a TimeoutException via the API timeout. The Rust
-                // translation eagerly fails both handles with the same
-                // error so the app side observes the failure on whichever
-                // it awaits first — strictly faithful to Java's contract
-                // (the primary handle's failure) while avoiding the
-                // app-side blocking-then-timeout dance for the secondary
-                // handle.
-                offsets_ready.complete_exceptionally(err.clone());
-                handle.complete_exceptionally(err);
+                ));
                 return;
             };
             // Resolve offsets (Java's `event.offsets().orElseGet(subscriptions::allConsumed)`).
@@ -763,11 +761,13 @@ impl ApplicationEventProcessor {
             let rm_guard = self.lock_request_managers();
             let Some(commit) = rm_guard.commit.as_ref() else {
                 drop(rm_guard);
-                let err = KafkaError::illegal_state(
+                // Java: `process(SyncCommitEvent)` empty-manager branch
+                // only fails `event.future()`; `offsetsReady` is left
+                // un-completed. See `process_commit_async` for rationale.
+                let _ = offsets_ready;
+                handle.complete_exceptionally(KafkaError::illegal_state(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
-                );
-                offsets_ready.complete_exceptionally(err.clone());
-                handle.complete_exceptionally(err);
+                ));
                 return;
             };
             let resolved = match offsets {
@@ -2172,27 +2172,43 @@ mod tests {
         result.expect("update_fetch_positions must succeed when no partitions need positions");
     }
 
-    /// `CommitAsync` without a commit manager fails the handle with
-    /// `illegal_state` carrying Java's exact error message.
+    /// `CommitAsync` without a commit manager fails the primary handle
+    /// with `illegal_state` carrying Java's exact error message. Java's
+    /// `process(AsyncCommitEvent)` empty-manager branch only completes
+    /// `event.future()` exceptionally and leaves `offsetsReady`
+    /// un-completed — the app-side then surfaces a TimeoutException via
+    /// the default API timeout. The Rust translation matches this
+    /// contract: the primary fails immediately; the secondary
+    /// `offsets_ready` stays pending. The regression test pins the
+    /// behavior so a future change that silently re-introduces eager
+    /// dual-fail is caught.
     #[tokio::test(flavor = "current_thread")]
     async fn commit_async_without_commit_manager_fails_with_illegal_state() {
         let mut fx = setup_processor(false); // no group id → no commit manager
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
-        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        // Snapshot a second handle pointing to the same inner slot so we
+        // can observe `is_done()` after the variant has moved
+        // `offsets_ready` into the event.
+        let ready_probe = offsets_ready.erased();
         fx.processor
             .process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
-        let err = ready_rx
-            .await
-            .expect("sender alive")
-            .expect_err("must fail when no commit manager");
+        let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
         assert!(
             err.to_string().contains("CommitRequestManager is not available"),
             "expected illegal-state error mentioning CommitRequestManager, got: {err}"
         );
-        let err2 = rx.await.expect("sender alive").expect_err("primary handle must also fail");
+        // Secondary handle is intentionally un-completed (matches Java's
+        // `event.future().completeExceptionally(...)` while leaving
+        // `offsetsReady` pending). Asserting via the erased probe
+        // instead of awaiting `ready_rx` (which would hang).
         assert!(
-            err2.to_string().contains("CommitRequestManager is not available"),
-            "expected illegal-state error mentioning CommitRequestManager, got: {err2}"
+            !ready_probe.is_done(),
+            "offsets_ready must remain un-completed when commit manager is missing (matches Java)",
+        );
+        assert!(
+            matches!(ready_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+            "offsets_ready receiver must be pending (no sender fire)",
         );
     }
 
@@ -2221,19 +2237,29 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    /// `CommitSync` without a commit manager fails the handle with
-    /// `illegal_state`.
+    /// `CommitSync` without a commit manager fails the primary handle with
+    /// `illegal_state` and leaves `offsets_ready` un-completed. Matches
+    /// Java's `process(SyncCommitEvent)` empty-manager branch.
     #[tokio::test(flavor = "current_thread")]
     async fn commit_sync_without_commit_manager_fails_with_illegal_state() {
         let mut fx = setup_processor(false);
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
-        let (offsets_ready, _ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        let ready_probe = offsets_ready.erased();
         fx.processor
             .process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         assert!(
             err.to_string().contains("CommitRequestManager is not available"),
             "expected illegal-state error, got: {err}"
+        );
+        assert!(
+            !ready_probe.is_done(),
+            "offsets_ready must remain un-completed when commit manager is missing (matches Java)",
+        );
+        assert!(
+            matches!(ready_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
+            "offsets_ready receiver must be pending (no sender fire)",
         );
     }
 

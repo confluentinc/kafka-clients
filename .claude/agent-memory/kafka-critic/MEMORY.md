@@ -31,3 +31,6 @@
 - [M8 Phase 7a patterns](review_m8_phase7a_patterns.md) — §27 receive-path: per-record Arc<str> alloc + DefaultRecord clone violate zero-copy; Notify race; transactional code path partially missing
 - [M8 Phase 7a fix-cycle](review_m8_phase7a_fix_cycle.md) — §27 fix verification grep patterns; Notify pin+enable; ControlRecordType fail-loud divergence
 - [M8 Phase 7b patterns](review_m8_phase7b_patterns.md) — CompletableFuture single-slot vs Rust queue; IllegalStateException scope; new-method-no-test pattern; §27 audit heuristics
+- [M8 Phase 8b patterns](review_m8_phase8b_patterns.md) — §31 listener-present check; Err swallow; unsafe impl Send smell; plan test-count inflation; Timer.update side effects
+- [M8 Phase 10 wire-prereq patterns](review_m8_phase10_wire_prereq_patterns.md) — outer hook + inner stub; isStaleEpochErrorAndValidEpochAvailable predicate; check-order parity; test name vs body
+- [M8 Phase 10 round-2 patterns](review_m8_phase10_round2.md) — phase-ordering invariant from RequestManagers.entries(); canCommit gate collapse; exception-cache scope; transient-topic leak

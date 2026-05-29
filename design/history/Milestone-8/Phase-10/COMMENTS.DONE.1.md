@@ -329,3 +329,58 @@ that describe the actual translated behavior (Java references inline).
 > `subscriptions.allConsumed()` snapshot." Phase 10 IS this phase, and
 > commit 2.5/N landed the plumbing. The comment is the symptom of the
 > actual #1 bug above — once #1 is fixed the comment goes away.
+
+---
+
+## Round 2 — Phase 10
+
+### Issue R2-5: `AsyncCommit` / `SyncCommit` empty-commit-manager branch eagerly fails `offsets_ready`
+
+> - **File**:
+>   `src/consumer/internals/events/application_event_processor.rs:716-719`
+>   (and the symmetric `process_commit_sync` at `:769-771`).
+> - **Commit**: `4c76cae` Phase 10 (5/N): async-dispatch arms
+> - **Severity**: Behavior Mismatch (intentional deviation, but
+>   worth verifying with a regression test)
+> - **Java Reference**:
+>   `ApplicationEventProcessor.java:244-260` (`process(AsyncCommitEvent)`)
+>   and `:262-278` (`process(SyncCommitEvent)`). Both: empty-manager
+>   branch only calls `event.future().completeExceptionally(...)`,
+>   leaving `offsetsReady` un-completed; `AsyncKafkaConsumer.java:1050`
+>   then waits on `offsetsReady` with `defaultApiTimeoutMs` and surfaces
+>   a `TimeoutException`.
+> - **Description**: The Rust arm completes BOTH handles
+>   exceptionally (`offsets_ready.complete_exceptionally(err.clone());
+>   handle.complete_exceptionally(err)`). The comment at `:706-715`
+>   documents the deviation as "strictly faithful to Java's contract
+>   (the primary handle's failure) while avoiding the app-side
+>   blocking-then-timeout dance". This is plausibly an improvement
+>   (immediate clear error vs delayed timeout), but the deviation
+>   changes the observable error: Java callers see `TimeoutException`,
+>   Rust callers see `IllegalStateException`. Phase 11's
+>   `AsyncKafkaConsumer::commit_async` wiring will read whichever
+>   handle resolves first — both fail now, so the error type the
+>   caller observes depends on Phase-11 polling order.
+> - **Expected**: Either (a) restore Java behaviour: only fail
+>   `handle`, leave `offsets_ready` un-completed (Rust would still
+>   hang the same way Java does if the app side awaits both); or
+>   (b) keep the eager dual-fail and add a regression test that asserts
+>   the contract — specifically that `commit_async_without_commit_manager_fails_with_illegal_state`
+>   observes IllegalState on `offsets_ready` too. Today's test only
+>   awaits `handle.receiver()` and does not pin the secondary handle's
+>   state — a future change could revert to Java behaviour silently.
+>   Without a test, the deviation is invisible to subsequent reviewers.
+> - **Actual**: Both handles fail with `IllegalStateException`; no
+>   test pins this contract.
+
+**Resolution**: Restored Java behavior (option (a)). The empty-manager
+branches in both `process_commit_async` and `process_commit_sync` now
+only fail the primary `handle` and leave `offsets_ready` un-completed —
+matching `ApplicationEventProcessor.java:244-278`. Both existing
+regression tests (`commit_async_without_commit_manager_fails_with_illegal_state`
+and `commit_sync_without_commit_manager_fails_with_illegal_state`) were
+extended to pin the secondary-handle contract: a snapshot
+`erased()` of `offsets_ready` taken before the variant moves it lets us
+assert `!is_done()` on the inner slot, and `ready_rx.try_recv()` must
+observe `TryRecvError::Empty`. This catches any future silent
+revert to eager dual-fail.
