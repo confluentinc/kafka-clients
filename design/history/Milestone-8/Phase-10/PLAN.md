@@ -454,3 +454,146 @@ processor file; (7) builds on (4)+(5); (8) builds on (7); (9) is the
 final pass. Default plan: single Actor running serially — the
 parallelism here is small (~1 hour saved on the wire-prereqs) and
 likely not worth coordinator overhead.
+
+## Status — Closure
+
+**Date closed:** 2026-05-29.
+
+### Commits delivered (13)
+
+| # | Hash | Title |
+| --- | --- | --- |
+| 1 | `66948a0` | Phase 10 (1/N): RequestManagers — wire offsets + fetch slots |
+| 2 | `a0e3c19` | Phase 10 (2/N): CommitRequestManager — auto-commit hook + drain fix + retry counter |
+| — | `d3ac959` | fixup! Phase 10 (2/N + 2.5/N + 1/N): COMMENTS.1.md fixes #1, #2, #3, #4, #5 |
+| 2.5 | `4b9d99d` | Phase 10 (2.5/N): CommitRequestManager — MemberStateListener impl + auto-commit-sync-before-rebalance |
+| 3a | `8187354` | Phase 10 (3a/N): OffsetsRequestManager — relocate init_with_committed_offsets_if_needed |
+| 3b | `2b3d050` | Phase 10 (3b/N): OffsetsRequestManager — update_fetch_positions |
+| 3c | `86e698d` | Phase 10 (3c/N): OffsetsRequestManager — fetch_offsets + cluster-listener replay |
+| 3d | `eee76c4` | Phase 10 (3d/N): OffsetsRequestManager — try_connect plumbing |
+| 4 | `8fcbe26` | Phase 10 (4/N): ApplicationEventProcessor — dispatch table + non-async arms |
+| 5 | `4c76cae` | Phase 10 (5/N): ApplicationEventProcessor — async-dispatch arms |
+| 6 | `3fc404a` | Phase 10 (6/N): ApplicationEventProcessorTest — translate all in-scope tests |
+| 7 | `e86f7c1` | Phase 10 (7/N): ConsumerNetworkThread — runOnce skeleton + shutdown |
+| 8 | `3d6e7d4` | Phase 10 (8/N): ConsumerNetworkThreadTest — exhaustive translation |
+| 9 | _(this commit)_ | Phase 10 (9/N): wire-up + lint + agent-memory notes — Phase 10 closes |
+
+All wire-prereqs (1–9) closed.
+
+### Definition of Done — final check
+
+  - [x] `cargo build` clean (no warnings).
+  - [x] `cargo test --lib` 1546 tests pass, 0 failures.
+  - [x] `cargo xtask format-check` clean.
+  - [x] `cargo xtask lint` clean (clippy `-D warnings`).
+  - [x] `cargo xtask check-generated` clean.
+  - [x] Every in-scope test from `ConsumerNetworkThreadTest` (13) and
+    `ApplicationEventProcessorTest` (39) translated. Skipped tests
+    listed under "Skipped tests" with rationale.
+  - [x] `cargo test --lib consumer_network_thread` passes.
+  - [x] `cargo test --lib application_event_processor` passes.
+  - [x] No `panic!` / `unimplemented!` / `todo!` / `unsafe` in
+    production code. One `TODO:` comment remains at
+    `consumer_membership_manager.rs:538` as a deliberate Phase-11
+    carry-over marker explained in the surrounding context.
+  - [x] `RequestManagers::entries()` returns managers in Java's
+    registration order (membership skipped by design — Phase-3 of
+    `run_once` re-supplies its side-effect).
+  - [x] Lock-discipline audit on the processor: no `SubscriptionState`
+    `MutexGuard` held across an `.await` or across a
+    `BackgroundEventHandler::add` call. Walked in Critic round 1 and
+    re-walked in commit 9.
+  - [x] No `#[async_trait]` on `EventProcessor<E>` (sync `fn process`).
+  - [x] `ConsumerNetworkThread::run_once` has exactly ONE wakeup-token
+    cancellation-safe `.await` point (Phase 4 network poll under
+    `select! { biased; token.cancelled; delegate.poll }`).
+    The Phase-3 `membership.reconcile().await` and Phase-2
+    `delegate.try_connect().await` calls run before the wakeup-guarded
+    poll and are short-lived in practice — not bound to wakeup-token
+    cancel-safety per §11.
+  - [x] §10/§11 cross-checks:
+    - Single `tokio::spawn` per consumer (run consumes self).
+    - `wakeup()` uses the rotating-token primitive (`WakeupTrigger`).
+    - `process_application_events` drains via `try_recv` in
+      `while let` loop, unbounded.
+
+### Carry-overs to Phase 11
+
+These were explicitly deferred per the per-commit notes and are NOT
+defects in Phase 10:
+
+  - **`AsyncKafkaConsumer` glue** (Phase 11 owns):
+    - Spawn the bg task via `tokio::spawn(consumer_network_thread.run())`.
+    - App-side `wakeup()` plumbing — calling
+      `WakeupTrigger::wakeup()` from the public API + rotating the
+      token after a method returns `KafkaError::Wakeup(_)`.
+    - `process_background_events` on the app side per §31 — drain
+      rebalance-listener callback-needed events and invoke listeners
+      inline on the caller's task.
+    - `consumer.maximum_time_to_wait()` exposure to the app side.
+    - `consumer.close(timeout)` — sends `signal_close`, awaits the
+      spawn handle.
+    - `consumer_membership_manager.leave_group()` /
+      `leave_group_on_close()` invocation from `close()` epilogue
+      (Phase 8b note).
+    - `reset_poll_timer` → `maybe_rejoin_stale_member` invocation in
+      `poll()` epilogue (Phase 8b note).
+    - Auto-commit-sync-before-rebalance invocation inside the
+      membership reconcile sequence: see
+      `consumer_membership_manager.rs:538` TODO marker. The
+      `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
+      method (commit 2.5) is ready to call; only the poll-path
+      scaffolding is missing.
+
+  - **`AsyncConsumerMetrics` translation** (deferred across Milestone-8):
+    - `testRunOnceRecordTimeBetweenNetworkThreadPoll`,
+    - `testRunOnceRecordApplicationEventQueueSizeAndApplicationEventQueueTime`,
+    - `testRunOnceInvokesReaper` / `testCleanupInvokesReaper`
+      metric-record assertions (the reaper-invocation observation
+      itself was translated; only the metric check is deferred).
+
+  - **`Supplier<...>` constructor error path** — Java's
+    `testNetworkClientDelegateInitializeResourcesError` etc. exercise
+    suppliers that fail during init. Rust constructor takes
+    already-constructed values; the error path moves to the Phase 11
+    consumer constructor wrapper.
+
+  - **`testStartupAndTearDown`** — `Thread.start()` / `isAlive()`
+    semantics belong on the `AsyncKafkaConsumer` spawn surface, not
+    the network-thread struct itself. Phase 11.
+
+  - **Streams arm tests in `ApplicationEventProcessorTest`** (6 cases)
+    skipped per `consumer-threading.md` §20. Not a Phase 11 carry —
+    explicitly out of milestone scope.
+
+### Audit results (commit 9)
+
+  - **TODO/FIXME/unimplemented/todo! search**: 1 hit total in
+    production code — `consumer_membership_manager.rs:538` is a
+    deliberate Phase-11 carry-over marker, well documented in the
+    surrounding context. Per the wrap-commit instructions option (c),
+    explained as intentional. All other matches are in `#[cfg(test)]`
+    modules (panic-on-test-invariant patterns).
+  - **`unwrap()` / `expect()` in production**: all hits are
+    `.lock().expect("... poisoned")` on `std::sync::Mutex` (canonical
+    recovery-impossible per CLAUDE.md §10.1) and a small number of
+    invariant `.expect("delegate not contended on bg task")` /
+    `.expect("receiver fresh")` invariant assertions (bg-task is the
+    sole holder of the relevant lock — Java would catch the equivalent
+    via `IllegalStateException`).
+  - **`tokio::sync::Mutex<SubscriptionState>`**: zero hits.
+  - **`parking_lot::Mutex`**: zero hits.
+  - **`#[async_trait]` on `EventProcessor` or per-record traits**:
+    zero hits.
+  - **Handle preservation (§28)**: every `CompletableApplicationEvent<T>`
+    arm in the processor calls `handle.complete*` exactly once on
+    every code path (success / Err / recv_err / early-return-failure).
+    Spawned continuations match all three receiver-result branches.
+  - **Lock discipline (§16)**: every `.await` site in the Phase-10
+    production code reviewed. `std::sync::Mutex` guards
+    (`RequestManagers`, `SubscriptionState`, manager-internal state)
+    are released before `.await` in every spawned-task path. The only
+    lock held across `.await` is `Arc<tokio::sync::Mutex<NetworkClientDelegate>>`
+    — the runtime-async lock owned solely by the bg task, by design.
+
+Phase 10 closes.
