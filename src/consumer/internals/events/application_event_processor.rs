@@ -71,6 +71,7 @@ use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::application_event::ApplicationEvent;
+use super::completable_event_reaper::CompletableEventReaper;
 use super::event_processor::EventProcessor;
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
@@ -99,6 +100,14 @@ pub(crate) struct ApplicationEventProcessor {
     /// Subscription state — guarded by `std::sync::Mutex` per
     /// `consumer-threading.md` §16.
     subscriptions: Arc<Mutex<SubscriptionState>>,
+    /// Shared application-event reaper — same instance owned by
+    /// [`super::super::consumer_network_thread::ConsumerNetworkThread`].
+    /// The processor registers SECONDARY handles (e.g. `offsets_ready`
+    /// from `CommitAsync` / `CommitSync` when the commit manager is
+    /// absent) so their deadlines are still enforced even though the
+    /// bg-task's `process_application_events` only registers the
+    /// primary handle via `event.erased_handle()`.
+    application_event_reaper: Arc<Mutex<CompletableEventReaper>>,
     /// Java: `private int metadataVersionSnapshot`. Captures the
     /// metadata-version cursor at construction; advances when a
     /// pattern-subscription rebuild has been triggered. Used by
@@ -110,14 +119,27 @@ pub(crate) struct ApplicationEventProcessor {
 impl ApplicationEventProcessor {
     /// Java: 4-arg constructor (logContext, requestManagers, metadata,
     /// subscriptions). The Rust translation drops `LogContext` (we use
-    /// `log`) and takes the three shared references by `Arc`.
+    /// `log`) and takes the three shared references by `Arc`, plus the
+    /// `CompletableEventReaper` shared with the bg task (Phase-10 R3-1):
+    /// the AEP registers secondary `offsets_ready` handles directly on
+    /// the empty-commit-manager fall-through so the reaper enforces the
+    /// deadline (mirroring Java's `Timer`-based `ConsumerUtils.getResult`
+    /// wait that surfaces `TimeoutException` after the user-supplied
+    /// timeout elapses).
     pub(crate) fn new(
         request_managers: Arc<Mutex<RequestManagers>>,
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
+        application_event_reaper: Arc<Mutex<CompletableEventReaper>>,
     ) -> Self {
         let metadata_version_snapshot = metadata.update_version();
-        Self { request_managers, metadata, subscriptions, metadata_version_snapshot }
+        Self {
+            request_managers,
+            metadata,
+            subscriptions,
+            application_event_reaper,
+            metadata_version_snapshot,
+        }
     }
 
     /// Java: `int metadataVersionSnapshot()` — visible-for-testing.
@@ -704,12 +726,27 @@ impl ApplicationEventProcessor {
                 // only completes `event.future()` exceptionally; it does
                 // NOT mark / fail `offsetsReady`. The app-side
                 // `ConsumerUtils.getResult(offsetsReady, ...)` waits with
-                // `defaultApiTimeoutMs` and surfaces a TimeoutException.
-                // We mirror that contract so the secondary handle remains
-                // un-completed until its deadline elapses; the primary
-                // handle carries the IllegalState that the user observes
-                // directly from `commit_async()` / `commit_sync()`.
-                let _ = offsets_ready;
+                // `defaultApiTimeoutMs` and surfaces a TimeoutException
+                // when the user-supplied `Timer` elapses.
+                //
+                // Rust's secondary `offsets_ready` handle is a oneshot
+                // sender; if we drop it un-completed, the receiver
+                // resolves with `RecvError` immediately — divergent from
+                // Java's "wait the full deadline then TimeoutException".
+                // To restore Java's contract we register the secondary
+                // handle with the application-event reaper (Phase-10
+                // R3-1). The reaper holds a strong ref keeping the
+                // sender alive, then completes it with
+                // `KafkaError::Timeout` when `deadline_ms` elapses —
+                // exactly mirroring Java's `Timer`-based timeout.
+                {
+                    let mut reaper = match self.application_event_reaper.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    reaper.add(offsets_ready.erased());
+                }
+                drop(offsets_ready);
                 handle.complete_exceptionally(KafkaError::illegal_state(
                     "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -763,8 +800,21 @@ impl ApplicationEventProcessor {
                 drop(rm_guard);
                 // Java: `process(SyncCommitEvent)` empty-manager branch
                 // only fails `event.future()`; `offsetsReady` is left
-                // un-completed. See `process_commit_async` for rationale.
-                let _ = offsets_ready;
+                // un-completed and the user-side `Timer` in
+                // `ConsumerUtils.getResult` eventually fires a
+                // TimeoutException. See `process_commit_async` for the
+                // full rationale — Rust registers the secondary handle
+                // with the reaper so its deadline is enforced and the
+                // receiver eventually resolves with `KafkaError::Timeout`
+                // (Phase-10 R3-1).
+                {
+                    let mut reaper = match self.application_event_reaper.lock() {
+                        Ok(g) => g,
+                        Err(p) => p.into_inner(),
+                    };
+                    reaper.add(offsets_ready.erased());
+                }
+                drop(offsets_ready);
                 handle.complete_exceptionally(KafkaError::illegal_state(
                     "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
                 ));
@@ -1503,6 +1553,10 @@ mod tests {
         request_managers: Arc<Mutex<RequestManagers>>,
         metadata: Arc<ConsumerMetadata>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
+        /// Shared reaper — tests that exercise secondary-handle
+        /// registration (e.g. the `process_commit_async` empty-manager
+        /// arm) drive it directly via `reap(now)`.
+        reaper: Arc<Mutex<CompletableEventReaper>>,
     }
 
     fn make_metadata(subs: Arc<Mutex<SubscriptionState>>) -> Arc<ConsumerMetadata> {
@@ -1607,13 +1661,15 @@ mod tests {
             fetch,
         )));
 
+        let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
+            Arc::clone(&reaper),
         );
 
-        Fixture { processor, request_managers, metadata, subscriptions }
+        Fixture { processor, request_managers, metadata, subscriptions, reaper }
     }
 
     /// Construct a heartbeat manager wired to a membership manager. The
@@ -2184,39 +2240,99 @@ mod tests {
     /// `process(AsyncCommitEvent)` empty-manager branch only completes
     /// `event.future()` exceptionally and leaves `offsetsReady`
     /// un-completed — the app-side then surfaces a TimeoutException via
-    /// the default API timeout. The Rust translation matches this
-    /// contract: the primary fails immediately; the secondary
-    /// `offsets_ready` stays pending. The regression test pins the
-    /// behavior so a future change that silently re-introduces eager
-    /// dual-fail is caught.
+    /// the user-supplied `Timer` in `ConsumerUtils.getResult`.
+    ///
+    /// Rust's `offsets_ready` is a oneshot sender; dropping it un-completed
+    /// would resolve the receiver with `RecvError` immediately, diverging
+    /// from Java's "wait the full deadline then TimeoutException". Phase-10
+    /// R3-1 fixes that by registering `offsets_ready` with the
+    /// application-event reaper, which keeps a strong ref to the inner
+    /// sender and completes it with `KafkaError::Timeout` once the
+    /// deadline elapses — mirroring Java's `Timer`-based timeout.
+    ///
+    /// This test pins both halves of the contract: (a) the primary
+    /// handle fails immediately with the illegal-state message, (b) the
+    /// secondary `offsets_ready` is registered with the reaper and is
+    /// completed with a `KafkaError::Timeout` when `reap` runs past the
+    /// deadline.
     #[tokio::test(flavor = "current_thread")]
     async fn commit_async_without_commit_manager_fails_with_illegal_state() {
         let mut fx = setup_processor(false); // no group id → no commit manager
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
-        // Snapshot a second handle pointing to the same inner slot so we
-        // can observe `is_done()` after the variant has moved
-        // `offsets_ready` into the event.
+        // Snapshot the erased handle BEFORE the variant moves
+        // `offsets_ready`. Used both to observe `is_done()` after the
+        // empty-manager arm runs and to assert the reaper sees the same
+        // inner slot via `contains`.
         let ready_probe = offsets_ready.erased();
+
+        // Pre-check: reaper is empty before the AEP fires.
+        {
+            let r = fx.reaper.lock().unwrap();
+            assert_eq!(r.size(), 0, "reaper must start empty");
+        }
+
         fx.processor
             .process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
+
         let err = rx.await.expect("sender alive").expect_err("primary handle must fail");
         assert!(
             err.to_string().contains("CommitRequestManager is not available"),
             "expected illegal-state error mentioning CommitRequestManager, got: {err}"
         );
-        // Secondary handle is intentionally un-completed (matches Java's
-        // `event.future().completeExceptionally(...)` while leaving
-        // `offsetsReady` pending). Asserting via the erased probe
-        // instead of awaiting `ready_rx` (which would hang).
+
+        // The secondary `offsets_ready` handle must be registered with
+        // the reaper (Phase-10 R3-1) — `contains` matches via
+        // `inner_id`, so a freshly-erased probe still resolves to the
+        // same tracked slot.
+        {
+            let r = fx.reaper.lock().unwrap();
+            assert_eq!(r.size(), 1, "reaper must track offsets_ready after empty-manager arm");
+            assert!(
+                r.contains(&ready_probe),
+                "reaper must contain offsets_ready (matched by inner_id, not Arc identity)"
+            );
+        }
+
+        // Before the deadline, the secondary handle is pending — the
+        // receiver sees neither a value nor a closed sender.
         assert!(
             !ready_probe.is_done(),
-            "offsets_ready must remain un-completed when commit manager is missing (matches Java)",
+            "offsets_ready must remain un-completed before deadline elapses",
         );
         assert!(
             matches!(ready_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
-            "offsets_ready receiver must be pending (no sender fire)",
+            "offsets_ready receiver must be pending before deadline (Rust mirrors Java's Timer wait)",
         );
+
+        // Advance past the deadline and run the reaper — Java's `Timer`
+        // fires `TimeoutException`; Rust's reaper fires
+        // `KafkaError::Timeout` with the equivalent diagnostic.
+        let expired = {
+            let mut r = fx.reaper.lock().unwrap();
+            r.reap(60_001)
+        };
+        assert_eq!(expired, 1, "reap must count the past-due offsets_ready handle");
+
+        // Receiver now resolves with the timeout error — exact variant
+        // and message asserted (DoD §3).
+        let received = ready_rx.await.expect("reaper completed the sender, receiver must resolve");
+        let timeout_err = received.expect_err("expected timeout error, got Ok");
+        match &timeout_err {
+            KafkaError::Timeout(msg) => {
+                assert!(
+                    msg.contains("past its expiration"),
+                    "expected reaper timeout diagnostic, got: {timeout_err}"
+                );
+            },
+            other => panic!("expected KafkaError::Timeout, got: {other:?}"),
+        }
+
+        // And the reaper has dropped the entry now that it is done.
+        {
+            let r = fx.reaper.lock().unwrap();
+            assert_eq!(r.size(), 0, "reaper must drop the completed entry");
+        }
     }
 
     /// `CommitAsync` with empty offsets and a group-id'd consumer resolves
@@ -2244,30 +2360,79 @@ mod tests {
         assert!(result.is_empty());
     }
 
-    /// `CommitSync` without a commit manager fails the primary handle with
-    /// `illegal_state` and leaves `offsets_ready` un-completed. Matches
-    /// Java's `process(SyncCommitEvent)` empty-manager branch.
+    /// `CommitSync` without a commit manager fails the primary handle
+    /// with `illegal_state` and registers `offsets_ready` with the
+    /// reaper so its deadline is enforced (Phase-10 R3-1) — mirroring
+    /// Java's `process(SyncCommitEvent)` empty-manager branch followed
+    /// by the `ConsumerUtils.getResult(offsetsReady, timer)`
+    /// `TimeoutException`. See `commit_async_without_commit_manager_*`
+    /// for the full rationale.
     #[tokio::test(flavor = "current_thread")]
     async fn commit_sync_without_commit_manager_fails_with_illegal_state() {
         let mut fx = setup_processor(false);
         let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
         let (offsets_ready, mut ready_rx) = CompletableEventHandle::<()>::new(60_000);
         let ready_probe = offsets_ready.erased();
+
+        {
+            let r = fx.reaper.lock().unwrap();
+            assert_eq!(r.size(), 0, "reaper must start empty");
+        }
+
         fx.processor
             .process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
+
         let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
         assert!(
             err.to_string().contains("CommitRequestManager is not available"),
             "expected illegal-state error, got: {err}"
         );
+
+        // The secondary `offsets_ready` handle is registered with the
+        // reaper after the empty-manager arm runs.
+        {
+            let r = fx.reaper.lock().unwrap();
+            assert_eq!(r.size(), 1, "reaper must track offsets_ready after empty-manager arm");
+            assert!(
+                r.contains(&ready_probe),
+                "reaper must contain offsets_ready (matched by inner_id)"
+            );
+        }
+
         assert!(
             !ready_probe.is_done(),
-            "offsets_ready must remain un-completed when commit manager is missing (matches Java)",
+            "offsets_ready must remain un-completed before deadline elapses",
         );
         assert!(
             matches!(ready_rx.try_recv(), Err(tokio::sync::oneshot::error::TryRecvError::Empty)),
-            "offsets_ready receiver must be pending (no sender fire)",
+            "offsets_ready receiver must be pending before deadline",
         );
+
+        // Advance past the deadline and reap — secondary handle is
+        // completed with `KafkaError::Timeout` (Java's
+        // `TimeoutException` analog).
+        let expired = {
+            let mut r = fx.reaper.lock().unwrap();
+            r.reap(60_001)
+        };
+        assert_eq!(expired, 1, "reap must count the past-due offsets_ready handle");
+
+        let received = ready_rx.await.expect("reaper completed the sender, receiver must resolve");
+        let timeout_err = received.expect_err("expected timeout error, got Ok");
+        match &timeout_err {
+            KafkaError::Timeout(msg) => {
+                assert!(
+                    msg.contains("past its expiration"),
+                    "expected reaper timeout diagnostic, got: {timeout_err}"
+                );
+            },
+            other => panic!("expected KafkaError::Timeout, got: {other:?}"),
+        }
+
+        {
+            let r = fx.reaper.lock().unwrap();
+            assert_eq!(r.size(), 0, "reaper must drop the completed entry");
+        }
     }
 
     /// `FetchCommittedOffsets` without a commit manager fails the handle
@@ -2394,10 +2559,12 @@ mod tests {
         // Wire RequestManagers with NO offsets manager — exercise the
         // failure path inside `process_async_poll`.
         let request_managers = Arc::new(Mutex::new(RequestManagers::new(None, None, None, None, None, None, None)));
+        let reaper = Arc::new(Mutex::new(CompletableEventReaper::new()));
         let mut processor = ApplicationEventProcessor::new(
             Arc::clone(&request_managers),
             Arc::clone(&metadata),
             Arc::clone(&subscriptions),
+            reaper,
         );
 
         let state = Arc::new(super::super::application_event::AsyncPollState::new());

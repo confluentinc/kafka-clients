@@ -1072,8 +1072,9 @@ mod tests {
         let poll_timeouts = counting_delegate.client_for_test_ref().poll_timeouts();
         let has_in_flight_script = counting_delegate.client_for_test_ref().has_in_flight_script();
         let delegate = Arc::new(AsyncMutex::new(counting_delegate));
-        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
@@ -1140,8 +1141,9 @@ mod tests {
             None,
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
-        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
@@ -1190,8 +1192,9 @@ mod tests {
             None,
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
-        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
@@ -1645,8 +1648,9 @@ mod tests {
             None,
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
-        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();
@@ -1709,8 +1713,9 @@ mod tests {
             None,
         )));
         let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
-        let processor = ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone());
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
         let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
         let wakeup = WakeupTrigger::new();

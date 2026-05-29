@@ -588,3 +588,86 @@ success path; `fetch_offsets_clears_transient_topics_on_failure`
 exercises the topic-authorization failure path. Both assert the
 topic is in the transient set BEFORE the response completes and
 absent AFTER.
+
+---
+
+## R3-1 (round 3). `let _ = offsets_ready;` caused `RecvError`, not Java's "pending forever"
+
+- **Original fixup commit**: `d41c649` (Phase 10 (5/N))
+- **File**: `src/consumer/internals/events/application_event_processor.rs`
+  — `process_commit_async` and `process_commit_sync` empty-manager
+  branches.
+- **Severity**: Behavior Mismatch (latent, surfaces only when Phase-11
+  wires the app-side awaiter of `ready_rx`)
+- **Java Reference**: `ApplicationEventProcessor.java:244-260`
+  (`process(AsyncCommitEvent)`) — Java's empty-manager branch leaves
+  `offsetsReady` un-completed. The app side then calls
+  `ConsumerUtils.getResult(offsetsReady, timer)`, which TIMER-based
+  waits for `defaultApiTimeoutMs` and surfaces a `TimeoutException`.
+- **Description**: The previous fix replaced
+  `offsets_ready.complete_exceptionally(err)` with
+  `let _ = offsets_ready;`. The intent was "leave un-completed, match
+  Java". But Rust's idiom diverges from Java's:
+  - Java: future is never completed; receiver-side wait blocks until
+    the explicit timer fires.
+  - Rust: when `offsets_ready` is dropped, its `Arc<HandleInner>` ref
+    count drops. In PRODUCTION, no other strong ref existed (the
+    reaper only tracked `event.erased_handle()` for the primary —
+    `offsets_ready` was NOT registered with the reaper). So the
+    `oneshot::Sender` inside `HandleInner.sender` dropped, and any
+    receiver `.await` resolved with
+    `tokio::sync::oneshot::error::RecvError` almost immediately — not
+    a timeout.
+  - The original regression test masked the divergence because it
+    explicitly snapshot `ready_probe = offsets_ready.erased()` BEFORE
+    the variant moved the handle. The probe held an extra
+    `Arc<HandleInner>` strong ref, so the inner sender stayed alive,
+    and `try_recv()` returned `Empty`. In production no such probe
+    exists, so the production behavior diverged from what the test
+    asserted.
+
+**Resolution**: Critic option (a) — register the secondary
+`offsets_ready` with the reaper. The reaper holds a strong ref to the
+inner sender (keeping it alive until the deadline) and completes it
+with `KafkaError::Timeout` once `reap(now)` observes `now > deadline_ms`,
+exactly mirroring Java's `Timer`-based `TimeoutException`. Steps:
+
+1. `ApplicationEventProcessor` gained an
+   `application_event_reaper: Arc<Mutex<CompletableEventReaper>>` field
+   sharing the same instance as `ConsumerNetworkThread`. The
+   constructor signature now takes the reaper as a 4th argument.
+2. `process_commit_async` and `process_commit_sync` empty-manager
+   branches now call
+   `self.application_event_reaper.lock().add(offsets_ready.erased())`
+   BEFORE failing the primary handle. The secondary handle is then
+   dropped (with `drop(offsets_ready)` to make the intent explicit) —
+   the reaper-held erased ref keeps the inner sender alive.
+3. Both regression tests
+   (`commit_async_without_commit_manager_fails_with_illegal_state` and
+   `commit_sync_without_commit_manager_fails_with_illegal_state`) were
+   extended to:
+   - Pre-check the reaper is empty (`size() == 0`).
+   - Verify the primary handle fails with the illegal-state error
+     message.
+   - Verify the reaper now tracks `offsets_ready` via `size() == 1`
+     and `contains(&ready_probe)` (inner_id match, not Arc identity).
+   - Verify `ready_rx.try_recv() == Empty` before the deadline.
+   - Call `reaper.reap(60_001)` (1 ms past the 60_000 deadline) and
+     assert the return value is 1 (one event expired).
+   - Await `ready_rx` and assert the variant is
+     `KafkaError::Timeout(msg)` with `msg.contains("past its expiration")`
+     — the reaper's diagnostic.
+   - Verify the reaper drops the entry afterwards (`size() == 0`).
+4. The five production call sites of `ApplicationEventProcessor::new`
+   in `consumer_network_thread.rs` (and one in the
+   `async_poll_without_offsets_manager_fails_state` test) were updated
+   to pass the reaper. The bg-task ones share the SAME reaper instance
+   that `ConsumerNetworkThread` already owns, so the reaper held by
+   the AEP and the one driven by `run_once`'s Phase-6 `reap` step are
+   the same `Arc<Mutex<...>>`.
+
+This restores Java's "user waits the full deadline then sees a
+timeout error" contract while keeping Rust's reaper as the
+deadline-enforcement mechanism (Java uses a user-side `Timer`, Rust
+uses the bg-task reaper — both produce equivalent observable
+behavior).
