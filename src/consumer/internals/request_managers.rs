@@ -278,7 +278,9 @@ mod tests {
             IsolationLevel::ReadUncommitted,
             100,
             30_000,
+            60_000,
             std::sync::Arc::new(ApiVersions::new()),
+            None,
         )
     }
 

@@ -20,14 +20,14 @@
 //!
 //! ## Scope
 //!
-//! This translation covers the **reset** (`reset_positions_if_needed`) and
-//! **validate** (`validate_positions_if_needed`) code paths that Java's
-//! `updateFetchPositions` orchestrates. Methods that depend on the
-//! out-of-scope `CommitRequestManager` (`fetch_offsets`,
-//! `update_fetch_positions`, `prepare_fetch_offsets_requests`,
-//! `init_with_committed_offsets_if_needed`) are deferred until that
-//! manager lands — they're constrained from the KIP-848 protocol path by
-//! Phase 6's `RequestManagers` skeleton already reserving the slot.
+//! This translation covers the **reset** (`reset_positions_if_needed`),
+//! **validate** (`validate_positions_if_needed`) and
+//! **init-with-committed-offsets**
+//! ([`Self::init_with_committed_offsets_if_needed`]) code paths that Java's
+//! `updateFetchPositions` orchestrates. The remaining Java methods that
+//! depend on `CommitRequestManager` (`fetch_offsets` for `list_offsets`,
+//! `update_fetch_positions`, `prepare_fetch_offsets_requests`) are
+//! deferred to Phase 10 commits 3b/3c.
 //!
 //! ## Concurrency
 //!
@@ -49,10 +49,10 @@
 
 #![allow(dead_code)]
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::api_versions::ApiVersions;
 use crate::client_response::ClientResponse;
@@ -63,9 +63,11 @@ use crate::common::requests::{
     list_offsets_request::CONSUMER_REPLICA_ID,
 };
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::consumer::OffsetAndMetadata;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 
 use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+use super::commit_request_manager::CommitRequestManager;
 use super::consumer_metadata::ConsumerMetadata;
 use super::network_client_delegate::{PollResult, UnsentRequest};
 use super::offset_fetcher_utils::{
@@ -104,8 +106,27 @@ pub(crate) struct OffsetsRequestManager {
     metadata: Arc<ConsumerMetadata>,
     isolation_level: IsolationLevel,
     request_timeout_ms: i64,
+    /// Java: `defaultApiTimeoutMs`. Used by
+    /// [`Self::init_with_committed_offsets_if_needed`] to compute the
+    /// internal `fetchCommittedDeadlineMs` (Java
+    /// `OffsetsRequestManager.java:379`).
+    default_api_timeout_ms: i64,
     api_versions: Arc<ApiVersions>,
     offset_fetcher_utils: Arc<OffsetFetcherUtilsState>,
+    /// Optional handle to the commit manager — `None` when the consumer
+    /// has no group. Java's `OffsetsRequestManager` accepts the commit
+    /// manager as a non-null parameter but the
+    /// `initWithCommittedOffsetsIfNeeded` path explicitly returns early
+    /// when no group is configured; this Rust translation collapses both
+    /// cases into `None`.
+    commit_request_manager: Option<Arc<CommitRequestManager>>,
+    /// The in-flight `OffsetFetch` triggered by the most-recent
+    /// [`Self::init_with_committed_offsets_if_needed`] call. Java:
+    /// `pendingOffsetFetchEvent`. Reused by subsequent calls when the
+    /// initializing-partition set matches, so a poll that times out
+    /// while an `OffsetFetch` is still in flight does not waste the
+    /// outstanding request. Cleared when the underlying fetch resolves.
+    pending_offset_fetch_event: Arc<Mutex<Option<PendingFetchCommittedRequest>>>,
 
     /// Requests built but not yet drained by `poll`. Java:
     /// `requestsToSend`.
@@ -118,19 +139,44 @@ pub(crate) struct OffsetsRequestManager {
     closing: bool,
 }
 
+/// In-flight `OffsetFetch` carrying the set of initializing partitions
+/// that triggered it plus any additional `oneshot::Sender`s that have
+/// piggy-backed on the same request (the "reuse" path).
+///
+/// Mirrors Java's `OffsetsRequestManager.PendingFetchCommittedRequest`.
+/// Java holds a `CompletableFuture` whose downstream `whenComplete`
+/// handlers form a chain; Rust uses a `Vec<oneshot::Sender>` because
+/// `oneshot::Receiver` is single-consumer.
+struct PendingFetchCommittedRequest {
+    requested_partitions: HashSet<TopicPartition>,
+    /// Senders waiting for the in-flight fetch to resolve. The first
+    /// entry is for the caller that initially issued the fetch; each
+    /// subsequent reuse adds another sender. When the fetch completes,
+    /// the driver task drains the vec and forwards the result (or its
+    /// `()` ack on success — offsets are written into the
+    /// `SubscriptionState` as side effects) to every sender.
+    waiters: Vec<oneshot::Sender<Result<(), KafkaError>>>,
+}
+
 impl OffsetsRequestManager {
     /// Constructs a new `OffsetsRequestManager`.
     ///
-    /// Mirrors Java's constructor minus the `CommitRequestManager` and
-    /// `LogContext` parameters (the former is out of scope for this
-    /// milestone; the latter is implicit in Rust through `log`).
+    /// Mirrors Java's constructor minus the `LogContext` parameter
+    /// (implicit in Rust through `log`). `commit_request_manager` is
+    /// `Option<Arc<CommitRequestManager>>` so test fixtures and the
+    /// (out-of-scope) group-less assignor path can pass `None`; Java
+    /// requires the commit manager non-null and short-circuits the
+    /// `initWithCommittedOffsetsIfNeeded` path internally.
+    #[allow(clippy::too_many_arguments)] // Mirrors Java constructor argument list.
     pub(crate) fn new(
         subscription_state: Arc<Mutex<SubscriptionState>>,
         metadata: Arc<ConsumerMetadata>,
         isolation_level: IsolationLevel,
         retry_backoff_ms: i64,
         request_timeout_ms: i64,
+        default_api_timeout_ms: i64,
         api_versions: Arc<ApiVersions>,
+        commit_request_manager: Option<Arc<CommitRequestManager>>,
     ) -> Self {
         let offset_fetcher_utils = Arc::new(OffsetFetcherUtilsState::new(
             metadata.clone(),
@@ -144,8 +190,11 @@ impl OffsetsRequestManager {
             metadata: metadata.clone(),
             isolation_level,
             request_timeout_ms,
+            default_api_timeout_ms,
             api_versions,
             offset_fetcher_utils,
+            commit_request_manager,
+            pending_offset_fetch_event: Arc::new(Mutex::new(None)),
             requests_to_send: Vec::new(),
             pending_completions_rx,
             pending_completions_tx,
@@ -331,6 +380,126 @@ impl OffsetsRequestManager {
         }
     }
 
+    /// Refresh fetch positions for any partition that still requires
+    /// one, using committed offsets retrieved from the group
+    /// coordinator. Mirrors Java's
+    /// `OffsetsRequestManager.initWithCommittedOffsetsIfNeeded`.
+    ///
+    /// The Java contract:
+    ///
+    /// 1. Empty `initializing_partitions` ⇒ completed `Ok(())`.
+    /// 2. Otherwise, if there is an in-flight `OffsetFetch` whose
+    ///    requested-partition set matches the new request, **reuse it**:
+    ///    register the caller's `oneshot::Sender` on the existing
+    ///    pending event. Java:
+    ///    `OffsetsRequestManager.canReusePendingOffsetFetchEvent`.
+    /// 3. Otherwise, build a new `OffsetFetch` via the commit manager,
+    ///    using `max(deadline_ms, current_time_ms + default_api_timeout_ms)`
+    ///    as the request deadline so the OffsetFetch outlives the
+    ///    triggering `updateFetchPositions` deadline if needed.
+    /// 4. On fetch completion: apply offsets via [`Self::refresh_offsets`]
+    ///    (mirrors Java's `refreshOffsets` + `ConsumerUtils.refreshCommittedOffsets`)
+    ///    and fan the result out to every waiter on the pending event.
+    pub(crate) fn init_with_committed_offsets_if_needed(
+        &self,
+        initializing_partitions: HashSet<TopicPartition>,
+        deadline_ms: i64,
+        current_time_ms: i64,
+    ) -> oneshot::Receiver<Result<(), KafkaError>> {
+        let (tx, rx) = oneshot::channel();
+        if initializing_partitions.is_empty() {
+            let _ = tx.send(Ok(()));
+            return rx;
+        }
+        log::debug!("Refreshing committed offsets for partitions {:?}", initializing_partitions);
+
+        // Reuse path — same partition set still in flight.
+        {
+            let mut guard = self
+                .pending_offset_fetch_event
+                .lock()
+                .expect("pending_offset_fetch_event mutex poisoned");
+            if let Some(pending) = guard.as_mut()
+                && pending.requested_partitions == initializing_partitions
+            {
+                pending.waiters.push(tx);
+                return rx;
+            }
+        }
+
+        // No commit manager (e.g. consumer has no group): nothing to do,
+        // resolve immediately. Java reaches the same outcome by
+        // short-circuiting before `commitRequestManager.fetchOffsets` is
+        // called.
+        let Some(commit_rm) = self.commit_request_manager.as_ref() else {
+            let _ = tx.send(Ok(()));
+            return rx;
+        };
+
+        // New fetch path. The deadline is the later of the caller's
+        // `deadlineMs` and the internal default-api-timeout slack so the
+        // underlying OffsetFetch is not abandoned solely because the
+        // triggering event's deadline is short.
+        let fetch_committed_deadline_ms = deadline_ms.max(current_time_ms.saturating_add(self.default_api_timeout_ms));
+        let inner_rx =
+            commit_rm.fetch_offsets(initializing_partitions.clone(), fetch_committed_deadline_ms, current_time_ms);
+
+        {
+            let mut guard = self
+                .pending_offset_fetch_event
+                .lock()
+                .expect("pending_offset_fetch_event mutex poisoned");
+            *guard =
+                Some(PendingFetchCommittedRequest { requested_partitions: initializing_partitions, waiters: vec![tx] });
+        }
+
+        // Drive the in-flight fetch: when it resolves, apply the offsets
+        // to the subscription state and fan the result out to every
+        // waiter that registered on this pending event.
+        let pending_slot = Arc::clone(&self.pending_offset_fetch_event);
+        let subscription_state = Arc::clone(&self.subscription_state);
+        let metadata = Arc::clone(&self.metadata);
+        tokio::spawn(async move {
+            let fetch_result = match inner_rx.await {
+                Ok(r) => r,
+                Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+            };
+
+            // Take the waiters out of the pending slot and clear it
+            // (Java: `pendingOffsetFetchEvent = null` inside the
+            // `whenComplete` callback).
+            let waiters = {
+                let mut guard = pending_slot.lock().expect("pending_offset_fetch_event mutex poisoned");
+                guard.take().map(|p| p.waiters).unwrap_or_default()
+            };
+
+            // Apply the committed offsets to the subscription state.
+            let result_for_waiters = match fetch_result {
+                Ok(offsets) => {
+                    refresh_offsets(&offsets, subscription_state.as_ref(), metadata.as_ref());
+                    Ok(())
+                },
+                Err(err) => {
+                    log::error!("Error fetching committed offsets to update positions: {}", err);
+                    Err(err)
+                },
+            };
+
+            // Fan the result out to every waiter. Use `clone` because
+            // `KafkaError` is cloneable but the `Result` we send is
+            // by-value per sender.
+            for waiter in waiters {
+                let payload = match &result_for_waiters {
+                    Ok(()) => Ok(()),
+                    Err(err) => Err(err.clone()),
+                };
+                let _ = waiter.send(payload);
+            }
+        });
+
+        rx
+    }
+
     /// Drains pending completions and forwards them to the
     /// `OffsetFetcherUtilsState` handlers.
     fn drain_pending_completions(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
@@ -455,6 +624,55 @@ fn downcast_offsets_for_leader_epoch(response: &ClientResponse) -> Option<&Offse
     }
 }
 
+/// Apply committed offsets to the subscription state for partitions
+/// that are still initializing. Mirrors Java's
+/// `ConsumerUtils.refreshCommittedOffsets` composed with
+/// `OffsetsRequestManager.offsetsForInitializingPartitions` (filter to
+/// initializing) and `OffsetsRequestManager.refreshOffsets` (success
+/// branch).
+///
+/// Filtering ensures we do not overwrite a position that the user set
+/// manually via `seek` between the time the OffsetFetch was issued and
+/// the response arrived; Java does the same in
+/// `OffsetsRequestManager.offsetsForInitializingPartitions`.
+fn refresh_offsets(
+    offsets: &HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+    subscription_state: &Mutex<SubscriptionState>,
+    metadata: &ConsumerMetadata,
+) {
+    // Snapshot the currently initializing partitions before acquiring
+    // the write lock (Java reads via subscriptionState.initializingPartitions()).
+    let currently_initializing = {
+        let guard = subscription_state.lock().expect("SubscriptionState mutex poisoned");
+        guard.initializing_partitions()
+    };
+
+    let metadata_arc = metadata.metadata_arc();
+    let mut subs = subscription_state.lock().expect("SubscriptionState mutex poisoned");
+    for (tp, oam) in offsets {
+        let Some(oam) = oam.as_ref() else {
+            // No committed offset for this partition — Java's
+            // `refreshCommittedOffsets` skips `null` values.
+            continue;
+        };
+        if !currently_initializing.contains(tp) {
+            continue;
+        }
+        // Update the last-seen epoch first, then seek if still assigned.
+        if let Some(epoch) = oam.leader_epoch() {
+            let _ = metadata_arc.update_last_seen_epoch_if_newer(tp, epoch);
+        }
+        if !subs.is_assigned(tp) {
+            // Partition was unassigned between request and response —
+            // skip the seek (Java: same isAssigned guard).
+            continue;
+        }
+        let leader_and_epoch = metadata_arc.current_leader(tp);
+        let position = FetchPosition::with_leader(oam.offset(), oam.leader_epoch(), leader_and_epoch);
+        let _ = subs.seek_unvalidated(tp, position);
+    }
+}
+
 impl RequestManager for OffsetsRequestManager {
     /// Drains completed responses then returns the queued
     /// requests. Java: `poll(long currentTimeMs)`.
@@ -522,7 +740,9 @@ mod tests {
             IsolationLevel::ReadUncommitted,
             100,
             30_000,
+            60_000,
             Arc::new(ApiVersions::new()),
+            None,
         )
     }
 
@@ -582,5 +802,223 @@ mod tests {
         assert!(!mgr.closing);
         RequestManager::signal_close(&mut mgr);
         assert!(mgr.closing);
+    }
+
+    // -----------------------------------------------------------------
+    //   init_with_committed_offsets_if_needed (relocated from
+    //   CommitRequestManager — Phase 10 commit 3a/N)
+    // -----------------------------------------------------------------
+
+    use crate::consumer::OffsetAndMetadata;
+    use crate::consumer::internals::commit_request_manager::CommitRequestManager;
+    use crate::metadata::LeaderAndEpoch;
+
+    /// Build an `OffsetsRequestManager` plus a backing
+    /// `CommitRequestManager` so the init-with-committed path can be
+    /// exercised end-to-end (the spawned driver task expects a real
+    /// commit manager to fulfil the fetch oneshot).
+    fn new_manager_with_commit() -> (OffsetsRequestManager, Arc<CommitRequestManager>, Arc<Mutex<SubscriptionState>>) {
+        let config = ConsumerConfig::from_properties(&std::collections::HashMap::from([
+            ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+            ("group.id".to_string(), "g".to_string()),
+        ]))
+        .expect("config");
+        let subscription_state = Arc::new(Mutex::new(SubscriptionState::new(
+            crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy::EARLIEST,
+        )));
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let commit_rm = Arc::new(CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subscription_state.clone(),
+            "g",
+            None,
+            0,
+        ));
+        let mgr = OffsetsRequestManager::new(
+            subscription_state.clone(),
+            metadata,
+            IsolationLevel::ReadUncommitted,
+            100,
+            30_000,
+            60_000,
+            Arc::new(ApiVersions::new()),
+            Some(commit_rm.clone()),
+        );
+        (mgr, commit_rm, subscription_state)
+    }
+
+    /// Java parity:
+    /// `OffsetsRequestManager.initWithCommittedOffsetsIfNeeded` returns
+    /// `CompletableFuture.completedFuture(null)` when the
+    /// initializing-partition set is empty.
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_with_committed_offsets_empty_partitions_resolves_immediately() {
+        let mgr = new_manager();
+        let rx = mgr.init_with_committed_offsets_if_needed(HashSet::new(), i64::MAX, 0);
+        let result = rx.await.expect("oneshot");
+        assert!(result.is_ok());
+    }
+
+    /// Java models the commit manager as a constructor-required
+    /// argument, but the
+    /// `initWithCommittedOffsetsIfNeeded` chain effectively short-circuits
+    /// when there is nothing to fetch from. The Rust translation collapses
+    /// "no group" into `commit_request_manager = None`, and the method
+    /// resolves immediately with `Ok(())`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_with_committed_offsets_no_commit_manager_resolves_immediately() {
+        let mgr = new_manager(); // no commit manager
+        let mut partitions = HashSet::new();
+        partitions.insert(TopicPartition::new("t".to_string(), 0));
+        let rx = mgr.init_with_committed_offsets_if_needed(partitions, i64::MAX, 0);
+        let result = rx.await.expect("oneshot");
+        assert!(result.is_ok());
+    }
+
+    /// First call with non-empty initializing partitions issues an
+    /// `OffsetFetch` request on the commit manager (visible as an entry
+    /// on the commit manager's `unsent_offset_fetches` queue).
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_with_committed_offsets_enqueues_fetch_offsets_request() {
+        let (mgr, commit_rm, _) = new_manager_with_commit();
+        let mut partitions = HashSet::new();
+        partitions.insert(TopicPartition::new("t".to_string(), 0));
+        let _rx = mgr.init_with_committed_offsets_if_needed(partitions.clone(), i64::MAX, 0);
+        // The commit manager's pending queue should have one fetch
+        // request enqueued by the spawned chain.
+        let guard = commit_rm.inner_state_for_test();
+        assert_eq!(guard, 1, "fetch_offsets should have enqueued one OffsetFetch request");
+    }
+
+    /// Java parity:
+    /// `OffsetsRequestManager.canReusePendingOffsetFetchEvent` returns
+    /// true when the partition set matches an in-flight fetch. A second
+    /// call with the same partitions must NOT issue another
+    /// `OffsetFetch` — both callers wait on the same underlying request.
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_with_committed_offsets_reuses_pending_fetch() {
+        let (mgr, commit_rm, _) = new_manager_with_commit();
+        let mut partitions = HashSet::new();
+        partitions.insert(TopicPartition::new("t".to_string(), 0));
+
+        let _rx1 = mgr.init_with_committed_offsets_if_needed(partitions.clone(), i64::MAX, 0);
+        let _rx2 = mgr.init_with_committed_offsets_if_needed(partitions.clone(), i64::MAX, 0);
+
+        // Only one OffsetFetch should have been enqueued — the second
+        // call piggy-backs on the pending event.
+        let guard = commit_rm.inner_state_for_test();
+        assert_eq!(
+            guard, 1,
+            "second call should reuse the pending OffsetFetch, not issue a new one"
+        );
+    }
+
+    /// Java parity: a second call with a DIFFERENT partition set bypasses
+    /// the reuse path (`canReusePendingOffsetFetchEvent` returns false)
+    /// and issues a new `OffsetFetch`. Note that Java's exact behavior
+    /// here is to overwrite the pending event slot; the new request
+    /// replaces the old one. We accept the same: the new fetch is
+    /// enqueued.
+    #[tokio::test(flavor = "current_thread")]
+    async fn init_with_committed_offsets_does_not_reuse_for_different_partitions() {
+        let (mgr, commit_rm, _) = new_manager_with_commit();
+        let mut partitions1 = HashSet::new();
+        partitions1.insert(TopicPartition::new("t".to_string(), 0));
+        let mut partitions2 = HashSet::new();
+        partitions2.insert(TopicPartition::new("t".to_string(), 1));
+
+        let _rx1 = mgr.init_with_committed_offsets_if_needed(partitions1, i64::MAX, 0);
+        let _rx2 = mgr.init_with_committed_offsets_if_needed(partitions2, i64::MAX, 0);
+
+        let guard = commit_rm.inner_state_for_test();
+        assert_eq!(guard, 2, "different partition sets should each issue their own OffsetFetch");
+    }
+
+    /// Java parity:
+    /// `ConsumerUtils.refreshCommittedOffsets` — for each entry in the
+    /// offsets map that maps to a currently-assigned, currently-initializing
+    /// partition, set the position via `seek_unvalidated`. The Rust
+    /// helper is a free function so we can drive it independently of the
+    /// in-flight fetch.
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_offsets_seeks_unvalidated_for_initializing_assigned_partitions() {
+        let (_mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("t".to_string(), 0);
+
+        // Assign tp without a position so it is "initializing".
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+            assert!(subs.initializing_partitions().contains(&tp));
+            assert!(subs.is_assigned(&tp));
+        }
+
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &ConsumerConfig::from_properties(&std::collections::HashMap::from([
+                ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("group.id".to_string(), "g".to_string()),
+            ]))
+            .expect("config"),
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+
+        let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+        offsets.insert(tp.clone(), Some(OffsetAndMetadata::new(10).expect("offset metadata")));
+
+        super::refresh_offsets(&offsets, subscription_state.as_ref(), metadata.as_ref());
+
+        // The position should now be set to offset 10.
+        let subs = subscription_state.lock().unwrap();
+        let position = subs.position(&tp).expect("position lookup").expect("position present");
+        assert_eq!(position.offset, 10);
+    }
+
+    /// Java parity:
+    /// `OffsetsRequestManager.offsetsForInitializingPartitions` — filter
+    /// out offsets for partitions that are no longer initializing (e.g.
+    /// the user called `seek` manually between request and response).
+    #[tokio::test(flavor = "current_thread")]
+    async fn refresh_offsets_skips_partitions_no_longer_initializing() {
+        let (_mgr, _commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("t".to_string(), 0);
+
+        // Assign tp AND give it a manual position — it is no longer
+        // initializing.
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+            let pos = FetchPosition::with_leader(99, None, LeaderAndEpoch::no_leader_or_epoch());
+            subs.seek_unvalidated(&tp, pos).expect("seek");
+            assert!(!subs.initializing_partitions().contains(&tp));
+        }
+
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &ConsumerConfig::from_properties(&std::collections::HashMap::from([
+                ("bootstrap.servers".to_string(), "localhost:9092".to_string()),
+                ("group.id".to_string(), "g".to_string()),
+            ]))
+            .expect("config"),
+            subscription_state.clone(),
+            ClusterResourceListeners::new(),
+        ));
+
+        let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+        offsets.insert(tp.clone(), Some(OffsetAndMetadata::new(10).expect("offset metadata")));
+        super::refresh_offsets(&offsets, subscription_state.as_ref(), metadata.as_ref());
+
+        // The position should NOT have been overwritten to 10.
+        let subs = subscription_state.lock().unwrap();
+        let position = subs.position(&tp).expect("position lookup").expect("position present");
+        assert_eq!(position.offset, 99);
     }
 }

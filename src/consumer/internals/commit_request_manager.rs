@@ -42,11 +42,11 @@
 //!   commit 2.5/N). The reconciliation pipeline's invocation of this
 //!   method is deferred to Phase 11 because awaiting the returned
 //!   `oneshot::Receiver` requires the consumer poll-path scaffolding.
-//! - `init_with_committed_offsets_if_needed` is the integration point for
-//!   Phase 7d's deferred `update_fetch_positions` work — it accepts the
-//!   initializing partitions and a deadline, calls [`Self::fetch_offsets`],
-//!   and the caller (Phase 10's `OffsetsRequestManager` extension) applies
-//!   the result to the subscription state.
+//! - `init_with_committed_offsets_if_needed` lives on
+//!   `OffsetsRequestManager` (Phase 10, commit 3a/N) — that's where Java
+//!   places it. It composes a call to [`Self::fetch_offsets`] with
+//!   subscription-state updates. The commit manager owns only the
+//!   underlying `fetch_offsets` request issuance.
 
 // Phase 9 lands the manager; Phase 10 wires it into the bg task and
 // Phase 11 wires the public API. Suppress dead-code warnings until then.
@@ -867,20 +867,15 @@ impl CommitRequestManager {
         rx
     }
 
-    /// Phase-7d carry-over: fetch the previously-committed offset for each
-    /// initializing partition, used by
-    /// `OffsetsRequestManager::update_fetch_positions` to seed positions
-    /// for partitions that have no current position.
-    ///
-    /// Phase 9 lands the method; Phase 10 wires it to the calling site in
-    /// `OffsetsRequestManager`.
-    pub(crate) fn init_with_committed_offsets_if_needed(
-        &self,
-        initializing_partitions: HashSet<TopicPartition>,
-        deadline_ms: i64,
-        now_ms: i64,
-    ) -> oneshot::Receiver<FetchResult> {
-        self.fetch_offsets(initializing_partitions, deadline_ms, now_ms)
+    /// Test-only accessor exposing the current count of unsent
+    /// `OffsetFetch` requests on the pending queue. Used by sibling
+    /// modules' tests (e.g.
+    /// `OffsetsRequestManager::init_with_committed_offsets_if_needed`)
+    /// to verify request issuance without reaching into private state.
+    #[cfg(test)]
+    pub(crate) fn inner_state_for_test(&self) -> usize {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard.pending.unsent_offset_fetches.len()
     }
 
     // ---------------------------------------------------------------------
@@ -2027,19 +2022,6 @@ mod tests {
         let mut partitions = HashSet::new();
         partitions.insert(TopicPartition::new("t".to_string(), 0));
         let _rx = manager.fetch_offsets(partitions, i64::MAX, 0);
-        let guard = manager.inner.state.lock().unwrap();
-        assert_eq!(guard.pending.unsent_offset_fetches.len(), 1);
-    }
-
-    /// `init_with_committed_offsets_if_needed` delegates to
-    /// `fetch_offsets`. Phase 9 carry-over verifying the public surface
-    /// for Phase 7d's deferred work.
-    #[tokio::test(flavor = "current_thread")]
-    async fn init_with_committed_offsets_if_needed_delegates_to_fetch_offsets() {
-        let manager = make_manager(0, false);
-        let mut partitions = HashSet::new();
-        partitions.insert(TopicPartition::new("t".to_string(), 0));
-        let _rx = manager.init_with_committed_offsets_if_needed(partitions, i64::MAX, 0);
         let guard = manager.inner.state.lock().unwrap();
         assert_eq!(guard.pending.unsent_offset_fetches.len(), 1);
     }
