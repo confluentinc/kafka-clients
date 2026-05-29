@@ -878,6 +878,30 @@ impl CommitRequestManager {
         guard.pending.unsent_offset_fetches.len()
     }
 
+    /// Test-only helper: pop the first unsent `OffsetFetch` request and
+    /// resolve its underlying `oneshot::Sender` with the given offset
+    /// map. Used by sibling-module tests
+    /// (`OffsetsRequestManager::update_fetch_positions`) to drive the
+    /// committed-offset response branch without standing up a full
+    /// network client.
+    ///
+    /// Returns `true` if a pending fetch was found and completed,
+    /// `false` if the queue was empty.
+    #[cfg(test)]
+    pub(crate) fn complete_first_unsent_fetch_for_test(
+        &self,
+        offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>>,
+    ) -> bool {
+        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+        if guard.pending.unsent_offset_fetches.is_empty() {
+            return false;
+        }
+        let request = guard.pending.unsent_offset_fetches.remove(0);
+        drop(guard);
+        request.complete_ok(offsets);
+        true
+    }
+
     // ---------------------------------------------------------------------
     //                              close path
     // ---------------------------------------------------------------------

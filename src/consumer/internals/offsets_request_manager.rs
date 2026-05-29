@@ -92,6 +92,20 @@ enum PendingCompletion {
     },
 }
 
+/// A deferred call to `init_with_partition_offsets_if_needed` scheduled by
+/// the spawned [`Self::update_fetch_positions`] continuation. Carries the
+/// originally-captured `initializing_partitions` set so the
+/// `reset_initializing_positions` filter still excludes partitions added
+/// to the assignment after the OffsetFetch was issued (Java parity:
+/// `OffsetsRequestManager.testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`).
+///
+/// Decoupling this from `PendingCompletion` keeps the post-fetch reset
+/// chain self-contained — the followup is owned by `update_fetch_positions`
+/// and never interleaved with response-handling work.
+struct PendingFollowupReset {
+    initial_partitions: HashSet<TopicPartition>,
+}
+
 /// The KIP-848 `OffsetsRequestManager`. Drives `ListOffsets` (for offset
 /// reset) and `OffsetsForLeaderEpoch` (for position validation) requests.
 ///
@@ -136,6 +150,22 @@ pub(crate) struct OffsetsRequestManager {
     /// from another task.
     pending_completions_rx: mpsc::UnboundedReceiver<PendingCompletion>,
     pending_completions_tx: mpsc::UnboundedSender<PendingCompletion>,
+    /// Pending `init_with_partition_offsets_if_needed` follow-ups
+    /// scheduled by the spawned task driving
+    /// [`Self::update_fetch_positions`]. Drained on the next `poll` —
+    /// Java performs this in-line inside `whenComplete`; the Rust bg
+    /// task achieves the same effect by deferring to the request-manager
+    /// `poll` call, which owns `&mut self` and can mutate
+    /// `requests_to_send`.
+    pending_followup_rx: mpsc::UnboundedReceiver<PendingFollowupReset>,
+    pending_followup_tx: mpsc::UnboundedSender<PendingFollowupReset>,
+    /// Java: `cachedUpdatePositionsException`. Stores an error that
+    /// occurred during a previous `updateFetchPositions` call whose
+    /// triggering event already expired by the time the inner OffsetFetch
+    /// chain resolved. Surfaced on the next call via
+    /// [`Self::maybe_complete_with_previous_exception`] (Java parity:
+    /// `OffsetsRequestManager.maybeCompleteWithPreviousException`).
+    cached_update_positions_exception: Arc<Mutex<Option<KafkaError>>>,
     closing: bool,
 }
 
@@ -185,6 +215,7 @@ impl OffsetsRequestManager {
             retry_backoff_ms,
         ));
         let (pending_completions_tx, pending_completions_rx) = mpsc::unbounded_channel();
+        let (pending_followup_tx, pending_followup_rx) = mpsc::unbounded_channel();
         let manager = Self {
             subscription_state,
             metadata: metadata.clone(),
@@ -198,6 +229,9 @@ impl OffsetsRequestManager {
             requests_to_send: Vec::new(),
             pending_completions_rx,
             pending_completions_tx,
+            pending_followup_rx,
+            pending_followup_tx,
+            cached_update_positions_exception: Arc::new(Mutex::new(None)),
             closing: false,
         };
         // Register the cluster metadata update callback. The listener
@@ -500,6 +534,292 @@ impl OffsetsRequestManager {
         rx
     }
 
+    /// Drive a position update for the consumer's assigned partitions.
+    ///
+    /// Mirrors Java's `OffsetsRequestManager.updateFetchPositions(long)`.
+    /// Returns a `oneshot::Receiver` that resolves with `Ok(())` once
+    /// every initializing partition has either a fetched committed
+    /// offset applied to its position, or has been marked for reset via
+    /// [`SubscriptionState::reset_initializing_positions`].
+    ///
+    /// High-level flow (Java parity):
+    ///
+    /// 1. If a previous call cached an exception via
+    ///    [`Self::cache_exception_if_event_expired`], surface it now
+    ///    (clearing the slot).
+    /// 2. Run `validate_positions_if_needed` synchronously — log
+    ///    truncation detection is part of "update positions".
+    /// 3. If `subscription_state.has_all_fetch_positions()`, resolve
+    ///    immediately with `Ok(())`.
+    /// 4. Otherwise capture the current `initializing_partitions` set
+    ///    and either:
+    ///     - call [`Self::init_with_committed_offsets_if_needed`], chained
+    ///       with a spawned followup that, on success, marks the
+    ///       captured set for reset via `reset_initializing_positions`
+    ///       and enqueues the ListOffsets requests on the next `poll`;
+    ///     - or, when no group is configured (no commit manager),
+    ///       run [`Self::init_with_partition_offsets_if_needed`] inline.
+    ///
+    /// **Deviation from Java (acceptable):** Java's
+    /// `resetPositionsIfNeeded()` returns a `CompletableFuture<Void>`
+    /// whose completion is chained into the outer result; the Rust
+    /// `reset_positions_if_needed` is fire-and-forget (no completion
+    /// future yet — the underlying chain is a Phase-7d carry-over). The
+    /// returned receiver therefore resolves once `reset_initializing_positions`
+    /// has marked the captured partitions, NOT when the resulting
+    /// ListOffsets requests have completed. Callers that need
+    /// "positions actually retrieved" must continue calling
+    /// `update_fetch_positions` until `has_all_fetch_positions()`
+    /// returns true. This matches Java's caller pattern in
+    /// `AsyncKafkaConsumer.poll`.
+    pub(crate) fn update_fetch_positions(
+        &mut self,
+        deadline_ms: i64,
+        current_time_ms: i64,
+    ) -> oneshot::Receiver<Result<(), KafkaError>> {
+        let (tx, rx) = oneshot::channel();
+
+        // Java's outer try wraps the whole body in `maybeWrapAsKafkaException`.
+        // The Rust translation already returns `KafkaError` from every fallible
+        // call below, so the explicit wrap is a no-op (`KafkaError` is the
+        // Rust equivalent of `KafkaException`).
+        match self.update_fetch_positions_inner(deadline_ms, current_time_ms, tx) {
+            Ok(consumed_tx) => consumed_tx,
+            Err((tx, err)) => {
+                // Match Java: synchronous error path also goes through
+                // `cacheExceptionIfEventExpired`. The `whenComplete` runs
+                // immediately because the result is already failed.
+                self.maybe_cache_update_positions_exception(&err, deadline_ms, current_time_ms);
+                let _ = tx.send(Err(err));
+            },
+        }
+        rx
+    }
+
+    /// Inner driver for [`Self::update_fetch_positions`]. Returns the
+    /// `oneshot::Sender` un-fired when work has been scheduled
+    /// asynchronously (the spawned chain owns the sender), or returns
+    /// it back with an error when a synchronous fault occurred and the
+    /// caller should fail the result.
+    #[allow(clippy::type_complexity)] // Java has the same fan-out via try/catch.
+    fn update_fetch_positions_inner(
+        &mut self,
+        deadline_ms: i64,
+        current_time_ms: i64,
+        tx: oneshot::Sender<Result<(), KafkaError>>,
+    ) -> Result<(), (oneshot::Sender<Result<(), KafkaError>>, KafkaError)> {
+        // (1) Propagate a previously-cached error from an expired event.
+        if let Some(cached) = self.take_cached_update_positions_exception() {
+            let _ = tx.send(Err(cached));
+            return Ok(());
+        }
+
+        // (2) Validate positions. Java's `validatePositionsIfNeeded()` is
+        // void; the cached LogTruncationException flows back here via the
+        // Rust `Result` return.
+        if let Err(err) = self.validate_positions_if_needed(current_time_ms) {
+            return Err((tx, err));
+        }
+
+        // (3) Fast path — every partition already has a fetch position.
+        let has_all = {
+            let subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+            subs.has_all_fetch_positions()
+        };
+        if has_all {
+            let _ = tx.send(Ok(()));
+            return Ok(());
+        }
+
+        // (4) Capture the initializing set at this moment, as Java does
+        // inside `updatePositionsWithOffsets`. The captured set is used
+        // BOTH as the input to the OffsetFetch AND as the filter passed
+        // to `resetInitializingPositions` after the response arrives —
+        // this is what prevents the reset from including partitions
+        // added to the assignment mid-flight.
+        let initializing_partitions = {
+            let subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+            subs.initializing_partitions()
+        };
+
+        if self.commit_request_manager.is_some() {
+            // The committed-offset path: issue (or reuse) an OffsetFetch,
+            // then on resolution mark the captured initializing set for
+            // reset and schedule ListOffsets enqueueing on the next poll.
+            let inner_rx = self.init_with_committed_offsets_if_needed(
+                initializing_partitions.clone(),
+                deadline_ms,
+                current_time_ms,
+            );
+            self.spawn_committed_offsets_followup(inner_rx, initializing_partitions, deadline_ms, tx);
+            Ok(())
+        } else {
+            // No group → no committed offsets → just mark partitions for
+            // reset inline. Java reaches the same result via
+            // `updatePositions = initWithPartitionOffsetsIfNeeded(...)`
+            // when `commitRequestManager == null`.
+            if let Err(err) = self.init_with_partition_offsets_if_needed(&initializing_partitions, current_time_ms) {
+                return Err((tx, err));
+            }
+            let _ = tx.send(Ok(()));
+            Ok(())
+        }
+    }
+
+    /// Java parity: `initWithPartitionOffsetsIfNeeded(initializingPartitions)`.
+    ///
+    /// Marks every captured initializing partition for reset (filtered by
+    /// the captured set so partitions added mid-flight are NOT reset) and
+    /// then enqueues `ListOffsets` requests via
+    /// [`Self::reset_positions_if_needed`].
+    fn init_with_partition_offsets_if_needed(
+        &mut self,
+        initializing_partitions: &HashSet<TopicPartition>,
+        current_time_ms: i64,
+    ) -> Result<(), KafkaError> {
+        {
+            // Java captures `initializingPartitions::contains` as a predicate;
+            // clone the set so we don't hold the subscription-state lock
+            // across the predicate's borrow of `initializing_partitions`.
+            let captured = initializing_partitions.clone();
+            let mut subs = self.subscription_state.lock().expect("SubscriptionState mutex poisoned");
+            subs.reset_initializing_positions(|tp| captured.contains(tp))?;
+        }
+        self.reset_positions_if_needed(current_time_ms)
+    }
+
+    /// Spawn the followup task that awaits the committed-offset fetch
+    /// `oneshot`, then either:
+    ///
+    /// - on success, locks the subscription state to mark the captured
+    ///   partitions for reset and queues a `PendingFollowupReset` so the
+    ///   next `poll()` enqueues ListOffsets requests, then completes
+    ///   the outer `tx` with `Ok(())`;
+    /// - on failure, maybe-caches the error and completes the outer
+    ///   `tx` with `Err`.
+    fn spawn_committed_offsets_followup(
+        &self,
+        inner_rx: oneshot::Receiver<Result<(), KafkaError>>,
+        initial_partitions: HashSet<TopicPartition>,
+        deadline_ms: i64,
+        outer_tx: oneshot::Sender<Result<(), KafkaError>>,
+    ) {
+        let subscription_state = Arc::clone(&self.subscription_state);
+        let pending_followup_tx = self.pending_followup_tx.clone();
+        let cached = Arc::clone(&self.cached_update_positions_exception);
+        tokio::spawn(async move {
+            // Await the committed-offset fetch. If the inner sender was
+            // dropped (request cancelled / manager torn down) Java would
+            // never complete the future; we surface a network error
+            // instead so the outer caller doesn't hang silently
+            // (CLAUDE.md §5: silently completing or hanging futures is
+            // worse than an explicit error).
+            let fetch_result = match inner_rx.await {
+                Ok(r) => r,
+                Err(_) => Err(KafkaError::new(crate::common::protocol::Errors::NetworkException)),
+            };
+
+            let result_for_outer: Result<(), KafkaError> = match fetch_result {
+                Ok(()) => {
+                    // Java's `initWithPartitionOffsetsIfNeeded` runs inside
+                    // the `whenComplete` chain. The synchronous bit
+                    // (`reset_initializing_positions`) is done inline; the
+                    // `reset_positions_if_needed` (ListOffsets enqueue) is
+                    // deferred to the next `poll` via the followup channel
+                    // because it requires `&mut self`.
+                    let reset_outcome = {
+                        let captured = initial_partitions.clone();
+                        let mut subs = subscription_state.lock().expect("SubscriptionState mutex poisoned");
+                        subs.reset_initializing_positions(|tp| captured.contains(tp))
+                    };
+                    match reset_outcome {
+                        Ok(()) => {
+                            // Schedule the ListOffsets-enqueue follow-up on
+                            // the next poll. If the receiver is gone (manager
+                            // dropped) the send is a no-op — the partitions
+                            // are still marked AWAIT_RESET in the
+                            // subscription state, so a subsequent
+                            // `reset_positions_if_needed` call will pick them
+                            // up.
+                            let _ = pending_followup_tx.send(PendingFollowupReset { initial_partitions });
+                            Ok(())
+                        },
+                        Err(err) => Err(err),
+                    }
+                },
+                Err(err) => {
+                    log::debug!("OffsetFetch chain failed during update_fetch_positions: {}", err);
+                    Err(err)
+                },
+            };
+
+            // Java parity: `cacheExceptionIfEventExpired` runs on every
+            // result completion. We invoke the same logic here. The
+            // "current time" is captured at this moment — Java reads
+            // `time.milliseconds()` inside the `whenComplete` callback.
+            let now_ms = current_time_ms_for_followup();
+            if let Err(ref err) = result_for_outer
+                && now_ms >= deadline_ms
+            {
+                let mut guard = cached.lock().expect("cached_update_positions_exception mutex poisoned");
+                if guard.is_none() {
+                    *guard = Some(err.clone());
+                } else {
+                    log::debug!(
+                        "Discarding expired update_fetch_positions error because another error is already cached: {}",
+                        err
+                    );
+                }
+            }
+
+            let _ = outer_tx.send(result_for_outer);
+        });
+    }
+
+    /// Take and clear the cached `update_fetch_positions` error (Java:
+    /// `cachedUpdatePositionsException.getAndSet(null)`).
+    fn take_cached_update_positions_exception(&self) -> Option<KafkaError> {
+        let mut guard = self
+            .cached_update_positions_exception
+            .lock()
+            .expect("cached_update_positions_exception mutex poisoned");
+        guard.take()
+    }
+
+    /// Cache the given error if `current_time_ms >= deadline_ms`. Java:
+    /// `cacheExceptionIfEventExpired`. The cache is idempotent — only
+    /// the first error in a contiguous run is stored.
+    fn maybe_cache_update_positions_exception(&self, err: &KafkaError, deadline_ms: i64, current_time_ms: i64) {
+        if current_time_ms < deadline_ms {
+            return;
+        }
+        let mut guard = self
+            .cached_update_positions_exception
+            .lock()
+            .expect("cached_update_positions_exception mutex poisoned");
+        if guard.is_none() {
+            *guard = Some(err.clone());
+        }
+    }
+
+    /// Drain any pending `update_fetch_positions` followups scheduled by
+    /// the spawned task. Each followup triggers a
+    /// [`Self::reset_positions_if_needed`] call so the captured
+    /// partitions' ListOffsets requests are enqueued on the next
+    /// network poll. Java does this inline inside the `whenComplete`
+    /// chain; the Rust translation defers to `poll()` because
+    /// `reset_positions_if_needed` requires `&mut self`.
+    fn drain_pending_followups(&mut self, current_time_ms: i64) {
+        while let Ok(_followup) = self.pending_followup_rx.try_recv() {
+            // The captured partitions are already marked AWAIT_RESET on
+            // the subscription state by the spawned task; we just need to
+            // enqueue ListOffsets requests for everything in that state.
+            if let Err(err) = self.reset_positions_if_needed(current_time_ms) {
+                log::error!("Error enqueueing ListOffsets after committed-offset fetch: {}", err);
+            }
+        }
+    }
+
     /// Drains pending completions and forwards them to the
     /// `OffsetFetcherUtilsState` handlers.
     fn drain_pending_completions(&mut self, current_time_ms: i64) -> Result<(), KafkaError> {
@@ -608,6 +928,24 @@ impl OffsetsRequestManager {
     }
 }
 
+/// Read the wall-clock time in milliseconds since the unix epoch — used
+/// by the spawned `update_fetch_positions` followup to decide whether
+/// the triggering event has already expired (Java parity:
+/// `time.milliseconds()` inside `cacheExceptionIfEventExpired`).
+///
+/// Java's `Time` abstraction is mock-friendly; the Rust translation uses
+/// `std::time::SystemTime` directly inside the spawned task. Tests that
+/// need to control time can instead pass `current_time_ms` directly via
+/// the synchronous fail path of [`OffsetsRequestManager::update_fetch_positions`]
+/// (where the spawned task is not used).
+fn current_time_ms_for_followup() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(i64::MAX)
+}
+
 /// Helper to downcast a `ClientResponse` to a `ListOffsetsResponse`.
 fn downcast_list_offsets(response: &ClientResponse) -> Option<&crate::common::requests::ListOffsetsResponse> {
     match response.response_body() {
@@ -684,6 +1022,10 @@ impl RequestManager for OffsetsRequestManager {
         if let Err(err) = self.drain_pending_completions(current_time_ms) {
             log::error!("Error draining pending offset completions: {}", err);
         }
+        // Run any pending update-fetch-positions follow-ups before
+        // `requests_to_send` is taken — the follow-up calls
+        // `reset_positions_if_needed` which pushes into the queue.
+        self.drain_pending_followups(current_time_ms);
         let unsent = std::mem::take(&mut self.requests_to_send);
         if unsent.is_empty() {
             PollResult::empty()
@@ -1020,5 +1362,363 @@ mod tests {
         let subs = subscription_state.lock().unwrap();
         let position = subs.position(&tp).expect("position lookup").expect("position present");
         assert_eq!(position.offset, 99);
+    }
+
+    // -----------------------------------------------------------------
+    //   update_fetch_positions
+    //   (Java: OffsetsRequestManager.updateFetchPositions)
+    // -----------------------------------------------------------------
+
+    /// Helper: yield several times to give spawned futures a chance to
+    /// run. The followup driver awaits the inner `oneshot::Receiver`,
+    /// then performs synchronous state-mutation work and completes the
+    /// outer sender; on a current-thread runtime a single yield is not
+    /// always enough.
+    async fn yield_until<F: Fn() -> bool>(predicate: F) {
+        for _ in 0..16 {
+            if predicate() {
+                return;
+            }
+            tokio::task::yield_now().await;
+        }
+    }
+
+    /// Java parity: with no initializing partitions, the result resolves
+    /// immediately to `Ok(())` because `has_all_fetch_positions()` is
+    /// true at entry.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_with_no_initializing_partitions_resolves_immediately() {
+        let mut mgr = new_manager();
+        let rx = mgr.update_fetch_positions(i64::MAX, 0);
+        let result = rx.await.expect("oneshot");
+        assert!(result.is_ok());
+    }
+
+    /// Java parity: `OffsetsRequestManager.updateFetchPositions` with the
+    /// fast-path branch `hasAllFetchPositions == true` does not call
+    /// `commitRequestManager.fetchOffsets`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_with_all_positions_does_not_issue_fetch() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        // Assign and seek manually so the partition has a position.
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+            let pos = FetchPosition::with_leader(42, None, LeaderAndEpoch::no_leader_or_epoch());
+            subs.seek_unvalidated(&tp, pos).expect("seek");
+            assert!(subs.has_all_fetch_positions());
+        }
+
+        let rx = mgr.update_fetch_positions(i64::MAX, 0);
+        let result = rx.await.expect("oneshot");
+        assert!(result.is_ok());
+
+        // No OffsetFetch should have been issued.
+        assert_eq!(commit_rm.inner_state_for_test(), 0);
+    }
+
+    /// Java parity: `testUpdatePositionsWithCommittedOffsets` (request
+    /// issuance half).
+    ///
+    /// `update_fetch_positions` triggered with a single initializing
+    /// partition must enqueue exactly one `OffsetFetch` request through
+    /// the commit manager.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_with_committed_offsets_enqueues_offset_fetch() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+            assert!(!subs.has_all_fetch_positions());
+        }
+
+        let _rx = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(
+            commit_rm.inner_state_for_test(),
+            1,
+            "update_fetch_positions should enqueue exactly one OffsetFetch"
+        );
+    }
+
+    /// Java parity: `testUpdatePositionsWithCommittedOffsets` (response
+    /// half). After the OffsetFetch resolves with committed offsets, the
+    /// outer `update_fetch_positions` result is `Ok(())` and the
+    /// position has been seeked-unvalidated to the committed offset.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_with_committed_offsets_applies_position_on_response() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+        }
+
+        let rx = mgr.update_fetch_positions(i64::MAX, 0);
+
+        // Drive the inner OffsetFetch to completion with committed offset = 10.
+        let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+        offsets.insert(tp.clone(), Some(OffsetAndMetadata::new(10).expect("offset metadata")));
+        assert!(
+            commit_rm.complete_first_unsent_fetch_for_test(offsets),
+            "expected an unsent OffsetFetch to complete"
+        );
+
+        let result = rx.await.expect("oneshot");
+        assert!(result.is_ok());
+
+        let subs = subscription_state.lock().unwrap();
+        let position = subs.position(&tp).expect("position lookup").expect("position present");
+        assert_eq!(position.offset, 10);
+    }
+
+    /// Java parity: `testUpdatePositionsWithCommittedOffsetsReusesRequest`.
+    ///
+    /// Two `update_fetch_positions` calls with the same initializing
+    /// partition set must reuse the in-flight `OffsetFetch` — only one
+    /// fetch request appears on the commit manager's pending queue, and
+    /// both outer receivers resolve when the underlying fetch
+    /// completes.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_reuses_pending_request_for_same_partitions() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+        }
+
+        let rx1 = mgr.update_fetch_positions(i64::MAX, 0);
+        let rx2 = mgr.update_fetch_positions(i64::MAX, 0);
+
+        // Only one OffsetFetch should have been enqueued — the second
+        // call piggy-backs on the pending event (mirrors
+        // `canReusePendingOffsetFetchEvent`).
+        assert_eq!(
+            commit_rm.inner_state_for_test(),
+            1,
+            "second update_fetch_positions call must reuse the pending OffsetFetch"
+        );
+
+        // Complete the single in-flight fetch and verify both outer
+        // receivers resolve.
+        let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+        offsets.insert(tp.clone(), Some(OffsetAndMetadata::new(10).expect("offset metadata")));
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+
+        assert!(rx1.await.expect("rx1").is_ok());
+        assert!(rx2.await.expect("rx2").is_ok());
+
+        let subs = subscription_state.lock().unwrap();
+        let position = subs.position(&tp).expect("position lookup").expect("position present");
+        assert_eq!(position.offset, 10);
+    }
+
+    /// Java parity:
+    /// `testUpdatePositionsDoesNotApplyOffsetsIfPartitionNotInitializingAnymore`.
+    ///
+    /// If a partition was initializing when the OffsetFetch was issued
+    /// but gets a manual position via `seek` before the response
+    /// arrives, the committed offset MUST NOT overwrite that position.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_does_not_apply_offsets_if_partition_no_longer_initializing() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+        }
+
+        let _rx = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(commit_rm.inner_state_for_test(), 1);
+
+        // Between request and response, seek manually — the partition is
+        // no longer initializing.
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let pos = FetchPosition::with_leader(99, None, LeaderAndEpoch::no_leader_or_epoch());
+            subs.seek_unvalidated(&tp, pos).expect("seek");
+            assert!(!subs.initializing_partitions().contains(&tp));
+        }
+
+        // Now complete the fetch with a different offset.
+        let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+        offsets.insert(tp.clone(), Some(OffsetAndMetadata::new(5).expect("offset metadata")));
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+
+        // Give the spawned followup a chance to run.
+        let subs_for_check = subscription_state.clone();
+        let tp_for_check = tp.clone();
+        yield_until(|| {
+            let subs = subs_for_check.lock().unwrap();
+            subs.position(&tp_for_check)
+                .ok()
+                .flatten()
+                .map(|p| p.offset == 99)
+                .unwrap_or(false)
+        })
+        .await;
+
+        let subs = subscription_state.lock().unwrap();
+        let position = subs.position(&tp).expect("position lookup").expect("position present");
+        // The manual seek must NOT have been overwritten by the committed offset.
+        assert_eq!(position.offset, 99);
+    }
+
+    /// Java parity:
+    /// `testUpdatePositionsDoesNotResetPositionBeforeRetrievingOffsetsForNewlyAddedPartition`.
+    ///
+    /// `update_fetch_positions` captures the initializing-partition set
+    /// at call time. If a NEW partition is added to the assignment
+    /// between the OffsetFetch dispatch and its response, the
+    /// `reset_initializing_positions` step in the followup MUST NOT
+    /// include that newly added partition — its filter is restricted to
+    /// the captured set.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_does_not_reset_partitions_added_mid_flight() {
+        let (mut mgr, commit_rm, subscription_state) = new_manager_with_commit();
+        let tp1 = TopicPartition::new("topic1".to_string(), 1);
+        let tp2 = TopicPartition::new("topic2".to_string(), 2);
+
+        // Assign tp1 initially.
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp1.clone());
+            subs.assign_from_user(set).expect("assign");
+        }
+
+        let _rx = mgr.update_fetch_positions(i64::MAX, 0);
+        assert_eq!(commit_rm.inner_state_for_test(), 1);
+
+        // Now add tp2 to the assignment while the OffsetFetch is still
+        // in flight.
+        {
+            let mut subs = subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp1.clone());
+            set.insert(tp2.clone());
+            subs.assign_from_user(set).expect("assign");
+        }
+
+        // Complete the fetch returning a committed offset for tp1 (Java
+        // mock returns `Map.of(tp1, ...)`).
+        let mut offsets: HashMap<TopicPartition, Option<OffsetAndMetadata>> = HashMap::new();
+        offsets.insert(tp1.clone(), Some(OffsetAndMetadata::new(10).expect("offset metadata")));
+        assert!(commit_rm.complete_first_unsent_fetch_for_test(offsets));
+
+        // Wait for the followup to apply the committed offset to tp1.
+        let subs_for_check = subscription_state.clone();
+        let tp1_for_check = tp1.clone();
+        yield_until(|| {
+            let subs = subs_for_check.lock().unwrap();
+            subs.position(&tp1_for_check)
+                .ok()
+                .flatten()
+                .map(|p| p.offset == 10)
+                .unwrap_or(false)
+        })
+        .await;
+
+        let subs = subscription_state.lock().unwrap();
+        // tp1: position applied via seek_unvalidated to 10.
+        let position1 = subs.position(&tp1).expect("position lookup").expect("position present");
+        assert_eq!(position1.offset, 10);
+        // tp2: still initializing — was NOT marked AWAIT_RESET (filter
+        // excluded it). It would not have a position yet AND it would
+        // still be in `initializing_partitions`.
+        assert!(
+            subs.initializing_partitions().contains(&tp2),
+            "tp2 added mid-flight must NOT have been marked AWAIT_RESET"
+        );
+    }
+
+    /// Java parity (no-group branch): when `commit_request_manager` is
+    /// `None`, `update_fetch_positions` runs
+    /// `initWithPartitionOffsetsIfNeeded` inline. With
+    /// `AutoOffsetResetStrategy::EARLIEST`, the initializing partition
+    /// is marked for AWAIT_RESET — verifiable on the subscription state.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_without_commit_manager_marks_partitions_for_reset() {
+        let mut mgr = new_manager(); // No commit manager
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        // Note: `new_manager`'s SubscriptionState is initialized with
+        // AutoOffsetResetStrategy::EARLIEST, so reset_initializing_positions
+        // marks for AWAIT_RESET (does not raise NoOffsetForPartition).
+        {
+            let mut subs = mgr.subscription_state.lock().unwrap();
+            let mut set = HashSet::new();
+            set.insert(tp.clone());
+            subs.assign_from_user(set).expect("assign");
+            assert!(subs.initializing_partitions().contains(&tp));
+        }
+
+        let rx = mgr.update_fetch_positions(i64::MAX, 0);
+        let result = rx.await.expect("oneshot");
+        assert!(result.is_ok());
+
+        // After the call, the partition is no longer "initializing" —
+        // it's now in AWAIT_RESET state (marked by
+        // `request_offset_reset_default`).
+        let subs = mgr.subscription_state.lock().unwrap();
+        assert!(
+            !subs.initializing_partitions().contains(&tp),
+            "tp must have been moved out of initializing into AWAIT_RESET"
+        );
+    }
+
+    /// Java parity (`maybeCompleteWithPreviousException`): a cached
+    /// `update_fetch_positions` error from a previous expired event is
+    /// surfaced on the next call (and cleared atomically).
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_surfaces_cached_previous_exception() {
+        let mut mgr = new_manager();
+
+        // Seed a cached error directly (this is what
+        // `cacheExceptionIfEventExpired` does in Java when an expired event
+        // surfaces an error).
+        let cached_err = KafkaError::new(crate::common::protocol::Errors::TopicAuthorizationFailed);
+        {
+            let mut guard = mgr.cached_update_positions_exception.lock().unwrap();
+            *guard = Some(cached_err.clone());
+        }
+
+        let rx = mgr.update_fetch_positions(i64::MAX, 0);
+        let result = rx.await.expect("oneshot");
+
+        match result {
+            Err(err) => {
+                // Java propagates the exact cached exception; Rust does
+                // the same with the cloned `KafkaError`. Confirm the
+                // error type matches.
+                assert_eq!(
+                    err.error().to_string(),
+                    cached_err.error().to_string(),
+                    "cached error should be surfaced on the next call"
+                );
+            },
+            Ok(()) => panic!("expected cached error to be surfaced"),
+        }
+
+        // The cache must have been cleared.
+        let guard = mgr.cached_update_positions_exception.lock().unwrap();
+        assert!(guard.is_none(), "cache should be cleared after consumption");
     }
 }
