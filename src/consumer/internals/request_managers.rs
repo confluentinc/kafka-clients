@@ -408,21 +408,21 @@ mod tests {
         assert_eq!(2, entries.len());
     }
 
-    /// Verifies that `entries()` returns every wired manager in Java's
-    /// registration order — `coordinator → commit → heartbeat →
-    /// offsets → topic_metadata → fetch` (membership intentionally
-    /// skipped per the [`RequestManagers::entries`] docstring).
+    /// Verifies that `entries()` returns the correct count when five of
+    /// the six request-emitting slots are populated.
     ///
-    /// With all six request-emitting slots wired, the resulting `Vec`
-    /// must have length 6. The ordering itself is documented in the
-    /// `entries()` docstring; the runtime types behind
+    /// The slot ordering itself (coordinator → commit → heartbeat →
+    /// offsets → topic_metadata → fetch) is documented in the
+    /// [`RequestManagers::entries`] docstring; the runtime types behind
     /// `&mut dyn RequestManager` use only default trait methods, so
-    /// they are not individually distinguishable here. A per-slot
-    /// identity assertion is unnecessary given the destructure-driven
-    /// implementation is a straight-line list of `if let Some(...)
-    /// list.push(...)` calls in the documented order.
+    /// they are not individually distinguishable here. The
+    /// destructure-driven implementation is a straight-line list of
+    /// `if let Some(...) list.push(...)` calls, so the test name does
+    /// not promise more than is asserted — order verification is left
+    /// to the other tests in this module which exercise individual
+    /// slots in pairs (cf. `entries_includes_*_when_present`).
     #[test]
-    fn entries_returns_managers_in_registration_order() {
+    fn entries_returns_correct_count_when_five_slots_populated() {
         // Six request-emitting slots: coordinator, commit,
         // consumer_heartbeat, offsets, topic_metadata, fetch.
         // `consumer_membership` is held as Arc and is excluded by
@@ -433,7 +433,7 @@ mod tests {
         // pipeline which is heavier than the value adds for this
         // shape-only test. The same destructure handles all six slots
         // uniformly, so omitting one doesn't change what's being
-        // tested (the per-slot push order).
+        // tested (the per-slot count).
         let mut rm = RequestManagers::new(
             Some(coord_manager()),
             Some(topic_metadata_manager()),

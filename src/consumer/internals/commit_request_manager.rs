@@ -1029,31 +1029,93 @@ impl CommitRequestManager {
     }
 
     fn maybe_auto_commit_async(&mut self, current_time_ms: i64) {
-        // Java: maybeAutoCommitAsync() — only fires when autoCommit enabled
-        // AND timer expired AND no in-flight commit.
-        let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
-        let should_fire = match guard.auto_commit.as_ref() {
-            Some(ac) => ac.should_auto_commit(current_time_ms),
-            None => false,
+        // Java: `maybeAutoCommitAsync()` — only fires when autoCommit enabled
+        // AND timer expired AND no in-flight commit. Then snapshots
+        // `subscriptions.allConsumed()`, enqueues an `OffsetCommitRequestState`
+        // (deadline = `Long.MAX_VALUE`), resets the interval timer, and on
+        // a retriable failure resets the timer with `retry_backoff_ms`
+        // (Java's `maybeResetTimerWithBackoff`).
+        let should_fire = {
+            let guard = self.inner.state.lock().expect("commit manager state poisoned");
+            match guard.auto_commit.as_ref() {
+                Some(ac) => ac.should_auto_commit(current_time_ms),
+                None => false,
+            }
         };
         if !should_fire {
             return;
         }
-        // Auto-commit fires with `Long.MAX_VALUE` deadline (Java).
-        if let Some(ac) = guard.auto_commit.as_mut() {
-            ac.set_inflight_commit_status(true);
-            ac.reset_timer(current_time_ms);
+        // Snapshot `subscriptions.allConsumed()` (Java:
+        // `createOffsetCommitRequest(subscriptions.allConsumed(), Long.MAX_VALUE)`).
+        let offsets = {
+            let guard = self.inner.subscriptions.lock().expect("subscriptions poisoned");
+            guard.all_consumed()
+        };
+        // Java still resets the timer when no offsets are committed (the
+        // `resetAutoCommitTimer()` call in `maybeAutoCommitAsync` runs
+        // unconditionally after `requestAutoCommit`). Reset before the
+        // empty-short-circuit so the next interval fires on schedule.
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            if let Some(ac) = guard.auto_commit.as_mut() {
+                ac.reset_timer(current_time_ms);
+            }
         }
-        // Java: auto-commit pulls from `subscriptions.allConsumed()`. We
-        // don't have `SubscriptionState` plumbed in for Phase 9 yet (the
-        // bg task wiring lands in Phase 10), so emit an empty-offsets
-        // sentinel that resolves immediately. Phase 10 will replace this
-        // with the actual `subscriptions.allConsumed()` snapshot.
-        // No outbound request — just flip the flag back so the next
-        // interval can fire.
-        if let Some(ac) = guard.auto_commit.as_mut() {
-            ac.set_inflight_commit_status(false);
+        if offsets.is_empty() {
+            // Java's `requestAutoCommit` resolves with an empty map; no
+            // request is enqueued and the inflight flag is never raised.
+            return;
         }
+        self.maybe_update_last_seen_epoch_if_newer(&offsets);
+        let member_info = {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            if let Some(ac) = guard.auto_commit.as_mut() {
+                ac.set_inflight_commit_status(true);
+            }
+            guard.member_info.clone()
+        };
+        let (request, request_rx) = OffsetCommitRequestState::new(
+            offsets,
+            member_info,
+            self.inner.retry_backoff_ms,
+            self.inner.retry_backoff_max_ms,
+            i64::MAX,
+            current_time_ms,
+        );
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.pending.unsent_offset_commits.push_back(request);
+        }
+        // Java: `maybeResetTimerWithBackoff` — on a retriable failure
+        // reset the auto-commit timer with `retry_backoff_ms`. Also
+        // clears the `inflightCommitStatus` flag regardless of outcome
+        // (Java's `autoCommitCallback` BiConsumer in `requestAutoCommit`).
+        let inner = Arc::clone(&self.inner);
+        tokio::spawn(async move {
+            let outcome = request_rx.await;
+            let mut guard = inner.state.lock().expect("commit manager state poisoned");
+            if let Some(ac) = guard.auto_commit.as_mut() {
+                ac.set_inflight_commit_status(false);
+            }
+            match outcome {
+                Ok(Ok(_committed)) => {
+                    log::debug!("Completed asynchronous auto-commit of offsets");
+                },
+                Ok(Err(err)) => {
+                    if err.is_retriable() {
+                        log::debug!("Asynchronous auto-commit of offsets failed due to retriable error: {err}");
+                        if let Some(ac) = guard.auto_commit.as_mut() {
+                            ac.reset_timer_with_backoff(current_time_ms, inner.retry_backoff_ms);
+                        }
+                    } else {
+                        log::debug!("Asynchronous auto-commit of offsets failed: {err}");
+                    }
+                },
+                Err(_) => {
+                    log::debug!("Asynchronous auto-commit channel closed without a result");
+                },
+            }
+        });
     }
 
     fn fail_all_with_error(pending: &mut PendingRequests, err: KafkaError) {
@@ -1644,24 +1706,35 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     // `requestAttempt.offsets = subscriptions.allConsumed();` before
     // recursing. Initial value is preserved for the no-mutation path.
     let _last_offsets = initial_offsets;
+    // Java's `isStaleEpochErrorAndValidEpochAvailable` requires
+    // `memberInfo.memberEpoch.isPresent()` (`CommitRequestManager.java:573-575`).
+    // Captured here once at driver entry because `member_info` does not
+    // change across retries within a single driver invocation.
+    let has_valid_member_epoch = member_info.member_epoch.is_some();
     let outcome: Result<(), KafkaError> = loop {
         match request_rx.await {
             Ok(Ok(_committed)) => break Ok(()),
             Ok(Err(err)) => {
-                let is_retriable_for_rebalance = err.is_retriable() || err.error() == Errors::StaleMemberEpoch;
+                // Java line 349: enter the retry gate only when the error
+                // is a RetriableException OR the stale-epoch case AND a
+                // valid member epoch is currently known.
+                let is_stale_epoch_with_valid_epoch = err.error() == Errors::StaleMemberEpoch && has_valid_member_epoch;
+                let is_retriable_for_rebalance = err.is_retriable() || is_stale_epoch_with_valid_epoch;
                 if !is_retriable_for_rebalance {
                     log::debug!("Auto-commit sync before rebalance failed with non-retriable error: {err}");
                     break Err(err);
                 }
-                // Java treats UNKNOWN_TOPIC_OR_PARTITION as fatal here
-                // (`CommitRequestManager.java:353-355`) even though it's
-                // otherwise retriable.
-                if err.error() == Errors::UnknownTopicOrPartition {
-                    log::debug!("Auto-commit sync before rebalance failed because topic or partition were deleted");
-                    break Err(err);
-                }
-                // Advance the local "now" by the configured retry backoff
-                // and check the deadline.
+                // Java order (`CommitRequestManager.java:350-368`):
+                //   1. `requestAttempt.isExpired()` → wrap as TimeoutException
+                //   2. else if UnknownTopicOrPartitionException → fatal,
+                //      surface the original error
+                //   3. else → retry
+                // The previous request-state object is consumed by the
+                // network-build path, so we compare `current_time_ms`
+                // (advanced once per retriable failure by the configured
+                // backoff, mirroring how the bg-task's `runOnce` loop only
+                // re-polls a retry after the exponential-backoff window
+                // elapses) against `deadline_ms` here.
                 let backoff = inner.retry_backoff_ms.max(0);
                 current_time_ms = current_time_ms.saturating_add(backoff);
                 attempts += 1;
@@ -1671,6 +1744,15 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                         "Failed to commit offsets within the deadline: {}",
                         err.error().message()
                     )));
+                }
+                // Java treats UNKNOWN_TOPIC_OR_PARTITION as fatal here
+                // (`CommitRequestManager.java:353-355`) even though it's
+                // otherwise retriable. Checked AFTER expiry per Java's
+                // order: when both conditions hold, Java's
+                // TimeoutException wins.
+                if err.error() == Errors::UnknownTopicOrPartition {
+                    log::debug!("Auto-commit sync before rebalance failed because topic or partition were deleted");
+                    break Err(err);
                 }
                 // Re-snapshot `subscriptions.allConsumed()` for the retry
                 // (Java: `requestAttempt.offsets = subscriptions.allConsumed();`).
@@ -2001,22 +2083,127 @@ mod tests {
     /// Phase 10 wire-prereq #6:
     /// [`CommitRequestManager::update_timer_and_maybe_commit`] is the
     /// processor-side entry point that ensures the auto-commit timer is
-    /// honoured at event-dispatch time. With auto-commit enabled and the
-    /// timer past its expiration, calling the hook should fire the
-    /// auto-commit path — observable via the timer being reset back to a
-    /// fresh interval (the `maybe_auto_commit_async` driver always resets
-    /// the timer when it fires).
-    #[test]
-    fn update_timer_and_maybe_commit_fires_when_timer_expired() {
-        let mut manager = make_manager(0, true);
+    /// honoured at event-dispatch time. With auto-commit enabled, the
+    /// timer past its expiration, AND `subscriptions.allConsumed()`
+    /// non-empty, calling the hook must (a) reset the timer to a fresh
+    /// interval, (b) enqueue an `OffsetCommitRequestState` on
+    /// `pending.unsent_offset_commits`, and (c) raise the auto-commit
+    /// `has_inflight_commit` flag (mirrors Java's
+    /// `maybeAutoCommitAsync` → `requestAutoCommit` path).
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_timer_and_maybe_commit_fires_when_timer_expired() {
+        let (manager, subs) = make_manager_with_subs(0, true);
+        // Seed `subscriptions.allConsumed()` with a single assigned
+        // partition at offset 100 so the auto-commit request is built
+        // with a non-empty offsets map.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut partitions = HashSet::new();
+            partitions.insert(tp.clone());
+            s.assign_from_user(partitions).expect("assign_from_user");
+            s.seek(&tp, 100).expect("seek");
+        }
+        // Pre-condition: no unsent commit yet.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert!(guard.pending.unsent_offset_commits.is_empty());
+            assert!(
+                !guard.auto_commit.as_ref().unwrap().has_inflight_commit,
+                "inflight flag must start clear"
+            );
+        }
         // Advance past the auto-commit interval (1000ms — configured in
         // `test_config`) and call the hook.
+        let mut manager = manager;
         let after_expiry_ms = 2_000;
         manager.update_timer_and_maybe_commit(after_expiry_ms);
-        // The auto-commit driver should have reset the timer to a fresh
-        // interval, so `maximum_time_to_wait(after_expiry_ms)` should be
-        // back to the full interval (1000ms).
+        // (a) Timer reset to a fresh interval.
         assert_eq!(manager.maximum_time_to_wait(after_expiry_ms), 1_000);
+        // (b) One unsent commit request enqueued; (c) inflight flag is
+        // raised because `requestAutoCommit` set it before the request
+        // resolves.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert_eq!(
+                guard.pending.unsent_offset_commits.len(),
+                1,
+                "auto-commit must enqueue exactly one request when subscriptions are non-empty"
+            );
+            assert!(
+                guard.auto_commit.as_ref().unwrap().has_inflight_commit,
+                "inflight flag must be raised while the auto-commit request is outstanding"
+            );
+            // Sanity: the enqueued request carries the snapshotted offsets.
+            let queued = guard.pending.unsent_offset_commits.front().unwrap();
+            assert_eq!(queued.offsets.len(), 1);
+            assert!(queued.offsets.contains_key(&tp));
+        }
+
+        // Now ship the request and drive a successful response to confirm
+        // the inflight flag flips back on completion (mirrors Java's
+        // `autoCommitCallback` BiConsumer in `requestAutoCommit`).
+        use crate::common::Node;
+        use crate::common::requests::ConcreteResponse;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let poll_result = manager.poll_with_coordinator(&mut coordinator, after_expiry_ms);
+        assert_eq!(poll_result.unsent_requests.len(), 1);
+        let mut unsent_requests = poll_result.unsent_requests;
+        let unsent = unsent_requests.remove(0);
+        let mut response_data: HashMap<TopicPartition, Errors> = HashMap::new();
+        response_data.insert(tp.clone(), Errors::None);
+        let response = ConcreteResponse::OffsetCommit(
+            crate::common::requests::OffsetCommitResponse::from_response_data(0, &response_data),
+        );
+        let header = crate::common::requests::RequestHeader::new(
+            &crate::common::protocol::ApiKeys::OFFSET_COMMIT,
+            0,
+            "test-client",
+            0,
+        )
+        .expect("request header");
+        let client_response = crate::client_response::ClientResponse::new(
+            header,
+            None,
+            "localhost:9092",
+            0,
+            1,
+            false,
+            None,
+            None,
+            Some(response),
+        );
+        unsent.handler().on_complete(client_response);
+        // Yield until the spawned auto-commit task clears the flag.
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            let guard = manager.inner.state.lock().unwrap();
+            if !guard.auto_commit.as_ref().unwrap().has_inflight_commit {
+                return;
+            }
+        }
+        panic!("has_inflight_commit flag was not cleared on auto-commit success");
+    }
+
+    /// With auto-commit enabled but `subscriptions.allConsumed()` empty
+    /// (no assigned partitions with valid positions), the hook resets the
+    /// auto-commit timer but does NOT enqueue a request and does NOT
+    /// raise the inflight flag. Mirrors Java's `requestAutoCommit`
+    /// short-circuit on empty offsets.
+    #[test]
+    fn update_timer_and_maybe_commit_resets_timer_when_no_consumed_offsets() {
+        let (manager, _subs) = make_manager_with_subs(0, true);
+        let mut manager = manager;
+        let after_expiry_ms = 2_000;
+        manager.update_timer_and_maybe_commit(after_expiry_ms);
+        // Timer reset (Java does this unconditionally in `maybeAutoCommitAsync`).
+        assert_eq!(manager.maximum_time_to_wait(after_expiry_ms), 1_000);
+        // No request enqueued; inflight flag stays clear.
+        let guard = manager.inner.state.lock().unwrap();
+        assert!(guard.pending.unsent_offset_commits.is_empty());
+        assert!(!guard.auto_commit.as_ref().unwrap().has_inflight_commit);
     }
 
     /// With auto-commit DISABLED, the hook is a no-op (Java:
@@ -2350,5 +2537,133 @@ mod tests {
             }
         }
         panic!("maybe_auto_commit_sync_before_rebalance future did not resolve after 32 yields");
+    }
+
+    /// Phase 10 fixup (COMMENTS.1.md #2): Java's
+    /// `isStaleEpochErrorAndValidEpochAvailable` predicate requires
+    /// `memberInfo.memberEpoch.isPresent()`. When the consumer has no
+    /// valid member epoch (e.g. the member has left the group), a
+    /// `StaleMemberEpoch` failure must NOT enter the retry gate — Java
+    /// surfaces the original error directly. Previously the Rust driver
+    /// dropped this guard and would loop until the deadline expired,
+    /// then surface a `Timeout` instead of the original error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_sync_before_rebalance_surfaces_stale_epoch_when_no_valid_epoch() {
+        use crate::common::Node;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+        let (manager, subs) = make_manager_with_subs(0, true);
+        // Member epoch defaults to None — that's the relevant precondition
+        // for this test. Confirm.
+        {
+            let guard = manager.inner.state.lock().unwrap();
+            assert!(
+                guard.member_info.member_epoch.is_none(),
+                "test relies on the default member_info having no epoch"
+            );
+        }
+        // Seed `subscriptions.allConsumed()` with one partition so the
+        // rebalance flush actually enqueues a request.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut partitions = HashSet::new();
+            partitions.insert(tp.clone());
+            s.assign_from_user(partitions).expect("assign_from_user");
+            s.seek(&tp, 100).expect("seek");
+        }
+
+        // Use a generous deadline so a Timeout result would only arise
+        // from the buggy retry-loop path (not from genuinely-expired
+        // backoff progression).
+        let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
+
+        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let mut manager = manager;
+        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        assert_eq!(poll_result.unsent_requests.len(), 1);
+        let mut unsent_requests = poll_result.unsent_requests;
+        let unsent = unsent_requests.remove(0);
+        // Drive a StaleMemberEpoch failure into the response handler.
+        unsent.handler().on_failure(1, KafkaError::new(Errors::StaleMemberEpoch));
+
+        // Yield until the public future resolves; expect the original
+        // StaleMemberEpoch error, NOT a Timeout (the buggy code would
+        // retry indefinitely because the gate would admit the error,
+        // then eventually surface Timeout).
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            match public_rx.try_recv() {
+                Ok(Ok(())) => panic!("expected StaleMemberEpoch failure, got Ok"),
+                Ok(Err(err)) => {
+                    assert_eq!(
+                        err.error(),
+                        Errors::StaleMemberEpoch,
+                        "expected StaleMemberEpoch surfaced unchanged when member_epoch is None, got {err:?}"
+                    );
+                    return;
+                },
+                Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
+                Err(oneshot::error::TryRecvError::Empty) => {},
+            }
+        }
+        panic!("auto-commit-sync-before-rebalance future did not resolve after 32 yields");
+    }
+
+    /// Phase 10 fixup (COMMENTS.1.md #3): when BOTH the request deadline
+    /// is past AND the error is `UnknownTopicOrPartition`, Java's order
+    /// (`CommitRequestManager.java:350-368`) checks `isExpired` first and
+    /// surfaces a wrapped `TimeoutException` (not the UTOP error). The
+    /// Rust driver previously checked UTOP first, surfacing the raw
+    /// error.
+    #[tokio::test(flavor = "current_thread")]
+    async fn auto_commit_sync_before_rebalance_timeout_wins_over_unknown_topic_or_partition() {
+        use crate::common::Node;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+        let (manager, subs) = make_manager_with_subs(0, true);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut partitions = HashSet::new();
+            partitions.insert(tp.clone());
+            s.assign_from_user(partitions).expect("assign_from_user");
+            s.seek(&tp, 100).expect("seek");
+        }
+        // Pick a deadline that is already past at `now_ms = 0`. The
+        // driver's local clock starts at `now_ms` and advances by
+        // `retry_backoff_ms` on each retriable failure; with `deadline =
+        // 1`, a single retry tick crosses it.
+        let deadline_ms: i64 = 1;
+        let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(deadline_ms, 0);
+
+        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let mut manager = manager;
+        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        assert_eq!(poll_result.unsent_requests.len(), 1);
+        let mut unsent_requests = poll_result.unsent_requests;
+        let unsent = unsent_requests.remove(0);
+        // Drive an UnknownTopicOrPartition failure (Errors::is_retriable
+        // = true), with the deadline already past.
+        unsent.handler().on_failure(1, KafkaError::new(Errors::UnknownTopicOrPartition));
+
+        for _ in 0..32 {
+            tokio::task::yield_now().await;
+            match public_rx.try_recv() {
+                Ok(Ok(())) => panic!("expected failure, got Ok"),
+                Ok(Err(err)) => {
+                    assert!(
+                        matches!(err, KafkaError::Timeout(_)),
+                        "expected Timeout (deadline check wins over UTOP), got {err:?}"
+                    );
+                    return;
+                },
+                Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
+                Err(oneshot::error::TryRecvError::Empty) => {},
+            }
+        }
+        panic!("auto-commit-sync-before-rebalance future did not resolve after 32 yields");
     }
 }
