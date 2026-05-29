@@ -1096,10 +1096,18 @@ impl OffsetsRequestManager {
         match self.update_fetch_positions_inner(deadline_ms, current_time_ms, tx) {
             Ok(consumed_tx) => consumed_tx,
             Err((tx, err)) => {
-                // Match Java: synchronous error path also goes through
-                // `cacheExceptionIfEventExpired`. The `whenComplete` runs
-                // immediately because the result is already failed.
-                self.maybe_cache_update_positions_exception(&err, deadline_ms, current_time_ms);
+                // Java's outer `catch (Exception e)` in
+                // `updateFetchPositions` (`OffsetsRequestManager.java:260-262`)
+                // calls `result.completeExceptionally(maybeWrapAsKafkaException(e))`
+                // ONLY — it does NOT register a `whenComplete` cache hook.
+                // The `cacheExceptionIfEventExpired` hook is registered
+                // exclusively inside `updatePositionsWithOffsets` (the
+                // committed-offset path's spawned continuation in Rust).
+                // Synchronously-thrown errors (e.g. a cached
+                // `LogTruncationException` flowing back from
+                // `validatePositionsIfNeeded`) must NOT be cached here —
+                // doing so causes double-delivery when the previous call
+                // already surfaced the same error.
                 let _ = tx.send(Err(err));
             },
         }
@@ -1312,21 +1320,15 @@ impl OffsetsRequestManager {
         *guard = Some(err);
     }
 
-    /// Cache the given error if `current_time_ms >= deadline_ms`. Java:
-    /// `cacheExceptionIfEventExpired`. The cache is idempotent — only
-    /// the first error in a contiguous run is stored.
-    fn maybe_cache_update_positions_exception(&self, err: &KafkaError, deadline_ms: i64, current_time_ms: i64) {
-        if current_time_ms < deadline_ms {
-            return;
-        }
-        let mut guard = self
-            .cached_update_positions_exception
-            .lock()
-            .expect("cached_update_positions_exception mutex poisoned");
-        if guard.is_none() {
-            *guard = Some(err.clone());
-        }
-    }
+    // Note: there is no shared `maybe_cache_update_positions_exception`
+    // helper. Java's `cacheExceptionIfEventExpired` hook (registered as a
+    // `whenComplete` inside `updatePositionsWithOffsets` —
+    // `OffsetsRequestManager.java:283`) is inlined into the
+    // committed-offset spawned followup (see
+    // [`Self::spawn_committed_offsets_followup`]). Synchronous errors
+    // from the outer `updateFetchPositions` body are NOT cached
+    // (Java's outer `catch` block does not register the hook), so
+    // there is no caller from the sync path.
 
     /// Drain any pending `update_fetch_positions` followups scheduled by
     /// the spawned task. Each followup triggers a
@@ -2408,6 +2410,64 @@ mod tests {
         assert!(
             !subs.initializing_partitions().contains(&tp),
             "tp must have been moved out of initializing into AWAIT_RESET"
+        );
+    }
+
+    /// Regression for COMMENTS R2-3: `update_fetch_positions` MUST NOT
+    /// cache synchronous errors thrown from `validate_positions_if_needed`.
+    /// Java's outer `catch (Exception e)` in `updateFetchPositions`
+    /// (`OffsetsRequestManager.java:260-262`) only calls
+    /// `result.completeExceptionally(...)`; the
+    /// `cacheExceptionIfEventExpired` hook is registered ONLY inside the
+    /// committed-offset path's `whenComplete`. Caching here would
+    /// produce double-delivery: the caller sees the error THIS call,
+    /// then the next `update_fetch_positions` call surfaces the same
+    /// cached error.
+    ///
+    /// Setup: pre-seed a `LogTruncationError` in
+    /// `cached_validate_positions_exception` (Java path:
+    /// `OffsetsForLeaderEpoch` response set it). Call
+    /// `update_fetch_positions` with `current_time_ms >= deadline_ms`
+    /// (the Java "event expired" condition that would trigger caching
+    /// IF the bug were present). The Err must propagate to the caller,
+    /// and `cached_update_positions_exception` MUST be empty afterwards.
+    #[tokio::test(flavor = "current_thread")]
+    async fn update_fetch_positions_does_not_cache_synchronous_validate_errors() {
+        let mut mgr = new_manager();
+
+        // Pre-seed a validate error (Java's path:
+        // `OffsetsForLeaderEpoch` response set it via
+        // `cachedValidatePositionsException.set(error)`).
+        let seeded_err = KafkaError::new(crate::common::protocol::Errors::UnknownServerError);
+        mgr.shared.offset_fetcher_utils.maybe_set_validate_error(seeded_err.clone());
+
+        // current_time_ms == deadline_ms triggers the would-be cache
+        // condition (`now_ms >= deadline_ms`). Java's outer catch does
+        // NOT cache; Rust must match.
+        let deadline_ms = 100;
+        let current_time_ms = 100;
+        let rx = mgr.update_fetch_positions(deadline_ms, current_time_ms);
+        let result = rx.await.expect("oneshot");
+
+        match result {
+            Err(err) => {
+                assert_eq!(
+                    err.error().to_string(),
+                    seeded_err.error().to_string(),
+                    "validate error must propagate to caller this call",
+                );
+            },
+            Ok(()) => panic!("expected validate error to be surfaced"),
+        }
+
+        // The cache MUST be empty — Java does not cache from the outer
+        // catch. The bug fix removes the
+        // `maybe_cache_update_positions_exception` call from the sync
+        // error path.
+        let guard = mgr.cached_update_positions_exception.lock().unwrap();
+        assert!(
+            guard.is_none(),
+            "synchronous validate error must NOT be cached (Java's outer catch does not cache)",
         );
     }
 

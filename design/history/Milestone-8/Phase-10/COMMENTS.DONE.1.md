@@ -480,3 +480,58 @@ construct a manager with a real `CommitRequestManager` and
 the `false` arm must NOT emit a rebalance-listener event and must
 leave state in `Reconciling`; the `true` arm DOES emit and advances
 to `Acknowledging`.
+
+### Issue R2-3: `update_fetch_positions` caches synchronous `validate_positions_if_needed` errors that Java never caches
+
+> - **File**: `src/consumer/internals/offsets_request_manager.rs:601-616`
+>   (the outer `match` in `update_fetch_positions`) and
+>   `:639-647` (the validate Err branch in
+>   `update_fetch_positions_inner`).
+> - **Commit**: `2b3d050` Phase 10 (3b/N): `update_fetch_positions`
+> - **Severity**: Bug
+> - **Java Reference**: `OffsetsRequestManager.java:235-264` (the outer
+>   `updateFetchPositions`'s `try/catch (Exception e) {
+>   result.completeExceptionally(maybeWrapAsKafkaException(e)); }`)
+>   combined with `:280-306` (`cacheExceptionIfEventExpired(result,
+>   deadlineMs)` is registered ONLY in `updatePositionsWithOffsets`,
+>   not in the outer `updateFetchPositions`).
+> - **Description**: Java caches an error via
+>   `cachedUpdatePositionsException.set(error)` only on the OUTER
+>   result of `updatePositionsWithOffsets`, NOT on the outer
+>   `updateFetchPositions` result. So if `validatePositionsIfNeeded()`
+>   throws (e.g. a cached `LogTruncationException` from a previous
+>   validate response), Java's `catch` block completes the result
+>   exceptionally and never registers a `whenComplete` hook —
+>   **no caching happens**. Rust's `update_fetch_positions` outer
+>   match calls `maybe_cache_update_positions_exception(&err, …)` on
+>   every `Err((tx, err))` return from `_inner` — INCLUDING the
+>   `validate_positions_if_needed` Err arm at `:639-641`. Result: a
+>   validate-thrown `LogTruncationException` at-or-past-deadline gets
+>   delivered to the caller in this call AND cached, then re-delivered
+>   to the NEXT call via `take_cached_update_positions_exception` —
+>   the user observes the same error twice.
+> - **Expected**: Move the caching call into the spawned-followup path
+>   only (the equivalent of Java's `updatePositionsWithOffsets`-internal
+>   hook). The synchronous validate Err must NOT cache.
+> - **Actual**: Validate-thrown errors with `current_time_ms >=
+>   deadline_ms` are cached → double-delivery on the next call.
+
+**Resolution**: Removed the `maybe_cache_update_positions_exception`
+call from the outer `match` Err arm in
+`OffsetsRequestManager::update_fetch_positions`. The synchronous error
+path now just sends the error on the outer `tx` and returns —
+matching Java's outer `catch (Exception e) {
+result.completeExceptionally(maybeWrapAsKafkaException(e)); }`. The
+spawned committed-offset followup retains its own
+`cacheExceptionIfEventExpired`-equivalent block (inline, not via the
+now-removed helper), preserving Java's
+`updatePositionsWithOffsets`-internal caching for the genuinely
+asynchronous error path. Deleted the now-dead
+`maybe_cache_update_positions_exception` helper in favor of inline
+caching in the spawned task. Regression test
+`update_fetch_positions_does_not_cache_synchronous_validate_errors`:
+pre-seeds a validate error via
+`OffsetFetcherUtilsState::maybe_set_validate_error`, calls
+`update_fetch_positions` with `current_time_ms == deadline_ms` (the
+exact condition that previously triggered the bug), asserts the error
+propagates AND `cached_update_positions_exception` stays empty.
