@@ -59,16 +59,22 @@ use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
+use regex::Regex;
+
 use crate::common::{KafkaError, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
+use crate::consumer::SubscriptionPattern;
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
 use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
+use crate::consumer::internals::consumer_network_thread::ThreadTime;
 use crate::consumer::internals::consumer_rebalance_listener_invoker::ConsumerRebalanceListenerInvoker;
 use crate::consumer::internals::deserializers::Deserializers;
+use crate::consumer::internals::events::application_event::ApplicationEvent;
 use crate::consumer::internals::events::application_event_handler::ApplicationEventHandler;
-use crate::consumer::internals::events::background_event::BackgroundEventEnvelope;
+use crate::consumer::internals::events::background_event::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::internals::events::completable_event::{calculate_deadline_ms, make_completable_event};
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
 use crate::consumer::internals::request_managers::RequestManagers;
@@ -221,6 +227,8 @@ where
     /// Cached `ConsumerConfig` for late-bound config lookups (e.g.
     /// inside `close`).
     config: ConsumerConfig,
+    /// Time source used for `current_time_ms` arguments to events.
+    time: Arc<dyn ThreadTime>,
 }
 
 /// Components handed to [`AsyncKafkaConsumer::new_with_thread`]: the
@@ -247,6 +255,7 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + 'static, V: Send + 'sta
     pub offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
     pub deserializers: Arc<Deserializers<K, V>>,
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
+    pub time: Arc<dyn ThreadTime>,
 }
 
 impl<K, V> AsyncKafkaConsumer<K, V>
@@ -291,6 +300,7 @@ where
             closed: AtomicBool::new(false),
             rebalance_listener: Mutex::new(None),
             config: components.config,
+            time: components.time,
         }
     }
 
@@ -387,6 +397,430 @@ where
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
     }
+
+    // ── Subscribe / unsubscribe / assign ───────────────────────────────
+    //
+    // Translates Java's `subscribe(Collection<String>)`,
+    // `subscribe(Collection<String>, ConsumerRebalanceListener)`,
+    // `subscribe(SubscriptionPattern)`, `subscribe(SubscriptionPattern,
+    // ConsumerRebalanceListener)`, `subscribe(Pattern)`,
+    // `subscribe(Pattern, ConsumerRebalanceListener)`, `unsubscribe()`,
+    // and `assign(Collection<TopicPartition>)`.
+    //
+    // Each method:
+    //   1. Verifies `closed` (Java's `acquireAndEnsureOpen`).
+    //   2. Validates arguments (returning `KafkaError::illegal_argument`
+    //      where Java throws `IllegalArgumentException`). Rust's type
+    //      system makes the `null`-target tests un-translatable;
+    //      `"".trim().is_empty()` covers the empty/blank case.
+    //   3. Briefly acquires the `SubscriptionState` lock to read
+    //      `assigned_partitions`, drops the guard, then enqueues an
+    //      `ApplicationEvent` carrying the change. Mirrors
+    //      `consumer-threading.md` §16 lock discipline — the actual
+    //      mutation of `SubscriptionState` happens on the bg task via
+    //      the matching `ApplicationEventProcessor` arm.
+    //
+    // `fetchBuffer.retainAll(...)` calls present in the Java source are
+    // omitted here — the consumer's `FetchBuffer` is wired in commit
+    // (4/N) along with the poll loop. The bg-side
+    // `ApplicationEventProcessor` already retains-all when processing
+    // the matching subscribe/assign event, so the only consequence of
+    // the gap is that records already buffered for removed partitions
+    // are returned on the next `poll()` — Phase 11 commit (4/N) closes
+    // this seam.
+
+    /// Translates Java's `private void throwIfGroupIdNotDefined()`.
+    fn throw_if_group_id_not_defined(&self) -> Result<(), KafkaError> {
+        if self.group_id.as_deref().map(str::is_empty).unwrap_or(true) {
+            return Err(KafkaError::illegal_argument(
+                "To use the group management or offset commit APIs, you must provide a valid \
+                 group.id in the consumer configuration.",
+            ));
+        }
+        Ok(())
+    }
+
+    /// Translates Java's `acquireAndEnsureOpen()` — the runtime
+    /// reentrancy guard is dropped per Phase 11 PLAN.md deferral #4
+    /// (Rust's `&mut self` enforces single-caller exclusivity at
+    /// compile time), so this is just the `closed` check.
+    fn ensure_open(&self) -> Result<(), KafkaError> {
+        if self.is_closed() {
+            return Err(KafkaError::illegal_state("This consumer has already been closed."));
+        }
+        Ok(())
+    }
+
+    /// Java: `void subscribe(Collection<String>)`.
+    ///
+    /// Subscribes to the given topics. An empty list acts as
+    /// `unsubscribe()`. Errors:
+    ///   - [`KafkaError::illegal_argument`] if any topic is empty / whitespace.
+    ///   - [`KafkaError::illegal_argument`] if `group.id` is unset
+    ///     (Java's `InvalidGroupIdException`).
+    pub async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError> {
+        self.subscribe_internal_topics(topics, None).await
+    }
+
+    /// Java: `void subscribe(Collection<String>, ConsumerRebalanceListener)`.
+    ///
+    /// Same as [`Self::subscribe`] but registers a rebalance listener.
+    /// Java throws `IllegalArgumentException` for a null listener;
+    /// Rust makes the `Option`-of-`Arc` representation explicit, so the
+    /// `with_listener` form takes a concrete `Arc` and the listener is
+    /// always non-null at the type level.
+    pub async fn subscribe_with_listener(
+        &mut self,
+        topics: Vec<String>,
+        listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), KafkaError> {
+        self.subscribe_internal_topics(topics, Some(listener)).await
+    }
+
+    /// Java: `void subscribe(SubscriptionPattern)` — server-side regex
+    /// subscribe (KIP-848 RE2J).
+    pub async fn subscribe_re2j_pattern(&mut self, pattern: SubscriptionPattern) -> Result<(), KafkaError> {
+        self.subscribe_to_regex(pattern, None).await
+    }
+
+    /// Java: `void subscribe(SubscriptionPattern, ConsumerRebalanceListener)`.
+    pub async fn subscribe_re2j_pattern_with_listener(
+        &mut self,
+        pattern: SubscriptionPattern,
+        listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), KafkaError> {
+        self.subscribe_to_regex(pattern, Some(listener)).await
+    }
+
+    /// Java: `void subscribe(Pattern)` — client-side regex subscribe.
+    ///
+    /// Takes a compiled `regex::Regex` instead of a raw `&str` so we
+    /// preserve compile-time pattern validation (Java's `Pattern.compile`
+    /// is also up-front).
+    pub async fn subscribe_pattern(&mut self, pattern: Regex) -> Result<(), KafkaError> {
+        self.subscribe_internal_pattern(pattern, None).await
+    }
+
+    /// Java: `void subscribe(Pattern, ConsumerRebalanceListener)`.
+    pub async fn subscribe_pattern_with_listener(
+        &mut self,
+        pattern: Regex,
+        listener: Arc<dyn ConsumerRebalanceListener>,
+    ) -> Result<(), KafkaError> {
+        self.subscribe_internal_pattern(pattern, Some(listener)).await
+    }
+
+    /// Translates Java's `subscribeInternal(Collection<String>, Optional<ConsumerRebalanceListener>)`.
+    async fn subscribe_internal_topics(
+        &mut self,
+        topics: Vec<String>,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+        self.throw_if_group_id_not_defined()?;
+
+        if topics.is_empty() {
+            // Java: `topics.isEmpty()` is treated as the same as
+            // `unsubscribe()`. Match the recursion.
+            return self.unsubscribe().await;
+        }
+
+        for topic in &topics {
+            if topic.trim().is_empty() {
+                return Err(KafkaError::illegal_argument(
+                    "Topic collection to subscribe to cannot contain null or empty topic",
+                ));
+            }
+        }
+
+        // Store the listener app-side so `process_background_events` can
+        // pick it up when the bg task posts a callback-needed event.
+        // Drop the guard immediately — listeners are read briefly per
+        // §16 lock discipline.
+        if let Some(l) = listener.as_ref() {
+            *self.rebalance_listener.lock().unwrap() = Some(Arc::clone(l));
+        }
+
+        log::info!("Subscribed to topic(s): {}", topics.join(", "));
+
+        let topics_set: std::collections::HashSet<String> = topics.into_iter().collect();
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::TopicSubscriptionChange { handle, topics: topics_set, listener },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Translates Java's `subscribeInternal(Pattern, Optional<ConsumerRebalanceListener>)`.
+    async fn subscribe_internal_pattern(
+        &mut self,
+        pattern: Regex,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+        self.throw_if_group_id_not_defined()?;
+        if pattern.as_str().is_empty() {
+            return Err(KafkaError::illegal_argument("Topic pattern to subscribe to cannot be empty"));
+        }
+
+        if let Some(l) = listener.as_ref() {
+            *self.rebalance_listener.lock().unwrap() = Some(Arc::clone(l));
+        }
+
+        log::info!("Subscribed to pattern: '{pattern}'");
+
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::TopicPatternSubscriptionChange { handle, pattern, listener },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Translates Java's `subscribeToRegex(SubscriptionPattern, Optional<ConsumerRebalanceListener>)`.
+    async fn subscribe_to_regex(
+        &mut self,
+        pattern: SubscriptionPattern,
+        listener: Option<Arc<dyn ConsumerRebalanceListener>>,
+    ) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+        self.throw_if_group_id_not_defined()?;
+        if pattern.pattern().is_empty() {
+            return Err(KafkaError::illegal_argument("Topic pattern to subscribe to cannot be empty"));
+        }
+
+        if let Some(l) = listener.as_ref() {
+            *self.rebalance_listener.lock().unwrap() = Some(Arc::clone(l));
+        }
+
+        log::info!("Subscribing to regular expression {}", pattern.pattern());
+
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, pattern, listener },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Java: `void unsubscribe()`.
+    ///
+    /// Unsubscribes from all topics / patterns and clears the assignment.
+    /// Java enqueues an `UnsubscribeEvent` and then loops
+    /// `processBackgroundEvents(future, timer, ignoreErrorPredicate)` to
+    /// drive any rebalance-listener callbacks that arrive during the
+    /// teardown. The Phase 11 commit (3/N) version drains pending
+    /// background events ONCE via `process_background_events` and awaits
+    /// the completable handle — the iterative draining loop lands in
+    /// commit (4/N) along with `poll`.
+    pub async fn unsubscribe(&mut self) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+
+        // §31: drain any pending background events on the caller's task
+        // BEFORE issuing the unsubscribe. This is required because the
+        // bg task may have queued rebalance-listener callbacks that the
+        // teardown must observe.
+        self.process_background_events().await?;
+
+        let assigned_for_log = {
+            let subs = self.subscriptions.lock().unwrap();
+            subs.assigned_partitions()
+        };
+        log::info!("Unsubscribing all topics or patterns and assigned partitions {assigned_for_log:?}");
+
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        let result = self
+            .application_event_handler
+            .add_and_get::<()>(ApplicationEvent::Unsubscribe { handle }, receiver, now_ms)
+            .await;
+
+        // Drain again so any rebalance-listener callbacks that the bg
+        // task posted during the unsubscribe rebalance are observed
+        // before returning to the user.
+        let drain_result = self.process_background_events().await;
+
+        // Reset the listener field — the previous subscription is gone.
+        *self.rebalance_listener.lock().unwrap() = None;
+
+        match result {
+            Ok(()) => drain_result,
+            // Java logs and rethrows but the typed result already
+            // surfaces the failure. Drop the secondary drain error if the
+            // primary already failed.
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Java: `void assign(Collection<TopicPartition>)`.
+    ///
+    /// Manually assigns the given partitions. An empty collection acts
+    /// as `unsubscribe()`. Errors:
+    ///   - [`KafkaError::illegal_argument`] if any topic is empty / whitespace.
+    pub async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+
+        if partitions.is_empty() {
+            return self.unsubscribe().await;
+        }
+
+        for tp in &partitions {
+            if tp.topic().trim().is_empty() {
+                return Err(KafkaError::illegal_argument(
+                    "Topic partitions to assign to cannot have null or empty topic",
+                ));
+            }
+        }
+
+        // Java also invokes `fetchBuffer.retainAll(currentTopicPartitions)`
+        // here. That call is wired in commit (4/N) — see the section
+        // comment above.
+
+        let partitions_set: std::collections::HashSet<TopicPartition> = partitions.into_iter().collect();
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Java: `defaultApiTimeoutDeadlineMs()`.
+    fn default_api_timeout_deadline_ms(&self) -> i64 {
+        calculate_deadline_ms(self.time.milliseconds(), self.default_api_timeout_ms)
+    }
+
+    // ── §31 process_background_events ─────────────────────────────────
+    //
+    // Per `consumer-threading.md` §31, this method MUST be called at the
+    // top of every blocking-style API. It drains the bg-event channel
+    // via `try_recv` in a `while let` loop and dispatches each event on
+    // the caller's task — listener callbacks invoke the user-supplied
+    // `ConsumerRebalanceListener` inline.
+
+    /// Drains the background-events channel and dispatches each event
+    /// on the caller's task. Mirrors Java's `boolean processBackgroundEvents()`.
+    ///
+    /// Returns:
+    ///   - `Ok(())` on success (no error events drained).
+    ///   - `Err(KafkaError)` on the first error event drained. Subsequent
+    ///     events are still processed (mirroring Java's
+    ///     `firstError.compareAndSet`); the additional errors are logged
+    ///     at `warn` level.
+    ///
+    /// # Lock discipline (§16)
+    ///
+    /// This method MUST NOT hold the `SubscriptionState` mutex guard
+    /// across the listener invocation. The implementation does not
+    /// acquire the guard at all — the listener invoker reads paused
+    /// partitions inside its own brief lock window.
+    pub(crate) async fn process_background_events(&mut self) -> Result<(), KafkaError> {
+        let mut first_error: Option<KafkaError> = None;
+
+        loop {
+            let envelope = match self.background_event_rx.try_recv() {
+                Ok(env) => env,
+                Err(mpsc::error::TryRecvError::Empty) => break,
+                Err(mpsc::error::TryRecvError::Disconnected) => {
+                    // The bg task has shut down. Nothing more to drain;
+                    // surface only if no other error has been recorded.
+                    if first_error.is_none() {
+                        first_error = Some(KafkaError::illegal_state("Consumer background task is no longer running."));
+                    }
+                    break;
+                },
+            };
+
+            match envelope.event {
+                BackgroundEvent::Error { error } => {
+                    Self::record_first_error(&mut first_error, error);
+                },
+                BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, partitions, ack } => {
+                    // Read the currently-registered listener and drop the
+                    // guard before invoking (§16 / §31). The
+                    // `rebalance_listener` lock is separate from
+                    // `SubscriptionState`, so no recursive lock concern.
+                    let listener = self.rebalance_listener.lock().unwrap().clone();
+
+                    let result = match listener {
+                        Some(listener) => {
+                            // Invoke on the caller's task — never `tokio::spawn`.
+                            // The invoker drops `SubscriptionState`'s guard
+                            // before `.await`ing the user-supplied callback
+                            // (see `consumer_rebalance_listener_invoker.rs`).
+                            use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName as M;
+                            match method_name {
+                                M::OnPartitionsAssigned => {
+                                    self.rebalance_listener_invoker
+                                        .invoke_partitions_assigned(&listener, &partitions)
+                                        .await
+                                },
+                                M::OnPartitionsRevoked => {
+                                    self.rebalance_listener_invoker
+                                        .invoke_partitions_revoked(&listener, &partitions)
+                                        .await
+                                },
+                                M::OnPartitionsLost => {
+                                    self.rebalance_listener_invoker
+                                        .invoke_partitions_lost(&listener, &partitions)
+                                        .await
+                                },
+                            }
+                        },
+                        // No listener registered — match Java's behavior
+                        // (Java's invoker treats a missing listener as a
+                        // successful no-op).
+                        None => Ok(()),
+                    };
+
+                    // Send the result on the embedded oneshot ack so the
+                    // bg task can advance the rebalance state machine.
+                    let send_result = result.clone();
+                    let _ = ack.send(send_result);
+
+                    // Java throws if the result is an error — we propagate
+                    // via `first_error` so subsequent events are still
+                    // processed.
+                    if let Err(err) = result {
+                        Self::record_first_error(&mut first_error, err);
+                    }
+                },
+            }
+        }
+
+        match first_error {
+            Some(err) => Err(err),
+            None => Ok(()),
+        }
+    }
+
+    /// Java: `firstError.compareAndSet(null, e)` — first error wins;
+    /// subsequent errors are logged at `warn`.
+    fn record_first_error(slot: &mut Option<KafkaError>, err: KafkaError) {
+        if slot.is_none() {
+            *slot = Some(err);
+        } else {
+            log::warn!("An error occurred when processing the background event: {err}");
+        }
+    }
 }
 
 #[cfg(test)]
@@ -429,12 +863,26 @@ mod tests {
         }
     }
 
-    /// Build a consumer with all dependencies stubbed to defaults. The
-    /// bg task is **never spawned** in the unit-test path — the
-    /// `JoinHandle` is replaced by a pre-completed future so awaiting
-    /// it is immediate. This keeps tests deterministic and avoids
-    /// requiring a full tokio multi-thread runtime.
-    fn make_test_consumer() -> AsyncKafkaConsumer<Vec<u8>, Vec<u8>> {
+    /// Test-side handles handed back from [`make_test_consumer_with_channels`].
+    /// Holding these lets the test impersonate the bg task: drain the
+    /// app-event channel to act on `add_and_get`-style events, and push
+    /// background events into the consumer's bg-event channel for
+    /// `process_background_events` to drain.
+    struct ConsumerTestHandles {
+        /// Receiver for app-side events. Held by the test instead of the
+        /// (absent) bg task.
+        app_event_rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+        /// Sender for bg-side events, used to enqueue events the bg task
+        /// would normally post.
+        bg_event_tx: mpsc::UnboundedSender<BackgroundEventEnvelope>,
+        /// Handle on the shared `SubscriptionState` so tests can inspect /
+        /// pre-populate it.
+        subscriptions: Arc<Mutex<SubscriptionState>>,
+    }
+
+    /// Builds a consumer along with the test-side channel handles needed
+    /// to act as the bg task during a test.
+    fn make_test_consumer_with_channels() -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerTestHandles) {
         let mut config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         config.client_id = "test-client".to_string();
         config.group_id = Some("test-group".to_string());
@@ -449,21 +897,17 @@ mod tests {
         let request_managers = Arc::new(std::sync::Mutex::new(RequestManagers::new(
             None, None, None, None, None, None, None,
         )));
-        let (_app_tx, app_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let (app_handler_tx, _app_handler_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        // Test stand-in for the bg task's app-event receiver. Tests hold
+        // this `app_event_rx` and pull events off it themselves.
+        let (app_handler_tx, app_event_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         let app_handler = Arc::new(ApplicationEventHandler::new(app_handler_tx));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let max_time = Arc::new(AtomicI64::new(0));
         let wakeup = WakeupTrigger::new();
 
-        // Stub join handle — spawn a noop task that completes
-        // immediately. Tests do not assert on the bg task's behavior
-        // in this commit.
-        let join_handle: JoinHandle<()> = tokio::spawn(async move {
-            // Hold the receiver until the consumer drops the sender so
-            // the channel does not race-close.
-            let _rx = app_rx;
-        });
+        // Stub join handle — spawn a noop task. Tests do not assert on
+        // the bg task's behavior in this commit.
+        let join_handle: JoinHandle<()> = tokio::spawn(async move {});
         let signal_close_called = Arc::new(AtomicBool::new(false));
         let signal_close_flag = Arc::clone(&signal_close_called);
         let wakeup_called = Arc::new(AtomicBool::new(false));
@@ -478,7 +922,7 @@ mod tests {
             join_handle,
         );
 
-        let (_bg_tx, bg_rx) = mpsc::unbounded_channel::<BackgroundEventEnvelope>();
+        let (bg_event_tx, bg_rx) = mpsc::unbounded_channel::<BackgroundEventEnvelope>();
         let interceptors = Arc::new(Mutex::new(ConsumerInterceptors::<Vec<u8>, Vec<u8>>::new(Vec::new())));
         let offset_commit_callback_invoker =
             Arc::new(OffsetCommitCallbackInvoker::<Vec<u8>, Vec<u8>>::new(ConsumerInterceptors::<
@@ -497,7 +941,7 @@ mod tests {
             config,
             client_id,
             group_id: Some("test-group".to_string()),
-            subscriptions: subs,
+            subscriptions: Arc::clone(&subs),
             metadata,
             request_managers,
             background_event_rx: bg_rx,
@@ -510,8 +954,17 @@ mod tests {
             offset_commit_callback_invoker,
             deserializers,
             interceptors,
+            time: Arc::new(crate::consumer::internals::consumer_network_thread::SystemThreadTime),
         };
-        AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components)
+        (
+            AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
+            ConsumerTestHandles { app_event_rx, bg_event_tx, subscriptions: subs },
+        )
+    }
+
+    /// Backwards-compat alias for the existing state-read tests.
+    fn make_test_consumer() -> AsyncKafkaConsumer<Vec<u8>, Vec<u8>> {
+        make_test_consumer_with_channels().0
     }
 
     #[tokio::test]
@@ -579,5 +1032,318 @@ mod tests {
         let assignment = consumer.assignment();
         assert_eq!(assignment.len(), 1);
         assert!(assignment.contains(&tp));
+    }
+
+    // ─── Subscribe / unsubscribe / assign tests (commit (3/N)) ───
+    //
+    // These tests stand in for Java's
+    // `AsyncKafkaConsumerTest.testSubscribeGeneratesEvent` /
+    // `testSubscribePatternGeneratesEvent` /
+    // `testUnsubscribeGeneratesUnsubscribeEvent` /
+    // `testAssign*` / etc. Where Java's tests use Mockito to immediately
+    // satisfy `applicationEventHandler.addAndGet(...)`, the Rust tests
+    // spawn a small helper task that drains one envelope off the
+    // app-event channel and `complete`s the handle inside it.
+    //
+    // Skipped Java tests for this commit (rationale per row):
+    //   - `testAssignOnNullTopicPartition` / `testAssignOnNullTopicInPartition`
+    //     — Rust's type system makes the `null` case unrepresentable:
+    //     `Vec<TopicPartition>` cannot contain a `null` slot, and
+    //     `TopicPartition` requires an owned `String` topic.
+    //   - `testSubscribeToNullTopicCollection` /
+    //     `testSubscriptionOnNullTopic` — same.
+    //   - `testReaperInvokedInUnsubscribe` — depends on `backgroundEventReaper.reap(time)`
+    //     wiring inside `process_background_events`; the reaper hookup
+    //     itself lands later (Phase 11 commit (4/N)). Deferred to that
+    //     commit.
+    //   - `testGroupMetadataIsResetAfterUnsubscribe` — depends on the
+    //     `MemberStateListener` (commit (7/N)) that populates
+    //     `group_metadata`. Deferred to that commit.
+    //   - `testUnsubscribeWithoutGroupId` — depends on a no-group ctor
+    //     path which is built in commit (7/N) via `new_consumer`.
+    //     Deferred.
+    //   - `testSubscribePatternAgainstBrokerNotSupportingRegex` —
+    //     end-to-end against a `MockClient`; depends on the poll path
+    //     (commit (4/N)).
+    //   - `testReaperInvokedInPoll` / similar poll-only flows — commit
+    //     (4/N).
+
+    /// Helper: spawn a task that takes the next envelope off the
+    /// app-event channel and completes its `handle` with `Ok(())`.
+    /// Mirrors Java's
+    /// `completeTopicSubscriptionChangeEventSuccessfully()` / etc.
+    fn auto_complete_next_event(
+        mut rx: mpsc::UnboundedReceiver<ApplicationEventEnvelope>,
+    ) -> tokio::task::JoinHandle<Option<ApplicationEventEnvelope>> {
+        tokio::spawn(async move {
+            let env = rx.recv().await?;
+            match &env.event {
+                ApplicationEvent::TopicSubscriptionChange { handle, .. } => {
+                    handle.complete(());
+                },
+                ApplicationEvent::TopicPatternSubscriptionChange { handle, .. } => {
+                    handle.complete(());
+                },
+                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, .. } => {
+                    handle.complete(());
+                },
+                ApplicationEvent::AssignmentChange { handle, .. } => {
+                    handle.complete(());
+                },
+                ApplicationEvent::Unsubscribe { handle } => {
+                    handle.complete(());
+                },
+                _ => {
+                    // Unknown variant — leave the handle un-completed; the
+                    // test's `add_and_get` will time out and the
+                    // assertion will be a clear failure.
+                },
+            }
+            Some(env)
+        })
+    }
+
+    /// Java: `testSubscribeGeneratesEvent`.
+    #[tokio::test]
+    async fn subscribe_generates_topic_subscription_change_event() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        consumer.subscribe(vec!["topic1".to_string()]).await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::TopicSubscriptionChange { .. }));
+    }
+
+    /// Java: `testSubscribePatternGeneratesEvent` (client-side Pattern).
+    #[tokio::test]
+    async fn subscribe_pattern_generates_topic_pattern_subscription_change_event() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        let pattern = Regex::new("topic.*").expect("valid regex");
+        consumer.subscribe_pattern(pattern).await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::TopicPatternSubscriptionChange { .. }));
+    }
+
+    /// Java: `testSubscribeToRe2JPatternGeneratesEvent`.
+    #[tokio::test]
+    async fn subscribe_re2j_pattern_generates_event() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        consumer
+            .subscribe_re2j_pattern(SubscriptionPattern::new("t*"))
+            .await
+            .expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::TopicRe2JPatternSubscriptionChange { .. }));
+    }
+
+    /// Java: `testSubscribeToRe2JPatternValidation` — empty pattern
+    /// rejected, non-empty pattern accepted.
+    #[tokio::test]
+    async fn subscribe_re2j_pattern_rejects_empty() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let err = consumer
+            .subscribe_re2j_pattern(SubscriptionPattern::new(""))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::IllegalArgument(ref msg) if msg.contains("empty")));
+    }
+
+    /// Java: `testUnsubscribeGeneratesUnsubscribeEvent`.
+    #[tokio::test]
+    async fn unsubscribe_generates_unsubscribe_event() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        consumer.unsubscribe().await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::Unsubscribe { .. }));
+    }
+
+    /// Java: `testSubscribeToEmptyListActsAsUnsubscribe`.
+    #[tokio::test]
+    async fn subscribe_to_empty_list_acts_as_unsubscribe() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        consumer.subscribe(Vec::new()).await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::Unsubscribe { .. }));
+    }
+
+    /// Java: `testSubscriptionOnEmptyTopic` — blank topic rejected.
+    #[tokio::test]
+    async fn subscribe_rejects_blank_topic() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let err = consumer.subscribe(vec!["  ".to_string()]).await.expect_err("must err");
+        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+    }
+
+    /// Java: `testAssign`.
+    #[tokio::test]
+    async fn assign_generates_assignment_change_event_and_clears_subscription() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        let tp = TopicPartition::new("foo".to_string(), 3);
+        consumer.assign(vec![tp.clone()]).await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        match env.event {
+            ApplicationEvent::AssignmentChange { partitions, .. } => {
+                assert!(partitions.contains(&tp));
+            },
+            other => panic!("expected AssignmentChange, got {}", other.type_name()),
+        }
+    }
+
+    /// Java: `testAssignOnEmptyTopicPartition` — empty collection
+    /// acts as `unsubscribe()`.
+    #[tokio::test]
+    async fn assign_on_empty_acts_as_unsubscribe() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        consumer.assign(Vec::new()).await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::Unsubscribe { .. }));
+    }
+
+    /// Java: `testAssignOnEmptyTopicInPartition` — blank topic rejected.
+    #[tokio::test]
+    async fn assign_rejects_blank_topic_in_partition() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("  ".to_string(), 0);
+        let err = consumer.assign(vec![tp]).await.expect_err("must err");
+        assert!(matches!(err, KafkaError::IllegalArgument(_)));
+    }
+
+    /// Sanity check: subscribe stores the listener app-side so
+    /// `process_background_events` can pick it up.
+    #[tokio::test]
+    async fn subscribe_with_listener_stores_listener() {
+        use async_trait::async_trait;
+        struct DummyListener;
+        #[async_trait]
+        impl ConsumerRebalanceListener for DummyListener {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        let listener: Arc<dyn ConsumerRebalanceListener> = Arc::new(DummyListener);
+        consumer
+            .subscribe_with_listener(vec!["t".to_string()], Arc::clone(&listener))
+            .await
+            .expect("ok");
+        let _ = completer.await;
+        let stored = consumer.rebalance_listener.lock().unwrap().clone();
+        assert!(stored.is_some(), "listener must be stored on subscribe_with_listener");
+    }
+
+    // ─── §31 process_background_events skeleton tests ───
+    //
+    // Full §31 regression pair (commit-from-inside-listener,
+    // listener-blocks-rebalance) lands in Phase 11 commit (11/N). The
+    // skeleton tests below just verify the drain loop and dispatch.
+
+    /// Error event is drained and surfaces from
+    /// `process_background_events`.
+    #[tokio::test]
+    async fn process_background_events_surfaces_error_event() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::Error { error: KafkaError::timeout("boom") },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+        let result = consumer.process_background_events().await;
+        assert!(matches!(result, Err(KafkaError::Timeout(_))));
+    }
+
+    /// Callback-needed event with no listener registered: succeeds and
+    /// the ack is sent with `Ok(())` — mirrors Java's
+    /// `listener.isPresent() == false` no-op branch.
+    #[tokio::test]
+    async fn process_background_events_with_no_listener_acks_ok() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use tokio::sync::oneshot;
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+        consumer.process_background_events().await.expect("ok");
+        // The ack must have been resolved with `Ok(())`.
+        let ack_result = ack_rx.await.expect("ack received");
+        assert!(ack_result.is_ok());
+    }
+
+    /// Callback-needed event with a registered listener: the listener's
+    /// `on_partitions_assigned` is invoked inline on the caller's task,
+    /// and the ack is sent with the listener's result.
+    #[tokio::test]
+    async fn process_background_events_invokes_registered_listener() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+        use tokio::sync::oneshot;
+
+        struct RecordingListener {
+            count: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for RecordingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.count.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let listener: Arc<RecordingListener> = Arc::new(RecordingListener { count: AtomicUsize::new(0) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        let env = BackgroundEventEnvelope {
+            event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                ack: ack_tx,
+            },
+            enqueued_ms: 0,
+        };
+        handles.bg_event_tx.send(env).expect("send ok");
+        consumer.process_background_events().await.expect("ok");
+        assert_eq!(listener.count.load(Ordering::SeqCst), 1);
+        assert!(ack_rx.await.expect("ack received").is_ok());
+
+        // Silence the unused-field warning for `subscriptions` on the
+        // test handles (used here so the helper struct stays
+        // forward-compatible with future tests that need to inspect the
+        // shared state).
+        drop(handles.subscriptions);
+    }
+
+    /// Empty bg-events channel: returns immediately with `Ok(())`.
+    #[tokio::test]
+    async fn process_background_events_on_empty_channel_is_ok() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        consumer.process_background_events().await.expect("ok");
     }
 }
