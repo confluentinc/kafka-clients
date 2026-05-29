@@ -27,6 +27,7 @@ pub(crate) mod consumer_heartbeat_request_manager;
 pub(crate) mod consumer_interceptors;
 pub(crate) mod consumer_membership_manager;
 pub(crate) mod consumer_metadata;
+pub(crate) mod consumer_network_thread;
 pub(crate) mod coordinator_request_manager;
 pub(crate) mod deserializers;
 pub(crate) mod events;

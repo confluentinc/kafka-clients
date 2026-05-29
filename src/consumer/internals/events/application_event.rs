@@ -299,6 +299,73 @@ impl ApplicationEvent {
             _ => false,
         }
     }
+
+    /// Returns `true` if this variant implements Java's
+    /// `MetadataErrorNotifiableEvent` interface — i.e. would be a
+    /// candidate for [`Self::on_metadata_error`] dispatch.
+    ///
+    /// The set is kept in sync with [`Self::on_metadata_error`]: any
+    /// variant that returns `true` from this predicate must also have
+    /// a non-`_` arm in `on_metadata_error`. The `metadata_error_notifiable_predicate_matches_on_metadata_error`
+    /// test below enforces this with `assert_eq!(predicate, dispatched)`.
+    ///
+    /// Used by [`crate::consumer::internals::consumer_network_thread::ConsumerNetworkThread::process_application_events`]
+    /// to decide whether to query `network_client_delegate.get_and_clear_metadata_error()`
+    /// in the per-event arm (Java mirrors this with `event instanceof
+    /// MetadataErrorNotifiableEvent`).
+    pub(crate) fn is_metadata_error_notifiable(&self) -> bool {
+        matches!(
+            self,
+            Self::AsyncPoll { .. }
+                | Self::CheckAndUpdatePositions { .. }
+                | Self::ListOffsets { .. }
+                | Self::TopicMetadata { .. }
+                | Self::AllTopicsMetadata { .. }
+        )
+    }
+
+    /// Returns the type-erased completable handle for variants that
+    /// extend Java's `CompletableApplicationEvent<T>` (i.e. carry a
+    /// `handle: CompletableEventHandle<T>` field). Non-completable
+    /// variants return `None`.
+    ///
+    /// Used by [`crate::consumer::internals::consumer_network_thread::ConsumerNetworkThread::process_application_events`]
+    /// to register the handle with the [`super::completable_event_reaper::CompletableEventReaper`]
+    /// — mirrors Java's
+    /// `if (event instanceof CompletableEvent) applicationEventReaper.add((CompletableEvent<?>) event)`.
+    pub(crate) fn erased_handle(
+        &self,
+    ) -> Option<std::sync::Arc<dyn super::completable_event::CompletableEventErasedHandle>> {
+        match self {
+            // Completable variants — return the erased handle.
+            Self::AssignmentChange { handle, .. } => Some(handle.erased()),
+            Self::LeaveGroupOnClose { handle, .. } => Some(handle.erased()),
+            Self::UpdatePatternSubscription { handle } => Some(handle.erased()),
+            Self::CommitAsync { handle, .. } => Some(handle.erased()),
+            Self::CommitSync { handle, .. } => Some(handle.erased()),
+            Self::FetchCommittedOffsets { handle, .. } => Some(handle.erased()),
+            Self::ListOffsets { handle, .. } => Some(handle.erased()),
+            Self::CheckAndUpdatePositions { handle } => Some(handle.erased()),
+            Self::ResetOffset { handle, .. } => Some(handle.erased()),
+            Self::TopicMetadata { handle, .. } => Some(handle.erased()),
+            Self::AllTopicsMetadata { handle } => Some(handle.erased()),
+            Self::TopicSubscriptionChange { handle, .. } => Some(handle.erased()),
+            Self::TopicPatternSubscriptionChange { handle, .. } => Some(handle.erased()),
+            Self::TopicRe2JPatternSubscriptionChange { handle, .. } => Some(handle.erased()),
+            Self::Unsubscribe { handle } => Some(handle.erased()),
+            Self::CreateFetchRequests { handle } => Some(handle.erased()),
+            Self::PausePartitions { handle, .. } => Some(handle.erased()),
+            Self::ResumePartitions { handle, .. } => Some(handle.erased()),
+            Self::CurrentLag { handle, .. } => Some(handle.erased()),
+            Self::SeekUnvalidated { handle, .. } => Some(handle.erased()),
+            // Non-completable variants — Java: not `instanceof CompletableEvent`.
+            Self::CommitOnClose
+            | Self::StopFindCoordinatorOnClose
+            | Self::NewTopicsMetadataUpdate
+            | Self::ConsumerRebalanceListenerCallbackCompleted { .. }
+            | Self::AsyncPoll { .. } => None,
+        }
+    }
 }
 
 impl std::fmt::Debug for ApplicationEvent {
@@ -564,6 +631,75 @@ mod tests {
         // handle's sender.
         let ev = ApplicationEvent::CommitOnClose;
         assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+    }
+
+    /// Verifies `is_metadata_error_notifiable()` agrees with the set of
+    /// variants for which `on_metadata_error()` returns `true`. The
+    /// predicate is consumed by the bg-task drain in
+    /// `consumer_network_thread.rs` to decide whether to query the
+    /// delegate's metadata-error slot; drift between the two would
+    /// silently change the behaviour at the per-event arm.
+    #[test]
+    fn metadata_error_notifiable_predicate_matches_on_metadata_error() {
+        // For each variant we know is notifiable, the predicate must
+        // return true and `on_metadata_error` must return true.
+        let state = Arc::new(AsyncPollState::new());
+        let ev = ApplicationEvent::AsyncPoll { deadline_ms: 0, poll_time_ms: 0, state };
+        assert!(ev.is_metadata_error_notifiable());
+        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
+
+        let (handle, _rx, _erased) = make_completable_event::<()>(0);
+        let ev = ApplicationEvent::CheckAndUpdatePositions { handle };
+        assert!(ev.is_metadata_error_notifiable());
+        assert!(ev.on_metadata_error(KafkaError::timeout("md")));
+
+        // Non-notifiable variants: predicate false, dispatch false.
+        let ev = ApplicationEvent::CommitOnClose;
+        assert!(!ev.is_metadata_error_notifiable());
+        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+
+        let ev = ApplicationEvent::NewTopicsMetadataUpdate;
+        assert!(!ev.is_metadata_error_notifiable());
+        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+
+        let ev = ApplicationEvent::StopFindCoordinatorOnClose;
+        assert!(!ev.is_metadata_error_notifiable());
+        assert!(!ev.on_metadata_error(KafkaError::timeout("md")));
+    }
+
+    /// Verifies `erased_handle()` returns `Some` for variants extending
+    /// Java's `CompletableApplicationEvent<T>` and `None` for
+    /// non-completable variants.
+    #[test]
+    fn erased_handle_returns_some_for_completable_variants() {
+        // Completable variants.
+        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let ev = ApplicationEvent::AssignmentChange { handle: h, current_time_ms: 0, partitions: HashSet::new() };
+        assert!(ev.erased_handle().is_some());
+
+        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let ev = ApplicationEvent::Unsubscribe { handle: h };
+        assert!(ev.erased_handle().is_some());
+
+        let (h, _rx, _e) = make_completable_event::<()>(0);
+        let ev =
+            ApplicationEvent::LeaveGroupOnClose { handle: h, membership_operation: GroupMembershipOperation::Default };
+        assert!(ev.erased_handle().is_some());
+
+        // Non-completable variants.
+        assert!(ApplicationEvent::CommitOnClose.erased_handle().is_none());
+        assert!(ApplicationEvent::StopFindCoordinatorOnClose.erased_handle().is_none());
+        assert!(ApplicationEvent::NewTopicsMetadataUpdate.erased_handle().is_none());
+
+        // `AsyncPoll` is bare (NOT CompletableApplicationEvent) — see
+        // §28 of consumer-threading.md. Despite being metadata-error-
+        // notifiable, it must NOT register with the reaper.
+        let state = Arc::new(AsyncPollState::new());
+        let ev = ApplicationEvent::AsyncPoll { deadline_ms: 0, poll_time_ms: 0, state };
+        assert!(
+            ev.erased_handle().is_none(),
+            "AsyncPoll extends ApplicationEvent (not CompletableApplicationEvent) — must not register"
+        );
     }
 
     #[test]
