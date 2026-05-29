@@ -750,51 +750,24 @@ impl CommitRequestManager {
         invoker: Arc<OffsetCommitCallbackInvoker<K, V>>,
         now_ms: i64,
     ) -> oneshot::Receiver<CommitResult> {
+        // Two-stage chain: the bare `commit_async_no_callback` does the
+        // actual commit work (mirrors Java's `commitAsync(Map)` on
+        // `CommitRequestManager`). On top of it we layer callback /
+        // interceptor enqueueing — Java's `AsyncKafkaConsumer.commitAsync`
+        // does the same via `whenComplete` on the future returned by the
+        // manager. Keeping the two stages separate lets the bg-task
+        // processor invoke the bare commit without owning a generic
+        // `OffsetCommitCallbackInvoker<K, V>`.
+        let inner_rx = self.commit_async_no_callback(offsets.clone(), now_ms);
         let (tx, rx) = oneshot::channel();
-        if offsets.is_empty() {
-            log::debug!("Skipping commit of empty offsets");
-            let _ = tx.send(Ok(HashMap::new()));
-            return rx;
-        }
-        self.maybe_update_last_seen_epoch_if_newer(&offsets);
-        let member_info = {
-            let guard = self.inner.state.lock().expect("commit manager state poisoned");
-            guard.member_info.clone()
-        };
-        let (request, request_rx) = OffsetCommitRequestState::new(
-            offsets.clone(),
-            member_info,
-            self.inner.retry_backoff_ms,
-            self.inner.retry_backoff_max_ms,
-            i64::MAX, // commit_async never expires per Java (no deadline).
-            now_ms,
-        );
-        {
-            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
-            guard.pending.unsent_offset_commits.push_back(request);
-        }
         let result_tx = Arc::new(Mutex::new(Some(tx)));
-        let offsets_for_callback = offsets.clone();
+        let offsets_for_callback = offsets;
         tokio::spawn(async move {
-            // Resolve the public future + enqueue the callback when the
-            // request completes. Java wraps retriable errors with
-            // `RetriableCommitFailedException` for the async path.
-            let outcome = request_rx.await;
+            let outcome = inner_rx.await;
             let (success_value, callback_err) = match outcome {
                 Ok(Ok(_committed_offsets)) => (Some(offsets_for_callback.clone()), None),
-                Ok(Err(err)) => {
-                    let mapped = if err.is_retriable() {
-                        KafkaError::from(ConsumerError::retriable_commit_failed_with_cause(err))
-                    } else {
-                        err
-                    };
-                    (None, Some(mapped))
-                },
-                Err(_recv_err) => {
-                    // Sender dropped without sending — treat as a generic
-                    // failure. This should not happen in steady state.
-                    (None, Some(KafkaError::new(Errors::UnknownServerError)))
-                },
+                Ok(Err(err)) => (None, Some(err)),
+                Err(_recv_err) => (None, Some(KafkaError::new(Errors::UnknownServerError))),
             };
 
             // Mirror Java's AsyncKafkaConsumer.commitAsync (lines
@@ -816,6 +789,79 @@ impl CommitRequestManager {
                     (None, Some(err)) => Err(err),
                     _ => unreachable!("commit_async outcome must be ok-or-err"),
                 });
+            }
+        });
+        rx
+    }
+
+    /// Bare async-commit primitive — mirrors Java's bare
+    /// `CommitRequestManager.commitAsync(Map<TopicPartition, OffsetAndMetadata>)`.
+    ///
+    /// Does NOT enqueue any user callback or interceptor — that wiring
+    /// lives in `AsyncKafkaConsumer.commitAsync` on the Java side, and in
+    /// the [`Self::commit_async`] wrapper on the Rust side. The
+    /// bg-task `ApplicationEventProcessor` calls this method directly
+    /// (Java's processor does the same: `manager.commitAsync(offsets)`).
+    ///
+    /// Returns a `oneshot::Receiver` resolving to the committed offsets on
+    /// success or a [`KafkaError`] on failure. Retriable errors are
+    /// wrapped with `RetriableCommitFailedException` to match Java's
+    /// `commitAsyncExceptionForError`.
+    pub(crate) fn commit_async_no_callback(
+        &self,
+        offsets: HashMap<TopicPartition, OffsetAndMetadata>,
+        now_ms: i64,
+    ) -> oneshot::Receiver<CommitResult> {
+        let (tx, rx) = oneshot::channel();
+        if offsets.is_empty() {
+            log::debug!("Skipping commit of empty offsets");
+            let _ = tx.send(Ok(HashMap::new()));
+            return rx;
+        }
+        self.maybe_update_last_seen_epoch_if_newer(&offsets);
+        let member_info = {
+            let guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.member_info.clone()
+        };
+        let offsets_for_result = offsets.clone();
+        let (request, request_rx) = OffsetCommitRequestState::new(
+            offsets,
+            member_info,
+            self.inner.retry_backoff_ms,
+            self.inner.retry_backoff_max_ms,
+            i64::MAX, // commit_async never expires per Java (no deadline).
+            now_ms,
+        );
+        {
+            let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
+            guard.pending.unsent_offset_commits.push_back(request);
+        }
+        let result_tx = Arc::new(Mutex::new(Some(tx)));
+        tokio::spawn(async move {
+            // Resolve the public future based on the commit request's
+            // response. Java wraps retriable errors with
+            // `RetriableCommitFailedException` for the async path.
+            let outcome = request_rx.await;
+            let resolved: CommitResult = match outcome {
+                Ok(Ok(_committed_offsets)) => Ok(offsets_for_result),
+                Ok(Err(err)) => {
+                    let mapped = if err.is_retriable() {
+                        KafkaError::from(ConsumerError::retriable_commit_failed_with_cause(err))
+                    } else {
+                        err
+                    };
+                    Err(mapped)
+                },
+                Err(_recv_err) => {
+                    // Sender dropped without sending — treat as a generic
+                    // failure. This should not happen in steady state.
+                    Err(KafkaError::new(Errors::UnknownServerError))
+                },
+            };
+
+            let mut guard = result_tx.lock().expect("commit_async_no_callback tx poisoned");
+            if let Some(tx) = guard.take() {
+                let _ = tx.send(resolved);
             }
         });
         rx

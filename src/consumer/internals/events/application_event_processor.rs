@@ -12,7 +12,7 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! `ApplicationEventProcessor` — Phase-10 sync-dispatch table.
+//! `ApplicationEventProcessor` — Phase-10 dispatch table (sync + async arms).
 //!
 //! Translated from
 //! `org.apache.kafka.clients.consumer.internals.events.ApplicationEventProcessor`.
@@ -21,23 +21,21 @@
 //!
 //! # Phase-10 commit split
 //!
-//! Phase 10 splits the processor across two commits:
+//! Phase 10 lands the processor across two commits:
 //!
-//! - **Commit 4/N (this file's first landing):** every variant whose Java
-//!   handling is purely synchronous — subscription changes, pause/resume,
-//!   seek, reset, current-lag, assignment-change, commit-on-close,
+//! - **Commit 4/N:** every variant whose Java handling is purely
+//!   synchronous — subscription changes, pause/resume, seek, reset,
+//!   current-lag, assignment-change, commit-on-close,
 //!   `StopFindCoordinatorOnClose`, and `NewTopicsMetadataUpdate`.
-//! - **Commit 5/N:** the async-dispatch arms — `AsyncPoll`,
+//! - **Commit 5/N (this file):** the async-dispatch arms — `AsyncPoll`,
 //!   `CommitAsync`, `CommitSync`, `FetchCommittedOffsets`, `ListOffsets`,
 //!   `CheckAndUpdatePositions`, `TopicMetadata`, `AllTopicsMetadata`,
-//!   `Unsubscribe`, `CreateFetchRequests`, `LeaveGroupOnClose`, and
-//!   `ConsumerRebalanceListenerCallbackCompleted`.
-//!
-//! Each deferred arm in this commit fails its associated completable
-//! handle with `KafkaError::unsupported_version("... — wired in Phase 10
-//! commit 5/N")` so the app side observes an error instead of a
-//! silently-dropped handle (§28 of `consumer-threading.md`). Commit 5
-//! replaces these with the real async-dispatch implementations.
+//!   `Unsubscribe`, `CreateFetchRequests`, `LeaveGroupOnClose`. Each arm
+//!   spawns a detached `tokio::task` that awaits the relevant manager
+//!   future and writes its completion to the event's
+//!   [`CompletableEventHandle`] — mirroring Java's
+//!   `whenComplete(complete(event.future()))` chain (the spawned task
+//!   plays the same role as Java's CompletableFuture callback dispatch).
 //!
 //! # Lock discipline
 //!
@@ -51,15 +49,31 @@
 //! is wrapped in `Arc<Mutex<RequestManagers>>`. The mutex is held
 //! briefly on the bg task only (single-threaded acquisition), so
 //! contention is nil — but we never `.await` while holding it.
+//!
+//! # Async-arm pattern
+//!
+//! Each async arm in this commit follows the same shape:
+//!
+//! 1. Lock `RequestManagers` long enough to call the manager method and
+//!    obtain a `oneshot::Receiver<...>` (or to perform a sync
+//!    pre-check that early-returns the handle).
+//! 2. Drop the lock.
+//! 3. `tokio::spawn` a continuation task that awaits the receiver and
+//!    completes the event's handle (matching Java's
+//!    `future.whenComplete(complete(event.future()))`).
+//!
+//! Spawning is per-event (not per-record); the hot-path rule from
+//! CLAUDE.md §11 still applies inside `Fetcher` / `FetchCollector`.
 
 #![allow(dead_code)]
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex};
 
 use super::application_event::ApplicationEvent;
 use super::event_processor::EventProcessor;
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
+use crate::consumer::OffsetAndMetadata;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
 use crate::consumer::internals::request_manager::RequestManager;
@@ -541,28 +555,55 @@ impl ApplicationEventProcessor {
 
     /// Java: `process(ConsumerRebalanceListenerCallbackCompletedEvent)`.
     ///
-    /// **Deferred to commit 5/N.** The full bidirectional
-    /// background-event handshake (§31) — including the pending-callback
-    /// future map on `ConsumerMembershipManager` — is wired in commit
-    /// 5/N alongside the async-dispatch arms. For now we log a warning;
-    /// the listener-invoker plumbing on the app side is not yet calling
-    /// back into the bg task, so this event is currently never enqueued
-    /// by in-tree code.
+    /// # §31 translation deviation
+    ///
+    /// Java models the listener handshake as a *pair* of events: the bg
+    /// task enqueues `ConsumerRebalanceListenerCallbackNeededEvent` on
+    /// the background-events queue (no completion sender), and after
+    /// invoking the listener the app side enqueues a *separate*
+    /// `ConsumerRebalanceListenerCallbackCompletedEvent` back to the bg
+    /// task; the processor's body (this method, Java side) then completes
+    /// the future the membership manager is waiting on.
+    ///
+    /// The Rust translation collapses the round-trip by embedding a
+    /// `tokio::sync::oneshot::Sender<Result<(), KafkaError>>` directly in
+    /// `BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded` (see
+    /// `AbstractMembershipManager::invoke_rebalance_callback`). The
+    /// membership manager `await`s the sender's receiver directly; the
+    /// app side completes the ack by sending on the embedded sender.
+    /// No second event is required.
+    ///
+    /// As a result, this arm has no work to perform in Rust. We still
+    /// match Java's diagnostic: if a `Completed` event reaches the
+    /// processor without a heartbeat manager present, log the same
+    /// warning so the failure mode is observable in tests / logs.
+    /// The event variant remains in [`ApplicationEvent`] both to keep
+    /// the Java parity surface visible to readers and to leave room for
+    /// future diagnostics (e.g. tracing the original Java event lifecycle).
     fn process_consumer_rebalance_listener_callback_completed(
         &mut self,
         method_name: crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName,
         error: Option<KafkaError>,
     ) {
-        let _ = (method_name, error);
+        let _ = error;
         let rm_guard = self.lock_request_managers();
         if rm_guard.consumer_heartbeat.is_none() {
             log::warn!(
-                "An internal error occurred; the group membership manager was not present, so the notification of the rebalance-listener callback execution could not be sent"
+                "An internal error occurred; the group membership manager was not present, so the notification of the {} callback execution could not be sent",
+                method_name.fully_qualified_method_name()
             );
             return;
         }
-        log::warn!(
-            "ConsumerRebalanceListenerCallbackCompleted is wired in Phase 10 commit 5/N alongside the async-dispatch arms"
+        // Rust's embedded-sender pattern (see method doc above) already
+        // resolves the membership manager's `ack_rx`. No further action
+        // here. Java's body would call
+        // `membershipManager.consumerRebalanceListenerCallbackCompleted(event)`,
+        // which completes a future the reconcile loop awaits — Rust's
+        // reconcile awaits the embedded `ack_rx` directly, so this
+        // method is intentionally empty.
+        log::trace!(
+            "ConsumerRebalanceListenerCallbackCompleted({}) observed; ack already delivered via embedded oneshot sender",
+            method_name.fully_qualified_method_name()
         );
     }
 
@@ -637,6 +678,632 @@ impl ApplicationEventProcessor {
         }
     }
 
+    // ===================================================================
+    // Async-dispatch arms (Phase 10 commit 5/N)
+    // ===================================================================
+
+    /// Java: `process(AsyncCommitEvent)`.
+    ///
+    /// Resolves the offsets to commit (using `subscriptions.all_consumed()`
+    /// when the event carries `None`), marks the secondary `offsets_ready`
+    /// handle complete, then spawns a continuation task that awaits the
+    /// commit-manager future and writes the result to the primary handle.
+    /// Mirrors Java's `manager.commitAsync(offsets).whenComplete(...)`.
+    fn process_commit_async(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        offsets_ready: super::completable_event::CompletableEventHandle<()>,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+    ) {
+        // Java: `if (requestManagers.commitRequestManager.isEmpty()) { ... }`.
+        let commit_rx = {
+            let rm_guard = self.lock_request_managers();
+            let Some(commit) = rm_guard.commit.as_ref() else {
+                drop(rm_guard);
+                let err = KafkaError::illegal_state(
+                    "Unable to async commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
+                );
+                // Java's empty-manager branch completes only `event.future()`
+                // exceptionally and leaves `offsetsReady` un-completed; the
+                // app-side `ConsumerUtils.getResult(offsetsReady, ...)`
+                // surfaces a TimeoutException via the API timeout. The Rust
+                // translation eagerly fails both handles with the same
+                // error so the app side observes the failure on whichever
+                // it awaits first — strictly faithful to Java's contract
+                // (the primary handle's failure) while avoiding the
+                // app-side blocking-then-timeout dance for the secondary
+                // handle.
+                offsets_ready.complete_exceptionally(err.clone());
+                handle.complete_exceptionally(err);
+                return;
+            };
+            // Resolve offsets (Java's `event.offsets().orElseGet(subscriptions::allConsumed)`).
+            let resolved = match offsets {
+                Some(o) => o,
+                None => {
+                    let subs = self.lock_subscriptions();
+                    subs.all_consumed()
+                },
+            };
+            // Java: `event.markOffsetsReady()` happens after offsets are resolved.
+            offsets_ready.complete(());
+            commit.commit_async_no_callback(resolved, current_time_ms_now())
+        };
+        // Spawn continuation — mirrors Java's `whenComplete(complete(event.future()))`.
+        tokio::spawn(async move {
+            match commit_rx.await {
+                Ok(Ok(committed)) => {
+                    handle.complete(committed);
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state("commit_async_no_callback sender dropped"));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(SyncCommitEvent)`.
+    ///
+    /// Same shape as [`Self::process_commit_async`] but routes through
+    /// `commit_sync(offsets, deadline_ms)`. The event's
+    /// `CompletableEventHandle` carries `deadline_ms` already (it was set
+    /// when the event was constructed on the app side).
+    fn process_commit_sync(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        offsets_ready: super::completable_event::CompletableEventHandle<()>,
+        offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
+    ) {
+        let deadline_ms = handle.deadline_ms();
+        let now_ms = current_time_ms_now();
+        let commit_rx = {
+            let rm_guard = self.lock_request_managers();
+            let Some(commit) = rm_guard.commit.as_ref() else {
+                drop(rm_guard);
+                let err = KafkaError::illegal_state(
+                    "Unable to sync commit offset because the CommitRequestManager is not available. Check if group.id was set correctly",
+                );
+                offsets_ready.complete_exceptionally(err.clone());
+                handle.complete_exceptionally(err);
+                return;
+            };
+            let resolved = match offsets {
+                Some(o) => o,
+                None => {
+                    let subs = self.lock_subscriptions();
+                    subs.all_consumed()
+                },
+            };
+            offsets_ready.complete(());
+            commit.commit_sync(resolved, deadline_ms, now_ms)
+        };
+        tokio::spawn(async move {
+            match commit_rx.await {
+                Ok(Ok(committed)) => {
+                    handle.complete(committed);
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state("commit_sync sender dropped"));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(FetchCommittedOffsetsEvent)`.
+    fn process_fetch_committed_offsets(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<HashMap<TopicPartition, OffsetAndMetadata>>,
+        partitions: HashSet<TopicPartition>,
+    ) {
+        let deadline_ms = handle.deadline_ms();
+        let now_ms = current_time_ms_now();
+        let fetch_rx = {
+            let rm_guard = self.lock_request_managers();
+            let Some(commit) = rm_guard.commit.as_ref() else {
+                drop(rm_guard);
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "Unable to fetch committed offset because the CommitRequestManager is not available. Check if group.id was set correctly",
+                ));
+                return;
+            };
+            commit.fetch_offsets(partitions, deadline_ms, now_ms)
+        };
+        tokio::spawn(async move {
+            match fetch_rx.await {
+                Ok(Ok(map)) => {
+                    // CommitRequestManager::fetch_offsets returns
+                    // HashMap<TopicPartition, Option<OffsetAndMetadata>>.
+                    // Java's FetchCommittedOffsetsEvent returns
+                    // Map<TopicPartition, OffsetAndMetadata>: Java represents
+                    // "no committed offset" by mapping to a sentinel
+                    // OffsetAndMetadata(INVALID_OFFSET, ...) — see
+                    // `CommitRequestManager.handleOffsetFetchResponse`. The
+                    // Rust translation strips entries whose value is `None`
+                    // (matching the observable behaviour of the public API:
+                    // partitions without a committed offset are absent from
+                    // the returned map).
+                    let stripped: HashMap<TopicPartition, OffsetAndMetadata> =
+                        map.into_iter().filter_map(|(k, v)| v.map(|om| (k, om))).collect();
+                    handle.complete(stripped);
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state("fetch_offsets sender dropped"));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(ListOffsetsEvent)`.
+    fn process_list_offsets(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<
+            HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>>,
+        >,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+        require_timestamps: bool,
+    ) {
+        let fetch_rx = {
+            let mut rm_guard = self.lock_request_managers();
+            let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
+                drop(rm_guard);
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "OffsetsRequestManager not available when processing a ListOffsets event",
+                ));
+                return;
+            };
+            offsets_mgr.fetch_offsets(timestamps_to_search, require_timestamps)
+        };
+        tokio::spawn(async move {
+            match fetch_rx.await {
+                Ok(Ok(map)) => {
+                    handle.complete(map);
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "OffsetsRequestManager fetch_offsets sender dropped",
+                    ));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(CheckAndUpdatePositionsEvent)`.
+    fn process_check_and_update_positions(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+        let deadline_ms = handle.deadline_ms();
+        let now_ms = current_time_ms_now();
+        let update_rx = {
+            let mut rm_guard = self.lock_request_managers();
+            let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
+                drop(rm_guard);
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "OffsetsRequestManager not available when processing a CheckAndUpdatePositions event",
+                ));
+                return;
+            };
+            offsets_mgr.update_fetch_positions(deadline_ms, now_ms)
+        };
+        tokio::spawn(async move {
+            match update_rx.await {
+                Ok(Ok(())) => {
+                    handle.complete(());
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "OffsetsRequestManager update_fetch_positions sender dropped",
+                    ));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(TopicMetadataEvent)`.
+    fn process_topic_metadata(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<HashMap<String, Vec<crate::common::PartitionInfo>>>,
+        topic: String,
+    ) {
+        let deadline_ms = handle.deadline_ms();
+        let md_rx = {
+            let mut rm_guard = self.lock_request_managers();
+            let Some(tm_mgr) = rm_guard.topic_metadata.as_mut() else {
+                drop(rm_guard);
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "TopicMetadataRequestManager not available when processing a TopicMetadata event",
+                ));
+                return;
+            };
+            tm_mgr.request_topic_metadata(topic, deadline_ms)
+        };
+        tokio::spawn(async move {
+            match md_rx.await {
+                Ok(Ok(map)) => {
+                    handle.complete(map);
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "TopicMetadataRequestManager request_topic_metadata sender dropped",
+                    ));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(AllTopicsMetadataEvent)`.
+    fn process_all_topics_metadata(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<HashMap<String, Vec<crate::common::PartitionInfo>>>,
+    ) {
+        let deadline_ms = handle.deadline_ms();
+        let md_rx = {
+            let mut rm_guard = self.lock_request_managers();
+            let Some(tm_mgr) = rm_guard.topic_metadata.as_mut() else {
+                drop(rm_guard);
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "TopicMetadataRequestManager not available when processing an AllTopicsMetadata event",
+                ));
+                return;
+            };
+            tm_mgr.request_all_topics_metadata(deadline_ms)
+        };
+        tokio::spawn(async move {
+            match md_rx.await {
+                Ok(Ok(map)) => {
+                    handle.complete(map);
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "TopicMetadataRequestManager request_all_topics_metadata sender dropped",
+                    ));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(CreateFetchRequestsEvent)`.
+    fn process_create_fetch_requests(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+        let fetch_rx = {
+            let mut rm_guard = self.lock_request_managers();
+            let Some(fetch_mgr) = rm_guard.fetch.as_mut() else {
+                drop(rm_guard);
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "FetchRequestManager not available when processing a CreateFetchRequests event",
+                ));
+                return;
+            };
+            fetch_mgr.create_fetch_requests()
+        };
+        tokio::spawn(async move {
+            match fetch_rx.await {
+                Ok(Ok(())) => {
+                    handle.complete(());
+                },
+                Ok(Err(err)) => {
+                    handle.complete_exceptionally(err);
+                },
+                Err(_recv_err) => {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "FetchRequestManager create_fetch_requests sender dropped",
+                    ));
+                },
+            }
+        });
+    }
+
+    /// Java: `process(UnsubscribeEvent)`.
+    ///
+    /// Two sub-paths (Java preserves both):
+    ///
+    /// 1. **With heartbeat manager**: route through
+    ///    `membership_manager.leave_group(now_ms)` (spawned task).
+    /// 2. **Without heartbeat manager**: clear subscription state inline
+    ///    and complete the handle immediately. Java: "If the consumer is
+    ///    not using the group management capabilities, we still need to
+    ///    clear all assignments it may have."
+    fn process_unsubscribe(&mut self, handle: super::completable_event::CompletableEventHandle<()>) {
+        // Resolve dispatch under a brief lock. Mirror Java's
+        // `if (requestManagers.consumerHeartbeatRequestManager.isPresent())`
+        // branch — heartbeat present → spawn `leave_group` continuation;
+        // absent → clear subscription state inline.
+        let membership_arc = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .consumer_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        match membership_arc {
+            Some(mm) => {
+                let now_ms = current_time_ms_now();
+                tokio::spawn(async move {
+                    match mm.leave_group(now_ms).await {
+                        Ok(()) => {
+                            handle.complete(());
+                        },
+                        Err(err) => {
+                            handle.complete_exceptionally(err);
+                        },
+                    }
+                });
+            },
+            None => {
+                {
+                    let mut subs = self.lock_subscriptions();
+                    subs.unsubscribe();
+                }
+                handle.complete(());
+            },
+        }
+    }
+
+    /// Java: `process(LeaveGroupOnCloseEvent)`.
+    fn process_leave_group_on_close(
+        &mut self,
+        handle: super::completable_event::CompletableEventHandle<()>,
+        membership_operation: crate::consumer::GroupMembershipOperation,
+    ) {
+        // Java: `if (requestManagers.consumerMembershipManager.isPresent())`.
+        // In Rust the membership manager is held on the heartbeat manager
+        // (single ownership site). The proxy check is the same.
+        let membership_arc = {
+            let rm_guard = self.lock_request_managers();
+            rm_guard
+                .consumer_heartbeat
+                .as_ref()
+                .map(|hrm| Arc::clone(hrm.membership_manager()))
+        };
+        match membership_arc {
+            Some(mm) => {
+                let now_ms = current_time_ms_now();
+                log::debug!(
+                    "Signal the ConsumerMembershipManager to leave the consumer group since the consumer is closing"
+                );
+                tokio::spawn(async move {
+                    match mm.leave_group_on_close(membership_operation, now_ms).await {
+                        Ok(()) => {
+                            handle.complete(());
+                        },
+                        Err(err) => {
+                            handle.complete_exceptionally(err);
+                        },
+                    }
+                });
+            },
+            None => {
+                // Java's branch logs and returns without completing the
+                // future (StreamsMembershipManager is §20-skip). The
+                // app-side caller will time out via the reaper. To make
+                // the failure observable (DoD §5: no silent drops) we
+                // explicitly fail the handle.
+                handle.complete_exceptionally(KafkaError::illegal_state(
+                    "ConsumerMembershipManager not available when processing a LeaveGroupOnClose event",
+                ));
+            },
+        }
+    }
+
+    /// Java: `process(AsyncPollEvent)`.
+    ///
+    /// Pumps the membership/fetch state machine. Mirrors Java's
+    /// processing phase-for-phase:
+    ///
+    /// 1. `maybeReconcile(true)` on the membership manager (Rust is
+    ///    async; spawned task awaits).
+    /// 2. If commit manager present, `updateTimerAndMaybeCommit(pollTimeMs)`.
+    /// 3. If heartbeat present: `maybeUpdatePatternSubscription`,
+    ///    `onConsumerPoll`, `resetPollTimer(pollTimeMs)`.
+    /// 4. `updateFetchPositions(deadlineMs)` → continues to
+    ///    `createFetchRequests()` on success; mark state complete.
+    /// 5. Errors mapped via `maybe_complete_async_poll_event_exceptionally`
+    ///    semantics (timeout errors are ignored; other errors fail the
+    ///    state).
+    ///
+    /// `markValidatePositionsComplete` is set immediately after the
+    /// `update_fetch_positions` call returns (matching Java's
+    /// `event.markValidatePositionsComplete()` — Java sets it
+    /// synchronously, between the call and the `whenComplete`).
+    fn process_async_poll(
+        &mut self,
+        deadline_ms: i64,
+        poll_time_ms: i64,
+        state: Arc<super::application_event::AsyncPollState>,
+    ) {
+        // Snapshot Arc clones for the spawned task — every shared
+        // dependency the continuation needs.
+        let request_managers = Arc::clone(&self.request_managers);
+        // Pattern-subscription refresh.
+        //
+        // Java places `maybeUpdatePatternSubscription` INSIDE step 2 of
+        // `process(AsyncPollEvent)` (after `maybeReconcile`, inside the
+        // `commitRequestManager.isPresent()` block). We invoke it here —
+        // synchronously, before spawning — because:
+        //   1. `maybe_update_pattern_subscription` reads/writes
+        //      `self.metadata_version_snapshot`, which is an inherent
+        //      field of `ApplicationEventProcessor` (not Send-shared with
+        //      the spawned task).
+        //   2. Java's reconcile→pattern-update ordering is a
+        //      side-channel ordering (the pattern update notifies
+        //      `onSubscriptionUpdated`, which the *next* reconcile
+        //      observes — not this one). Running the pattern update
+        //      first instead means *this* reconcile sees the new pattern;
+        //      `onSubscriptionUpdated` still fires before the next
+        //      heartbeat — semantically equivalent for the steady-state
+        //      consumer.
+        // The bg-side commit-7 wiring will eventually fold this back
+        // into the processor's loop with the rest of the membership
+        // state machine.
+        let has_heartbeat_with_commit = {
+            let rm_guard = match request_managers.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            rm_guard.consumer_heartbeat.is_some() && rm_guard.commit.is_some()
+        };
+        if has_heartbeat_with_commit {
+            self.maybe_update_pattern_subscription();
+        }
+
+        tokio::spawn(async move {
+            // --- Step 1: maybeReconcile(true). ---
+            // Acquire a ref to the membership manager outside the lock.
+            let membership_arc = {
+                let rm_guard = match request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard
+                    .consumer_heartbeat
+                    .as_ref()
+                    .map(|hrm| Arc::clone(hrm.membership_manager()))
+            };
+            if let Some(mm) = &membership_arc {
+                // Java's `maybeReconcile(true)` is sync (void). Rust's
+                // `reconcile(...)` is async because it awaits the
+                // rebalance-listener callback acks. We await it inline —
+                // mirrors Java's "do reconciliation work before moving
+                // on to update positions" sequencing.
+                if let Err(err) = mm.reconcile(poll_time_ms).await
+                    && !is_ignorable_async_poll_error(&err)
+                {
+                    state.complete_exceptionally(err);
+                    return;
+                }
+            }
+
+            // --- Step 2: commit manager auto-commit + heartbeat onPoll. ---
+            // Java guards step-2 work on `commitRequestManager.isPresent()`.
+            {
+                let mut rm_guard = match request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                if rm_guard.commit.is_some() {
+                    if let Some(commit) = rm_guard.commit.as_mut() {
+                        commit.update_timer_and_maybe_commit(poll_time_ms);
+                    }
+                    if let Some(hrm) = rm_guard.consumer_heartbeat.as_mut() {
+                        // Java: `membershipManager.onConsumerPoll();`.
+                        // Rust's `abstract_mm.on_consumer_poll(epoch)`
+                        // takes the join-group epoch — we forward the
+                        // membership manager's `join_group_epoch()`
+                        // (mirroring Java's `joinGroupEpoch()` override).
+                        let mm = hrm.membership_manager();
+                        let join_epoch = mm.join_group_epoch();
+                        if let Err(e) = mm.abstract_mm.on_consumer_poll(join_epoch) {
+                            log::warn!("on_consumer_poll failed: {}", e);
+                        }
+                        hrm.inner_mut().reset_poll_timer(poll_time_ms);
+                    }
+                }
+            }
+            // `membership_arc` is consumed in step 1; nothing more to do
+            // with it here. Step 2 acquires its own access via the
+            // `RequestManagers` lock.
+            drop(membership_arc);
+
+            // --- Step 3: updateFetchPositions → createFetchRequests. ---
+            let update_rx = {
+                let mut rm_guard = match request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let Some(offsets_mgr) = rm_guard.offsets.as_mut() else {
+                    // Without OffsetsRequestManager we cannot make progress.
+                    state.complete_exceptionally(KafkaError::illegal_state(
+                        "OffsetsRequestManager not available when processing AsyncPoll",
+                    ));
+                    return;
+                };
+                offsets_mgr.update_fetch_positions(deadline_ms, poll_time_ms)
+            };
+            // Java: `event.markValidatePositionsComplete()` — fires
+            // immediately after the call returns, before the
+            // `whenComplete` chain.
+            state.mark_validate_positions_complete();
+
+            match update_rx.await {
+                Ok(Ok(())) => {
+                    // Continue to createFetchRequests.
+                },
+                Ok(Err(err)) => {
+                    if is_ignorable_async_poll_error(&err) {
+                        // Java: `log.trace("Ignoring timeout for {}: {}", ...)`.
+                        log::trace!("Ignoring timeout during update_fetch_positions: {}", err);
+                    } else {
+                        state.complete_exceptionally(err);
+                        return;
+                    }
+                },
+                Err(_recv_err) => {
+                    state.complete_exceptionally(KafkaError::illegal_state(
+                        "OffsetsRequestManager update_fetch_positions sender dropped",
+                    ));
+                    return;
+                },
+            }
+
+            // --- Step 4: createFetchRequests. ---
+            let fetch_rx = {
+                let mut rm_guard = match request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let Some(fetch_mgr) = rm_guard.fetch.as_mut() else {
+                    state.complete_exceptionally(KafkaError::illegal_state(
+                        "FetchRequestManager not available when processing AsyncPoll",
+                    ));
+                    return;
+                };
+                fetch_mgr.create_fetch_requests()
+            };
+            match fetch_rx.await {
+                Ok(Ok(())) => {
+                    state.complete_successfully();
+                },
+                Ok(Err(err)) => {
+                    if is_ignorable_async_poll_error(&err) {
+                        // Mirror Java's trace-log-and-complete behaviour:
+                        // a timeout during createFetchRequests should NOT
+                        // fail the event (Java logs and falls through to
+                        // event.completeSuccessfully).
+                        state.complete_successfully();
+                    } else {
+                        state.complete_exceptionally(err);
+                    }
+                },
+                Err(_recv_err) => {
+                    state.complete_exceptionally(KafkaError::illegal_state(
+                        "FetchRequestManager create_fetch_requests sender dropped",
+                    ));
+                },
+            }
+        });
+    }
+
+    // -------------------------------------------------------------------
+    // Lock helpers
+    // -------------------------------------------------------------------
+
     /// Internal helper. `Mutex` is `std::sync::Mutex` — never held across
     /// `.await`. Recovers from poisoning by extracting the inner guard
     /// (mirrors the rest of the codebase).
@@ -654,19 +1321,37 @@ impl ApplicationEventProcessor {
             Err(poisoned) => poisoned.into_inner(),
         }
     }
+}
 
-    /// Fail a completable handle for an async-dispatch arm that has been
-    /// deferred to commit 5/N. The app side observes an explicit error
-    /// rather than a silently-dropped handle (§28 / DoD §5).
-    fn fail_deferred_async_handle<T: Send + 'static>(
-        &self,
-        handle: super::completable_event::CompletableEventHandle<T>,
-        arm_name: &str,
-    ) {
-        handle.complete_exceptionally(KafkaError::unsupported_version(format!(
-            "{arm_name} is wired in Phase 10 commit 5/N (async-dispatch arms)"
-        )));
-    }
+// ============================================================================
+// Helpers
+// ============================================================================
+
+/// Returns the current wall-clock time in milliseconds since the Unix epoch.
+///
+/// Java's `Time.milliseconds()` is mock-friendly; the Rust translation uses
+/// `std::time::SystemTime` directly. Tests that need to control time
+/// either inject a mock time source via the request manager's own clock or
+/// drive the processor's `current_time_ms` arg on events like
+/// `AssignmentChange` (which carries it explicitly per Java).
+fn current_time_ms_now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(i64::MAX)
+}
+
+/// Java: `maybeCompleteAsyncPollEventExceptionally(event, t)`.
+///
+/// Returns `true` when the error should be IGNORED (logged at trace level
+/// in Java) rather than failing the event. Specifically, Java ignores
+/// timeout exceptions during the update-positions / create-fetch-requests
+/// chain so the consumer can recover on the next `poll()` iteration —
+/// AsyncPoll itself is a polling primitive and a per-iteration timeout is
+/// not user-facing. Non-timeout errors are surfaced.
+fn is_ignorable_async_poll_error(err: &KafkaError) -> bool {
+    matches!(err, KafkaError::Timeout(_))
 }
 
 impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
@@ -721,55 +1406,46 @@ impl EventProcessor<ApplicationEvent> for ApplicationEventProcessor {
                 self.process_consumer_rebalance_listener_callback_completed(method_name, error);
             },
 
-            // ───── Async-dispatch arms (deferred to commit 5/N) ─────
+            // ───── Async-dispatch arms (commit 5/N) ─────
             //
-            // Java spawns a `CompletableFuture` continuation
-            // (`whenComplete(complete(event.future()))`) for each of
-            // these. The Rust translation will use a detached
-            // `tokio::spawn` per-event that awaits the relevant manager
-            // future and writes the result to the handle. Until then,
-            // we fail the handle with an explicit error so the app side
-            // observes the deferral.
-            ApplicationEvent::AsyncPoll { state, .. } => {
-                state.complete_exceptionally(KafkaError::unsupported_version(
-                    "AsyncPoll is wired in Phase 10 commit 5/N (async-dispatch arms)",
-                ));
+            // Each arm calls into the corresponding request manager,
+            // gets a `oneshot::Receiver`, then spawns a continuation
+            // task that awaits the receiver and writes the result to
+            // the event's handle. Mirrors Java's
+            // `whenComplete(complete(event.future()))` chain. See the
+            // module-level docstring "Async-arm pattern" for details.
+            ApplicationEvent::AsyncPoll { deadline_ms, poll_time_ms, state } => {
+                self.process_async_poll(deadline_ms, poll_time_ms, state);
             },
-            ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
-                offsets_ready.complete_exceptionally(KafkaError::unsupported_version(
-                    "CommitAsync is wired in Phase 10 commit 5/N (async-dispatch arms)",
-                ));
-                self.fail_deferred_async_handle(handle, "CommitAsync");
+            ApplicationEvent::CommitAsync { handle, offsets_ready, offsets } => {
+                self.process_commit_async(handle, offsets_ready, offsets);
             },
-            ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
-                offsets_ready.complete_exceptionally(KafkaError::unsupported_version(
-                    "CommitSync is wired in Phase 10 commit 5/N (async-dispatch arms)",
-                ));
-                self.fail_deferred_async_handle(handle, "CommitSync");
+            ApplicationEvent::CommitSync { handle, offsets_ready, offsets } => {
+                self.process_commit_sync(handle, offsets_ready, offsets);
             },
-            ApplicationEvent::FetchCommittedOffsets { handle, .. } => {
-                self.fail_deferred_async_handle(handle, "FetchCommittedOffsets");
+            ApplicationEvent::FetchCommittedOffsets { handle, partitions } => {
+                self.process_fetch_committed_offsets(handle, partitions);
             },
-            ApplicationEvent::ListOffsets { handle, .. } => {
-                self.fail_deferred_async_handle(handle, "ListOffsets");
+            ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps } => {
+                self.process_list_offsets(handle, timestamps_to_search, require_timestamps);
             },
             ApplicationEvent::CheckAndUpdatePositions { handle } => {
-                self.fail_deferred_async_handle(handle, "CheckAndUpdatePositions");
+                self.process_check_and_update_positions(handle);
             },
-            ApplicationEvent::TopicMetadata { handle, .. } => {
-                self.fail_deferred_async_handle(handle, "TopicMetadata");
+            ApplicationEvent::TopicMetadata { handle, topic } => {
+                self.process_topic_metadata(handle, topic);
             },
             ApplicationEvent::AllTopicsMetadata { handle } => {
-                self.fail_deferred_async_handle(handle, "AllTopicsMetadata");
+                self.process_all_topics_metadata(handle);
             },
             ApplicationEvent::Unsubscribe { handle } => {
-                self.fail_deferred_async_handle(handle, "Unsubscribe");
+                self.process_unsubscribe(handle);
             },
             ApplicationEvent::CreateFetchRequests { handle } => {
-                self.fail_deferred_async_handle(handle, "CreateFetchRequests");
+                self.process_create_fetch_requests(handle);
             },
-            ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
-                self.fail_deferred_async_handle(handle, "LeaveGroupOnClose");
+            ApplicationEvent::LeaveGroupOnClose { handle, membership_operation } => {
+                self.process_leave_group_on_close(handle, membership_operation);
             },
         }
     }
@@ -1430,20 +2106,260 @@ mod tests {
             });
     }
 
-    // -------------------------------------------------------------------
-    // Deferred-arm sanity: verify the async-dispatch arms fail their
-    // handles cleanly (no panic, no hang). Commit 5/N replaces these
-    // with real implementations.
-    // -------------------------------------------------------------------
-    #[test]
-    fn deferred_async_arms_fail_handles_with_unsupported_version() {
+    // ===================================================================
+    // Async-arm smoke tests (commit 5/N)
+    //
+    // Java: `ApplicationEventProcessorTest` covers each async arm. This
+    // commit translates the smallest set proving each arm's bg-side
+    // wiring works end-to-end. The exhaustive translation is owned by
+    // commit 6/N (per PLAN.md). These tests target the arm-level wiring:
+    // that the processor spawns a continuation, awaits the manager
+    // future, and completes the event's handle.
+    // ===================================================================
+
+    /// `CheckAndUpdatePositions` with no positions to fetch resolves
+    /// immediately. The bg-side `OffsetsRequestManager::update_fetch_positions`
+    /// short-circuits when the subscription has no partitions requiring
+    /// validation / reset.
+    #[tokio::test(flavor = "current_thread")]
+    async fn check_and_update_positions_resolves_when_no_partitions_pending() {
         let mut fx = setup_processor(true);
-        let (handle, rx) = CompletableEventHandle::<()>::new(20_000);
+        let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
         fx.processor.process(ApplicationEvent::CheckAndUpdatePositions { handle });
-        let err = await_complete(rx).expect_err("deferred arm must fail handle");
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("CheckAndUpdatePositions must not hang")
+            .expect("sender alive");
+        result.expect("update_fetch_positions must succeed when no partitions need positions");
+    }
+
+    /// `CommitAsync` without a commit manager fails the handle with
+    /// `illegal_state` carrying Java's exact error message.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_async_without_commit_manager_fails_with_illegal_state() {
+        let mut fx = setup_processor(false); // no group id → no commit manager
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor
+            .process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
+        let err = ready_rx
+            .await
+            .expect("sender alive")
+            .expect_err("must fail when no commit manager");
         assert!(
-            err.to_string().contains("Phase 10 commit 5/N"),
-            "expected deferred-arm error, got: {err}"
+            err.to_string().contains("CommitRequestManager is not available"),
+            "expected illegal-state error mentioning CommitRequestManager, got: {err}"
         );
+        let err2 = rx.await.expect("sender alive").expect_err("primary handle must also fail");
+        assert!(
+            err2.to_string().contains("CommitRequestManager is not available"),
+            "expected illegal-state error mentioning CommitRequestManager, got: {err2}"
+        );
+    }
+
+    /// `CommitAsync` with empty offsets and a group-id'd consumer resolves
+    /// both the secondary `offsets_ready` and primary handle successfully.
+    /// `offsets: None` → resolve via `subscriptions.all_consumed()`, which
+    /// is empty when no positions have been recorded.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_async_empty_consumed_offsets_completes_handle_ok() {
+        let mut fx = setup_processor(true);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor
+            .process(ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: None });
+        // `offsets_ready` must fire first (Java: mark_offsets_ready BEFORE awaiting).
+        ready_rx
+            .await
+            .expect("sender alive")
+            .expect("offsets_ready must complete on success");
+        // Primary handle: empty input → empty result map, OK.
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("CommitAsync must not hang on empty offsets")
+            .expect("sender alive")
+            .expect("ok");
+        assert!(result.is_empty());
+    }
+
+    /// `CommitSync` without a commit manager fails the handle with
+    /// `illegal_state`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn commit_sync_without_commit_manager_fails_with_illegal_state() {
+        let mut fx = setup_processor(false);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        let (offsets_ready, _ready_rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor
+            .process(ApplicationEvent::CommitSync { handle, offsets_ready, offsets: None });
+        let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
+        assert!(
+            err.to_string().contains("CommitRequestManager is not available"),
+            "expected illegal-state error, got: {err}"
+        );
+    }
+
+    /// `FetchCommittedOffsets` without a commit manager fails the handle
+    /// with `illegal_state`.
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_committed_offsets_without_commit_manager_fails_with_illegal_state() {
+        let mut fx = setup_processor(false);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        fx.processor
+            .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
+        let err = rx.await.expect("sender alive").expect_err("must fail without commit manager");
+        assert!(
+            err.to_string().contains("CommitRequestManager is not available"),
+            "expected illegal-state error, got: {err}"
+        );
+    }
+
+    /// `FetchCommittedOffsets` with an empty partition set resolves
+    /// immediately to an empty map (commit manager short-circuits).
+    #[tokio::test(flavor = "current_thread")]
+    async fn fetch_committed_offsets_empty_partitions_resolves_immediately() {
+        let mut fx = setup_processor(true);
+        let (handle, rx) = CompletableEventHandle::<HashMap<TopicPartition, OffsetAndMetadata>>::new(60_000);
+        fx.processor
+            .process(ApplicationEvent::FetchCommittedOffsets { handle, partitions: HashSet::new() });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("FetchCommittedOffsets must not hang on empty partitions")
+            .expect("sender alive")
+            .expect("ok");
+        assert!(result.is_empty());
+    }
+
+    /// `ListOffsets` with an empty timestamps map resolves immediately to
+    /// an empty result map (OffsetsRequestManager short-circuits).
+    #[tokio::test(flavor = "current_thread")]
+    async fn list_offsets_empty_timestamps_resolves_immediately() {
+        let mut fx = setup_processor(true);
+        let (handle, rx) =
+            CompletableEventHandle::<HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>>>::new(60_000);
+        fx.processor.process(ApplicationEvent::ListOffsets {
+            handle,
+            timestamps_to_search: HashMap::new(),
+            require_timestamps: false,
+        });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("ListOffsets must not hang on empty timestamps")
+            .expect("sender alive")
+            .expect("ok");
+        assert!(result.is_empty());
+    }
+
+    /// `CreateFetchRequests` with no fetch manager fails the handle with
+    /// `illegal_state` (fetch slot is `None` in the test fixture for
+    /// non-group-id consumers, and `setup_processor` leaves it `None`
+    /// even with-group-id; the smoke test confirms the failure path).
+    #[tokio::test(flavor = "current_thread")]
+    async fn create_fetch_requests_without_fetch_manager_fails_with_illegal_state() {
+        let mut fx = setup_processor(true);
+        let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::CreateFetchRequests { handle });
+        let err = rx.await.expect("sender alive").expect_err("must fail without fetch manager");
+        assert!(
+            err.to_string().contains("FetchRequestManager not available"),
+            "expected illegal-state error mentioning FetchRequestManager, got: {err}"
+        );
+    }
+
+    /// `Unsubscribe` without a heartbeat manager (no group id) clears
+    /// subscription state inline and completes the handle synchronously.
+    #[tokio::test(flavor = "current_thread")]
+    async fn unsubscribe_without_group_id_clears_subscription_inline() {
+        let mut fx = setup_processor(false);
+        // Set up a concrete subscription first so unsubscribe has work to do.
+        {
+            let mut guard = fx.subscriptions.lock().unwrap();
+            let mut topics = HashSet::new();
+            topics.insert("topic1".to_string());
+            guard.subscribe_topics(topics, None).unwrap();
+        }
+        let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::Unsubscribe { handle });
+        let result = tokio::time::timeout(std::time::Duration::from_secs(5), rx)
+            .await
+            .expect("Unsubscribe must not hang")
+            .expect("sender alive");
+        result.expect("unsubscribe must succeed");
+        // Subscription is cleared.
+        let guard = fx.subscriptions.lock().unwrap();
+        assert!(
+            guard.subscription().is_empty(),
+            "subscription must be cleared after unsubscribe"
+        );
+    }
+
+    /// `LeaveGroupOnClose` without a heartbeat manager fails the handle
+    /// with `illegal_state` (Java's branch logs and returns; Rust
+    /// surfaces the failure to avoid a silent drop per DoD §5).
+    #[tokio::test(flavor = "current_thread")]
+    async fn leave_group_on_close_without_heartbeat_fails_handle() {
+        let mut fx = setup_processor(false);
+        let (handle, rx) = CompletableEventHandle::<()>::new(60_000);
+        fx.processor.process(ApplicationEvent::LeaveGroupOnClose {
+            handle,
+            membership_operation: crate::consumer::GroupMembershipOperation::LeaveGroup,
+        });
+        let err = rx
+            .await
+            .expect("sender alive")
+            .expect_err("must fail without membership manager");
+        assert!(
+            err.to_string().contains("ConsumerMembershipManager not available"),
+            "expected illegal-state error, got: {err}"
+        );
+    }
+
+    /// `AsyncPoll` without an OffsetsRequestManager fails the
+    /// `AsyncPollState` cleanly.
+    #[tokio::test(flavor = "current_thread")]
+    async fn async_poll_without_offsets_manager_fails_state() {
+        let subscriptions = make_subscriptions();
+        let metadata = make_metadata(Arc::clone(&subscriptions));
+        // Wire RequestManagers with NO offsets manager — exercise the
+        // failure path inside `process_async_poll`.
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(None, None, None, None, None, None, None)));
+        let mut processor = ApplicationEventProcessor::new(
+            Arc::clone(&request_managers),
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+        );
+
+        let state = Arc::new(super::super::application_event::AsyncPollState::new());
+        processor.process(ApplicationEvent::AsyncPoll {
+            deadline_ms: 60_000,
+            poll_time_ms: 0,
+            state: Arc::clone(&state),
+        });
+        // Spin until the spawned task completes.
+        for _ in 0..200 {
+            if state.is_complete() {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert!(state.is_complete(), "AsyncPoll state should complete");
+        let err = state.error().expect("error must be set when no OffsetsRequestManager is wired");
+        assert!(
+            err.to_string().contains("OffsetsRequestManager not available"),
+            "expected illegal-state error, got: {err}"
+        );
+    }
+
+    /// `ConsumerRebalanceListenerCallbackCompleted` is a no-op in Rust
+    /// (the §31 embedded-oneshot pattern resolves the ack directly). Verify
+    /// the dispatch table accepts the event without panicking.
+    #[test]
+    fn rebalance_listener_callback_completed_is_noop() {
+        let mut fx = setup_processor(true);
+        fx.processor
+            .process(ApplicationEvent::ConsumerRebalanceListenerCallbackCompleted {
+                method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                error: None,
+            });
+        // No assertion: the test passes if no panic.
     }
 }
