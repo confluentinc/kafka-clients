@@ -384,3 +384,99 @@ extended to pin the secondary-handle contract: a snapshot
 assert `!is_done()` on the inner slot, and `ready_rx.try_recv()` must
 observe `TryRecvError::Empty`. This catches any future silent
 revert to eager dual-fail.
+
+### Issue R2-1: `run_once` Phase-3 placement: `membership.reconcile()` runs AFTER `offsets`/`fetch` poll
+
+> - **File**: `src/consumer/internals/consumer_network_thread.rs:367-381`
+> - **Commit**: `e86f7c1` Phase 10 (7/N): ConsumerNetworkThread runOnce
+> - **Severity**: Behavior Mismatch
+> - **Java Reference**: `ConsumerNetworkThread.java:222-226` (the
+>   `for (RequestManager rm : requestManagers.entries())` loop) and
+>   `RequestManagers.java:91-101` (entries order:
+>   `coordinator → commit → heartbeat → membership → offsets →
+>    topicMetadata → fetch`). `AbstractMembershipManager.java:1409`
+>   shows `poll(now)` calls `maybeReconcile(false)`.
+> - **Description**: The closure plan / round-1 aside required commit 7
+>   to "explicitly call `membership.reconcile()` per iteration". The
+>   call is now present, but it sits as Phase 3 — AFTER all entries are
+>   polled (which already includes `offsets`, `topicMetadata`, `fetch`)
+>   and BEFORE the network-client poll. Java's order places membership
+>   BETWEEN `heartbeat` and `offsets` inside the same per-entry loop:
+>   reconcile may transition the assignment (e.g. acknowledging a new
+>   target), and Java's `offsets.poll()` / `fetch.poll()` then run with
+>   the post-reconcile subscription state in the SAME iteration. Rust's
+>   ordering means within a given `run_once`, offsets/fetch poll against
+>   the **pre-reconcile** state; their visible effect of any reconcile
+>   is delayed by one iteration.
+> - **Expected**: Insert the `membership.reconcile().await` between the
+>   heartbeat-poll step and the offsets-poll step of the Phase-2 entries
+>   loop, mirroring Java's positional invariant. Concretely: split the
+>   Phase-2 `rm_guard.entries()` walk into "managers before membership"
+>   and "managers after membership", drive reconcile between them.
+> - **Actual**: All entries (incl. offsets/fetch) poll first, then
+>   membership reconciles, then network polls.
+
+**Resolution**: Split the bg task's Phase-2 walk into "before-membership"
+and "after-membership" halves, calling `membership.reconcile(now, false)`
+between them. The boundary is provided by a new
+`RequestManagers::membership_boundary()` accessor that returns the
+position membership would occupy in Java's `entries()`:
+`coordinator + commit + consumer_heartbeat` slot count. The PollResult
+vec collected from `entries()` is now `split_off(boundary)`-ed; the
+front half (coordinator/commit/heartbeat) feeds `add_all` first, then
+reconcile runs, then the tail (offsets/topic_metadata/fetch and any
+`dyn_managers`) feeds `add_all`. This preserves Java's positional
+invariant: any subscription-state change from reconcile is visible to
+the after-membership manager polls inside the SAME run-once iteration.
+The existing `run_once_invokes_membership_reconcile` test continues to
+cover dispatch; the ordering itself is enforced by construction
+(`split_off(boundary)`).
+
+### Issue R2-2: `reconcile` ignores Java's `canCommit` gate
+
+> - **File**: `src/consumer/internals/consumer_membership_manager.rs:471`
+>   (signature) + callers
+>   - `src/consumer/internals/consumer_network_thread.rs:378`
+>     (`membership.reconcile(current_time_ms).await` from `run_once`)
+>   - `src/consumer/internals/events/application_event_processor.rs:1185`
+>     (`mm.reconcile(poll_time_ms).await` from `process_async_poll`)
+> - **Commit**: `e86f7c1` (7/N) + `4c76cae` (5/N)
+> - **Severity**: Behavior Mismatch
+> - **Java Reference**: `AbstractMembershipManager.java:824-854`
+>   (`maybeReconcile(boolean canCommit)` — `if (autoCommitEnabled &&
+>   !canCommit) return;`). Java's `entries().poll()` path passes
+>   `false`; `process(AsyncPollEvent)` passes `true`.
+> - **Description**: Rust's `ConsumerMembershipManager::reconcile(now)`
+>   takes no `can_commit` parameter and always proceeds. Java skips the
+>   reconciliation entirely when `autoCommitEnabled && !canCommit` —
+>   i.e. the per-iteration `entries().poll()` call MUST NOT advance
+>   reconciliation when auto-commit is enabled; only the AsyncPoll
+>   path (which has just run `updateTimerAndMaybeCommit`) advances. The
+>   Rust collapse means the per-iteration call from `run_once` can
+>   advance reconciliation with un-committed offsets — exactly the
+>   scenario the `canCommit` gate exists to prevent.
+> - **Expected**: Pass a `can_commit: bool` parameter through to
+>   `reconcile`; the `run_once` caller passes `false`, the `AsyncPoll`
+>   caller passes `true`.
+> - **Actual**: Both call sites use the same `reconcile(now)` and the
+>   gate is missing.
+
+**Resolution**: Added the `can_commit: bool` parameter to
+`ConsumerMembershipManager::reconcile`. The gate
+`if auto_commit_enabled && !can_commit { return Ok(()); }` lives
+between step 4 (short-circuit ACK) and step 6 (mark-in-progress),
+matching the position of Java's `AbstractMembershipManager.java:854`.
+Updated call sites: `ConsumerNetworkThread::run_once` passes `false`
+(per-iteration path); `ApplicationEventProcessor::process_async_poll`
+passes `true` (post-`updateTimerAndMaybeCommit` path). Test-only
+`reconcile(0, ...)` call sites in the membership manager's own tests
+pass `true` (they pre-date the gate and exercise the full-reconcile
+path with `commit_request_manager=None`, so the gate is inert
+regardless of the bool). Two new regression tests
+(`reconcile_can_commit_false_is_noop_when_auto_commit_enabled` and
+`reconcile_can_commit_true_proceeds_when_auto_commit_enabled`)
+construct a manager with a real `CommitRequestManager` and
+`auto_commit_enabled=true`, then exercise both `can_commit` branches:
+the `false` arm must NOT emit a rebalance-listener event and must
+leave state in `Reconciling`; the `true` arm DOES emit and advances
+to `Acknowledging`.

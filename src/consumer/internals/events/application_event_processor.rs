@@ -1182,7 +1182,14 @@ impl ApplicationEventProcessor {
                 // rebalance-listener callback acks. We await it inline —
                 // mirrors Java's "do reconciliation work before moving
                 // on to update positions" sequencing.
-                if let Err(err) = mm.reconcile(poll_time_ms).await
+                //
+                // Pass `can_commit = true`: at this site Java passes
+                // `true` because `updateTimerAndMaybeCommit` will have
+                // run by the time the membership advances (step 2
+                // below). Java's `maybeReconcile(true)` lets the
+                // auto-commit-enabled path proceed because any pending
+                // offsets are already being flushed.
+                if let Err(err) = mm.reconcile(poll_time_ms, true).await
                     && !is_ignorable_async_poll_error(&err)
                 {
                     state.complete_exceptionally(err);

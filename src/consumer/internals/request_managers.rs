@@ -226,6 +226,39 @@ impl RequestManagers {
         list
     }
 
+    /// Index, into the [`Self::entries`] vec, of the first manager that
+    /// Java places AFTER the membership slot.
+    ///
+    /// Java's `RequestManagers.entries()` interleaves:
+    /// `coordinator → commit → heartbeat → membership → offsets → ...`.
+    /// In Rust the membership manager is skipped from `entries()` (held
+    /// as `Arc`, shared with the heartbeat manager — see
+    /// [`Self::entries`]'s docstring), so the bg task drives
+    /// `ConsumerMembershipManager::reconcile(...)` directly between the
+    /// "before-membership" managers and the "after-membership"
+    /// managers. This index is the boundary the bg task uses to split
+    /// the entries walk.
+    ///
+    /// Returns the position where membership would have lived: i.e. the
+    /// count of currently-present `coordinator`, `commit`, and
+    /// `consumer_heartbeat`. `dyn_managers` from
+    /// [`Self::with_dyn_managers`] are appended AFTER concrete slots,
+    /// so they are always "after-membership" for the bg-task split (the
+    /// production code path leaves `dyn_managers` empty).
+    pub(crate) fn membership_boundary(&self) -> usize {
+        let mut n = 0;
+        if self.coordinator.is_some() {
+            n += 1;
+        }
+        if self.commit.is_some() {
+            n += 1;
+        }
+        if self.consumer_heartbeat.is_some() {
+            n += 1;
+        }
+        n
+    }
+
     /// Idempotent close. Subsequent calls are no-ops.
     ///
     /// Java: `close()`. Java additionally invokes `closeQuietly` on

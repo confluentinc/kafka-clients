@@ -467,8 +467,19 @@ impl ConsumerMembershipManager {
     /// `revokeAndAssign(...)` chain, but linearised because we have
     /// `async/await` instead of `CompletableFuture::whenComplete`.
     ///
-    /// Java: `maybeReconcile(boolean canCommit)`.
-    pub(crate) async fn reconcile(&self, current_time_ms: i64) -> Result<(), KafkaError> {
+    /// `can_commit` mirrors Java's parameter: when auto-commit is
+    /// enabled and `can_commit` is `false`, the reconciliation must be
+    /// skipped because there is no safe opportunity to flush in-progress
+    /// offsets before the assignment changes. Java passes `false` from
+    /// `AbstractMembershipManager.poll(now)` (the per-iteration
+    /// `entries()` walk) and `true` from `ApplicationEventProcessor.process(AsyncPollEvent)`
+    /// (which has just run `updateTimerAndMaybeCommit`). The Rust
+    /// translation mirrors this through the bg-task call site (passes
+    /// `false`) and the `process_async_poll` arm (passes `true`).
+    ///
+    /// Java: `maybeReconcile(boolean canCommit)`
+    /// (`AbstractMembershipManager.java:824`).
+    pub(crate) async fn reconcile(&self, current_time_ms: i64, can_commit: bool) -> Result<(), KafkaError> {
         // 1. State / progress checks.
         {
             let guard = match self.abstract_mm.inner.lock() {
@@ -524,33 +535,36 @@ impl ConsumerMembershipManager {
             return Ok(());
         }
 
-        // 5. Auto-commit-before-reconciliation. Java's
-        // `signalReconciliationStarted()` calls
-        // `commitRequestManager.maybeAutoCommitSyncBeforeRebalance(...)`.
-        // Phase 10 (commit 2.5/N) supplied the
-        // `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
-        // method. Wiring this `reconcile` body to actually invoke it
-        // requires the `AsyncKafkaConsumer` poll-path scaffolding so the
-        // returned `oneshot::Receiver` can be awaited inside the rebalance
-        // sequence — that's a Phase 11 concern. For now, log and proceed,
-        // mirroring Java's `commitResult.whenComplete` error branch.
+        // 5. Java's `if (autoCommitEnabled && !canCommit) return;` gate
+        // (`AbstractMembershipManager.java:854`). Skip reconciliation when
+        // auto-commit is enabled and the caller has not validated that
+        // committing is currently safe (i.e. the per-iteration
+        // `entries().poll()` path, which passes `can_commit=false`). The
+        // AsyncPoll path passes `can_commit=true` because
+        // `updateTimerAndMaybeCommit` ran just before, so any pending
+        // offsets are already in-flight.
         //
-        // TODO: Phase 11 wires the invocation:
-        // `self.commit_request_manager.maybe_auto_commit_sync_before_rebalance(
-        //     deadline_ms, now_ms).await?` at this site.
-        if self.commit_request_manager.is_some() {
-            let auto_commit = {
-                let guard = match self.abstract_mm.inner.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                guard.auto_commit_enabled
+        // Phase 11 will additionally wire the actual flush via
+        // `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
+        // (the method exists since commit 2.5/N) once the
+        // `AsyncKafkaConsumer` poll-path scaffolding lands. That flush
+        // happens inside Java's `revokeAndAssign(...)` chain, NOT here —
+        // this `if` is the prior, independent gate.
+        let auto_commit_enabled = if self.commit_request_manager.is_some() {
+            let guard = match self.abstract_mm.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
             };
-            if auto_commit {
-                log::debug!(
-                    "Auto-commit-before-rebalance invocation deferred to Phase 11; proceeding with reconciliation."
-                );
-            }
+            guard.auto_commit_enabled
+        } else {
+            false
+        };
+        if auto_commit_enabled && !can_commit {
+            log::trace!(
+                "Skipping reconciliation: auto-commit is enabled and the caller cannot \
+                 guarantee that offsets are safe to commit (can_commit=false)."
+            );
+            return Ok(());
         }
 
         // 6. Mark reconciliation in progress.
@@ -1120,6 +1134,54 @@ mod tests {
         (mgr, rx)
     }
 
+    /// Helper that constructs a manager carrying a real
+    /// `CommitRequestManager` and `auto_commit_enabled=true` — required
+    /// to exercise Java's `if (autoCommitEnabled && !canCommit) return;`
+    /// gate inside [`ConsumerMembershipManager::reconcile`].
+    fn make_with_commit_manager(
+        with_listener: bool,
+    ) -> (
+        ConsumerMembershipManager,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        if with_listener {
+            subs.lock()
+                .unwrap()
+                .subscribe_topics(HashSet::new(), Some(Arc::new(NoopListener)))
+                .unwrap();
+        }
+        let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            subs.clone(),
+            ClusterResourceListeners::new(),
+        ));
+        let commit_mgr = Arc::new(crate::consumer::internals::commit_request_manager::CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "test-group",
+            None,
+            0,
+        ));
+        let (tx, rx) = mpsc::unbounded_channel();
+        let beh = Arc::new(BackgroundEventHandler::new(tx));
+        let mgr = ConsumerMembershipManager::new(
+            "test-group",
+            None,
+            None,
+            100,
+            None,
+            subs,
+            Some(commit_mgr),
+            metadata,
+            beh,
+            true, // auto_commit_enabled
+        );
+        (mgr, rx)
+    }
+
     /// Translated from `ConsumerMembershipManagerTest#testMembershipManagerServerAssignor`.
     #[test]
     fn server_assignor_accessor() {
@@ -1239,7 +1301,7 @@ mod tests {
 
         let mgr_arc = Arc::new(mgr);
         let mgr_clone = mgr_arc.clone();
-        let bg = tokio::spawn(async move { mgr_clone.reconcile(0).await });
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
 
         // App-side: expect onPartitionsAssigned event (no revoked
         // partitions because we had none). Ack with Ok(()).
@@ -1253,6 +1315,84 @@ mod tests {
             other => panic!("unexpected event: {:?}", other),
         }
 
+        bg.await.unwrap().unwrap();
+        assert_eq!(mgr_arc.state(), MemberState::Acknowledging);
+    }
+
+    /// Regression for COMMENTS R2-2: `reconcile(now, can_commit=false)`
+    /// is a no-op when auto-commit is enabled AND a commit manager is
+    /// present, mirroring Java's
+    /// `if (autoCommitEnabled && !canCommit) return;` at
+    /// `AbstractMembershipManager.java:854`.
+    ///
+    /// Path: state is `Reconciling` with a real target assignment that
+    /// would otherwise emit an `OnPartitionsAssigned` background event;
+    /// calling `reconcile(_, false)` MUST NOT emit that event and MUST
+    /// NOT transition out of `Reconciling`. Calling
+    /// `reconcile(_, true)` from the same setup DOES proceed
+    /// (separate test below).
+    #[tokio::test]
+    async fn reconcile_can_commit_false_is_noop_when_auto_commit_enabled() {
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        mgr.transition_to_joining().unwrap();
+
+        let topic_id = Uuid::random_uuid();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.assigned_topic_names_cache.insert(topic_id, "t1".to_string());
+        }
+        let mut new_assignment = HashMap::new();
+        new_assignment.insert(topic_id, vec![0]);
+        mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        // can_commit=false MUST short-circuit (auto-commit gate).
+        mgr.reconcile(0, false).await.unwrap();
+
+        // No callback event was emitted, and the state stayed in
+        // RECONCILING.
+        assert!(
+            matches!(rx.try_recv(), Err(tokio::sync::mpsc::error::TryRecvError::Empty)),
+            "no rebalance-listener event should be emitted when can_commit=false gate triggers",
+        );
+        assert_eq!(
+            mgr.state(),
+            MemberState::Reconciling,
+            "reconciliation must not have advanced when can_commit=false (auto-commit gate active)",
+        );
+    }
+
+    /// Companion to [`reconcile_can_commit_false_is_noop_when_auto_commit_enabled`].
+    /// Same setup with `can_commit=true` proceeds — callback event is
+    /// emitted and state advances after ack.
+    #[tokio::test]
+    async fn reconcile_can_commit_true_proceeds_when_auto_commit_enabled() {
+        let (mgr, mut rx) = make_with_commit_manager(true);
+        mgr.transition_to_joining().unwrap();
+
+        let topic_id = Uuid::random_uuid();
+        {
+            let mut guard = mgr.abstract_mm.inner.lock().unwrap();
+            guard.assigned_topic_names_cache.insert(topic_id, "t1".to_string());
+        }
+        let mut new_assignment = HashMap::new();
+        new_assignment.insert(topic_id, vec![0]);
+        mgr.abstract_mm.process_assignment_received(new_assignment).unwrap();
+        assert_eq!(mgr.state(), MemberState::Reconciling);
+
+        let mgr_arc = Arc::new(mgr);
+        let mgr_clone = mgr_arc.clone();
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
+
+        let env = rx.recv().await.expect("event");
+        match env.event {
+            BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { method_name, ack, partitions } => {
+                assert_eq!(method_name, ConsumerRebalanceListenerMethodName::OnPartitionsAssigned);
+                assert_eq!(partitions.len(), 1);
+                ack.send(Ok(())).unwrap();
+            },
+            other => panic!("unexpected event: {:?}", other),
+        }
         bg.await.unwrap().unwrap();
         assert_eq!(mgr_arc.state(), MemberState::Acknowledging);
     }
@@ -1326,7 +1466,7 @@ mod tests {
 
         let mgr_arc = Arc::new(mgr);
         let mgr_clone = mgr_arc.clone();
-        let bg = tokio::spawn(async move { mgr_clone.reconcile(0).await });
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
 
         let env = rx.recv().await.expect("event");
         if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } = env.event {
@@ -1655,7 +1795,7 @@ mod tests {
 
         let mgr_arc = Arc::new(mgr);
         let mgr_clone = mgr_arc.clone();
-        let bg = tokio::spawn(async move { mgr_clone.reconcile(0).await });
+        let bg = tokio::spawn(async move { mgr_clone.reconcile(0, true).await });
 
         let env = rx.recv().await.expect("event");
         if let BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded { ack, .. } = env.event {

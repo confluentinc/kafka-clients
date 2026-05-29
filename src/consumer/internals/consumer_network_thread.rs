@@ -326,6 +326,19 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         //       pollWaitTimeMs = Math.min(pollWaitTimeMs, timeoutMs);
         //   }
         //
+        // Java's `entries()` includes membership in-line (between
+        // heartbeat and offsets); its `poll(...)` body is
+        // `maybeReconcile(false); return EMPTY;` so the side-effect
+        // happens between the heartbeat's `addAll` and the offsets'
+        // `poll(...)`. Rust's `entries()` intentionally skips
+        // membership (Phase 8b ownership: `Arc` shared with the
+        // heartbeat manager), so we split the entries walk in two and
+        // call `ConsumerMembershipManager::reconcile(now, false)`
+        // between them — preserving Java's invariant that
+        // `offsets.poll()` / `topic_metadata.poll()` / `fetch.poll()`
+        // observe any post-reconcile subscription-state updates within
+        // the SAME `run_once` iteration.
+        //
         // Rust additionally drains `PollResult::try_connect` (Phase 10
         // 3d) — Java's request managers call
         // `networkClientDelegate.tryConnect(node)` directly during
@@ -340,16 +353,31 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         // `request_managers` from being held across any `.await`
         // (`consumer-threading.md` §16).
         let mut poll_wait_time_ms: i64 = MAX_POLL_TIMEOUT_MS;
-        let collected: Vec<super::network_client_delegate::PollResult> = {
+        let (collected_before, collected_after): (
+            Vec<super::network_client_delegate::PollResult>,
+            Vec<super::network_client_delegate::PollResult>,
+        ) = {
             let mut rm_guard = match self.request_managers.lock() {
                 Ok(g) => g,
                 Err(p) => p.into_inner(),
             };
-            rm_guard.entries().into_iter().map(|rm| rm.poll(current_time_ms)).collect()
+            let boundary = rm_guard.membership_boundary();
+            let mut all: Vec<super::network_client_delegate::PollResult> =
+                rm_guard.entries().into_iter().map(|rm| rm.poll(current_time_ms)).collect();
+            // `split_off(boundary)` gives `[boundary..]` as the tail
+            // (after-membership entries: offsets, topic_metadata,
+            // fetch, dyn_managers). The leading `[..boundary]` slice
+            // stays in `all` (before-membership entries: coordinator,
+            // commit, consumer_heartbeat). If `boundary` ≥ `all.len()`,
+            // `split_off` returns an empty Vec — handled below by
+            // skipping the "after" loop.
+            let safe_boundary = boundary.min(all.len());
+            let tail = all.split_off(safe_boundary);
+            (all, tail)
         };
         {
             let mut delegate_guard = self.network_client_delegate.lock().await;
-            for mut poll_result in collected {
+            for mut poll_result in collected_before {
                 // Drain the try_connect slot BEFORE add_all_from_poll_result,
                 // mirroring Java's tryConnect-then-addAll order inside the
                 // manager body. `std::mem::take` swaps in an empty Vec
@@ -364,20 +392,35 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             }
         }
 
-        // ──── Phase 3: drive membership.reconcile per iteration ────
+        // ──── Phase 2.5: drive membership.reconcile per iteration ────
         //
-        // Java's `RequestManagers.entries()` includes membership, whose
-        // `poll(...)` body is `maybeReconcile(false); return EMPTY;`.
-        // Rust's `entries()` intentionally skips membership (Phase 8b
-        // ownership: Arc shared with heartbeat); the side-effect is
-        // re-supplied here at the same phase point.
+        // Java's `AbstractMembershipManager.poll(now)` body is
+        // `maybeReconcile(false); return EMPTY;`. Pass
+        // `can_commit = false`: this is the per-iteration call where
+        // we have NOT just run `updateTimerAndMaybeCommit`, so it is
+        // not safe to advance reconciliation when auto-commit is
+        // enabled (Java's `AbstractMembershipManager.java:854`).
         //
-        // Failures are logged and swallowed, matching the Java
+        // Failures are logged and swallowed, matching Java's
         // surrounding-runOnce `try { ... } catch (Throwable e) { log }`.
         if let Some(membership) = self.membership.clone()
-            && let Err(e) = membership.reconcile(current_time_ms).await
+            && let Err(e) = membership.reconcile(current_time_ms, false).await
         {
             log::warn!("Membership reconcile failed: {}", e);
+        }
+
+        // ──── Phase 2.6: poll after-membership managers (offsets,
+        // topic_metadata, fetch, dyn) ────
+        {
+            let mut delegate_guard = self.network_client_delegate.lock().await;
+            for mut poll_result in collected_after {
+                let try_connect_nodes = std::mem::take(&mut poll_result.try_connect);
+                for node in try_connect_nodes {
+                    delegate_guard.try_connect(&node, current_time_ms).await;
+                }
+                let timeout_ms = delegate_guard.add_all_from_poll_result(poll_result, current_time_ms);
+                poll_wait_time_ms = poll_wait_time_ms.min(timeout_ms);
+            }
         }
 
         // ──── Phase 4: poll the network client ────
