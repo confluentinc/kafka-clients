@@ -1079,15 +1079,14 @@ mod tests {
         );
         unsent.handler().on_complete(response);
 
-        // Yield so the spawned forwarder runs. Two yields leave
-        // headroom for the response-receive arm to fully execute
-        // through `on_response_inner` (which acquires the inflight
-        // mutex).
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
-
-        // User-facing future resolved; inflight entry removed.
-        let received = rx.try_recv().expect("response delivered via spawned forwarder");
+        // Wait deterministically for the spawned forwarder to resolve
+        // the user-facing future. `tokio::time::timeout` bounds the
+        // wait at 100ms — `yield_now` only re-queues the current task
+        // and does not guarantee a spawned task has run.
+        let received = tokio::time::timeout(std::time::Duration::from_millis(100), &mut rx)
+            .await
+            .expect("forwarder must resolve receiver within 100ms")
+            .expect("response delivered via spawned forwarder");
         let map = received.expect("ok response");
         assert!(map.contains_key(topic), "topic present in result map: {map:?}");
         assert_eq!(0, manager.inflight_count(), "inflight cleared by forwarder");
@@ -1108,9 +1107,23 @@ mod tests {
         let unsent = res.unsent_requests.into_iter().next().unwrap();
 
         // Fire a transport-layer retriable failure through the handler.
+        // The retriable + inside-deadline path calls
+        // `state.timed_state.on_failed_attempt(now)` (line 313), which
+        // advances the entry into a non-zero backoff. Wait for that
+        // observable side effect deterministically (replaces fragile
+        // `yield_now` pairs — `yield_now` re-queues the current task
+        // but does not guarantee a spawned task ran).
         unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        loop {
+            if manager.inflight_remaining_backoff_ms(0, 0) > 0 {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("forwarder did not run within 100ms (expected `on_failed_attempt` side effect)");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
 
         // Retriable + inside the deadline → entry stays, future
         // unresolved.

@@ -766,6 +766,26 @@ mod tests {
     /// have caught the response-routing gap the Phase 12 audit
     /// identified (audit verdict: BROKEN, no production callsite of
     /// `take_response_receiver`).
+    /// Polls `predicate` with a short async sleep between attempts,
+    /// bounded by a 100ms wall-clock budget. Replaces the fragile
+    /// `tokio::task::yield_now().await; yield_now().await;` pattern in
+    /// regression tests — `yield_now` re-queues the calling task but
+    /// does not guarantee a spawned task has executed. A short timed
+    /// wait is deterministic across both current-thread and
+    /// multi-thread runtimes.
+    async fn wait_until<F: FnMut() -> bool>(mut predicate: F) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(100);
+        loop {
+            if predicate() {
+                return;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("wait_until predicate never became true within 100ms");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
     #[tokio::test]
     async fn test_response_routing_through_spawned_forwarder() {
         let mut manager = setup_manager();
@@ -780,20 +800,11 @@ mod tests {
         let response = build_client_response(&mut unsent, Errors::None, 0);
         unsent.handler().on_complete(response);
 
-        // Yield so the spawned forwarder runs and writes the coordinator
-        // back through `on_response_inner`. Tokio's runtime guarantees
-        // that yielding allows ready tasks to be polled.
-        tokio::task::yield_now().await;
-        // A second yield: the forwarder calls `on_response_inner` which
-        // acquires multiple Mutex slots; a single yield is usually
-        // sufficient, but two leaves headroom for the response-receive
-        // arm to fully execute before we assert.
-        tokio::task::yield_now().await;
+        // Wait deterministically for the spawned forwarder to run
+        // (drains `response_rx` and writes the coordinator through
+        // `on_response_inner`). See `wait_until` for the rationale.
+        wait_until(|| manager.coordinator().is_some()).await;
 
-        assert!(
-            manager.coordinator().is_some(),
-            "coordinator must be populated via the spawned forwarder, not just the test-only on_response path"
-        );
         let n = manager.coordinator().expect("coordinator present");
         assert_eq!(i32::MAX - node().id(), n.id());
         assert_eq!(node().host(), n.host());
@@ -814,12 +825,12 @@ mod tests {
         // Fire a transport-layer failure through the handler. The
         // spawned forwarder's `Ok(Err(err))` arm runs.
         unsent.handler().on_failure(0, KafkaError::new(Errors::NetworkException));
-        tokio::task::yield_now().await;
-        tokio::task::yield_now().await;
+        // Wait deterministically for the forwarder to record the
+        // mark-coordinator-unknown anchor.
+        wait_until(|| *manager.inner.time_marked_unknown_ms.lock().unwrap() != -1).await;
 
         // Coordinator stays unknown (it was never set), and the
         // mark-coordinator-unknown anchor is recorded by the forwarder.
         assert!(manager.coordinator().is_none());
-        assert_ne!(-1, *manager.inner.time_marked_unknown_ms.lock().unwrap());
     }
 }
