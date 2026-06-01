@@ -417,3 +417,41 @@ Each section records the original Critic finding + the resolving commit.
   skip rationale for `testGroupMetadataIsResetAfterUnsubscribe` is
   updated to point at the new test.
 
+---
+
+## Issue 22: `commit_async` can return `KafkaError::Wakeup` but Java's `commitAsync` never throws `WakeupException` — RESOLVED
+
+- **Original commit**: `b5ce5c5` fixup of Phase 11 (5/N) (Issues 10 + 11
+  fixup that introduced the shared `enable_wakeup=true` in
+  `commit_inner`'s offsets-ready wait).
+- **Resolving commit**: `41540ae` fixup of Phase 11 (5/N).
+- **Resolution**: `commit_inner` gains an `enable_wakeup: bool`
+  parameter. `commit_sync_internal` passes `true` (matches Java
+  `AsyncKafkaConsumer.java:1716` `setActiveTask(commitFuture)`);
+  `commit_async_internal` passes `false` (matches Java line 1684-1700
+  — `commitAsync` is documented non-blocking and never throws
+  `WakeupException`). User code calling `commit_async()` followed by
+  `wakeup()` now observes the commit complete normally instead of
+  surfacing `KafkaError::Wakeup`.
+- **Verification**: `issue_22_commit_async_does_not_observe_wakeup` —
+  pre-cancels the wakeup token, drives `commit_async()` against a
+  drainer that completes the `CommitAsync` envelope normally, and
+  asserts the call returns `Ok(())`. Without the fix the
+  `enable_wakeup=true` offsets-ready wait would surface
+  `KafkaError::Wakeup`.
+
+---
+
+## Issue 23: `commit_async_user_supplied_callback_with_exception_group_authz` test uses wrong error variant — RESOLVED
+
+- **Original commit**: `3a7bcf1` Phase 11 (5/N) (`commit_async_*`
+  test block).
+- **Resolving commit**: `41540ae` fixup of Phase 11 (5/N).
+- **Resolution**: The test now calls
+  `commit_async_callback_with_exception(KafkaError::group_authorization("test-group"))`
+  instead of `KafkaError::illegal_argument("Group authorization exception")`,
+  actually exercising the `KafkaError::GroupAuthorization` variant.
+  Matches Java's `@ParameterizedTest` second parameter
+  `GroupAuthorizationException`
+  (`AsyncKafkaConsumerTest.java:342-356`).
+
