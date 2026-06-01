@@ -176,3 +176,62 @@
 
 - **Commits**:
   - `fixup! Phase 12.5 (3/N): Issue 4 — drive transition_to_fenced/_fatal from heartbeat response classifier`
+
+## Issue 6: Rust Fenced arm emits `BackgroundEvent::Error` that Java does not — RESOLVED
+
+- **File**: `src/consumer/internals/consumer_heartbeat_request_manager.rs` (the `Fenced` arm of `on_response`)
+- **Severity**: Behavior Mismatch (Java divergence)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java:411-427`
+
+### Resolution
+
+The `Fenced` arm of `ConsumerHeartbeatRequestManager::on_response` previously
+emitted a `BackgroundEvent::Error { error: KafkaError::FencedMemberEpoch ... }`
+alongside the `PendingMembershipTransition::Fenced` side-channel push. This
+diverged from Java: `AbstractHeartbeatRequestManager.java:411-427` — the
+`FENCED_MEMBER_EPOCH` and `UNKNOWN_MEMBER_ID` arms call **only**
+`membershipManager().transitionToFenced()` + `heartbeatRequestState.reset()`.
+They do NOT call `backgroundEventHandler.add(new ErrorEvent(...))` — that is
+reserved for `handleFatalFailure` (`:455-458`).
+
+Net effect of the prior behaviour: a Rust consumer that got fenced would
+surface `KafkaError::FencedMemberEpoch` from `poll()` via the §31 background-
+event drain, where a Java consumer in the same situation continues to return
+`ConsumerRecords::empty()` and rejoins transparently via the
+`transitionToFenced` → `onPartitionsLost` → JOINING flow.
+
+### Fix
+
+1. Removed the `background_event_handler.add(BackgroundEvent::Error { ... }, ...)`
+   block from the `Fenced` arm. The membership state listener and the
+   `onPartitionsLost` callback (driven by the Phase 2.4 `transition_to_fenced.await`
+   drain in `consumer_network_thread.rs`) remain the correct propagation paths.
+2. Updated the comment block in the `Fenced` arm to spell out the Java contract
+   and call out the contrast with `handleFatalFailure` (which DOES emit
+   ErrorEvent — line 456) so future readers don't reintroduce the divergence.
+3. Updated test `issue4_fenced_member_epoch_drives_transition_to_fenced`:
+   - Replaced the `BackgroundEvent::Error must be emitted on the fence path`
+     assertion with the inverted assertion: no `BackgroundEvent::Error` envelope
+     was emitted (the side-channel transition is the only side effect).
+   - Added a citation to `AbstractHeartbeatRequestManager.java:411-427` so the
+     test pins the Java parity, not just the Rust behaviour at time of writing.
+
+The `Fatal` path is unaffected — Java's `handleFatalFailure` does emit
+`ErrorEvent` (`:455-458`), and the Rust `Fatal` arm of `on_response` and the
+non-retriable branch of `on_failure` both continue to emit `BackgroundEvent::Error`
+correctly. The `issue4_group_authorization_failed_drives_transition_to_fatal`
+test still asserts the ErrorEvent emission on the Fatal path.
+
+### Java vs Rust ErrorEvent emission matrix (post-fix)
+
+| Heartbeat outcome              | Java                                              | Rust (post-fix)                             |
+|--------------------------------|---------------------------------------------------|---------------------------------------------|
+| Fenced (FENCED_MEMBER_EPOCH)   | `transitionToFenced()` only, no ErrorEvent       | `PendingMembershipTransition::Fenced`, no ErrorEvent |
+| Fenced (UNKNOWN_MEMBER_ID)     | `transitionToFenced()` only, no ErrorEvent       | `PendingMembershipTransition::Fenced`, no ErrorEvent |
+| Fatal (response body)          | `handleFatalFailure(...)` → ErrorEvent + Fatal   | ErrorEvent + `PendingMembershipTransition::Fatal(...)` |
+| Fatal (transport non-retriable)| `handleFatalFailure(...)` → ErrorEvent + Fatal   | ErrorEvent + `PendingMembershipTransition::Fatal(...)` |
+| TopicAuthorizationFailed       | ErrorEvent only, no transition                   | ErrorEvent only, no transition (`HeartbeatErrorAction::Handled` after emit) |
+
+### Commits
+
+- `fixup! Phase 12.5 (3/N): Issue 6 — Fenced arm should not emit BackgroundEvent::Error`

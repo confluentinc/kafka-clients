@@ -520,8 +520,21 @@ impl ConsumerHeartbeatRequestManager {
             HeartbeatErrorAction::Handled => {},
             HeartbeatErrorAction::Fenced => {
                 // Java: `membershipManager().transitionToFenced()`
-                // (`AbstractHeartbeatRequestManager.java:415,424` —
+                // (`AbstractHeartbeatRequestManager.java:411-427` —
                 // FENCED_MEMBER_EPOCH and UNKNOWN_MEMBER_ID arms).
+                // The fence is treated as an INTERNAL state-machine
+                // event: Java does NOT call
+                // `backgroundEventHandler.add(new ErrorEvent(...))`
+                // here (compare with `handleFatalFailure` at
+                // `:455-458` which does emit an ErrorEvent). The
+                // member transitions through FENCED → JOINING and
+                // re-joins silently; the user never sees the fence
+                // from `poll()`. Emitting a `BackgroundEvent::Error`
+                // would surface `KafkaError::FencedMemberEpoch` to
+                // the user, diverging from Java which returns
+                // `ConsumerRecords::empty()` and rejoins
+                // transparently.
+                //
                 // The Rust `transition_to_fenced` is `async` (it
                 // awaits the §31 onPartitionsLost listener); we
                 // can't `.await` from sync `poll(now)`. Instead we
@@ -533,26 +546,6 @@ impl ConsumerHeartbeatRequestManager {
                 // `membership.reconcile(now).await`. See
                 // [`PendingMembershipTransition`] for the rationale.
                 //
-                // The error is ALSO surfaced to the user via the
-                // background-event channel so `poll()` returns the
-                // fence error — matching Java's behaviour where the
-                // bg side calls `transitionToFenced` AND the
-                // background-event-handler is invoked (Java
-                // `AbstractHeartbeatRequestManager.java:402` for
-                // TOPIC_AUTHORIZATION_FAILED is the closest analog
-                // of "emit ErrorEvent + don't transition"; the fence
-                // arms call transitionToFenced and the fenced
-                // member-epoch error is propagated to the user via
-                // the existing membership-state-listener / poll
-                // path).
-                let err = KafkaError::with_message(
-                    Errors::FencedMemberEpoch,
-                    "Heartbeat received fenced member-epoch / unknown-member-id from broker".to_string(),
-                );
-                let _ = self
-                    .inner
-                    .background_event_handler
-                    .add(BackgroundEvent::Error { error: err }, completion_time_ms);
                 // Receiver lives as long as the heartbeat manager —
                 // ignore the send error during shutdown races.
                 let _ = self.pending_membership_transition_tx.send(PendingMembershipTransition::Fenced);
@@ -1546,8 +1539,10 @@ mod tests {
     ///    (no listener) → JOINING (Java's
     ///    `transitionToFenced(callbackHandlerSupplier)` rejoins
     ///    immediately when there's nothing to release).
-    /// 5. Assert at least one `BackgroundEvent::Error` envelope was
-    ///    emitted so the fence is propagated to the user via `poll()`.
+    /// 5. Assert NO `BackgroundEvent::Error` envelope was emitted —
+    ///    Java treats the fence as an INTERNAL state-machine event
+    ///    and does NOT call `backgroundEventHandler.add(...)` on the
+    ///    fence path (`AbstractHeartbeatRequestManager.java:411-427`).
     #[tokio::test]
     async fn issue4_fenced_member_epoch_drives_transition_to_fenced() {
         let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
@@ -1580,16 +1575,25 @@ mod tests {
             "after transition_to_fenced with empty assignment, state should rejoin to JOINING"
         );
 
-        // The error is also surfaced to the user via the background
-        // event handler (matches Java's `transitionToFenced` flow plus
-        // the analogue of `handleFatalFailure`'s ErrorEvent
-        // propagation behaviour for retriable fence errors).
+        // Java reference: `AbstractHeartbeatRequestManager.java:411-427`
+        // — the FENCED_MEMBER_EPOCH / UNKNOWN_MEMBER_ID arms call
+        // ONLY `membershipManager().transitionToFenced()` +
+        // `heartbeatRequestState.reset()`. They do NOT invoke
+        // `backgroundEventHandler.add(new ErrorEvent(...))` — that is
+        // reserved for `handleFatalFailure` (`:455-458`). The fence
+        // is internal: Java's consumer rejoins transparently and the
+        // user observes `ConsumerRecords::empty()` from `poll()`, not
+        // an error. Rust must match: NO `BackgroundEvent::Error`
+        // envelope on the fence path.
         assert!(
-            events.iter().any(|env| matches!(
+            !events.iter().any(|env| matches!(
                 &env.event,
                 crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
             )),
-            "BackgroundEvent::Error must be emitted on the fence path so poll() surfaces the fence"
+            "BackgroundEvent::Error must NOT be emitted on the fence path — Java treats the \
+             fence as an internal state transition and does not surface an ErrorEvent to the user. \
+             Got events: {:?}",
+            events.iter().map(|env| std::mem::discriminant(&env.event)).collect::<Vec<_>>()
         );
     }
 
