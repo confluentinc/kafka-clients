@@ -235,3 +235,80 @@ test still asserts the ErrorEvent emission on the Fatal path.
 ### Commits
 
 - `fixup! Phase 12.5 (3/N): Issue 6 — Fenced arm should not emit BackgroundEvent::Error`
+
+## Issue 5: Unknown heartbeat response error codes fall through to `Handled` in Rust but `Fatal` in Java — RESOLVED
+
+- **File**: `src/consumer/internals/consumer_heartbeat_request_manager.rs` (the `final_action` match around `handle_specific_exception_in_response`)
+- **Severity**: Bug (Behavior Mismatch with Java)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java:435-441`
+
+### Resolution
+
+Java's `default:` arm of `onErrorResponse`'s switch
+(`AbstractHeartbeatRequestManager.java:435-441`) calls
+`handleSpecificExceptionInResponse(...)`; if that returns `false` (no
+consumer-specific handler matched), Java falls back to
+`handleFatalFailure(error.exception(errorMessage))` —
+i.e. **emit `ErrorEvent` + `transitionToFatal`**. Net effect: any
+unknown / future heartbeat-response error code puts the Java consumer
+into `FATAL` state and propagates the failure to the user via `poll()`.
+
+The Rust translation in commit `1950caf` used
+`.unwrap_or(HeartbeatErrorAction::Handled)` when the specific handler
+returned `None`, silently swallowing the unknown error. The member
+stayed in its current state and the heartbeat kept retrying
+indefinitely — diverging from Java's fail-fast contract for the
+catch-all branch.
+
+Error codes affected (non-exhaustive — anything not in the abstract
+switch and not in `{UnsupportedVersion, UnreleasedInstanceId,
+FencedInstanceId}`): `RebalanceInProgress`, `IllegalGeneration`,
+`UnknownTopicOrPartition`, `RequestTimedOut`, plus any future broker
+error codes added in 4.3+.
+
+### Fix
+
+1. Replaced `.unwrap_or(HeartbeatErrorAction::Handled)` with
+   `.unwrap_or_else(|| { log::error!(...); HeartbeatErrorAction::Fatal(KafkaError::with_message(error, error_message.clone())) })`
+   inside the `DelegateToSpecific` arm of the `final_action` match.
+   The `log::error!` call mirrors Java's
+   `logger.error("{} failed due to unexpected error {}: {}", ...)` at
+   line 438, ensuring the unknown-code branch is loud at the log level
+   too — not just routed through the side-channel.
+
+2. Added regression test
+   `issue5_unknown_error_code_falls_through_to_fatal` that:
+   - Drives a `RebalanceInProgress` response through the spawned
+     forwarder (`RebalanceInProgress` is in the
+     "unknown to the heartbeat classifier" set — not enumerated in
+     the abstract switch, not recognised by the consumer-specific
+     handler).
+   - Asserts exactly one `PendingMembershipTransition::Fatal(...)`
+     envelope was emitted, carrying the original `RebalanceInProgress`
+     error code (the catch-all preserves the broker's error code; it
+     does not substitute a generic one).
+   - Drives `mm.transition_to_fatal(0).await` (what the bg-task Phase
+     2.4 drain does) and asserts the membership state advances to
+     `Fatal`.
+   - Asserts at least one `BackgroundEvent::Error` envelope was
+     emitted on the background-event channel — matches Java's
+     `handleFatalFailure` → `backgroundEventHandler.add(new ErrorEvent(error))`
+     at `:455-458`.
+
+### Updated classification-table catch-all row
+
+The error-classification matrix in this file (above, Issue 4) listed
+the catch-all behavior as Rust `unwrap_or(Handled)` for unknown
+codes. Post-fix, the row becomes:
+
+| Rust error code           | Rust action  | Side-channel emission | Java behaviour                                                       |
+|---------------------------|--------------|-----------------------|----------------------------------------------------------------------|
+| any other (response body) | `Fatal(...)` | `Fatal(...)`          | `default:` arm → `handleSpecificExceptionInResponse` returns false → `handleFatalFailure` |
+
+This row now matches the existing transport-failure catch-all row
+(both fall through to the same Fatal path on the unknown-code
+boundary).
+
+### Commits
+
+- `fixup! Phase 12.5 (3/N): Issue 5 — unknown-error-code fatal fallback in heartbeat classifier`

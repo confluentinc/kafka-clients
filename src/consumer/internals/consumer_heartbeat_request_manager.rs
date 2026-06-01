@@ -513,7 +513,24 @@ impl ConsumerHeartbeatRequestManager {
         let final_action = match action {
             HeartbeatErrorAction::DelegateToSpecific => self
                 .handle_specific_exception_in_response(error, &error_message, completion_time_ms)
-                .unwrap_or(HeartbeatErrorAction::Handled),
+                .unwrap_or_else(|| {
+                    // Java: `AbstractHeartbeatRequestManager.java:435-441` —
+                    // the `default:` arm of `onErrorResponse`'s switch
+                    // calls `handleSpecificExceptionInResponse(...)`; if
+                    // that returns false (no consumer-specific handler
+                    // matched), Java falls back to
+                    // `handleFatalFailure(error.exception(errorMessage))`.
+                    // Rust's mapping: `None` from the specific handler
+                    // means "no match" — fall through to the same fatal
+                    // path so unknown / future error codes don't get
+                    // silently swallowed.
+                    log::error!(
+                        "ConsumerGroupHeartbeatRequest failed due to unexpected error {:?}: {}",
+                        error,
+                        error_message
+                    );
+                    HeartbeatErrorAction::Fatal(KafkaError::with_message(error, error_message.clone()))
+                }),
             other => other,
         };
         match final_action {
@@ -1660,6 +1677,92 @@ mod tests {
                 crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
             )),
             "BackgroundEvent::Error must be emitted on the fatal path"
+        );
+    }
+
+    /// Phase 12.5 round-3 regression for Issue 5 — unknown error
+    /// codes must fall through to the `Fatal` arm, not `Handled`.
+    ///
+    /// Java reference: `AbstractHeartbeatRequestManager.java:435-441`
+    /// — the `default:` arm of `onErrorResponse`'s switch calls
+    /// `handleSpecificExceptionInResponse(...)`; if that returns
+    /// false (no consumer-specific handler matched), Java falls back
+    /// to `handleFatalFailure(error.exception(errorMessage))`. The
+    /// effect: an unknown error code (or one the abstract switch
+    /// does not enumerate and the consumer-specific handler does
+    /// not recognise) puts the member into FATAL state and surfaces
+    /// an `ErrorEvent` so `poll()` returns the failure to the user.
+    ///
+    /// Rust used to `.unwrap_or(HeartbeatErrorAction::Handled)` when
+    /// the specific handler returned `None`, which silently swallowed
+    /// the unknown error and left the member in its current state —
+    /// the heartbeat would then keep retrying indefinitely. This
+    /// test pins the corrected behaviour.
+    ///
+    /// `RebalanceInProgress` is used as the unknown-code probe: it
+    /// is not enumerated in the abstract `classify_response_error`
+    /// match (which only handles
+    /// `NotCoordinator|CoordinatorNotAvailable|CoordinatorLoadInProgress|GroupAuthorizationFailed|TopicAuthorizationFailed|InvalidRequest|GroupMaxSizeReached|UnsupportedAssignor|FencedMemberEpoch|UnknownMemberId|InvalidRegularExpression`),
+    /// so it falls through to `DelegateToSpecific`. The Consumer
+    /// variant's `handle_specific_exception_in_response` only
+    /// recognises `UnsupportedVersion|UnreleasedInstanceId|FencedInstanceId`,
+    /// so it returns `None` and the fallback `Fatal` arm must fire.
+    ///
+    /// Test shape:
+    /// 1. Drive a heartbeat, route a `RebalanceInProgress` response
+    ///    through the forwarder, drive `poll(now)` until the drain
+    ///    classifies (helper).
+    /// 2. Assert exactly one `PendingMembershipTransition::Fatal(...)`
+    ///    envelope was emitted on the side-channel, carrying the
+    ///    original error code.
+    /// 3. Drive `mm.transition_to_fatal(now).await` and assert state
+    ///    is `Fatal`.
+    /// 4. Assert at least one `BackgroundEvent::Error` envelope was
+    ///    emitted (matches Java's `handleFatalFailure` ErrorEvent
+    ///    propagation).
+    #[tokio::test]
+    async fn issue5_unknown_error_code_falls_through_to_fatal() {
+        let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
+
+        let (transitions, events) =
+            drive_error_response_and_collect(&mut mgr, &mm, &coord, &mut beh_rx, Errors::RebalanceInProgress.code())
+                .await;
+
+        assert_eq!(
+            transitions.len(),
+            1,
+            "exactly one PendingMembershipTransition expected for the unknown-code → Fatal fallback"
+        );
+        match &transitions[0] {
+            PendingMembershipTransition::Fatal(err) => {
+                assert_eq!(
+                    err.error(),
+                    Errors::RebalanceInProgress,
+                    "Fatal envelope must carry the original (unknown) error code, not a substituted one"
+                );
+            },
+            other => panic!(
+                "unknown error code REBALANCE_IN_PROGRESS must classify to Fatal (Java \
+                 `AbstractHeartbeatRequestManager.java:435-441` `default:` arm), got: {:?}",
+                other
+            ),
+        }
+
+        // Drive the transition as the bg-task would.
+        mm.transition_to_fatal(0).await.expect("transition_to_fatal ok");
+
+        assert_eq!(mm.state(), MemberState::Fatal, "after transition_to_fatal, state must be FATAL");
+
+        // Java `handleFatalFailure` (`:455-458`) emits an ErrorEvent
+        // alongside the fatal transition so the user observes the
+        // failure from `poll()`. The Rust Fatal arm must do the same.
+        assert!(
+            events.iter().any(|env| matches!(
+                &env.event,
+                crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
+            )),
+            "BackgroundEvent::Error must be emitted on the unknown-error-code fatal fallback path \
+             so poll() surfaces the failure to the user"
         );
     }
 }
