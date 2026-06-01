@@ -1704,6 +1704,7 @@ where
     async fn commit_inner(
         &mut self,
         commit_event: CommitEventKind,
+        enable_wakeup: bool,
     ) -> Result<
         tokio::sync::oneshot::Receiver<Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError>>,
         KafkaError,
@@ -1746,21 +1747,25 @@ where
         // `process_background_events_until` so a bg-task
         // rebalance-listener callback enqueued mid-wait is delivered on
         // the caller's task instead of blocking the bg task on its
-        // ack. Issue 11 / §11: enable wakeup observation so a
-        // concurrent `wakeup()` interrupts even this preliminary wait —
-        // matches the contract that EVERY user-blocking step inside
-        // commit_sync responds to wakeup. (Java's
-        // `setActiveTask(commitFuture)` happens after this wait, so
-        // strictly speaking Java would not observe wakeup here; but the
-        // Rust pattern of routing through the drain helper makes the
-        // wakeup-observable semantic uniform across phases.)
+        // ack.
+        //
+        // Wakeup observation is per-caller: `commit_sync` passes
+        // `enable_wakeup=true` to match Java's `setActiveTask(commitFuture)`
+        // contract (every user-blocking phase of commit_sync responds to
+        // wakeup, so we tighten the offsets-ready wait too — Java's
+        // `setActiveTask` happens after this wait, but the uniform
+        // wakeup-observable semantic across all phases of commit_sync is
+        // more useful than strict Java parity here). `commit_async` passes
+        // `enable_wakeup=false` because Java's `commitAsync` is documented
+        // as non-blocking and never throws `WakeupException` — Issue 22
+        // regression (`AsyncKafkaConsumer.java:1684-1700`).
         let or_deadline_ms = self.default_api_timeout_deadline_ms();
         self.process_background_events_until::<()>(
             offsets_ready_rx,
             or_deadline_ms,
             |_| false,
             "Timed out waiting for offsetsReady on commit event",
-            true,
+            enable_wakeup,
         )
         .await?;
 
@@ -1810,7 +1815,10 @@ where
         let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
 
         let receiver = self
-            .commit_inner(CommitEventKind::Sync { offsets: offsets.clone(), deadline_ms })
+            .commit_inner(
+                CommitEventKind::Sync { offsets: offsets.clone(), deadline_ms },
+                /* enable_wakeup = */ true,
+            )
             .await?;
 
         // Java: `awaitPendingAsyncCommitsAndExecuteCommitCallbacks(requestTimer, true)`
@@ -1885,7 +1893,17 @@ where
         callback: Option<Arc<dyn crate::consumer::OffsetCommitCallback>>,
     ) -> Result<(), KafkaError> {
         self.ensure_open()?;
-        let receiver = self.commit_inner(CommitEventKind::Async { offsets: offsets.clone() }).await?;
+        // Issue 22 / `AsyncKafkaConsumer.java:1684-1700`: Java's
+        // `commitAsync` is documented as non-blocking and never throws
+        // `WakeupException`. Pass `enable_wakeup=false` so a concurrent
+        // `wakeup()` does NOT interrupt the preliminary offsets-ready
+        // wait — the commit completes normally on the bg task.
+        let receiver = self
+            .commit_inner(
+                CommitEventKind::Async { offsets: offsets.clone() },
+                /* enable_wakeup = */ false,
+            )
+            .await?;
 
         // Java: `lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete(...)`
         // — the resulting future is stored on the consumer so a later
@@ -4271,6 +4289,37 @@ mod tests {
         drainer.await.expect("drainer ok");
     }
 
+    /// Issue 22 regression: `commit_async` must NOT observe wakeup at
+    /// any phase of the call. Java's `commitAsync`
+    /// (`AsyncKafkaConsumer.java:1684-1700`) is documented as
+    /// non-blocking and never throws `WakeupException`. Pre-cancelling
+    /// the wakeup token before calling `commit_async` must not surface
+    /// `KafkaError::Wakeup`.
+    #[tokio::test]
+    async fn issue_22_commit_async_does_not_observe_wakeup() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Pre-cancel the wakeup token. With Issue 22's fix
+        // (`enable_wakeup=false` in `commit_async`), this must not
+        // surface a Wakeup error from `commit_async`. Without the fix,
+        // the shared `commit_inner` would return Wakeup from the
+        // offsets-ready wait, which is a divergence from Java.
+        consumer.wakeup_trigger.wakeup();
+
+        // Drainer: complete the CommitAsync envelope normally.
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, .. } = env.event {
+                    offsets_ready.complete(());
+                    handle.complete(HashMap::new());
+                    return;
+                }
+            }
+        });
+
+        consumer.commit_async().await.expect("commit_async must NOT surface Wakeup");
+        completer.await.expect("completer ok");
+    }
+
     /// Issue 11 negative: APIs Java doesn't `setActiveTask` (e.g.
     /// `pause`) must NOT observe wakeup. The Rust drain helper passes
     /// `enable_wakeup=false` so the wait completes normally.
@@ -5170,7 +5219,10 @@ mod tests {
 
     #[tokio::test]
     async fn commit_async_user_supplied_callback_with_exception_group_authz() {
-        commit_async_callback_with_exception(KafkaError::illegal_argument("Group authorization exception")).await;
+        // Issue 23: must use `KafkaError::GroupAuthorization`, not a string-shaped
+        // `IllegalArgument`. Java's `@ParameterizedTest` second parameter is
+        // `GroupAuthorizationException` (`AsyncKafkaConsumerTest.java:342-356`).
+        commit_async_callback_with_exception(KafkaError::group_authorization("test-group")).await;
     }
 
     async fn commit_async_callback_with_exception(injected: KafkaError) {
