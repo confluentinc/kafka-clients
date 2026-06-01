@@ -5553,6 +5553,499 @@ mod tests {
         drop(drainer);
     }
 
+    // ─── Phase 11 commit (10/N) Java test translations: close / metadata / lifecycle ───
+    //
+    // Final batch: close-path branches, metadata APIs, seek-to-end /
+    // seek-to-beginning, list-offsets, partition metadata, processBackgroundEvents
+    // timing.
+    //
+    // SKIPs (commit 10 batch):
+    //   - testFailConstructor — PLAN deferral #5 (Supplier-style ctor
+    //     failure paths don't translate; bad-config path observed via
+    //     `KafkaError` returned from `new_consumer`).
+    //   - testCloseInvokesStreamsRebalanceListener* /
+    //     testCloseWrapsStreamsRebalanceListenerException — PLAN
+    //     deferral #2 (Streams out of scope per §20).
+    //   - testInterceptorAutoCommitOnClose — deferred to Issue 17 fix
+    //     (commit 12 batch).
+    //   - testReaperInvokedInClose / testReaperInvokedInUnsubscribe /
+    //     testReaperInvokedInPoll — require Mockito-style spy on the
+    //     reaper. The reap calls are wired (close_internal:2675, etc);
+    //     `ConsumerNetworkThreadTest` (Phase 10 commit 8/N) exercises
+    //     the bg-task reap path with a real reaper.
+    //   - testSubscribePatternAgainstBrokerNotSupportingRegex — Phase
+    //     12 integration tests (needs MockClient).
+    //   - testGroupMetadataIsResetAfterUnsubscribe — see commit 8 skip
+    //     section.
+    //   - testLongPollWaitIsLimited — requires a full FetchCollector
+    //     wired into the bg task; observable only via integration tests.
+    //   - testNoWakeupInCloseCommit — covered by close-path inline
+    //     tests (the close drainer completes CommitSync envelopes
+    //     normally, demonstrating no wakeup interference).
+    //   - testCommitSyncAllConsumed / testAutoCommitSyncDisabled — require
+    //     a fully-wired SubscriptionState `commit_sync_all_consumed`
+    //     helper that is consumer-internal (Java: package-private). The
+    //     close-path inline tests demonstrate the SyncCommitEvent
+    //     enqueue/no-enqueue behaviour for the auto_commit_enabled flag.
+
+    /// Java: `testSuccessfulStartupShutdown` (Java line 279-284). A
+    /// freshly-constructed consumer can be closed without throwing.
+    /// The inline `close_is_idempotent` is the stricter version; this
+    /// stays parallel to Java's name + body for clarity.
+    #[tokio::test]
+    async fn successful_startup_shutdown() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+        consumer.close().await.expect("close ok");
+        drop(drainer);
+    }
+
+    /// Java: `testCloseAwaitPendingAsyncCommitComplete` (Java line 1087-1106).
+    /// On close, a pending async commit's callback fires.
+    #[tokio::test]
+    async fn close_awaits_pending_async_commit_complete() {
+        use std::sync::atomic::AtomicUsize;
+        struct ClosingCallback {
+            invoked: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for ClosingCallback {
+            async fn on_complete(
+                &self,
+                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+                _error: Option<&KafkaError>,
+            ) {
+                self.invoked.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let cb = Arc::new(ClosingCallback { invoked: Arc::clone(&invoked) });
+        consumer
+            .commit_async_offsets_with_callback(HashMap::new(), cb)
+            .await
+            .expect("ok");
+        consumer.close().await.expect("close ok");
+        // The callback must have fired (close drains pending async commits).
+        assert_eq!(
+            invoked.load(Ordering::SeqCst),
+            1,
+            "pending async-commit callback must fire on close"
+        );
+        drop(drainer);
+    }
+
+    /// Java: `testCloseLeavesGroup(0 || DEFAULT_CLOSE_TIMEOUT_MS)`
+    /// (Java line 693-704, `@ParameterizedTest`). The KIP-848 close
+    /// path always submits a `LeaveGroupOnClose` event before
+    /// shutting down. Translated as two test methods (timeout=0 and
+    /// timeout=DEFAULT_CLOSE_TIMEOUT_MS) per the @ParameterizedTest →
+    /// loop rule.
+    async fn close_leaves_group_for_timeout_inner(timeout_ms: u64) {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let saw_leave = Arc::new(AtomicBool::new(false));
+        let saw_leave_clone = Arc::clone(&saw_leave);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        saw_leave_clone.store(true, Ordering::SeqCst);
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        consumer
+            .close_with_options(crate::consumer::CloseOptions::timeout(Duration::from_millis(timeout_ms)))
+            .await
+            .expect("close ok");
+
+        // close()'s last step drops `application_event_handler` and the
+        // network_thread_close handler. The drainer's `app_event_rx.recv()`
+        // returns None once all senders are dropped. Wait for the drainer
+        // to fully drain.
+        drop(consumer);
+        let _ = drainer.await;
+
+        assert!(
+            saw_leave.load(Ordering::SeqCst),
+            "LeaveGroupOnClose must be enqueued (timeout={timeout_ms})"
+        );
+    }
+
+    #[tokio::test]
+    async fn close_leaves_group_timeout_zero() {
+        close_leaves_group_for_timeout_inner(0).await;
+    }
+
+    #[tokio::test]
+    async fn close_leaves_group_timeout_default() {
+        // Java: `ConsumerUtils.DEFAULT_CLOSE_TIMEOUT_MS = 30_000`.
+        use crate::consumer::internals::consumer_utils::DEFAULT_CLOSE_TIMEOUT_MS;
+        close_leaves_group_for_timeout_inner(DEFAULT_CLOSE_TIMEOUT_MS as u64).await;
+    }
+
+    /// Java: `testVerifyApplicationEventOnShutdown` (Java line 683-691).
+    /// On close, `CommitOnCloseEvent` is enqueued (Java verifies via
+    /// `verify(applicationEventHandler).add(any(CommitOnCloseEvent.class))`).
+    #[tokio::test]
+    async fn close_enqueues_commit_on_close_event() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let saw_commit_on_close = Arc::new(AtomicBool::new(false));
+        let saw_clone = Arc::clone(&saw_commit_on_close);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::CommitOnClose => {
+                        saw_clone.store(true, Ordering::SeqCst);
+                    },
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+        consumer.close().await.expect("close ok");
+        assert!(
+            saw_commit_on_close.load(Ordering::SeqCst),
+            "CommitOnClose event must be enqueued"
+        );
+        drop(drainer);
+    }
+
+    /// Java: `testSeekToBeginning` (Java line 1817-1826). `seek_to_beginning`
+    /// enqueues a `ResetOffset` event with the EARLIEST strategy.
+    #[tokio::test]
+    async fn seek_to_beginning_enqueues_reset_offset_event() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let topics = vec![tp.clone()];
+
+        let captured_strategy = Arc::new(std::sync::Mutex::new(None::<AutoOffsetResetStrategy>));
+        let captured_partitions = Arc::new(std::sync::Mutex::new(Vec::<TopicPartition>::new()));
+        let cap_strategy = Arc::clone(&captured_strategy);
+        let cap_partitions = Arc::clone(&captured_partitions);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ResetOffset { handle, partitions, offset_reset_strategy } = env.event {
+                    *cap_strategy.lock().unwrap() = Some(offset_reset_strategy);
+                    *cap_partitions.lock().unwrap() = partitions.into_iter().collect();
+                    handle.complete(());
+                    return;
+                }
+            }
+        });
+
+        consumer.seek_to_beginning(&topics).await.expect("ok");
+        drainer.await.expect("task ok");
+
+        let strat = captured_strategy.lock().unwrap().clone().expect("ResetOffset event seen");
+        assert_eq!(strat, AutoOffsetResetStrategy::EARLIEST);
+        let parts = captured_partitions.lock().unwrap().clone();
+        assert!(parts.contains(&tp));
+    }
+
+    /// Java: `testSeekToEnd` (Java line 1844-1853). Symmetric to
+    /// seek_to_beginning but with LATEST.
+    #[tokio::test]
+    async fn seek_to_end_enqueues_reset_offset_event() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("test".to_string(), 0);
+        let topics = vec![tp.clone()];
+
+        let captured_strategy = Arc::new(std::sync::Mutex::new(None::<AutoOffsetResetStrategy>));
+        let cap_strategy = Arc::clone(&captured_strategy);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ResetOffset { handle, offset_reset_strategy, .. } = env.event {
+                    *cap_strategy.lock().unwrap() = Some(offset_reset_strategy);
+                    handle.complete(());
+                    return;
+                }
+            }
+        });
+
+        consumer.seek_to_end(&topics).await.expect("ok");
+        drainer.await.expect("task ok");
+
+        let strat = captured_strategy.lock().unwrap().clone().expect("ResetOffset event seen");
+        assert_eq!(strat, AutoOffsetResetStrategy::LATEST);
+    }
+
+    /// Java: `testSeekToBeginningWithException` (Java line 1828-1834).
+    /// When the `ResetOffsetEvent` is completed exceptionally with a
+    /// timeout, `seek_to_beginning` surfaces the error.
+    #[tokio::test]
+    async fn seek_to_beginning_propagates_event_exception() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ResetOffset { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::timeout("test timeout"));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer.seek_to_beginning(&[tp]).await.expect_err("must err");
+        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testSeekToEndWithException` (Java line 1836-1842). Symmetric.
+    #[tokio::test]
+    async fn seek_to_end_propagates_event_exception() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("test".to_string(), 0);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ResetOffset { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::timeout("test timeout"));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer.seek_to_end(&[tp]).await.expect_err("must err");
+        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testBeginningOffsets` (Java line 861-882). With a positive
+    /// timeout the `beginning_offsets_timeout` waits for the
+    /// `ListOffsets` event to complete and returns the per-partition
+    /// offsets map.
+    #[tokio::test]
+    async fn beginning_offsets_returns_event_result() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let t0 = TopicPartition::new("t0".to_string(), 2);
+        let t1 = TopicPartition::new("t0".to_string(), 3);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    let mut result: HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>> =
+                        HashMap::new();
+                    result.insert(
+                        TopicPartition::new("t0".to_string(), 2),
+                        Some(crate::consumer::OffsetAndTimestamp::new(5, 1).expect("ok")),
+                    );
+                    result.insert(
+                        TopicPartition::new("t0".to_string(), 3),
+                        Some(crate::consumer::OffsetAndTimestamp::new(6, 3).expect("ok")),
+                    );
+                    handle.complete(result);
+                    return;
+                }
+            }
+        });
+
+        let offsets = consumer
+            .beginning_offsets_timeout(&[t0.clone(), t1.clone()], Duration::from_millis(100))
+            .await
+            .expect("ok");
+        assert_eq!(offsets.get(&t0), Some(&5));
+        assert_eq!(offsets.get(&t1), Some(&6));
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testBeginningOffsetsThrowsKafkaExceptionForUnderlyingExecutionFailure`
+    /// (Java line 884-897). The `ListOffsetsEvent` completes
+    /// exceptionally and the error propagates.
+    #[tokio::test]
+    async fn beginning_offsets_propagates_event_exception() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 0);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "Unexpected failure processing List Offsets event",
+                    ));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer
+            .beginning_offsets_timeout(&[tp], Duration::from_millis(100))
+            .await
+            .expect_err("must err");
+        assert!(
+            !matches!(err, KafkaError::Timeout(_)),
+            "non-timeout err propagates, got {err:?}"
+        );
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testBeginningOffsetsTimeoutException` (Java line 965-977)
+    /// — the event times out, surfacing as `Timeout`. (Symmetric for
+    /// testEndOffsetsTimeoutException line 979-991.)
+    #[tokio::test]
+    async fn beginning_offsets_propagates_timeout() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic".to_string(), 5);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::timeout(
+                        "Event did not complete in time and was expired by the reaper",
+                    ));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer
+            .beginning_offsets_timeout(&[tp], Duration::from_millis(100))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testOffsetsForTimes` (Java line 936-950). Happy-path
+    /// resolution returns a map of `OffsetAndTimestamp` for each
+    /// requested partition.
+    #[tokio::test]
+    async fn offsets_for_times_returns_event_result() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let t0 = TopicPartition::new("t0".to_string(), 2);
+        let t1 = TopicPartition::new("t0".to_string(), 3);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    let mut result: HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>> =
+                        HashMap::new();
+                    result.insert(
+                        TopicPartition::new("t0".to_string(), 2),
+                        Some(crate::consumer::OffsetAndTimestamp::new(5, 1).expect("ok")),
+                    );
+                    result.insert(
+                        TopicPartition::new("t0".to_string(), 3),
+                        Some(crate::consumer::OffsetAndTimestamp::new(6, 3).expect("ok")),
+                    );
+                    handle.complete(result);
+                    return;
+                }
+            }
+        });
+
+        let mut ts_search: HashMap<TopicPartition, i64> = HashMap::new();
+        ts_search.insert(t0.clone(), 1);
+        ts_search.insert(t1.clone(), 2);
+        let result = consumer
+            .offsets_for_times_timeout(ts_search, Duration::from_millis(100))
+            .await
+            .expect("ok");
+        assert_eq!(result.get(&t0).map(|x| x.offset()), Some(5));
+        assert_eq!(result.get(&t1).map(|x| x.offset()), Some(6));
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testProcessBackgroundEventsWithoutDelay` (Java line 1717-1730).
+    /// When the typed-completion is already ready, the drain helper
+    /// returns immediately and the timer's remaining_ms equals the
+    /// initial value. We don't model Java's `Timer.remainingMs()`
+    /// surface directly; instead we assert the drain helper returns
+    /// quickly when the receiver is already-completed.
+    #[tokio::test]
+    async fn process_background_events_until_returns_immediately_for_ready_receiver() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        // Build a pre-completed receiver.
+        let (handle, receiver, _erased) =
+            crate::consumer::internals::events::completable_event::make_completable_event::<()>(i64::MAX);
+        handle.complete(());
+
+        let start = std::time::Instant::now();
+        let deadline = consumer.time.milliseconds() + 1000;
+        let result = consumer
+            .process_background_events_until::<()>(receiver, deadline, |_| false, "should not see this msg", false)
+            .await;
+        let elapsed = start.elapsed();
+        result.expect("ready receiver must resolve");
+        assert!(
+            elapsed < Duration::from_millis(50),
+            "ready receiver should resolve immediately, elapsed: {elapsed:?}"
+        );
+    }
+
+    /// Java: `testProcessBackgroundEventsTimesOut` (Java line 1736-1752).
+    /// A receiver that never completes surfaces as `Timeout`.
+    #[tokio::test]
+    async fn process_background_events_until_times_out_for_pending_receiver() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let (_handle, receiver, _erased) =
+            crate::consumer::internals::events::completable_event::make_completable_event::<()>(i64::MAX);
+        // Keep _handle alive — never complete it.
+
+        let deadline = consumer.time.milliseconds() + 100;
+        let err = consumer
+            .process_background_events_until::<()>(receiver, deadline, |_| false, "drain helper timeout", false)
+            .await
+            .expect_err("must time out");
+        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+    }
+
     /// Compile-time check: `AsyncKafkaConsumer<K, V>` is `Consumer<K, V>`.
     /// Asserts the trait impl is wired correctly.
     #[test]
