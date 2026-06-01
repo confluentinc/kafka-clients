@@ -1089,13 +1089,16 @@ where
             wakeup_for_fn.wakeup();
         });
 
-        // The `max_time_to_wait_ms` slot stays at the initial value
-        // `0` in Phase 12 — no copy-back wiring from the bg task's
-        // internal `cached_max_time_to_wait_ms`. Tests that observe
-        // the value go through the bg task's `maximum_time_to_wait()`
-        // accessor directly via test infra; the app-side
-        // `AsyncKafkaConsumer::maximum_time_to_wait_ms()` accessor
-        // returns 0 until a future commit adds the copy-back.
+        // The `max_time_to_wait_ms` slot is seeded with
+        // `MAX_POLL_TIMEOUT_MS` at ctor time (line above) and the bg task
+        // writes to the SAME `Arc<AtomicI64>` cell on every `run_once`
+        // iteration via `cached_max_time_to_wait_ms.store(...)`
+        // (consumer_network_thread.rs). The app-side
+        // `AsyncKafkaConsumer::maximum_time_to_wait_ms()` accessor reads
+        // the bg-task's current value through this shared Arc — Java's
+        // `cachedMaximumTimeToWait` is a single `long` field
+        // (`AsyncKafkaConsumer.java:354`); the Arc<AtomicI64> is the Rust
+        // equivalent that bridges the two task boundaries.
 
         let join_handle: JoinHandle<()> = tokio::spawn(async move {
             let mut thread = network_thread;

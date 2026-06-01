@@ -401,12 +401,13 @@ where
 /// Constructs a new [`Consumer`] from a configuration and explicit
 /// key/value [`Deserializer`]s.
 ///
-/// Phase 2 stub: returns [`KafkaError::unsupported_version`] for both
-/// group-protocol arms. Phase 11 replaces the `GroupProtocol::Consumer`
-/// arm with `Ok(Box::new(AsyncKafkaConsumer::new(...)?))`; the signature
-/// stays the same. The `GroupProtocol::Classic` arm remains an error per
-/// `consumer-threading.md` §20 (classic protocol deferred to a later
-/// milestone).
+/// For `group.protocol=consumer` (KIP-848), this returns
+/// `Box::new(AsyncKafkaConsumer::new(...)?)` — the production consumer
+/// built end-to-end with `SubscriptionState`, `ConsumerMetadata`,
+/// `NetworkClient`, every `RequestManager`, and a single bg task
+/// (`ConsumerNetworkThread`). For `group.protocol=classic`, returns
+/// [`KafkaError::unsupported_version`] per `consumer-threading.md` §20
+/// (classic protocol deferred to a later milestone).
 ///
 /// Java passes deserializers via `ConsumerConfig` reflection; Rust takes
 /// them as explicit `Box<dyn>` parameters (Phase 1 decision not to
@@ -418,36 +419,36 @@ where
 /// its own constructor. The factory is for the production consumer only.
 pub fn new_consumer<K, V>(
     config: ConsumerConfig,
-    _key_deserializer: Box<dyn Deserializer<K>>,
-    _value_deserializer: Box<dyn Deserializer<V>>,
+    key_deserializer: Box<dyn Deserializer<K>>,
+    value_deserializer: Box<dyn Deserializer<V>>,
 ) -> Result<Box<dyn Consumer<K, V>>, KafkaError>
 where
     K: Send + Sync + 'static,
     V: Send + Sync + 'static,
 {
-    // Phase 11 commit (7/N) wires `Consumer<K, V>` over `AsyncKafkaConsumer`
-    // via [`async_kafka_consumer::AsyncKafkaConsumer::new_with_components`].
-    // The factory below is the public entry-point users call once the
-    // production constructor wiring (`NetworkClient` + `ChannelBuilder` +
-    // `Selector` + `ConsumerNetworkThread::run` spawn) lands in
-    // Phase 12 — which translates the 350-line Java primary constructor at
-    // `AsyncKafkaConsumer.java:285-600` end-to-end. For Milestone-8 we ship
-    // the `AsyncKafkaConsumer` struct + trait impl complete and exposed via
-    // `pub use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer`,
-    // so library tests (`tests/consumer/async_kafka_consumer_test.rs`)
-    // construct an instance directly via `AsyncKafkaConsumer::new_with_components`
-    // with an in-process `MockClient`-backed bg task. The
-    // `Box<dyn Consumer<K, V>>` dispatch surface is verified by the
-    // (compile-time) `trait_surface_check.rs` integration test and by the
-    // trait impl in `async_kafka_consumer.rs`.
+    // Phase 12 commit (4/N) wires the `GroupProtocol::Consumer` arm to
+    // the production constructor at
+    // [`async_kafka_consumer::AsyncKafkaConsumer::new`], which translates
+    // the Java primary constructor at `AsyncKafkaConsumer.java:285-518`
+    // end-to-end. The ctor builds the full dependency closure
+    // (`SubscriptionState`, `ConsumerMetadata`, `NetworkClient` +
+    // PLAINTEXT `ChannelBuilder`, every `RequestManager`,
+    // `ApplicationEventHandler`, `ConsumerNetworkThread` bg task) and
+    // hands off to `AsyncKafkaConsumer::new_with_components` so the
+    // Phase-11 test seam is preserved. `Box<dyn Consumer<K, V>>` is
+    // returned so the dispatch surface stays object-safe (Consumer
+    // trait surface check at `tests/consumer/trait_surface_check.rs`).
+    //
+    // `GroupProtocol::Classic` remains an `unsupported_version` error
+    // per `consumer-threading.md` §20 (classic protocol deferred to a
+    // later milestone).
     let protocol = GroupProtocol::of(config.group_protocol())?;
     match protocol {
-        GroupProtocol::Consumer => Err(KafkaError::unsupported_version(
-            "AsyncKafkaConsumer production constructor wiring is deferred to Phase 12 \
-             (the Java primary constructor at AsyncKafkaConsumer.java:285-600). \
-             Use AsyncKafkaConsumer::new_with_components(...) directly in tests; \
-             the dispatch trait impl is complete in commit Phase 11 (7/N).",
-        )),
+        GroupProtocol::Consumer => Ok(Box::new(async_kafka_consumer::AsyncKafkaConsumer::<K, V>::new(
+            config,
+            key_deserializer,
+            value_deserializer,
+        )?)),
         GroupProtocol::Classic => Err(KafkaError::unsupported_version(
             "Classic group protocol is not yet supported in this client; \
              set group.protocol=consumer (KIP-848).",

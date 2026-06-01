@@ -104,3 +104,19 @@ Applied option (b) per the issue's resolution guidance: closures kept as no-ops 
 Phase 12 is PLAINTEXT-only and does not exercise this path; the deferral is documented in code per the Critic's preferred option.
 
 Fixup commit references `143f30a`.
+
+## Issue 6: stale comment in `AsyncKafkaConsumer::new` contradicts the Issue 3 fix
+
+**Commit**: `6114cb0` (Phase 12 commit 3/N Issue-3 fixup)
+**File**: `src/consumer/async_kafka_consumer.rs:1092-1098`
+**Severity**: Nit (doc-only; no behavior bug)
+
+### Description
+
+After the Issue 3 fixup, the `max_time_to_wait_ms` slot is seeded with `MAX_POLL_TIMEOUT_MS` and the bg-task writes to the SAME `Arc<AtomicI64>` cell every iteration. The stale comment block claimed the slot stays at `0` with no copy-back, misleading future maintainers.
+
+### Resolution
+
+Rewrote the comment block at `async_kafka_consumer.rs:1092-1100` to describe the actual wiring: the slot is seeded with `MAX_POLL_TIMEOUT_MS` at ctor time and the bg task writes to the shared `Arc<AtomicI64>` cell every `run_once` iteration. The app-side `maximum_time_to_wait_ms()` accessor reads the bg-task's current value through this shared Arc. Includes a reference to Java's single `cachedMaximumTimeToWait` long field at `AsyncKafkaConsumer.java:354` to anchor the parity argument.
+
+Folded into Phase 12 commit (4/N) — `Phase 12 (4/N): factory swap in new_consumer + smoke test + Issue 6`.

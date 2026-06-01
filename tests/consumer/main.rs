@@ -17,6 +17,7 @@
 //! Mirrors the Java test classes under
 //! `org.apache.kafka.clients.consumer` (and the `internals` subpackage).
 
+mod async_kafka_consumer_test;
 mod auto_offset_reset_strategy_test;
 mod close_options_test;
 mod consumer_config_test;
