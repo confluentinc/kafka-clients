@@ -2605,8 +2605,18 @@ where
         // `wakeupTrigger.disableWakeups()`).
         self.wakeup_trigger.disable();
 
+        // Java's `createTimerForCloseRequests(timeout)`
+        // (`AsyncKafkaConsumer.java:1590-1594`) caps the user-supplied
+        // timeout at `requestTimeoutMs`. With the default config
+        // (timeout=30s, request_timeout_ms=30s) the cap is a no-op,
+        // but a user calling `close(Duration::from_secs(300))` would
+        // otherwise block the consumer for 5 minutes per
+        // close-step — Java clips to `request.timeout.ms` so each
+        // close-step inherits the broker-RPC bound.
+        let request_timeout_ms = self.config.request_timeout_ms() as i64;
+        let capped_timeout_ms = std::cmp::min(timeout.as_millis() as i64, request_timeout_ms);
         let close_start_ms = self.time.milliseconds();
-        let close_deadline_ms = calculate_deadline_ms(close_start_ms, timeout.as_millis() as i64);
+        let close_deadline_ms = calculate_deadline_ms(close_start_ms, capped_timeout_ms);
 
         // First-error tracking mirrors Java's `AtomicReference<Throwable> firstException`.
         let mut first_error: Option<KafkaError> = None;
@@ -3737,6 +3747,54 @@ mod tests {
         assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
     }
 
+    /// Issue 14 regression: `position_timeout` must propagate
+    /// non-Timeout errors from the underlying `CheckAndUpdatePositions`
+    /// event (e.g. an authorization error surfaced by the bg task).
+    /// The previous `.await.ok()` blanket-swallowed all errors so the
+    /// user observed a generic Timeout instead of the root cause.
+    /// Java only catches `TimeoutException`
+    /// (`AsyncKafkaConsumer.java:1960-1971`); anything else propagates.
+    #[tokio::test]
+    async fn issue_14_position_propagates_non_timeout_errors() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Pre-assign a partition so position_timeout reaches the
+        // event-submit path instead of returning IllegalState early.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp.clone());
+            subs.assign_from_user(assigned).unwrap();
+        }
+
+        // Drainer: complete the CheckAndUpdatePositions handle with
+        // an explicit non-Timeout error (mirrors a bg-side
+        // illegal-state failure). Without the Issue 14 fix the
+        // `.await.ok()` would silently swallow this and the loop
+        // would spin until the user-supplied timeout — yielding a
+        // misleading Timeout instead of the root cause.
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CheckAndUpdatePositions { handle } = env.event {
+                    handle.complete_exceptionally(KafkaError::illegal_state(
+                        "bg-side test failure (Issue 14 regression)",
+                    ));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer
+            .position_timeout(&tp, Duration::from_secs(5))
+            .await
+            .expect_err("must surface the bg-task error, not a generic Timeout");
+        assert!(
+            matches!(err, KafkaError::IllegalState(ref m) if m.contains("Issue 14 regression")),
+            "expected IllegalState (bg-task explicit error), got {err:?}"
+        );
+        drainer.await.expect("drainer ok");
+    }
+
     /// Issue 11 negative: APIs Java doesn't `setActiveTask` (e.g.
     /// `pause`) must NOT observe wakeup. The Rust drain helper passes
     /// `enable_wakeup=false` so the wait completes normally.
@@ -4424,6 +4482,76 @@ mod tests {
             .expect("ok");
         assert!(consumer.is_closed());
         drop(drainer);
+    }
+
+    /// Issue 15 regression: `close_internal` must cap the
+    /// user-supplied timeout at `request.timeout.ms` per Java's
+    /// `createTimerForCloseRequests(timeout)`
+    /// (`AsyncKafkaConsumer.java:1590-1594`). We assert directly on
+    /// the deadline carried by the close-path event — Java's
+    /// `LeaveGroupOnCloseEvent(deadline)` is built with the capped
+    /// timer; the Rust analog flows through
+    /// `ApplicationEvent::LeaveGroupOnClose { handle, .. }` and the
+    /// handle's deadline reflects the capped value.
+    #[tokio::test]
+    async fn close_caps_timeout_at_request_timeout_ms() {
+        use crate::consumer::CloseOptions;
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+
+        // Default config: request_timeout_ms = 30s. A 5-minute user
+        // timeout MUST be capped at 30s before computing the deadline.
+        let request_timeout_ms = consumer.config.request_timeout_ms() as i64;
+        assert_eq!(request_timeout_ms, 30_000, "default request_timeout_ms");
+
+        // Capture the deadline observed on the `LeaveGroupOnClose`
+        // event handle — that's the post-cap value Java would build
+        // via `calculateDeadlineMs(closeTimer)`.
+        let captured_deadline = Arc::new(Mutex::new(None::<i64>));
+        let captured_clone = Arc::clone(&captured_deadline);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::LeaveGroupOnClose { handle, .. } => {
+                        *captured_clone.lock().unwrap() = Some(handle.deadline_ms());
+                        handle.complete(());
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                    },
+                    _ => {},
+                }
+            }
+        });
+
+        let now_before = consumer.time.milliseconds();
+        consumer
+            .close_with_options(CloseOptions::timeout(Duration::from_secs(300)))
+            .await
+            .expect("close ok");
+        drop(drainer);
+
+        let captured_deadline_val = captured_deadline.lock().unwrap().expect("LeaveGroupOnClose seen");
+        // The user passed 5min = 300_000ms; the cap reduces this to
+        // 30_000ms. The observed deadline must be at most
+        // now_before + 30_000ms (with a small fudge for clock drift
+        // since `now_before` is captured before the cap logic runs).
+        let user_uncapped = now_before + 300_000;
+        let expected_capped = now_before + request_timeout_ms;
+        assert!(
+            captured_deadline_val < user_uncapped - 1_000,
+            "deadline must NOT use the raw 5min user timeout \
+             (captured={captured_deadline_val}, user_uncapped={user_uncapped})"
+        );
+        assert!(
+            captured_deadline_val <= expected_capped + 100,
+            "deadline must be at most now+request_timeout_ms \
+             (captured={captured_deadline_val}, expected_capped={expected_capped})"
+        );
     }
 
     /// Issue 12 regression: `run_rebalance_callbacks_on_close` must

@@ -216,6 +216,51 @@ Each section records the original Critic finding + the resolving commit.
 
 ---
 
+## Issue 14: `position`'s `add_and_get.await.ok()` silently swallows non-Timeout errors (Java only swallows `TimeoutException`) — RESOLVED
+
+- **Original commit**: `de1d475` Phase 11 (6/N).
+- **Resolving commit**: same fixup as Issue 10. The `.await.ok()` was
+  replaced when `position_timeout` was migrated to `submit_and_drain`.
+  The new code matches Java's narrow `try/catch (TimeoutException e)`:
+    ```rust
+    match drain_result {
+        Ok(()) => {},
+        Err(KafkaError::Timeout(_)) => {},
+        Err(err) => return Err(err),
+    }
+    ```
+- **Verification**: `issue_14_position_propagates_non_timeout_errors` —
+  the drainer completes the `CheckAndUpdatePositions` handle with an
+  explicit `IllegalState` error (mirrors a non-Timeout bg-task failure);
+  the test asserts the consumer surfaces that specific error instead of
+  the generic `Timeout` that the previous `.await.ok()` would yield.
+
+---
+
+## Issue 15: `close_internal` does not apply Java's `Math.min(timeout, requestTimeoutMs)` cap — RESOLVED
+
+- **Original commit**: `069a6c4` Phase 11 (7/N).
+- **Resolving commit**: fixup of Phase 11 (7/N) — adds the cap when
+  computing `close_deadline_ms`:
+    ```rust
+    let request_timeout_ms = self.config.request_timeout_ms() as i64;
+    let capped_timeout_ms = std::cmp::min(timeout.as_millis() as i64, request_timeout_ms);
+    let close_deadline_ms = calculate_deadline_ms(close_start_ms, capped_timeout_ms);
+    ```
+  Mirrors Java's `createTimerForCloseRequests` at
+  `AsyncKafkaConsumer.java:1590-1594`.
+- **Resolution**: With default config (timeout=30s,
+  request_timeout_ms=30s) the cap is a no-op. A user calling
+  `close(Duration::from_secs(300))` now sees each close-step bounded
+  at 30s instead of 5 minutes.
+- **Verification**: `close_caps_timeout_at_request_timeout_ms` —
+  passes a 5-minute user timeout, asserts the deadline carried by
+  the `LeaveGroupOnClose` event handle is at most
+  `now + request_timeout_ms` (the capped value) and strictly less
+  than the user's raw 5-minute value.
+
+---
+
 ## Issue 12: `runRebalanceCallbacksOnClose` uses `subscriptions.assignedPartitions()` where Java uses `groupAssignmentSnapshot.get()` — RESOLVED
 
 - **Original commit**: `069a6c4` Phase 11 (7/N).
