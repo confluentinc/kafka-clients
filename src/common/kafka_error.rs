@@ -300,6 +300,16 @@ impl KafkaError {
         Self::GroupAuthorization(GroupAuthorizationError::new(group_id))
     }
 
+    /// Create an invalid group ID error.
+    ///
+    /// Corresponds to Java's `InvalidGroupIdException` (an `ApiException`
+    /// subclass carrying error code [`Errors::InvalidGroupId`]). Thrown
+    /// by group-management / offset-commit APIs when the consumer was
+    /// constructed without a valid `group.id`.
+    pub fn invalid_group_id(message: impl Into<String>) -> Self {
+        Self::Generic(KafkaGenericError::with_message(Errors::InvalidGroupId, message))
+    }
+
     /// Create a buffer exhausted error.
     ///
     /// Corresponds to Java's `BufferExhaustedException`.

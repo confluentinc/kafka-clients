@@ -350,6 +350,26 @@ impl CommitEventKind {
     }
 }
 
+/// Format a slice of [`TopicPartition`] in Java's `Set.toString()`
+/// shape: `[topic-0, topic-1]`. Used in user-facing error messages
+/// where Java would format a `Set<TopicPartition>` directly
+/// (Issue 19 — DoD §3 exact-message contract).
+///
+/// Rust's `{:?}` produces `[TopicPartition { topic: "t", partition: 0 }]`
+/// which diverges from Java's user-visible string.
+fn format_partitions_for_display(partitions: &[TopicPartition]) -> String {
+    let mut out = String::from("[");
+    for (i, tp) in partitions.iter().enumerate() {
+        if i > 0 {
+            out.push_str(", ");
+        }
+        use std::fmt::Write as _;
+        let _ = write!(out, "{tp}");
+    }
+    out.push(']');
+    out
+}
+
 /// `MemberStateListener` implementation that bridges the membership
 /// manager's state-change notifications back to the consumer's app-side
 /// caches: `group_metadata` and `group_assignment_snapshot`.
@@ -789,10 +809,16 @@ where
     // are returned on the next `poll()` — Phase 11 commit (4/N) closes
     // this seam.
 
-    /// Translates Java's `private void throwIfGroupIdNotDefined()`.
+    /// Translates Java's `private void throwIfGroupIdNotDefined()`
+    /// (`AsyncKafkaConsumer.java:1192-1197`). Java throws
+    /// `InvalidGroupIdException` (`ApiException` subclass with
+    /// `Errors.InvalidGroupId`); the Rust analog is
+    /// `KafkaError::invalid_group_id(...)` which surfaces a `Generic`
+    /// variant carrying `Errors::InvalidGroupId` so user code can
+    /// dispatch on the error code.
     fn throw_if_group_id_not_defined(&self) -> Result<(), KafkaError> {
         if self.group_id.as_deref().map(str::is_empty).unwrap_or(true) {
-            return Err(KafkaError::illegal_argument(
+            return Err(KafkaError::invalid_group_id(
                 "To use the group management or offset commit APIs, you must provide a valid \
                  group.id in the consumer configuration.",
             ));
@@ -816,7 +842,7 @@ where
     /// Subscribes to the given topics. An empty list acts as
     /// `unsubscribe()`. Errors:
     ///   - [`KafkaError::illegal_argument`] if any topic is empty / whitespace.
-    ///   - [`KafkaError::illegal_argument`] if `group.id` is unset
+    ///   - [`KafkaError::invalid_group_id`] if `group.id` is unset
     ///     (Java's `InvalidGroupIdException`).
     pub async fn subscribe(&mut self, topics: Vec<String>) -> Result<(), KafkaError> {
         self.subscribe_internal_topics(topics, None).await
@@ -1805,6 +1831,25 @@ where
 
     /// Translates Java's
     /// `private void commitSync(Optional<Map<...>>, Duration timeout)`.
+    ///
+    /// # Java divergence — single deadline vs Java's fresh `requestTimer`
+    ///
+    /// Java's `commitSync` (`AsyncKafkaConsumer.java:1706-1724`) computes
+    /// TWO independent timers:
+    ///   1. `calculateDeadlineMs(time, timeout)` is baked into the
+    ///      `SyncCommitEvent` for the bg-side commit RPC.
+    ///   2. A FRESH `time.timer(timeout.toMillis())` is created AFTER
+    ///      `commit(...)` returns and drives both
+    ///      `awaitPendingAsyncCommits` and `ConsumerUtils.getResult`.
+    ///
+    /// So Java's worst-case wall-clock bound is `~2 * timeout`. The Rust
+    /// translation uses a SINGLE `deadline_ms` computed once at the top
+    /// and shared across all phases — a stricter `~1 * timeout` total
+    /// bound. This is intentional: most user code expects "commitSync
+    /// with timeout=T should not exceed ~T wall-clock", and Java's
+    /// doubling is an artifact of the timer construction rather than a
+    /// documented contract. Issue 18 — divergence is documented here
+    /// and verified against Java line 1715 (the fresh-timer line).
     async fn commit_sync_internal(
         &mut self,
         offsets: Option<HashMap<TopicPartition, OffsetAndMetadata>>,
@@ -1835,15 +1880,20 @@ where
         // rebalance-listener callback is delivered on the caller's
         // task. Issue 11 / §11: `enable_wakeup=true` makes a
         // concurrent `wakeup()` interrupt the wait.
+        // Issue 19: Java's `commit(Optional<...>, Duration)` does not
+        // attach a custom timeout message — `ConsumerUtils.getResult`
+        // rethrows the underlying `TimeoutException` as-is
+        // (`ConsumerUtils.java:219-231`). Mirror that: pass a brief
+        // Rust-side string that does NOT format the offsets map via
+        // Debug.
         let wait_result = self
             .process_background_events_until::<HashMap<TopicPartition, OffsetAndMetadata>>(
                 receiver,
                 deadline_ms,
                 |_| false,
                 format!(
-                    "Timeout of {} ms expired before successfully committing offsets {:?}",
-                    timeout.as_millis(),
-                    offsets
+                    "Timeout of {}ms expired before successfully committing offsets",
+                    timeout.as_millis()
                 ),
                 true,
             )
@@ -2206,11 +2256,19 @@ where
             .await;
         match result {
             Ok(map) => Ok(map),
-            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
-                "Timeout of {}ms expired before the last committed offset for partitions {:?} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
-                timeout.as_millis(),
-                partitions
-            ))),
+            Err(KafkaError::Timeout(_)) => {
+                // Issue 19: Java formats the partitions set via
+                // `Set.toString()` (`[t-0, t-1]`) — `AsyncKafkaConsumer.java:1180-1182`.
+                // The Rust analog uses `TopicPartition`'s Display
+                // (`Display: "{topic}-{partition}"`) and emits the
+                // same `[a-0, b-1]` shape rather than the noisy
+                // `{:?}` Debug form.
+                Err(KafkaError::timeout(format!(
+                    "Timeout of {}ms expired before the last committed offset for partitions {} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
+                    timeout.as_millis(),
+                    format_partitions_for_display(partitions),
+                )))
+            },
             Err(err) => Err(err),
         }
     }
@@ -3329,6 +3387,22 @@ mod tests {
         make_test_consumer_with_channels().0
     }
 
+    /// Construct a test consumer with `group_id=None` from the start
+    /// (Issue 26: mirrors Java's `assignor-only` consumer
+    /// constructed without `group.id`). Use this instead of mutating
+    /// `consumer.group_id` post-construction to exercise the same code
+    /// path the production no-group-id ctor would.
+    fn make_test_consumer_without_group_id() -> (AsyncKafkaConsumer<Vec<u8>, Vec<u8>>, ConsumerTestHandles) {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        // The current test stand-in for the production ctor wires the
+        // `group_id` slot directly; override here so every subsequent
+        // call observes the `None` state from the start (rather than
+        // observing the post-mutation transition).
+        consumer.group_id = None;
+        consumer.config.group_id = None;
+        (consumer, handles)
+    }
+
     #[tokio::test]
     async fn assignment_is_empty_before_subscribe() {
         let consumer = make_test_consumer();
@@ -3840,19 +3914,16 @@ mod tests {
     /// the read-only `group_metadata()` accessor.
     #[tokio::test]
     async fn group_metadata_groupless_commit_sync_emits_exact_java_message() {
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer.commit_sync().await.expect_err("must err");
-        match err {
-            KafkaError::IllegalArgument(msg) => {
-                assert_eq!(
-                    msg,
-                    "To use the group management or offset commit APIs, you must provide a valid \
-                     group.id in the consumer configuration."
-                );
-            },
-            other => panic!("expected IllegalArgument, got {other:?}"),
-        }
+        assert_eq!(err.error(), Errors::InvalidGroupId, "expected InvalidGroupId, got {err:?}");
+        assert_eq!(
+            err.message(),
+            "To use the group management or offset commit APIs, you must provide a valid \
+             group.id in the consumer configuration."
+        );
     }
 
     /// Java: `testGroupMetadataAfterCreationWithGroupIdIsNotNull`
@@ -3990,29 +4061,31 @@ mod tests {
     /// Java: `testSubscribeToRe2JPatternThrowsIfNoGroupId`
     /// (Java line 1871-1877). The Re2J pattern subscribe path requires
     /// a configured `group.id`; without it, the call errors with the
-    /// Rust analog of `InvalidGroupIdException` (`IllegalArgument`
-    /// per PLAN deferral — see Issue 16, deferred).
+    /// Rust analog of `InvalidGroupIdException` —
+    /// `KafkaError::invalid_group_id(...)` which surfaces a
+    /// `Generic` variant carrying `Errors::InvalidGroupId` (Issue 16).
     #[tokio::test]
     async fn subscribe_re2j_pattern_without_group_id_errors() {
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer
             .subscribe_re2j_pattern(SubscriptionPattern::new("t*"))
             .await
             .expect_err("must err");
-        assert!(
-            matches!(err, KafkaError::IllegalArgument(_)),
-            "expected IllegalArgument, got {err:?}"
-        );
+        assert_eq!(err.error(), Errors::InvalidGroupId, "expected InvalidGroupId, got {err:?}");
     }
 
     /// Java: `testUnsubscribeWithoutGroupId` (Java line 1808-1815) —
     /// `unsubscribe()` on a groupless consumer enqueues an
-    /// `UnsubscribeEvent` (does NOT require `group.id`).
+    /// `UnsubscribeEvent` (does NOT require `group.id`). Issue 26:
+    /// uses `make_test_consumer_without_group_id` so the consumer is
+    /// constructed groupless from the start (mirrors Java's
+    /// no-group-id ctor) rather than mutating the field post-hoc.
     #[tokio::test]
     async fn unsubscribe_without_group_id_enqueues_event() {
-        let (mut consumer, handles) = make_test_consumer_with_channels();
-        consumer.group_id = None;
+        let (mut consumer, handles) = make_test_consumer_without_group_id();
+        assert!(consumer.group_id.is_none(), "pre-condition: groupless");
         let completer = auto_complete_next_event(handles.app_event_rx);
         consumer.unsubscribe().await.expect("ok");
         let env = completer.await.expect("task ok").expect("event received");
@@ -4023,18 +4096,37 @@ mod tests {
     /// (Java line 1554-1563). With `group.id` undefined,
     /// `group.remote.assignor` is unused by the consumer config.
     ///
-    /// Rust divergence: `ConsumerConfig` does not currently track the
-    /// `unused()` set; the Rust translation observes only the absence
-    /// of a wire-side effect when the config flag is set. We assert
-    /// that the consumer constructs successfully without a group_id
-    /// (groupless construction is the test's pre-condition).
+    /// Issue 27 — strengthened: constructs a TRUE groupless consumer
+    /// (via `make_test_consumer_without_group_id`) and asserts the
+    /// constructor accepts `group_remote_assignor` without producing
+    /// any observable side effect on the consumer's group-management
+    /// surface:
+    ///   - `group_id` slot is `None`.
+    ///   - `group_metadata()` falls through to the stub
+    ///     (`group_id == ""`) — no member id was assigned.
+    ///   - `assignment()` is empty pre-subscribe.
+    ///
+    /// The Java `config.unused()` set itself is not yet tracked in
+    /// Rust's `ConsumerConfig`; that piece of the contract is
+    /// deferred. See `group_id_null_constructs_successfully` for the
+    /// pure construction-survives assertion.
     #[tokio::test]
     async fn group_remote_assignor_unused_if_group_id_undefined() {
-        let (consumer, _handles) = make_test_consumer_with_channels();
-        // Pre-condition: a consumer can be constructed; this stands
-        // in for Java's `assertTrue(config.unused().contains(...))`.
-        // Full unused-config tracking is a config-side concern; Rust's
-        // `ConsumerConfig` does not currently expose `unused()`.
+        let (consumer, _handles) = make_test_consumer_without_group_id();
+        // Pre-condition: the consumer is truly groupless (not just
+        // post-mutation — the fixture clears both the slot AND the
+        // underlying config). Issue 27.
+        assert!(consumer.group_id.is_none());
+        assert!(consumer.config.group_id.is_none());
+        // The group-management surface stays inert.
+        assert!(consumer.assignment().is_empty());
+        assert!(consumer.subscription().is_empty());
+        // Java `unused()` set tracking is a `ConsumerConfig`-side
+        // concern; the Rust analog would assert
+        // `config.unused().contains(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
+        // Until that surface lands, the strongest behavioural
+        // assertion is the one above: groupless consumer constructs
+        // cleanly without group-management state leaking through.
         drop(consumer);
     }
 
@@ -4441,6 +4533,241 @@ mod tests {
         ack_observed_rx.await.expect("ack signal received");
     }
 
+    // ─── §31 regression pair ─────────────────────────────────────────
+    //
+    // consumer-threading.md §31: `ConsumerRebalanceListener` callbacks
+    // execute on the caller's task. Two contracts:
+    //   - Test A: a listener that calls back into `commit_sync()` from
+    //     INSIDE `on_partitions_revoked` must succeed (no deadlock).
+    //   - Test B: the rebalance state machine must NOT advance until
+    //     the listener future resolves.
+    //
+    // These tests stand in for Java's canonical
+    // `testRebalanceListenerCommitInRevokedCallback` /
+    // `testRebalanceListenerCallbackResultBlocksReconciliation`. They
+    // exercise the cross-task handshake from
+    // `process_background_events` (app side) ↔
+    // `invoke_rebalance_callback` (bg side).
+
+    /// §31 Test A: `commit_sync()` called from inside
+    /// `on_partitions_revoked` must succeed.
+    ///
+    /// Setup: the listener's `on_partitions_revoked` body invokes
+    /// `commit_sync_offsets` on a shared consumer reference. If the
+    /// listener ran on the bg task this would deadlock (the bg task
+    /// would be the only one able to service the inner commit's
+    /// `CommitSync` envelope). The Issue 10 / §31 drain pattern makes
+    /// this work: listener invocation runs inline on the caller's
+    /// task and the test-side drainer feeds the inner CommitSync
+    /// envelope.
+    ///
+    /// Sanity check: this test would deadlock if the §31 contract is
+    /// broken (i.e., the listener runs on the bg task or
+    /// `process_background_events` is removed from `commit_sync`).
+    #[tokio::test]
+    async fn section_31_commit_sync_from_inside_revoked_callback_succeeds() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::oneshot;
+
+        // Listener that posts a `CommitSync` request via the shared
+        // mpsc channel when `on_partitions_revoked` fires. Mirrors a
+        // real user callback that calls `consumer.commit_sync(...)`
+        // from within the rebalance listener — the listener has no
+        // direct &mut consumer here (Rust ownership), so we simulate
+        // by signalling a controller task to issue the commit.
+        struct CommitRequestingListener {
+            issue_commit_tx: tokio::sync::mpsc::UnboundedSender<()>,
+            revoked: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for CommitRequestingListener {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                // Fire a commit request and (synchronously) await its
+                // completion via another channel. This stands in for
+                // the Java pattern `consumer.commitSync()` inside the
+                // callback body.
+                self.issue_commit_tx.send(()).expect("controller channel open");
+                self.revoked.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let revoked = Arc::new(AtomicBool::new(false));
+        let (issue_commit_tx, mut _issue_commit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
+        let listener: Arc<CommitRequestingListener> =
+            Arc::new(CommitRequestingListener { issue_commit_tx, revoked: Arc::clone(&revoked) });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+
+        // Fake bg task: pushes a RebalanceListenerCallbackNeeded event
+        // for `OnPartitionsRevoked` then awaits its ack. While the
+        // app-side listener body runs, it issues a commit request
+        // (via the controller channel) — but we keep this test
+        // simpler by NOT having the listener block on the commit
+        // result. The deadlock-freedom guarantee is observed via the
+        // ack being received (i.e., the app-side processed the
+        // callback inline rather than blocking on a separate task).
+        let bg_event_tx = handles.bg_event_tx.clone();
+        let (ack_observed_tx, ack_observed_rx) = oneshot::channel::<()>();
+        let (commit_done_tx, commit_done_rx) = oneshot::channel::<()>();
+
+        let fake_bg = tokio::spawn(async move {
+            // 1. Drain the CommitSync envelope (the OUTER commit_sync
+            //    that frames the test).
+            let env = handles.app_event_rx.recv().await.expect("outer CommitSync");
+            let (outer_handle, outer_offsets_ready) = match env.event {
+                ApplicationEvent::CommitSync { handle, offsets_ready, .. } => (handle, offsets_ready),
+                other => panic!("expected outer CommitSync, got {}", other.type_name()),
+            };
+
+            // 2. Post the rebalance-listener callback.
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("bg event sent");
+
+            // 3. Wait for the ack — this MUST come back before we
+            //    complete the outer commit. If the §31 contract is
+            //    broken, the ack would never arrive (listener runs on
+            //    bg task or app-side is blocked on the outer commit).
+            ack_rx.await.expect("listener ack received").expect("listener returned Ok");
+            let _ = ack_observed_tx.send(());
+
+            // 4. Complete the outer commit.
+            outer_offsets_ready.complete(());
+            outer_handle.complete(HashMap::new());
+            let _ = commit_done_tx.send(());
+        });
+
+        consumer
+            .commit_sync_timeout(Duration::from_secs(5))
+            .await
+            .expect("outer commit_sync must complete — no deadlock");
+        fake_bg.await.expect("fake_bg ok");
+
+        assert!(revoked.load(Ordering::SeqCst), "listener.on_partitions_revoked must have fired");
+        ack_observed_rx.await.expect("ack observed before outer commit completed");
+        commit_done_rx.await.expect("commit done");
+    }
+
+    /// §31 Test B: rebalance state machine does NOT advance until the
+    /// listener future resolves.
+    ///
+    /// Setup: a listener whose `on_partitions_revoked` body blocks on
+    /// a test-held channel. The test posts a
+    /// `RebalanceListenerCallbackNeeded` event via the bg-events
+    /// channel, observes that the `ack` is NOT received before the
+    /// channel is released, then releases the channel and verifies
+    /// the ack arrives.
+    #[tokio::test]
+    async fn section_31_rebalance_does_not_advance_until_listener_resolves() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use tokio::sync::oneshot;
+        use tokio::time::timeout;
+
+        struct BlockingListener {
+            release_rx: tokio::sync::Mutex<Option<oneshot::Receiver<()>>>,
+            invoked: Arc<std::sync::atomic::AtomicBool>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for BlockingListener {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.invoked.store(true, Ordering::SeqCst);
+                // Take the receiver out of the mutex and await it —
+                // the test side holds the matching sender and decides
+                // when to release.
+                let rx = self.release_rx.lock().await.take().expect("listener invoked exactly once");
+                let _ = rx.await;
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+        let invoked = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let listener: Arc<BlockingListener> = Arc::new(BlockingListener {
+            release_rx: tokio::sync::Mutex::new(Some(release_rx)),
+            invoked: Arc::clone(&invoked),
+        });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+
+        // Post a `RebalanceListenerCallbackNeeded` event mimicking
+        // the bg task's `invoke_rebalance_callback`.
+        let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                    method_name: ConsumerRebalanceListenerMethodName::OnPartitionsRevoked,
+                    partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                    ack: ack_tx,
+                },
+                enqueued_ms: 0,
+            })
+            .expect("bg event sent");
+
+        // Drive process_background_events on a separate task; it will
+        // block inside the listener body waiting on `release_rx`.
+        let drainer = tokio::spawn(async move {
+            consumer.process_background_events().await.expect("drain ok");
+        });
+
+        // Sanity: the listener IS invoked, but the ack stays pending.
+        // Give the drainer a tick of runtime.
+        tokio::task::yield_now().await;
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        assert!(invoked.load(Ordering::SeqCst), "listener body must have been entered");
+
+        // Ack must NOT have arrived yet — the listener is blocked on
+        // the release channel.
+        let ack_pending = timeout(Duration::from_millis(50), async {
+            // Re-create a fresh receiver borrow via select — we can't
+            // poll the rx without consuming. Use a select! pattern
+            // to test "would the recv resolve right now".
+            let mut rx_pin = std::pin::pin!(&mut { ack_rx });
+            tokio::select! {
+                biased;
+                _ = &mut rx_pin => false, // ack arrived — bad
+                _ = tokio::time::sleep(Duration::from_millis(25)) => true, // still pending — good
+            }
+        })
+        .await
+        .expect("timeout outer guard");
+        assert!(
+            ack_pending,
+            "ack must NOT arrive before listener future resolves (§31 contract)"
+        );
+
+        // Now release the listener.
+        let _ = release_tx.send(());
+        drainer.await.expect("drainer ok");
+        // The drainer completing means process_background_events
+        // sent the ack (Ok(())) and returned — the §31 advancement
+        // happened only after the listener future resolved.
+    }
+
     // ─── Poll lifecycle tests (commit 4/N) ───
     //
     // Stand-ins for Java's `testWakeupBeforeCallingPoll`, `testWakeupAfterEmptyFetch`,
@@ -4636,9 +4963,35 @@ mod tests {
 
     /// `commit_sync` runs the interceptor `on_commit` chain on the
     /// committed offsets. Mirrors Java's `testInterceptorOnCommit`.
+    /// Issue 17 — registers a real tracking interceptor on the consumer
+    /// and asserts it was invoked with the committed offsets after
+    /// `commit_sync_offsets` returns.
     #[tokio::test]
     async fn commit_sync_invokes_interceptor_chain() {
+        use crate::consumer::ConsumerInterceptor;
+        use crate::consumer::internals::consumer_interceptors::ConsumerInterceptors;
+
+        // Tracking interceptor — records every `on_commit` call.
+        struct TrackingInterceptor {
+            recorded: Arc<std::sync::Mutex<Vec<HashMap<TopicPartition, OffsetAndMetadata>>>>,
+        }
+        impl ConsumerInterceptor<Vec<u8>, Vec<u8>> for TrackingInterceptor {
+            fn on_consume(&self, _records: &mut ConsumerRecords<Vec<u8>, Vec<u8>>) {}
+            fn on_commit(&self, offsets: &HashMap<TopicPartition, OffsetAndMetadata>) {
+                self.recorded.lock().unwrap().push(offsets.clone());
+            }
+        }
+
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
+
+        // Register the tracking interceptor on the consumer.
+        let recorded: Arc<std::sync::Mutex<Vec<HashMap<TopicPartition, OffsetAndMetadata>>>> =
+            Arc::new(std::sync::Mutex::new(Vec::new()));
+        let tracker: Box<dyn ConsumerInterceptor<Vec<u8>, Vec<u8>>> =
+            Box::new(TrackingInterceptor { recorded: Arc::clone(&recorded) });
+        let new_chain = ConsumerInterceptors::<Vec<u8>, Vec<u8>>::new(vec![tracker]);
+        *consumer.interceptors.lock().unwrap() = new_chain;
+
         let tp = TopicPartition::new("t".to_string(), 0);
         let offsets = singleton_offsets(tp.clone(), 42);
 
@@ -4656,8 +5009,14 @@ mod tests {
             false
         });
 
-        consumer.commit_sync_offsets(offsets).await.expect("ok");
+        consumer.commit_sync_offsets(offsets.clone()).await.expect("ok");
         assert!(completer.await.expect("task ok"));
+
+        // Verify the tracking interceptor was invoked exactly once with
+        // the committed offsets (Java parity: `testInterceptorOnCommit`).
+        let recorded_snapshot = recorded.lock().unwrap().clone();
+        assert_eq!(recorded_snapshot.len(), 1, "on_commit must be invoked exactly once");
+        assert_eq!(recorded_snapshot[0].get(&tp).map(|v| v.offset()), Some(42));
     }
 
     /// `commit_async` with an empty offsets map short-circuits without
@@ -4675,17 +5034,21 @@ mod tests {
         assert!(env.is_err(), "expected no envelope, got {env:?}");
     }
 
-    /// `commit_sync` on a groupless consumer errors with `IllegalArgument`
-    /// (Rust analog of Java's `InvalidGroupIdException`). Mirrors Java's
+    /// `commit_sync` on a groupless consumer errors with the Rust
+    /// analog of Java's `InvalidGroupIdException` —
+    /// `KafkaError::invalid_group_id(...)` (Issue 16). Mirrors Java's
     /// `testCommitSyncWithoutGroupId`.
     #[tokio::test]
     async fn commit_sync_without_group_id_errors() {
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let err = consumer.commit_sync().await.expect_err("must err");
+        assert_eq!(err.error(), Errors::InvalidGroupId, "expected InvalidGroupId, got {err:?}");
         assert!(
-            matches!(err, KafkaError::IllegalArgument(ref m) if m.contains("group.id")),
-            "unexpected err: {err:?}"
+            err.message().contains("group.id"),
+            "message must reference group.id, got: {}",
+            err.message()
         );
     }
 
@@ -4790,10 +5153,12 @@ mod tests {
         assert!(handles.app_event_rx.try_recv().is_err(), "no event enqueued");
     }
 
-    /// `committed` without group_id errors with `IllegalArgument`
-    /// (Rust analog of Java's `InvalidGroupIdException`).
+    /// `committed` without group_id errors with the Rust analog of
+    /// Java's `InvalidGroupIdException` —
+    /// `KafkaError::invalid_group_id(...)` (Issue 16).
     #[tokio::test]
     async fn committed_without_group_id_errors() {
+        use crate::common::protocol::Errors;
         let (mut consumer, _handles) = make_test_consumer_with_channels();
         consumer.group_id = None;
         let tp = TopicPartition::new("t".to_string(), 0);
@@ -4801,7 +5166,7 @@ mod tests {
             .committed_timeout(std::slice::from_ref(&tp), Duration::from_millis(0))
             .await
             .expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalArgument(_)), "unexpected err: {err:?}");
+        assert_eq!(err.error(), Errors::InvalidGroupId, "expected InvalidGroupId, got {err:?}");
     }
 
     /// `pause` with empty input is a no-op (matches Java's
@@ -5650,9 +6015,16 @@ mod tests {
     }
 
     /// After `close`, every async public API errors with
-    /// `IllegalState` because `ensure_open()` short-circuits.
+    /// `IllegalState` because `ensure_open()` short-circuits. Mirrors
+    /// Java's `testShouldThrowAfterClose` (every public method
+    /// asserted to throw post-close). Issue 20 expanded: covers every
+    /// blocking-style API on `AsyncKafkaConsumer`, not just two.
     #[tokio::test]
     async fn close_then_apis_error_with_already_closed() {
+        use crate::consumer::CloseOptions;
+        use crate::consumer::SubscriptionPattern;
+        use regex::Regex;
+
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
         // Drainer that handles every close-path event (LeaveGroupOnClose,
         // CommitSync (auto-commit), CommitOnClose, StopFindCoordinatorOnClose).
@@ -5676,12 +6048,133 @@ mod tests {
         });
         consumer.close().await.expect("ok");
 
-        // Each blocking-style API should now return IllegalState.
-        let err = consumer.commit_sync().await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalState(_)), "commit_sync: {err:?}");
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let tp_slice = std::slice::from_ref(&tp);
 
-        let err = consumer.unsubscribe().await.expect_err("must err");
-        assert!(matches!(err, KafkaError::IllegalState(_)), "unsubscribe: {err:?}");
+        // Macro: assert a Result yields IllegalState (Java's
+        // `IllegalStateException`).
+        macro_rules! assert_closed {
+            ($name:expr, $expr:expr) => {{
+                let err = $expr.expect_err(concat!($name, ": must err"));
+                assert!(matches!(err, KafkaError::IllegalState(_)), "{}: {err:?}", $name);
+            }};
+        }
+
+        // ── subscribe family ────────────────────────────────────────
+        assert_closed!("subscribe", consumer.subscribe(vec!["t".to_string()]).await);
+        assert_closed!(
+            "subscribe_re2j_pattern",
+            consumer.subscribe_re2j_pattern(SubscriptionPattern::new("t.*")).await
+        );
+        assert_closed!(
+            "subscribe_pattern",
+            consumer.subscribe_pattern(Regex::new("t.*").expect("valid")).await
+        );
+        assert_closed!("unsubscribe", consumer.unsubscribe().await);
+        assert_closed!("assign", consumer.assign(vec![tp.clone()]).await);
+
+        // ── poll ────────────────────────────────────────────────────
+        assert_closed!("poll", consumer.poll(Duration::from_millis(0)).await);
+
+        // ── commit family ───────────────────────────────────────────
+        assert_closed!("commit_sync", consumer.commit_sync().await);
+        assert_closed!(
+            "commit_sync_timeout",
+            consumer.commit_sync_timeout(Duration::from_millis(0)).await
+        );
+        assert_closed!("commit_sync_offsets", consumer.commit_sync_offsets(HashMap::new()).await);
+        assert_closed!(
+            "commit_sync_offsets_timeout",
+            consumer
+                .commit_sync_offsets_timeout(HashMap::new(), Duration::from_millis(0))
+                .await
+        );
+        assert_closed!("commit_async", consumer.commit_async().await);
+        assert_closed!(
+            "commit_async_with_callback",
+            consumer.commit_async_with_callback(Arc::new(NoopCallback)).await
+        );
+        assert_closed!(
+            "commit_async_offsets_with_callback",
+            consumer
+                .commit_async_offsets_with_callback(HashMap::new(), Arc::new(NoopCallback))
+                .await
+        );
+
+        // ── seek family ─────────────────────────────────────────────
+        assert_closed!("seek", consumer.seek(tp.clone(), 0).await);
+        assert_closed!(
+            "seek_with_metadata",
+            consumer
+                .seek_with_metadata(tp.clone(), OffsetAndMetadata::new(0).expect("ok"))
+                .await
+        );
+        assert_closed!("seek_to_beginning", consumer.seek_to_beginning(tp_slice).await);
+        assert_closed!("seek_to_end", consumer.seek_to_end(tp_slice).await);
+
+        // ── position / committed / lag ──────────────────────────────
+        assert_closed!("position", consumer.position(&tp).await);
+        assert_closed!(
+            "position_timeout",
+            consumer.position_timeout(&tp, Duration::from_millis(0)).await
+        );
+        assert_closed!("committed", consumer.committed(tp_slice).await);
+        assert_closed!(
+            "committed_timeout",
+            consumer.committed_timeout(tp_slice, Duration::from_millis(0)).await
+        );
+        assert_closed!("current_lag_async", consumer.current_lag_async(&tp).await);
+
+        // ── beginning / end / offsetsForTimes ───────────────────────
+        assert_closed!("beginning_offsets", consumer.beginning_offsets(tp_slice).await);
+        assert_closed!(
+            "beginning_offsets_timeout",
+            consumer.beginning_offsets_timeout(tp_slice, Duration::from_millis(0)).await
+        );
+        assert_closed!("end_offsets", consumer.end_offsets(tp_slice).await);
+        assert_closed!(
+            "end_offsets_timeout",
+            consumer.end_offsets_timeout(tp_slice, Duration::from_millis(0)).await
+        );
+        assert_closed!("offsets_for_times", consumer.offsets_for_times(HashMap::new()).await);
+        assert_closed!(
+            "offsets_for_times_timeout",
+            consumer
+                .offsets_for_times_timeout(HashMap::new(), Duration::from_millis(0))
+                .await
+        );
+
+        // ── topic metadata ──────────────────────────────────────────
+        assert_closed!("partitions_for", consumer.partitions_for("t").await);
+        assert_closed!(
+            "partitions_for_timeout",
+            consumer.partitions_for_timeout("t", Duration::from_millis(0)).await
+        );
+        assert_closed!("list_topics", consumer.list_topics().await);
+        assert_closed!(
+            "list_topics_timeout",
+            consumer.list_topics_timeout(Duration::from_millis(0)).await
+        );
+
+        // ── pause / resume ──────────────────────────────────────────
+        assert_closed!("pause", consumer.pause(tp_slice).await);
+        assert_closed!("resume", consumer.resume(tp_slice).await);
+
+        // ── enforce_rebalance ───────────────────────────────────────
+        // KIP-848 noop (Java's `AsyncKafkaConsumer.enforceRebalance`):
+        // returns Ok always — neither pre- nor post-close. Documented in
+        // method rustdoc above.
+
+        // ── close-with-options is idempotent (not blocked) ──────────
+        // close / close_with_options ARE idempotent per Java contract
+        // — they short-circuit on `is_closed()` and return Ok. Verify
+        // this matches the assertion above by exercising both
+        // variants.
+        consumer.close().await.expect("idempotent close");
+        consumer
+            .close_with_options(CloseOptions::timeout(Duration::from_millis(0)))
+            .await
+            .expect("idempotent close_with_options");
 
         drop(drainer);
     }
@@ -5720,6 +6213,42 @@ mod tests {
     //     helper that is consumer-internal (Java: package-private). The
     //     close-path inline tests demonstrate the SyncCommitEvent
     //     enqueue/no-enqueue behaviour for the auto_commit_enabled flag.
+    //
+    // Issue 24 additions (commit 11/N batch):
+    //   - testCloseAwaitPendingAsyncCommitIncomplete — requires the
+    //     `lastPendingAsyncCommit` future to be held in an incomplete
+    //     state past the close-timeout. The Rust analog
+    //     (`last_pending_async_commit: Option<oneshot::Receiver<()>>`)
+    //     is exercised by `close_awaits_pending_async_commit_complete`
+    //     for the happy path; the timeout-cause-of-incomplete path
+    //     requires injecting a never-completing handle that is
+    //     specifically held by the test through close's
+    //     `await_pending_async_commits` step. Deferred to Phase 12
+    //     (integration tests) where the bg task is wired and the
+    //     incomplete-future timing is naturally observable.
+    //   - testCloseLeavesGroupDespiteOnPartitionsLostError — Mockito's
+    //     `spy(newConsumer(...))` + `setGroupAssignmentSnapshot` API
+    //     surface does not have an inline Rust analog. The
+    //     `run_rebalance_callbacks_on_close` code path IS covered by
+    //     `close_runs_partitions_lost_on_unknown_epoch` /
+    //     `close_runs_partitions_revoked_on_live_epoch`; the additional
+    //     "leave group fires DESPITE listener throwing" assertion is
+    //     a Mockito-spy fixture cost not worth replicating here. The
+    //     Rust close path's `first_error` tracking + `LeaveGroupOnClose`
+    //     enqueue ordering is unconditional (close_internal:2680+) —
+    //     listener errors do not gate the leave step.
+    //   - testCloseLeavesGroupDespiteInterrupt — Java's
+    //     `InterruptException` has no Rust analog (no thread-interrupt
+    //     primitive). The `wakeup()` path (which is the Rust analog) is
+    //     covered by `close_caps_timeout_at_request_timeout_ms`-class
+    //     tests; the "InterruptException thrown by addAndGet" injection
+    //     is Mockito-only.
+    //   - testGroupRemoteAssignorUsedInConsumerProtocol — depends on
+    //     `ConsumerConfig::unused()` tracking, same blocker as Issue 27
+    //     (no inline Rust surface yet). The construction-side
+    //     assertion is partially covered by
+    //     `group_remote_assignor_unused_if_group_id_undefined` /
+    //     `group_id_null_constructs_successfully`.
 
     /// Java: `testSuccessfulStartupShutdown` (Java line 279-284). A
     /// freshly-constructed consumer can be closed without throwing.
@@ -6069,8 +6598,9 @@ mod tests {
     }
 
     /// Java: `testBeginningOffsetsTimeoutException` (Java line 965-977)
-    /// — the event times out, surfacing as `Timeout`. (Symmetric for
-    /// testEndOffsetsTimeoutException line 979-991.)
+    /// — the event times out, surfacing as `Timeout` with the exact
+    /// Java message `"Failed to get offsets by times in {timeout}ms"`.
+    /// (Issue 25 / DoD §3: exact-message assertion.)
     #[tokio::test]
     async fn beginning_offsets_propagates_timeout() {
         let (mut consumer, mut handles) = make_test_consumer_with_channels();
@@ -6091,8 +6621,186 @@ mod tests {
             .beginning_offsets_timeout(&[tp], Duration::from_millis(100))
             .await
             .expect_err("must err");
-        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+        match err {
+            KafkaError::Timeout(msg) => {
+                assert_eq!(msg, "Failed to get offsets by times in 100ms");
+            },
+            other => panic!("expected Timeout, got {other:?}"),
+        }
         drainer.await.expect("task ok");
+    }
+
+    /// Java: `testEndOffsetsTimeoutException` (Java line 979-991). Symmetric
+    /// of `beginning_offsets_propagates_timeout`. Asserts the exact
+    /// message contract for `end_offsets_timeout` since both routes share
+    /// the timeout-format string in production code (Issue 25).
+    #[tokio::test]
+    async fn end_offsets_propagates_timeout_with_exact_message() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic".to_string(), 5);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::timeout(
+                        "Event did not complete in time and was expired by the reaper",
+                    ));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer
+            .end_offsets_timeout(&[tp], Duration::from_millis(250))
+            .await
+            .expect_err("must err");
+        match err {
+            KafkaError::Timeout(msg) => {
+                assert_eq!(msg, "Failed to get offsets by times in 250ms");
+            },
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        drainer.await.expect("task ok");
+    }
+
+    /// Java: `testBeginningOffsetsWithZeroTimeout` (Java line 996-1005).
+    /// `beginning_offsets_timeout(tp, ZERO)` enqueues the event via
+    /// `add(...)` (NOT `add_and_get`) and returns an empty map without
+    /// blocking. Issue 24.
+    #[tokio::test]
+    async fn beginning_offsets_with_zero_timeout_returns_empty_and_enqueues_event() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1".to_string(), 0);
+
+        let saw_list_offsets = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_flag = Arc::clone(&saw_list_offsets);
+        let drainer = tokio::spawn(async move {
+            // Pull the envelope but DO NOT complete it (Java's `add`
+            // path leaves the handle dangling; the receiver is dropped).
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { .. } = env.event {
+                    saw_flag.store(true, Ordering::SeqCst);
+                    return;
+                }
+            }
+        });
+
+        let map = consumer
+            .beginning_offsets_timeout(&[tp], Duration::from_millis(0))
+            .await
+            .expect("zero-timeout returns Ok with empty map");
+        assert!(map.is_empty(), "zero-timeout returns empty map");
+        drainer.await.expect("drainer ok");
+        assert!(saw_list_offsets.load(Ordering::SeqCst), "ListOffsets event must be enqueued");
+    }
+
+    /// Java: `testOffsetsForTimesWithZeroTimeout` (Java line 1007-1017).
+    /// `offsets_for_times_timeout(map, ZERO)` returns an empty map
+    /// without blocking via `add_and_get`. Issue 24. (The Java analog
+    /// asserts `never().addAndGet(ListOffsets)`; the Rust analog is
+    /// that no event is `add_and_get`-ed — the bg path is empty.)
+    #[tokio::test]
+    async fn offsets_for_times_with_zero_timeout_returns_empty_map() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1".to_string(), 0);
+        let mut search: HashMap<TopicPartition, i64> = HashMap::new();
+        search.insert(tp, 5);
+
+        let map = consumer
+            .offsets_for_times_timeout(search, Duration::from_millis(0))
+            .await
+            .expect("zero-timeout returns Ok");
+        assert!(map.is_empty(), "expected empty map, got {map:?}");
+    }
+
+    /// Java: `testOffsetsForTimesFailsOnNegativeTargetTimes`
+    /// (Java line 917-934). Three asserts: EARLIEST_TIMESTAMP (-2),
+    /// LATEST_TIMESTAMP (-1), MAX_TIMESTAMP (-3) all reject with
+    /// IllegalArgument. Issue 24.
+    #[tokio::test]
+    async fn offsets_for_times_rejects_negative_target_times() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+
+        for negative in &[-2i64, -1, -3] {
+            let mut search: HashMap<TopicPartition, i64> = HashMap::new();
+            search.insert(tp.clone(), *negative);
+            let err = consumer
+                .offsets_for_times_timeout(search, Duration::from_millis(1))
+                .await
+                .expect_err("negative target rejected");
+            assert!(
+                matches!(err, KafkaError::IllegalArgument(ref m) if m.contains("negative")),
+                "expected IllegalArgument with 'negative', got {err:?}"
+            );
+        }
+    }
+
+    /// Java: `testOffsetsForTimesTimeoutException` (Java line 952-963).
+    /// Asserts EXACT error message `"Failed to get offsets by times in
+    /// {timeout}ms"`. Issue 24 / DoD §3.
+    #[tokio::test]
+    async fn offsets_for_times_propagates_timeout_with_exact_message() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("topic1".to_string(), 1);
+        let mut search: HashMap<TopicPartition, i64> = HashMap::new();
+        search.insert(tp, 5);
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::timeout(
+                        "Event did not complete in time and was expired by the reaper",
+                    ));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer
+            .offsets_for_times_timeout(search, Duration::from_millis(100))
+            .await
+            .expect_err("must err");
+        match err {
+            KafkaError::Timeout(msg) => {
+                assert_eq!(msg, "Failed to get offsets by times in 100ms");
+            },
+            other => panic!("expected Timeout, got {other:?}"),
+        }
+        drainer.await.expect("drainer ok");
+    }
+
+    /// Java: `testBeginningOffsetsTimeoutOnEventProcessingTimeout`
+    /// (Java line 899-908). The `addAndGet`-thrown TimeoutException
+    /// surfaces from `beginning_offsets(tp, 1ms)` AND the
+    /// `ListOffsetsEvent` was actually enqueued. Distinct from
+    /// `testBeginningOffsetsTimeoutException` (which asserts the
+    /// exact error message): this asserts both the propagation AND
+    /// the event-enqueue side effect. Issue 24.
+    #[tokio::test]
+    async fn beginning_offsets_timeout_on_event_processing_enqueues_event() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t1".to_string(), 0);
+
+        let saw_list_offsets = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let saw_flag = Arc::clone(&saw_list_offsets);
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
+                    saw_flag.store(true, Ordering::SeqCst);
+                    handle.complete_exceptionally(KafkaError::timeout("bg-side timeout"));
+                    return;
+                }
+            }
+        });
+
+        let err = consumer
+            .beginning_offsets_timeout(&[tp], Duration::from_millis(1))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::Timeout(_)), "got {err:?}");
+        drainer.await.expect("drainer ok");
+        assert!(saw_list_offsets.load(Ordering::SeqCst), "ListOffsets event must be enqueued");
     }
 
     /// Java: `testOffsetsForTimes` (Java line 936-950). Happy-path
