@@ -66,16 +66,28 @@ submodule commit `a18251bae0b825c69794a50dffd4c3100cf5ca5b`.
 | 9 | **Commit** | `CommitRequestManager` (1282), `OffsetCommitCallbackInvoker`. Tests: `CommitRequestManagerTest`. | `src/consumer/internals/{commit_request_manager, offset_commit_callback_invoker}.rs` + tests | Phase 4, 5, 6 |
 | 10 | **Background task & event processor** | `ConsumerNetworkThread` (321), `ApplicationEventProcessor`. Tests: `ConsumerNetworkThreadTest`, `ApplicationEventProcessorTest`. | `src/consumer/internals/{consumer_network_thread, application_event_processor}.rs`. Single `tokio::spawn` per consumer (§10) with `runOnce()` phase ordering; `select!` over shutdown/wakeup/network-poll. | Phase 5–9 |
 | 11 | **`AsyncKafkaConsumer` public impl** | `AsyncKafkaConsumer.java` (2368), `ConsumerRebalanceListenerInvoker`, `ConsumerUtils`. Tests: `AsyncKafkaConsumerTest` (~2K) plus the two `ConsumerRebalanceListener` regression tests required by `consumer-threading.md` §31. | `src/consumer/async_kafka_consumer.rs` implementing `Consumer<K,V>`; `process_background_events` invocation in every blocking-style API (§31) | Phase 2, 3, 5, 7, 8, 9, 10 |
-| 12 | **Integration test** — CLOSED [^p12] | analog of producer Phase 6 integration | `tests/integration/consumer_test.rs`: 4 end-to-end flows + production ctor wired through `new_consumer` factory. **Integration tests `#[ignore]`-gated on the response-routing gap** documented in `Phase-12/RESPONSE-ROUTING-AUDIT.md` — see footnote. | Phase 11 |
+| 12 | **Integration test** — CLOSED [^p12] | analog of producer Phase 6 integration | `tests/integration/consumer_test.rs`: 4 end-to-end flows + production ctor wired through `new_consumer` factory. **Integration tests un-ignored in Phase 12.5** once the response-routing gap was closed — see footnote. | Phase 11 |
+| 12.5 | **Response routing for the 4 BROKEN RMs** — CLOSED [^p12_5] | `CoordinatorRequestManager`, `TopicMetadataRequestManager`, `ConsumerHeartbeatRequestManager`, `FetchRequestManager` | per-RM `take_response_receiver` + spawned-task dispatch wired through. Heartbeat uses mpsc channel-back since `transition_to_fenced/_fatal` is async and `poll(now)` is sync. Integration tests un-ignored. | Phase 12 |
 
 [^p12]: Phase 12 production ctor wired end-to-end. The 4 integration
-tests (`tests/integration/consumer_test.rs`) are `#[ignore]`-gated
-pending **Phase 12.5** which wires response routing for the 4 BROKEN
+tests (`tests/integration/consumer_test.rs`) were `#[ignore]`-gated
+pending **Phase 12.5** which wired response routing for the 4 BROKEN
 RequestManagers (coordinator, consumer_heartbeat, fetch,
-topic_metadata) per `Phase-12/RESPONSE-ROUTING-AUDIT.md`. The gap is
-structural carry-over from Phase 10 — Phase 10 did not wire the per-RM
-`whenComplete` translation and only 2 of 6 RMs landed it locally
-(commit, offsets). Phase 12.5 charter at `Phase-12.5/PLAN.md`.
+topic_metadata) per `Phase-12/RESPONSE-ROUTING-AUDIT.md`. With
+Phase 12.5 CLOSED, the gap is closed; integration tests are
+un-ignored and run green end to end.
+
+[^p12_5]: Phase 12.5 CLOSED with 14 commits (`ba37a51..9662a77`).
+All four `tests/integration/consumer_test.rs` tests pass against
+testcontainers Kafka 4.2.0. The structural Phase-10 carry-over
+(per-RM `whenComplete` translation) is resolved: `Inner` types
+are `Arc<Mutex<...>>` (`CoordinatorRequestManager`,
+`TopicMetadataRequestManager`) or `Arc<Inner>` with interior
+mutability + mpsc side-channel for async transitions
+(`ConsumerHeartbeatRequestManager`), and `make_*_request` paths
+take the response receiver and spawn dispatch tasks. Charter at
+`Phase-12.5/PLAN.md`. Critic rounds 1-4 all closed; see
+`Phase-12.5/COMMENTS.DONE.1.md`.
 
 ## Module structure
 

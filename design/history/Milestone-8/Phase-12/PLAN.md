@@ -607,65 +607,63 @@ bg task to the app-side accessor.
   exercises the production ctor against a refused-connection
   `127.0.0.1:1` peer. Runtime: ~100ms (smoke test does NOT take 30s —
   Critic Issue 9 ruled moot by measurement).
-- **4 integration tests written but `#[ignore]`-gated.**
-  `tests/integration/consumer_test.rs` carries
+- **4 integration tests written but `#[ignore]`-gated at end of
+  Phase 12.** `tests/integration/consumer_test.rs` carries
   `test_subscribe_and_poll_records`,
   `test_assign_partitions_and_poll`,
   `test_commit_sync_then_resume_in_same_group`,
-  `test_seek_to_beginning_re_reads_records`. Each is `#[ignore]`d on
-  the response-routing gap (see RESPONSE-ROUTING-AUDIT.md).
+  `test_seek_to_beginning_re_reads_records`. Each was `#[ignore]`d on
+  the response-routing gap (see RESPONSE-ROUTING-AUDIT.md) at
+  Phase-12 close. **Phase 12.5 has since shipped and un-ignored all
+  four** — they pass end to end against a real broker.
 
-### What was deferred — Phase 12.5
+### Phase 12.5 — SHIPPED
 
-`design/history/Milestone-8/Phase-12/RESPONSE-ROUTING-AUDIT.md` audits
-all 6 `RequestManager`s and identifies **4 BROKEN** ones whose
-`UnsentRequest` build sites do NOT call
-`take_response_receiver()`, so broker responses are dropped silently:
+`design/history/Milestone-8/Phase-12/RESPONSE-ROUTING-AUDIT.md` audited
+all 6 `RequestManager`s and identified **4 BROKEN** ones whose
+`UnsentRequest` build sites did NOT call
+`take_response_receiver()`, so broker responses were dropped silently:
 
 - `coordinator_request_manager.rs:240`
 - `consumer_heartbeat_request_manager.rs:278`
 - `fetch_request_manager.rs:266`
 - `topic_metadata_request_manager.rs:344`
 
-The other 2 (`commit_request_manager`, `offsets_request_manager`) are
-WIRED. The audit shows the gap is structural carry-over from Phase 10
-which did not enumerate per-RM `whenComplete` translation as a
-deliverable (PLAN.md grep returns zero hits for "FindCoordinator",
-"Heartbeat response", "Metadata response").
+The other 2 (`commit_request_manager`, `offsets_request_manager`) were
+already WIRED. The gap was structural carry-over from Phase 10.
 
-**Phase 12.5 charter:** `design/history/Milestone-8/Phase-12.5/PLAN.md`.
-Wires response routing for the 4 BROKEN RMs using the canonical
-`Arc<Mutex<Inner>>` interior-mutability pattern from
-`commit_request_manager.rs:1410-1429` (or mpsc channel-back from
-`offsets_request_manager.rs` where the RM holds locks the forwarder
-would otherwise re-enter — see PLAN risk matrix). Un-ignores the 4
-integration tests in `tests/integration/consumer_test.rs`. Deletes the
-3 misleading rustdoc blocks at
-`coordinator_request_manager.rs:226-233`,
-`fetch_request_manager.rs:267-270`,
-`topic_metadata_request_manager.rs:184-199`.
+**Phase 12.5 CLOSED** (`design/history/Milestone-8/Phase-12.5/PLAN.md`):
+all four BROKEN RMs now use either the canonical `Arc<Mutex<Inner>>`
+interior-mutability pattern (`coordinator_request_manager`,
+`topic_metadata_request_manager`) or an mpsc channel-back pattern
+where the RM has async transitions the sync `poll(now)` can't drive
+inline (`consumer_heartbeat_request_manager` for
+`transition_to_fenced/_fatal`; `fetch_request_manager` for response
+dispatch via the bg-task pending-set). The 4 integration tests are
+un-ignored and run green end to end.
 
-Estimated size: ~200 LOC production + ~80 LOC tests across 6 commits
-(4 RM refactors + 1 integration un-ignore + 1 close-out).
+Final shape: 14 commits (`ba37a51..9662a77`), ~600 LOC production +
+~300 LOC tests, 4 Critic review rounds all closed (see
+`Phase-12.5/COMMENTS.DONE.1.md`).
 
-### Carry-overs (NOT in Phase 12.5 scope)
+### Carry-overs (NOT in Phase 12 or Phase 12.5 scope)
 
 - `AsyncConsumerMetrics` / `KafkaConsumerMetrics` translation —
   deferred Milestone-8-wide.
-- SSL/SASL `ChannelBuilder` escape hatch — Phase 12 ships PLAINTEXT
-  only; Phase 12.5 continues PLAINTEXT.
+- SSL/SASL `ChannelBuilder` escape hatch — Phase 12/12.5 ship
+  PLAINTEXT only.
 - C FFI for `AsyncKafkaConsumer` — out of milestone.
 - Classic-protocol path — out of milestone per consumer-threading.md
   §20.
 
 ### Phase-11 deferred unit tests
 
-The 5 markers listed at `PLAN.md:148-166` were re-examined at close-out
-(commit 7/N). Each Phase-11 deferral was confirmed to depend on
-response routing (Phase 12.5), not on the production ctor itself
-which is now wired. Markers updated in-place to point at Phase 12.5
-per `RESPONSE-ROUTING-AUDIT.md` instead of "Phase 12 integration tests".
-No tests were newly translatable from the production ctor alone — the
-bg task cannot drive `FindCoordinator` → `Heartbeat` → `Fetch` →
-`OffsetCommit` end-to-end until 4/6 RMs have their response receiver
-plumbed through.
+The 5 markers listed at `PLAN.md:148-166` were re-examined at
+Phase-12 close-out (commit 7/N). Each Phase-11 deferral was confirmed
+to depend on response routing (Phase 12.5), not on the production
+ctor itself. Markers at end of Phase 12 pointed at Phase 12.5.
+**With Phase 12.5 CLOSED**, the response-routing dependency is met
+and these unit tests can be revisited in a future milestone — the bg
+task now drives `FindCoordinator` → `Heartbeat` → `Fetch` →
+`OffsetCommit` end-to-end against a real broker, and the 4
+`tests/integration/consumer_test.rs` tests prove the loop.

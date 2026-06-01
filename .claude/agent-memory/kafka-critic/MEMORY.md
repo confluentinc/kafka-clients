@@ -40,3 +40,5 @@
 - [M8 Phase 11 batch-3 patterns](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision (commit_inner → commit_async); skip section must enumerate Java tests
 - [M8 Phase 12 patterns](review_m8_phase12_patterns.md) — production-ctor wire-up: entries-skip without driver, dual-notifier on shared-state, separated Arc<AtomicI64>, auth no-op framing
 - [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped when RM lacks `take_response_receiver`+spawn pattern; rustdoc claims ≠ code reality
+- [M8 Phase 12.5 patterns](review_m8_phase12_5.md) — Pre-branch whenComplete side effects (e.g. getAndClearFatalError) easy to miss in async forwarder translation; yield_now-based regression tests fragility
+- [M8 Phase 12.5 round-3](review_m8_phase12_5_round3.md) — Java switch `default:` arm fatal fallback omitted in Option::unwrap_or; Fenced arm spurious ErrorEvent diverges from Java

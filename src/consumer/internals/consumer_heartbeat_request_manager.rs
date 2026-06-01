@@ -588,8 +588,12 @@ impl ConsumerHeartbeatRequestManager {
             },
             HeartbeatErrorAction::DelegateToSpecific => {
                 // Already handled above; this arm is unreachable
-                // because we unwrapped to `Handled` if the specific
-                // handler returned `None`.
+                // because the `match action` block resolves
+                // `DelegateToSpecific` to a concrete action — either
+                // the specific handler's return value, or `Fatal`
+                // when the specific handler returns `None` (the
+                // `unwrap_or_else` fallback above). No path leaves
+                // `DelegateToSpecific` as the `final_action`.
                 debug_assert!(false, "DelegateToSpecific should have been resolved");
             },
         }

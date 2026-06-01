@@ -574,3 +574,95 @@ Per `.claude/rules/agent-roles.md`:
 - **Classic-protocol path.** Out of milestone per
   `consumer-threading.md` §20.
 - **C FFI for `AsyncKafkaConsumer`.** Out of milestone.
+
+## Status: CLOSED (Phase 12.5 commits 1/N — 6/N)
+
+Phase 12.5 closed: all six request managers either had response
+routing wired in this phase (coordinator, topic_metadata,
+consumer_heartbeat, fetch — driven from the bg task or its
+spawned task slot) or already had it (commit, offsets — calling
+`take_response_receiver` + dispatching from a spawned task). The
+four integration tests are un-ignored and run green end to end.
+
+### Commit-hash table
+
+| Commit  | Title                                                                                       |
+|---------|---------------------------------------------------------------------------------------------|
+| ba37a51 | Phase 12.5 (1/N): coordinator_request_manager — Arc<Mutex<Inner>> response routing          |
+| 9086078 | fixup! Phase 12.5 (1/N): Issue 2 — robust forwarder-sync in regression tests                |
+| fcbb08f | fixup! Phase 12.5 (1/N): Issue 1 — clear fatal_error on coordinator failure paths           |
+| a239b80 | Phase 12.5 (2/N): topic_metadata_request_manager — Arc<Mutex<Inner>> response routing       |
+| 1950caf | Phase 12.5 (3/N): consumer_heartbeat_request_manager — mpsc channel-back response routing   |
+| 6059bc7 | fixup! Phase 12.5 (3/N): Issue 3 — reset_heartbeat_state on error response branch           |
+| 0e72ee7 | fixup! Phase 12.5 (3/N): Issue 4 — drive transition_to_fenced/_fatal from classifier        |
+| 842e046 | fixup! Phase 12.5 (3/N): Issue 6 — Fenced arm should not emit BackgroundEvent::Error        |
+| 4f84ecd | fixup! Phase 12.5 (3/N): Issue 5 — unknown-error-code fatal fallback in heartbeat classifier|
+| e0d98ba | fixup! Phase 12.5 (3/N): Issue 7 — register CommitRequestManager as MemberStateListener     |
+| c2834cd | Phase 12.5 (4/N): fetch_request_manager — mpsc channel-back response routing                |
+| a969a67 | fixup! Phase 12.5 (5/N): Issue 8 — cap max.poll.records in commit-resume test               |
+| dd33ebf | fixup! Phase 12.5 (5/N): Issue 8 — add LeaveGroup sleep + raise c2 poll deadline            |
+| 9662a77 | Phase 12.5 (5/N): un-ignore 4 integration tests — response routing wired end-to-end         |
+| (HEAD)  | Phase 12.5 (6/N): close-out — 4/4 integration tests green + PLAN status + agent-memory      |
+
+### What shipped
+
+- **coordinator_request_manager** (`ba37a51`): `Arc<Mutex<Inner>>`
+  refactor; `make_find_coordinator_request` now calls
+  `take_response_receiver` and spawns a task that dispatches to
+  `Inner::on_response` / `on_failure`. Critic round-1 follow-ups
+  (Issues 1 + 2) moved the `getAndClearFatalError()` call to the
+  top of the spawned task (matching Java's `whenComplete` parity)
+  and hardened the regression test's forwarder-sync.
+
+- **topic_metadata_request_manager** (`a239b80`): `Arc<Mutex<Inner>>`
+  refactor along the same pattern; `make_topic_metadata_request`
+  takes the receiver and spawns dispatch into
+  `Inner::handle_response` / `handle_error`.
+
+- **consumer_heartbeat_request_manager** (`1950caf` + 5 Critic round-2
+  / round-3 fixups): mpsc-channel-back response routing — the sync
+  `poll(now)` synthesizes a "pending membership transition" envelope
+  that the bg task drains BEFORE
+  `membership.reconcile(now).await` to drive
+  `transition_to_fenced` / `_fatal` from the heartbeat classifier
+  on the appropriate task. Issues 3-7 closed the rest of the
+  AbstractHeartbeatRequestManager parity gap: reset state at top
+  of error branch, classifier drives membership transitions, Fenced
+  arm does not emit `BackgroundEvent::Error`, unknown error codes
+  fall through to `Fatal` (not `Handled`), and
+  `CommitRequestManager` is now registered as a
+  `MemberStateListener` so OffsetCommit requests carry the correct
+  member id/epoch.
+
+- **fetch_request_manager** (`c2834cd`): mpsc channel-back response
+  routing; the bg task drains the pending-set in
+  `create_fetch_request` and dispatches fetch responses to
+  `FetchBuffer` (and the FetchSession state-machine).
+
+- **Integration tests un-ignored** (`9662a77`): all four
+  `tests/integration/consumer_test.rs` tests now run green against a
+  testcontainers Kafka 4.2.0 broker. The
+  `test_commit_sync_then_resume_in_same_group` test needed two
+  test-side adjustments beyond the original `max.poll.records=5`
+  cap (5s sleep between consumer1.close and consumer2 ctor; c2's
+  poll-loop deadline raised 30s → 60s) — production code is
+  unchanged.
+
+### Final test counts
+
+- **Unit tests** (`cargo test`): 3,447 passed (Phase 12.5 added
+  regression tests for `clear_fatal_error_on_recv_err`,
+  `forwarder_advances_on_send_failure`,
+  `commit_picks_up_member_id_epoch_after_registration`, plus
+  per-RM unit tests for the new response-routing paths).
+- **Integration tests** (`cargo test --features integration-tests
+  --test integration consumer_test`): 4 passed, 0 failed,
+  0 ignored.
+- **Format/lint**: clean.
+
+### Open follow-ups
+
+None known. The Phase-12 carry-over (response routing) is closed.
+Listener registration discrepancies, error-classifier branch
+parity, and ErrorEvent emission matrix all match Java semantics
+end to end (Critic round 1-4 all closed; see `COMMENTS.DONE.1.md`).
