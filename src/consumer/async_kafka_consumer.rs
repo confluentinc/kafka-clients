@@ -383,7 +383,12 @@ impl ConsumerStateNotifier {
         group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
         group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
     ) -> Self {
-        Self { group_id: group_id.into(), group_instance_id, group_metadata, group_assignment_snapshot }
+        Self {
+            group_id: group_id.into(),
+            group_instance_id,
+            group_metadata,
+            group_assignment_snapshot,
+        }
     }
 
     /// Java: `private void updateGroupMetadata(Optional<Integer> memberEpoch, String memberId)`
@@ -856,25 +861,27 @@ where
         log::info!("Subscribed to topic(s): {}", topics.join(", "));
 
         let topics_set: std::collections::HashSet<String> = topics.into_iter().collect();
-        let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
         // Java passes the listener INSIDE the event so the bg task owns
         // installation — the app side never registers the listener until
         // the event has been accepted. Mirror this by sending the
         // listener through the event AND only mirroring it into the
-        // app-side `rebalance_listener` slot AFTER `add_and_get`
-        // resolves Ok (so a failed submission does not leave the
-        // app-side slot pointing at a listener that never landed in
+        // app-side `rebalance_listener` slot AFTER the submit resolves
+        // `Ok(())` (so a failed submission does not leave the app-side
+        // slot pointing at a listener that never landed in
         // `SubscriptionState`).
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::TopicSubscriptionChange { handle, topics: topics_set, listener },
-                receiver,
-                now_ms,
-            )
-            .await?;
+        // Java's `subscribe(...)` does NOT call `setActiveTask` — match
+        // by passing `enable_wakeup=false`.
+        self.submit_and_drain::<()>(
+            ApplicationEvent::TopicSubscriptionChange { handle, topics: topics_set, listener },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the subscribe event to complete",
+            false,
+        )
+        .await?;
         if let Some(l) = listener_for_app_side {
             *self.rebalance_listener.lock().unwrap() = Some(l);
         }
@@ -895,19 +902,19 @@ where
 
         log::info!("Subscribed to pattern: '{pattern}'");
 
-        let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
         // See `subscribe_internal_topics` for why we store the listener
-        // only after `add_and_get` resolves Ok.
+        // only after the submit resolves Ok.
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::TopicPatternSubscriptionChange { handle, pattern, listener },
-                receiver,
-                now_ms,
-            )
-            .await?;
+        self.submit_and_drain::<()>(
+            ApplicationEvent::TopicPatternSubscriptionChange { handle, pattern, listener },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the subscribe-pattern event to complete",
+            false,
+        )
+        .await?;
         if let Some(l) = listener_for_app_side {
             *self.rebalance_listener.lock().unwrap() = Some(l);
         }
@@ -928,19 +935,19 @@ where
 
         log::info!("Subscribing to regular expression {}", pattern.pattern());
 
-        let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
         // See `subscribe_internal_topics` for why we store the listener
-        // only after `add_and_get` resolves Ok.
+        // only after the submit resolves Ok.
         let listener_for_app_side = listener.as_ref().map(Arc::clone);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, pattern, listener },
-                receiver,
-                now_ms,
-            )
-            .await?;
+        self.submit_and_drain::<()>(
+            ApplicationEvent::TopicRe2JPatternSubscriptionChange { handle, pattern, listener },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the subscribe-regex event to complete",
+            false,
+        )
+        .await?;
         if let Some(l) = listener_for_app_side {
             *self.rebalance_listener.lock().unwrap() = Some(l);
         }
@@ -993,6 +1000,10 @@ where
                 deadline_ms,
                 ignore_predicate,
                 "Failed while waiting for the unsubscribe event to complete",
+                // Java's `unsubscribe()` does NOT call
+                // `wakeupTrigger.setActiveTask(...)` (see
+                // `AsyncKafkaConsumer.java:1830-1850`). Match that.
+                false,
             )
             .await;
 
@@ -1040,13 +1051,15 @@ where
         let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
-                receiver,
-                now_ms,
-            )
-            .await
+        self.submit_and_drain::<()>(
+            ApplicationEvent::AssignmentChange { handle, current_time_ms: now_ms, partitions: partitions_set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the assignment-change event to complete",
+            // Java's `assign(...)` does NOT call `setActiveTask` — match.
+            false,
+        )
+        .await
     }
 
     /// Java: `defaultApiTimeoutDeadlineMs()`.
@@ -1189,24 +1202,53 @@ where
     ///                                Predicate<Exception> ignoreErrorEventException)`
     /// (`AsyncKafkaConsumer.java:2271`). Each iteration:
     ///
-    /// 1. Drains the bg-event channel (invokes any pending listener
+    /// 1. Observes any pending wakeup (§11) — if [`Self::wakeup`] has
+    ///    been called the loop returns `KafkaError::Wakeup` and the
+    ///    caller rotates the token.
+    /// 2. Drains the bg-event channel (invokes any pending listener
     ///    callbacks on the caller's task).
-    /// 2. If the completion receiver has resolved, returns the value.
-    /// 3. Otherwise, races a 100ms bounded wait against the receiver.
-    /// 4. Loops while the absolute `deadline_ms` is not exceeded.
+    /// 3. If the completion receiver has resolved, returns the value.
+    /// 4. Otherwise, races a 100ms bounded wait against the receiver
+    ///    AND the wakeup token's cancellation signal.
+    /// 5. Loops while the absolute `deadline_ms` is not exceeded.
+    ///
+    /// # `enable_wakeup`
+    ///
+    /// Mirrors Java's `wakeupTrigger.setActiveTask(future)` /
+    /// `clearTask()` discipline: only blocking APIs that Java registers
+    /// the future on observe the wakeup. Close-path callers
+    /// (`leave_group_on_close`,
+    /// `await_pending_async_commits_and_execute_commit_callbacks` with
+    /// `enable_wakeup=false`) pass `false` here so the disabled-wakeups
+    /// guarantee from `wakeup_trigger.disable()` is also respected on
+    /// the per-API axis.
     ///
     /// Returns `Err(KafkaError::timeout(...))` when the deadline
-    /// expires without a completion.
+    /// expires without a completion, or `Err(KafkaError::Wakeup(...))`
+    /// when a concurrent `wakeup()` interrupts the wait.
     pub(crate) async fn process_background_events_until<T: Send + 'static>(
         &mut self,
         receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
         deadline_ms: i64,
         ignore_error_predicate: impl Fn(&KafkaError) -> bool,
         timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
     ) -> Result<T, KafkaError> {
         let mut receiver = receiver;
 
         loop {
+            // Stage 0: observe pending wakeup (§11). Java's pattern is
+            // `wakeupTrigger.setActiveTask(future)` BEFORE the wait — a
+            // concurrent `wakeup()` then completes the future
+            // exceptionally. Our rotating-token equivalent re-checks at
+            // the top of every loop iteration so the `select!` below
+            // sees a freshly-cancelled token when the user calls
+            // `wakeup()` during the wait.
+            if enable_wakeup && let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
+
             let had_events = match self.process_background_events().await {
                 Ok(had) => had,
                 Err(err) => {
@@ -1240,16 +1282,50 @@ where
                             return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
                         }
                         let wait = std::cmp::min(remaining, 100) as u64;
-                        match tokio::time::timeout(Duration::from_millis(wait), &mut receiver).await {
-                            Ok(Ok(Ok(value))) => return Ok(value),
-                            Ok(Ok(Err(err))) => return Err(err),
-                            Ok(Err(_recv_err)) => {
-                                return Err(KafkaError::illegal_state(
-                                    "Background task dropped the completion sender without completing it",
-                                ));
+                        // §11: race the receiver against the wakeup
+                        // token's cancellation so `wakeup()` from
+                        // another task interrupts the wait
+                        // immediately. The token clone is cheap (Arc).
+                        let token = if enable_wakeup {
+                            Some(self.wakeup_trigger.current_token())
+                        } else {
+                            None
+                        };
+                        let recv_fut = &mut receiver;
+                        match token {
+                            Some(tok) => {
+                                tokio::select! {
+                                    biased;
+                                    _ = tok.cancelled() => {
+                                        // Loop top will surface
+                                        // KafkaError::Wakeup via
+                                        // maybe_trigger_wakeup + rotate.
+                                    },
+                                    res = tokio::time::timeout(Duration::from_millis(wait), recv_fut) => {
+                                        match res {
+                                            Ok(Ok(Ok(value))) => return Ok(value),
+                                            Ok(Ok(Err(err))) => return Err(err),
+                                            Ok(Err(_recv_err)) => {
+                                                return Err(KafkaError::illegal_state(
+                                                    "Background task dropped the completion sender without completing it",
+                                                ));
+                                            },
+                                            // Java's `swallow TimeoutException` — keep looping.
+                                            Err(_elapsed) => {},
+                                        }
+                                    },
+                                }
                             },
-                            // Java's `swallow TimeoutException` — keep looping.
-                            Err(_elapsed) => {},
+                            None => match tokio::time::timeout(Duration::from_millis(wait), recv_fut).await {
+                                Ok(Ok(Ok(value))) => return Ok(value),
+                                Ok(Ok(Err(err))) => return Err(err),
+                                Ok(Err(_recv_err)) => {
+                                    return Err(KafkaError::illegal_state(
+                                        "Background task dropped the completion sender without completing it",
+                                    ));
+                                },
+                                Err(_elapsed) => {},
+                            },
                         }
                     }
                 },
@@ -1260,6 +1336,35 @@ where
                 return Err(KafkaError::timeout(timeout_msg.as_ref().to_string()));
             }
         }
+    }
+
+    /// Submit `event` and await its typed completion via
+    /// [`Self::process_background_events_until`], interleaving bg-event
+    /// drains and observing wakeup (§31 / §11).
+    ///
+    /// This is the standard pattern for blocking-style consumer APIs:
+    /// it replaces the direct
+    /// `application_event_handler.add_and_get(event, receiver, now).await`
+    /// call which has the deadlock pitfall documented in
+    /// `process_background_events_until` (a bg-task `select!` blocked on
+    /// a `RebalanceListenerCallbackNeeded` ack cannot serve the
+    /// completion event until the app side drains the listener
+    /// callback from the bg-event channel).
+    ///
+    /// `enable_wakeup` mirrors Java's per-API `setActiveTask` decision;
+    /// see [`Self::process_background_events_until`] doc-comment.
+    pub(crate) async fn submit_and_drain<T: Send + 'static>(
+        &mut self,
+        event: ApplicationEvent,
+        receiver: tokio::sync::oneshot::Receiver<Result<T, KafkaError>>,
+        deadline_ms: i64,
+        timeout_msg: impl AsRef<str>,
+        enable_wakeup: bool,
+    ) -> Result<T, KafkaError> {
+        let now_ms = self.time.milliseconds();
+        self.application_event_handler.add(event, now_ms)?;
+        self.process_background_events_until::<T>(receiver, deadline_ms, |_| false, timeout_msg, enable_wakeup)
+            .await
     }
 
     /// Returns the milliseconds remaining until the supplied deadline,
@@ -1591,22 +1696,28 @@ where
 
         // Java: `ConsumerUtils.getResult(commitEvent.offsetsReady(), defaultApiTimeoutMs.toMillis())`.
         // This blocks until the bg task has resolved which offsets to
-        // commit (so subsequent fetches don't shift the
-        // commit window).
+        // commit (so subsequent fetches don't shift the commit window).
+        // Issue 10 / §31: route the wait through
+        // `process_background_events_until` so a bg-task
+        // rebalance-listener callback enqueued mid-wait is delivered on
+        // the caller's task instead of blocking the bg task on its
+        // ack. Issue 11 / §11: enable wakeup observation so a
+        // concurrent `wakeup()` interrupts even this preliminary wait —
+        // matches the contract that EVERY user-blocking step inside
+        // commit_sync responds to wakeup. (Java's
+        // `setActiveTask(commitFuture)` happens after this wait, so
+        // strictly speaking Java would not observe wakeup here; but the
+        // Rust pattern of routing through the drain helper makes the
+        // wakeup-observable semantic uniform across phases.)
         let or_deadline_ms = self.default_api_timeout_deadline_ms();
-        let or_remaining = self.remaining_ms(or_deadline_ms);
-        match tokio::time::timeout(Duration::from_millis(or_remaining as u64), offsets_ready_rx).await {
-            Ok(Ok(Ok(()))) => {},
-            Ok(Ok(Err(err))) => return Err(err),
-            Ok(Err(_recv_err)) => {
-                return Err(KafkaError::illegal_state(
-                    "Background task dropped the offsets-ready sender for commit",
-                ));
-            },
-            Err(_elapsed) => {
-                return Err(KafkaError::timeout("Timed out waiting for offsetsReady on commit event"));
-            },
-        }
+        self.process_background_events_until::<()>(
+            offsets_ready_rx,
+            or_deadline_ms,
+            |_| false,
+            "Timed out waiting for offsetsReady on commit event",
+            true,
+        )
+        .await?;
 
         Ok(receiver)
     }
@@ -1663,25 +1774,30 @@ where
         self.await_pending_async_commits_and_execute_commit_callbacks(deadline_ms, true)
             .await?;
 
-        // Java: `ConsumerUtils.getResult(commitFuture, requestTimer)` with
-        // wakeup-trigger registration for the duration of the await.
-        let remaining = self.remaining_ms(deadline_ms);
-        let wait_result = tokio::time::timeout(Duration::from_millis(remaining.max(0) as u64), receiver).await;
-        let committed: HashMap<TopicPartition, OffsetAndMetadata> = match wait_result {
-            Ok(Ok(Ok(map))) => map,
-            Ok(Ok(Err(err))) => return Err(err),
-            Ok(Err(_recv_err)) => {
-                return Err(KafkaError::illegal_state(
-                    "Background task dropped the commit_sync sender without completing it",
-                ));
-            },
-            Err(_elapsed) => {
-                return Err(KafkaError::timeout(format!(
+        // Java: `ConsumerUtils.getResult(commitFuture, requestTimer)`
+        // with `wakeupTrigger.setActiveTask(commitFuture)` for the
+        // duration of the await (`AsyncKafkaConsumer.java:1716,
+        // :1719-1724`). Issue 10 / §31: route through
+        // `process_background_events_until` so a mid-wait
+        // rebalance-listener callback is delivered on the caller's
+        // task. Issue 11 / §11: `enable_wakeup=true` makes a
+        // concurrent `wakeup()` interrupt the wait.
+        let wait_result = self
+            .process_background_events_until::<HashMap<TopicPartition, OffsetAndMetadata>>(
+                receiver,
+                deadline_ms,
+                |_| false,
+                format!(
                     "Timeout of {} ms expired before successfully committing offsets {:?}",
                     timeout.as_millis(),
-                    offsets,
-                )));
-            },
+                    offsets
+                ),
+                true,
+            )
+            .await;
+        let committed: HashMap<TopicPartition, OffsetAndMetadata> = match wait_result {
+            Ok(map) => map,
+            Err(err) => return Err(err),
         };
 
         // Java: `interceptors.onCommit(committedOffsets)`.
@@ -1767,30 +1883,44 @@ where
     /// (`AsyncKafkaConsumer.java:1726-1749`).
     ///
     /// If there is a pending async commit, await it (bounded by the
-    /// deadline) and then drain the callback invoker queue. The `enable_wakeup`
-    /// flag mirrors Java's wakeup-trigger registration; when `true`, a
-    /// concurrent `wakeup()` interrupts the wait with
-    /// `KafkaError::Wakeup`.
+    /// deadline) and then drain the callback invoker queue. The
+    /// `enable_wakeup` flag mirrors Java's
+    /// `wakeupTrigger.setActiveTask(futureToAwait)` at line 1738 —
+    /// `true` makes a concurrent `wakeup()` interrupt the wait.
+    ///
+    /// Issue 10 / §31: the wait is routed through
+    /// [`Self::process_background_events_until`] so a bg-task
+    /// rebalance-listener callback enqueued mid-wait is delivered on
+    /// the caller's task. The `last_pending_async_commit` is a
+    /// `oneshot::Receiver<()>`; we adapt it to the typed-result form
+    /// expected by the helper via a fast bridge task.
     async fn await_pending_async_commits_and_execute_commit_callbacks(
         &mut self,
         deadline_ms: i64,
-        _enable_wakeup: bool,
+        enable_wakeup: bool,
     ) -> Result<(), KafkaError> {
         if let Some(rx) = self.last_pending_async_commit.take() {
-            let remaining = self.remaining_ms(deadline_ms);
-            let wait = remaining.max(0) as u64;
-            match tokio::time::timeout(Duration::from_millis(wait), rx).await {
-                Ok(_) => {
-                    // Either resolved (Ok(())) or the sender was dropped
-                    // (RecvError). Both are terminal for the pending
-                    // commit; proceed to drain the callbacks.
-                },
-                Err(_elapsed) => {
-                    return Err(KafkaError::timeout(
-                        "Timed out waiting for last pending async commit to complete",
-                    ));
-                },
-            }
+            // Bridge the `oneshot::Receiver<()>` to the
+            // `oneshot::Receiver<Result<(), KafkaError>>` shape the
+            // drain helper expects. Java's
+            // `awaitPendingAsyncCommits...` treats a dropped sender
+            // (RecvError) as "the commit already completed" (Java line
+            // 1740-1742 — `CompletableFuture.getOrThrow()` returns
+            // normally for already-completed futures), so we map both
+            // arms of the inner `rx` to `Ok(())`.
+            let (tx_typed, rx_typed) = tokio::sync::oneshot::channel::<Result<(), KafkaError>>();
+            tokio::spawn(async move {
+                let _ = rx.await;
+                let _ = tx_typed.send(Ok(()));
+            });
+            self.process_background_events_until::<()>(
+                rx_typed,
+                deadline_ms,
+                |_| false,
+                "Timed out waiting for last pending async commit to complete",
+                enable_wakeup,
+            )
+            .await?;
         }
         // Java: `offsetCommitCallbackInvoker.executeCallbacks()`.
         self.offset_commit_callback_invoker.invoke_pending_callbacks().await;
@@ -1819,15 +1949,16 @@ where
         self.ensure_open()?;
         log::info!("Seeking to offset {offset} for partition {partition}");
         let deadline_ms = self.default_api_timeout_deadline_ms();
-        let now_ms = self.time.milliseconds();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::SeekUnvalidated { handle, partition, offset, offset_epoch: None },
-                receiver,
-                now_ms,
-            )
-            .await
+        // Java's `seek(...)` does NOT call `setActiveTask` — match.
+        self.submit_and_drain::<()>(
+            ApplicationEvent::SeekUnvalidated { handle, partition, offset, offset_epoch: None },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek event to complete",
+            false,
+        )
+        .await
     }
 
     /// Java: `void seek(TopicPartition, OffsetAndMetadata)`.
@@ -1846,20 +1977,20 @@ where
             None => log::info!("Seeking to offset {offset} for partition {partition}"),
         }
         let deadline_ms = self.default_api_timeout_deadline_ms();
-        let now_ms = self.time.milliseconds();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::SeekUnvalidated {
-                    handle,
-                    partition,
-                    offset,
-                    offset_epoch: offset_and_metadata.leader_epoch(),
-                },
-                receiver,
-                now_ms,
-            )
-            .await
+        self.submit_and_drain::<()>(
+            ApplicationEvent::SeekUnvalidated {
+                handle,
+                partition,
+                offset,
+                offset_epoch: offset_and_metadata.leader_epoch(),
+            },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek event to complete",
+            false,
+        )
+        .await
     }
 
     /// Java: `void seekToBeginning(Collection<TopicPartition>)`.
@@ -1884,15 +2015,15 @@ where
         self.ensure_open()?;
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let deadline_ms = self.default_api_timeout_deadline_ms();
-        let now_ms = self.time.milliseconds();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<()>(
-                ApplicationEvent::ResetOffset { handle, partitions: set, offset_reset_strategy: strategy },
-                receiver,
-                now_ms,
-            )
-            .await
+        self.submit_and_drain::<()>(
+            ApplicationEvent::ResetOffset { handle, partitions: set, offset_reset_strategy: strategy },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for the seek-with-reset-strategy event to complete",
+            false,
+        )
+        .await
     }
 
     /// Java: `long position(TopicPartition)` — uses default API timeout.
@@ -1927,18 +2058,38 @@ where
             }
 
             // Java: `updateFetchPositions(timer)` — drives the
-            // `CheckAndUpdatePositionsEvent` round-trip.
+            // `CheckAndUpdatePositionsEvent` round-trip. Routed through
+            // `submit_and_drain` so a bg-task rebalance-listener
+            // callback enqueued mid-wait is delivered on the caller's
+            // task (Issue 10 / §31). Java `setActiveTask` analog: the
+            // helper's `enable_wakeup=true` makes a concurrent
+            // `wakeup()` interrupt the wait (Issue 11 / §11).
             let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-            self.application_event_handler
-                .add_and_get::<()>(ApplicationEvent::CheckAndUpdatePositions { handle }, receiver, now_ms)
-                .await
-                .ok();
-
-            if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
-                self.wakeup_trigger.rotate();
-                return Err(err);
+            let drain_result = self
+                .submit_and_drain::<()>(
+                    ApplicationEvent::CheckAndUpdatePositions { handle },
+                    receiver,
+                    deadline_ms,
+                    "Timeout expired while waiting for CheckAndUpdatePositions",
+                    true,
+                )
+                .await;
+            // Java's `updateFetchPositions` catches `TimeoutException`
+            // only and returns false; any other exception propagates
+            // (`AsyncKafkaConsumer.java:1960-1971`). Issue 14: replace
+            // the previous `.await.ok()` blanket swallow with explicit
+            // error handling.
+            match drain_result {
+                Ok(()) => {},
+                Err(KafkaError::Timeout(_)) => {
+                    // Loop will re-check `remaining_ms` below and
+                    // surface the user-facing timeout error.
+                },
+                Err(err) => return Err(err),
             }
 
+            // The drain helper rotates the token on wakeup itself, so
+            // the second-line check below is only the deadline guard.
             if self.time.milliseconds() >= deadline_ms {
                 return Err(KafkaError::timeout(format!(
                     "Timeout of {}ms expired before the position for partition {} could be determined",
@@ -1975,12 +2126,19 @@ where
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) =
             make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        // Java's `committed(...)` calls `setActiveTask(event.future())`
+        // (`AsyncKafkaConsumer.java:1176`) so a concurrent `wakeup()`
+        // interrupts the wait — `enable_wakeup=true`. Issue 10 / §31:
+        // the helper interleaves bg-event drains so a mid-wait
+        // rebalance-listener callback is delivered on the caller's
+        // task instead of deadlocking the bg task on its ack.
         let result = self
-            .application_event_handler
-            .add_and_get::<HashMap<TopicPartition, OffsetAndMetadata>>(
+            .submit_and_drain::<HashMap<TopicPartition, OffsetAndMetadata>>(
                 ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
                 receiver,
-                now_ms,
+                deadline_ms,
+                "Timeout expired while waiting for FetchCommittedOffsets",
+                true,
             )
             .await;
         match result {
@@ -2001,20 +2159,24 @@ where
     /// stub (commit (2/N)) returned `None` for every input.
     pub async fn current_lag_async(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, KafkaError> {
         self.ensure_open()?;
-        let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let (handle, receiver, _erased) = make_completable_event::<Option<i64>>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<Option<i64>>(
-                ApplicationEvent::CurrentLag {
-                    handle,
-                    partition: topic_partition.clone(),
-                    isolation_level: self.isolation_level,
-                },
-                receiver,
-                now_ms,
-            )
-            .await
+        // Java's `currentLag` does NOT call `setActiveTask` —
+        // `enable_wakeup=false`. Issue 10 / §31: still routes through
+        // the drain helper so a bg-task listener callback fired during
+        // the wait is serviced.
+        self.submit_and_drain::<Option<i64>>(
+            ApplicationEvent::CurrentLag {
+                handle,
+                partition: topic_partition.clone(),
+                isolation_level: self.isolation_level,
+            },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for CurrentLag",
+            false,
+        )
+        .await
     }
 
     // ── Beginning / end offsets / offsetsForTimes ─────────────────────
@@ -2090,12 +2252,17 @@ where
 
         let (handle, receiver, _erased) =
             make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+        // Java's `beginningOffsets` / `endOffsets` do NOT call
+        // `setActiveTask` — `enable_wakeup=false`. Issue 10 / §31: the
+        // drain helper interleaves bg-event processing so a mid-wait
+        // listener callback is serviced on the caller's task.
         let result = self
-            .application_event_handler
-            .add_and_get::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
+            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
                 receiver,
-                now_ms,
+                deadline_ms,
+                "Timeout expired while waiting for ListOffsets",
+                false,
             )
             .await;
         match result {
@@ -2167,12 +2334,16 @@ where
 
         let (handle, receiver, _erased) =
             make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+        // Java's `offsetsForTimes` does NOT call `setActiveTask` —
+        // `enable_wakeup=false`. Issue 10 / §31: drain helper still
+        // interleaves bg-event processing.
         let result = self
-            .application_event_handler
-            .add_and_get::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
+            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
                 receiver,
-                now_ms,
+                deadline_ms,
+                "Timeout expired while waiting for ListOffsets",
+                false,
             )
             .await;
         match result {
@@ -2232,12 +2403,15 @@ where
         let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
         let (handle, receiver, _erased) =
             make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
+        // Java's `partitionsFor` calls `setActiveTask(future)`
+        // (`AsyncKafkaConsumer.java:1223`) — `enable_wakeup=true`.
         let map = self
-            .application_event_handler
-            .add_and_get::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
+            .submit_and_drain::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
                 ApplicationEvent::TopicMetadata { handle, topic: topic.to_string() },
                 receiver,
-                now_ms,
+                deadline_ms,
+                "Timeout expired while waiting for TopicMetadata",
+                true,
             )
             .await?;
         Ok(map.get(topic).cloned().unwrap_or_default())
@@ -2266,13 +2440,16 @@ where
         let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
         let (handle, receiver, _erased) =
             make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
-                ApplicationEvent::AllTopicsMetadata { handle },
-                receiver,
-                now_ms,
-            )
-            .await
+        // Java's `listTopics` calls `setActiveTask(future)`
+        // (`AsyncKafkaConsumer.java:1251`) — `enable_wakeup=true`.
+        self.submit_and_drain::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
+            ApplicationEvent::AllTopicsMetadata { handle },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for AllTopicsMetadata",
+            true,
+        )
+        .await
     }
 
     // ── Pause / resume ─────────────────────────────────────────────────
@@ -2284,13 +2461,20 @@ where
         if partitions.is_empty() {
             return Ok(());
         }
-        let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<()>(ApplicationEvent::PausePartitions { handle, partitions: set }, receiver, now_ms)
-            .await
+        // Java's `pause(...)` does NOT call `setActiveTask` —
+        // `enable_wakeup=false`. Issue 10 / §31: drain helper still
+        // services bg-event callbacks fired during the wait.
+        self.submit_and_drain::<()>(
+            ApplicationEvent::PausePartitions { handle, partitions: set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for PausePartitions",
+            false,
+        )
+        .await
     }
 
     /// Java: `void resume(Collection<TopicPartition>)`
@@ -2300,13 +2484,18 @@ where
         if partitions.is_empty() {
             return Ok(());
         }
-        let now_ms = self.time.milliseconds();
         let deadline_ms = self.default_api_timeout_deadline_ms();
         let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
-        self.application_event_handler
-            .add_and_get::<()>(ApplicationEvent::ResumePartitions { handle, partitions: set }, receiver, now_ms)
-            .await
+        // Java's `resume(...)` does NOT call `setActiveTask`.
+        self.submit_and_drain::<()>(
+            ApplicationEvent::ResumePartitions { handle, partitions: set },
+            receiver,
+            deadline_ms,
+            "Timeout expired while waiting for ResumePartitions",
+            false,
+        )
+        .await
     }
 
     // ── Enforce rebalance (KIP-848: unsupported) ──────────────────────
@@ -2596,14 +2785,20 @@ where
         }
 
         log::debug!("Leaving the consumer group during consumer close");
-        let now_ms = self.time.milliseconds();
         let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        // Java's `leaveGroupOnClose` does NOT call `setActiveTask` and
+        // close has already called `wakeup_trigger.disable()`
+        // (Java line 1545) so wakeup is inert in this path —
+        // `enable_wakeup=false`. Issue 10 / §31: still routes through
+        // the drain helper so a pending rebalance-listener callback is
+        // serviced on the caller's task.
         let result = self
-            .application_event_handler
-            .add_and_get::<()>(
+            .submit_and_drain::<()>(
                 ApplicationEvent::LeaveGroupOnClose { handle, membership_operation },
                 receiver,
-                now_ms,
+                deadline_ms,
+                "Timeout expired while waiting for LeaveGroupOnClose",
+                false,
             )
             .await;
         match result {
@@ -3505,6 +3700,164 @@ mod tests {
         consumer.process_background_events().await.expect("ok");
     }
 
+    /// Issue 11 regression: a blocking API with `enable_wakeup=true`
+    /// (`commit_sync`, here) must observe a `wakeup()` posted by
+    /// another task and return `KafkaError::Wakeup`. This mirrors
+    /// Java's `wakeupTrigger.setActiveTask(commitFuture)` discipline at
+    /// `AsyncKafkaConsumer.java:1716`.
+    #[tokio::test]
+    async fn issue_11_commit_sync_observes_wakeup_during_wait() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        // Pre-cancel the wakeup token. The drain helper's top-of-loop
+        // `maybe_trigger_wakeup` check will see this and return.
+        consumer.wakeup_trigger.wakeup();
+
+        let err = consumer
+            .commit_sync_timeout(Duration::from_secs(5))
+            .await
+            .expect_err("must wake up before deadline");
+        assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+        // Token rotated after the wakeup was surfaced.
+        assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+    }
+
+    /// Issue 11 regression: `committed_timeout` ALSO observes wakeup
+    /// (Java line 1176 `setActiveTask`).
+    #[tokio::test]
+    async fn issue_11_committed_observes_wakeup_during_wait() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        consumer.wakeup_trigger.wakeup();
+
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = consumer
+            .committed_timeout(&[tp], Duration::from_secs(5))
+            .await
+            .expect_err("must wake up before deadline");
+        assert!(matches!(err, KafkaError::Wakeup(_)), "expected Wakeup, got {err:?}");
+        assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+    }
+
+    /// Issue 11 negative: APIs Java doesn't `setActiveTask` (e.g.
+    /// `pause`) must NOT observe wakeup. The Rust drain helper passes
+    /// `enable_wakeup=false` so the wait completes normally.
+    #[tokio::test]
+    async fn issue_11_pause_does_not_observe_wakeup() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        consumer.wakeup_trigger.wakeup();
+        let tp = TopicPartition::new("t".to_string(), 0);
+
+        // Spawn a completer that resolves the PausePartitions event.
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::PausePartitions { handle, .. } = env.event {
+                    handle.complete(());
+                    return;
+                }
+            }
+        });
+
+        // Should succeed without raising Wakeup despite the cancelled token.
+        consumer.pause(&[tp]).await.expect("pause must NOT observe wakeup");
+        completer.await.expect("completer ok");
+    }
+
+    /// Issue 10 regression: every blocking-style API must drain the
+    /// bg-event channel while waiting on its typed completion so a
+    /// rebalance-listener callback enqueued by the bg task (which
+    /// blocks on its ack — see `abstract_membership_manager.rs:747`)
+    /// is delivered on the caller's task instead of deadlocking.
+    ///
+    /// Scenario: app calls `commit_sync_timeout` with a short timeout;
+    /// before the commit event is completed, a
+    /// `RebalanceListenerCallbackNeeded` lands on the bg-event channel
+    /// AND its ack receiver is held by a "fake bg task" that waits for
+    /// the listener invocation. The Rust drain helper must invoke the
+    /// app-side listener inline, ack the callback, and then resolve
+    /// the commit. Without Issue 10's fix this would deadlock until
+    /// the commit_sync timeout.
+    #[tokio::test]
+    async fn issue_10_commit_sync_drains_listener_callback_while_waiting() {
+        use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicBool;
+        use tokio::sync::oneshot;
+
+        struct InlineListener {
+            invoked: Arc<AtomicBool>,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for InlineListener {
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.invoked.store(true, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let invoked = Arc::new(AtomicBool::new(false));
+        let listener: Arc<InlineListener> = Arc::new(InlineListener { invoked: Arc::clone(&invoked) });
+        *consumer.rebalance_listener.lock().unwrap() = Some(listener as Arc<dyn ConsumerRebalanceListener>);
+
+        // Coordination channel: the fake bg task signals back when it
+        // has received the listener ack.
+        let (ack_observed_tx, ack_observed_rx) = oneshot::channel::<()>();
+
+        // Fake bg task: waits for a CommitSync envelope, posts a
+        // `RebalanceListenerCallbackNeeded` to the bg channel and
+        // awaits its ack BEFORE completing the commit. This is exactly
+        // the order that the Java/Rust bg task's
+        // `invoke_rebalance_callback` would see.
+        let bg_event_tx = handles.bg_event_tx.clone();
+        let completer = tokio::spawn(async move {
+            // 1. Pull the CommitSync envelope.
+            let env = handles.app_event_rx.recv().await.expect("CommitSync envelope must arrive");
+            let (handle, offsets_ready) = match env.event {
+                ApplicationEvent::CommitSync { handle, offsets_ready, .. } => (handle, offsets_ready),
+                other => panic!("expected CommitSync, got {}", other.type_name()),
+            };
+
+            // 2. Post a listener callback that the app side must drain
+            //    while it's blocked on the commit.
+            let (ack_tx, ack_rx) = oneshot::channel::<Result<(), KafkaError>>();
+            bg_event_tx
+                .send(BackgroundEventEnvelope {
+                    event: BackgroundEvent::ConsumerRebalanceListenerCallbackNeeded {
+                        method_name: ConsumerRebalanceListenerMethodName::OnPartitionsAssigned,
+                        partitions: vec![TopicPartition::new("t".to_string(), 0)],
+                        ack: ack_tx,
+                    },
+                    enqueued_ms: 0,
+                })
+                .expect("bg event sent");
+
+            // 3. Block until the app side acks the listener callback —
+            //    the deadlock-free guarantee Issue 10 enforces.
+            let _ = ack_rx.await.expect("listener ack received");
+            let _ = ack_observed_tx.send(());
+
+            // 4. Now complete the commit.
+            offsets_ready.complete(());
+            handle.complete(HashMap::new());
+        });
+
+        consumer
+            .commit_sync_timeout(Duration::from_secs(5))
+            .await
+            .expect("commit_sync completes — no deadlock");
+        completer.await.expect("completer task ok");
+
+        assert!(invoked.load(Ordering::SeqCst), "listener must have been invoked");
+        // Sanity: the ack was observed before the commit completed,
+        // proving the drain was interleaved.
+        ack_observed_rx.await.expect("ack signal received");
+    }
+
     // ─── Poll lifecycle tests (commit 4/N) ───
     //
     // Stand-ins for Java's `testWakeupBeforeCallingPoll`, `testWakeupAfterEmptyFetch`,
@@ -4126,7 +4479,11 @@ mod tests {
             0,
             "no listener call when snapshot is empty (manual-assign consumer)"
         );
-        assert_eq!(listener.lost.load(Ordering::SeqCst), 0, "no listener call when snapshot is empty");
+        assert_eq!(
+            listener.lost.load(Ordering::SeqCst),
+            0,
+            "no listener call when snapshot is empty"
+        );
     }
 
     /// Issue 12/13 regression: `run_rebalance_callbacks_on_close`

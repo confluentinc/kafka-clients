@@ -122,6 +122,100 @@ Each section records the original Critic finding + the resolving commit.
 
 ---
 
+## Issue 10: BG-task `invoke_rebalance_callback` blocks on ack; app-side `add_and_get` does NOT drain bg events → deadlock risk on `commit_*`, `position`, `committed`, `beginning_offsets`, `end_offsets`, `offsets_for_times`, `pause`, `resume`, `seek*`, `leave_group_on_close` — RESOLVED
+
+- **Original commit**: `3a7bcf1` Phase 11 (5/N) introduced
+  `process_background_events_until` but only wired it through
+  `unsubscribe()`. Subsequent commits added more blocking-style APIs
+  via `add_and_get(...).await` without iterative drain.
+- **Resolving commit**: fixup of Phase 11 (5/N) — adds a
+  `Self::submit_and_drain` helper that does
+  `application_event_handler.add(event)` followed by
+  `process_background_events_until(receiver, deadline, ignore=|_| false, msg, enable_wakeup)`,
+  and routes every blocking-style API through it:
+    - `subscribe` / `subscribe_internal_pattern` / `subscribe_to_regex`
+    - `assign`
+    - `commit_inner` (the `offsets_ready_rx` wait) +
+      `commit_sync_internal` (the typed-result wait)
+    - `await_pending_async_commits_and_execute_commit_callbacks`
+      (bridges `oneshot::Receiver<()>` to typed form)
+    - `seek` / `seek_with_metadata` / `seek_with_reset_strategy`
+    - `position_timeout` (replaces the `add_and_get(...).await.ok()`)
+    - `committed_timeout`
+    - `current_lag_async`
+    - `beginning_or_end_offsets` + `offsets_for_times_timeout`
+    - `partitions_for_timeout` + `list_topics_timeout`
+    - `pause` + `resume`
+    - `leave_group_on_close`
+- **Resolution**: `process_background_events_until` gained an
+  `enable_wakeup: bool` parameter so each API can pass the right
+  setActiveTask analog (see Issue 11). The wait loop now also
+  `select!`s the receiver against the wakeup token's cancellation
+  signal — when `enable_wakeup=true`, a concurrent `wakeup()` returns
+  `KafkaError::Wakeup` immediately instead of waiting up to 100ms for
+  the timeout to fire.
+- **Verification**:
+    - `issue_10_commit_sync_drains_listener_callback_while_waiting`:
+      simulates the exact deadlock scenario from the Critic's
+      description — a `RebalanceListenerCallbackNeeded` lands on the
+      bg channel mid-commit, and the test's fake bg task blocks on the
+      ack BEFORE completing the commit. With the fix, the app-side
+      drain helper invokes the listener inline, the ack flows back,
+      and the commit completes. Without the fix, the commit would
+      time out at 5s.
+    - All 62 `async_kafka_consumer` tests pass.
+
+---
+
+## Issue 11: Every blocking-style API except `poll` / `position` ignores `wakeup()` — Java's `wakeupTrigger.setActiveTask` mechanism is not translated — RESOLVED
+
+- **Original commit**: `5f6dee9` Phase 11 (4/N) onwards — each
+  blocking API translated without the `setActiveTask` analog.
+- **Resolving commit**: same fixup as Issue 10. The Rust analog of
+  Java's `setActiveTask(future)` + `clearTask()` discipline is the
+  `enable_wakeup: bool` parameter on
+  `process_background_events_until` (and the wrapping
+  `submit_and_drain`). At the top of every loop iteration the helper
+  re-checks `wakeup_trigger.maybe_trigger_wakeup()`; in the bounded
+  wait it `select!`s the receiver against
+  `wakeup_trigger.current_token().cancelled()`. On a `wakeup()` the
+  token is rotated immediately before returning `KafkaError::Wakeup`,
+  mirroring Java's "clear the volatile flag after throwing
+  WakeupException once" (§11).
+- **Per-API matrix** (matches Java source — `enable_wakeup` value):
+    - `commit_sync` / `commit_sync_internal` typed wait: **true**
+      (Java line 1716)
+    - `committed_timeout`: **true** (Java line 1176)
+    - `partitions_for_timeout`: **true** (Java line 1223)
+    - `list_topics_timeout`: **true** (Java line 1251)
+    - `position_timeout` (CheckAndUpdatePositions wait): **true**
+      (Java line 1963)
+    - `await_pending_async_commits_...`: per-call `enable_wakeup`
+      param (Java line 1738 / 1562)
+    - `commit_inner` offsets-ready wait: **true** (deviation from
+      Java — see code comment; uniform wakeup-observable semantic
+      makes commit_sync respond to wakeup at every phase, NOT
+      blocking the user 30s on offsets_ready while the commit deadline
+      is 5s)
+    - `subscribe` / `assign` / `seek*` / `pause` / `resume`: **false**
+      (Java does not setActiveTask)
+    - `current_lag_async`: **false** (Java does not setActiveTask)
+    - `beginning_or_end_offsets` / `offsets_for_times`: **false**
+      (Java does not setActiveTask)
+    - `leave_group_on_close`: **false** (wakeup disabled by close
+      path anyway)
+- **Verification**:
+    - `issue_11_commit_sync_observes_wakeup_during_wait` — pre-cancel
+      the token, verify commit_sync returns Wakeup quickly and
+      rotates.
+    - `issue_11_committed_observes_wakeup_during_wait` — same for
+      `committed_timeout`.
+    - `issue_11_pause_does_not_observe_wakeup` — pre-cancel the
+      token, verify `pause` completes normally despite the cancelled
+      token (Java doesn't setActiveTask for pause).
+
+---
+
 ## Issue 12: `runRebalanceCallbacksOnClose` uses `subscriptions.assignedPartitions()` where Java uses `groupAssignmentSnapshot.get()` — RESOLVED
 
 - **Original commit**: `069a6c4` Phase 11 (7/N).
