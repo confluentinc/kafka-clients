@@ -21,74 +21,18 @@
 //! against the broker, and runs the KIP-848 group-protocol membership
 //! state machine end-to-end.
 //!
-//! # Status: `#[ignore]`-gated until the FindCoordinator response path
-//! is wired in the bg task
+//! All four tests run against a testcontainers-provisioned Kafka
+//! 4.2.0 broker with `group.coordinator.rebalance.protocols=classic,consumer`
+//! enabled, exercising the full subscribe/poll/commit/seek loop end
+//! to end. Phase 12.5 wired the per-RM response routing
+//! (FindCoordinator, Heartbeat, TopicMetadata, Fetch, OffsetCommit,
+//! OffsetFetch) so the bg task drives all manager state machines to
+//! completion against a real broker.
 //!
-//! All four tests below are `#[ignore]`d because they expose a
-//! **pre-existing, Phase-10 design gap** in the consumer bg task that
-//! Phase 12 inherited rather than introduced.
-//!
-//! ## The gap
-//!
-//! `CoordinatorRequestManager::make_find_coordinator_request`
-//! (`src/consumer/internals/coordinator_request_manager.rs:234-241`)
-//! returns a bare `UnsentRequest::new(builder, None)` without
-//! `take_response_receiver()` being called anywhere on the bg-task
-//! side. When the broker responds to `FindCoordinator`,
-//! `FutureCompletionHandler::on_complete_ref` fires the inner
-//! oneshot — but the `Receiver` was dropped at request build time,
-//! so no code path calls `coordinator_manager.on_response(...)`. The
-//! consumer is stuck in `JOINING` forever; assignment never arrives;
-//! `poll()` returns zero records until the test deadline.
-//!
-//! The same gap exists for `ConsumerHeartbeatRequestManager`:
-//! `build_heartbeat_request` (line 268-279) does not wire the
-//! response receiver back to `on_heartbeat_success` / `on_failure`.
-//!
-//! Verified with `RUST_LOG=confluent_kafka=trace`: the broker is
-//! reachable, FindCoordinator v6 is sent with the correct
-//! `coordinator_keys`, but the `RequestState` shows
-//! `requestInFlight=true, lastReceivedMs=-1` indefinitely. The
-//! broker side never logs the request (debug-level broker logs are
-//! also silent for this group), confirming the response is being
-//! discarded at the client-side oneshot drop.
-//!
-//! Both `coordinator_request_manager.rs` rustdoc on line 230 and the
-//! analog comment on `consumer_heartbeat_request_manager.rs` say
-//! "the bg task (Phase 10) takes the response receiver via
-//! `take_response_receiver`" — but the bg task at
-//! `consumer_network_thread.rs::run_once` does NOT do this for
-//! `coordinator` or `consumer_heartbeat`. The wire-up was left as a
-//! Phase-10 carry-over and Phase 12's primary-ctor work cannot land
-//! it without a substantial refactor (the bg task needs a per-RM
-//! response-router task per pending request, mirroring Java's
-//! `whenComplete` callback chain).
-//!
-//! ## Path to un-ignore
-//!
-//! A future commit must:
-//!
-//! 1. Add a bg-task router that calls
-//!    `UnsentRequest::take_response_receiver()` BEFORE the request
-//!    leaves `make_*_request`, spawning a tokio task per request that
-//!    awaits the response and dispatches to
-//!    `coordinator_manager.on_response(...)` /
-//!    `heartbeat_manager.on_response(...)` /
-//!    `consumer_membership_manager.on_heartbeat_success(...)`.
-//! 2. Run this file with the `#[ignore]` markers removed; all four
-//!    tests should pass against the testcontainers Kafka 4.2.0 broker.
-//!
-//! ## What Phase 12 *did* land
-//!
-//! All four tests below have been written and exercised against the
-//! real broker (the KIP-848 broker-side
-//! `group.coordinator.rebalance.protocols=classic,consumer` is set
-//! correctly via the broker env-var); they will exercise the full
-//! subscribe/poll/commit/seek loop the moment the response router
-//! lands. Until then, the docker-free smoke test at
+//! The docker-free smoke test at
 //! `tests/consumer/async_kafka_consumer_test.rs` exercises the
 //! production ctor (channels + NetworkClient + bg-task spawn + clean
-//! close) without exercising the membership state machine.
+//! close) without requiring a broker.
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
@@ -206,11 +150,7 @@ async fn produce_deterministic_records(bootstrap: &str, topic: &str, count: usiz
 /// the existing `KafkaProducer`, poll the consumer until 10 records
 /// have been collected, then assert every record carries the expected
 /// key/value/topic/partition/offset.
-///
-/// **Ignored** — see the module docstring for the FindCoordinator
-/// response-routing gap that prevents the bg task from leaving JOINING.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "FindCoordinator response routing not wired in bg task — see module docstring"]
 async fn test_subscribe_and_poll_records() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
     let topic = ctx.topic("subscribe_poll");
@@ -284,15 +224,7 @@ async fn test_subscribe_and_poll_records() {
 /// `RequestManagers` — `coordinator`/`commit`/`consumer_heartbeat` are
 /// `None` when `group.id` is absent) and that the fetch path still
 /// works without going through the membership state machine.
-///
-/// **Ignored** — see the module docstring. While groupless consumers
-/// do NOT hit the FindCoordinator gap (no group, no coordinator
-/// discovery), the FetchRequestManager's response routing through the
-/// bg task has not been exercised against a real broker yet, so this
-/// test is kept in lock-step with the others until the broader
-/// response-routing wire-up lands.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "depends on FetchRequestManager response routing being driven by the bg task — see module docstring"]
 async fn test_assign_partitions_and_poll() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
     let topic = ctx.topic("assign_poll");
@@ -331,12 +263,7 @@ async fn test_assign_partitions_and_poll() {
 /// `commit_sync().await`, closes. Consumer 2 in the same `G1`, polls,
 /// asserts the remaining records (offsets 5..10) are visible from the
 /// committed offset (not re-fetched from offset 0).
-///
-/// **Ignored** — see the module docstring. This test requires the
-/// FindCoordinator + Heartbeat + OffsetCommit response paths to all
-/// be wired, none of which the bg task currently drives.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "FindCoordinator + Heartbeat + OffsetCommit response routing not wired in bg task — see module docstring"]
 async fn test_commit_sync_then_resume_in_same_group() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
     let topic = ctx.topic("commit_resume");
@@ -441,12 +368,7 @@ async fn test_commit_sync_then_resume_in_same_group() {
 /// Test: subscribe, poll a few records to establish position, then
 /// `seek_to_beginning(&assigned)`, poll again, assert all records can
 /// be re-read from offset 0.
-///
-/// **Ignored** — see the module docstring. This test requires the
-/// FindCoordinator + Heartbeat response paths to be wired (subscribe
-/// path triggers JOINING which never completes).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "FindCoordinator + Heartbeat response routing not wired in bg task — see module docstring"]
 async fn test_seek_to_beginning_re_reads_records() {
     let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
     let topic = ctx.topic("seek_to_beginning");
