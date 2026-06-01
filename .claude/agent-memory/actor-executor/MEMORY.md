@@ -35,3 +35,6 @@
 - [SSL/TLS Transport](ssl_tls_transport.md) — rustls patterns, ChannelBuilder refactor, NoHostnameVerifier, Box<TlsStream> for enum size
 - [SASL PLAIN auth flow](sasl_plain_auth_flow.md) — PLAIN goes INTERMEDIATE->COMPLETE directly, CLIENT_COMPLETE is for SCRAM only
 - [tokio watch send vs send_replace](tokio_watch_send_vs_send_replace.md) — watch::Sender::send drops value when no receivers; use send_replace
+- [Phase 12 (1-3/N) partial notes](phase12_partial_commits_1-3_notes.md) — AsyncKafkaConsumer ctor scaffold + RequestManagers Arc slot refactor + dual-notifier + bg-task spawn pattern
+- [Phase 12 Critic round-1 patterns](phase12_critic_round1_patterns.md) — bg-task RM polling parity for Arc-skipped slots, single-Arc state-notifier via components, shared Arc<AtomicI64>, &self via interior mutability, pollOnClose parity
+- [Phase 12 commits 4-6 notes](phase12_commits_4-6_notes.md) — factory swap + smoke test + integration tests #[ignore]-gated on pre-existing FindCoordinator/Heartbeat bg-task response-routing gap (Phase-10 carry-over)

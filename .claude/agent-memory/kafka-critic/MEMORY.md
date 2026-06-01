@@ -38,3 +38,5 @@
 - [M8 Phase 11 batch-1 patterns](review_m8_phase11_batch1.md) — acquireAndEnsureOpen drops closed-check too; one-shot drain vs Java iterative loop; store-listener-before-await consistency
 - [M8 Phase 11 batch-2 patterns](review_m8_phase11_batch2.md) — bg-task ack blocks app-side add_and_get → deadlock; wakeup setActiveTask missing; groupAssignmentSnapshot + MemberStateListener gap; .await.ok() swallows fatal errors
 - [M8 Phase 11 batch-3 patterns](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision (commit_inner → commit_async); skip section must enumerate Java tests
+- [M8 Phase 12 patterns](review_m8_phase12_patterns.md) — production-ctor wire-up: entries-skip without driver, dual-notifier on shared-state, separated Arc<AtomicI64>, auth no-op framing
+- [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped when RM lacks `take_response_receiver`+spawn pattern; rustdoc claims ≠ code reality
