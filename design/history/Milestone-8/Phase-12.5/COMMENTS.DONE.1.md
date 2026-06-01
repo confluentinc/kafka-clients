@@ -108,3 +108,71 @@
 
 - **Commits**:
   - `fixup! Phase 12.5 (3/N): Issue 3 — reset_heartbeat_state on error response branch`
+
+---
+
+## Issue 4: Heartbeat `Fenced` / `Fatal` error actions never drive `transitionToFenced` / `transitionToFatal` in production — RESOLVED
+
+- **File**: `src/consumer/internals/consumer_heartbeat_request_manager.rs:441-472` (the `Fenced` / `Fatal` arms of `on_response`); `src/consumer/internals/consumer_network_thread.rs::run_once` (new Phase 2.4 drain).
+- **Severity**: Behavior Mismatch (Missing Requirement)
+- **Java Reference**:
+  - `AbstractHeartbeatRequestManager.java:411-427` — `FENCED_MEMBER_EPOCH` / `UNKNOWN_MEMBER_ID` arms call `membershipManager().transitionToFenced();` synchronously inside the `whenComplete` lambda.
+  - `AbstractHeartbeatRequestManager.java:455-458` — `handleFatalFailure(Throwable error)` calls `membershipManager().transitionToFatal();` synchronously.
+  - `ConsumerHeartbeatRequestManager.java:109` — `handleSpecificFailure` for `UnsupportedVersionException` calls `handleFatalFailure(...)` (also transitions to FATAL).
+
+- **Description**:
+  When Rust's `classify_response_error` returned `HeartbeatErrorAction::Fenced` or `HeartbeatErrorAction::Fatal(err)`, the drain emitted a `BackgroundEvent::Error` envelope but no production code path drove `transition_to_fenced` / `transition_to_fatal` on the membership state machine. `grep "\.transition_to_fatal\|\.transition_to_fenced" src/ | grep -v test` returned only test callsites. As a result, the membership manager could not recover from broker fencing or transition to FATAL — a fenced consumer would propagate the error to the user via `poll()` but the membership state would not advance to FENCED → JOINING, and the consumer could not rejoin after a server-side fence.
+
+- **Fix (option 1 from Critic comment — production wiring)**:
+
+  1. **Heartbeat-side side-channel** (`consumer_heartbeat_request_manager.rs`):
+     - New `pub(crate) enum PendingMembershipTransition { Fenced, Fatal(KafkaError) }`.
+     - New `mpsc::UnboundedChannel<PendingMembershipTransition>` field on `ConsumerHeartbeatRequestManager`.
+     - `on_response` `Fenced` arm pushes `PendingMembershipTransition::Fenced` in addition to emitting `BackgroundEvent::Error`.
+     - `on_response` `Fatal(err)` arm pushes `PendingMembershipTransition::Fatal(err.clone())` in addition to emitting the error event.
+     - `on_failure` fatal path (non-retriable + `handle_specific_failure` returned false) pushes `PendingMembershipTransition::Fatal(error.clone())`.
+     - `handle_specific_failure` (UnsupportedVersion arm) pushes `PendingMembershipTransition::Fatal(...)` to mirror Java's `handleFatalFailure` inside `ConsumerHeartbeatRequestManager.handleSpecificFailure`.
+     - New `pub(crate) fn take_pending_membership_transitions(&mut self) -> Vec<PendingMembershipTransition>` drains the side-channel.
+
+  2. **RequestManagers façade** (`request_managers.rs`):
+     - New `pub(crate) fn take_pending_membership_transitions(&mut self)` delegates to `consumer_heartbeat.as_mut()?.take_pending_membership_transitions()`, returns empty Vec if no heartbeat manager is wired.
+
+  3. **Bg-task drive** (`consumer_network_thread.rs` `run_once`):
+     - New "Phase 2.4" block inserted between `entries().poll(now)` (which lets the heartbeat manager classify pending responses) and "Phase 2.5: membership.reconcile" (which observes the post-transition state).
+     - Locks `request_managers`, drains transitions, drops the guard, then `await`s `membership.transition_to_fenced(now)` / `transition_to_fatal(now)` for each envelope. Failures are logged and swallowed (mirrors Java's `whenComplete` lambda which logs but does not rethrow).
+
+  **§16 audit**: between draining the transitions and the cross-RM `membership.transition_to_*` `.await` calls, no `Mutex::lock()` is held — the `request_managers` guard is dropped before the `.await`. The membership manager's internal `Mutex` is acquired inside the transition methods, not from the caller side.
+
+- **Regression tests** (in `consumer_heartbeat_request_manager.rs::tests`):
+
+  1. `issue4_fenced_member_epoch_drives_transition_to_fenced` — drives a heartbeat, routes a `FENCED_MEMBER_EPOCH` response through the spawned forwarder, drives `poll(now)` until the drain classifies, asserts exactly one `PendingMembershipTransition::Fenced` envelope on the side-channel, drives `mm.transition_to_fenced(0).await`, asserts the membership state is `Joining` (post-fence rejoin — `transition_to_fenced` with empty assignment runs JOINING → FENCED → no listener → JOINING), and asserts at least one `BackgroundEvent::Error` envelope was emitted.
+
+  2. `issue4_group_authorization_failed_drives_transition_to_fatal` — drives a heartbeat, routes a `GROUP_AUTHORIZATION_FAILED` response, drives `poll(now)` until the drain classifies, asserts exactly one `PendingMembershipTransition::Fatal(...)` envelope carrying `Errors::GroupAuthorizationFailed`, drives `mm.transition_to_fatal(0).await`, asserts the membership state is `Fatal`, and asserts at least one `BackgroundEvent::Error` envelope was emitted.
+
+  Both tests use a new `drive_error_response_and_collect` helper that encapsulates the response-routing scaffolding (poll, on_complete, drain loop with 200ms deadline) so the per-error tests focus on the classification mapping.
+
+- **Error-classification table** (Rust mapping verified against Java `AbstractHeartbeatRequestManager.java:351-446` and `ConsumerHeartbeatRequestManager.java:98-160`):
+
+  | Rust error code               | Rust action                          | Side-channel emission     | Java behaviour                                              |
+  |-------------------------------|--------------------------------------|---------------------------|-------------------------------------------------------------|
+  | `NotCoordinator`              | `Handled` (mark coord unknown, reset)| none                      | `coordinatorRequestManager.markCoordinatorUnknown` + reset  |
+  | `CoordinatorNotAvailable`     | `Handled` (mark coord unknown, reset)| none                      | same as above                                               |
+  | `CoordinatorLoadInProgress`   | `Handled` (backoff + retry)          | none                      | log + backoff, no transition                                |
+  | `GroupAuthorizationFailed`    | `Fatal(GAFE)`                        | `Fatal(...)`              | `handleFatalFailure` → `transitionToFatal`                  |
+  | `TopicAuthorizationFailed`    | `Handled` (emit ErrorEvent)          | none                      | `backgroundEventHandler.add(ErrorEvent)`, no transition     |
+  | `InvalidRequest`              | `Fatal(...)`                         | `Fatal(...)`              | `handleFatalFailure` → `transitionToFatal`                  |
+  | `GroupMaxSizeReached`         | `Fatal(...)`                         | `Fatal(...)`              | same as above                                               |
+  | `UnsupportedAssignor`         | `Fatal(...)`                         | `Fatal(...)`              | same as above                                               |
+  | `FencedMemberEpoch`           | `Fenced`                             | `Fenced`                  | `membershipManager().transitionToFenced()` + skip backoff   |
+  | `UnknownMemberId`             | `Fenced`                             | `Fenced`                  | same as above                                               |
+  | `InvalidRegularExpression`    | `Fatal(...)`                         | `Fatal(...)`              | `handleFatalFailure` → `transitionToFatal`                  |
+  | `UnsupportedVersion` (response)| `Fatal(...)` via `handle_specific_exception_in_response` | `Fatal(...)` | `handleSpecificExceptionInResponse` → `handleFatalFailure` |
+  | `UnreleasedInstanceId`        | `Fatal(...)` via `handle_specific_exception_in_response` | `Fatal(...)` | classify + `handleFatalFailure`                            |
+  | `FencedInstanceId`            | `Fatal(...)` via `handle_specific_exception_in_response` | `Fatal(...)` | classify + `handleFatalFailure`                            |
+  | `UnsupportedVersion` (transport / `on_failure`) | fatal via `handle_specific_failure` | `Fatal(...)` | `handleSpecificFailure` → `handleFatalFailure`           |
+  | any other (transport non-retriable + `handle_specific_failure` returns false) | fatal | `Fatal(...)` | `handleFatalFailure`                                       |
+
+  Every error code that Java passes to `transitionToFenced` / `transitionToFatal` now routes to the same call in Rust via the side-channel.
+
+- **Commits**:
+  - `fixup! Phase 12.5 (3/N): Issue 4 — drive transition_to_fenced/_fatal from heartbeat response classifier`

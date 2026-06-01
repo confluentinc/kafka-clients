@@ -460,6 +460,56 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             }
         }
 
+        // ──── Phase 2.4: drive pending fenced/fatal transitions ────
+        //
+        // Java's `AbstractHeartbeatRequestManager` calls
+        // `membershipManager().transitionToFenced()` / `transitionToFatal()`
+        // synchronously inside its `whenComplete` lambda
+        // (`AbstractHeartbeatRequestManager.java:415,424,457`). Rust's
+        // membership transitions are `async` (they await §31's
+        // onPartitionsLost listener) and the heartbeat manager's
+        // `poll(now)` is sync, so the heartbeat pushes the
+        // classification onto a side-channel
+        // ([`PendingMembershipTransition`]) and the bg-task drains
+        // and `await`s it here — AFTER `entries().poll(now)` (so the
+        // heartbeat's drain has had a chance to classify any pending
+        // responses) and BEFORE `membership.reconcile(now)` (so the
+        // membership state machine observes the fence / fatal before
+        // reconciliation runs).
+        //
+        // Failures from the transition `await` are logged and
+        // swallowed — mirrors Java's `whenComplete` lambda which logs
+        // errors thrown by transitionToFenced / transitionToFatal but
+        // does not rethrow.
+        if let Some(membership) = self.membership.clone() {
+            let pending = {
+                let mut rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard.take_pending_membership_transitions()
+            };
+            for transition in pending {
+                use super::consumer_heartbeat_request_manager::PendingMembershipTransition;
+                match transition {
+                    PendingMembershipTransition::Fenced => {
+                        if let Err(e) = membership.transition_to_fenced(current_time_ms).await {
+                            log::warn!("transition_to_fenced (driven from heartbeat) failed: {}", e);
+                        }
+                    },
+                    PendingMembershipTransition::Fatal(err) => {
+                        log::error!(
+                            "Driving membership.transition_to_fatal from heartbeat fatal classification: {}",
+                            err
+                        );
+                        if let Err(e) = membership.transition_to_fatal(current_time_ms).await {
+                            log::warn!("transition_to_fatal (driven from heartbeat) failed: {}", e);
+                        }
+                    },
+                }
+            }
+        }
+
         // ──── Phase 2.5: drive membership.reconcile per iteration ────
         //
         // Java's `AbstractMembershipManager.poll(now)` body is

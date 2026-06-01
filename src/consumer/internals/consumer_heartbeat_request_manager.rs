@@ -84,6 +84,36 @@ pub(crate) enum PendingHeartbeatCompletion {
     Failure { error: KafkaError, completion_time_ms: i64 },
 }
 
+/// Side-channel envelope emitted by [`ConsumerHeartbeatRequestManager`]
+/// when the response classifier yields a `Fenced` or `Fatal` outcome.
+/// The heartbeat manager's `poll(now)` is sync, but
+/// `ConsumerMembershipManager::transition_to_fenced` /
+/// `transition_to_fatal` are `async` (they await §31
+/// `onPartitionsLost` listener callbacks). The bg-task drains this
+/// channel from the heartbeat handle after `entries().poll(now)` and
+/// `await`s the appropriate transition on `self.membership`.
+///
+/// Mirrors Java's `AbstractHeartbeatRequestManager.java:415,424`
+/// (`membershipManager().transitionToFenced();` synchronous inside the
+/// `whenComplete` lambda) and `AbstractHeartbeatRequestManager.java:457`
+/// (`handleFatalFailure` → `membershipManager().transitionToFatal();`).
+/// Rust splits the "advise the membership manager" half off because the
+/// membership transition is `async` and `poll` is sync.
+#[derive(Debug)]
+pub(crate) enum PendingMembershipTransition {
+    /// Broker returned `FENCED_MEMBER_EPOCH` or `UNKNOWN_MEMBER_ID`.
+    /// The bg-task drives
+    /// `ConsumerMembershipManager::transition_to_fenced(now).await`.
+    Fenced,
+    /// Fatal heartbeat outcome. Carries the error for logging /
+    /// debugging; the membership-side `transition_to_fatal(now)` does
+    /// not consume the error itself but the surrounding bg-task may
+    /// log it. The fatal `BackgroundEvent::Error` envelope is emitted
+    /// to the user separately at the call site that pushes this
+    /// transition.
+    Fatal(KafkaError),
+}
+
 /// Tracks which fields were sent on the most recent heartbeat. Java's
 /// `HeartbeatState.SentFields` private inner class. We omit fields only
 /// changed in unscoped paths (rebalance timeout, regex pattern) on a
@@ -267,6 +297,17 @@ pub(crate) struct ConsumerHeartbeatRequestManager {
     /// bg-task `poll(now)` cycle touches it. (`mpsc::UnboundedReceiver`
     /// is `Send` but not `Sync`; single-ownership keeps it sound.)
     pending_completion_rx: mpsc::UnboundedReceiver<PendingHeartbeatCompletion>,
+    /// Sender for [`PendingMembershipTransition`]. The heartbeat-side
+    /// `on_response` / `on_failure` pushes an envelope here whenever
+    /// the classifier yields `Fenced` or `Fatal`. The bg-task drains
+    /// via [`Self::take_pending_membership_transitions`] after
+    /// `entries().poll(now)` and `await`s the matching
+    /// `ConsumerMembershipManager::transition_to_*` call on
+    /// `self.membership`.
+    pending_membership_transition_tx: mpsc::UnboundedSender<PendingMembershipTransition>,
+    /// Drained by [`Self::take_pending_membership_transitions`].
+    /// Same single-owner constraint as `pending_completion_rx`.
+    pending_membership_transition_rx: mpsc::UnboundedReceiver<PendingMembershipTransition>,
 }
 
 impl ConsumerHeartbeatRequestManager {
@@ -290,13 +331,38 @@ impl ConsumerHeartbeatRequestManager {
         let rebalance_timeout_ms = membership_manager.rebalance_timeout_ms;
         let heartbeat_state = HeartbeatState::new(subscriptions, membership_manager.clone(), rebalance_timeout_ms);
         let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
+        let (pending_membership_transition_tx, pending_membership_transition_rx) = mpsc::unbounded_channel();
         Self {
             inner,
             membership_manager,
             heartbeat_state,
             pending_completion_tx,
             pending_completion_rx,
+            pending_membership_transition_tx,
+            pending_membership_transition_rx,
         }
+    }
+
+    /// Drain the [`PendingMembershipTransition`] side-channel. Called
+    /// by the bg-task immediately after `entries().poll(now)` has run
+    /// (so the heartbeat's own drain has had a chance to classify any
+    /// pending responses) and BEFORE `membership.reconcile(now).await`
+    /// (so the membership state machine observes the fence / fatal
+    /// before reconciliation runs).
+    ///
+    /// The bg-task then `await`s each transition via
+    /// `ConsumerMembershipManager::transition_to_fenced(now)` /
+    /// `transition_to_fatal(now)`.
+    ///
+    /// Mirrors Java's `AbstractHeartbeatRequestManager.java:415,424`
+    /// (`membershipManager().transitionToFenced();`) and `:457`
+    /// (`handleFatalFailure` → `membershipManager().transitionToFatal();`).
+    pub(crate) fn take_pending_membership_transitions(&mut self) -> Vec<PendingMembershipTransition> {
+        let mut out = Vec::new();
+        while let Ok(t) = self.pending_membership_transition_rx.try_recv() {
+            out.push(t);
+        }
+        out
     }
 
     /// Java: `resetHeartbeatState()`.
@@ -453,15 +519,32 @@ impl ConsumerHeartbeatRequestManager {
         match final_action {
             HeartbeatErrorAction::Handled => {},
             HeartbeatErrorAction::Fenced => {
-                // Java: `membershipManager().transitionToFenced()`.
-                // The Rust transition is async (per
-                // `consumer-threading.md` §10: membership state
-                // transitions live on the bg-task `.await` path).
-                // Surface the fence as a background event so the
-                // bg-task's existing error-handling path can drive
-                // the async transition. The heartbeat_request_state
-                // was already reset by `classify_response_error`
-                // (Java's "skip backoff" semantics).
+                // Java: `membershipManager().transitionToFenced()`
+                // (`AbstractHeartbeatRequestManager.java:415,424` —
+                // FENCED_MEMBER_EPOCH and UNKNOWN_MEMBER_ID arms).
+                // The Rust `transition_to_fenced` is `async` (it
+                // awaits the §31 onPartitionsLost listener); we
+                // can't `.await` from sync `poll(now)`. Instead we
+                // emit a `PendingMembershipTransition::Fenced`
+                // envelope onto the side-channel — the bg-task
+                // drains it via
+                // `take_pending_membership_transitions()` after
+                // `entries().poll(now)` and BEFORE
+                // `membership.reconcile(now).await`. See
+                // [`PendingMembershipTransition`] for the rationale.
+                //
+                // The error is ALSO surfaced to the user via the
+                // background-event channel so `poll()` returns the
+                // fence error — matching Java's behaviour where the
+                // bg side calls `transitionToFenced` AND the
+                // background-event-handler is invoked (Java
+                // `AbstractHeartbeatRequestManager.java:402` for
+                // TOPIC_AUTHORIZATION_FAILED is the closest analog
+                // of "emit ErrorEvent + don't transition"; the fence
+                // arms call transitionToFenced and the fenced
+                // member-epoch error is propagated to the user via
+                // the existing membership-state-listener / poll
+                // path).
                 let err = KafkaError::with_message(
                     Errors::FencedMemberEpoch,
                     "Heartbeat received fenced member-epoch / unknown-member-id from broker".to_string(),
@@ -470,19 +553,28 @@ impl ConsumerHeartbeatRequestManager {
                     .inner
                     .background_event_handler
                     .add(BackgroundEvent::Error { error: err }, completion_time_ms);
+                // Receiver lives as long as the heartbeat manager —
+                // ignore the send error during shutdown races.
+                let _ = self.pending_membership_transition_tx.send(PendingMembershipTransition::Fenced);
             },
             HeartbeatErrorAction::Fatal(err) => {
-                // Java: `handleFatalFailure(error.exception(...))` —
-                // emits an `ErrorEvent` and calls
+                // Java: `handleFatalFailure(error.exception(...))`
+                // (`AbstractHeartbeatRequestManager.java:455-458`) —
+                // emits an `ErrorEvent` AND calls
                 // `membershipManager().transitionToFatal()`. The
-                // Rust transition is async (see Fenced rationale).
-                // Surface the error to the bg-task via the
-                // background-event channel; the bg-task's existing
-                // fatal-handling path drives the async transition.
+                // Rust `transition_to_fatal` is `async` (it awaits
+                // the §31 onPartitionsLost listener); we can't
+                // `.await` from sync `poll(now)`. Push a
+                // `PendingMembershipTransition::Fatal(...)`
+                // envelope; the bg-task drains and `await`s the
+                // transition after `entries().poll(now)`.
                 let _ = self
                     .inner
                     .background_event_handler
-                    .add(BackgroundEvent::Error { error: err }, completion_time_ms);
+                    .add(BackgroundEvent::Error { error: err.clone() }, completion_time_ms);
+                let _ = self
+                    .pending_membership_transition_tx
+                    .send(PendingMembershipTransition::Fatal(err));
             },
             HeartbeatErrorAction::DelegateToSpecific => {
                 // Already handled above; this arm is unreachable
@@ -513,14 +605,26 @@ impl ConsumerHeartbeatRequestManager {
             let specific_handled = self.handle_specific_failure(error, completion_time_ms);
             if !specific_handled {
                 log::error!("ConsumerGroupHeartbeatRequest failed due to fatal error: {}", error);
-                // Java: `handleFatalFailure` emits an ErrorEvent and
-                // calls `membershipManager().transitionToFatal()`.
-                // The membership transition is async; surface the
-                // error so the bg-task drives it.
+                // Java: `handleFatalFailure(exception)`
+                // (`AbstractHeartbeatRequestManager.java:455-458`) —
+                // emits an `ErrorEvent` AND calls
+                // `membershipManager().transitionToFatal()`. Both
+                // are mirrored in Rust:
+                //   1. emit `BackgroundEvent::Error` for the user.
+                //   2. push `PendingMembershipTransition::Fatal(...)`
+                //      onto the side-channel; the bg-task drains and
+                //      `await`s `transition_to_fatal(now)` after
+                //      `entries().poll(now)`. The membership
+                //      transition is `async` (it awaits §31's
+                //      onPartitionsLost listener) so we can't
+                //      `.await` from sync `poll`.
                 let _ = self
                     .inner
                     .background_event_handler
                     .add(BackgroundEvent::Error { error: error.clone() }, completion_time_ms);
+                let _ = self
+                    .pending_membership_transition_tx
+                    .send(PendingMembershipTransition::Fatal(error.clone()));
             }
         }
         // Java: `membershipManager().onHeartbeatFailure(retriable)`
@@ -547,12 +651,20 @@ impl ConsumerHeartbeatRequestManager {
                 CONSUMER_PROTOCOL_NOT_SUPPORTED_MSG
             };
             log::error!("ConsumerGroupHeartbeatRequest failed due to unsupported version: {message}");
+            let fatal_err = KafkaError::unsupported_version(message.to_string());
+            // Java (`ConsumerHeartbeatRequestManager.java:109`):
+            // `handleFatalFailure(new UnsupportedVersionException(message, exception));`
+            // i.e. emits ErrorEvent AND calls
+            // `membershipManager().transitionToFatal()`. Mirror both.
             let _ = self.inner.background_event_handler.add(
                 crate::consumer::internals::events::background_event::BackgroundEvent::Error {
-                    error: KafkaError::unsupported_version(message.to_string()),
+                    error: fatal_err.clone(),
                 },
                 current_time_ms,
             );
+            let _ = self
+                .pending_membership_transition_tx
+                .send(PendingMembershipTransition::Fatal(fatal_err));
             return true;
         }
         false
@@ -834,6 +946,21 @@ mod tests {
         Arc<CoordinatorRequestManager>,
         Arc<ConsumerMembershipManager>,
     ) {
+        let (hb, coord, mm, _rx) = make_with_coord_capturing_events(initial_interval_ms);
+        (hb, coord, mm)
+    }
+
+    /// Same as [`make_with_coord`] but also returns the background-event
+    /// receiver so a test can observe `BackgroundEvent::Error` envelopes
+    /// emitted by the heartbeat manager.
+    fn make_with_coord_capturing_events(
+        initial_interval_ms: Option<i64>,
+    ) -> (
+        ConsumerHeartbeatRequestManager,
+        Arc<CoordinatorRequestManager>,
+        Arc<ConsumerMembershipManager>,
+        mpsc::UnboundedReceiver<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = Arc::new(ConsumerMetadata::from_config(
@@ -841,7 +968,7 @@ mod tests {
             subs.clone(),
             ClusterResourceListeners::new(),
         ));
-        let (tx, _rx) = mpsc::unbounded_channel();
+        let (tx, rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let mm = Arc::new(ConsumerMembershipManager::new(
@@ -860,7 +987,7 @@ mod tests {
         if let Some(interval) = initial_interval_ms {
             hb.inner.heartbeat_request_state.update_heartbeat_interval_ms(0, interval);
         }
-        (hb, coord, mm)
+        (hb, coord, mm, rx)
     }
 
     /// Test helper: inject a coordinator so `poll` doesn't short-circuit
@@ -1306,6 +1433,229 @@ mod tests {
         assert!(
             !mgr.inner.heartbeat_request_state.request_in_flight(),
             "request_in_flight must be cleared by the failure path drain"
+        );
+    }
+
+    /// Helper for Issue-4 regression tests: drives a heartbeat, routes
+    /// the supplied error-code response through the spawned forwarder,
+    /// drives `poll(now)` until the drain has classified the response,
+    /// then drains the side-channel and returns the pending transitions
+    /// + the background-event envelopes that arrived during the loop.
+    ///
+    /// Encapsulates the response-routing scaffolding so the per-error
+    /// tests focus on the classification mapping.
+    async fn drive_error_response_and_collect(
+        mgr: &mut ConsumerHeartbeatRequestManager,
+        mm: &Arc<ConsumerMembershipManager>,
+        coord: &Arc<CoordinatorRequestManager>,
+        beh_rx: &mut mpsc::UnboundedReceiver<
+            crate::consumer::internals::events::background_event::BackgroundEventEnvelope,
+        >,
+        error_code: i16,
+    ) -> (
+        Vec<PendingMembershipTransition>,
+        Vec<crate::consumer::internals::events::background_event::BackgroundEventEnvelope>,
+    ) {
+        use crate::client_response::ClientResponse;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::request_header::RequestHeader;
+        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+
+        set_coordinator(coord);
+        make_joining(mm);
+        // First poll emits the heartbeat. JOINING is a
+        // should_heartbeat_now() state and the initial interval is 0.
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = error_code;
+        data.member_id = Some(mm.member_id());
+        data.member_epoch = 0;
+        data.heartbeat_interval_ms = 1_000;
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+
+        let header = RequestHeader::new(
+            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+            "",
+            1,
+        )
+        .expect("header ok");
+        let client_response = ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
+        );
+        unsent.handler().on_complete(client_response);
+
+        // Drive poll() until the spawned forwarder has enqueued the
+        // completion and the drain has fired the classification.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            let _ = mgr.poll(0);
+            let transitions = mgr.take_pending_membership_transitions();
+            if !transitions.is_empty() {
+                // Collect any pending background events from the drain.
+                let mut events = Vec::new();
+                while let Ok(env) = beh_rx.try_recv() {
+                    events.push(env);
+                }
+                return (transitions, events);
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "no PendingMembershipTransition was emitted by the drain after 200ms — \
+                     classification of error_code={} did not route to Fenced/Fatal",
+                    error_code
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+    }
+
+    /// Phase 12.5 round-2 regression for Issue 4 (Fenced path).
+    ///
+    /// When the broker returns a `FENCED_MEMBER_EPOCH` error in the
+    /// heartbeat response body, Java
+    /// (`AbstractHeartbeatRequestManager.java:411-418`) calls
+    /// `membershipManager().transitionToFenced()` synchronously inside
+    /// the `whenComplete` lambda. Rust's transition is `async`, so the
+    /// heartbeat manager emits a
+    /// `PendingMembershipTransition::Fenced` envelope onto its
+    /// side-channel; the bg-task drains and `await`s the transition.
+    ///
+    /// Test shape:
+    /// 1. Drive a heartbeat, route a `FENCED_MEMBER_EPOCH` response
+    ///    through the forwarder, drive `poll(now)` until the drain
+    ///    classifies (helper).
+    /// 2. Assert exactly one `PendingMembershipTransition::Fenced`
+    ///    envelope was emitted on the side-channel.
+    /// 3. Drive `mm.transition_to_fenced(now).await` — what the
+    ///    bg-task does after draining.
+    /// 4. Assert the membership state reflects the post-fence flow:
+    ///    with no assignment, `transition_to_fenced` runs FENCED →
+    ///    (no listener) → JOINING (Java's
+    ///    `transitionToFenced(callbackHandlerSupplier)` rejoins
+    ///    immediately when there's nothing to release).
+    /// 5. Assert at least one `BackgroundEvent::Error` envelope was
+    ///    emitted so the fence is propagated to the user via `poll()`.
+    #[tokio::test]
+    async fn issue4_fenced_member_epoch_drives_transition_to_fenced() {
+        let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
+
+        let (transitions, events) =
+            drive_error_response_and_collect(&mut mgr, &mm, &coord, &mut beh_rx, Errors::FencedMemberEpoch.code())
+                .await;
+
+        assert_eq!(transitions.len(), 1, "exactly one PendingMembershipTransition expected");
+        assert!(
+            matches!(transitions[0], PendingMembershipTransition::Fenced),
+            "FENCED_MEMBER_EPOCH must classify to PendingMembershipTransition::Fenced, got: {:?}",
+            transitions[0]
+        );
+
+        // Drive the transition as the bg-task would. No assignment is
+        // held, so transition_to_fenced runs Joining → Fenced →
+        // (no listener, no partitions to release) → Joining.
+        mm.transition_to_fenced(0).await.expect("transition_to_fenced ok");
+
+        // Final state: Joining (post-fence rejoin). The intermediate
+        // Fenced state is exercised by `state == Fenced` checks inside
+        // transition_to_fenced; what we observe externally after the
+        // await completes is the post-rejoin state. See
+        // `consumer_membership_manager.rs::transition_to_fenced` for
+        // the FENCED → JOINING tail.
+        assert_eq!(
+            mm.state(),
+            MemberState::Joining,
+            "after transition_to_fenced with empty assignment, state should rejoin to JOINING"
+        );
+
+        // The error is also surfaced to the user via the background
+        // event handler (matches Java's `transitionToFenced` flow plus
+        // the analogue of `handleFatalFailure`'s ErrorEvent
+        // propagation behaviour for retriable fence errors).
+        assert!(
+            events.iter().any(|env| matches!(
+                &env.event,
+                crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
+            )),
+            "BackgroundEvent::Error must be emitted on the fence path so poll() surfaces the fence"
+        );
+    }
+
+    /// Phase 12.5 round-2 regression for Issue 4 (Fatal path).
+    ///
+    /// When the broker returns a fatal-class error in the heartbeat
+    /// response body (here `GROUP_AUTHORIZATION_FAILED`), Java's
+    /// `AbstractHeartbeatRequestManager.java:388-394` calls
+    /// `handleFatalFailure(error.exception(...))`, which (`:455-458`)
+    /// emits an `ErrorEvent` AND calls
+    /// `membershipManager().transitionToFatal()`. Rust's transition is
+    /// `async`, so the heartbeat manager emits a
+    /// `PendingMembershipTransition::Fatal(err)` envelope and the
+    /// bg-task drains + `await`s the transition.
+    ///
+    /// Test shape:
+    /// 1. Drive a heartbeat, route a `GROUP_AUTHORIZATION_FAILED`
+    ///    response through the forwarder, drive `poll(now)` until
+    ///    the drain classifies (helper).
+    /// 2. Assert exactly one `PendingMembershipTransition::Fatal(...)`
+    ///    envelope was emitted on the side-channel, carrying the
+    ///    appropriate error.
+    /// 3. Drive `mm.transition_to_fatal(now).await` — what the
+    ///    bg-task does after draining.
+    /// 4. Assert the membership state is `Fatal`.
+    /// 5. Assert at least one `BackgroundEvent::Error` envelope was
+    ///    emitted (matches Java's `handleFatalFailure` ErrorEvent).
+    #[tokio::test]
+    async fn issue4_group_authorization_failed_drives_transition_to_fatal() {
+        let (mut mgr, coord, mm, mut beh_rx) = make_with_coord_capturing_events(Some(0));
+
+        let (transitions, events) = drive_error_response_and_collect(
+            &mut mgr,
+            &mm,
+            &coord,
+            &mut beh_rx,
+            Errors::GroupAuthorizationFailed.code(),
+        )
+        .await;
+
+        assert_eq!(transitions.len(), 1, "exactly one PendingMembershipTransition expected");
+        match &transitions[0] {
+            PendingMembershipTransition::Fatal(err) => {
+                assert_eq!(
+                    err.error(),
+                    Errors::GroupAuthorizationFailed,
+                    "Fatal envelope must carry the original error code"
+                );
+            },
+            other => panic!("GROUP_AUTHORIZATION_FAILED must classify to Fatal, got: {:?}", other),
+        }
+
+        // Drive the transition as the bg-task would.
+        mm.transition_to_fatal(0).await.expect("transition_to_fatal ok");
+
+        assert_eq!(mm.state(), MemberState::Fatal, "after transition_to_fatal, state must be FATAL");
+
+        // The error is also surfaced to the user via the background
+        // event handler (matches Java's `handleFatalFailure` —
+        // `backgroundEventHandler.add(new ErrorEvent(error))`).
+        assert!(
+            events.iter().any(|env| matches!(
+                &env.event,
+                crate::consumer::internals::events::background_event::BackgroundEvent::Error { .. }
+            )),
+            "BackgroundEvent::Error must be emitted on the fatal path"
         );
     }
 }
