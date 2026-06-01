@@ -345,9 +345,29 @@ async fn test_commit_sync_then_resume_in_same_group() {
     produce_deterministic_records(ctx.bootstrap_servers(), &topic, 10).await;
 
     // Consumer 1: poll 5 records, commit, close.
+    //
+    // `max.poll.records=5` caps each `poll()` at five records so the
+    // `collected < 5` loop terminates at exactly 5, not 10. Without
+    // this override the default `max.poll.records=500` would let the
+    // broker return all 10 records in one fetch, advancing
+    // consumer1's position to offset 10 and committing the
+    // high-watermark — consumer2 would then see zero records. This
+    // mirrors the Java `KafkaConsumerTest` "commit-then-resume"
+    // pattern.
     {
+        let consumer1_props = HashMap::from([
+            ("bootstrap.servers".to_string(), ctx.bootstrap_servers().to_string()),
+            ("group.id".to_string(), group_id.clone()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+            ("client.id".to_string(), "integration-test-consumer".to_string()),
+            ("enable.auto.commit".to_string(), "false".to_string()),
+            ("max.poll.records".to_string(), "5".to_string()),
+        ]);
+        let consumer1_config = ConsumerConfig::from_properties(&consumer1_props).expect("invalid test config");
+
         let mut consumer1 = new_consumer::<String, String>(
-            make_consumer_config(ctx.bootstrap_servers(), &group_id),
+            consumer1_config,
             Box::new(StringDeserializer),
             Box::new(StringDeserializer),
         )

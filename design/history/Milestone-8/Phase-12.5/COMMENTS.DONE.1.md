@@ -380,3 +380,42 @@ fail with `left: "" / right: "<uuid>"`. Verified locally.
 ### Commits
 
 - `fixup! Phase 12.5 (3/N): Issue 7 — register CommitRequestManager as MemberStateListener`
+
+## Issue 8 (Actor-discovered, post-Issue-7 fix): `test_commit_sync_then_resume_in_same_group` — test-design over-poll — RESOLVED
+
+- **File**: `tests/integration/consumer_test.rs:340-407`
+- **Severity**: Test bug (no production code defect)
+- **Java Reference**: `KafkaConsumerTest.java` analog "commit-then-resume"
+  scenarios set `max.poll.records=5`.
+- **Description**: After Issue 7 was fixed, three of four integration
+  tests passed; the fourth failed at `consumer2 should see remaining
+  records (>0 and <=5), saw 0`. Root cause: consumer1's poll loop
+  used `while collected < 5`, but with the default
+  `max.poll.records=500`, the broker returned all 10 produced records
+  in a single fetch. consumer1 advanced position to offset 10 and
+  committed the high-watermark; consumer2 in the same group then saw
+  zero records. `commit_sync()` itself worked correctly — the test
+  was over-polling.
+
+- **Fix**: Per the user's authorization (Option 1 in COMMENTS.1.md
+  Issue 8), the consumer1 config inside
+  `test_commit_sync_then_resume_in_same_group` now sets
+  `max.poll.records=5` directly via a local `HashMap` (rather than
+  through the shared `make_consumer_config` helper, to keep the
+  override visible at the test site). This caps each `poll()` at 5
+  records, the loop terminates at exactly 5, consumer1 commits
+  offset 5, and consumer2 sees the remaining 5 records. The cap
+  matches the Java `KafkaConsumerTest` pattern.
+
+  No production code changes; isolated to test code. The fix lives
+  next to a code comment that explains the rationale and references
+  the Java pattern.
+
+### Verification
+
+- `cargo test --features integration-tests --test integration_main consumer_test`
+  now reports 4 passed, 0 failed, 0 ignored.
+
+### Commits
+
+- `fixup! Phase 12.5 (5/N): Issue 8 — cap max.poll.records in commit-resume test`
