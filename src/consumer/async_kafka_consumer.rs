@@ -934,7 +934,7 @@ where
         // build + spawn. Each Java step maps line-for-line to the Rust
         // block below.
         use crate::consumer::internals::consumer_network_thread::{
-            ConsumerNetworkThread, SystemThreadTime, ThreadTime,
+            ConsumerNetworkThread, MAX_POLL_TIMEOUT_MS, SystemThreadTime, ThreadTime,
         };
         use crate::consumer::internals::events::application_event_processor::ApplicationEventProcessor;
 
@@ -985,7 +985,15 @@ where
         // `signal_close_fn` / `wakeup_fn` are erased through
         // [`NetworkThreadCloseHandle`] so the outer `AsyncKafkaConsumer`
         // struct stays non-generic over `K`.
-        let max_time_to_wait_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
+        //
+        // `max_time_to_wait_ms` is built here and passed into both
+        // `ConsumerNetworkThread::new` (which writes the post-poll
+        // computed bound on every `run_once` iteration) AND the consumer
+        // struct (which reads via `maximum_time_to_wait_ms()`). The bg
+        // task seeds it to `MAX_POLL_TIMEOUT_MS` inside its ctor — mirrors
+        // Java's `ApplicationEventHandler.maximumTimeToWait()` slot shared
+        // with the bg thread.
+        let max_time_to_wait_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS));
 
         let network_thread = ConsumerNetworkThread::new(
             Arc::clone(&time),
@@ -994,8 +1002,9 @@ where
             app_event_processor,
             Arc::clone(&_network_client_delegate),
             Arc::clone(&request_managers),
-            membership_opt,
+            membership_opt.clone(),
             wakeup_trigger.clone(),
+            Arc::clone(&max_time_to_wait_ms),
         );
 
         // Capture the running-flag + wakeup handles before moving

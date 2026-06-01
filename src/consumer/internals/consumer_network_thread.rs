@@ -238,7 +238,15 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         request_managers: Arc<std::sync::Mutex<RequestManagers>>,
         membership: Option<Arc<ConsumerMembershipManager>>,
         wakeup: WakeupTrigger,
+        cached_max_time_to_wait_ms: Arc<AtomicI64>,
     ) -> Self {
+        // Seed the shared slot with `MAX_POLL_TIMEOUT_MS` — Java's
+        // `ApplicationEventHandler.maximumTimeToWait()` returns
+        // `Long.MAX_VALUE` until the bg thread's first `runOnce` runs, but
+        // the bg-task here writes a tighter bound on each iteration, so we
+        // seed with `MAX_POLL_TIMEOUT_MS` (the safer "wake at least this
+        // often" default).
+        cached_max_time_to_wait_ms.store(MAX_POLL_TIMEOUT_MS, Ordering::Release);
         let wakeup_rx = wakeup.subscribe();
         Self {
             application_event_rx,
@@ -249,7 +257,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             wakeup,
             wakeup_rx,
             running: Arc::new(AtomicBool::new(true)),
-            cached_max_time_to_wait_ms: Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            cached_max_time_to_wait_ms,
             close_timeout_ms: AtomicI64::new(DEFAULT_CLOSE_TIMEOUT_MS),
             last_poll_time_ms: 0,
             time,
@@ -814,7 +822,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 mod tests {
     use std::collections::{HashSet, VecDeque};
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicUsize;
+    use std::sync::atomic::{AtomicI64, AtomicUsize};
     use std::time::Duration;
 
     use crate::api_versions::ApiVersions;
@@ -1136,6 +1144,7 @@ mod tests {
             request_managers,
             None,
             wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
         );
         (
             CountingFixture { thread, time, delegate, reaper, tx },
@@ -1205,6 +1214,7 @@ mod tests {
             request_managers.clone(),
             None,
             wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
         );
         (thread, tx, reaper, time, request_managers)
     }
@@ -1256,6 +1266,7 @@ mod tests {
             request_managers,
             Some(membership.clone()),
             wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
         );
         (thread, membership)
     }
@@ -1712,6 +1723,7 @@ mod tests {
             request_managers,
             None,
             wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
         );
 
         // 1. Notifiable handle with a large deadline so the reaper
@@ -1777,6 +1789,7 @@ mod tests {
             request_managers,
             None,
             wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
         );
 
         // Plant the metadata error.
