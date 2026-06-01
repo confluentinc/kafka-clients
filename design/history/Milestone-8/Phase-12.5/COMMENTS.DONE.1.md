@@ -312,3 +312,71 @@ boundary).
 ### Commits
 
 - `fixup! Phase 12.5 (3/N): Issue 5 — unknown-error-code fatal fallback in heartbeat classifier`
+
+## Issue 7: `CommitRequestManager` not registered as a `MemberStateListener` — RESOLVED
+
+- **Discovered by**: Actor (running the integration suite at the end of
+  Phase 12.5 commit (4/N)).
+- **File**: `src/consumer/async_kafka_consumer.rs:986-1023`
+- **Severity**: Bug (Behavior Mismatch with Java — silently breaks all
+  `commit_sync` / `commit_async` / auto-commit calls for KIP-848
+  consumers in a group).
+- **Java Reference**: `RequestManagers.java:273-274` (KIP-848 /
+  `consumer` group protocol arm).
+- **Description**: Java registers TWO listeners on the membership
+  manager:
+
+  ```java
+  membershipManager.registerStateListener(commitRequestManager);
+  membershipManager.registerStateListener(applicationThreadMemberStateListener);
+  ```
+
+  `commitRequestManager` implements `MemberStateListener` — its
+  `onMemberEpochUpdated(epoch, memberId)` writes the broker-assigned
+  UUID into its internal `MemberInfo`, which is then read at
+  `OffsetCommitRequest` build time.
+
+  Pre-fix, Rust's `new_with_components` registered only the
+  `state_notifier` (Java's `applicationThreadMemberStateListener`
+  equivalent). The `CommitRequestManager.member_info.member_id` stayed
+  at the default empty string, so every OffsetCommit went out with the
+  wrong member id and the broker returned `UNKNOWN_MEMBER_ID`. The
+  integration test `test_commit_sync_then_resume_in_same_group` was the
+  first thing to drive the full
+  `ConsumerMembershipManager::on_heartbeat_success` →
+  listener-fanout → commit-request-build chain end-to-end, exposing the
+  gap.
+
+### Fix
+
+`src/consumer/async_kafka_consumer.rs` `new` ctor: register `commit`
+on `membership.abstract_mm` as a `MemberStateListener` BEFORE
+registering `state_notifier`, mirroring Java's exact two-line ordering.
+The `commit` Arc was moved into `RequestManagers::new` earlier in the
+ctor, so the listener handle is read back via
+`request_managers.lock().commit_handle()`.
+
+### Regression test
+
+`issue_7_commit_request_manager_registered_as_member_state_listener`
+(`src/consumer/async_kafka_consumer.rs`):
+
+1. Builds an `AsyncKafkaConsumer` via the production `new(config)` ctor
+   (with `group.id` set and `group.protocol=consumer`, pointed at a
+   refused localhost port — the smoke-test pattern).
+2. Reaches into `consumer.request_managers.lock().{commit, consumer_membership}`.
+3. Asserts `commit.member_info_for_test().member_id == ""` pre-update.
+4. Captures `membership.abstract_mm.inner.lock().member_id` (the
+   auto-generated UUID).
+5. Calls `update_member_epoch(42)` on the membership inner — this
+   fans out to all registered listeners.
+6. Asserts `commit.member_info_for_test().member_id` now equals the
+   membership manager's UUID, AND
+   `member_info.member_epoch == Some(42)`.
+
+Reverting the registration in `new_with_components` makes this test
+fail with `left: "" / right: "<uuid>"`. Verified locally.
+
+### Commits
+
+- `fixup! Phase 12.5 (3/N): Issue 7 — register CommitRequestManager as MemberStateListener`

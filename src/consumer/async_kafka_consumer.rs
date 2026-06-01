@@ -984,11 +984,46 @@ where
         ));
 
         if let Some(membership) = membership_opt.as_ref() {
-            // Java's `AsyncKafkaConsumer.java:462` — the `memberStateListener`
-            // is passed into `RequestManagers.supplier(...)` which forwards
-            // it to `ConsumerMembershipManager`. Phase 12's Rust translation
-            // registers directly here because membership is already
-            // constructed by this point.
+            // Java's `RequestManagers.java:273-274` (KIP-848 / `consumer`
+            // group protocol arm) registers TWO listeners on the membership
+            // manager in this exact order:
+            //
+            //     membershipManager.registerStateListener(commitRequestManager);
+            //     membershipManager.registerStateListener(applicationThreadMemberStateListener);
+            //
+            // The Rust translation mirrors that fan-out:
+            //
+            //   1. `commit` (when `group.id` is present) — its
+            //      `MemberStateListener::on_member_epoch_updated` writes the
+            //      broker-assigned UUID into `CommitRequestManager`'s
+            //      internal `MemberInfo`, which is then read at
+            //      `OffsetCommitRequest` build time. Without this
+            //      registration the OffsetCommit goes out with the default
+            //      empty member id and the broker rejects it with
+            //      `UNKNOWN_MEMBER_ID`. See Phase 12.5 COMMENTS.DONE Issue 7.
+            //
+            //   2. `state_notifier` (always) — writes the new
+            //      `ConsumerGroupMetadata` into the shared `Arc<Mutex<...>>`
+            //      slot that `Consumer::group_metadata()` reads. This is
+            //      Java's `applicationThreadMemberStateListener` equivalent
+            //      and Phase 12 Issue 2's single-notifier wiring.
+            //
+            // Note: in the `(coordinator, commit, membership)` build chain
+            // above, `commit` is `Some` whenever `membership_opt` is `Some`
+            // (both are gated on `group_id`), so the `commit.as_ref()` check
+            // here is defense-in-depth.
+            // `commit` was moved into `RequestManagers::new` above; read
+            // it back through the `commit_handle()` accessor (returns a
+            // cloned `Option<Arc<...>>`).
+            let commit_listener_handle: Option<Arc<CommitRequestManager>> = {
+                let rm_guard = request_managers.lock().expect("rm not poisoned");
+                rm_guard.commit_handle()
+            };
+            if let Some(commit_arc) = commit_listener_handle {
+                membership
+                    .abstract_mm
+                    .register_state_listener(commit_arc as Arc<dyn MemberStateListener>);
+            }
             membership
                 .abstract_mm
                 .register_state_listener(Arc::clone(&state_notifier) as Arc<dyn MemberStateListener>);
@@ -4172,6 +4207,132 @@ mod tests {
         assert!(!token.is_cancelled());
         consumer.wakeup();
         assert!(token.is_cancelled(), "wakeup() must cancel the current token");
+    }
+
+    /// Phase 12.5 Issue 7 regression: the production ctor must register
+    /// the `CommitRequestManager` as a `MemberStateListener` on the
+    /// `ConsumerMembershipManager`, so heartbeat-driven member-epoch
+    /// updates propagate the broker-assigned UUID into the commit
+    /// manager's internal `MemberInfo`. Without this registration the
+    /// `OffsetCommitRequest` goes out with the default empty member id
+    /// and the broker rejects it with `UNKNOWN_MEMBER_ID`.
+    ///
+    /// Java parity: `RequestManagers.java:273-274` (KIP-848 / `consumer`
+    /// group protocol arm) — Java registers two listeners on
+    /// `membershipManager`, the first being `commitRequestManager`
+    /// itself.
+    ///
+    /// The test exercises the actual production ctor path
+    /// (`AsyncKafkaConsumer::new`) against a refuses-connection broker —
+    /// the same pattern as `tests/consumer/async_kafka_consumer_test.rs`
+    /// — then drives `update_member_epoch(...)` on the membership
+    /// manager's `MembershipInner` directly. This fans out to all
+    /// registered listeners; we assert that the `CommitRequestManager`'s
+    /// `member_info.member_id` updated to match the membership
+    /// manager's auto-generated UUID. Reverting the listener
+    /// registration in `new_with_components` makes this test fail with
+    /// an empty `member_id`.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn issue_7_commit_request_manager_registered_as_member_state_listener() {
+        use std::collections::HashMap;
+
+        use crate::common::serialization::Deserializer;
+
+        // Local string deserializer matching the smoke-test pattern.
+        struct TestStringDeserializer;
+        impl Deserializer<String> for TestStringDeserializer {
+            fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, KafkaError> {
+                String::from_utf8(data.to_vec()).map_err(|e| KafkaError::serialization(format!("invalid utf-8: {}", e)))
+            }
+        }
+
+        // Build a `ConsumerConfig` with `group.protocol=consumer` and a
+        // `group.id` so the membership + commit managers are constructed
+        // by the ctor (gated paths). Point at a refused localhost port
+        // so the ctor does not block on network IO.
+        let props = HashMap::from([
+            ("bootstrap.servers".to_string(), "127.0.0.1:1".to_string()),
+            ("group.id".to_string(), "issue-7-group".to_string()),
+            ("group.protocol".to_string(), "consumer".to_string()),
+            ("client.id".to_string(), "issue-7-client".to_string()),
+            ("auto.offset.reset".to_string(), "earliest".to_string()),
+            ("enable.auto.commit".to_string(), "false".to_string()),
+        ]);
+        let config = ConsumerConfig::from_properties(&props).expect("config validates");
+
+        let mut consumer = AsyncKafkaConsumer::<String, String>::new(
+            config,
+            Box::new(TestStringDeserializer),
+            Box::new(TestStringDeserializer),
+        )
+        .expect("ctor should succeed against a refused broker");
+
+        // Reach into the production `RequestManagers` slot. Both
+        // `consumer_membership` and `commit` MUST be `Some` because
+        // `group.id` was set.
+        let (membership_arc, commit_arc) = {
+            let rm_guard = consumer.request_managers.lock().expect("rm not poisoned");
+            (
+                rm_guard
+                    .consumer_membership
+                    .as_ref()
+                    .expect("group.id set → membership must be Some")
+                    .clone(),
+                rm_guard.commit.as_ref().expect("group.id set → commit must be Some").clone(),
+            )
+        };
+
+        // Pre-condition: `member_info.member_id` defaults to "" — the
+        // broker-assigned UUID has not been observed yet. If the listener
+        // was already invoked somehow during ctor we'd see the membership
+        // manager's UUID here.
+        assert_eq!(
+            commit_arc.member_info_for_test().member_id,
+            "",
+            "before epoch update, member_id should be the default empty string"
+        );
+
+        // Capture the membership manager's auto-generated UUID. This is
+        // the value the listener will pass to
+        // `on_member_epoch_updated(epoch, member_id)`.
+        let expected_member_id = {
+            let inner_guard = membership_arc.abstract_mm.inner.lock().expect("membership inner not poisoned");
+            inner_guard.member_id.clone()
+        };
+        assert!(
+            !expected_member_id.is_empty(),
+            "membership manager must have auto-generated a UUID"
+        );
+
+        // Drive `update_member_epoch(...)` directly on the inner. This
+        // is the same fan-out that Java's heartbeat-response handler
+        // triggers via `MembershipManager.updateMemberEpoch(int)`.
+        // `update_member_epoch` calls `notify_epoch_change(Some(epoch))`
+        // which iterates `state_updates_listeners` and invokes each
+        // listener's `on_member_epoch_updated(epoch, &self.member_id)`.
+        {
+            let mut inner_guard = membership_arc.abstract_mm.inner.lock().expect("membership inner not poisoned");
+            inner_guard.update_member_epoch(42);
+        }
+
+        // Post-condition: if `CommitRequestManager` was registered as a
+        // `MemberStateListener`, its `member_info` now carries the
+        // membership manager's UUID + epoch.
+        let post = commit_arc.member_info_for_test();
+        assert_eq!(
+            post.member_id, expected_member_id,
+            "Issue 7: CommitRequestManager.member_id must equal membership.member_id after \
+             update_member_epoch — this proves the listener registration in new_with_components \
+             routed the epoch update through to the commit manager"
+        );
+        assert_eq!(
+            post.member_epoch,
+            Some(42),
+            "epoch should match the value passed to update_member_epoch"
+        );
+
+        // Clean shutdown.
+        consumer.close().await.expect("close should succeed");
     }
 
     /// Stand-in for Java's `testAssignmentReturnsAssignedPartitions`

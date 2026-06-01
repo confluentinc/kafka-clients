@@ -969,6 +969,20 @@ impl CommitRequestManager {
         guard.pending.unsent_offset_fetches.len()
     }
 
+    /// Test-only accessor exposing a clone of the current `MemberInfo`
+    /// (member id + member epoch). Used by sibling-module tests
+    /// (e.g. `async_kafka_consumer` Issue-7 regression) to verify that
+    /// `MemberStateListener::on_member_epoch_updated` writes propagated
+    /// into the commit manager's member-info slot — which is read at
+    /// `OffsetCommitRequest` build time. Without a working registration
+    /// chain the `member_id` stays at the default empty string and the
+    /// broker rejects commits with `UNKNOWN_MEMBER_ID`.
+    #[cfg(test)]
+    pub(crate) fn member_info_for_test(&self) -> MemberInfo {
+        let guard = self.inner.state.lock().expect("commit manager state poisoned");
+        guard.member_info.clone()
+    }
+
     /// Test-only helper: pop the first unsent `OffsetFetch` request and
     /// resolve its underlying `oneshot::Sender` with the given offset
     /// map. Used by sibling-module tests
