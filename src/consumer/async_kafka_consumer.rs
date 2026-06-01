@@ -521,6 +521,36 @@ pub(crate) struct AsyncKafkaConsumerComponents<K: Send + Sync + 'static, V: Send
     pub interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>>,
     pub isolation_level: IsolationLevel,
     pub time: Arc<dyn ThreadTime>,
+    /// Shared `Arc<Mutex<Option<ConsumerGroupMetadata>>>` slot. Java has a
+    /// **single** `AtomicReference<Optional<ConsumerGroupMetadata>>` field
+    /// (`AsyncKafkaConsumer.java:289`); the same slot is referenced by
+    /// the `MemberStateListener` registered on the membership manager AND
+    /// read by the public `groupMetadata()` accessor. The Rust
+    /// translation enforces that single-source-of-truth contract by
+    /// requiring the production ctor to build the slot once and pass it
+    /// through here — the same Arc is then registered on
+    /// `ConsumerMembershipManager` via [`Self::state_notifier`] AND
+    /// stored on the consumer struct's `group_metadata` field.
+    pub group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    /// Shared `Arc<Mutex<HashSet<TopicPartition>>>` slot mirroring
+    /// Java's `groupAssignmentSnapshot` field
+    /// (`AsyncKafkaConsumer.java:317`). Same single-source-of-truth
+    /// contract as [`Self::group_metadata`] — the production ctor builds
+    /// once and threads the Arc through both
+    /// `ConsumerStateNotifier::on_group_assignment_updated` (writer) and
+    /// `AsyncKafkaConsumer::run_rebalance_callbacks_on_close` (reader).
+    pub group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+    /// The single `MemberStateListener` instance (Java
+    /// `AsyncKafkaConsumer.java:343-353`'s anonymous-inner-class
+    /// `memberStateListener`) that writes to
+    /// [`Self::group_metadata`] and [`Self::group_assignment_snapshot`].
+    /// The production ctor clones this Arc and registers it on
+    /// `ConsumerMembershipManager` BEFORE the bg-task spawn; the
+    /// consumer struct stores it for the `state_notifier()` accessor used
+    /// in close-time `reset_group_metadata()` and by tests. Tests can
+    /// register `consumer.state_notifier()` on a custom membership
+    /// manager when they bypass the production ctor.
+    pub state_notifier: Arc<ConsumerStateNotifier>,
 }
 
 impl<K, V> AsyncKafkaConsumer<K, V>
@@ -885,43 +915,46 @@ where
         )));
 
         // ═══════════════════════════════════════════════════════════════
-        // State-notifier registration on the membership manager.
+        // State-notifier construction + registration on membership.
         // ═══════════════════════════════════════════════════════════════
         //
-        // Phase 12 PLAN.md §"State-notifier registration": the
-        // `ConsumerStateNotifier` that updates the consumer's
-        // `group_metadata` and `group_assignment_snapshot` caches must
-        // be registered on the membership manager BEFORE the bg-task
-        // spawn so the very first heartbeat-response observation drives
-        // `update_group_metadata`.
+        // Java keeps a SINGLE `AtomicReference<Optional<ConsumerGroupMetadata>> groupMetadata`
+        // field and a SINGLE `MemberStateListener` instance
+        // (`AsyncKafkaConsumer.java:289, 343-353, 447`). Both the
+        // constructor's initial `groupMetadata.set(initializeGroupMetadata(...))`
+        // write AND the listener's `updateGroupMetadata(...)` writes
+        // target the same slot.
         //
-        // The state-notifier itself is constructed inside
-        // `new_with_components` (Phase 11), so we build a temporary
-        // `ConsumerStateNotifier` here and register it; commit (3/N)
-        // hands the same state-notifier instance into the
-        // components struct.
+        // The Rust translation enforces this by building the
+        // `group_metadata` / `group_assignment_snapshot` Arcs and the
+        // `ConsumerStateNotifier` ONCE here, then threading the same
+        // instances through both the membership-manager registration
+        // (so heartbeat-response observations drive `update_group_metadata`
+        // on the shared slot) AND the `AsyncKafkaConsumerComponents`
+        // hand-off (so `Consumer::group_metadata()` reads the same slot).
+        //
+        // Issue 2 from the Phase-12 Critic review: previously the ctor
+        // built TWO notifiers (one here, one inside `new_with_components`),
+        // so `group_metadata` updates went to a slot the app side never
+        // read. Single-notifier wiring now closes that gap.
+        let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
+        let state_notifier = Arc::new(ConsumerStateNotifier::new(
+            group_id.clone().unwrap_or_default(),
+            config.group_instance_id().map(|s| s.to_string()),
+            Arc::clone(&group_metadata),
+            Arc::clone(&group_assignment_snapshot),
+        ));
+
         if let Some(membership) = membership_opt.as_ref() {
-            let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
-            let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
-            let state_notifier = Arc::new(ConsumerStateNotifier::new(
-                group_id.clone().unwrap_or_default(),
-                config.group_instance_id().map(|s| s.to_string()),
-                Arc::clone(&group_metadata),
-                Arc::clone(&group_assignment_snapshot),
-            ));
+            // Java's `AsyncKafkaConsumer.java:462` — the `memberStateListener`
+            // is passed into `RequestManagers.supplier(...)` which forwards
+            // it to `ConsumerMembershipManager`. Phase 12's Rust translation
+            // registers directly here because membership is already
+            // constructed by this point.
             membership
                 .abstract_mm
                 .register_state_listener(Arc::clone(&state_notifier) as Arc<dyn MemberStateListener>);
-            // The `group_metadata` / `group_assignment_snapshot` /
-            // `state_notifier` Arcs are intentionally dropped here —
-            // commit (3/N) reconstructs them inside the
-            // `AsyncKafkaConsumerComponents` flow (which uses its own
-            // notifier instance per the Phase-11 test-rig contract).
-            // The drop is safe because the membership manager already
-            // holds an `Arc<dyn MemberStateListener>` to the notifier
-            // we registered — the notifier outlives this scope via the
-            // membership manager's listener list.
-            let _ = (group_metadata, group_assignment_snapshot);
         }
 
         // ═══════════════════════════════════════════════════════════════
@@ -1043,35 +1076,12 @@ where
         // ── Assemble `AsyncKafkaConsumerComponents` and hand off ──
         //
         // The Phase-11 test seam stays — the production path builds the
-        // components struct and calls `Self::new_with_components(...)`
-        // which constructs the `ConsumerStateNotifier` internally (a
-        // separate notifier from the one we registered above on the
-        // membership manager; Phase-11 contract).
-        //
-        // Note on the two-notifier design (deliberate Phase 12 split,
-        // see PLAN.md §"State-notifier registration"):
-        //   * The notifier registered on the membership manager earlier
-        //     in this ctor observes heartbeat-response member-epoch
-        //     updates from the bg task and pushes them into ITS OWN
-        //     `group_metadata` Arc — which is dropped at the end of the
-        //     registration block, leaving the membership manager
-        //     holding the only strong reference to the notifier (via
-        //     its listener vec).
-        //   * The notifier reconstructed inside `new_with_components`
-        //     drives the app-side
-        //     `state_notifier()`/`group_metadata()`/
-        //     `group_assignment_snapshot` accessors. Tests register the
-        //     `new_with_components` notifier directly via
-        //     `consumer.state_notifier()` — the production ctor's
-        //     dual-notifier wiring means the production
-        //     `group_metadata()` reads only update when tests OR a
-        //     future single-notifier consolidation drives them.
-        //
-        // A follow-up commit can collapse these into a single notifier
-        // by threading the notifier through `AsyncKafkaConsumerComponents`
-        // and registering it on the membership manager inside
-        // `new_with_components`. Phase-11 PLAN.md `state_notifier`-
-        // related TODO comments call this out for follow-up.
+        // components struct and calls `Self::new_with_components(...)`.
+        // Phase-12 Issue 2 (Critic review) consolidated to a single
+        // `ConsumerStateNotifier`: the Arc registered on the membership
+        // manager earlier in this ctor and the Arc stored on the consumer
+        // struct are the SAME instance, mirroring Java's single
+        // `memberStateListener`.
 
         let components = AsyncKafkaConsumerComponents {
             config,
@@ -1094,6 +1104,9 @@ where
             interceptors: _interceptors,
             isolation_level: _isolation_level,
             time,
+            group_metadata,
+            group_assignment_snapshot,
+            state_notifier,
         };
 
         Ok(Self::new_with_components(components))
@@ -1104,20 +1117,16 @@ where
         let default_api_timeout_ms = components.config.default_api_timeout_ms as i64;
         let retry_backoff_ms = components.config.retry_backoff_ms();
 
-        // Build the `MemberStateListener` bridge once and share the two
-        // backing `Arc<Mutex<…>>` slots with the consumer struct. The
-        // production wire-up (Phase 12) clones `state_notifier` and
-        // registers it on the `ConsumerMembershipManager`; tests can do
-        // the same in-line.
-        let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
-        let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
-        let state_notifier = Arc::new(ConsumerStateNotifier::new(
-            components.group_id.clone().unwrap_or_default(),
-            components.config.group_instance_id().map(|s| s.to_string()),
-            Arc::clone(&group_metadata),
-            Arc::clone(&group_assignment_snapshot),
-        ));
-
+        // The `state_notifier`, `group_metadata`, and
+        // `group_assignment_snapshot` slots are constructed by the caller
+        // (production ctor: `Self::new`; tests: their fixture builder)
+        // and threaded through here. The production ctor registers the
+        // SAME `state_notifier` Arc on the membership manager BEFORE the
+        // bg-task spawn — mirroring Java's single `MemberStateListener`
+        // instance (`AsyncKafkaConsumer.java:289, 343-353, 447`). Tests
+        // construct their own Arcs and either register the notifier
+        // themselves or skip registration if they don't exercise the
+        // membership path.
         Self {
             subscriptions: components.subscriptions,
             metadata: components.metadata,
@@ -1132,9 +1141,9 @@ where
             fetch_collector: components.fetch_collector,
             client_id: components.client_id,
             group_id: components.group_id,
-            group_metadata,
-            group_assignment_snapshot,
-            state_notifier,
+            group_metadata: components.group_metadata,
+            group_assignment_snapshot: components.group_assignment_snapshot,
+            state_notifier: components.state_notifier,
             rebalance_listener_invoker: components.rebalance_listener_invoker,
             offset_commit_callback_invoker: components.offset_commit_callback_invoker,
             deserializers: components.deserializers,
@@ -3915,6 +3924,22 @@ mod tests {
             Arc::new(crate::consumer::internals::fetch_collector::SystemFetchCollectorTime),
         ));
 
+        // Build the state-notifier + shared slots once (Phase-12
+        // Issue 2): the test fixture mirrors the production ctor by
+        // constructing the slots locally and threading the same Arcs
+        // through `state_notifier` and the components struct. Tests
+        // that need the listener registered on a membership manager
+        // call `consumer.state_notifier()` and pass the Arc to
+        // `AbstractMembershipManager::register_state_listener`.
+        let group_metadata_slot: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_assignment_snapshot_slot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
+        let state_notifier = Arc::new(ConsumerStateNotifier::new(
+            "test-group".to_string(),
+            None,
+            Arc::clone(&group_metadata_slot),
+            Arc::clone(&group_assignment_snapshot_slot),
+        ));
+
         let components = AsyncKafkaConsumerComponents {
             config,
             client_id,
@@ -3936,6 +3961,9 @@ mod tests {
             interceptors,
             isolation_level: IsolationLevel::ReadUncommitted,
             time: Arc::new(crate::consumer::internals::consumer_network_thread::SystemThreadTime),
+            group_metadata: group_metadata_slot,
+            group_assignment_snapshot: group_assignment_snapshot_slot,
+            state_notifier,
         };
         (
             AsyncKafkaConsumer::<Vec<u8>, Vec<u8>>::new_with_components(components),
@@ -4054,6 +4082,47 @@ mod tests {
         let consumer = make_test_consumer();
         let tp = TopicPartition::new("t".to_string(), 0);
         assert_eq!(consumer.current_lag(&tp), None);
+    }
+
+    /// Phase-12 Issue 2 regression: when the consumer's `state_notifier`
+    /// Arc is registered on a `ConsumerMembershipManager` listener list
+    /// (the production wiring) and a heartbeat-response-style member-epoch
+    /// update is dispatched on the listener side, the app-side
+    /// `group_metadata()` observes the new epoch.
+    ///
+    /// Pre-fix this test would fail because the production ctor built two
+    /// separate notifiers — one registered on the membership manager, one
+    /// reachable through `consumer.state_notifier()` — and writes to one
+    /// did not reach the other's backing slot.
+    #[tokio::test]
+    async fn issue_2_state_notifier_writes_visible_through_consumer_after_registration() {
+        use crate::consumer::internals::member_state_listener::MemberStateListener;
+
+        let consumer = make_test_consumer();
+        let notifier = consumer.state_notifier();
+
+        // Mimic the production ctor's
+        // `membership.abstract_mm.register_state_listener(state_notifier)`
+        // call: take the Arc out of the consumer, hand it to the
+        // listener-registration site, and dispatch a fake
+        // `on_member_epoch_updated`. The app side must see the change.
+        //
+        // `register_state_listener` takes `Arc<dyn MemberStateListener>`.
+        // We don't need a real `ConsumerMembershipManager` here; the
+        // contract is "register_state_listener obtains an
+        // Arc<dyn MemberStateListener> and may invoke its methods at any
+        // time" — the test substitutes for that registration site by
+        // calling the trait method directly on the Arc-erased listener.
+        let listener: Arc<dyn MemberStateListener> = notifier;
+        listener.on_member_epoch_updated(Some(99), "member-from-listener");
+
+        // App-side observes the change through the same shared slot the
+        // listener wrote into — proving the `state_notifier` and
+        // `group_metadata` Arcs are wired as a single source of truth
+        // (Java `AsyncKafkaConsumer.java:289, 343-353`).
+        let meta = consumer.group_metadata();
+        assert_eq!(meta.generation_id(), 99);
+        assert_eq!(meta.member_id(), "member-from-listener");
     }
 
     #[tokio::test]

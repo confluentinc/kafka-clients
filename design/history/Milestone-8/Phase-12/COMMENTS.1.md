@@ -4,7 +4,7 @@ Reviewing commits (1/N) `a4378ce`, (2/N) `143f30a`, (3/N) `d3e9e15`.
 
 | Batch | Issues | Status |
 |---|---|---|
-| 1 | 1, 2, 4, 5 | Open |
+| 1 | 1, 4 | Open |
 
 ---
 
@@ -64,47 +64,6 @@ Alternative: change the dyn-trait `CommitRequestManager::poll` impl from `PollRe
 
 ---
 
-## Issue 2: Dual `ConsumerStateNotifier` instances — bg-task writes to a slot that no app-side accessor reads
-
-**Commit**: `143f30a` (Phase 12 commit 2/N) + `d3e9e15` (Phase 12 commit 3/N)
-**File**: `src/consumer/async_kafka_consumer.rs:903-925` (registers notifier #A), `src/consumer/async_kafka_consumer.rs:1093-1144` (`new_with_components` builds notifier #B)
-**Severity**: **blocking**
-**Java reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AsyncKafkaConsumer.java:289` (the single `AtomicReference<Optional<ConsumerGroupMetadata>> groupMetadata`), `343-353` (the single `memberStateListener` that writes to it), `447` (`groupMetadata.set(initializeGroupMetadata(...))`), `462` (the same `memberStateListener` passed to `RequestManagers.supplier`).
-
-### Description
-
-Java keeps a **single** `AtomicReference<Optional<ConsumerGroupMetadata>> groupMetadata` field and a **single** `MemberStateListener` instance (`memberStateListener` at line 343). Both the constructor's initial `groupMetadata.set(initializeGroupMetadata(...))` write (line 447) and the listener's `updateGroupMetadata(...)` writes (via `onMemberEpochUpdated`, line 345) target the same slot. The public `groupMetadata()` accessor (line 1929) reads from that same slot.
-
-The Rust translation builds **two** `ConsumerStateNotifier` instances against **two distinct** `Arc<Mutex<Option<ConsumerGroupMetadata>>>` slots:
-
-1. **Notifier #A** (commit 2/N, `async_kafka_consumer.rs:903-924`): built in the production ctor's group-id-present branch. Its `group_metadata` and `group_assignment_snapshot` Arcs are LOCAL to the `if let Some(membership)` block and dropped at end-of-scope. The notifier itself is moved into the membership manager's listener list via `register_state_listener`, so it stays alive — but the only external reference to its backing `Arc<Mutex<Option<ConsumerGroupMetadata>>>` is held inside the notifier itself.
-
-2. **Notifier #B** (Phase 11, `new_with_components`, `async_kafka_consumer.rs:1103-1110`): built inside `new_with_components`. Its backing Arcs become the consumer struct's `self.group_metadata` and `self.group_assignment_snapshot` fields. The `Consumer::group_metadata()` impl reads from `self.group_metadata`.
-
-Result: the bg task drives `onMemberEpochUpdated` → `update_group_metadata` on **notifier #A**, writing into a slot only reachable through #A. The user's `consumer.group_metadata()` reads **notifier #B**'s slot, which stays at the initial `None`. The app-side observation diverges from Java's contract.
-
-### Why this is blocking
-
-- The Phase 12 PLAN.md `Risks` section line 553-555 explicitly notes "the test assertion observing `group_metadata().member_epoch() > 0` would be flaky" if registration is wrong — and here registration is on the *wrong* notifier. The assertion will be persistently `0`, not flaky.
-- The Phase-11-deferred unit test at `async_kafka_consumer.rs:3967` (group_metadata bg-task wire-up assertion, PLAN.md commit 7) cannot pass with this wiring — its whole point is verifying the bg task drives group_metadata updates that the app side observes.
-- `Consumer::group_assignment_snapshot()` (KIP-848) is affected identically — `onGroupAssignmentUpdated` writes to notifier #A's slot, not the one the consumer reads.
-
-### Expected
-
-Match Java: a single `MemberStateListener` instance writes to a single `Arc<Mutex<Option<ConsumerGroupMetadata>>>` slot that is shared between (a) the membership manager's listener list and (b) the consumer struct's `group_metadata` field. The same applies to `group_assignment_snapshot`.
-
-### Suggested fix
-
-Either of:
-
-1. **Consolidate via components**: build the `ConsumerStateNotifier` (and its two backing `Arc<Mutex<...>>` slots) once in the production ctor, register it on the membership manager, AND pass the notifier + the two slots into `AsyncKafkaConsumerComponents`. Modify `new_with_components` to consume the passed-in notifier/slots instead of constructing new ones (add an optional `state_notifier: Option<Arc<ConsumerStateNotifier>>` field on `AsyncKafkaConsumerComponents`; if `Some`, use it; if `None`, fall back to the current Phase-11 test-rig behavior).
-
-2. **Build outside, inject in**: extract notifier construction into a helper called from both code paths; have the production ctor call it, then thread the resulting (notifier, slot, slot) tuple into both the membership registration and the components struct.
-
-Option 1 is closer to the existing component-struct contract. Add a regression test where: the bg-task receives a synthetic heartbeat response that drives `onMemberEpochUpdated`, then the app side reads `consumer.group_metadata().member_epoch()` and asserts the new epoch is visible.
-
----
-
 ## Issue 4: `FetchRequestManager::is_unavailable` / `maybe_throw_auth_failure` no-ops swallow auth errors silently — observable behavior gap from Java
 
 **Commit**: `143f30a` (Phase 12 commit 2/N)
@@ -138,35 +97,6 @@ Either:
 Add the deferral marker (option a) for Phase 12. **Before SSL/SASL wiring lands**, the closures MUST be replaced with delegate-backed snapshots — leaving the `|_| Ok(())` in place when auth is plausible is a real bug. Add a test that constructs a `mock_broker` that returns `SASL_AUTHENTICATION_FAILED` on the first connect and asserts the consumer surfaces the auth error before the second reconnect attempt would have completed.
 
 Also: update the closure construction's inline comment to acknowledge that the auth-failure no-op IS a correctness gap (Phase 12 doesn't hit it solely because it's PLAINTEXT-only), not just a "one extra round-trip" performance hit.
-
----
-
-## Issue 5: Listener-registered `ConsumerStateNotifier`'s backing `Arc<Mutex<Option<ConsumerGroupMetadata>>>` is unreachable — writes will succeed but go to an orphaned slot
-
-**Commit**: `143f30a` (Phase 12 commit 2/N)
-**File**: `src/consumer/async_kafka_consumer.rs:903-925`
-**Severity**: nit (already captured as part of Issue 2's root cause, but worth a separate note because the explicit `let _ = (group_metadata, group_assignment_snapshot);` (line 924) makes the orphaning intentional yet incorrect)
-**Java reference**: `kafka/.../AsyncKafkaConsumer.java:289, 343-353, 447`.
-
-### Description
-
-The block at `async_kafka_consumer.rs:904-911` builds `group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>` and `group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>`, wraps them in a `ConsumerStateNotifier`, registers the notifier on the membership manager, and then explicitly drops the local Arc references on line 924 via `let _ = (group_metadata, group_assignment_snapshot);`.
-
-The comment claims "the membership manager's listener list holds the only remaining strong reference… the notifier outlives this scope via the membership manager's listener list." That is true for the notifier itself — but the backing `Arc<Mutex<Option<ConsumerGroupMetadata>>>` slot becomes reachable ONLY through the notifier's `group_metadata` field, which is private (`pub(crate) struct ConsumerStateNotifier { group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>, ... }` at lines 393-395).
-
-So when the bg-task receives a heartbeat response and triggers `onMemberEpochUpdated` → `update_group_metadata`, the write to `*self.group_metadata.lock().unwrap() = Some(next)` SUCCEEDS, but no other code path reads from that slot — the slot is reachable only through the membership manager's listener list, and nothing on the listener-callback path traverses back through the listener to read its private field.
-
-### Why this is a nit, not a blocker (separate from Issue 2)
-
-Issue 2 is the actual user-visible bug (`consumer.group_metadata()` returns stale data). This issue is the structural reason — the orphaned-Arc pattern at line 924 is a code smell that, while it isn't strictly wrong on its own (Java has private state inside its listener too), telegraphs the dual-notifier mistake. Fixing Issue 2 will also remove the orphan.
-
-### Expected
-
-After Issue 2's fix (single notifier), this block should disappear or change shape: instead of building a notifier locally and dropping the Arcs, the ctor should build the notifier as part of the eventual `AsyncKafkaConsumerComponents` payload, register it on the membership manager, and pass it through to `new_with_components`.
-
-### Suggested fix
-
-Subsumed by Issue 2's fix. When closing Issue 2, also remove the `let _ = (group_metadata, group_assignment_snapshot);` line and the "intentionally dropped" comment — the new wiring should not need them.
 
 ---
 
