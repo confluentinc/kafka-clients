@@ -24,9 +24,9 @@
 //! # Status: `#[ignore]`-gated until the FindCoordinator response path
 //! is wired in the bg task
 //!
-//! Tests below are `#[ignore]`d because they expose a **pre-existing,
-//! Phase-10 design gap** in the consumer bg task that Phase 12
-//! inherited rather than introduced.
+//! All four tests below are `#[ignore]`d because they expose a
+//! **pre-existing, Phase-10 design gap** in the consumer bg task that
+//! Phase 12 inherited rather than introduced.
 //!
 //! ## The gap
 //!
@@ -75,17 +75,17 @@
 //!    `coordinator_manager.on_response(...)` /
 //!    `heartbeat_manager.on_response(...)` /
 //!    `consumer_membership_manager.on_heartbeat_success(...)`.
-//! 2. Run this file with the `#[ignore]` markers removed; all tests
-//!    should pass against the testcontainers Kafka 4.2.0 broker.
+//! 2. Run this file with the `#[ignore]` markers removed; all four
+//!    tests should pass against the testcontainers Kafka 4.2.0 broker.
 //!
 //! ## What Phase 12 *did* land
 //!
-//! The test below has been written and exercised against the real
-//! broker (the KIP-848 broker-side
+//! All four tests below have been written and exercised against the
+//! real broker (the KIP-848 broker-side
 //! `group.coordinator.rebalance.protocols=classic,consumer` is set
-//! correctly via the broker env-var); it will exercise the full
-//! subscribe/poll loop the moment the response router lands. Until
-//! then, the docker-free smoke test at
+//! correctly via the broker env-var); they will exercise the full
+//! subscribe/poll/commit/seek loop the moment the response router
+//! lands. Until then, the docker-free smoke test at
 //! `tests/consumer/async_kafka_consumer_test.rs` exercises the
 //! production ctor (channels + NetworkClient + bg-task spawn + clean
 //! close) without exercising the membership state machine.
@@ -96,6 +96,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use confluent_kafka::common::KafkaError;
+use confluent_kafka::common::TopicPartition;
 use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::common::serialization::StringSerializer;
 use confluent_kafka::consumer::ConsumerConfig;
@@ -148,6 +149,19 @@ fn make_consumer_config(bootstrap: &str, group_id: &str) -> ConsumerConfig {
         ("group.protocol".to_string(), "consumer".to_string()),
         ("auto.offset.reset".to_string(), "earliest".to_string()),
         ("client.id".to_string(), "integration-test-consumer".to_string()),
+        ("enable.auto.commit".to_string(), "false".to_string()),
+    ]);
+    ConsumerConfig::from_properties(&props).expect("invalid test config")
+}
+
+/// Variant of `make_consumer_config` without a `group.id` — for the
+/// assignment-only test below.
+fn make_consumer_config_groupless(bootstrap: &str) -> ConsumerConfig {
+    let props = HashMap::from([
+        ("bootstrap.servers".to_string(), bootstrap.to_string()),
+        ("group.protocol".to_string(), "consumer".to_string()),
+        ("auto.offset.reset".to_string(), "earliest".to_string()),
+        ("client.id".to_string(), "integration-test-consumer-noassign".to_string()),
         ("enable.auto.commit".to_string(), "false".to_string()),
     ]);
     ConsumerConfig::from_properties(&props).expect("invalid test config")
@@ -260,6 +274,193 @@ async fn test_subscribe_and_poll_records() {
             );
         }
     }
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Test: explicit-assignment consumer (no `group.id`) reads records
+/// from `partition=0`. Verifies the production ctor wiring builds a
+/// groupless consumer (no membership / heartbeat / commit managers in
+/// `RequestManagers` — `coordinator`/`commit`/`consumer_heartbeat` are
+/// `None` when `group.id` is absent) and that the fetch path still
+/// works without going through the membership state machine.
+///
+/// **Ignored** — see the module docstring. While groupless consumers
+/// do NOT hit the FindCoordinator gap (no group, no coordinator
+/// discovery), the FetchRequestManager's response routing through the
+/// bg task has not been exercised against a real broker yet, so this
+/// test is kept in lock-step with the others until the broader
+/// response-routing wire-up lands.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "depends on FetchRequestManager response routing being driven by the bg task — see module docstring"]
+async fn test_assign_partitions_and_poll() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
+    let topic = ctx.topic("assign_poll");
+
+    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 5).await;
+
+    let mut consumer = new_consumer::<String, String>(
+        make_consumer_config_groupless(ctx.bootstrap_servers()),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("new_consumer should succeed for groupless consumer");
+
+    let tp = TopicPartition::new(topic.clone(), 0);
+    consumer.assign(vec![tp.clone()]).await.expect("assign should succeed");
+
+    let mut collected: Vec<(String, String)> = Vec::new();
+    let start = Instant::now();
+    while collected.len() < 5 && start.elapsed() < Duration::from_secs(30) {
+        let records = consumer.poll(Duration::from_secs(5)).await.expect("poll should succeed");
+        for record in &records {
+            let key = record.key().expect("record key should be present").clone();
+            let value = record.value().expect("record value should be present").clone();
+            assert_eq!(record.topic(), topic);
+            assert_eq!(record.partition(), 0, "all records should be on partition 0");
+            collected.push((key, value));
+        }
+    }
+
+    assert_eq!(collected.len(), 5, "should have polled all 5 records, got {}", collected.len());
+
+    consumer.close().await.expect("consumer close should succeed");
+}
+
+/// Test: consumer 1 subscribes in group `G1`, polls 5 records,
+/// `commit_sync().await`, closes. Consumer 2 in the same `G1`, polls,
+/// asserts the remaining records (offsets 5..10) are visible from the
+/// committed offset (not re-fetched from offset 0).
+///
+/// **Ignored** — see the module docstring. This test requires the
+/// FindCoordinator + Heartbeat + OffsetCommit response paths to all
+/// be wired, none of which the bg task currently drives.
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "FindCoordinator + Heartbeat + OffsetCommit response routing not wired in bg task — see module docstring"]
+async fn test_commit_sync_then_resume_in_same_group() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
+    let topic = ctx.topic("commit_resume");
+    let group_id = ctx.group_id("g_resume");
+
+    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 10).await;
+
+    // Consumer 1: poll 5 records, commit, close.
+    {
+        let mut consumer1 = new_consumer::<String, String>(
+            make_consumer_config(ctx.bootstrap_servers(), &group_id),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("consumer1 ctor should succeed");
+
+        consumer1
+            .subscribe(vec![topic.clone()])
+            .await
+            .expect("subscribe should succeed");
+
+        let mut collected = 0;
+        let start = Instant::now();
+        while collected < 5 && start.elapsed() < Duration::from_secs(30) {
+            let records = consumer1.poll(Duration::from_secs(5)).await.expect("poll should succeed");
+            collected += records.count();
+        }
+        assert!(collected >= 5, "consumer1 should have polled at least 5 records");
+
+        consumer1.commit_sync().await.expect("commit_sync should succeed");
+        consumer1.close().await.expect("consumer1 close should succeed");
+    }
+
+    // Consumer 2: same group, polls only the remaining records.
+    {
+        let mut consumer2 = new_consumer::<String, String>(
+            make_consumer_config(ctx.bootstrap_servers(), &group_id),
+            Box::new(StringDeserializer),
+            Box::new(StringDeserializer),
+        )
+        .expect("consumer2 ctor should succeed");
+
+        consumer2
+            .subscribe(vec![topic.clone()])
+            .await
+            .expect("subscribe should succeed");
+
+        let mut total = 0;
+        let start = Instant::now();
+        while start.elapsed() < Duration::from_secs(30) {
+            let records = consumer2.poll(Duration::from_secs(5)).await.expect("poll should succeed");
+            total += records.count();
+            // Give the broker an extra second to surface any straggler records.
+            if total > 0 && start.elapsed() > Duration::from_secs(10) {
+                break;
+            }
+        }
+
+        // We polled 5 records before commit; consumer2 should see the
+        // remaining 5 (not all 10).
+        assert!(
+            total > 0 && total <= 5,
+            "consumer2 should see remaining records (>0 and <=5), saw {}",
+            total
+        );
+
+        consumer2.close().await.expect("consumer2 close should succeed");
+    }
+}
+
+/// Test: subscribe, poll a few records to establish position, then
+/// `seek_to_beginning(&assigned)`, poll again, assert all records can
+/// be re-read from offset 0.
+///
+/// **Ignored** — see the module docstring. This test requires the
+/// FindCoordinator + Heartbeat response paths to be wired (subscribe
+/// path triggers JOINING which never completes).
+#[tokio::test(flavor = "multi_thread")]
+#[ignore = "FindCoordinator + Heartbeat response routing not wired in bg task — see module docstring"]
+async fn test_seek_to_beginning_re_reads_records() {
+    let mut ctx = TestContext::new(cluster_config_with_kip848()).await;
+    let topic = ctx.topic("seek_to_beginning");
+    let group_id = ctx.group_id("g_seek");
+
+    produce_deterministic_records(ctx.bootstrap_servers(), &topic, 5).await;
+
+    let mut consumer = new_consumer::<String, String>(
+        make_consumer_config(ctx.bootstrap_servers(), &group_id),
+        Box::new(StringDeserializer),
+        Box::new(StringDeserializer),
+    )
+    .expect("new_consumer should succeed");
+
+    consumer.subscribe(vec![topic.clone()]).await.expect("subscribe should succeed");
+
+    // First poll: wait for assignment to land, then drain at least one
+    // batch to establish position.
+    let mut first_pass_count = 0;
+    let start = Instant::now();
+    while first_pass_count < 5 && start.elapsed() < Duration::from_secs(30) {
+        let records = consumer.poll(Duration::from_secs(5)).await.expect("poll should succeed");
+        first_pass_count += records.count();
+    }
+    assert_eq!(first_pass_count, 5, "first pass should drain all 5 records");
+
+    // Seek every assigned partition back to the start.
+    let assigned: Vec<TopicPartition> = consumer.assignment().into_iter().collect();
+    assert!(!assigned.is_empty(), "seek_to_beginning requires non-empty assignment");
+    consumer
+        .seek_to_beginning(&assigned)
+        .await
+        .expect("seek_to_beginning should succeed");
+
+    // Second pass: same 5 records arrive again.
+    let mut second_pass_count = 0;
+    let restart = Instant::now();
+    while second_pass_count < 5 && restart.elapsed() < Duration::from_secs(30) {
+        let records = consumer.poll(Duration::from_secs(5)).await.expect("poll should succeed");
+        second_pass_count += records.count();
+    }
+    assert_eq!(
+        second_pass_count, 5,
+        "second pass after seek_to_beginning should re-read all 5 records"
+    );
 
     consumer.close().await.expect("consumer close should succeed");
 }
