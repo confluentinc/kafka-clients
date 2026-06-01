@@ -79,6 +79,7 @@ use crate::consumer::internals::deserializers::Deserializers;
 use crate::consumer::internals::events::application_event::{ApplicationEvent, AsyncPollState};
 use crate::consumer::internals::events::application_event_handler::ApplicationEventHandler;
 use crate::consumer::internals::events::background_event::{BackgroundEvent, BackgroundEventEnvelope};
+use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
 use crate::consumer::internals::events::completable_event::{calculate_deadline_ms, make_completable_event};
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
@@ -538,6 +539,198 @@ where
     /// `AsyncKafkaConsumer.java:521` (the 20-arg form), with the
     /// metrics / telemetry parameters dropped per Phase 11 PLAN.md
     /// deferrals.
+    /// Production constructor — translates Java's primary
+    /// `AsyncKafkaConsumer(ConsumerConfig, Deserializer<K>, Deserializer<V>,
+    /// Optional<StreamsRebalanceData>)` (`AsyncKafkaConsumer.java:355-518`)
+    /// in three buildable slices per Phase-12 PLAN.md:
+    ///
+    /// - **Commit (1/N) — this method:** Builds channels, subscriptions,
+    ///   metadata, `NetworkClient`, `NetworkClientDelegate`,
+    ///   `BackgroundEventHandler`, `FetchBuffer`, `FetchConfig`,
+    ///   `Deserializers`, `ConsumerInterceptors`, and the
+    ///   `OffsetCommitCallbackInvoker`. Returns
+    ///   `Err(KafkaError::unsupported_version(...))` at the end because
+    ///   the `RequestManagers` (commit (2/N)) and bg-task spawn (commit
+    ///   (3/N)) are not yet wired — see PLAN.md commit-table rows 1-3.
+    /// - **Commit (2/N):** Adds `RequestManagers` wiring (coordinator,
+    ///   commit, heartbeat, membership, offsets, topic-metadata, fetch)
+    ///   with the group-protocol gate at Java lines 502-505, plus the
+    ///   `ConsumerStateNotifier::register_state_listener` registration on
+    ///   `ConsumerMembershipManager` (PLAN.md §"State-notifier
+    ///   registration").
+    /// - **Commit (3/N):** Adds bg-task spawn + `NetworkThreadCloseHandle`
+    ///   assembly + `Self::new_with_components(...)` call. After commit
+    ///   (3/N) this constructor compiles end-to-end.
+    ///
+    /// PLAINTEXT only in Phase 12 (PLAN.md §"Out of scope" — SSL/SASL
+    /// `ChannelBuilder` escape hatches deferred). Bootstrap addresses
+    /// resolved via [`crate::client_utils::parse_and_validate_addresses`]
+    /// — same call the producer uses (mirrors Java
+    /// `ClientUtils.parseAndValidateAddresses`).
+    ///
+    /// # Java field-init order
+    ///
+    /// Mirrors the table in PLAN.md (Java lines 390-508 → Rust action).
+    /// Each block below references the Java line that originated it.
+    pub fn new(
+        config: ConsumerConfig,
+        key_deserializer: Box<dyn crate::common::serialization::Deserializer<K>>,
+        value_deserializer: Box<dyn crate::common::serialization::Deserializer<V>>,
+    ) -> Result<Self, KafkaError> {
+        use crate::ApiVersions;
+        use crate::DefaultHostResolver;
+        use crate::client_utils;
+        use crate::common::internals::ClusterResourceListeners;
+        use crate::common::network::PlaintextChannelBuilder;
+        use crate::common::network::Selector;
+        use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+        use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
+        use crate::consumer::internals::consumer_utils::CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        use crate::consumer::internals::fetch_config::FetchConfig;
+        use crate::consumer::internals::network_client_delegate::NetworkClientDelegate;
+        use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
+        use crate::network_client::NetworkClient;
+
+        log::debug!("Initializing the Kafka consumer");
+
+        // Java line 390 — `clientId = config.getString(CLIENT_ID_CONFIG)`.
+        let client_id: Arc<str> = Arc::from(config.client_id());
+        // Java line 391 — `autoCommitEnabled = config.getBoolean(...)`.
+        // Cached on `self` via `new_with_components`; read here for the
+        // log line below.
+        let _auto_commit_enabled = config.enable_auto_commit();
+        // Java line 397 — `defaultApiTimeoutMs = Duration.ofMillis(...)`.
+        // Read but stored on the consumer struct via
+        // `new_with_components`.
+        let _default_api_timeout_ms = config.default_api_timeout_ms;
+
+        // Java lines 393-394 — `backgroundEventQueue` /
+        // `applicationEventQueue` allocations. Both are unbounded —
+        // mirrors Java's `LinkedBlockingQueue<>`.
+        let (bg_event_tx, _bg_event_rx) = mpsc::unbounded_channel::<BackgroundEventEnvelope>();
+        let (_app_event_tx, _app_event_rx) = mpsc::unbounded_channel::<
+            crate::consumer::internals::events::application_event::ApplicationEventEnvelope,
+        >();
+
+        // Java line 411 — `subscriptions = createSubscriptionState(config,
+        // logContext)`. The `auto.offset.reset` strategy is parsed once at
+        // ctor time.
+        let auto_offset_reset = AutoOffsetResetStrategy::from_string(config.auto_offset_reset())?;
+        let subscriptions: Arc<Mutex<SubscriptionState>> =
+            Arc::new(Mutex::new(SubscriptionState::new(auto_offset_reset)));
+
+        // Java line 408-409 — `interceptorList`, `interceptors = new
+        // ConsumerInterceptors<>(...)`. The Java reflection-based loader is
+        // not translated (per PLAN.md "Out of scope"); the Rust ctor
+        // builds an empty interceptor chain. Users supply interceptors via
+        // a future config-extension API.
+        let _interceptors: Arc<Mutex<ConsumerInterceptors<K, V>>> =
+            Arc::new(Mutex::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
+
+        // Java line 410 — `deserializers = new Deserializers<>(...)`.
+        let _deserializers: Arc<Deserializers<K, V>> =
+            Arc::new(Deserializers::new(key_deserializer, value_deserializer));
+
+        // Java line 412-414 — `clusterResourceListeners`. Phase-11
+        // deferral keeps notifier wiring as a no-op (`ClusterResourceListeners::new()`).
+        let cluster_resource_listeners = ClusterResourceListeners::new();
+
+        // Java line 415 — `metadata = metadataFactory.build(...)`.
+        let metadata = Arc::new(ConsumerMetadata::from_config(
+            &config,
+            Arc::clone(&subscriptions),
+            cluster_resource_listeners,
+        ));
+
+        // Java lines 416-417 — `addresses =
+        // ClientUtils.parseAndValidateAddresses(config)`,
+        // `metadata.bootstrap(addresses)`.
+        let addresses = client_utils::parse_and_validate_addresses(config.bootstrap_servers())?;
+        metadata.bootstrap(addresses);
+
+        // Java line 420 — `fetchConfig = new FetchConfig(config)`.
+        let fetch_config = FetchConfig::from_consumer_config(&config)?;
+        // Java line 421 — `isolationLevel = fetchConfig.isolationLevel`.
+        let _isolation_level = fetch_config.isolation_level;
+
+        // Java line 423 — `apiVersions = new ApiVersions()`.
+        let api_versions = Arc::new(ApiVersions::new());
+
+        // Java lines 425-429 — `backgroundEventHandler = new
+        // BackgroundEventHandler(...)`.
+        let background_event_handler = Arc::new(BackgroundEventHandler::new(bg_event_tx));
+
+        // Java line 432 — `fetchBuffer = new FetchBuffer(logContext)`.
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+
+        // Java lines 434-445 — `networkClientDelegateSupplier =
+        // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
+        // `from_config` Selector / NetworkClient wiring at
+        // `src/producer/kafka_producer.rs:268-289`. PLAINTEXT only.
+        let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
+        let selector = Selector::with_defaults(config.connections_max_idle_ms, channel_builder);
+        let shared_metadata = metadata.metadata_arc();
+        let network_client = NetworkClient::with_metadata(
+            selector,
+            shared_metadata,
+            config.client_id(),
+            CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION as usize,
+            config.reconnect_backoff_ms,
+            config.reconnect_backoff_max_ms,
+            config.send_buffer_bytes,
+            config.receive_buffer_bytes,
+            config.request_timeout_ms,
+            config.socket_connection_setup_timeout_ms,
+            config.socket_connection_setup_timeout_max_ms,
+            true, // discover_broker_versions — mirrors Java
+            api_versions,
+            DefaultHostResolver::new(),
+            config.metadata_max_age_ms, // rebootstrap_trigger_ms
+            MetadataRecoveryStrategy::None,
+        );
+        let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(NetworkClientDelegate::new(
+            &config,
+            network_client,
+            Arc::clone(&metadata).metadata_arc(),
+            Arc::clone(&background_event_handler),
+            false, // notify_metadata_errors_via_error_queue — Java
+                   // passes `false` for the consumer ctor (Java
+                   // `AsyncKafkaConsumer.java:443`).
+        )));
+
+        // Java line 446 — `offsetCommitCallbackInvoker = new
+        // OffsetCommitCallbackInvoker(interceptors)`. The interceptor
+        // chain is constructed once and cloned/wrapped here; the
+        // commit-callback invoker owns its own ConsumerInterceptors
+        // instance for `on_commit` dispatch (per Phase-9 design).
+        let _offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>> =
+            Arc::new(OffsetCommitCallbackInvoker::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
+
+        // Java line 447 — `groupMetadata.set(initializeGroupMetadata(...))`
+        // — only when `group.id` is present. The cache itself lives on
+        // the consumer struct (built inside `new_with_components`).
+        let _group_id = config.group_id().map(|s| s.to_string());
+
+        // Suppress unused warnings: every binding above is the precursor
+        // for commits (2/N) and (3/N) which thread these into the
+        // RequestManagers + bg-task spawn. The `Err(...)` below is the
+        // PLAN-mandated placeholder for commit (1/N).
+        let _ = (
+            &subscriptions,
+            &metadata,
+            &fetch_buffer,
+            &fetch_config,
+            &background_event_handler,
+            &client_id,
+        );
+
+        Err(KafkaError::unsupported_version(
+            "AsyncKafkaConsumer production constructor wiring lands in Phase 12 \
+             commits (2/N) and (3/N); commit (1/N) only builds the channels + \
+             subscriptions + metadata + NetworkClient prefix.",
+        ))
+    }
+
     pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
         let auto_commit_enabled = components.config.enable_auto_commit();
         let default_api_timeout_ms = components.config.default_api_timeout_ms as i64;
