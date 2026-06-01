@@ -325,3 +325,62 @@ Each section records the original Critic finding + the resolving commit.
 - **Note on Issue 12 interaction**: the three close-path tests under
   Issue 12 exercise the end-to-end notifier-to-snapshot-to-close
   pipeline, doubling as Issue 13 regression coverage.
+
+---
+
+## Issue 5: `subscribe_re2j_pattern_rejects_empty` weakens the Java exact-message assertion — RESOLVED
+
+- **Original commit**: `0d88bb9` Phase 11 (3/N).
+- **Resolving commit**: Phase 11 (8/N) test-translation batch.
+- **Verification**:
+  - `subscribe_re2j_pattern_rejects_empty` now asserts the exact Java
+    message `"Topic pattern to subscribe to cannot be empty"` via
+    `assert_eq!` (was `msg.contains("empty")`).
+  - New `subscribe_re2j_pattern_accepts_valid_pattern` test exercises
+    Java line 1865's `assertDoesNotThrow(() -> consumer.subscribe(new SubscriptionPattern("t*")))`.
+  - The skip-rationale block at the top of `subscribe_re2j_pattern_rejects_empty`
+    documents the null-pattern and null-listener cases as
+    unrepresentable in Rust.
+
+---
+
+## Issue 6: `ConsumerRebalanceListenerInvoker` paused-partition log path uncovered — RESOLVED
+
+- **Original commit**: `aa29e7c` Phase 11 (1/N).
+- **Resolving commit**: Phase 11 (8/N) test-translation batch.
+- **Verification**: Three new tests in
+  `src/consumer/internals/consumer_rebalance_listener_invoker.rs`:
+  - `invoke_partitions_revoked_with_paused_partition_exercises_log_path`
+    — populates `SubscriptionState` with a paused partition that
+    intersects the revoke set; the call succeeds (the log branch is
+    exercised but `info!` output is not directly asserted — log capture
+    requires plumbing not yet built; the panic-free run + listener
+    invocation is the observable signal).
+  - `invoke_partitions_lost_with_paused_partition_exercises_log_path`
+    — symmetric for `invoke_partitions_lost`.
+  - `invoke_partitions_revoked_with_no_paused_intersection_skips_log`
+    — negative branch: no paused intersection, so the log path is
+    skipped.
+- **Note on Issue 6 (b)**: the no-listener "silent no-op" divergence
+  is acceptable — the Rust translation favours the bg-task path that
+  invokes the listener via the `process_background_events` callback,
+  and the no-listener arm is a documented short-circuit. No production
+  behaviour change.
+
+---
+
+## Issue 7: `assignment_change_event_and_clears_subscription` test name oversells — RESOLVED
+
+- **Original commit**: `0d88bb9` Phase 11 (3/N).
+- **Resolving commit**: Phase 11 (8/N) test-translation batch.
+- **Verification**:
+  - Old `assign_generates_assignment_change_event_and_clears_subscription`
+    renamed to `assign_generates_assignment_change_event` (matches
+    Java's `testAssign` name + body — only the event-enqueue
+    assertion).
+  - New `assign_clears_subscription_after_event_completes` test
+    exercises Java line 821-822's
+    `assertTrue(consumer.subscription().isEmpty())` AND
+    `assertTrue(consumer.assignment().contains(tp))` by driving the
+    test handle through `assign_from_user` on the shared
+    `SubscriptionState`.

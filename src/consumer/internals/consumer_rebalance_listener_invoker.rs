@@ -361,4 +361,84 @@ mod tests {
         let err = invoker.invoke_partitions_assigned(&listener, &[]).await.expect_err("must err");
         assert!(matches!(err, KafkaError::Wakeup(_)));
     }
+
+    /// Issue 6 regression: `invokePartitionsRevoked` must exercise the
+    /// paused-partition log path when the revoked set intersects the
+    /// paused set. Without this test the pause-flag-clear branch
+    /// (`ConsumerRebalanceListenerInvoker.java:91-95`) is unexercised.
+    /// We pre-assign + pause a partition, then call
+    /// `invoke_partitions_revoked` with the SAME partition — the call
+    /// must succeed (no panic on lock acquire, log line emitted).
+    #[tokio::test]
+    async fn invoke_partitions_revoked_with_paused_partition_exercises_log_path() {
+        let subs = make_subs();
+        // Assign + pause the partition.
+        let tp = TopicPartition::new("paused-topic".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut assigned = std::collections::HashSet::new();
+            assigned.insert(tp.clone());
+            s.assign_from_user(assigned).expect("assign ok");
+            s.pause(&tp).expect("pause ok");
+            assert!(s.paused_partitions().contains(&tp));
+        }
+        let invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subs));
+        let listener: Arc<CountingListener> = CountingListener::new();
+        let arc_listener: Arc<dyn ConsumerRebalanceListener> = listener.clone();
+
+        // Revoke the same paused partition — must hit the log branch.
+        invoker
+            .invoke_partitions_revoked(&arc_listener, std::slice::from_ref(&tp))
+            .await
+            .expect("ok");
+        assert_eq!(listener.on_revoked.load(Ordering::SeqCst), 1);
+    }
+
+    /// Issue 6 regression: symmetric paused-partition log path for
+    /// `invokePartitionsLost` (`ConsumerRebalanceListenerInvoker.java:104-108`).
+    #[tokio::test]
+    async fn invoke_partitions_lost_with_paused_partition_exercises_log_path() {
+        let subs = make_subs();
+        let tp = TopicPartition::new("paused-topic".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut assigned = std::collections::HashSet::new();
+            assigned.insert(tp.clone());
+            s.assign_from_user(assigned).expect("assign ok");
+            s.pause(&tp).expect("pause ok");
+        }
+        let invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subs));
+        let listener: Arc<CountingListener> = CountingListener::new();
+        let arc_listener: Arc<dyn ConsumerRebalanceListener> = listener.clone();
+
+        invoker
+            .invoke_partitions_lost(&arc_listener, std::slice::from_ref(&tp))
+            .await
+            .expect("ok");
+        assert_eq!(listener.on_lost.load(Ordering::SeqCst), 1);
+    }
+
+    /// Negative branch: revoked set does NOT intersect paused set,
+    /// so the log branch is skipped (the `revoke_paused.is_empty()`
+    /// arm). Asserts the call still succeeds.
+    #[tokio::test]
+    async fn invoke_partitions_revoked_with_no_paused_intersection_skips_log() {
+        let subs = make_subs();
+        let paused = TopicPartition::new("paused-topic".to_string(), 0);
+        let revoked = TopicPartition::new("other-topic".to_string(), 0);
+        {
+            let mut s = subs.lock().unwrap();
+            let mut assigned = std::collections::HashSet::new();
+            assigned.insert(paused.clone());
+            assigned.insert(revoked.clone());
+            s.assign_from_user(assigned).expect("assign ok");
+            s.pause(&paused).expect("pause ok");
+        }
+        let invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subs));
+        let listener: Arc<CountingListener> = CountingListener::new();
+        let arc_listener: Arc<dyn ConsumerRebalanceListener> = listener.clone();
+
+        invoker.invoke_partitions_revoked(&arc_listener, &[revoked]).await.expect("ok");
+        assert_eq!(listener.on_revoked.load(Ordering::SeqCst), 1);
+    }
 }
