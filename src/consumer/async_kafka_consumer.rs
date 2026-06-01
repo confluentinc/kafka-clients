@@ -53,7 +53,7 @@
 
 #![allow(dead_code)] // Phase 11 commits 5-7 wire commit / state-query / close.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
@@ -83,6 +83,7 @@ use crate::consumer::internals::events::completable_event::{calculate_deadline_m
 use crate::consumer::internals::events::completable_event_reaper::CompletableEventReaper;
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_collector::FetchCollector;
+use crate::consumer::internals::member_state_listener::MemberStateListener;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
 use crate::consumer::internals::request_managers::RequestManagers;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -214,8 +215,31 @@ where
     group_id: Option<String>,
     /// Group metadata cached by the `MemberStateListener` callback;
     /// returned by [`Self::group_metadata`]. `None` while uninitialized
-    /// or for assignment-only consumers.
+    /// or for assignment-only consumers. Updated by
+    /// [`ConsumerStateNotifier::on_member_epoch_updated`] which is the
+    /// `MemberStateListener` registered with the membership manager
+    /// (production wire-up in Phase 12; for tests, callers register
+    /// [`Self::state_notifier`] directly on the membership manager).
     group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    /// Java: `private final AtomicReference<Set<TopicPartition>> groupAssignmentSnapshot`
+    /// (`AsyncKafkaConsumer.java:317`).
+    ///
+    /// Snapshot of the partitions assigned to this consumer through the
+    /// **group-management** path (not `assign(...)` — manually-assigned
+    /// partitions never appear here). Updated by
+    /// [`ConsumerStateNotifier::on_group_assignment_updated`] from the
+    /// membership manager's reconciliation step (Java
+    /// `setGroupAssignmentSnapshot(...)` at line 786-788). Read by
+    /// [`Self::run_rebalance_callbacks_on_close`] to determine which
+    /// partitions are passed to the user's `on_partitions_revoked` /
+    /// `on_partitions_lost` callback on close.
+    group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+    /// `MemberStateListener` impl that updates `group_metadata` and
+    /// `group_assignment_snapshot` when the membership manager fires a
+    /// state-change notification. Cloned out of [`Self::state_notifier`]
+    /// at construction time and exposed for production wire-up
+    /// (Phase 12).
+    state_notifier: Arc<ConsumerStateNotifier>,
     /// Invoker for the user-supplied [`ConsumerRebalanceListener`].
     rebalance_listener_invoker: ConsumerRebalanceListenerInvoker,
     /// Drains pending `OffsetCommitCallback` invocations at the top of
@@ -326,6 +350,88 @@ impl CommitEventKind {
     }
 }
 
+/// `MemberStateListener` implementation that bridges the membership
+/// manager's state-change notifications back to the consumer's app-side
+/// caches: `group_metadata` and `group_assignment_snapshot`.
+///
+/// Mirrors Java's anonymous-inner-class `memberStateListener` at
+/// `AsyncKafkaConsumer.java:343-353`. The callbacks are invoked
+/// synchronously from the bg task (membership-manager reconciliation
+/// step); they only touch their two `Arc<Mutex<…>>` fields and never
+/// call back into the consumer or take other locks, so the brief
+/// critical sections are §16-safe.
+pub(crate) struct ConsumerStateNotifier {
+    /// Group ID this consumer belongs to. Used to populate fresh
+    /// [`ConsumerGroupMetadata`] when the cache is empty.
+    group_id: String,
+    /// Optional `group.instance.id` (static membership identifier).
+    /// Preserved across epoch updates in the resulting
+    /// [`ConsumerGroupMetadata`].
+    group_instance_id: Option<String>,
+    /// Shared with [`AsyncKafkaConsumer::group_metadata`].
+    group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+    /// Shared with [`AsyncKafkaConsumer::group_assignment_snapshot`].
+    group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+}
+
+impl ConsumerStateNotifier {
+    /// Constructor. The `group_metadata` / `group_assignment_snapshot`
+    /// Arcs are owned by both the notifier and the consumer.
+    pub(crate) fn new(
+        group_id: impl Into<String>,
+        group_instance_id: Option<String>,
+        group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>,
+        group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>,
+    ) -> Self {
+        Self { group_id: group_id.into(), group_instance_id, group_metadata, group_assignment_snapshot }
+    }
+
+    /// Java: `private void updateGroupMetadata(Optional<Integer> memberEpoch, String memberId)`
+    /// (`AsyncKafkaConsumer.java:772-784`).
+    ///
+    /// Updates the cached [`ConsumerGroupMetadata`] to carry the new
+    /// epoch / member-id. Java's implementation is an `updateAndGet`
+    /// over an `AtomicReference<Optional<ConsumerGroupMetadata>>` that
+    /// short-circuits when the slot is empty; we mirror that by
+    /// initializing the slot lazily here (Java initializes it at
+    /// construction time when `group.id` is present —
+    /// `initializeGroupMetadata`).
+    fn update_group_metadata(&self, member_epoch: Option<i32>, member_id: &str) {
+        let Some(epoch) = member_epoch else {
+            // Java's `memberEpoch.ifPresent(...)` short-circuits when
+            // None — no metadata mutation.
+            return;
+        };
+        let mut guard = self.group_metadata.lock().unwrap();
+        #[allow(deprecated)]
+        let next = ConsumerGroupMetadata::with_details(
+            self.group_id.clone(),
+            epoch,
+            member_id.to_string(),
+            self.group_instance_id.clone(),
+        );
+        *guard = Some(next);
+    }
+}
+
+impl MemberStateListener for ConsumerStateNotifier {
+    /// Java: `memberStateListener.onMemberEpochUpdated(memberEpoch, memberId)`
+    /// (`AsyncKafkaConsumer.java:344-347`).
+    fn on_member_epoch_updated(&self, member_epoch: Option<i32>, member_id: &str) {
+        self.update_group_metadata(member_epoch, member_id);
+    }
+
+    /// Java: `memberStateListener.onGroupAssignmentUpdated(partitions)`
+    /// (`AsyncKafkaConsumer.java:349-352`). Snapshots the assignment so
+    /// `runRebalanceCallbacksOnClose` can drive listener callbacks over
+    /// the **group**-assigned partitions specifically (manual
+    /// `assign(...)` partitions are intentionally excluded).
+    fn on_group_assignment_updated(&self, partitions: &HashSet<TopicPartition>) {
+        let mut guard = self.group_assignment_snapshot.lock().unwrap();
+        *guard = partitions.clone();
+    }
+}
+
 /// Components handed to [`AsyncKafkaConsumer::new_with_thread`]: the
 /// per-RM container, metadata, subscriptions, application-event handle,
 /// reaper, wakeup trigger, etc. Constructed by the production factory
@@ -377,6 +483,20 @@ where
         let default_api_timeout_ms = components.config.default_api_timeout_ms as i64;
         let retry_backoff_ms = components.config.retry_backoff_ms();
 
+        // Build the `MemberStateListener` bridge once and share the two
+        // backing `Arc<Mutex<…>>` slots with the consumer struct. The
+        // production wire-up (Phase 12) clones `state_notifier` and
+        // registers it on the `ConsumerMembershipManager`; tests can do
+        // the same in-line.
+        let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+        let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
+        let state_notifier = Arc::new(ConsumerStateNotifier::new(
+            components.group_id.clone().unwrap_or_default(),
+            components.config.group_instance_id().map(|s| s.to_string()),
+            Arc::clone(&group_metadata),
+            Arc::clone(&group_assignment_snapshot),
+        ));
+
         Self {
             subscriptions: components.subscriptions,
             metadata: components.metadata,
@@ -391,7 +511,9 @@ where
             fetch_collector: components.fetch_collector,
             client_id: components.client_id,
             group_id: components.group_id,
-            group_metadata: Arc::new(Mutex::new(None)),
+            group_metadata,
+            group_assignment_snapshot,
+            state_notifier,
             rebalance_listener_invoker: components.rebalance_listener_invoker,
             offset_commit_callback_invoker: components.offset_commit_callback_invoker,
             deserializers: components.deserializers,
@@ -511,9 +633,14 @@ where
     /// **Returns a stub value silently when the consumer is closed**
     /// (Java throws `IllegalStateException`).
     ///
-    /// The returned struct is a clone of the cached value; the
-    /// `MemberStateListener` (Phase 8b) updates the cache via
-    /// `Self::update_group_metadata`.
+    /// The returned struct is a clone of the cached value. The cache
+    /// is populated by [`ConsumerStateNotifier::on_member_epoch_updated`]
+    /// which is the [`MemberStateListener`] registered on the
+    /// `ConsumerMembershipManager` at production wire-up time
+    /// (Phase 12 — see [`Self::state_notifier`]). Until the bg task
+    /// receives its first heartbeat response with a member-epoch
+    /// (or until tests invoke the notifier directly), the cache is
+    /// empty and this method returns a fresh stub.
     pub fn group_metadata(&self) -> ConsumerGroupMetadata {
         let guard = self.group_metadata.lock().unwrap();
         match guard.as_ref() {
@@ -552,6 +679,21 @@ where
         // the consumer struct). Returning `None` matches Java's behavior
         // for "lag unknown".
         None
+    }
+
+    /// Returns the [`ConsumerStateNotifier`] this consumer expects to
+    /// be registered as a [`MemberStateListener`] on the
+    /// `ConsumerMembershipManager`. The production factory (Phase 12)
+    /// performs this registration immediately after constructing the
+    /// membership manager; tests can do the same on their stand-in
+    /// manager.
+    ///
+    /// Mirrors Java's anonymous-inner-class `memberStateListener` field
+    /// at `AsyncKafkaConsumer.java:343-353`: that listener is passed
+    /// into the membership-manager builder so the bg task can invoke it
+    /// during reconciliation.
+    pub(crate) fn state_notifier(&self) -> Arc<ConsumerStateNotifier> {
+        Arc::clone(&self.state_notifier)
     }
 
     /// Java: `void wakeup()`. Sync — callable from any task, including
@@ -2383,18 +2525,35 @@ where
     ///
     /// Invokes the user's `on_partitions_revoked` (if `memberEpoch > 0`)
     /// or `on_partitions_lost` (if `memberEpoch <= 0`) on the
-    /// currently-assigned partitions. The listener runs inline on the
-    /// caller's task (§31). Errors propagate.
+    /// **group-assigned** partitions captured by the most recent
+    /// reconciliation. The listener runs inline on the caller's task
+    /// (§31). Errors propagate.
+    ///
+    /// # Why `group_assignment_snapshot` and not `subscriptions.assigned_partitions()`
+    ///
+    /// Java reads from `groupAssignmentSnapshot.get()`
+    /// (`AsyncKafkaConsumer.java:1624`) which is populated only by the
+    /// `MemberStateListener.onGroupAssignmentUpdated` callback fired
+    /// during reconciliation. The snapshot deliberately excludes
+    /// partitions added via `assign(...)` (manual assignment) so
+    /// non-group consumers get no callback on close — Java line
+    /// 1626-1628 returns early on empty snapshot.
+    ///
+    /// Reading from `SubscriptionState::assigned_partitions()` would
+    /// (a) include manual `assign(...)` partitions, and (b) miss the
+    /// "partition was just revoked but `SubscriptionState` hasn't been
+    /// updated yet" window the snapshot still covers.
     async fn run_rebalance_callbacks_on_close(&mut self) -> Result<(), KafkaError> {
         if self.group_id.is_none() {
             return Ok(());
         }
 
-        // Snapshot assigned partitions outside any nested lock.
+        // Java: `Set<TopicPartition> assignedPartitions = groupAssignmentSnapshot.get();`
         let assigned: Vec<TopicPartition> = {
-            let subs = self.subscriptions.lock().unwrap();
-            subs.assigned_partitions().into_iter().collect()
+            let guard = self.group_assignment_snapshot.lock().unwrap();
+            guard.iter().cloned().collect()
         };
+        // Java line 1626-1628: `if (assignedPartitions.isEmpty()) return;`.
         if assigned.is_empty() {
             return Ok(());
         }
@@ -2931,6 +3090,58 @@ mod tests {
         let consumer = make_test_consumer();
         let meta = consumer.group_metadata();
         assert_eq!(meta.group_id(), "test-group");
+    }
+
+    /// Java parity: `memberStateListener.onMemberEpochUpdated` →
+    /// `updateGroupMetadata` populates the cached metadata.
+    /// (`AsyncKafkaConsumer.java:343-353`, `:772-784`).
+    #[tokio::test]
+    async fn state_notifier_populates_group_metadata_on_epoch_update() {
+        let consumer = make_test_consumer();
+        let notifier = consumer.state_notifier();
+        // Pre-condition: the cache is empty (stub returned).
+        assert_eq!(consumer.group_metadata().generation_id(), -1);
+
+        notifier.on_member_epoch_updated(Some(42), "member-id-xyz");
+
+        let meta = consumer.group_metadata();
+        assert_eq!(meta.group_id(), "test-group");
+        assert_eq!(meta.generation_id(), 42);
+        assert_eq!(meta.member_id(), "member-id-xyz");
+    }
+
+    /// Java: `memberEpoch.ifPresent(...)` short-circuits when None —
+    /// the cache is NOT cleared. Mirrors Java's
+    /// `updateGroupMetadata(Optional.empty(), …)` no-op behavior.
+    #[tokio::test]
+    async fn state_notifier_with_none_epoch_does_not_modify_cache() {
+        let consumer = make_test_consumer();
+        let notifier = consumer.state_notifier();
+        notifier.on_member_epoch_updated(Some(7), "m1");
+        notifier.on_member_epoch_updated(None, "m1");
+        // None did not overwrite — the epoch 7 entry survives.
+        assert_eq!(consumer.group_metadata().generation_id(), 7);
+    }
+
+    /// Java parity: `memberStateListener.onGroupAssignmentUpdated` →
+    /// `setGroupAssignmentSnapshot(partitions)` updates the snapshot
+    /// (`AsyncKafkaConsumer.java:349-352`, `:786-788`).
+    #[tokio::test]
+    async fn state_notifier_updates_group_assignment_snapshot() {
+        let consumer = make_test_consumer();
+        let notifier = consumer.state_notifier();
+        let tp0 = TopicPartition::new("t".to_string(), 0);
+        let tp1 = TopicPartition::new("t".to_string(), 1);
+        let mut set: HashSet<TopicPartition> = HashSet::new();
+        set.insert(tp0.clone());
+        set.insert(tp1.clone());
+
+        notifier.on_group_assignment_updated(&set);
+
+        let snap = consumer.group_assignment_snapshot.lock().unwrap().clone();
+        assert_eq!(snap.len(), 2);
+        assert!(snap.contains(&tp0));
+        assert!(snap.contains(&tp1));
     }
 
     #[tokio::test]
@@ -3860,6 +4071,165 @@ mod tests {
             .expect("ok");
         assert!(consumer.is_closed());
         drop(drainer);
+    }
+
+    /// Issue 12 regression: `run_rebalance_callbacks_on_close` must
+    /// read from `group_assignment_snapshot` (populated by the
+    /// `MemberStateListener`) — NOT from
+    /// `SubscriptionState::assigned_partitions()`. With only a manual
+    /// `assign(...)` (so the snapshot stays empty), close must NOT
+    /// invoke any rebalance callback (Java line 1626-1628).
+    #[tokio::test]
+    async fn run_rebalance_callbacks_on_close_skips_when_snapshot_empty() {
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingListener {
+            revoked: AtomicUsize,
+            lost: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for CountingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.lost.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let listener: Arc<CountingListener> =
+            Arc::new(CountingListener { revoked: AtomicUsize::new(0), lost: AtomicUsize::new(0) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+
+        // Populate SubscriptionState as if the user called assign(...).
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp);
+            subs.assign_from_user(assigned).unwrap();
+        }
+        // The snapshot stays empty — no reconciliation has run.
+        assert!(consumer.group_assignment_snapshot.lock().unwrap().is_empty());
+
+        consumer.run_rebalance_callbacks_on_close().await.expect("ok");
+        assert_eq!(
+            listener.revoked.load(Ordering::SeqCst),
+            0,
+            "no listener call when snapshot is empty (manual-assign consumer)"
+        );
+        assert_eq!(listener.lost.load(Ordering::SeqCst), 0, "no listener call when snapshot is empty");
+    }
+
+    /// Issue 12/13 regression: `run_rebalance_callbacks_on_close`
+    /// invokes `on_partitions_revoked` when the snapshot is non-empty
+    /// AND `member_epoch > 0` (populated via the state notifier).
+    /// Without Issue 13's `MemberStateListener` wire-up the epoch would
+    /// always be -1 and the callback would always be `on_partitions_lost`.
+    #[tokio::test]
+    async fn run_rebalance_callbacks_on_close_invokes_revoked_on_live_epoch() {
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingListener {
+            revoked: AtomicUsize,
+            lost: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for CountingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.lost.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let listener: Arc<CountingListener> =
+            Arc::new(CountingListener { revoked: AtomicUsize::new(0), lost: AtomicUsize::new(0) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+
+        // The state notifier captures both the snapshot and the epoch
+        // — mirrors what the bg-task reconciliation step would do.
+        let notifier = consumer.state_notifier();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let mut snap = HashSet::new();
+        snap.insert(tp.clone());
+        notifier.on_group_assignment_updated(&snap);
+        notifier.on_member_epoch_updated(Some(5), "member-1");
+
+        consumer.run_rebalance_callbacks_on_close().await.expect("ok");
+        assert_eq!(
+            listener.revoked.load(Ordering::SeqCst),
+            1,
+            "live epoch + non-empty snapshot must invoke on_partitions_revoked"
+        );
+        assert_eq!(listener.lost.load(Ordering::SeqCst), 0);
+    }
+
+    /// Issue 12/13 regression: when the snapshot is non-empty but the
+    /// epoch is unknown (member fenced / never received heartbeat
+    /// response), Java falls through to `on_partitions_lost`.
+    #[tokio::test]
+    async fn run_rebalance_callbacks_on_close_invokes_lost_on_unknown_epoch() {
+        use async_trait::async_trait;
+        use std::sync::atomic::AtomicUsize;
+
+        struct CountingListener {
+            revoked: AtomicUsize,
+            lost: AtomicUsize,
+        }
+        #[async_trait]
+        impl ConsumerRebalanceListener for CountingListener {
+            async fn on_partitions_assigned(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                Ok(())
+            }
+            async fn on_partitions_revoked(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.revoked.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+            async fn on_partitions_lost(&self, _: &[TopicPartition]) -> Result<(), KafkaError> {
+                self.lost.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            }
+        }
+
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let listener: Arc<CountingListener> =
+            Arc::new(CountingListener { revoked: AtomicUsize::new(0), lost: AtomicUsize::new(0) });
+        *consumer.rebalance_listener.lock().unwrap() =
+            Some(Arc::clone(&listener) as Arc<dyn ConsumerRebalanceListener>);
+
+        // Populate snapshot but do NOT update epoch — generation_id
+        // stays at -1, so `on_partitions_lost` is invoked.
+        let notifier = consumer.state_notifier();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let mut snap = HashSet::new();
+        snap.insert(tp.clone());
+        notifier.on_group_assignment_updated(&snap);
+
+        consumer.run_rebalance_callbacks_on_close().await.expect("ok");
+        assert_eq!(listener.revoked.load(Ordering::SeqCst), 0);
+        assert_eq!(
+            listener.lost.load(Ordering::SeqCst),
+            1,
+            "unknown epoch + non-empty snapshot must invoke on_partitions_lost"
+        );
     }
 
     /// `close` on a groupless consumer skips the leave-group event

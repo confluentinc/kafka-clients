@@ -115,3 +115,74 @@ Each section records the original Critic finding + the resolving commit.
   user porting from Java sees the difference at the API doc level.
 - **Verification**: doc-comments on `assignment()` / `subscription()`
   / `paused()` in `src/consumer/async_kafka_consumer.rs`.
+
+---
+
+# Phase 11 Batch 2 — Resolved Critic Comments (N=1)
+
+---
+
+## Issue 12: `runRebalanceCallbacksOnClose` uses `subscriptions.assignedPartitions()` where Java uses `groupAssignmentSnapshot.get()` — RESOLVED
+
+- **Original commit**: `069a6c4` Phase 11 (7/N).
+- **Resolving commit**: fixup of Phase 11 (7/N) — adds
+  `group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>` field
+  on `AsyncKafkaConsumer`, populated by the new `ConsumerStateNotifier`
+  bridge (Issue 13), and rewires `run_rebalance_callbacks_on_close` to
+  read from it instead of `subscriptions.assigned_partitions()`.
+- **Resolution**: Mirrors Java's
+  `AtomicReference<Set<TopicPartition>> groupAssignmentSnapshot`
+  (`AsyncKafkaConsumer.java:317`). The Rust field is updated by
+  `ConsumerStateNotifier::on_group_assignment_updated`
+  (= Java's anonymous `memberStateListener.onGroupAssignmentUpdated` at
+  line 349-352), which the production wire-up registers on the
+  `ConsumerMembershipManager` so it fires on reconciliation. Both
+  `assign(...)`-only consumers (snapshot stays empty → early return at
+  Java line 1626-1628) and partially-revoked windows (snapshot still
+  carries the partition but `subscriptions` has been updated) are now
+  handled per Java.
+- **Verification**: three new tests:
+    - `run_rebalance_callbacks_on_close_skips_when_snapshot_empty` —
+      manual `assign(...)` + empty snapshot ⇒ no callback.
+    - `run_rebalance_callbacks_on_close_invokes_revoked_on_live_epoch` —
+      snapshot populated + `member_epoch > 0` via notifier ⇒
+      `on_partitions_revoked`.
+    - `run_rebalance_callbacks_on_close_invokes_lost_on_unknown_epoch` —
+      snapshot populated + `member_epoch < 0` ⇒ `on_partitions_lost`.
+
+---
+
+## Issue 13: `group_metadata` cache is never populated — `MemberStateListener` wire-up missing — RESOLVED
+
+- **Original commit**: `77b0cbb` Phase 11 (2/N).
+- **Resolving commit**: combined fixup of Phase 11 (2/N) + (7/N) —
+  introduces `ConsumerStateNotifier: MemberStateListener` and the
+  per-instance `state_notifier: Arc<ConsumerStateNotifier>` field,
+  exposed via `Self::state_notifier()` so the production wire-up
+  (Phase 12) and tests can register it on the
+  `ConsumerMembershipManager`.
+- **Resolution**: The new `ConsumerStateNotifier` struct holds Arcs of
+  both `group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>>` and
+  `group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>>`,
+  shared 1:1 with the consumer struct. The two `MemberStateListener`
+  methods translate Java's anonymous-inner-class memberStateListener
+  callbacks at `AsyncKafkaConsumer.java:343-353`:
+    - `on_member_epoch_updated` ⇒ `update_group_metadata` (Java line
+      772-784) — `memberEpoch.ifPresent(...)` short-circuit preserved.
+    - `on_group_assignment_updated` ⇒ `setGroupAssignmentSnapshot`
+      (Java line 786-788).
+  Production wire-up (Phase 12 ctor) calls
+  `membership_manager.register_state_listener(consumer.state_notifier())`
+  immediately after constructing the membership manager. Until then,
+  tests construct the notifier (via `consumer.state_notifier()`) and
+  invoke it directly to drive close-path tests.
+- **Verification**: three new tests:
+    - `state_notifier_populates_group_metadata_on_epoch_update` —
+      epoch + member-id flow through the cache.
+    - `state_notifier_with_none_epoch_does_not_modify_cache` —
+      Java's `memberEpoch.ifPresent` short-circuit.
+    - `state_notifier_updates_group_assignment_snapshot` — snapshot
+      is overwritten on each reconciliation.
+- **Note on Issue 12 interaction**: the three close-path tests under
+  Issue 12 exercise the end-to-end notifier-to-snapshot-to-close
+  pipeline, doubling as Issue 13 regression coverage.
