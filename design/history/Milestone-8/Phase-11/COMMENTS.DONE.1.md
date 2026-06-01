@@ -455,3 +455,168 @@ Each section records the original Critic finding + the resolving commit.
   `GroupAuthorizationException`
   (`AsyncKafkaConsumerTest.java:342-356`).
 
+---
+
+## Issue 16: `throwIfGroupIdNotDefined` collapsed to `IllegalArgument` — RESOLVED
+
+- **Original commit**: `0d88bb9` Phase 11 (3/N) (initial
+  `throw_if_group_id_not_defined`).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Added `KafkaError::invalid_group_id(message)`
+  convenience constructor that wraps a `Generic` variant carrying
+  `Errors::InvalidGroupId` (mirrors Java's `InvalidGroupIdException`
+  / `ApiException` subclass with the matching protocol code).
+  `throw_if_group_id_not_defined` now returns
+  `KafkaError::invalid_group_id(...)`. All three groupless tests
+  (`commit_sync_without_group_id_errors`, `committed_without_group_id_errors`,
+  `subscribe_re2j_pattern_without_group_id_errors`,
+  `group_metadata_groupless_commit_sync_emits_exact_java_message`)
+  updated to assert on `err.error() == Errors::InvalidGroupId`
+  rather than substring matching.
+- **Verification**: All four tests pass; group-id error discriminator
+  is type-shaped rather than string-shaped.
+
+---
+
+## Issue 17: `commit_sync_invokes_interceptor_chain` empty chain — RESOLVED
+
+- **Original commit**: `3a7bcf1` Phase 11 (5/N).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Test now registers a real `TrackingInterceptor`
+  on the consumer (replaces the empty `ConsumerInterceptors` chain
+  in the test fixture for this test only). The interceptor
+  appends every `on_commit` invocation to a shared
+  `Arc<Mutex<Vec<HashMap<...>>>>`. After `commit_sync_offsets`
+  returns, the test asserts the recorder observed exactly one
+  invocation with the committed offset (42). Mirrors Java's
+  `testInterceptorOnCommit`.
+
+---
+
+## Issue 18: `commit_sync_internal` single deadline vs Java's fresh `requestTimer` — RESOLVED (option b — documented divergence)
+
+- **Original commit**: `3a7bcf1` Phase 11 (5/N).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Java's `commit_sync` creates two timers (one for
+  the bg-side commit RPC via `calculateDeadlineMs`, another fresh
+  one for the app-side wait via `time.timer(timeout.toMillis())`),
+  giving a worst-case total of `~2*timeout`. Rust uses a single
+  `deadline_ms` for `~1*timeout` total — stricter and arguably more
+  correct, but observably different. Per Critic's option (b),
+  documented the divergence in a rustdoc block on
+  `commit_sync_internal` citing Java line 1715 (the fresh-timer
+  line) and noting this is intentional behaviour.
+
+---
+
+## Issue 19: `committed_timeout` Debug formatting `{:?}` — RESOLVED
+
+- **Original commit**: `de1d475` Phase 11 (6/N).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Added `format_partitions_for_display(&[TopicPartition])`
+  helper that emits Java's `Set.toString()` shape (`[t-0, t-1]`) using
+  `TopicPartition`'s existing `Display` impl
+  (`"{topic}-{partition}"`). `committed_timeout`'s timeout error
+  message now uses this helper instead of `{:?}`. Also
+  cleaned up `commit_sync_internal`'s offsets-debug format —
+  Java's source rethrows the underlying `TimeoutException` without
+  a custom message (`ConsumerUtils.java:219-231`), so the Rust
+  message no longer includes the offsets map (was `{:?}`-formatted
+  HashMap, which produced unstable test-failing output).
+
+---
+
+## Issue 20: `close_then_apis_error_with_already_closed` coverage — RESOLVED
+
+- **Original commit**: `069a6c4` Phase 11 (7/N) (test added).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Expanded from 2 APIs (commit_sync, unsubscribe)
+  to every blocking-style API on `AsyncKafkaConsumer`: subscribe
+  family (5 variants), poll, commit family (7 variants), seek
+  family (4 variants), position / committed / lag (5), offsets
+  (8 — beginning / end / for_times × {default, _timeout}), metadata
+  (4), pause / resume (2). 28 `assert_closed!` macro invocations
+  in a single test, plus an idempotent-close check on `close()` and
+  `close_with_options()`. `enforce_rebalance` is a documented noop
+  in the KIP-848 implementation and stays Ok-returning.
+
+---
+
+## Issue 24: Untranslated Java tests — RESOLVED
+
+- **Original commit**: `30b48fd` Phase 11 (10/N) (skip-rationale block).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Four tests translated as new inline test methods:
+  - `beginning_offsets_with_zero_timeout_returns_empty_and_enqueues_event`
+    (Java `testBeginningOffsetsWithZeroTimeout`).
+  - `offsets_for_times_with_zero_timeout_returns_empty_map`
+    (Java `testOffsetsForTimesWithZeroTimeout`).
+  - `offsets_for_times_rejects_negative_target_times`
+    (Java `testOffsetsForTimesFailsOnNegativeTargetTimes` — all
+    three negative-target arms via a loop).
+  - `offsets_for_times_propagates_timeout_with_exact_message`
+    (Java `testOffsetsForTimesTimeoutException` — DoD §3 exact
+    message assertion).
+  - `beginning_offsets_timeout_on_event_processing_enqueues_event`
+    (Java `testBeginningOffsetsTimeoutOnEventProcessingTimeout` —
+    distinct from `testBeginningOffsetsTimeoutException` by also
+    asserting the event was enqueued).
+
+  Four tests get explicit SKIP rationales in the commit (10/N)
+  skip block:
+  - `testCloseAwaitPendingAsyncCommitIncomplete` — deferred to
+    Phase 12 (needs bg-task-wired incomplete-future timing).
+  - `testCloseLeavesGroupDespiteOnPartitionsLostError` — Mockito
+    `spy(newConsumer)` + `setGroupAssignmentSnapshot` surface
+    has no inline Rust analog; the listener-error-doesn't-gate-leave
+    contract is already inherent in `close_internal`'s sequential
+    ordering.
+  - `testCloseLeavesGroupDespiteInterrupt` — Java's
+    `InterruptException` has no Rust analog (no thread-interrupt
+    primitive).
+  - `testGroupRemoteAssignorUsedInConsumerProtocol` — depends on
+    `ConsumerConfig::unused()` tracking (same blocker as Issue 27).
+
+---
+
+## Issue 25: `beginning_offsets_propagates_timeout` exact message — RESOLVED
+
+- **Original commit**: `30b48fd` Phase 11 (10/N).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Test now uses `match err { KafkaError::Timeout(msg) => assert_eq!(msg, "Failed to get offsets by times in 100ms"), ... }`.
+  Added symmetric `end_offsets_propagates_timeout_with_exact_message`
+  test for `end_offsets_timeout` (DoD §3 — both routes share the
+  production timeout-format string, so both routes get exact
+  assertions).
+
+---
+
+## Issue 26: `unsubscribe_without_group_id_enqueues_event` post-mutation — RESOLVED
+
+- **Original commit**: `0d88bb9` Phase 11 (3/N) (test added).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Added
+  `make_test_consumer_without_group_id()` fixture that clears BOTH
+  `consumer.group_id` AND `consumer.config.group_id` (the Critic
+  pointed out that mutating just the field doesn't exercise the
+  same construction-time decisions as a true no-group-id ctor —
+  even though the production ctor is deferred to Phase 12, the
+  fixture matches that future shape). `unsubscribe_without_group_id_enqueues_event`
+  now uses this fixture and asserts the pre-condition.
+
+---
+
+## Issue 27: `group_remote_assignor_unused_if_group_id_undefined` stub — RESOLVED
+
+- **Original commit**: `30b48fd` Phase 11 (10/N) (test added).
+- **Resolving commit**: `5ca7e5a` Phase 11 (11/N).
+- **Resolution**: Test rewritten to use
+  `make_test_consumer_without_group_id()` (was using the regular
+  fixture with `group_id=Some("test-group")`, contradicting the
+  test name) and asserts a real behavioural surface:
+  `group_id.is_none()`, `config.group_id.is_none()`,
+  `assignment().is_empty()`, `subscription().is_empty()`. The
+  `config.unused()` set-tracking piece of Java's contract remains
+  deferred (no `ConsumerConfig::unused()` surface in Rust yet); the
+  rustdoc on the test now states this explicitly.
+
