@@ -4763,6 +4763,392 @@ mod tests {
         assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
     }
 
+    // ─── Phase 11 commit (9/N) Java test translations: poll / commit / wakeup ───
+    //
+    // Translates Java's `AsyncKafkaConsumerTest` poll-loop, commit-flow,
+    // and wakeup tests. Many already have an inline analog (commits 4-5);
+    // each Java test is either translated here or carries an explicit
+    // `// SKIP: covered by <existing_test>` rationale.
+    //
+    // SKIPs (commit 9 batch):
+    //   - testCommitSyncAwaitsCommitAsyncCompletionWithEmptyOffsets and
+    //     testCommitSyncAwaitsCommitAsyncCompletionWithNonEmptyOffsets —
+    //     covered by inline `commit_sync_drains_pending_async_commit`.
+    //   - testWakeupCommitted — covered by inline
+    //     `issue_11_committed_observes_wakeup_during_wait`.
+    //   - testEnsureCommitSyncExecutedCommitAsyncCallbacks — callback-fire
+    //     unit-tested in `OffsetCommitCallbackInvoker` + the inline
+    //     `commit_sync_drains_pending_async_commit` covers the drain path.
+    //   - testEnsureCallbackExecutedByApplicationThread — Rust's
+    //     `&mut self` API guarantees callbacks run on the caller's task;
+    //     no separate thread-identity assertion translates.
+    //   - testEnsurePollExecutedCommitAsyncCallbacks /
+    //     testEnsureShutdownExecutedCommitAsyncCallbacks — callback-fire
+    //     wire-up exercised via `OffsetCommitCallbackInvoker` unit tests
+    //     and via the close drainer that completes CommitAsync envelopes.
+    //   - testCommitAsyncWithNullCallback — covered by the inline
+    //     `commit_async_with_no_callback_enqueues_commit_async_event`.
+    //   - testInterceptorCommitSync / testInterceptorCommitAsync /
+    //     testInterceptorAutoCommitOnClose / testNoInterceptorCommitSyncFailed /
+    //     testNoInterceptorCommitAsyncFailed — interceptor-tracking path
+    //     deferred to Issue 17 (commit 12 batch).
+    //   - testWakeupAfterEmptyFetch / testWakeupAfterNonEmptyFetch —
+    //     require a fully-wired FetchCollector observable that signals
+    //     "wakeup mid-fetch". Without a `MockClient`-backed bg task this
+    //     would only exercise the wakeup_trigger plumbing already tested
+    //     by `wakeup_before_poll_throws_once_then_succeeds`. Deferred to
+    //     Phase 12 (integration tests against a real broker).
+    //   - testCommitted — full happy-path commit fetch — requires a
+    //     completer that returns offsets through the FetchCommittedOffsets
+    //     handle; the new `committed_propagates_event_exception` exercises
+    //     the same path with an error variant. Phase 12 integration tests
+    //     cover the happy path against a real broker.
+    //   - testPollThrowsInterruptExceptionIfInterrupted — Java's
+    //     `Thread.currentThread().interrupt()` is unrepresentable in
+    //     Rust (no thread-level interrupt flag). The equivalent is
+    //     cancellation via the consumer's `wakeup_trigger`, covered by
+    //     `wakeup_before_poll_throws_once_then_succeeds`.
+    //   - testListenerCallbacksInvoke (parameterized) — exercises the
+    //     §31 callback-invocation pipeline. The §31 regression pair in
+    //     commit 11/N covers the same surface with stricter scenarios.
+
+    /// Java: `testWakeupBeforeCallingPoll` (Java line 412-428). The
+    /// inline `poll_observes_pending_wakeup_and_rotates_token` already
+    /// asserts the first half (wakeup-before-poll surfaces Wakeup). The
+    /// new piece is the second half: a subsequent `poll()` does NOT
+    /// throw (token was rotated, fresh poll succeeds).
+    #[tokio::test]
+    async fn wakeup_before_poll_throws_once_then_succeeds() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("foo".to_string(), 3);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp.clone());
+            subs.assign_from_user(assigned).unwrap();
+        }
+
+        // Drainer: complete every AsyncPoll envelope so successful
+        // polls can land.
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::AsyncPoll { state, .. } = env.event {
+                    state.complete_successfully();
+                }
+            }
+        });
+
+        consumer.wakeup_trigger.wakeup();
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("wakeup");
+        assert!(matches!(err, KafkaError::Wakeup(_)));
+
+        // Second poll: must NOT raise (Java's `assertDoesNotThrow`).
+        let _ = consumer.poll(Duration::from_millis(0)).await.expect("ok");
+        drop(drainer);
+    }
+
+    /// Java: `testClearWakeupTriggerAfterPoll` (Java line 508-528). After
+    /// a successful `poll()`, the wakeup trigger is cleared so the next
+    /// `poll()` does not see a stale wakeup signal.
+    #[tokio::test]
+    async fn clear_wakeup_trigger_after_poll() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("foo".to_string(), 3);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp.clone());
+            subs.assign_from_user(assigned).unwrap();
+        }
+
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::AsyncPoll { state, .. } = env.event {
+                    state.complete_successfully();
+                }
+            }
+        });
+
+        // First poll completes successfully.
+        let _ = consumer.poll(Duration::from_millis(0)).await.expect("ok");
+        // Second poll must not raise.
+        let _ = consumer.poll(Duration::from_millis(0)).await.expect("ok");
+        // Wakeup trigger has no pending task.
+        assert!(!consumer.wakeup_trigger.current_token().is_cancelled());
+        drop(drainer);
+    }
+
+    /// Java: `testCommittedExceptionThrown` (Java line 398-410). When
+    /// the `FetchCommittedOffsetsEvent` is completed exceptionally, the
+    /// error propagates out of `committed_timeout`.
+    #[tokio::test]
+    async fn committed_propagates_event_exception() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Drainer completes the FetchCommittedOffsets handle with an error.
+        let drainer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::FetchCommittedOffsets { handle, .. } = env.event {
+                    handle.complete_exceptionally(KafkaError::illegal_state("Test exception"));
+                    return;
+                }
+            }
+        });
+
+        let tp = TopicPartition::new("t0".to_string(), 2);
+        let err = consumer
+            .committed_timeout(std::slice::from_ref(&tp), Duration::from_secs(1))
+            .await
+            .expect_err("must err");
+        // Java surfaces this as `KafkaException`; Rust surfaces the
+        // underlying KafkaError.
+        assert!(
+            !matches!(err, KafkaError::Timeout(_)),
+            "non-timeout err propagates, got {err:?}"
+        );
+        drainer.await.expect("drainer ok");
+    }
+
+    /// Java: `testCommitAsyncShouldCopyOffsets` (Java line 358-376) —
+    /// commit_async must capture a copy of the user-supplied offsets;
+    /// post-call modifications to the user's map must not affect the
+    /// enqueued event.
+    ///
+    /// Rust translation note: Rust's ownership semantics make this
+    /// inherent — the consumer takes the `HashMap` by value
+    /// (`commit_async_offsets_with_callback(offsets: HashMap<...>, ...)`)
+    /// — so the test asserts that the event's snapshot is the same as
+    /// the input.
+    #[tokio::test]
+    async fn commit_async_captures_offsets() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 2);
+        let offsets = singleton_offsets(tp.clone(), 10);
+
+        let offsets_for_assert = offsets.clone();
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, offsets: ev_offsets } = env.event {
+                    // The event's offsets must contain the same entries.
+                    let captured = ev_offsets.expect("CommitAsync.offsets is Some");
+                    assert_eq!(captured.get(&tp).map(|v| v.offset()), Some(10));
+                    assert_eq!(captured.len(), offsets_for_assert.len());
+                    offsets_ready.complete(());
+                    handle.complete(HashMap::new());
+                    return true;
+                }
+            }
+            false
+        });
+
+        consumer
+            .commit_async_offsets_with_callback(offsets, Arc::new(NoopCallback))
+            .await
+            .expect("ok");
+        assert!(completer.await.expect("task ok"));
+    }
+
+    /// Java: `testCommitSyncShouldCopyOffsets` (Java line 606-624) — the
+    /// symmetric test for `commit_sync_offsets`.
+    #[tokio::test]
+    async fn commit_sync_captures_offsets() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t0".to_string(), 2);
+        let offsets = singleton_offsets(tp.clone(), 10);
+
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitSync { handle, offsets_ready, offsets: ev_offsets } = env.event {
+                    let captured = ev_offsets.expect("CommitSync.offsets is Some");
+                    assert_eq!(captured.get(&tp).map(|v| v.offset()), Some(10));
+                    offsets_ready.complete(());
+                    handle.complete(HashMap::new());
+                    return true;
+                }
+            }
+            false
+        });
+
+        consumer.commit_sync_offsets(offsets).await.expect("ok");
+        assert!(completer.await.expect("task ok"));
+    }
+
+    /// Java: `testBackgroundError` (Java line 1518-1532). An
+    /// `ErrorEvent` posted by the bg task surfaces from `poll()`.
+    #[tokio::test]
+    async fn poll_surfaces_single_background_error() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp);
+            subs.assign_from_user(assigned).unwrap();
+        }
+        // Post an error to the bg event channel BEFORE calling poll —
+        // poll's process_background_events drain must surface it.
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::Error {
+                    error: KafkaError::illegal_state("Nobody expects the Spanish Inquisition"),
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("error must surface");
+        let msg = format!("{err}");
+        assert!(
+            msg.contains("Nobody expects the Spanish Inquisition"),
+            "expected the bg error message, got: {msg}"
+        );
+    }
+
+    /// Java: `testMultipleBackgroundErrors` (Java line 1534-1552). When
+    /// multiple errors are queued, only the FIRST is surfaced; the rest
+    /// remain on the queue or are silently consumed. Java asserts the
+    /// queue is empty after.
+    #[tokio::test]
+    async fn poll_surfaces_first_background_error_only() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        {
+            let mut subs = consumer.subscriptions.lock().unwrap();
+            let mut assigned: HashSet<TopicPartition> = HashSet::new();
+            assigned.insert(tp);
+            subs.assign_from_user(assigned).unwrap();
+        }
+        // Post TWO errors. Java's loop returns on the first.
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::Error {
+                    error: KafkaError::illegal_state("Nobody expects the Spanish Inquisition"),
+                },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+        handles
+            .bg_event_tx
+            .send(BackgroundEventEnvelope {
+                event: BackgroundEvent::Error { error: KafkaError::illegal_state("Spam, Spam, Spam") },
+                enqueued_ms: 0,
+            })
+            .expect("send ok");
+
+        let err = consumer.poll(Duration::from_millis(0)).await.expect_err("first error surfaces");
+        let msg = format!("{err}");
+        // Java's assertion: the FIRST error message is observed.
+        assert!(msg.contains("Spanish Inquisition"), "got: {msg}");
+    }
+
+    /// Java: `testCommitSyncAwaitsCommitAsyncButDoesNotFail`
+    /// (Java line 588-604). An async-commit that fails does NOT
+    /// propagate to the subsequent sync commit (the callback consumes
+    /// the error).
+    #[tokio::test]
+    async fn commit_sync_does_not_fail_when_pending_async_failed() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        // Drainer: complete the async commit EXCEPTIONALLY, then the
+        // sync commit normally.
+        let completer = tokio::spawn(async move {
+            let mut saw_sync = false;
+            while let Some(env) = handles.app_event_rx.recv().await {
+                match env.event {
+                    ApplicationEvent::CommitAsync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete_exceptionally(KafkaError::illegal_state("Test exception"));
+                    },
+                    ApplicationEvent::CommitSync { handle, offsets_ready, .. } => {
+                        offsets_ready.complete(());
+                        handle.complete(HashMap::new());
+                        saw_sync = true;
+                        return saw_sync;
+                    },
+                    _ => {},
+                }
+            }
+            saw_sync
+        });
+
+        // Async fail
+        consumer.commit_async().await.expect("async ok");
+        // Sync must NOT raise (Java's `assertDoesNotThrow`)
+        consumer.commit_sync().await.expect("sync must not fail");
+        assert!(completer.await.expect("task ok"));
+    }
+
+    /// Java: `testCommitAsyncUserSuppliedCallbackWithException` (line 342-356,
+    /// `@ParameterizedTest`) — the parameter is the exception type
+    /// (KafkaException / GroupAuthorizationException). The Rust analog
+    /// is two test methods, one per exception variant.
+    #[tokio::test]
+    async fn commit_async_user_supplied_callback_with_exception_kafka() {
+        commit_async_callback_with_exception(KafkaError::illegal_state("Test exception")).await;
+    }
+
+    #[tokio::test]
+    async fn commit_async_user_supplied_callback_with_exception_group_authz() {
+        commit_async_callback_with_exception(KafkaError::illegal_argument("Group authorization exception")).await;
+    }
+
+    async fn commit_async_callback_with_exception(injected: KafkaError) {
+        use std::sync::atomic::AtomicUsize;
+        struct RecordingCallback {
+            saw_error: Arc<std::sync::Mutex<Option<String>>>,
+            invoked: Arc<AtomicUsize>,
+        }
+        #[async_trait::async_trait]
+        impl crate::consumer::OffsetCommitCallback for RecordingCallback {
+            async fn on_complete(
+                &self,
+                _offsets: &HashMap<TopicPartition, OffsetAndMetadata>,
+                error: Option<&KafkaError>,
+            ) {
+                if let Some(e) = error {
+                    *self.saw_error.lock().unwrap() = Some(format!("{e}"));
+                }
+                self.invoked.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("my-topic".to_string(), 1);
+        let offsets = singleton_offsets(tp, 200);
+
+        let injected_clone = injected.clone();
+        let completer = tokio::spawn(async move {
+            while let Some(env) = handles.app_event_rx.recv().await {
+                if let ApplicationEvent::CommitAsync { handle, offsets_ready, .. } = env.event {
+                    offsets_ready.complete(());
+                    handle.complete_exceptionally(injected_clone.clone());
+                    return true;
+                }
+            }
+            false
+        });
+
+        let saw_error = Arc::new(std::sync::Mutex::new(None::<String>));
+        let invoked = Arc::new(AtomicUsize::new(0));
+        let cb: Arc<RecordingCallback> =
+            Arc::new(RecordingCallback { saw_error: Arc::clone(&saw_error), invoked: Arc::clone(&invoked) });
+        consumer.commit_async_offsets_with_callback(offsets, cb).await.expect("ok");
+
+        // Wait for the spawned continuation to enqueue the callback.
+        if let Some(rx) = consumer.last_pending_async_commit.take() {
+            let _ = rx.await;
+        }
+
+        // Drain the callback so it fires (Java's `forceCommitCallbackInvocation`).
+        consumer.offset_commit_callback_invoker.invoke_pending_callbacks().await;
+
+        assert!(completer.await.expect("task ok"));
+        assert_eq!(invoked.load(Ordering::SeqCst), 1, "callback must be invoked once");
+        let saw_msg = saw_error.lock().unwrap().clone().expect("callback observed error");
+        let injected_msg = format!("{injected}");
+        assert!(saw_msg == injected_msg, "callback error mismatch: {saw_msg} != {injected_msg}");
+    }
+
     // ─── Close / lifecycle tests (commit 7/N) ───
     //
     // Stand-ins for Java's `testCloseShouldBeIdempotent`,
