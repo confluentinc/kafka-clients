@@ -37,7 +37,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use super::commit_request_manager::CommitRequestManager;
 use super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
@@ -57,14 +57,15 @@ pub(crate) struct RequestManagers {
     /// path. Java: `public final Optional<CoordinatorRequestManager>
     /// coordinatorRequestManager`.
     ///
-    /// Wrapped in `Arc<Mutex<...>>` so it can be shared with
+    /// Wrapped in `Arc<...>` so it can be shared with
     /// [`ConsumerHeartbeatRequestManager`] (which holds the same handle
     /// to read the discovered coordinator node — Java does the same via
-    /// a heap reference). Skipped from [`Self::entries`] (like
-    /// `consumer_membership`); the bg task polls the coordinator
-    /// separately through [`Self::coordinator_handle`] so the lock can
-    /// be acquired briefly per poll iteration.
-    pub(crate) coordinator: Option<Arc<Mutex<CoordinatorRequestManager>>>,
+    /// a heap reference). [`CoordinatorRequestManager`] uses interior
+    /// mutability (`Arc<CoordinatorRequestManagerInner>` with `Mutex`
+    /// slots) so an outer `Mutex` is unnecessary. Skipped from
+    /// [`Self::entries`] (like `consumer_membership`); the bg task polls
+    /// the coordinator separately through [`Self::coordinator_handle`].
+    pub(crate) coordinator: Option<Arc<CoordinatorRequestManager>>,
     /// Topic-metadata request manager — serves `list_topics()` and
     /// `partitions_for(topic)` API calls. Java:
     /// `final TopicMetadataRequestManager topicMetadataRequestManager`
@@ -133,7 +134,7 @@ impl RequestManagers {
     /// what matters per `consumer-threading.md` §10 — see
     /// [`Self::entries`].
     pub(crate) fn new(
-        coordinator: Option<Arc<Mutex<CoordinatorRequestManager>>>,
+        coordinator: Option<Arc<CoordinatorRequestManager>>,
         topic_metadata: Option<TopicMetadataRequestManager>,
         commit: Option<Arc<CommitRequestManager>>,
         consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,
@@ -183,14 +184,13 @@ impl RequestManagers {
     ///
     /// `coordinator`, `commit`, and `consumer_membership` are
     /// **intentionally skipped** — they are held as
-    /// `Arc<Mutex<CoordinatorRequestManager>>`,
+    /// `Arc<CoordinatorRequestManager>`,
     /// `Arc<CommitRequestManager>`, and `Arc<ConsumerMembershipManager>`
     /// respectively so the heartbeat manager and the membership manager
     /// can share the same instance with the slot in this container
     /// (Java does the same via heap references). Producing a
-    /// `&mut dyn RequestManager` from a shared `Arc<Mutex<...>>` would
-    /// either require holding the `MutexGuard` across the `Vec` (lifetime
-    /// problem) or refactoring `RequestManager::poll` to take `&self`
+    /// `&mut dyn RequestManager` from a shared `Arc<...>` would
+    /// require refactoring `RequestManager::poll` to take `&self`
     /// (semantic mismatch with Java). Instead the bg task polls them
     /// separately via [`Self::coordinator_handle`],
     /// [`Self::commit_handle`], and `ConsumerMembershipManager::reconcile`.
@@ -241,12 +241,12 @@ impl RequestManagers {
         list
     }
 
-    /// Returns a clone of the `Arc<Mutex<CoordinatorRequestManager>>`
-    /// handle, if a coordinator manager is wired. The bg task uses this
-    /// to poll the coordinator separately from [`Self::entries`] —
-    /// briefly locking the mutex, calling [`RequestManager::poll`],
-    /// then dropping the guard before any subsequent `.await`.
-    pub(crate) fn coordinator_handle(&self) -> Option<Arc<Mutex<CoordinatorRequestManager>>> {
+    /// Returns a clone of the `Arc<CoordinatorRequestManager>` handle,
+    /// if a coordinator manager is wired. The bg task uses this to poll
+    /// the coordinator separately from [`Self::entries`] — calling into
+    /// the manager's interior-mutability methods without holding any
+    /// outer guard.
+    pub(crate) fn coordinator_handle(&self) -> Option<Arc<CoordinatorRequestManager>> {
         self.coordinator.clone()
     }
 
@@ -333,8 +333,8 @@ mod tests {
     use crate::consumer::internals::fetch_request_manager::{always_available, no_auth_failure};
     use crate::consumer::internals::subscription_state::SubscriptionState;
 
-    fn coord_manager() -> Arc<Mutex<CoordinatorRequestManager>> {
-        Arc::new(Mutex::new(CoordinatorRequestManager::new(100, 1_000, "group-1")))
+    fn coord_manager() -> Arc<CoordinatorRequestManager> {
+        Arc::new(CoordinatorRequestManager::new(100, 1_000, "group-1"))
     }
 
     fn topic_metadata_manager() -> TopicMetadataRequestManager {

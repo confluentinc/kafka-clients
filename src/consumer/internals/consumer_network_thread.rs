@@ -111,7 +111,6 @@ use super::events::application_event_processor::ApplicationEventProcessor;
 use super::events::completable_event_reaper::CompletableEventReaper;
 use super::events::event_processor::EventProcessor;
 use super::network_client_delegate::NetworkClientDelegate;
-use super::request_manager::RequestManager;
 use super::request_managers::RequestManagers;
 use super::wakeup_trigger::WakeupTrigger;
 
@@ -430,27 +429,16 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             // goes first; its `poll` may discover the coordinator node,
             // which `commit.poll_with_coordinator` then consumes.
             if let Some(coord_arc) = coord_handle.as_ref() {
-                let mut g = match coord_arc.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                before.push(g.poll(current_time_ms));
+                before.push(coord_arc.poll_shared(current_time_ms));
             }
             // Java: `CommitRequestManager.poll(currentTimeMs)`
             // (`CommitRequestManager.java:181-209`). Must run between
             // coordinator and heartbeat so unsent commits/fetches are
-            // shipped on every iteration. The coordinator guard is
-            // re-acquired briefly (the previous `before.push(g.poll(...))`
-            // block drops it before this point) so we can pass
-            // `&mut CoordinatorRequestManager` to `poll_with_coordinator`.
-            // `&self` is acceptable because `CommitRequestManager` uses
-            // interior mutability (`Arc<CommitRequestManagerInner>`).
+            // shipped on every iteration. Both `CoordinatorRequestManager`
+            // and `CommitRequestManager` use interior mutability
+            // (`Arc<...Inner>`), so `&self` is sufficient on both.
             if let (Some(coord_arc), Some(commit_arc)) = (coord_handle.as_ref(), commit_handle.as_ref()) {
-                let mut coord_g = match coord_arc.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                before.push(commit_arc.poll_with_coordinator(&mut coord_g, current_time_ms));
+                before.push(commit_arc.poll_with_coordinator(coord_arc.as_ref(), current_time_ms));
             }
             before.extend(entries_results); // heartbeat (if any)
             (before, tail)
@@ -1902,9 +1890,8 @@ mod tests {
         // Build a coordinator with a known coordinator node so
         // `poll_with_coordinator` proceeds past the `coordinator unknown`
         // early-return.
-        let mut coord = CoordinatorRequestManager::new(100, 1_000, "g".to_string());
-        coord.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let coordinator = Arc::new(Mutex::new(coord));
+        let coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g".to_string()));
+        coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
 
         // Build a real commit manager (no auto-commit; this test
         // exercises the explicit `commit_sync` path).

@@ -228,7 +228,7 @@ impl ConsumerHeartbeatRequestManager {
     pub(crate) fn new(
         current_time_ms: i64,
         config: &ConsumerConfig,
-        coordinator_request_manager: Arc<Mutex<CoordinatorRequestManager>>,
+        coordinator_request_manager: Arc<CoordinatorRequestManager>,
         subscriptions: Arc<Mutex<SubscriptionState>>,
         membership_manager: Arc<ConsumerMembershipManager>,
         background_event_handler: Arc<BackgroundEventHandler>,
@@ -268,13 +268,7 @@ impl ConsumerHeartbeatRequestManager {
     fn build_heartbeat_request(&mut self) -> UnsentRequest {
         let data = self.heartbeat_state.build_request_data();
         let builder = Box::new(ConsumerGroupHeartbeatRequestBuilder::new(data));
-        let node = {
-            let coord = match self.inner.coordinator_request_manager.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            coord.coordinator().cloned()
-        };
+        let node = self.inner.coordinator_request_manager.coordinator();
         UnsentRequest::new(builder, node)
     }
 
@@ -381,13 +375,7 @@ impl RequestManager for ConsumerHeartbeatRequestManager {
     /// `poll` only computes whether a heartbeat needs to be sent.
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
         // 1. Skip-heartbeat short-circuit.
-        let coordinator_known = {
-            let coord = match self.inner.coordinator_request_manager.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            coord.coordinator().is_some()
-        };
+        let coordinator_known = self.inner.coordinator_request_manager.coordinator().is_some();
         if !coordinator_known
             || self
                 .membership_manager
@@ -566,7 +554,7 @@ mod tests {
         initial_interval_ms: Option<i64>,
     ) -> (
         ConsumerHeartbeatRequestManager,
-        Arc<Mutex<CoordinatorRequestManager>>,
+        Arc<CoordinatorRequestManager>,
         Arc<ConsumerMembershipManager>,
     ) {
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
@@ -578,7 +566,7 @@ mod tests {
         ));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
-        let coord = Arc::new(Mutex::new(CoordinatorRequestManager::new(100, 1_000, "g")));
+        let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let mm = Arc::new(ConsumerMembershipManager::new(
             "g",
             None,
@@ -601,11 +589,8 @@ mod tests {
     /// Test helper: inject a coordinator so `poll` doesn't short-circuit
     /// on "coordinator unknown". Mirrors Mockito
     /// `when(coordinatorRequestManager.coordinator()).thenReturn(...)`.
-    fn set_coordinator(coord: &Arc<Mutex<CoordinatorRequestManager>>) {
-        coord
-            .lock()
-            .unwrap()
-            .set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+    fn set_coordinator(coord: &Arc<CoordinatorRequestManager>) {
+        coord.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
     }
 
     /// Test helper: drive the membership manager through

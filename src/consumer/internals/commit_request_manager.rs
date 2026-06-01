@@ -1093,7 +1093,7 @@ impl CommitRequestManager {
     /// Mirrors Java's `poll(long currentTimeMs)`.
     pub(crate) fn poll_with_coordinator(
         &self,
-        coordinator: &mut CoordinatorRequestManager,
+        coordinator: &CoordinatorRequestManager,
         current_time_ms: i64,
     ) -> PollResult {
         let closing = *self.inner.closing.lock().expect("commit manager closing flag poisoned");
@@ -1101,7 +1101,7 @@ impl CommitRequestManager {
         // Java: if coordinator is unknown, fail unsent commits if closing.
         if coordinator.coordinator().is_none() {
             let mut guard = self.inner.state.lock().expect("commit manager state poisoned");
-            if let Some(err) = coordinator.fatal_error().cloned() {
+            if let Some(err) = coordinator.fatal_error() {
                 Self::fail_all_with_error(&mut guard.pending, err);
             }
             if closing && guard.pending.has_unsent_requests() {
@@ -2288,9 +2288,9 @@ mod tests {
         use crate::common::Node;
         use crate::common::requests::ConcreteResponse;
         use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
-        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let poll_result = manager.poll_with_coordinator(&mut coordinator, after_expiry_ms);
+        let poll_result = manager.poll_with_coordinator(&coordinator, after_expiry_ms);
         assert_eq!(poll_result.unsent_requests.len(), 1);
         let mut unsent_requests = poll_result.unsent_requests;
         let unsent = unsent_requests.remove(0);
@@ -2384,9 +2384,9 @@ mod tests {
         }
 
         // Drive `poll_with_coordinator` to ship the request.
-        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 1);
         assert_eq!(poll_result.unsent_requests.len(), 1);
 
         // Inflight has the request now, unsent is empty.
@@ -2446,7 +2446,7 @@ mod tests {
         let tp = TopicPartition::new("t".to_string(), 0);
         let public_rx = manager.commit_sync(singleton_offset(tp.clone(), 100), deadline_ms, 0);
 
-        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
 
         // Drive enough send / fail cycles to trip the deadline. The poll
@@ -2469,7 +2469,7 @@ mod tests {
                 Err(oneshot::error::TryRecvError::Closed) => panic!("public sender dropped"),
                 Err(oneshot::error::TryRecvError::Empty) => {},
             }
-            let poll_result = manager.poll_with_coordinator(&mut coordinator, poll_time_ms);
+            let poll_result = manager.poll_with_coordinator(&coordinator, poll_time_ms);
             if let Some(unsent) = poll_result.unsent_requests.into_iter().next() {
                 unsent
                     .handler()
@@ -2618,9 +2618,9 @@ mod tests {
 
         // Ship the request via `poll_with_coordinator` to move the unsent
         // entry to the network client, exposing its completion handler.
-        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 1);
         assert_eq!(
             poll_result.unsent_requests.len(),
             1,
@@ -2717,9 +2717,9 @@ mod tests {
         // backoff progression).
         let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(i64::MAX, 0);
 
-        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 1);
         assert_eq!(poll_result.unsent_requests.len(), 1);
         let mut unsent_requests = poll_result.unsent_requests;
         let unsent = unsent_requests.remove(0);
@@ -2776,9 +2776,9 @@ mod tests {
         let deadline_ms: i64 = 1;
         let mut public_rx = manager.maybe_auto_commit_sync_before_rebalance(deadline_ms, 0);
 
-        let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
+        let coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
+        let poll_result = manager.poll_with_coordinator(&coordinator, 1);
         assert_eq!(poll_result.unsent_requests.len(), 1);
         let mut unsent_requests = poll_result.unsent_requests;
         let unsent = unsent_requests.remove(0);

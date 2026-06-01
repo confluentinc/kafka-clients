@@ -775,9 +775,10 @@ where
         // wraps the shared slot in `Arc<...>` — see `RequestManagers`
         // field docs and Phase 12 commit message for the refactor that
         // landed alongside this commit):
-        //   * `coordinator`: `Arc<Mutex<CoordinatorRequestManager>>` —
+        //   * `coordinator`: `Arc<CoordinatorRequestManager>` —
         //     shared with the heartbeat manager (heartbeat reads the
-        //     discovered coordinator node every poll).
+        //     discovered coordinator node every poll). Uses interior
+        //     mutability (`Arc<CoordinatorRequestManagerInner>`).
         //   * `commit`: `Arc<CommitRequestManager>` — shared with the
         //     membership manager (membership calls
         //     `maybeAutoCommitSyncBeforeRebalance` from `reconcile`).
@@ -794,12 +795,12 @@ where
             .map(|d| d.as_millis() as i64)
             .unwrap_or(0);
 
-        let coordinator: Option<Arc<Mutex<CoordinatorRequestManager>>> = group_id.as_ref().map(|gid| {
-            Arc::new(Mutex::new(CoordinatorRequestManager::new(
+        let coordinator: Option<Arc<CoordinatorRequestManager>> = group_id.as_ref().map(|gid| {
+            Arc::new(CoordinatorRequestManager::new(
                 config.retry_backoff_ms(),
                 config.retry_backoff_max_ms(),
                 gid.clone(),
-            )))
+            ))
         });
 
         let commit: Option<Arc<CommitRequestManager>> = group_id.as_ref().map(|gid| {

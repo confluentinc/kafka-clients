@@ -34,7 +34,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use crate::common::KafkaError;
 use crate::common::protocol::Errors;
@@ -71,8 +71,9 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// broker-side rebalance timeout.
     pub(crate) max_poll_interval_ms: i32,
     /// Coordinator-discovery manager — heartbeats target whatever node
-    /// the coordinator manager has resolved.
-    pub(crate) coordinator_request_manager: Arc<Mutex<CoordinatorRequestManager>>,
+    /// the coordinator manager has resolved. Held as `Arc<...>` (no
+    /// outer Mutex); the manager itself uses interior mutability.
+    pub(crate) coordinator_request_manager: Arc<CoordinatorRequestManager>,
     /// State for heartbeat-request timing and retry backoff.
     pub(crate) heartbeat_request_state: HeartbeatRequestState,
     /// Channel for surfacing errors and rebalance-listener callback
@@ -94,7 +95,7 @@ impl AbstractHeartbeatRequestManager {
     pub(crate) fn new(
         current_time_ms: i64,
         config: &ConsumerConfig,
-        coordinator_request_manager: Arc<Mutex<CoordinatorRequestManager>>,
+        coordinator_request_manager: Arc<CoordinatorRequestManager>,
         background_event_handler: Arc<BackgroundEventHandler>,
     ) -> Self {
         let max_poll_interval_ms = config.max_poll_interval_ms();
@@ -128,7 +129,7 @@ impl AbstractHeartbeatRequestManager {
     pub(crate) fn with_state(
         current_time_ms: i64,
         config: &ConsumerConfig,
-        coordinator_request_manager: Arc<Mutex<CoordinatorRequestManager>>,
+        coordinator_request_manager: Arc<CoordinatorRequestManager>,
         heartbeat_request_state: HeartbeatRequestState,
         background_event_handler: Arc<BackgroundEventHandler>,
     ) -> Self {
@@ -185,13 +186,7 @@ impl AbstractHeartbeatRequestManager {
     ///
     /// Java: `maybePropagateCoordinatorFatalErrorEvent()`.
     pub(crate) fn maybe_propagate_coordinator_fatal_error_event(&self, current_time_ms: i64) {
-        let fatal = {
-            let mut guard = match self.coordinator_request_manager.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            guard.get_and_clear_fatal_error()
-        };
+        let fatal = self.coordinator_request_manager.get_and_clear_fatal_error();
         if let Some(err) = fatal {
             // Ignored if the receiver is dropped — same as Java's silent
             // success when the queue is closed during shutdown.
@@ -227,25 +222,15 @@ impl AbstractHeartbeatRequestManager {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
         match error {
             Errors::NotCoordinator => {
-                {
-                    let mut guard = match self.coordinator_request_manager.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    guard.mark_coordinator_unknown(error_message, current_time_ms);
-                }
+                self.coordinator_request_manager
+                    .mark_coordinator_unknown(error_message, current_time_ms);
                 // Skip backoff so the next HB targets the new coordinator
                 self.heartbeat_request_state.reset();
                 HeartbeatErrorAction::Handled
             },
             Errors::CoordinatorNotAvailable => {
-                {
-                    let mut guard = match self.coordinator_request_manager.lock() {
-                        Ok(g) => g,
-                        Err(p) => p.into_inner(),
-                    };
-                    guard.mark_coordinator_unknown(error_message, current_time_ms);
-                }
+                self.coordinator_request_manager
+                    .mark_coordinator_unknown(error_message, current_time_ms);
                 self.heartbeat_request_state.reset();
                 HeartbeatErrorAction::Handled
             },
@@ -304,13 +289,8 @@ impl AbstractHeartbeatRequestManager {
     pub(crate) fn on_failure(&mut self, error: &KafkaError, current_time_ms: i64) -> HeartbeatFailureAction {
         self.heartbeat_request_state.on_failed_attempt(current_time_ms);
         if error.is_retriable() {
-            {
-                let mut guard = match self.coordinator_request_manager.lock() {
-                    Ok(g) => g,
-                    Err(p) => p.into_inner(),
-                };
-                guard.handle_coordinator_disconnect(error, current_time_ms);
-            }
+            self.coordinator_request_manager
+                .handle_coordinator_disconnect(error, current_time_ms);
             log::debug!(
                 "ConsumerGroupHeartbeatRequest failed because of the retriable exception. \
                  Will retry in {} ms: {}",
@@ -385,7 +365,7 @@ mod tests {
 
     fn make_state(now: i64) -> AbstractHeartbeatRequestManager {
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
-        let coord = Arc::new(Mutex::new(CoordinatorRequestManager::new(100, 1_000, "g")));
+        let coord = Arc::new(CoordinatorRequestManager::new(100, 1_000, "g"));
         let (tx, _rx) = mpsc::unbounded_channel();
         let beh = Arc::new(BackgroundEventHandler::new(tx));
         AbstractHeartbeatRequestManager::new(now, &config, coord, beh)

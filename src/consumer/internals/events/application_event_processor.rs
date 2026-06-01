@@ -77,7 +77,6 @@ use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
 use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
-use crate::consumer::internals::request_manager::RequestManager;
 use crate::consumer::internals::request_managers::RequestManagers;
 use crate::consumer::internals::subscription_state::{FetchPosition, SubscriptionState};
 
@@ -571,11 +570,7 @@ impl ApplicationEventProcessor {
         let rm_guard = self.lock_request_managers();
         if let Some(coord_arc) = rm_guard.coordinator.as_ref() {
             log::debug!("Signal CoordinatorRequestManager closing");
-            let mut coord = match coord_arc.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
-            };
-            coord.signal_close();
+            coord_arc.signal_close_shared();
         }
     }
 
@@ -1552,6 +1547,7 @@ mod tests {
     use crate::consumer::internals::events::background_event_handler::BackgroundEventHandler;
     use crate::consumer::internals::events::completable_event::CompletableEventHandle;
     use crate::consumer::internals::offsets_request_manager::OffsetsRequestManager;
+    use crate::consumer::internals::request_manager::RequestManager;
     use crate::consumer::internals::subscription_state::SubscriptionState;
     use crate::consumer::internals::topic_metadata_request_manager::TopicMetadataRequestManager;
 
@@ -1598,11 +1594,7 @@ mod tests {
 
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let coordinator = if with_group_id {
-            Some(Arc::new(std::sync::Mutex::new(CoordinatorRequestManager::new(
-                100,
-                1_000,
-                "test-group",
-            ))))
+            Some(Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group")))
         } else {
             None
         };
@@ -1701,7 +1693,7 @@ mod tests {
     ) -> ConsumerHeartbeatRequestManager {
         let (tx, _rx) = mpsc::unbounded_channel();
         let bg_handler = Arc::new(BackgroundEventHandler::new(tx));
-        let hb_coordinator = Arc::new(Mutex::new(CoordinatorRequestManager::new(100, 1_000, "test-group")));
+        let hb_coordinator = Arc::new(CoordinatorRequestManager::new(100, 1_000, "test-group"));
         let mm = Arc::new(ConsumerMembershipManager::new(
             "test-group",
             None,
@@ -2186,8 +2178,7 @@ mod tests {
         fx.processor.process(ApplicationEvent::StopFindCoordinatorOnClose);
         let rm_guard = fx.request_managers.lock().unwrap();
         let coord_arc = rm_guard.coordinator.as_ref().expect("coordinator present");
-        let coord = coord_arc.lock().unwrap();
-        assert!(coord.is_closing(), "signal_close should have flipped the closing flag");
+        assert!(coord_arc.is_closing(), "signal_close should have flipped the closing flag");
     }
 
     #[test]
