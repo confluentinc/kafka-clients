@@ -24,6 +24,7 @@ mod common;
 
 mod api_versions_test;
 mod connection_test;
+mod consumer_test;
 mod metadata_test;
 mod producer_test;
 mod ssl_sasl_test;
