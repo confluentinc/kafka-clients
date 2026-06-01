@@ -501,7 +501,7 @@ where
         Ok(())
     }
 
-    fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
+    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError> {
         // Java line 235-239.
         self.ensure_not_closed()?;
         self.committed.clear();
@@ -734,14 +734,14 @@ where
 
     // ── Seek ───────────────────────────────────────────────────────────
 
-    fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
+    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
         // Java line 393-396.
         self.ensure_not_closed()?;
         self.subscriptions.seek(&partition, offset)?;
         Ok(())
     }
 
-    fn seek_with_metadata(
+    async fn seek_with_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
@@ -752,7 +752,7 @@ where
         Ok(())
     }
 
-    fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
         // Java line 438-441.
         self.ensure_not_closed()?;
         self.subscriptions
@@ -760,7 +760,7 @@ where
         Ok(())
     }
 
-    fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
         // Java line 448-451.
         self.ensure_not_closed()?;
         self.subscriptions
@@ -939,7 +939,7 @@ where
 
     // ── Pause / resume ─────────────────────────────────────────────────
 
-    fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
         // Java line 519-524.
         for tp in partitions {
             self.subscriptions.pause(tp)?;
@@ -948,7 +948,7 @@ where
         Ok(())
     }
 
-    fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
         // Java line 527-532.
         for tp in partitions {
             self.subscriptions.resume(tp)?;

@@ -187,7 +187,12 @@ where
     ) -> Result<(), KafkaError>;
 
     /// Translates Java's `void assign(Collection<TopicPartition>)`.
-    fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError>;
+    ///
+    /// Async because Java's `assign` calls
+    /// `applicationEventHandler.addAndGet(new AssignmentChangeEvent(...))`
+    /// which blocks (`AsyncKafkaConsumer.java:1819`). The Rust translation
+    /// `.await`s the event handle.
+    async fn assign(&mut self, partitions: Vec<TopicPartition>) -> Result<(), KafkaError>;
 
     /// Translates Java's `void unsubscribe()`.
     async fn unsubscribe(&mut self) -> Result<(), KafkaError>;
@@ -236,27 +241,29 @@ where
         callback: Arc<dyn OffsetCommitCallback>,
     ) -> Result<(), KafkaError>;
 
-    // ── Seek (sync — Java: pure SubscriptionState mutation) ──
+    // ── Seek (async — Java: addAndGet on SeekUnvalidatedEvent / ResetOffsetEvent) ──
 
     /// Translates Java's `void seek(TopicPartition partition, long offset)`.
     ///
     /// Returns `Result` because Java throws `IllegalArgumentException` /
-    /// `IllegalStateException` on invalid input.
-    fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError>;
+    /// `IllegalStateException` on invalid input. Async because Java's seek
+    /// calls `applicationEventHandler.addAndGet(new SeekUnvalidatedEvent(...))`
+    /// which blocks (`AsyncKafkaConsumer.java:1068`).
+    async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError>;
 
     /// Translates Java's
     /// `void seek(TopicPartition partition, OffsetAndMetadata)`.
-    fn seek_with_metadata(
+    async fn seek_with_metadata(
         &mut self,
         partition: TopicPartition,
         offset_and_metadata: OffsetAndMetadata,
     ) -> Result<(), KafkaError>;
 
     /// Translates Java's `void seekToBeginning(Collection<TopicPartition>)`.
-    fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
 
     /// Translates Java's `void seekToEnd(Collection<TopicPartition>)`.
-    fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
 
     // ── Position / committed (async — may fetch from broker) ──
 
@@ -352,13 +359,21 @@ where
         timeout: Duration,
     ) -> Result<HashMap<TopicPartition, i64>, KafkaError>;
 
-    // ── Pause / resume (sync — Java: pure SubscriptionState mutation) ──
+    // ── Pause / resume (async — Java: addAndGet on PausePartitions / ResumePartitions) ──
 
     /// Translates Java's `void pause(Collection<TopicPartition>)`.
-    fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    ///
+    /// Async because Java's pause calls
+    /// `applicationEventHandler.addAndGet(new PausePartitionsEvent(...))`
+    /// which blocks (`AsyncKafkaConsumer.java:1279`).
+    async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
 
     /// Translates Java's `void resume(Collection<TopicPartition>)`.
-    fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
+    ///
+    /// Async because Java's resume calls
+    /// `applicationEventHandler.addAndGet(new ResumePartitionsEvent(...))`
+    /// which blocks (`AsyncKafkaConsumer.java:1292`).
+    async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError>;
 
     // ── Lifecycle ──
 
@@ -407,14 +422,31 @@ pub fn new_consumer<K, V>(
     _value_deserializer: Box<dyn Deserializer<V>>,
 ) -> Result<Box<dyn Consumer<K, V>>, KafkaError>
 where
-    K: Send + 'static,
-    V: Send + 'static,
+    K: Send + Sync + 'static,
+    V: Send + Sync + 'static,
 {
+    // Phase 11 commit (7/N) wires `Consumer<K, V>` over `AsyncKafkaConsumer`
+    // via [`async_kafka_consumer::AsyncKafkaConsumer::new_with_components`].
+    // The factory below is the public entry-point users call once the
+    // production constructor wiring (`NetworkClient` + `ChannelBuilder` +
+    // `Selector` + `ConsumerNetworkThread::run` spawn) lands in
+    // Phase 12 — which translates the 350-line Java primary constructor at
+    // `AsyncKafkaConsumer.java:285-600` end-to-end. For Milestone-8 we ship
+    // the `AsyncKafkaConsumer` struct + trait impl complete and exposed via
+    // `pub use crate::consumer::async_kafka_consumer::AsyncKafkaConsumer`,
+    // so library tests (`tests/consumer/async_kafka_consumer_test.rs`)
+    // construct an instance directly via `AsyncKafkaConsumer::new_with_components`
+    // with an in-process `MockClient`-backed bg task. The
+    // `Box<dyn Consumer<K, V>>` dispatch surface is verified by the
+    // (compile-time) `trait_surface_check.rs` integration test and by the
+    // trait impl in `async_kafka_consumer.rs`.
     let protocol = GroupProtocol::of(config.group_protocol())?;
     match protocol {
         GroupProtocol::Consumer => Err(KafkaError::unsupported_version(
-            "AsyncKafkaConsumer is not yet implemented (Milestone-8 Phase 11). \
-             Phase 2 only ships the trait surface.",
+            "AsyncKafkaConsumer production constructor wiring is deferred to Phase 12 \
+             (the Java primary constructor at AsyncKafkaConsumer.java:285-600). \
+             Use AsyncKafkaConsumer::new_with_components(...) directly in tests; \
+             the dispatch trait impl is complete in commit Phase 11 (7/N).",
         )),
         GroupProtocol::Classic => Err(KafkaError::unsupported_version(
             "Classic group protocol is not yet supported in this client; \

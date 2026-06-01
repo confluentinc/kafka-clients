@@ -85,7 +85,7 @@ async fn test_simple_mock() {
     beginning_offsets.insert(TopicPartition::new("test".to_string(), 0), 0i64);
     beginning_offsets.insert(TopicPartition::new("test".to_string(), 1), 0i64);
     consumer.update_beginning_offsets(beginning_offsets);
-    consumer.seek(TopicPartition::new("test".to_string(), 0), 0).unwrap();
+    consumer.seek(TopicPartition::new("test".to_string(), 0), 0).await.unwrap();
 
     consumer.add_record(build_record("test", 0, 0, "key1", "value1")).unwrap();
     consumer.add_record(build_record("test", 0, 1, "key2", "value2")).unwrap();
@@ -119,14 +119,14 @@ async fn test_consumer_records_is_empty_when_returning_no_records() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     let partition = TopicPartition::new("test".to_string(), 0);
 
-    consumer.assign(vec![partition.clone()]).unwrap();
+    consumer.assign(vec![partition.clone()]).await.unwrap();
     consumer.add_record(build_null_record("test", 0, 0)).unwrap();
 
     let mut end_offsets = HashMap::new();
     end_offsets.insert(partition.clone(), 1i64);
     consumer.update_end_offsets(end_offsets);
 
-    consumer.seek_to_end(&[partition]).unwrap();
+    consumer.seek_to_end(&[partition]).await.unwrap();
 
     let records = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
     assert_eq!(0, records.count());
@@ -140,18 +140,18 @@ async fn should_not_clear_records_for_paused_partitions() {
     let partition0 = TopicPartition::new("test".to_string(), 0);
     let test_partition_list = vec![partition0.clone()];
 
-    consumer.assign(test_partition_list.clone()).unwrap();
+    consumer.assign(test_partition_list.clone()).await.unwrap();
     consumer.add_record(build_null_record("test", 0, 0)).unwrap();
 
     let mut beginning_offsets = HashMap::new();
     beginning_offsets.insert(partition0.clone(), 0i64);
     consumer.update_beginning_offsets(beginning_offsets);
 
-    consumer.seek_to_beginning(&test_partition_list).unwrap();
+    consumer.seek_to_beginning(&test_partition_list).await.unwrap();
 
-    consumer.pause(&test_partition_list).unwrap();
+    consumer.pause(&test_partition_list).await.unwrap();
     let _ = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
-    consumer.resume(&test_partition_list).unwrap();
+    consumer.resume(&test_partition_list).await.unwrap();
 
     let records_second_poll = consumer.poll(std::time::Duration::from_millis(1)).await.unwrap();
     assert_eq!(1, records_second_poll.count());
@@ -352,7 +352,7 @@ async fn should_return_max_poll_records() {
     let mut consumer: MockConsumer<String, String> = MockConsumer::new(AutoOffsetResetStrategy::EARLIEST);
     let partition = TopicPartition::new("test".to_string(), 0);
 
-    consumer.assign(vec![partition.clone()]).unwrap();
+    consumer.assign(vec![partition.clone()]).await.unwrap();
 
     let mut beginning_offsets = HashMap::new();
     beginning_offsets.insert(partition.clone(), 0i64);

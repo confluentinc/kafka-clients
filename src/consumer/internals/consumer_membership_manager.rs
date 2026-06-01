@@ -549,12 +549,13 @@ impl ConsumerMembershipManager {
         // `updateTimerAndMaybeCommit` ran just before, so any pending
         // offsets are already in-flight.
         //
-        // Phase 11 will additionally wire the actual flush via
-        // `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
-        // (the method exists since commit 2.5/N) once the
-        // `AsyncKafkaConsumer` poll-path scaffolding lands. That flush
-        // happens inside Java's `revokeAndAssign(...)` chain, NOT here —
-        // this `if` is the prior, independent gate.
+        // Phase 11 (7/N) closes the prior carry-over by wiring the
+        // actual flush via
+        // [`CommitRequestManager::maybe_auto_commit_sync_before_rebalance`]
+        // below (step 8a). The flush happens inside Java's
+        // `revokeAndAssign(...)` chain (via `signalReconciliationStarted`,
+        // `AbstractMembershipManager.java:896`), NOT inside this gate —
+        // this `if` is the prior, independent skip-check.
         let auto_commit_enabled = if self.commit_request_manager.is_some() {
             let guard = match self.abstract_mm.inner.lock() {
                 Ok(g) => g,
@@ -612,6 +613,43 @@ impl ConsumerMembershipManager {
             // Java: subscriptions.markPendingRevocation(revokedPartitions).
             if let Err(e) = subs.mark_pending_revocation(&revoked_vec) {
                 log::warn!("mark_pending_revocation failed: {}", e);
+            }
+        }
+
+        // 8a. Java `signalReconciliationStarted()` →
+        // `CommitRequestManager::maybeAutoCommitSyncBeforeRebalance(deadlineMs)`
+        // (`ConsumerMembershipManager.java:272-279`,
+        //  `AbstractMembershipManager.java:894-919`).
+        //
+        // Commit `subscriptions.allConsumed()` synchronously if
+        // auto-commit is enabled. The deadline mirrors Java: the
+        // rebalance timeout (configured on this membership manager).
+        // Java's `whenComplete` propagates "failure proceeds with
+        // revocation anyway" semantics — log + ignore the commit
+        // failure here so the rebalance still advances.
+        if let Some(commit_mgr) = self.commit_request_manager.as_ref() {
+            let rebalance_timeout_ms = self.rebalance_timeout_ms as i64;
+            let deadline_ms = current_time_ms.saturating_add(rebalance_timeout_ms);
+            let commit_rx = commit_mgr.maybe_auto_commit_sync_before_rebalance(deadline_ms, current_time_ms);
+            match commit_rx.await {
+                Ok(Ok(())) => {
+                    log::debug!("Auto-commit before reconciling new assignment completed successfully.");
+                },
+                Ok(Err(err)) => {
+                    // Java: `log.error("Auto-commit request before reconciling new assignment failed. \
+                    // Will proceed with the reconciliation anyway.", commitReqError)`.
+                    log::error!(
+                        "Auto-commit request before reconciling new assignment failed. \
+                         Will proceed with the reconciliation anyway: {err}"
+                    );
+                },
+                Err(_recv_err) => {
+                    // Sender dropped — log and proceed.
+                    log::error!(
+                        "Auto-commit before reconciling new assignment: receiver dropped without completion. \
+                         Proceeding with the reconciliation anyway."
+                    );
+                },
             }
         }
 
@@ -1022,12 +1060,14 @@ impl std::fmt::Debug for ConsumerMembershipManager {
 ///    `testCommitOffsetsBeforeRebalance*`, `testAutoCommitBeforeRebalance*`,
 ///    `testCommitErrorDoesNotBlockReconcile*`. The
 ///    `CommitRequestManager::maybe_auto_commit_sync_before_rebalance`
-///    method itself lives on the commit manager (Phase 10, commit 2.5/N).
-///    The *call site* inside `reconcile` is still a no-op log — Phase 11
-///    wires the actual invocation as part of the AsyncKafkaConsumer
-///    poll-path scaffolding. Until that wiring lands, these tests have
-///    nothing to verify behaviourally on the Rust side. Deferred to
-///    Phase 11.
+///    method itself lives on the commit manager (Phase 10, commit 2.5/N),
+///    and the call site inside `reconcile` was wired in Phase 11
+///    commit (7/N) (step 8a, between `markPendingRevocation` and the
+///    `onPartitionsRevoked` callback dispatch). Behavioural translation
+///    of these tests requires end-to-end test infrastructure
+///    (`MockClient` driving a real bg task with a real commit manager)
+///    that lives in `tests/consumer/async_kafka_consumer_test.rs` —
+///    deferred to Phase 11 commits (8-10).
 ///
 /// 3. **Streams / Share manager** (~6 cases): `testStreams*`,
 ///    `testShare*`. Out of scope per `consumer-threading.md` §20.
