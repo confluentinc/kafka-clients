@@ -34,3 +34,7 @@
 - [M8 Phase 8b patterns](review_m8_phase8b_patterns.md) — §31 listener-present check; Err swallow; unsafe impl Send smell; plan test-count inflation; Timer.update side effects
 - [M8 Phase 10 wire-prereq patterns](review_m8_phase10_wire_prereq_patterns.md) — outer hook + inner stub; isStaleEpochErrorAndValidEpochAvailable predicate; check-order parity; test name vs body
 - [M8 Phase 10 round-2 patterns](review_m8_phase10_round2.md) — phase-ordering invariant from RequestManagers.entries(); canCommit gate collapse; exception-cache scope; transient-topic leak
+- [M8 Phase 10 round-3 patterns](review_m8_phase10_round3.md) — `let _ = handle;` drop semantics vs Java's never-completed future; probe Arc clone can mask production drop behavior
+- [M8 Phase 11 batch-1 patterns](review_m8_phase11_batch1.md) — acquireAndEnsureOpen drops closed-check too; one-shot drain vs Java iterative loop; store-listener-before-await consistency
+- [M8 Phase 11 batch-2 patterns](review_m8_phase11_batch2.md) — bg-task ack blocks app-side add_and_get → deadlock; wakeup setActiveTask missing; groupAssignmentSnapshot + MemberStateListener gap; .await.ok() swallows fatal errors
+- [M8 Phase 11 batch-3 patterns](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision (commit_inner → commit_async); skip section must enumerate Java tests
