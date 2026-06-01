@@ -67,6 +67,7 @@ use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRecords;
 use crate::consumer::OffsetAndMetadata;
+use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::SubscriptionPattern;
 use crate::consumer::consumer_config::ConsumerConfig;
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
@@ -1581,6 +1582,533 @@ where
         Ok(())
     }
 
+    // ── Seek / position / committed / lag ──────────────────────────────
+    //
+    // Translates Java's `seek(...)` / `seekToBeginning(...)` /
+    // `seekToEnd(...)` / `position(...)` / `committed(...)` /
+    // `currentLag(...)` (`AsyncKafkaConsumer.java:1055-1155, 1413-1425`).
+    //
+    // The seek methods route through a `SeekUnvalidated` /
+    // `ResetOffset` event. `position` and `committed` route through
+    // `CheckAndUpdatePositions` / `FetchCommittedOffsets` events. The
+    // current-lag arm enqueues a `CurrentLag` event.
+    //
+    // Each method calls `ensure_open()` first to mirror Java's
+    // `acquireAndEnsureOpen()` closed-consumer guard.
+
+    /// Java: `void seek(TopicPartition, long offset)`.
+    pub async fn seek(&mut self, partition: TopicPartition, offset: i64) -> Result<(), KafkaError> {
+        if offset < 0 {
+            return Err(KafkaError::illegal_argument("seek offset must not be a negative number"));
+        }
+        self.ensure_open()?;
+        log::info!("Seeking to offset {offset} for partition {partition}");
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let now_ms = self.time.milliseconds();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::SeekUnvalidated { handle, partition, offset, offset_epoch: None },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Java: `void seek(TopicPartition, OffsetAndMetadata)`.
+    pub async fn seek_with_metadata(
+        &mut self,
+        partition: TopicPartition,
+        offset_and_metadata: OffsetAndMetadata,
+    ) -> Result<(), KafkaError> {
+        let offset = offset_and_metadata.offset();
+        if offset < 0 {
+            return Err(KafkaError::illegal_argument("seek offset must not be a negative number"));
+        }
+        self.ensure_open()?;
+        match offset_and_metadata.leader_epoch() {
+            Some(epoch) => log::info!("Seeking to offset {offset} for partition {partition} with epoch {epoch}"),
+            None => log::info!("Seeking to offset {offset} for partition {partition}"),
+        }
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let now_ms = self.time.milliseconds();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::SeekUnvalidated {
+                    handle,
+                    partition,
+                    offset,
+                    offset_epoch: offset_and_metadata.leader_epoch(),
+                },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Java: `void seekToBeginning(Collection<TopicPartition>)`.
+    pub async fn seek_to_beginning(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::EARLIEST)
+            .await
+    }
+
+    /// Java: `void seekToEnd(Collection<TopicPartition>)`.
+    pub async fn seek_to_end(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.seek_with_reset_strategy(partitions, crate::consumer::AutoOffsetResetStrategy::LATEST)
+            .await
+    }
+
+    /// Translates Java's
+    /// `private void seek(Collection<TopicPartition>, AutoOffsetResetStrategy)`.
+    async fn seek_with_reset_strategy(
+        &mut self,
+        partitions: &[TopicPartition],
+        strategy: crate::consumer::AutoOffsetResetStrategy,
+    ) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+        let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let now_ms = self.time.milliseconds();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(
+                ApplicationEvent::ResetOffset { handle, partitions: set, offset_reset_strategy: strategy },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    /// Java: `long position(TopicPartition)` — uses default API timeout.
+    pub async fn position(&mut self, partition: &TopicPartition) -> Result<i64, KafkaError> {
+        self.position_timeout(partition, Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `long position(TopicPartition, Duration timeout)`
+    /// (`AsyncKafkaConsumer.java:1133-1155`).
+    pub async fn position_timeout(&mut self, partition: &TopicPartition, timeout: Duration) -> Result<i64, KafkaError> {
+        self.ensure_open()?;
+        {
+            let subs = self.subscriptions.lock().unwrap();
+            if !subs.is_assigned(partition) {
+                return Err(KafkaError::illegal_state(
+                    "You can only check the position for partitions assigned to this consumer.",
+                ));
+            }
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        loop {
+            // Read the validated position under the lock; drop guard before await.
+            let position_offset = {
+                let subs = self.subscriptions.lock().unwrap();
+                subs.valid_position(partition)?.map(|fp| fp.offset)
+            };
+            if let Some(offset) = position_offset {
+                return Ok(offset);
+            }
+
+            // Java: `updateFetchPositions(timer)` — drives the
+            // `CheckAndUpdatePositionsEvent` round-trip.
+            let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+            self.application_event_handler
+                .add_and_get::<()>(ApplicationEvent::CheckAndUpdatePositions { handle }, receiver, now_ms)
+                .await
+                .ok();
+
+            if let Err(err) = self.wakeup_trigger.maybe_trigger_wakeup() {
+                self.wakeup_trigger.rotate();
+                return Err(err);
+            }
+
+            if self.time.milliseconds() >= deadline_ms {
+                return Err(KafkaError::timeout(format!(
+                    "Timeout of {}ms expired before the position for partition {} could be determined",
+                    timeout.as_millis(),
+                    partition
+                )));
+            }
+        }
+    }
+
+    /// Java: `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>)`.
+    pub async fn committed(
+        &mut self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+        self.committed_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `Map<TopicPartition, OffsetAndMetadata> committed(Set<TopicPartition>, Duration)`
+    /// (`AsyncKafkaConsumer.java:1162-1190`).
+    pub async fn committed_timeout(
+        &mut self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndMetadata>, KafkaError> {
+        self.ensure_open()?;
+        self.throw_if_group_id_not_defined()?;
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, OffsetAndMetadata>>(deadline_ms);
+        let result = self
+            .application_event_handler
+            .add_and_get::<HashMap<TopicPartition, OffsetAndMetadata>>(
+                ApplicationEvent::FetchCommittedOffsets { handle, partitions: set },
+                receiver,
+                now_ms,
+            )
+            .await;
+        match result {
+            Ok(map) => Ok(map),
+            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+                "Timeout of {}ms expired before the last committed offset for partitions {:?} could be determined. Try tuning default.api.timeout.ms larger to relax the threshold.",
+                timeout.as_millis(),
+                partitions
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Java: `OptionalLong currentLag(TopicPartition)`
+    /// (`AsyncKafkaConsumer.java:1413-1425`).
+    ///
+    /// Phase 11 commit (6/N) wires the `CurrentLag` event. The previous
+    /// stub (commit (2/N)) returned `None` for every input.
+    pub async fn current_lag_async(&mut self, topic_partition: &TopicPartition) -> Result<Option<i64>, KafkaError> {
+        self.ensure_open()?;
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let (handle, receiver, _erased) = make_completable_event::<Option<i64>>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<Option<i64>>(
+                ApplicationEvent::CurrentLag {
+                    handle,
+                    partition: topic_partition.clone(),
+                    isolation_level: self.isolation_level,
+                },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    // ── Beginning / end offsets / offsetsForTimes ─────────────────────
+
+    /// Java: `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>)`.
+    pub async fn beginning_offsets(
+        &mut self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        self.beginning_offsets_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `Map<TopicPartition, Long> beginningOffsets(Collection<TopicPartition>, Duration)`.
+    pub async fn beginning_offsets_timeout(
+        &mut self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        // Java's `ListOffsetsRequest.EARLIEST_TIMESTAMP = -2L`.
+        self.beginning_or_end_offsets(partitions, -2, timeout).await
+    }
+
+    /// Java: `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>)`.
+    pub async fn end_offsets(
+        &mut self,
+        partitions: &[TopicPartition],
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        self.end_offsets_timeout(partitions, Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `Map<TopicPartition, Long> endOffsets(Collection<TopicPartition>, Duration)`.
+    pub async fn end_offsets_timeout(
+        &mut self,
+        partitions: &[TopicPartition],
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        // Java's `ListOffsetsRequest.LATEST_TIMESTAMP = -1L`.
+        self.beginning_or_end_offsets(partitions, -1, timeout).await
+    }
+
+    /// Translates Java's
+    /// `private Map<TopicPartition, Long> beginningOrEndOffset(Collection<TopicPartition>, long timestamp, Duration timeout)`
+    /// (`AsyncKafkaConsumer.java:1366-1411`).
+    async fn beginning_or_end_offsets(
+        &mut self,
+        partitions: &[TopicPartition],
+        timestamp: i64,
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, i64>, KafkaError> {
+        self.ensure_open()?;
+        if partitions.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let mut timestamps_to_search: HashMap<TopicPartition, i64> = HashMap::new();
+        for tp in partitions {
+            timestamps_to_search.insert(tp.clone(), timestamp);
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        if timeout.is_zero() {
+            // Java: `if (timeout.isZero()) { applicationEventHandler.add(listOffsetsEvent); return new HashMap<>(); }`.
+            let (handle, _receiver, _erased) =
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+            self.application_event_handler.add(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
+                now_ms,
+            )?;
+            return Ok(HashMap::new());
+        }
+
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+        let result = self
+            .application_event_handler
+            .add_and_get::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
+                receiver,
+                now_ms,
+            )
+            .await;
+        match result {
+            Ok(offsets_map) => {
+                let mut out = HashMap::with_capacity(offsets_map.len());
+                for (tp, opt) in offsets_map {
+                    if let Some(oat) = opt {
+                        out.insert(tp, oat.offset());
+                    }
+                }
+                Ok(out)
+            },
+            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+                "Failed to get offsets by times in {}ms",
+                timeout.as_millis()
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    /// Java: `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long>)`.
+    pub async fn offsets_for_times(
+        &mut self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+        self.offsets_for_times_timeout(timestamps_to_search, Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `Map<TopicPartition, OffsetAndTimestamp> offsetsForTimes(Map<TopicPartition, Long>, Duration)`
+    /// (`AsyncKafkaConsumer.java:1303-1344`).
+    pub async fn offsets_for_times_timeout(
+        &mut self,
+        timestamps_to_search: HashMap<TopicPartition, i64>,
+        timeout: Duration,
+    ) -> Result<HashMap<TopicPartition, OffsetAndTimestamp>, KafkaError> {
+        self.ensure_open()?;
+        // Java's per-entry argument validation: negative targets rejected.
+        for (tp, ts) in &timestamps_to_search {
+            if *ts < 0 {
+                return Err(KafkaError::illegal_argument(format!(
+                    "The target time for partition {tp} is {ts}. The target time cannot be negative."
+                )));
+            }
+        }
+        if timestamps_to_search.is_empty() {
+            return Ok(HashMap::new());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+
+        if timeout.is_zero() {
+            // Java: `if (timeout.toMillis() == 0L) { applicationEventHandler.add(...); return listOffsetsEvent.emptyResults(); }`.
+            let (handle, _receiver, _erased) =
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+            let empty_keys = timestamps_to_search.keys().cloned().collect::<Vec<_>>();
+            self.application_event_handler.add(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
+                now_ms,
+            )?;
+            // Java's `emptyResults()` returns a map with each input key
+            // mapped to `null`; here we omit the key entirely, since
+            // `OffsetAndTimestamp` is not nullable in Rust. The user
+            // observes "no data yet" via a missing key, matching Java's
+            // null-key semantic for the timeout-zero arm.
+            let _ = empty_keys;
+            return Ok(HashMap::new());
+        }
+
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+        let result = self
+            .application_event_handler
+            .add_and_get::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
+                ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
+                receiver,
+                now_ms,
+            )
+            .await;
+        match result {
+            Ok(offsets_map) => {
+                // Java filters out null values silently; mirror by skipping.
+                let mut out = HashMap::with_capacity(offsets_map.len());
+                for (tp, opt) in offsets_map {
+                    if let Some(oat) = opt {
+                        out.insert(tp, oat);
+                    }
+                }
+                Ok(out)
+            },
+            Err(KafkaError::Timeout(_)) => Err(KafkaError::timeout(format!(
+                "Failed to get offsets by times in {}ms",
+                timeout.as_millis()
+            ))),
+            Err(err) => Err(err),
+        }
+    }
+
+    // ── Topic metadata: partitionsFor / listTopics ────────────────────
+
+    /// Java: `List<PartitionInfo> partitionsFor(String topic)`.
+    pub async fn partitions_for(&mut self, topic: &str) -> Result<Vec<crate::common::PartitionInfo>, KafkaError> {
+        self.partitions_for_timeout(topic, Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `List<PartitionInfo> partitionsFor(String topic, Duration)`
+    /// (`AsyncKafkaConsumer.java:1210-1235`).
+    pub async fn partitions_for_timeout(
+        &mut self,
+        topic: &str,
+        timeout: Duration,
+    ) -> Result<Vec<crate::common::PartitionInfo>, KafkaError> {
+        self.ensure_open()?;
+        // Java: `Cluster cluster = this.metadata.fetch();
+        //        List<PartitionInfo> parts = cluster.partitionsForTopic(topic);
+        //        if (!parts.isEmpty()) return parts;`
+        {
+            let cluster = self.metadata.metadata_arc().fetch();
+            let parts = cluster.partitions_for_topic(topic);
+            if !parts.is_empty() {
+                return Ok(parts.to_vec());
+            }
+        }
+
+        if timeout.is_zero() {
+            return Err(KafkaError::timeout(format!(
+                "Timeout of {}ms expired before partitions for topic {topic} could be determined",
+                timeout.as_millis()
+            )));
+        }
+
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
+        let map = self
+            .application_event_handler
+            .add_and_get::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
+                ApplicationEvent::TopicMetadata { handle, topic: topic.to_string() },
+                receiver,
+                now_ms,
+            )
+            .await?;
+        Ok(map.get(topic).cloned().unwrap_or_default())
+    }
+
+    /// Java: `Map<String, List<PartitionInfo>> listTopics()`.
+    pub async fn list_topics(&mut self) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, KafkaError> {
+        self.list_topics_timeout(Duration::from_millis(self.default_api_timeout_ms as u64))
+            .await
+    }
+
+    /// Java: `Map<String, List<PartitionInfo>> listTopics(Duration)`
+    /// (`AsyncKafkaConsumer.java:1242-1260`).
+    pub async fn list_topics_timeout(
+        &mut self,
+        timeout: Duration,
+    ) -> Result<HashMap<String, Vec<crate::common::PartitionInfo>>, KafkaError> {
+        self.ensure_open()?;
+        if timeout.is_zero() {
+            return Err(KafkaError::timeout(format!(
+                "Timeout of {}ms expired before all topics' metadata could be listed",
+                timeout.as_millis()
+            )));
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = calculate_deadline_ms(now_ms, timeout.as_millis() as i64);
+        let (handle, receiver, _erased) =
+            make_completable_event::<HashMap<String, Vec<crate::common::PartitionInfo>>>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<HashMap<String, Vec<crate::common::PartitionInfo>>>(
+                ApplicationEvent::AllTopicsMetadata { handle },
+                receiver,
+                now_ms,
+            )
+            .await
+    }
+
+    // ── Pause / resume ─────────────────────────────────────────────────
+
+    /// Java: `void pause(Collection<TopicPartition>)`
+    /// (`AsyncKafkaConsumer.java:1273-1283`).
+    pub async fn pause(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(ApplicationEvent::PausePartitions { handle, partitions: set }, receiver, now_ms)
+            .await
+    }
+
+    /// Java: `void resume(Collection<TopicPartition>)`
+    /// (`AsyncKafkaConsumer.java:1286-1296`).
+    pub async fn resume(&mut self, partitions: &[TopicPartition]) -> Result<(), KafkaError> {
+        self.ensure_open()?;
+        if partitions.is_empty() {
+            return Ok(());
+        }
+        let now_ms = self.time.milliseconds();
+        let deadline_ms = self.default_api_timeout_deadline_ms();
+        let set: std::collections::HashSet<TopicPartition> = partitions.iter().cloned().collect();
+        let (handle, receiver, _erased) = make_completable_event::<()>(deadline_ms);
+        self.application_event_handler
+            .add_and_get::<()>(ApplicationEvent::ResumePartitions { handle, partitions: set }, receiver, now_ms)
+            .await
+    }
+
+    // ── Enforce rebalance (KIP-848: unsupported) ──────────────────────
+
+    /// Java: `void enforceRebalance()` / `void enforceRebalance(String)`
+    /// (`AsyncKafkaConsumer.java:1438-1446`).
+    ///
+    /// Both Java overloads log a warning and otherwise no-op under the
+    /// KIP-848 protocol (the classic protocol implements them via
+    /// `ConsumerCoordinator`). We match that: log + no-op, return
+    /// `Ok(())`. No `KafkaError::unsupported_version` since Java does not
+    /// throw.
+    pub async fn enforce_rebalance(&mut self, _reason: Option<&str>) -> Result<(), KafkaError> {
+        log::warn!("Operation not supported in new consumer group protocol");
+        Ok(())
+    }
+
     /// Java: `private void sendPrefetches(Timer timer)`
     /// (`AsyncKafkaConsumer.java:1995-2003`).
     ///
@@ -2449,5 +2977,157 @@ mod tests {
             _error: Option<&KafkaError>,
         ) {
         }
+    }
+
+    // ─── Seek / position / committed / lag tests (commit 6/N) ───
+
+    /// `seek` with a negative offset rejects with `IllegalArgument`.
+    /// Java: `seek` throws `IllegalArgumentException("seek offset must not
+    /// be a negative number")`.
+    #[tokio::test]
+    async fn seek_rejects_negative_offset() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = consumer.seek(tp, -1).await.expect_err("must err");
+        assert!(matches!(err, KafkaError::IllegalArgument(_)), "unexpected err: {err:?}");
+    }
+
+    /// `seek` enqueues a `SeekUnvalidated` event. Mirrors Java's
+    /// `testSeek` event-shape assertion.
+    #[tokio::test]
+    async fn seek_enqueues_seek_unvalidated_event() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        let tp = TopicPartition::new("t".to_string(), 0);
+        consumer.seek(tp.clone(), 42).await.expect("ok");
+        let env = completer.await.expect("task ok").expect("event received");
+        assert!(matches!(env.event, ApplicationEvent::SeekUnvalidated { partition, offset, .. }
+                if partition == tp && offset == 42));
+    }
+
+    /// `position` on an unassigned partition returns `IllegalState`.
+    #[tokio::test]
+    async fn position_on_unassigned_partition_errors() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = consumer
+            .position_timeout(&tp, Duration::from_millis(0))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::IllegalState(_)), "unexpected err: {err:?}");
+    }
+
+    /// `committed` on an empty partition set returns an empty map without
+    /// enqueuing an event. Java: `if (partitions.isEmpty()) return
+    /// Collections.emptyMap();`.
+    #[tokio::test]
+    async fn committed_with_empty_partitions_returns_empty_map() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        let map = consumer.committed_timeout(&[], Duration::from_millis(100)).await.expect("ok");
+        assert!(map.is_empty());
+        assert!(handles.app_event_rx.try_recv().is_err(), "no event enqueued");
+    }
+
+    /// `committed` without group_id errors with `IllegalArgument`
+    /// (Rust analog of Java's `InvalidGroupIdException`).
+    #[tokio::test]
+    async fn committed_without_group_id_errors() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        consumer.group_id = None;
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let err = consumer
+            .committed_timeout(std::slice::from_ref(&tp), Duration::from_millis(0))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::IllegalArgument(_)), "unexpected err: {err:?}");
+    }
+
+    /// `pause` with empty input is a no-op (matches Java's
+    /// `if (!partitions.isEmpty()) addAndGet(...)` short-circuit).
+    #[tokio::test]
+    async fn pause_with_empty_set_is_noop() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        consumer.pause(&[]).await.expect("ok");
+        assert!(handles.app_event_rx.try_recv().is_err(), "no event enqueued");
+    }
+
+    /// `resume` with empty input is a no-op (matches Java's
+    /// `if (!partitions.isEmpty()) addAndGet(...)` short-circuit).
+    #[tokio::test]
+    async fn resume_with_empty_set_is_noop() {
+        let (mut consumer, mut handles) = make_test_consumer_with_channels();
+        consumer.resume(&[]).await.expect("ok");
+        assert!(handles.app_event_rx.try_recv().is_err(), "no event enqueued");
+    }
+
+    /// `enforce_rebalance` is a documented no-op under KIP-848 (Java
+    /// `log.warn("Operation not supported in new consumer group protocol")`).
+    #[tokio::test]
+    async fn enforce_rebalance_is_noop() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        consumer.enforce_rebalance(None).await.expect("ok");
+        consumer.enforce_rebalance(Some("test reason")).await.expect("ok");
+    }
+
+    /// `offsets_for_times` rejects negative timestamps.
+    #[tokio::test]
+    async fn offsets_for_times_rejects_negative_timestamp() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let mut ts = HashMap::new();
+        ts.insert(TopicPartition::new("t".to_string(), 0), -5);
+        let err = consumer
+            .offsets_for_times_timeout(ts, Duration::from_millis(0))
+            .await
+            .expect_err("must err");
+        assert!(
+            matches!(err, KafkaError::IllegalArgument(ref msg) if msg.contains("negative")),
+            "unexpected err: {err:?}"
+        );
+    }
+
+    /// `offsets_for_times` with empty map returns empty map.
+    #[tokio::test]
+    async fn offsets_for_times_with_empty_map_returns_empty() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let map = consumer
+            .offsets_for_times_timeout(HashMap::new(), Duration::from_millis(0))
+            .await
+            .expect("ok");
+        assert!(map.is_empty());
+    }
+
+    /// `beginning_offsets` with empty input returns empty map.
+    #[tokio::test]
+    async fn beginning_offsets_with_empty_input_returns_empty() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let map = consumer
+            .beginning_offsets_timeout(&[], Duration::from_millis(0))
+            .await
+            .expect("ok");
+        assert!(map.is_empty());
+    }
+
+    /// `partitions_for` with zero timeout and empty metadata cache
+    /// errors with `Timeout`. Java: `if (timeout.toMillis() == 0L) throw
+    /// new TimeoutException()`.
+    #[tokio::test]
+    async fn partitions_for_with_zero_timeout_and_empty_metadata_errors() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let err = consumer
+            .partitions_for_timeout("t", Duration::from_millis(0))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
+    }
+
+    /// `list_topics` with zero timeout errors with `Timeout`.
+    #[tokio::test]
+    async fn list_topics_with_zero_timeout_errors() {
+        let (mut consumer, _handles) = make_test_consumer_with_channels();
+        let err = consumer
+            .list_topics_timeout(Duration::from_millis(0))
+            .await
+            .expect_err("must err");
+        assert!(matches!(err, KafkaError::Timeout(_)), "unexpected err: {err:?}");
     }
 }
