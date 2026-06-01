@@ -31,9 +31,11 @@
 use std::sync::{Arc, Mutex};
 
 use log::trace;
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::common::memory::buffer_supplier::BufferSupplier;
+use crate::common::protocol::Errors;
+use crate::common::requests::ConcreteResponse;
 use crate::common::requests::fetch_response::FetchResponse;
 use crate::common::{KafkaError, Node};
 use crate::consumer::internals::abstract_fetch::AbstractFetch;
@@ -69,6 +71,50 @@ pub(crate) fn no_auth_failure() -> MaybeAuthFailureFn {
     Arc::new(|_| Ok(()))
 }
 
+/// Envelope for routing a fetch-request completion (or its
+/// transport-level failure) from the spawned response forwarder back
+/// to the fetch manager's next `poll(now)` call.
+///
+/// Mirrors Java's
+/// `AbstractFetch.createFetchRequest(...).whenComplete((clientResponse, exception) -> { handleFetchSuccess / handleFetchFailure })`
+/// dispatch, but defers the `&mut AbstractFetch` access to the next
+/// bg-task `poll(now)` cycle so the cross-task hand-off stays serialized.
+///
+/// The fields are carried by **ownership** through the channel — in
+/// particular the `FetchResponse` carries `Bytes` partition payloads,
+/// so moving the enum across the channel does NOT copy the receive-path
+/// record bytes (consumer-threading.md §27 zero-copy invariant
+/// preserved — the spawned forwarder does NOT decode the response).
+///
+/// `for_close = true` routes to
+/// `AbstractFetch::handle_close_fetch_session_success` /
+/// `handle_close_fetch_session_failure` (close-fetch-session) instead of
+/// the normal fetch handlers; `poll_on_close` builders set this.
+pub(crate) enum PendingFetchCompletion {
+    /// Broker returned a `FetchResponse`. The forwarder captures the
+    /// response body, the per-node request data, the fetch target, and
+    /// the request API version (needed by Java's
+    /// `handleFetchSuccess` to dispatch through `responseData(version)`).
+    /// The drain applies the success path on `&mut AbstractFetch`
+    /// inside the next `poll(now)`.
+    Response {
+        fetch_target: Node,
+        request_data: FetchSessionRequestData,
+        response: FetchResponse,
+        request_version: i16,
+        for_close: bool,
+    },
+    /// Transport-level failure (network error, in-flight cancellation,
+    /// type mismatch on the response body). The drain calls
+    /// `AbstractFetch::handle_fetch_failure`.
+    Failure {
+        fetch_target: Node,
+        request_data: FetchSessionRequestData,
+        error: KafkaError,
+        for_close: bool,
+    },
+}
+
 /// `FetchRequestManager` — owns an [`AbstractFetch`] and produces fetch
 /// `UnsentRequest`s in response to `RequestManager::poll`.
 pub(crate) struct FetchRequestManager {
@@ -88,6 +134,17 @@ pub(crate) struct FetchRequestManager {
     /// reference to the delegate.
     is_unavailable: IsUnavailableFn,
     maybe_throw_auth_failure: MaybeAuthFailureFn,
+    /// Cloned into each spawned response forwarder so the forwarder can
+    /// route the fetch response back through `poll(now)`'s drain step.
+    /// See [`PendingFetchCompletion`] for the rationale.
+    pending_completion_tx: mpsc::UnboundedSender<PendingFetchCompletion>,
+    /// Drained by [`Self::drain_pending_completions`] at the top of
+    /// every `poll(now)` / `poll_on_close(now)` call. Held directly (no
+    /// outer `Mutex`) because the fetch manager is single-owner — only
+    /// the bg-task `poll(now)` cycle touches the receiver.
+    /// (`mpsc::UnboundedReceiver` is `Send` but not `Sync`;
+    /// single-ownership keeps it sound.)
+    pending_completion_rx: mpsc::UnboundedReceiver<PendingFetchCompletion>,
 }
 
 impl FetchRequestManager {
@@ -106,6 +163,7 @@ impl FetchRequestManager {
         is_unavailable: IsUnavailableFn,
         maybe_throw_auth_failure: MaybeAuthFailureFn,
     ) -> Self {
+        let (pending_completion_tx, pending_completion_rx) = mpsc::unbounded_channel();
         Self {
             abstract_fetch: AbstractFetch::new(
                 metadata,
@@ -117,6 +175,8 @@ impl FetchRequestManager {
             pending_fetch_requests: None,
             is_unavailable,
             maybe_throw_auth_failure,
+            pending_completion_tx,
+            pending_completion_rx,
         }
     }
 
@@ -158,32 +218,6 @@ impl FetchRequestManager {
     /// (Phase 10 wiring).
     pub(crate) fn abstract_fetch_mut(&mut self) -> &mut AbstractFetch {
         &mut self.abstract_fetch
-    }
-
-    /// Notifies the underlying `AbstractFetch` of a successful fetch
-    /// response. Phase 10 wires this via the response receiver's
-    /// `whenComplete` analog.
-    pub(crate) fn on_fetch_response(
-        &mut self,
-        fetch_target: &Node,
-        request_data: &FetchSessionRequestData,
-        response: &FetchResponse,
-        request_version: i16,
-    ) {
-        self.abstract_fetch
-            .handle_fetch_success(fetch_target, request_data, response, request_version);
-    }
-
-    /// Notifies the underlying `AbstractFetch` of a failed fetch
-    /// response. Phase 10 wires this via the response receiver's
-    /// `whenComplete` analog.
-    pub(crate) fn on_fetch_failure(
-        &mut self,
-        fetch_target: &Node,
-        request_data: &FetchSessionRequestData,
-        error: &KafkaError,
-    ) {
-        self.abstract_fetch.handle_fetch_failure(fetch_target, request_data, error);
     }
 
     /// Internal helper: build a `PollResult` by running
@@ -260,14 +294,69 @@ impl FetchRequestManager {
         // Build the per-node UnsentRequest list and ack ALL pending
         // create-fetch-requests callers together (Java's
         // `pendingFetchRequestFuture` single-slot semantics).
+        //
+        // For each per-node `UnsentRequest`, take the response
+        // receiver out and spawn a forwarder that converts the
+        // resolved `ClientResponse` (or transport error) into a
+        // `PendingFetchCompletion` envelope and routes it back through
+        // the mpsc channel. The next `poll(now)` / `poll_on_close(now)`
+        // call's `drain_pending_completions` then dispatches into
+        // `AbstractFetch::handle_fetch_*` on `&mut self`, mirroring
+        // Java's `whenComplete((response, exception) -> { ... })`
+        // lambda on `AbstractFetch.createFetchRequest`. CLAUDE.md §11
+        // hot-path note: one spawn per FetchRequest (per-broker batch),
+        // NOT per-record — the forwarder lives outside any per-record
+        // loop, and the response body bytes (a `Bytes` buffer inside
+        // `FetchResponse`) travel by **ownership** through the channel,
+        // never copied (consumer-threading.md §27).
         let mut requests: Vec<UnsentRequest> = Vec::with_capacity(prepared.len());
         for (_node_id, (target_node, request_data)) in prepared {
             let builder = self.abstract_fetch.create_fetch_request(&target_node, &request_data);
-            let unsent = UnsentRequest::new(Box::new(builder), Some(target_node));
-            // Phase 10 wires `whenComplete` here — the bg task awaits
-            // `unsent.take_response_receiver()` and dispatches into
-            // `on_fetch_response` / `on_fetch_failure`. Phase 7b just
-            // returns the request.
+            let mut unsent = UnsentRequest::new(Box::new(builder), Some(target_node.clone()));
+
+            let response_rx = unsent.take_response_receiver().expect("receiver fresh");
+            let tx = self.pending_completion_tx.clone();
+            let request_data_for_forwarder = request_data.clone();
+            let fetch_target_for_forwarder = target_node.clone();
+            let for_close_flag = for_close;
+            tokio::spawn(async move {
+                let completion = match response_rx.await {
+                    Ok(Ok(mut client_response)) => {
+                        let request_version = client_response.request_header().api_version();
+                        match client_response.take_response_body() {
+                            Some(ConcreteResponse::Fetch(resp)) => PendingFetchCompletion::Response {
+                                fetch_target: fetch_target_for_forwarder,
+                                request_data: request_data_for_forwarder,
+                                response: resp,
+                                request_version,
+                                for_close: for_close_flag,
+                            },
+                            _ => PendingFetchCompletion::Failure {
+                                fetch_target: fetch_target_for_forwarder,
+                                request_data: request_data_for_forwarder,
+                                error: KafkaError::new(Errors::UnknownServerError),
+                                for_close: for_close_flag,
+                            },
+                        }
+                    },
+                    Ok(Err(err)) => PendingFetchCompletion::Failure {
+                        fetch_target: fetch_target_for_forwarder,
+                        request_data: request_data_for_forwarder,
+                        error: err,
+                        for_close: for_close_flag,
+                    },
+                    Err(_recv) => PendingFetchCompletion::Failure {
+                        fetch_target: fetch_target_for_forwarder,
+                        request_data: request_data_for_forwarder,
+                        error: KafkaError::new(Errors::NetworkException),
+                        for_close: for_close_flag,
+                    },
+                };
+                // Receiver lives as long as the fetch manager; ignore
+                // the send error in case the manager has been dropped
+                // during a shutdown race.
+                let _ = tx.send(completion);
+            });
             requests.push(unsent);
         }
 
@@ -277,6 +366,65 @@ impl FetchRequestManager {
         trace!("FetchRequestManager: produced {} fetch requests", requests.len());
         PollResult::with_requests(requests)
     }
+
+    /// Drains the [`PendingFetchCompletion`] mpsc channel into
+    /// `AbstractFetch::handle_fetch_*` / `handle_close_fetch_session_*`.
+    /// Called at the top of [`RequestManager::poll`] and
+    /// [`RequestManager::poll_on_close`].
+    ///
+    /// Java reference: the `whenComplete` lambda body on
+    /// `AbstractFetch.createFetchRequest` — `handleFetchSuccess(...)` /
+    /// `handleFetchFailure(...)` (or `handleCloseFetchSessionSuccess` /
+    /// `handleCloseFetchSessionFailure` for the close path). The Java
+    /// code runs the lambda on the network-IO thread; Rust runs the
+    /// equivalent work here on the bg-task to keep all
+    /// `&mut AbstractFetch` access serialized through `poll(now)` and
+    /// to preserve §27 zero-copy (the response body bytes were moved
+    /// by ownership through the channel — `handle_fetch_success`
+    /// iterates the borrowed `&FetchResponse` and builds
+    /// `CompletedFetch` entries that hold their own `Arc<Bytes>`
+    /// slices without copying).
+    ///
+    /// **§16 audit**: between draining the channel and calling
+    /// `handle_fetch_success/_failure`, the only `Mutex` acquired is
+    /// `self.abstract_fetch.subscriptions` inside `handle_fetch_failure`
+    /// (which `AbstractFetch` already holds for the duration of that
+    /// call). No `MutexGuard` is held across an `.await` here — the
+    /// `try_recv` loop is synchronous and the cross-call dispatch is
+    /// synchronous too.
+    fn drain_pending_completions(&mut self) {
+        while let Ok(completion) = self.pending_completion_rx.try_recv() {
+            match completion {
+                PendingFetchCompletion::Response {
+                    fetch_target,
+                    request_data,
+                    response,
+                    request_version,
+                    for_close,
+                } => {
+                    if for_close {
+                        self.abstract_fetch
+                            .handle_close_fetch_session_success(&fetch_target, &request_data);
+                    } else {
+                        self.abstract_fetch.handle_fetch_success(
+                            &fetch_target,
+                            &request_data,
+                            &response,
+                            request_version,
+                        );
+                    }
+                },
+                PendingFetchCompletion::Failure { fetch_target, request_data, error, for_close } => {
+                    if for_close {
+                        self.abstract_fetch
+                            .handle_close_fetch_session_failure(&fetch_target, &request_data, &error);
+                    } else {
+                        self.abstract_fetch.handle_fetch_failure(&fetch_target, &request_data, &error);
+                    }
+                },
+            }
+        }
+    }
 }
 
 impl RequestManager for FetchRequestManager {
@@ -285,6 +433,11 @@ impl RequestManager for FetchRequestManager {
     /// requests for the next round, if any pending
     /// `CreateFetchRequestsEvent` ack is outstanding.
     fn poll(&mut self, current_time_ms: i64) -> PollResult {
+        // 0. Drain any pending fetch completions from prior spawned
+        // forwarders. State-update happens before request-building so
+        // the next `prepare_fetch_requests` observes the
+        // post-completion `nodes_with_pending_fetch_requests` set.
+        self.drain_pending_completions();
         self.poll_internal(current_time_ms, false)
     }
 
@@ -292,6 +445,9 @@ impl RequestManager for FetchRequestManager {
     /// `PollResult pollOnClose(long currentTimeMs)` — produces the
     /// close-fetch-session requests.
     fn poll_on_close(&mut self, current_time_ms: i64) -> PollResult {
+        // Drain any pending completions one last time so close paths
+        // observe the post-completion state.
+        self.drain_pending_completions();
         // Java's pollOnClose unconditionally enqueues a fresh ack so
         // pollInternal has something to satisfy.
         let (tx, _rx) = oneshot::channel();
@@ -485,5 +641,159 @@ mod tests {
     fn test_imports_smoke() {
         let _ = tp("x", 0);
         let _: HashSet<TopicPartition> = HashSet::new();
+    }
+
+    /// Bootstraps the manager's cluster snapshot with a single node so
+    /// `poll_on_close` can resolve `cluster.node_by_id(node_id)` to
+    /// produce a close-fetch-session `UnsentRequest`.
+    ///
+    /// `request_test_utils::metadata_update_with(1, ...)` seeds exactly
+    /// one node with id=0 (see `metadata_update_with_full` — node IDs are
+    /// `0..num_nodes`). So `node_id` MUST be 0 with this helper.
+    fn bootstrap_cluster_node(mgr: &FetchRequestManager, node_id: i32, topic: &str, partitions: i32) {
+        use std::collections::HashMap;
+        debug_assert_eq!(node_id, 0, "bootstrap_cluster_node only emits node id=0 — pass node_id=0");
+        mgr.abstract_fetch
+            .metadata
+            .add_transient_topics(HashSet::from([topic.to_string()]));
+        let mut counts = HashMap::new();
+        counts.insert(topic.to_string(), partitions);
+        let response = crate::common::requests::request_test_utils::metadata_update_with(1, &counts);
+        mgr.abstract_fetch
+            .metadata
+            .metadata_arc()
+            .update_with_current_request_version(&response, false, 0);
+    }
+
+    /// Build a synthesised `ClientResponse` carrying a `FetchResponse`
+    /// (or `None` for a disconnect-style response). Mirrors the
+    /// `build_list_offsets_client_response` helper in
+    /// `offsets_request_manager.rs`.
+    fn build_fetch_client_response(response: Option<FetchResponse>) -> crate::client_response::ClientResponse {
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::request_header::RequestHeader;
+        let header = RequestHeader::new(&ApiKeys::FETCH, ApiKeys::FETCH.latest_version(), "", 1).expect("header");
+        crate::client_response::ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            response.map(ConcreteResponse::Fetch),
+        )
+    }
+
+    /// Phase 12.5 (4/N) regression — response routing via the
+    /// `PendingFetchCompletion` mpsc channel on the **failure** path.
+    /// Drive `poll_on_close(now)` so a close-fetch-session
+    /// `UnsentRequest` is emitted, fire `on_failure` on the request's
+    /// handler, and then the next `poll_on_close` call's drain
+    /// dispatches into `AbstractFetch::handle_close_fetch_session_failure`,
+    /// which removes the node from
+    /// `nodes_with_pending_fetch_requests`.
+    ///
+    /// This is the test that would have caught the Phase-12 audit
+    /// response-routing gap on the fetch path (audit verdict: BROKEN,
+    /// no production callsite of `take_response_receiver`).
+    #[tokio::test]
+    async fn test_response_routing_failure_path() {
+        let mut mgr = make_manager();
+        // Seed the cluster with node id=0 so `poll_on_close` can resolve
+        // the node, and create a session handler so the close path
+        // produces a request.
+        bootstrap_cluster_node(&mgr, 0, "t", 1);
+        let _ = mgr.abstract_fetch.session_handler_or_create(0);
+        // Insert node 0 into the pending-fetch set so we can observe
+        // it being removed by the failure-path drain.
+        mgr.abstract_fetch.nodes_with_pending_fetch_requests.insert(0);
+
+        // `poll_on_close` builds a close-fetch-session request for the
+        // session-holding node.
+        let result = mgr.poll_on_close(100);
+        assert_eq!(1, result.unsent_requests.len(), "expected one close-fetch-session request");
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        // Fire a transport-level retriable failure through the handler.
+        unsent
+            .handler()
+            .on_failure(0, KafkaError::new(crate::common::protocol::Errors::NetworkException));
+
+        // Wait deterministically for the drain on the next `poll(now)`
+        // to observe the failure and remove node 0 from the pending set.
+        // The observable: `pending_fetch_node_ids()` no longer contains
+        // node 0 after `handle_close_fetch_session_failure` runs.
+        //
+        // NOTE: drive `poll(now)` (not `poll_on_close`) — both call
+        // `drain_pending_completions` at their top, but `poll_on_close`
+        // also unconditionally enqueues a fresh ack and re-emits a
+        // close-fetch-session request, which calls `create_fetch_request`
+        // and RE-INSERTS the node into the pending-fetch set. Using
+        // `poll` keeps the loop drain-only.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            let _ = mgr.poll(200);
+            if !mgr.abstract_fetch.pending_fetch_node_ids().contains(&0) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("node 0 remained in pending-fetch set; drain did not observe the spawned forwarder's failure");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            !mgr.abstract_fetch.pending_fetch_node_ids().contains(&0),
+            "handle_close_fetch_session_failure must remove the node from the pending-fetch set"
+        );
+    }
+
+    /// Phase 12.5 (4/N) regression — response routing via the
+    /// `PendingFetchCompletion` mpsc channel on the **success** path.
+    /// Drive `poll_on_close(now)`, synthesise a successful
+    /// `FetchResponse`, fire `on_complete` on the handler, then
+    /// observe `AbstractFetch::handle_close_fetch_session_success`
+    /// removing the node from the pending-fetch set on the next
+    /// drain.
+    #[tokio::test]
+    async fn test_response_routing_success_path() {
+        use crate::fetch_response_data::FetchResponseData;
+        let mut mgr = make_manager();
+        bootstrap_cluster_node(&mgr, 0, "t", 1);
+        let _ = mgr.abstract_fetch.session_handler_or_create(0);
+        mgr.abstract_fetch.nodes_with_pending_fetch_requests.insert(0);
+
+        let result = mgr.poll_on_close(100);
+        assert_eq!(1, result.unsent_requests.len());
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        // Synthesise an empty but successful `FetchResponse`.
+        let mut data = FetchResponseData::new();
+        data.set_error_code(0);
+        data.set_session_id(0);
+        data.set_throttle_time_ms(0);
+        let resp = FetchResponse::new(data);
+        unsent.handler().on_complete(build_fetch_client_response(Some(resp)));
+
+        // Wait deterministically for the drain on the next `poll(now)`
+        // to observe the success and remove node 0. See the failure-path
+        // test for why we use `poll` not `poll_on_close` here.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            let _ = mgr.poll(200);
+            if !mgr.abstract_fetch.pending_fetch_node_ids().contains(&0) {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!("node 0 remained in pending-fetch set; drain did not observe the spawned forwarder's success");
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            !mgr.abstract_fetch.pending_fetch_node_ids().contains(&0),
+            "handle_close_fetch_session_success must remove the node from the pending-fetch set"
+        );
     }
 }
