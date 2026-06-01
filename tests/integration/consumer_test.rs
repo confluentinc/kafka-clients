@@ -390,6 +390,13 @@ async fn test_commit_sync_then_resume_in_same_group() {
         consumer1.close().await.expect("consumer1 close should succeed");
     }
 
+    // Give the broker a moment to fully process consumer1's LeaveGroup
+    // before consumer2 joins the same group. Without this, consumer2 may
+    // race the LeaveGroup completion at the broker and either (a) join a
+    // stale assignment generation or (b) wait out the full session
+    // timeout (45s by default) before being assigned partitions.
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
     // Consumer 2: same group, polls only the remaining records.
     {
         let mut consumer2 = new_consumer::<String, String>(
@@ -406,11 +413,15 @@ async fn test_commit_sync_then_resume_in_same_group() {
 
         let mut total = 0;
         let start = Instant::now();
-        while start.elapsed() < Duration::from_secs(30) {
+        // 60s is generous — KIP-848 rebalance typically completes well
+        // within 10s, but consumer2 in the same group may still wait
+        // out part of consumer1's session timeout if LeaveGroup at
+        // close races partition reassignment broker-side.
+        while start.elapsed() < Duration::from_secs(60) {
             let records = consumer2.poll(Duration::from_secs(5)).await.expect("poll should succeed");
             total += records.count();
-            // Give the broker an extra second to surface any straggler records.
-            if total > 0 && start.elapsed() > Duration::from_secs(10) {
+            // Give the broker an extra few seconds to surface stragglers.
+            if total > 0 && start.elapsed() > Duration::from_secs(15) {
                 break;
             }
         }

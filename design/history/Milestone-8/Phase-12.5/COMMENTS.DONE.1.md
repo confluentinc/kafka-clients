@@ -407,14 +407,28 @@ fail with `left: "" / right: "<uuid>"`. Verified locally.
   offset 5, and consumer2 sees the remaining 5 records. The cap
   matches the Java `KafkaConsumerTest` pattern.
 
-  No production code changes; isolated to test code. The fix lives
-  next to a code comment that explains the rationale and references
-  the Java pattern.
+  After applying the cap, the test surfaced a second, independent
+  flakiness source: consumer2 (same group as consumer1) sometimes
+  waited out a large fraction of consumer1's session timeout
+  before being assigned partitions, observed as repeated empty
+  `poll()` returns. Two additional test-timing adjustments make
+  the run reliable across runs:
+
+  1. A 5-second `tokio::time::sleep` between consumer1's `close()`
+     and consumer2's construction lets the broker fully reflect
+     consumer1's `LeaveGroup`.
+  2. consumer2's polling-loop deadline raised from 30s → 60s, and
+     the "stragglers" break raised from 10s → 15s elapsed. KIP-848
+     rebalances typically complete within ~10s, but the test must
+     tolerate the rare longer assignment delay.
+
+  All three adjustments are test-side; no production code changes.
 
 ### Verification
 
-- `cargo test --features integration-tests --test integration_main consumer_test`
-  now reports 4 passed, 0 failed, 0 ignored.
+- `cargo test --features integration-tests --test integration consumer_test -- --ignored`
+  now reports 4 passed, 0 failed, 0 ignored across 3 consecutive
+  local runs.
 
 ### Commits
 
