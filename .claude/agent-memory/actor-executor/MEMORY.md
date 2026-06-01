@@ -38,3 +38,4 @@
 - [Phase 12 (1-3/N) partial notes](phase12_partial_commits_1-3_notes.md) — AsyncKafkaConsumer ctor scaffold + RequestManagers Arc slot refactor + dual-notifier + bg-task spawn pattern
 - [Phase 12 Critic round-1 patterns](phase12_critic_round1_patterns.md) — bg-task RM polling parity for Arc-skipped slots, single-Arc state-notifier via components, shared Arc<AtomicI64>, &self via interior mutability, pollOnClose parity
 - [Phase 12 commits 4-6 notes](phase12_commits_4-6_notes.md) — factory swap + smoke test + integration tests #[ignore]-gated on pre-existing FindCoordinator/Heartbeat bg-task response-routing gap (Phase-10 carry-over)
+- [Phase 12 consolidated patterns](phase12_consolidated_patterns.md) — Phase 12 close-out: production ctor + single-source state notifier, shared Arc<AtomicI64>, response-routing audit verdict (4/6 RMs BROKEN), Phase 12.5 charter, §16 risk on heartbeat fix, stale-rustdoc-deferral pattern

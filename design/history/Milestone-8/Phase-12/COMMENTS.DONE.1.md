@@ -120,3 +120,106 @@ After the Issue 3 fixup, the `max_time_to_wait_ms` slot is seeded with `MAX_POLL
 Rewrote the comment block at `async_kafka_consumer.rs:1092-1100` to describe the actual wiring: the slot is seeded with `MAX_POLL_TIMEOUT_MS` at ctor time and the bg task writes to the shared `Arc<AtomicI64>` cell every `run_once` iteration. The app-side `maximum_time_to_wait_ms()` accessor reads the bg-task's current value through this shared Arc. Includes a reference to Java's single `cachedMaximumTimeToWait` long field at `AsyncKafkaConsumer.java:354` to anchor the parity argument.
 
 Folded into Phase 12 commit (4/N) — `Phase 12 (4/N): factory swap in new_consumer + smoke test + Issue 6`.
+
+---
+
+## Issue 7: SCOPE-QUESTION — FindCoordinator / Heartbeat / Fetch response routing is not wired
+
+**Commit**: Carried to **Phase 12.5** (`Phase-12.5/PLAN.md`).
+**File**: `src/consumer/internals/coordinator_request_manager.rs:240`,
+`src/consumer/internals/consumer_heartbeat_request_manager.rs:278`,
+`src/consumer/internals/fetch_request_manager.rs:266`,
+`src/consumer/internals/topic_metadata_request_manager.rs:344`
+**Severity**: Bug (scope-question — confirmed real; deferred per phase boundary)
+
+### Resolution
+
+The user accepted recommendation (i) from the Critic — ship Phase 12
+as-is with the 4 integration tests `#[ignore]`-gated, open Phase 12.5
+to wire response routing for all 4 BROKEN RMs uniformly.
+
+The Critic's analysis was independently verified and confirmed by
+`design/history/Milestone-8/Phase-12/RESPONSE-ROUTING-AUDIT.md`, which
+audits all 6 RMs and finds:
+
+- **2 WIRED**: `commit_request_manager`, `offsets_request_manager`
+- **4 BROKEN**: `coordinator`, `consumer_heartbeat`, `fetch`,
+  `topic_metadata`
+
+The audit shows the gap is structural carry-over from Phase 10 (which
+did not enumerate per-RM `whenComplete` translation as a deliverable —
+PLAN.md grep returns zero hits for the BROKEN RMs). The fix is
+mechanical (canonical pattern at `commit_request_manager.rs:1410-1429`)
+but each RM is its own ~30-50 LOC refactor.
+
+Phase 12.5 charter: `design/history/Milestone-8/Phase-12.5/PLAN.md`.
+Estimated size: ~200 LOC production + ~80 LOC tests + un-ignore of the
+4 integration tests = ~280 LOC across 6 commits.
+
+The Critic correctly noted the Actor's docstring at
+`tests/integration/consumer_test.rs:62-65` overstated the refactor
+scope. Phase 12.5 PLAN.md documents the smaller, RM-local fix size and
+the structural decision (`Arc<Mutex<Inner>>` vs mpsc channel-back —
+per-RM choice documented inside the PLAN).
+
+Carried to Phase 12.5 in commit (7/N) of Phase 12.
+
+---
+
+## Issue 8: rustdoc comment misrepresents code state
+
+**Commit**: Carried to **Phase 12.5**.
+**File**: `src/consumer/internals/coordinator_request_manager.rs:226-233`,
+plus analog comments at
+`src/consumer/internals/consumer_heartbeat_request_manager.rs` and
+`src/consumer/internals/fetch_request_manager.rs:267-270` and
+`src/consumer/internals/topic_metadata_request_manager.rs:184-199`.
+**Severity**: Bug (documentation lie that misleads future readers)
+
+### Resolution
+
+The misleading rustdoc blocks claim "the bg task takes the response
+receiver via `take_response_receiver`" — false for all 4 BROKEN RMs.
+These rustdoc blocks will be **rewritten to describe the actual
+wire-up** by Phase 12.5, which lands the wire-up itself (Definition
+of Done item in `Phase-12.5/PLAN.md`).
+
+Editing the rustdoc in Phase 12 close-out would touch the same lines
+Phase 12.5 will rewrite — leaving the rustdoc as-is preserves a clear
+"bug location" marker for the Phase 12.5 Actor. The
+`RESPONSE-ROUTING-AUDIT.md` (committed in `b0738a1`) is the canonical
+"the rustdoc is wrong" document for any reader who lands on these
+files in the interim.
+
+Carried to Phase 12.5 in commit (7/N) of Phase 12.
+
+---
+
+## Issue 9: smoke test ctor likely takes 30s for `close().await`
+
+**Commit**: Closed in Phase 12 commit (7/N).
+**File**: `tests/consumer/async_kafka_consumer_test.rs:74-93`
+**Severity**: Test-quality (Critic's hypothesis ruled moot by measurement)
+
+### Resolution
+
+The Critic's analysis was speculative — "verify by running
+`time cargo test`. If the observed runtime is < 5s, this Issue is
+moot." Measurement at close-out:
+
+```
+$ time cargo test --test consumer new_consumer_builds_and_closes_against_refused_broker
+test async_kafka_consumer_test::new_consumer_builds_and_closes_against_refused_broker ... ok
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 37 filtered out; finished in 0.10s
+cargo test --test consumer  0.09s user 0.11s system 15% cpu 1.196 total
+```
+
+Runtime: **0.10s** (well under the 5s threshold). The Critic's
+predicted 30s `submit_and_drain` stall does not materialize, because
+`close()`'s `leave_group_on_close` path's `submit_and_drain` against a
+never-connected broker does not actually wait the full
+`request_timeout_ms` — channel closure / bg-task shutdown surfaces
+the error path sooner (likely the bg task's `run_once` returns
+`closing` before the deadline). No action required.
+
+Closed (no fix) in Phase 12 commit (7/N).

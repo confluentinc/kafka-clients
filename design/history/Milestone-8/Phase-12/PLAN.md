@@ -553,3 +553,119 @@ Per `.claude/rules/agent-roles.md`:
   `None` listener Arc; the Phase-8b membership manager handles `None`
   gracefully (no panic) but the test assertion observing
   `group_metadata().member_epoch() > 0` would be flaky.
+
+## Status — CLOSED
+
+Phase 12 is **CLOSED** as of commit (7/N). The production constructor
+ships, the `new_consumer` factory flows through `AsyncKafkaConsumer::new`
+for the `GroupProtocol::Consumer` arm, the state-notifier is wired
+single-source-of-truth onto the membership manager + consumer struct,
+and the shared `Arc<AtomicI64>` for `max_time_to_wait_ms` connects the
+bg task to the app-side accessor.
+
+### Final commit table
+
+| # | SHA | Title |
+|---|---|---|
+| 0 | `2eb875a` | `Phase 12 (0/N): PLAN.md — AsyncKafkaConsumer ctor wire-up + factory swap + integration smoke` |
+| 1 | `a4378ce` | `Phase 12 (1/N): scaffold AsyncKafkaConsumer::new(config, kd, vd) — build channels + subscriptions + metadata + NetworkClient` |
+| 2 | `143f30a` | `Phase 12 (2/N): build RequestManagers + group-protocol gate + state-notifier registration` |
+| 2-fixup | `db3f793` | `fixup! Phase 12 (2/N): Issues 1 + 4 — commit poll wire-up + auth-closure FIXME` |
+| 2-fixup | `8e2540c` | `fixup! Phase 12 (2/N): Issues 2 + 5 — single ConsumerStateNotifier wiring` |
+| 3 | `d3e9e15` | `Phase 12 (3/N): spawn bg task + assemble NetworkThreadCloseHandle + call new_with_components` |
+| 3-fixup | `6114cb0` | `fixup! Phase 12 (3/N): Issue 3 — shared Arc<AtomicI64> for max_time_to_wait_ms` |
+| 4 | `188ddf0` | `Phase 12 (4/N): factory swap in new_consumer + smoke test + Issue 6` |
+| 5 | `4b48abe` | `Phase 12 (5/N): integration consumer_test — subscribe + poll flow` |
+| 6 | `7bea0a4` | `Phase 12 (6/N): integration consumer_test — assign + commit + seek flows` |
+| 6-doc | `b0738a1` | `Phase 12: response-routing audit + Critic round-3 + agent-memory` |
+| 7 | TBD | `Phase 12 (7/N): close-out — PLAN status + Phase-11 deferral cleanup + Phase 12.5 pointer` |
+
+### What shipped
+
+- **Production constructor.** `AsyncKafkaConsumer::new(config, kd, vd)`
+  translates Java's primary ctor (`AsyncKafkaConsumer.java:355-518`)
+  line-for-line. Builds the full dependency closure (subscriptions,
+  metadata, `NetworkClient`, `BackgroundEventHandler`, `FetchBuffer`,
+  `Deserializers`, `ConsumerInterceptors`,
+  `OffsetCommitCallbackInvoker`, `RequestManagers`,
+  `ConsumerStateNotifier`, `ApplicationEventHandler`,
+  `CompletableEventReaper`, `FetchCollector`), registers the
+  state-notifier on the membership manager, and spawns the bg task.
+- **Factory swap.** `new_consumer()`'s `GroupProtocol::Consumer` arm
+  now flows through `AsyncKafkaConsumer::new`. The
+  `GroupProtocol::Classic` arm continues to return
+  `unsupported_version`.
+- **State-notifier single-source-of-truth.** `AsyncKafkaConsumerComponents`
+  carries `group_metadata`, `group_assignment_snapshot`, and
+  `state_notifier` as mandatory Arcs; the SAME Arcs are registered on
+  the membership manager AND stored on the consumer struct (Issue 2
+  resolution).
+- **Shared `Arc<AtomicI64>` for `max_time_to_wait_ms`.** Bg-task writes
+  via `cached_max_time_to_wait_ms.store(...)`; app-side reads via
+  `maximum_time_to_wait_ms()` accessor (Issue 3 resolution).
+- **Smoke test (docker-free).** `tests/consumer/async_kafka_consumer_test.rs`
+  exercises the production ctor against a refused-connection
+  `127.0.0.1:1` peer. Runtime: ~100ms (smoke test does NOT take 30s —
+  Critic Issue 9 ruled moot by measurement).
+- **4 integration tests written but `#[ignore]`-gated.**
+  `tests/integration/consumer_test.rs` carries
+  `test_subscribe_and_poll_records`,
+  `test_assign_partitions_and_poll`,
+  `test_commit_sync_then_resume_in_same_group`,
+  `test_seek_to_beginning_re_reads_records`. Each is `#[ignore]`d on
+  the response-routing gap (see RESPONSE-ROUTING-AUDIT.md).
+
+### What was deferred — Phase 12.5
+
+`design/history/Milestone-8/Phase-12/RESPONSE-ROUTING-AUDIT.md` audits
+all 6 `RequestManager`s and identifies **4 BROKEN** ones whose
+`UnsentRequest` build sites do NOT call
+`take_response_receiver()`, so broker responses are dropped silently:
+
+- `coordinator_request_manager.rs:240`
+- `consumer_heartbeat_request_manager.rs:278`
+- `fetch_request_manager.rs:266`
+- `topic_metadata_request_manager.rs:344`
+
+The other 2 (`commit_request_manager`, `offsets_request_manager`) are
+WIRED. The audit shows the gap is structural carry-over from Phase 10
+which did not enumerate per-RM `whenComplete` translation as a
+deliverable (PLAN.md grep returns zero hits for "FindCoordinator",
+"Heartbeat response", "Metadata response").
+
+**Phase 12.5 charter:** `design/history/Milestone-8/Phase-12.5/PLAN.md`.
+Wires response routing for the 4 BROKEN RMs using the canonical
+`Arc<Mutex<Inner>>` interior-mutability pattern from
+`commit_request_manager.rs:1410-1429` (or mpsc channel-back from
+`offsets_request_manager.rs` where the RM holds locks the forwarder
+would otherwise re-enter — see PLAN risk matrix). Un-ignores the 4
+integration tests in `tests/integration/consumer_test.rs`. Deletes the
+3 misleading rustdoc blocks at
+`coordinator_request_manager.rs:226-233`,
+`fetch_request_manager.rs:267-270`,
+`topic_metadata_request_manager.rs:184-199`.
+
+Estimated size: ~200 LOC production + ~80 LOC tests across 6 commits
+(4 RM refactors + 1 integration un-ignore + 1 close-out).
+
+### Carry-overs (NOT in Phase 12.5 scope)
+
+- `AsyncConsumerMetrics` / `KafkaConsumerMetrics` translation —
+  deferred Milestone-8-wide.
+- SSL/SASL `ChannelBuilder` escape hatch — Phase 12 ships PLAINTEXT
+  only; Phase 12.5 continues PLAINTEXT.
+- C FFI for `AsyncKafkaConsumer` — out of milestone.
+- Classic-protocol path — out of milestone per consumer-threading.md
+  §20.
+
+### Phase-11 deferred unit tests
+
+The 5 markers listed at `PLAN.md:148-166` were re-examined at close-out
+(commit 7/N). Each Phase-11 deferral was confirmed to depend on
+response routing (Phase 12.5), not on the production ctor itself
+which is now wired. Markers updated in-place to point at Phase 12.5
+per `RESPONSE-ROUTING-AUDIT.md` instead of "Phase 12 integration tests".
+No tests were newly translatable from the production ctor alone — the
+bg task cannot drive `FindCoordinator` → `Heartbeat` → `Fetch` →
+`OffsetCommit` end-to-end until 4/6 RMs have their response receiver
+plumbed through.

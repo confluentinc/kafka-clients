@@ -66,7 +66,16 @@ submodule commit `a18251bae0b825c69794a50dffd4c3100cf5ca5b`.
 | 9 | **Commit** | `CommitRequestManager` (1282), `OffsetCommitCallbackInvoker`. Tests: `CommitRequestManagerTest`. | `src/consumer/internals/{commit_request_manager, offset_commit_callback_invoker}.rs` + tests | Phase 4, 5, 6 |
 | 10 | **Background task & event processor** | `ConsumerNetworkThread` (321), `ApplicationEventProcessor`. Tests: `ConsumerNetworkThreadTest`, `ApplicationEventProcessorTest`. | `src/consumer/internals/{consumer_network_thread, application_event_processor}.rs`. Single `tokio::spawn` per consumer (§10) with `runOnce()` phase ordering; `select!` over shutdown/wakeup/network-poll. | Phase 5–9 |
 | 11 | **`AsyncKafkaConsumer` public impl** | `AsyncKafkaConsumer.java` (2368), `ConsumerRebalanceListenerInvoker`, `ConsumerUtils`. Tests: `AsyncKafkaConsumerTest` (~2K) plus the two `ConsumerRebalanceListener` regression tests required by `consumer-threading.md` §31. | `src/consumer/async_kafka_consumer.rs` implementing `Consumer<K,V>`; `process_background_events` invocation in every blocking-style API (§31) | Phase 2, 3, 5, 7, 8, 9, 10 |
-| 12 | **Integration test** | analog of producer Phase 6 integration | `tests/integration_consumer_test.rs`: subscribe → produce N records via existing producer → poll → assert, against Kafka 4.2.0 via testcontainers | Phase 11 |
+| 12 | **Integration test** — CLOSED [^p12] | analog of producer Phase 6 integration | `tests/integration/consumer_test.rs`: 4 end-to-end flows + production ctor wired through `new_consumer` factory. **Integration tests `#[ignore]`-gated on the response-routing gap** documented in `Phase-12/RESPONSE-ROUTING-AUDIT.md` — see footnote. | Phase 11 |
+
+[^p12]: Phase 12 production ctor wired end-to-end. The 4 integration
+tests (`tests/integration/consumer_test.rs`) are `#[ignore]`-gated
+pending **Phase 12.5** which wires response routing for the 4 BROKEN
+RequestManagers (coordinator, consumer_heartbeat, fetch,
+topic_metadata) per `Phase-12/RESPONSE-ROUTING-AUDIT.md`. The gap is
+structural carry-over from Phase 10 — Phase 10 did not wire the per-RM
+`whenComplete` translation and only 2 of 6 RMs landed it locally
+(commit, offsets). Phase 12.5 charter at `Phase-12.5/PLAN.md`.
 
 ## Module structure
 

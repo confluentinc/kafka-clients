@@ -560,9 +560,11 @@ where
 {
     /// Constructs an `AsyncKafkaConsumer` from pre-built components.
     ///
-    /// This is the **only** constructor in commit (2/N); the production
-    /// factory in `consumer/mod.rs` is wired in commit (7/N). Tests
-    /// build their own components (typically with a `MockClient`-backed
+    /// Test-visible seam. The production factory in
+    /// `consumer/mod.rs::new_consumer` flows through
+    /// `AsyncKafkaConsumer::new` (Phase 12 commit 4/N), which builds the
+    /// dependency closure and delegates to this method. Tests build
+    /// their own components (typically with a `MockClient`-backed
     /// `ConsumerNetworkThread`) and call this directly.
     ///
     /// Mirrors Java's test-visible constructor at
@@ -4539,7 +4541,9 @@ mod tests {
     //     invocation. The bg-task `reaper.reap(time)` is exercised via
     //     `ConsumerNetworkThreadTest` (Phase 10 commit 8/N).
     //   - testSubscribePatternAgainstBrokerNotSupportingRegex — end-to-end
-    //     against a `MockClient`; deferred to Phase 12 (integration tests).
+    //     against a `MockClient`; requires response routing for
+    //     FindCoordinator + Heartbeat to be wired (deferred to Phase 12.5
+    //     per `Phase-12/RESPONSE-ROUTING-AUDIT.md`).
 
     /// Java: `testFailOnClosedConsumer` (Java line 286-293) — asserts
     /// the EXACT message `"This consumer has already been closed."` is
@@ -4630,8 +4634,9 @@ mod tests {
         // member_id and generation_id are still 0 / "" until a
         // heartbeat lands; instance_id flows from config.
         // For now we assert the config carries the value — the bg-task
-        // wire-up that surfaces it through group_metadata lands in
-        // Phase 12 integration tests.
+        // wire-up that surfaces it through group_metadata requires
+        // Heartbeat response routing (deferred to Phase 12.5 per
+        // `Phase-12/RESPONSE-ROUTING-AUDIT.md`).
         assert_eq!(consumer.config.group_instance_id.as_deref(), Some("groupInstanceId1"));
     }
 
@@ -5958,13 +5963,14 @@ mod tests {
     //     require a fully-wired FetchCollector observable that signals
     //     "wakeup mid-fetch". Without a `MockClient`-backed bg task this
     //     would only exercise the wakeup_trigger plumbing already tested
-    //     by `wakeup_before_poll_throws_once_then_succeeds`. Deferred to
-    //     Phase 12 (integration tests against a real broker).
+    //     by `wakeup_before_poll_throws_once_then_succeeds`. Requires
+    //     Fetch response routing (deferred to Phase 12.5 per
+    //     `Phase-12/RESPONSE-ROUTING-AUDIT.md`).
     //   - testCommitted — full happy-path commit fetch — requires a
     //     completer that returns offsets through the FetchCommittedOffsets
     //     handle; the new `committed_propagates_event_exception` exercises
-    //     the same path with an error variant. Phase 12 integration tests
-    //     cover the happy path against a real broker.
+    //     the same path with an error variant. Phase 12.5 integration
+    //     tests cover the happy path against a real broker.
     //   - testPollThrowsInterruptExceptionIfInterrupted — Java's
     //     `Thread.currentThread().interrupt()` is unrepresentable in
     //     Rust (no thread-level interrupt flag). The equivalent is
@@ -6866,8 +6872,9 @@ mod tests {
     //     reaper. The reap calls are wired (close_internal:2675, etc);
     //     `ConsumerNetworkThreadTest` (Phase 10 commit 8/N) exercises
     //     the bg-task reap path with a real reaper.
-    //   - testSubscribePatternAgainstBrokerNotSupportingRegex — Phase
-    //     12 integration tests (needs MockClient).
+    //   - testSubscribePatternAgainstBrokerNotSupportingRegex — needs
+    //     MockClient or a wired bg task. Deferred to Phase 12.5
+    //     (response-routing) per `Phase-12/RESPONSE-ROUTING-AUDIT.md`.
     //   - testGroupMetadataIsResetAfterUnsubscribe — see commit 8 skip
     //     section.
     //   - testLongPollWaitIsLimited — requires a full FetchCollector
@@ -6890,9 +6897,10 @@ mod tests {
     //     for the happy path; the timeout-cause-of-incomplete path
     //     requires injecting a never-completing handle that is
     //     specifically held by the test through close's
-    //     `await_pending_async_commits` step. Deferred to Phase 12
-    //     (integration tests) where the bg task is wired and the
-    //     incomplete-future timing is naturally observable.
+    //     `await_pending_async_commits` step. Requires response routing
+    //     for the bg task to drive the incomplete-future timing
+    //     naturally — deferred to Phase 12.5 per
+    //     `Phase-12/RESPONSE-ROUTING-AUDIT.md`.
     //   - testCloseLeavesGroupDespiteOnPartitionsLostError — Mockito's
     //     `spy(newConsumer(...))` + `setGroupAssignmentSnapshot` API
     //     surface does not have an inline Rust analog. The
