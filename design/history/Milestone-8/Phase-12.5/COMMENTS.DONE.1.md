@@ -85,3 +85,26 @@
 
 - **Commits**:
   - `fixup! Phase 12.5 (1/N): Issue 2 — robust forwarder-sync in regression tests`
+
+---
+
+## Issue 3: `on_response` error branch skips `reset_heartbeat_state()` that Java's `onErrorResponse` calls first — RESOLVED
+
+- **File**: `src/consumer/internals/consumer_heartbeat_request_manager.rs:415-485` (the `on_response` method)
+- **Severity**: Bug (Behavior Mismatch with Java)
+- **Java Reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/consumer/internals/AbstractHeartbeatRequestManager.java:351-446` — specifically line 356 `resetHeartbeatState();` runs at the TOP of `onErrorResponse`, BEFORE `heartbeatRequestState.onFailedAttempt(currentTimeMs)` (line 357) and the per-error switch.
+- **Description**:
+  Java's `onErrorResponse(R response, long currentTimeMs)` resets the per-request `HeartbeatState` (the consumer-specific `SentFields` field tracker) at the top, before classifying. The Rust `on_response` error branch went straight to `self.inner.classify_response_error(error, &error_message, completion_time_ms)`. `classify_response_error` calls `on_failed_attempt` (matches Java line 357), but the per-request `HeartbeatState::reset()` (Java line 356) was **never called**. The transport-failure path (`on_failure`) correctly called `self.reset_heartbeat_state()`; the response-error path did not.
+
+  Net effect: after a heartbeat returned with an error code in the response body (e.g. `COORDINATOR_LOAD_IN_PROGRESS`, `INVALID_REQUEST`, `TOPIC_AUTHORIZATION_FAILED`), `SentFields` was NOT reset, so the next heartbeat's `build_request_data()` would diff against stale "sent" tracking and SKIP fields that Java would re-send (subscribed topic names, rebalance timeout, server assignor, local assignment, pattern). The broker may then assume the consumer is still using stale subscription state.
+
+- **Fix**: Added `self.reset_heartbeat_state();` at the very top of the error branch in `on_response`, before `classify_response_error`. Mirrors Java line 356 exactly.
+
+- **Regression test**: `issue3_error_response_resets_sent_fields` (in `consumer_heartbeat_request_manager.rs::tests`):
+  1. Subscribes to `["t"]` so `SubscriptionState` carries a non-empty topic list.
+  2. Drives `poll(now)` once and asserts the new `sent_fields_topics_populated()` test accessor returns `true` (sanity check that the first build populated `SentFields.subscribed_topic_names`).
+  3. Synthesises a `ConsumerGroupHeartbeatResponse` with `error_code = CoordinatorLoadInProgress` and routes it through `unsent.handler().on_complete(response)`.
+  4. Polls in a bounded loop until `sent_fields_topics_populated()` flips back to `false` — confirming the drain at the top of `poll(now)` invoked `reset_heartbeat_state()` on the error branch.
+
+- **Commits**:
+  - `fixup! Phase 12.5 (3/N): Issue 3 — reset_heartbeat_state on error response branch`

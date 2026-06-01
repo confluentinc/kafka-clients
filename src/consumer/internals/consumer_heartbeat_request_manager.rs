@@ -426,8 +426,22 @@ impl ConsumerHeartbeatRequestManager {
             }
             return;
         }
-        // Error response — classify via the abstract dispatch first,
-        // then delegate to the consumer-specific extras.
+        // Error response — Java's `onErrorResponse` resets the
+        // per-request `HeartbeatState` (the `SentFields` field tracker)
+        // at the TOP, before classifying. Without this, the next
+        // heartbeat's `build_request_data()` would diff against stale
+        // "sent" tracking and SKIP fields (subscribed topic names,
+        // rebalance timeout, server assignor, local assignment, pattern)
+        // that Java would re-send. The broker would then assume the
+        // consumer is still using stale subscription state.
+        //
+        // Java reference: `AbstractHeartbeatRequestManager.java:356`
+        // (`resetHeartbeatState();` runs at the top of `onErrorResponse`,
+        // before `heartbeatRequestState.onFailedAttempt(currentTimeMs)`
+        // and the per-error switch).
+        self.reset_heartbeat_state();
+        // Classify via the abstract dispatch first, then delegate to
+        // the consumer-specific extras.
         let error_message = format!("{error:?}");
         let action = self.inner.classify_response_error(error, &error_message, completion_time_ms);
         let final_action = match action {
@@ -604,6 +618,16 @@ impl ConsumerHeartbeatRequestManager {
     /// Returns the wrapped membership manager.
     pub(crate) fn membership_manager(&self) -> &Arc<ConsumerMembershipManager> {
         &self.membership_manager
+    }
+
+    /// Test-only accessor: returns `true` when the per-request
+    /// `SentFields` tracker has `subscribed_topic_names` populated (i.e.
+    /// the last build did NOT reset it). Used by the Issue-3 regression
+    /// to verify that `reset_heartbeat_state()` runs at the top of the
+    /// error branch of `on_response`.
+    #[cfg(test)]
+    pub(crate) fn sent_fields_topics_populated(&self) -> bool {
+        self.heartbeat_state.sent_fields.subscribed_topic_names.is_some()
     }
 }
 
@@ -1130,6 +1154,118 @@ mod tests {
         // The heartbeat interval was updated from the response (Java:
         // `heartbeatRequestState.updateHeartbeatIntervalMs(...)`).
         assert_eq!(mgr.inner.heartbeat_request_state.heartbeat_interval_ms(), 5_000);
+    }
+
+    /// Phase 12.5 round-2 regression for Issue 3: on the **error**
+    /// branch of `on_response` (broker returns a non-NONE error code in
+    /// the response body), the per-request `SentFields` tracker MUST be
+    /// reset, mirroring Java's `AbstractHeartbeatRequestManager.java:356`
+    /// (`resetHeartbeatState();` at the top of `onErrorResponse`).
+    ///
+    /// Without this, the next heartbeat's `build_request_data()` would
+    /// diff against stale `SentFields` and SKIP fields the broker needs
+    /// to re-receive (subscribed topic names, rebalance timeout, server
+    /// assignor, local assignment, pattern).
+    ///
+    /// Test shape:
+    /// 1. Subscribe to a topic so `SubscriptionState` has a non-empty
+    ///    subscription. Drive `poll(now)` once — the heartbeat builder
+    ///    populates `SentFields.subscribed_topic_names`.
+    /// 2. Synthesise a `ConsumerGroupHeartbeatResponse` with
+    ///    `error_code = CoordinatorLoadInProgress` (a benign
+    ///    retriable-via-backoff error that exercises the error branch
+    ///    of `on_response`).
+    /// 3. Drive the heartbeat handler with `on_complete(response)`.
+    /// 4. Drive `poll(now)` again to drain the
+    ///    `PendingHeartbeatCompletion::Response` envelope. Assert that
+    ///    `sent_fields_topics_populated()` is now `false` — the reset
+    ///    fired at the top of the error branch.
+    #[tokio::test]
+    async fn issue3_error_response_resets_sent_fields() {
+        use crate::client_response::ClientResponse;
+        use crate::common::protocol::ApiKeys;
+        use crate::common::requests::request_header::RequestHeader;
+        use crate::consumer_group_heartbeat_response_data::ConsumerGroupHeartbeatResponseData;
+        use std::collections::HashSet;
+
+        let (mut mgr, coord, mm) = make_with_coord(Some(0));
+        set_coordinator(&coord);
+        // Subscribe to a topic BEFORE driving the heartbeat so the
+        // request body includes `SubscribedTopicNames` and the diff
+        // tracker populates `SentFields.subscribed_topic_names`.
+        {
+            let subs_arc = mgr.heartbeat_state.subscriptions.clone();
+            let mut guard = subs_arc.lock().unwrap();
+            let mut topics = HashSet::new();
+            topics.insert("t".to_string());
+            guard.subscribe_topics(topics, None).unwrap();
+        }
+        make_joining(&mm);
+
+        // First poll emits a single heartbeat — the diff tracker now
+        // has `subscribed_topic_names = Some(...)`.
+        let result = mgr.poll(0);
+        assert_eq!(result.unsent_requests.len(), 1);
+        assert!(
+            mgr.sent_fields_topics_populated(),
+            "sanity: SentFields should be populated after the first heartbeat build"
+        );
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+
+        // Synthesise an ERROR response (CoordinatorLoadInProgress) so
+        // the `on_response` error branch runs. The drain runs at the
+        // top of the next `poll(now)`, where `reset_heartbeat_state()`
+        // must fire BEFORE `classify_response_error`.
+        let mut data = ConsumerGroupHeartbeatResponseData::new();
+        data.error_code = Errors::CoordinatorLoadInProgress.code();
+        data.member_id = Some(mm.member_id());
+        data.member_epoch = 0;
+        data.heartbeat_interval_ms = 1_000;
+        let resp = ConsumerGroupHeartbeatResponse::new(data);
+
+        let header = RequestHeader::new(
+            &ApiKeys::CONSUMER_GROUP_HEARTBEAT,
+            ApiKeys::CONSUMER_GROUP_HEARTBEAT.latest_version(),
+            "",
+            1,
+        )
+        .expect("header ok");
+        let client_response = ClientResponse::with_timeout(
+            header,
+            None,
+            "0",
+            0,
+            0,
+            false,
+            false,
+            None,
+            None,
+            Some(ConcreteResponse::ConsumerGroupHeartbeat(resp)),
+        );
+        unsent.handler().on_complete(client_response);
+
+        // Drive poll() until the spawned forwarder has enqueued the
+        // completion and the drain has run.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(200);
+        loop {
+            let _ = mgr.poll(0);
+            if !mgr.sent_fields_topics_populated() {
+                break;
+            }
+            if std::time::Instant::now() >= deadline {
+                panic!(
+                    "SentFields.subscribed_topic_names was NOT reset by the error branch \
+                     of on_response — Java's `resetHeartbeatState()` at the top of \
+                     `onErrorResponse` is missing in Rust"
+                );
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+        }
+        assert!(
+            !mgr.sent_fields_topics_populated(),
+            "after the error-response drain, SentFields must be reset so the next \
+             heartbeat re-sends the subscription state"
+        );
     }
 
     /// Phase 12.5 (3/N) regression — failure path. When the response
