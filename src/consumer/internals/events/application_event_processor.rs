@@ -172,8 +172,8 @@ impl ApplicationEventProcessor {
     ) {
         // Step 1: auto-commit timer refresh before the assign.
         {
-            let mut rm_guard = self.lock_request_managers();
-            if let Some(commit) = rm_guard.commit.as_mut() {
+            let rm_guard = self.lock_request_managers();
+            if let Some(commit) = rm_guard.commit.as_ref() {
                 commit.update_timer_and_maybe_commit(current_time_ms);
             }
         }
@@ -559,18 +559,22 @@ impl ApplicationEventProcessor {
 
     /// Java: `process(CommitOnCloseEvent)`.
     fn process_commit_on_close(&mut self) {
-        let mut rm_guard = self.lock_request_managers();
-        if let Some(commit) = rm_guard.commit.as_mut() {
+        let rm_guard = self.lock_request_managers();
+        if let Some(commit) = rm_guard.commit.as_ref() {
             log::debug!("Signal CommitRequestManager closing");
-            commit.signal_close();
+            commit.signal_close_shared();
         }
     }
 
     /// Java: `process(StopFindCoordinatorOnCloseEvent)`.
     fn process_stop_find_coordinator_on_close(&mut self) {
-        let mut rm_guard = self.lock_request_managers();
-        if let Some(coord) = rm_guard.coordinator.as_mut() {
+        let rm_guard = self.lock_request_managers();
+        if let Some(coord_arc) = rm_guard.coordinator.as_ref() {
             log::debug!("Signal CoordinatorRequestManager closing");
+            let mut coord = match coord_arc.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
             coord.signal_close();
         }
     }
@@ -1259,7 +1263,7 @@ impl ApplicationEventProcessor {
                     Err(p) => p.into_inner(),
                 };
                 if rm_guard.commit.is_some() {
-                    if let Some(commit) = rm_guard.commit.as_mut() {
+                    if let Some(commit) = rm_guard.commit.as_ref() {
                         commit.update_timer_and_maybe_commit(poll_time_ms);
                     }
                     if let Some(hrm) = rm_guard.consumer_heartbeat.as_mut() {
@@ -1594,19 +1598,23 @@ mod tests {
 
         let config = ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let coordinator = if with_group_id {
-            Some(CoordinatorRequestManager::new(100, 1_000, "test-group"))
+            Some(Arc::new(std::sync::Mutex::new(CoordinatorRequestManager::new(
+                100,
+                1_000,
+                "test-group",
+            ))))
         } else {
             None
         };
         let commit = if with_group_id {
-            Some(CommitRequestManager::new(
+            Some(Arc::new(CommitRequestManager::new(
                 &config,
                 Arc::clone(&metadata),
                 Arc::clone(&subscriptions),
                 "test-group",
                 None,
                 0,
-            ))
+            )))
         } else {
             None
         };
@@ -2177,7 +2185,8 @@ mod tests {
         let mut fx = setup_processor(true);
         fx.processor.process(ApplicationEvent::StopFindCoordinatorOnClose);
         let rm_guard = fx.request_managers.lock().unwrap();
-        let coord = rm_guard.coordinator.as_ref().expect("coordinator present");
+        let coord_arc = rm_guard.coordinator.as_ref().expect("coordinator present");
+        let coord = coord_arc.lock().unwrap();
         assert!(coord.is_closing(), "signal_close should have flipped the closing flag");
     }
 

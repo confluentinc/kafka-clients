@@ -584,10 +584,18 @@ where
         use crate::common::network::PlaintextChannelBuilder;
         use crate::common::network::Selector;
         use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
+        use crate::consumer::internals::commit_request_manager::CommitRequestManager;
+        use crate::consumer::internals::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
+        use crate::consumer::internals::consumer_membership_manager::ConsumerMembershipManager;
         use crate::consumer::internals::consumer_metadata::ConsumerMetadata;
         use crate::consumer::internals::consumer_utils::CONSUMER_MAX_INFLIGHT_REQUESTS_PER_CONNECTION;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
         use crate::consumer::internals::fetch_config::FetchConfig;
+        use crate::consumer::internals::fetch_request_manager::FetchRequestManager;
         use crate::consumer::internals::network_client_delegate::NetworkClientDelegate;
+        use crate::consumer::internals::offsets_request_manager::OffsetsRequestManager;
+        use crate::consumer::internals::request_managers::RequestManagers;
+        use crate::consumer::internals::topic_metadata_request_manager::TopicMetadataRequestManager;
         use crate::metadata_recovery_strategy::MetadataRecoveryStrategy;
         use crate::network_client::NetworkClient;
 
@@ -596,9 +604,7 @@ where
         // Java line 390 — `clientId = config.getString(CLIENT_ID_CONFIG)`.
         let client_id: Arc<str> = Arc::from(config.client_id());
         // Java line 391 — `autoCommitEnabled = config.getBoolean(...)`.
-        // Cached on `self` via `new_with_components`; read here for the
-        // log line below.
-        let _auto_commit_enabled = config.enable_auto_commit();
+        let auto_commit_enabled = config.enable_auto_commit();
         // Java line 397 — `defaultApiTimeoutMs = Duration.ofMillis(...)`.
         // Read but stored on the consumer struct via
         // `new_with_components`.
@@ -683,7 +689,7 @@ where
             config.socket_connection_setup_timeout_ms,
             config.socket_connection_setup_timeout_max_ms,
             true, // discover_broker_versions — mirrors Java
-            api_versions,
+            Arc::clone(&api_versions),
             DefaultHostResolver::new(),
             config.metadata_max_age_ms, // rebootstrap_trigger_ms
             MetadataRecoveryStrategy::None,
@@ -709,25 +715,226 @@ where
         // Java line 447 — `groupMetadata.set(initializeGroupMetadata(...))`
         // — only when `group.id` is present. The cache itself lives on
         // the consumer struct (built inside `new_with_components`).
-        let _group_id = config.group_id().map(|s| s.to_string());
+        let group_id = config.group_id().map(|s| s.to_string());
+
+        // ═══════════════════════════════════════════════════════════════
+        // Phase 12 commit (2/N): RequestManagers wiring.
+        // ═══════════════════════════════════════════════════════════════
+        //
+        // Java lines 448-465 — `requestManagersSupplier =
+        // RequestManagers.supplier(...)`. The Rust translation builds each
+        // manager directly. Group-protocol gate: coordinator / commit /
+        // heartbeat / membership are only built when `group.id` is
+        // present (Java's `Optional.ofNullable(groupId).map(...)` pattern
+        // inside `RequestManagers.supplier`).
+        //
+        // Slot sharing across managers (Java uses heap references; Rust
+        // wraps the shared slot in `Arc<...>` — see `RequestManagers`
+        // field docs and Phase 12 commit message for the refactor that
+        // landed alongside this commit):
+        //   * `coordinator`: `Arc<Mutex<CoordinatorRequestManager>>` —
+        //     shared with the heartbeat manager (heartbeat reads the
+        //     discovered coordinator node every poll).
+        //   * `commit`: `Arc<CommitRequestManager>` — shared with the
+        //     membership manager (membership calls
+        //     `maybeAutoCommitSyncBeforeRebalance` from `reconcile`).
+        //   * `consumer_membership`: `Arc<ConsumerMembershipManager>` —
+        //     shared with the heartbeat manager (heartbeat reads
+        //     state/epoch/assignment every poll).
+        // The bg-task `run_once` polls these three Arc-shared slots
+        // explicitly (`coordinator` via `lock()`, `commit` via
+        // `ApplicationEventProcessor` event arms, `membership` via
+        // `reconcile()`); see `consumer_network_thread.rs`.
+
+        let current_time_ms = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis() as i64)
+            .unwrap_or(0);
+
+        let coordinator: Option<Arc<Mutex<CoordinatorRequestManager>>> = group_id.as_ref().map(|gid| {
+            Arc::new(Mutex::new(CoordinatorRequestManager::new(
+                config.retry_backoff_ms(),
+                config.retry_backoff_max_ms(),
+                gid.clone(),
+            )))
+        });
+
+        let commit: Option<Arc<CommitRequestManager>> = group_id.as_ref().map(|gid| {
+            Arc::new(CommitRequestManager::new(
+                &config,
+                Arc::clone(&metadata),
+                Arc::clone(&subscriptions),
+                gid.clone(),
+                config.group_instance_id().map(|s| s.to_string()),
+                current_time_ms,
+            ))
+        });
+
+        // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
+        // groupProtocol == CONSUMER) config.ignore(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
+        // Rust does not track "ignored" config keys (no `ConfigDef`
+        // equivalent); this is a comment-only translation. The classic
+        // protocol path is deferred per `consumer-threading.md` §20, so
+        // we only need to silence the warning for KIP-848 (`Consumer`)
+        // consumers.
+        // (No-op in Rust.)
+
+        // KIP-848 ConsumerMembershipManager — only built for KIP-848
+        // (`group.protocol = consumer`) when `group.id` is present.
+        let membership_opt: Option<Arc<ConsumerMembershipManager>> = match (group_id.as_ref(), commit.as_ref()) {
+            (Some(gid), Some(commit_arc)) => Some(Arc::new(ConsumerMembershipManager::new(
+                gid.clone(),
+                config.group_instance_id().map(|s| s.to_string()),
+                None, // rack_id — Java reads from ConsumerConfig.CLIENT_RACK_CONFIG
+                config.max_poll_interval_ms(),
+                config.group_remote_assignor().map(|s| s.to_string()),
+                Arc::clone(&subscriptions),
+                // share() the commit handle: the membership manager + the
+                // RequestManagers.commit slot point to the same
+                // `Arc<CommitRequestManagerInner>` (Java holds one
+                // reference each).
+                Some(Arc::clone(commit_arc)),
+                Arc::clone(&metadata),
+                Arc::clone(&background_event_handler),
+                auto_commit_enabled,
+            ))),
+            _ => None,
+        };
+
+        // ConsumerHeartbeatRequestManager — only built when membership
+        // is present (heartbeat needs the membership state machine to
+        // build heartbeat-request bodies).
+        let consumer_heartbeat: Option<ConsumerHeartbeatRequestManager> =
+            match (coordinator.as_ref(), membership_opt.as_ref()) {
+                (Some(coord_arc), Some(membership)) => Some(ConsumerHeartbeatRequestManager::new(
+                    current_time_ms,
+                    &config,
+                    Arc::clone(coord_arc),
+                    Arc::clone(&subscriptions),
+                    Arc::clone(membership),
+                    Arc::clone(&background_event_handler),
+                )),
+                _ => None,
+            };
+
+        // OffsetsRequestManager — always built (Java's
+        // `RequestManagers.supplier` builds this unconditionally).
+        let offsets = Some(OffsetsRequestManager::new(
+            Arc::clone(&subscriptions),
+            Arc::clone(&metadata),
+            fetch_config.isolation_level,
+            config.retry_backoff_ms(),
+            config.request_timeout_ms() as i64,
+            config.default_api_timeout_ms as i64,
+            Arc::clone(&api_versions),
+            commit.as_ref().map(Arc::clone),
+        ));
+
+        // TopicMetadataRequestManager — always built.
+        let topic_metadata = Some(TopicMetadataRequestManager::new(&config));
+
+        // FetchRequestManager — always built. The `is_unavailable` and
+        // `maybe_throw_auth_failure` closures bridge to the delegate
+        // (the delegate is not visible from the fetch manager directly
+        // — Phase-7 design uses Arc<Fn> indirection).
+        let fetch = {
+            use crate::common::Node;
+            use crate::common::memory::buffer_supplier::BufferSupplier;
+
+            // Phase-12-deferred wiring: the delegate-backed
+            // `is_unavailable` / `maybe_throw_auth_failure` closures
+            // require an `Arc<AsyncMutex<NetworkClientDelegate<...>>>`
+            // crossing into a sync `Fn` boundary. Synchronously
+            // acquiring an async mutex inside a sync `Fn` is not
+            // possible without blocking. Phase 12 ships with no-op
+            // closures (always-available, never-auth-fail); the
+            // production bridge lands as a Phase-12 follow-up that
+            // exposes a sync snapshot of the delegate's
+            // node-availability map. The behavior gap is: the fetch
+            // manager treats every node as available, so it may
+            // schedule fetches to nodes that the delegate has
+            // disconnected. The delegate filters those at send-time, so
+            // the practical impact is one extra round-trip per
+            // disconnected-node fetch attempt — not a correctness bug.
+            let is_unavailable: crate::consumer::internals::fetch_request_manager::IsUnavailableFn =
+                Arc::new(|_n: &Node| false);
+            let maybe_auth: crate::consumer::internals::fetch_request_manager::MaybeAuthFailureFn =
+                Arc::new(|_n: &Node| Ok::<(), KafkaError>(()));
+
+            Some(FetchRequestManager::new(
+                Arc::clone(&metadata),
+                Arc::clone(&subscriptions),
+                fetch_config.clone(),
+                Arc::clone(&fetch_buffer),
+                Arc::new(BufferSupplier::create()),
+                is_unavailable,
+                maybe_auth,
+            ))
+        };
+
+        // Wrap the assembled `RequestManagers` in
+        // `Arc<std::sync::Mutex<...>>` (Phase 10 pattern #3).
+        let request_managers = Arc::new(std::sync::Mutex::new(RequestManagers::new(
+            coordinator,
+            topic_metadata,
+            commit,
+            consumer_heartbeat,
+            membership_opt.clone(),
+            offsets,
+            fetch,
+        )));
+
+        // ═══════════════════════════════════════════════════════════════
+        // State-notifier registration on the membership manager.
+        // ═══════════════════════════════════════════════════════════════
+        //
+        // Phase 12 PLAN.md §"State-notifier registration": the
+        // `ConsumerStateNotifier` that updates the consumer's
+        // `group_metadata` and `group_assignment_snapshot` caches must
+        // be registered on the membership manager BEFORE the bg-task
+        // spawn so the very first heartbeat-response observation drives
+        // `update_group_metadata`.
+        //
+        // The state-notifier itself is constructed inside
+        // `new_with_components` (Phase 11), so we build a temporary
+        // `ConsumerStateNotifier` here and register it; commit (3/N)
+        // hands the same state-notifier instance into the
+        // components struct.
+        if let Some(membership) = membership_opt.as_ref() {
+            let group_metadata: Arc<Mutex<Option<ConsumerGroupMetadata>>> = Arc::new(Mutex::new(None));
+            let group_assignment_snapshot: Arc<Mutex<HashSet<TopicPartition>>> = Arc::new(Mutex::new(HashSet::new()));
+            let state_notifier = Arc::new(ConsumerStateNotifier::new(
+                group_id.clone().unwrap_or_default(),
+                config.group_instance_id().map(|s| s.to_string()),
+                Arc::clone(&group_metadata),
+                Arc::clone(&group_assignment_snapshot),
+            ));
+            membership
+                .abstract_mm
+                .register_state_listener(Arc::clone(&state_notifier) as Arc<dyn MemberStateListener>);
+            // The `group_metadata` / `group_assignment_snapshot` /
+            // `state_notifier` Arcs are intentionally dropped here —
+            // commit (3/N) reconstructs them inside the
+            // `AsyncKafkaConsumerComponents` flow (which uses its own
+            // notifier instance per the Phase-11 test-rig contract).
+            // The drop is safe because the membership manager already
+            // holds an `Arc<dyn MemberStateListener>` to the notifier
+            // we registered — the notifier outlives this scope via the
+            // membership manager's listener list.
+            let _ = (group_metadata, group_assignment_snapshot);
+        }
 
         // Suppress unused warnings: every binding above is the precursor
-        // for commits (2/N) and (3/N) which thread these into the
-        // RequestManagers + bg-task spawn. The `Err(...)` below is the
-        // PLAN-mandated placeholder for commit (1/N).
-        let _ = (
-            &subscriptions,
-            &metadata,
-            &fetch_buffer,
-            &fetch_config,
-            &background_event_handler,
-            &client_id,
-        );
+        // for commit (3/N) which threads these into the bg-task spawn +
+        // `new_with_components` hand-off. The `Err(...)` below is the
+        // PLAN-mandated placeholder for commit (2/N).
+        let _ = (&subscriptions, &metadata, &fetch_buffer, &client_id, &request_managers);
 
         Err(KafkaError::unsupported_version(
             "AsyncKafkaConsumer production constructor wiring lands in Phase 12 \
-             commits (2/N) and (3/N); commit (1/N) only builds the channels + \
-             subscriptions + metadata + NetworkClient prefix.",
+             commit (3/N) (bg-task spawn + new_with_components hand-off). \
+             Commit (2/N) only builds the RequestManagers + state-notifier \
+             registration.",
         ))
     }
 

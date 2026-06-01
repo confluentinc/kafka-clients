@@ -37,7 +37,7 @@
 
 #![allow(dead_code)]
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use super::commit_request_manager::CommitRequestManager;
 use super::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
@@ -56,7 +56,15 @@ pub(crate) struct RequestManagers {
     /// `None` for the (currently out-of-scope) group-less assignor
     /// path. Java: `public final Optional<CoordinatorRequestManager>
     /// coordinatorRequestManager`.
-    pub(crate) coordinator: Option<CoordinatorRequestManager>,
+    ///
+    /// Wrapped in `Arc<Mutex<...>>` so it can be shared with
+    /// [`ConsumerHeartbeatRequestManager`] (which holds the same handle
+    /// to read the discovered coordinator node — Java does the same via
+    /// a heap reference). Skipped from [`Self::entries`] (like
+    /// `consumer_membership`); the bg task polls the coordinator
+    /// separately through [`Self::coordinator_handle`] so the lock can
+    /// be acquired briefly per poll iteration.
+    pub(crate) coordinator: Option<Arc<Mutex<CoordinatorRequestManager>>>,
     /// Topic-metadata request manager — serves `list_topics()` and
     /// `partitions_for(topic)` API calls. Java:
     /// `final TopicMetadataRequestManager topicMetadataRequestManager`
@@ -66,7 +74,16 @@ pub(crate) struct RequestManagers {
     /// Commit / offset-fetch request manager — `Some` when a group is
     /// configured. Java: `Optional<CommitRequestManager>
     /// commitRequestManager`.
-    pub(crate) commit: Option<CommitRequestManager>,
+    ///
+    /// Wrapped in `Arc<...>` so it can be shared with
+    /// [`ConsumerMembershipManager`] (which holds the same handle for
+    /// `maybeAutoCommitSyncBeforeRebalance` — Java does the same via a
+    /// heap reference). [`CommitRequestManager`] uses interior
+    /// mutability (`Arc<CommitRequestManagerInner>` with `Mutex` slots)
+    /// so an outer `Mutex` is unnecessary. Skipped from
+    /// [`Self::entries`] (like `consumer_membership`); the bg task polls
+    /// commit separately through [`Self::commit_handle`].
+    pub(crate) commit: Option<Arc<CommitRequestManager>>,
     /// KIP-848 consumer-group heartbeat manager — `Some` when a
     /// consumer-protocol group is configured. Java:
     /// `Optional<ConsumerHeartbeatRequestManager>`.
@@ -116,9 +133,9 @@ impl RequestManagers {
     /// what matters per `consumer-threading.md` §10 — see
     /// [`Self::entries`].
     pub(crate) fn new(
-        coordinator: Option<CoordinatorRequestManager>,
+        coordinator: Option<Arc<Mutex<CoordinatorRequestManager>>>,
         topic_metadata: Option<TopicMetadataRequestManager>,
-        commit: Option<CommitRequestManager>,
+        commit: Option<Arc<CommitRequestManager>>,
         consumer_heartbeat: Option<ConsumerHeartbeatRequestManager>,
         consumer_membership: Option<Arc<ConsumerMembershipManager>>,
         offsets: Option<OffsetsRequestManager>,
@@ -161,19 +178,22 @@ impl RequestManagers {
     /// (`consumer-threading.md` §10), matching Java's
     /// `RequestManagers.java:91-101` order:
     ///
-    /// `coordinator → commit → heartbeat → offsets → topic_metadata →
-    /// fetch`.
+    /// `(coordinator skipped) → (commit skipped) → heartbeat →
+    /// (membership skipped) → offsets → topic_metadata → fetch`.
     ///
-    /// `consumer_membership` is **intentionally skipped** — it is held
-    /// as `Arc<ConsumerMembershipManager>` because
-    /// [`ConsumerHeartbeatRequestManager`] also holds a reference to
-    /// it, so we cannot produce a `&mut dyn RequestManager` from it
-    /// here. Java's `AbstractMembershipManager.poll(...)` returns
-    /// `PollResult.EMPTY` and only calls `maybeReconcile(false)` as a
-    /// side effect; the Rust translation drives the async
-    /// `ConsumerMembershipManager::reconcile` from the bg task
-    /// directly (Phase 10), so skipping it from `entries()` does not
-    /// lose any request-emitting work.
+    /// `coordinator`, `commit`, and `consumer_membership` are
+    /// **intentionally skipped** — they are held as
+    /// `Arc<Mutex<CoordinatorRequestManager>>`,
+    /// `Arc<CommitRequestManager>`, and `Arc<ConsumerMembershipManager>`
+    /// respectively so the heartbeat manager and the membership manager
+    /// can share the same instance with the slot in this container
+    /// (Java does the same via heap references). Producing a
+    /// `&mut dyn RequestManager` from a shared `Arc<Mutex<...>>` would
+    /// either require holding the `MutexGuard` across the `Vec` (lifetime
+    /// problem) or refactoring `RequestManager::poll` to take `&self`
+    /// (semantic mismatch with Java). Instead the bg task polls them
+    /// separately via [`Self::coordinator_handle`],
+    /// [`Self::commit_handle`], and `ConsumerMembershipManager::reconcile`.
     ///
     /// Streams managers (`StreamsGroupHeartbeatRequestManager`,
     /// `StreamsMembershipManager`) are out of milestone scope per
@@ -188,9 +208,9 @@ impl RequestManagers {
         // Destructure so each `Option` is borrowed independently —
         // borrow-splitting per <https://doc.rust-lang.org/nomicon/borrow-splitting.html>.
         let Self {
-            coordinator,
+            coordinator: _,
             topic_metadata,
-            commit,
+            commit: _,
             consumer_heartbeat,
             consumer_membership: _,
             offsets,
@@ -199,15 +219,10 @@ impl RequestManagers {
             closed: _,
         } = self;
         let mut list: Vec<&mut dyn RequestManager> = Vec::new();
-        // Order matches Java (`RequestManagers.java:91-101`):
-        // coordinator → commit → heartbeat → (membership skipped) →
-        // offsets → topic_metadata → fetch.
-        if let Some(c) = coordinator.as_mut() {
-            list.push(c as &mut dyn RequestManager);
-        }
-        if let Some(c) = commit.as_mut() {
-            list.push(c as &mut dyn RequestManager);
-        }
+        // Order matches Java (`RequestManagers.java:91-101`) minus the
+        // three Arc-shared slots: (coordinator skipped) → (commit
+        // skipped) → heartbeat → (membership skipped) → offsets →
+        // topic_metadata → fetch.
         if let Some(h) = consumer_heartbeat.as_mut() {
             list.push(h as &mut dyn RequestManager);
         }
@@ -226,6 +241,25 @@ impl RequestManagers {
         list
     }
 
+    /// Returns a clone of the `Arc<Mutex<CoordinatorRequestManager>>`
+    /// handle, if a coordinator manager is wired. The bg task uses this
+    /// to poll the coordinator separately from [`Self::entries`] —
+    /// briefly locking the mutex, calling [`RequestManager::poll`],
+    /// then dropping the guard before any subsequent `.await`.
+    pub(crate) fn coordinator_handle(&self) -> Option<Arc<Mutex<CoordinatorRequestManager>>> {
+        self.coordinator.clone()
+    }
+
+    /// Returns a clone of the `Arc<CommitRequestManager>` handle, if a
+    /// commit manager is wired. Used by the bg task to poll commit
+    /// separately from [`Self::entries`] — `CommitRequestManager` uses
+    /// interior mutability (an `Arc<CommitRequestManagerInner>` whose
+    /// state is `Mutex`-guarded), so [`Self::commit_handle`] returns an
+    /// `Arc` rather than `Arc<Mutex<...>>`.
+    pub(crate) fn commit_handle(&self) -> Option<Arc<CommitRequestManager>> {
+        self.commit.clone()
+    }
+
     /// Index, into the [`Self::entries`] vec, of the first manager that
     /// Java places AFTER the membership slot.
     ///
@@ -233,30 +267,20 @@ impl RequestManagers {
     /// `coordinator → commit → heartbeat → membership → offsets → ...`.
     /// In Rust the membership manager is skipped from `entries()` (held
     /// as `Arc`, shared with the heartbeat manager — see
-    /// [`Self::entries`]'s docstring), so the bg task drives
-    /// `ConsumerMembershipManager::reconcile(...)` directly between the
-    /// "before-membership" managers and the "after-membership"
-    /// managers. This index is the boundary the bg task uses to split
-    /// the entries walk.
+    /// [`Self::entries`]'s docstring), and so are `coordinator` and
+    /// `commit` (also `Arc`-shared). The bg task drives the three
+    /// skipped managers explicitly between the "before-membership"
+    /// managers and the "after-membership" managers. This index is the
+    /// boundary the bg task uses to split the entries walk.
     ///
-    /// Returns the position where membership would have lived: i.e. the
-    /// count of currently-present `coordinator`, `commit`, and
-    /// `consumer_heartbeat`. `dyn_managers` from
-    /// [`Self::with_dyn_managers`] are appended AFTER concrete slots,
-    /// so they are always "after-membership" for the bg-task split (the
-    /// production code path leaves `dyn_managers` empty).
+    /// With coordinator + commit skipped from [`Self::entries`], the
+    /// boundary collapses to the count of present `consumer_heartbeat`
+    /// (0 or 1). `dyn_managers` from [`Self::with_dyn_managers`] are
+    /// appended AFTER concrete slots, so they are always
+    /// "after-membership" for the bg-task split (the production code
+    /// path leaves `dyn_managers` empty).
     pub(crate) fn membership_boundary(&self) -> usize {
-        let mut n = 0;
-        if self.coordinator.is_some() {
-            n += 1;
-        }
-        if self.commit.is_some() {
-            n += 1;
-        }
-        if self.consumer_heartbeat.is_some() {
-            n += 1;
-        }
-        n
+        if self.consumer_heartbeat.is_some() { 1 } else { 0 }
     }
 
     /// Idempotent close. Subsequent calls are no-ops.
@@ -309,8 +333,8 @@ mod tests {
     use crate::consumer::internals::fetch_request_manager::{always_available, no_auth_failure};
     use crate::consumer::internals::subscription_state::SubscriptionState;
 
-    fn coord_manager() -> CoordinatorRequestManager {
-        CoordinatorRequestManager::new(100, 1_000, "group-1")
+    fn coord_manager() -> Arc<Mutex<CoordinatorRequestManager>> {
+        Arc::new(Mutex::new(CoordinatorRequestManager::new(100, 1_000, "group-1")))
     }
 
     fn topic_metadata_manager() -> TopicMetadataRequestManager {
@@ -318,7 +342,7 @@ mod tests {
         TopicMetadataRequestManager::new(&config)
     }
 
-    fn commit_manager() -> CommitRequestManager {
+    fn commit_manager() -> Arc<CommitRequestManager> {
         let config = crate::consumer::ConsumerConfig::new(vec!["localhost:9092".to_string()]);
         let subs = std::sync::Arc::new(std::sync::Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
         let metadata = std::sync::Arc::new(ConsumerMetadata::from_config(
@@ -326,7 +350,7 @@ mod tests {
             std::sync::Arc::clone(&subs),
             ClusterResourceListeners::new(),
         ));
-        CommitRequestManager::new(&config, metadata, subs, "g", None, 0)
+        Arc::new(CommitRequestManager::new(&config, metadata, subs, "g", None, 0))
     }
 
     fn offsets_manager() -> OffsetsRequestManager {
@@ -388,19 +412,19 @@ mod tests {
         assert!(rm.entries().is_empty());
     }
 
-    /// Verifies that `entries()` returns the coordinator when present.
+    /// Verifies that `entries()` SKIPS the coordinator (it's
+    /// `Arc<Mutex<...>>`-shared with the heartbeat manager — the bg task
+    /// polls it separately via `coordinator_handle()`). Phase 12 wiring.
     #[test]
-    fn entries_includes_coordinator_when_present() {
+    fn entries_skips_coordinator_even_when_present() {
         let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, None, None);
         let entries = rm.entries();
-        assert_eq!(1, entries.len());
-        // We can call the trait method to confirm the upcast works.
-        // Default `maximum_time_to_wait` returns `i64::MAX`.
-        assert_eq!(i64::MAX, entries[0].maximum_time_to_wait(0));
+        assert!(entries.is_empty(), "coordinator must be skipped from entries()");
     }
 
-    /// Verifies that `entries()` returns both managers in deterministic
-    /// registration order (coordinator → topic_metadata).
+    /// Verifies that `entries()` returns the topic_metadata manager when
+    /// present. With coordinator skipped (`Arc`-shared), only
+    /// topic_metadata appears.
     #[test]
     fn entries_includes_topic_metadata_when_present() {
         let mut rm = RequestManagers::new(
@@ -413,7 +437,9 @@ mod tests {
             None,
         );
         let entries = rm.entries();
-        assert_eq!(2, entries.len());
+        // Coordinator is Arc-shared and excluded; only topic_metadata
+        // shows up.
+        assert_eq!(1, entries.len());
     }
 
     /// Verifies that `close` is idempotent — only the first call flips
@@ -447,32 +473,36 @@ mod tests {
         assert_eq!(names_round_one, names_round_two);
     }
 
-    /// Verifies that the commit slot is wired into `entries()` in
-    /// registration order (coordinator → commit → topic_metadata).
+    /// Verifies that `entries()` SKIPS the commit slot (it's
+    /// `Arc`-shared with the membership manager — the bg task /
+    /// `ApplicationEventProcessor` access it via `commit_handle()`).
+    /// Phase 12 wiring.
     #[test]
-    fn entries_includes_commit_when_present() {
+    fn entries_skips_commit_even_when_present() {
         let mut rm = RequestManagers::new(Some(coord_manager()), None, Some(commit_manager()), None, None, None, None);
         let entries = rm.entries();
-        assert_eq!(2, entries.len());
+        // Both coordinator and commit are Arc-shared and excluded.
+        assert!(entries.is_empty(), "commit must be skipped from entries()");
     }
 
     /// Verifies that the Phase 10 `offsets` slot is wired into
-    /// `entries()`. Pair with a coordinator so we can also confirm
-    /// the slot count.
+    /// `entries()`. With coordinator Arc-shared and excluded, only
+    /// offsets appears.
     #[test]
     fn entries_includes_offsets_when_present() {
         let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, Some(offsets_manager()), None);
         let entries = rm.entries();
-        assert_eq!(2, entries.len());
+        assert_eq!(1, entries.len());
     }
 
     /// Verifies that the Phase 10 `fetch` slot is wired into
-    /// `entries()`.
+    /// `entries()`. With coordinator Arc-shared and excluded, only
+    /// fetch appears.
     #[test]
     fn entries_includes_fetch_when_present() {
         let mut rm = RequestManagers::new(Some(coord_manager()), None, None, None, None, None, Some(fetch_manager()));
         let entries = rm.entries();
-        assert_eq!(2, entries.len());
+        assert_eq!(1, entries.len());
     }
 
     /// Verifies that `entries()` returns the correct count when five of
@@ -492,15 +522,14 @@ mod tests {
     fn entries_returns_correct_count_when_five_slots_populated() {
         // Six request-emitting slots: coordinator, commit,
         // consumer_heartbeat, offsets, topic_metadata, fetch.
-        // `consumer_membership` is held as Arc and is excluded by
-        // design — see entries() docstring.
+        // `consumer_membership`, `coordinator`, and `commit` are held
+        // as Arc and are excluded by design (Phase-12 production wiring)
+        // — see entries() docstring.
         //
         // Note: we leave `consumer_heartbeat` as None here because its
         // constructor requires a fully-wired membership manager + Arc
         // pipeline which is heavier than the value adds for this
-        // shape-only test. The same destructure handles all six slots
-        // uniformly, so omitting one doesn't change what's being
-        // tested (the per-slot count).
+        // shape-only test.
         let mut rm = RequestManagers::new(
             Some(coord_manager()),
             Some(topic_metadata_manager()),
@@ -511,7 +540,8 @@ mod tests {
             Some(fetch_manager()),
         );
         let entries = rm.entries();
-        // 5 = coordinator + commit + offsets + topic_metadata + fetch.
-        assert_eq!(5, entries.len());
+        // 3 = offsets + topic_metadata + fetch.
+        // (coordinator + commit are Arc-shared and excluded.)
+        assert_eq!(3, entries.len());
     }
 }

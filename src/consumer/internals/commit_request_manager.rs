@@ -471,6 +471,26 @@ impl CommitRequestManager {
         Self { inner }
     }
 
+    /// Returns a new `CommitRequestManager` handle that **shares** the
+    /// same `Arc<CommitRequestManagerInner>` state as `self`. Both
+    /// handles read and write through the same `Mutex`-guarded
+    /// runtime state, so all method calls on either handle observe the
+    /// same view (auto-commit timer, in-flight commits, pending fetches,
+    /// etc.).
+    ///
+    /// Mirrors Java's reference-sharing: `AsyncKafkaConsumer.java` builds
+    /// one `CommitRequestManager` and passes the same reference to
+    /// `RequestManagers` (`Optional<CommitRequestManager>`) and to
+    /// `ConsumerMembershipManager` (which holds it as a member field for
+    /// `maybeAutoCommitSyncBeforeRebalance`). In Rust the membership
+    /// manager wants `Option<Arc<CommitRequestManager>>` and
+    /// `RequestManagers` wants `Option<CommitRequestManager>` (owned),
+    /// so we hand `share()` to one side and the original handle to the
+    /// other.
+    pub(crate) fn share(&self) -> Self {
+        Self { inner: Arc::clone(&self.inner) }
+    }
+
     /// Returns `true` if auto-commit is enabled. Mirrors Java's
     /// `autoCommitEnabled()`.
     pub(crate) fn auto_commit_enabled(&self) -> bool {
@@ -512,7 +532,12 @@ impl CommitRequestManager {
     /// Used by `ApplicationEventProcessor` for `AsyncPoll` and
     /// `AssignmentChange` events so the auto-commit interval is honoured at
     /// event-dispatch time rather than only inside the bg-task `poll`.
-    pub(crate) fn update_timer_and_maybe_commit(&mut self, current_time_ms: i64) {
+    /// Takes `&self` (not `&mut self`) because all mutation flows through
+    /// the interior `Arc<CommitRequestManagerInner>` `Mutex` slots. The
+    /// shape change is required for Phase-12 production wire-up where the
+    /// commit manager is held as `Arc<CommitRequestManager>` and shared
+    /// with `ConsumerMembershipManager`.
+    pub(crate) fn update_timer_and_maybe_commit(&self, current_time_ms: i64) {
         // Java: updateTimerAndMaybeCommit — ensures the auto-commit timer
         // reflects the latest poll/event tick before potentially firing.
         self.maybe_auto_commit_async(current_time_ms);
@@ -524,6 +549,18 @@ impl CommitRequestManager {
     /// arm signalled correctly.
     pub(crate) fn is_closing(&self) -> bool {
         *self.inner.closing.lock().expect("commit manager closing flag poisoned")
+    }
+
+    /// Inherent `&self` variant of [`RequestManager::signal_close`] —
+    /// needed for callers holding an `Arc<CommitRequestManager>` (e.g.
+    /// the Phase-12 `ApplicationEventProcessor`, which acquires a shared
+    /// handle via `RequestManagers::commit_handle`). Equivalent to the
+    /// `RequestManager::signal_close` trait method body but operates
+    /// through interior mutability on `self.inner.closing` so an `&Arc`
+    /// handle is sufficient.
+    pub(crate) fn signal_close_shared(&self) {
+        let mut guard = self.inner.closing.lock().expect("commit manager closing flag poisoned");
+        *guard = true;
     }
 
     // ---------------------------------------------------------------------
@@ -1139,7 +1176,7 @@ impl CommitRequestManager {
         PollResult::new(next_poll, to_send)
     }
 
-    fn maybe_auto_commit_async(&mut self, current_time_ms: i64) {
+    fn maybe_auto_commit_async(&self, current_time_ms: i64) {
         // Java: `maybeAutoCommitAsync()` — only fires when autoCommit enabled
         // AND timer expired AND no in-flight commit. Then snapshots
         // `subscriptions.allConsumed()`, enqueues an `OffsetCommitRequestState`
@@ -2293,7 +2330,6 @@ mod tests {
     #[test]
     fn update_timer_and_maybe_commit_resets_timer_when_no_consumed_offsets() {
         let (manager, _subs) = make_manager_with_subs(0, true);
-        let mut manager = manager;
         let after_expiry_ms = 2_000;
         manager.update_timer_and_maybe_commit(after_expiry_ms);
         // Timer reset (Java does this unconditionally in `maybeAutoCommitAsync`).
@@ -2309,7 +2345,7 @@ mod tests {
     /// is false).
     #[test]
     fn update_timer_and_maybe_commit_is_noop_without_auto_commit() {
-        let mut manager = make_manager(0, false);
+        let manager = make_manager(0, false);
         // Calling the hook should not panic and `maximum_time_to_wait`
         // remains `i64::MAX` since no auto-commit timer exists.
         manager.update_timer_and_maybe_commit(5_000);

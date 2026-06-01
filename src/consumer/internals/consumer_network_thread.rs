@@ -111,6 +111,7 @@ use super::events::application_event_processor::ApplicationEventProcessor;
 use super::events::completable_event_reaper::CompletableEventReaper;
 use super::events::event_processor::EventProcessor;
 use super::network_client_delegate::NetworkClientDelegate;
+use super::request_manager::RequestManager;
 use super::request_managers::RequestManagers;
 use super::wakeup_trigger::WakeupTrigger;
 
@@ -357,23 +358,61 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             Vec<super::network_client_delegate::PollResult>,
             Vec<super::network_client_delegate::PollResult>,
         ) = {
-            let mut rm_guard = match self.request_managers.lock() {
-                Ok(g) => g,
-                Err(p) => p.into_inner(),
+            // Java's `entries()` walks
+            // `coordinator → commit → heartbeat → membership → offsets …`.
+            // The Rust container skips the three `Arc`-shared slots
+            // (coordinator, commit, membership) so the heartbeat manager
+            // and the membership manager can share their dependencies
+            // with the slot in `RequestManagers`. The bg-task drives
+            // the skipped managers explicitly here:
+            //   * `coordinator.poll(now)` — emits FindCoordinator
+            //     requests (the only RM whose `poll` does real work
+            //     when present); acquired via the `Arc<Mutex<...>>`
+            //     handle.
+            //   * `commit.poll(now)` — Java's body is meaningful but
+            //     the Rust translation's dyn-trait `poll` returns
+            //     empty (commit work is driven via
+            //     `ApplicationEventProcessor` event arms which call
+            //     `poll_with_coordinator` directly). Skipped here.
+            //   * `membership.reconcile(now, false)` — driven in
+            //     Phase 2.5 below.
+            let (coord_handle, mut entries_results) = {
+                let mut rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                let coord = rm_guard.coordinator_handle();
+                let entries: Vec<super::network_client_delegate::PollResult> =
+                    rm_guard.entries().into_iter().map(|rm| rm.poll(current_time_ms)).collect();
+                (coord, entries)
             };
-            let boundary = rm_guard.membership_boundary();
-            let mut all: Vec<super::network_client_delegate::PollResult> =
-                rm_guard.entries().into_iter().map(|rm| rm.poll(current_time_ms)).collect();
-            // `split_off(boundary)` gives `[boundary..]` as the tail
-            // (after-membership entries: offsets, topic_metadata,
-            // fetch, dyn_managers). The leading `[..boundary]` slice
-            // stays in `all` (before-membership entries: coordinator,
-            // commit, consumer_heartbeat). If `boundary` ≥ `all.len()`,
-            // `split_off` returns an empty Vec — handled below by
-            // skipping the "after" loop.
-            let safe_boundary = boundary.min(all.len());
-            let tail = all.split_off(safe_boundary);
-            (all, tail)
+            // `entries()` ordering with the three Arc-shared slots
+            // skipped is `heartbeat → offsets → topic_metadata → fetch
+            // → dyn`. `membership_boundary()` returns the heartbeat
+            // count (0 or 1); `split_off(boundary)` keeps the
+            // heartbeat (if any) in the leading slice and moves
+            // offsets/topic_metadata/fetch/dyn to the tail.
+            let boundary = {
+                let rm_guard = match self.request_managers.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                rm_guard.membership_boundary()
+            };
+            let safe_boundary = boundary.min(entries_results.len());
+            let tail = entries_results.split_off(safe_boundary);
+            let mut before: Vec<super::network_client_delegate::PollResult> = Vec::new();
+            // Java order: coordinator → commit (skipped per above) →
+            // heartbeat. Coordinator goes first.
+            if let Some(coord_arc) = coord_handle {
+                let mut g = match coord_arc.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                before.push(g.poll(current_time_ms));
+            }
+            before.extend(entries_results); // heartbeat (if any)
+            (before, tail)
         };
         {
             let mut delegate_guard = self.network_client_delegate.lock().await;
