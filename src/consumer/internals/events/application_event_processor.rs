@@ -968,8 +968,8 @@ impl ApplicationEventProcessor {
     ) {
         let deadline_ms = handle.deadline_ms();
         let md_rx = {
-            let mut rm_guard = self.lock_request_managers();
-            let Some(tm_mgr) = rm_guard.topic_metadata.as_mut() else {
+            let rm_guard = self.lock_request_managers();
+            let Some(tm_mgr) = rm_guard.topic_metadata.as_ref() else {
                 drop(rm_guard);
                 handle.complete_exceptionally(KafkaError::illegal_state(
                     "TopicMetadataRequestManager not available when processing a TopicMetadata event",
@@ -1002,8 +1002,8 @@ impl ApplicationEventProcessor {
     ) {
         let deadline_ms = handle.deadline_ms();
         let md_rx = {
-            let mut rm_guard = self.lock_request_managers();
-            let Some(tm_mgr) = rm_guard.topic_metadata.as_mut() else {
+            let rm_guard = self.lock_request_managers();
+            let Some(tm_mgr) = rm_guard.topic_metadata.as_ref() else {
                 drop(rm_guard);
                 handle.complete_exceptionally(KafkaError::illegal_state(
                     "TopicMetadataRequestManager not available when processing an AllTopicsMetadata event",
