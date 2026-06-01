@@ -387,22 +387,28 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             //     requests (the only RM whose `poll` does real work
             //     when present); acquired via the `Arc<Mutex<...>>`
             //     handle.
-            //   * `commit.poll(now)` — Java's body is meaningful but
-            //     the Rust translation's dyn-trait `poll` returns
-            //     empty (commit work is driven via
-            //     `ApplicationEventProcessor` event arms which call
-            //     `poll_with_coordinator` directly). Skipped here.
+            //   * `commit.poll_with_coordinator(coord, now)` — Java's
+            //     `CommitRequestManager.poll(currentTimeMs)`
+            //     (`CommitRequestManager.java:181-209`). Drains
+            //     `unsent_offset_commits` and `unsent_offset_fetches`
+            //     into `UnsentRequest`s, fires the auto-commit timer
+            //     via `maybe_auto_commit_async`, and handles
+            //     `closing && coordinator unknown` by failing pending
+            //     commits with `CommitFailedException`. Without this
+            //     call `commit_sync()`/`committed()` hang forever
+            //     (Phase-12 Critic Issue 1).
             //   * `membership.reconcile(now, false)` — driven in
             //     Phase 2.5 below.
-            let (coord_handle, mut entries_results) = {
+            let (coord_handle, commit_handle, mut entries_results) = {
                 let mut rm_guard = match self.request_managers.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
                 };
                 let coord = rm_guard.coordinator_handle();
+                let commit = rm_guard.commit_handle();
                 let entries: Vec<super::network_client_delegate::PollResult> =
                     rm_guard.entries().into_iter().map(|rm| rm.poll(current_time_ms)).collect();
-                (coord, entries)
+                (coord, commit, entries)
             };
             // `entries()` ordering with the three Arc-shared slots
             // skipped is `heartbeat → offsets → topic_metadata → fetch
@@ -420,14 +426,31 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             let safe_boundary = boundary.min(entries_results.len());
             let tail = entries_results.split_off(safe_boundary);
             let mut before: Vec<super::network_client_delegate::PollResult> = Vec::new();
-            // Java order: coordinator → commit (skipped per above) →
-            // heartbeat. Coordinator goes first.
-            if let Some(coord_arc) = coord_handle {
+            // Java order: coordinator → commit → heartbeat. Coordinator
+            // goes first; its `poll` may discover the coordinator node,
+            // which `commit.poll_with_coordinator` then consumes.
+            if let Some(coord_arc) = coord_handle.as_ref() {
                 let mut g = match coord_arc.lock() {
                     Ok(g) => g,
                     Err(p) => p.into_inner(),
                 };
                 before.push(g.poll(current_time_ms));
+            }
+            // Java: `CommitRequestManager.poll(currentTimeMs)`
+            // (`CommitRequestManager.java:181-209`). Must run between
+            // coordinator and heartbeat so unsent commits/fetches are
+            // shipped on every iteration. The coordinator guard is
+            // re-acquired briefly (the previous `before.push(g.poll(...))`
+            // block drops it before this point) so we can pass
+            // `&mut CoordinatorRequestManager` to `poll_with_coordinator`.
+            // `&self` is acceptable because `CommitRequestManager` uses
+            // interior mutability (`Arc<CommitRequestManagerInner>`).
+            if let (Some(coord_arc), Some(commit_arc)) = (coord_handle.as_ref(), commit_handle.as_ref()) {
+                let mut coord_g = match coord_arc.lock() {
+                    Ok(g) => g,
+                    Err(p) => p.into_inner(),
+                };
+                before.push(commit_arc.poll_with_coordinator(&mut coord_g, current_time_ms));
             }
             before.extend(entries_results); // heartbeat (if any)
             (before, tail)
@@ -710,7 +733,25 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         let close_deadline_ms = self.time.milliseconds().saturating_add(close_timeout_ms);
 
         // ──── 1. pollOnClose round ────
+        //
+        // Java's `cleanup` iterates `requestManagers.entries()` and calls
+        // `pollOnClose` on each. The Rust `entries()` skips coordinator
+        // and commit (Arc-shared); the bg-task drives them explicitly:
+        //   * coordinator has no close-side work (Java's
+        //     `CoordinatorRequestManager.pollOnClose` returns EMPTY).
+        //   * commit drains pending offset-commit requests via
+        //     `drain_pending_offset_commit_requests()` — mirrors Java
+        //     `CommitRequestManager.pollOnClose` which calls
+        //     `drainPendingOffsetCommitRequests()` (Java
+        //     `CommitRequestManager.java:215`).
         let current_time_ms = self.time.milliseconds();
+        let commit_on_close = {
+            let rm_guard = match self.request_managers.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            rm_guard.commit_handle()
+        };
         {
             let mut rm_guard = match self.request_managers.lock() {
                 Ok(g) => g,
@@ -722,6 +763,12 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                 .expect("delegate not contended on bg task");
             for rm in rm_guard.entries() {
                 let result = rm.poll_on_close(current_time_ms);
+                let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
+            }
+            // Commit's close-side drain (Java
+            // `CommitRequestManager.pollOnClose` → `drainPendingOffsetCommitRequests`).
+            if let Some(commit_arc) = commit_on_close.as_ref() {
+                let result = commit_arc.drain_pending_offset_commit_requests();
                 let _ = delegate_guard.add_all_from_poll_result(result, current_time_ms);
             }
         }
@@ -1826,5 +1873,107 @@ mod tests {
         thread.process_application_events();
         let r = reaper.lock().unwrap();
         assert!(r.contains(&erased_external), "LeaveGroupOnClose must be tracked");
+    }
+
+    /// Phase-12 Issue 1 regression: `run_once` drives
+    /// `CommitRequestManager::poll_with_coordinator`, draining
+    /// `unsent_offset_commits` into the delegate's unsent queue.
+    ///
+    /// Mirrors Java's `CommitRequestManager.poll(currentTimeMs)` being
+    /// called from `runOnce` via `requestManagers.entries()`. Without
+    /// this wiring, `commit_sync()` / `committed()` / auto-commit return
+    /// `oneshot::Receiver`s that never resolve — the test would hang
+    /// (the assertion below would fail with a 0-length unsent queue).
+    #[tokio::test]
+    async fn run_once_drives_commit_poll_with_coordinator() {
+        use std::collections::HashMap;
+
+        use crate::common::Node;
+        use crate::common::TopicPartition;
+        use crate::consumer::OffsetAndMetadata;
+        use crate::consumer::internals::commit_request_manager::CommitRequestManager;
+        use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
+
+        let mut config = make_config();
+        config.group_id = Some("g".to_string());
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+
+        // Build a coordinator with a known coordinator node so
+        // `poll_with_coordinator` proceeds past the `coordinator unknown`
+        // early-return.
+        let mut coord = CoordinatorRequestManager::new(100, 1_000, "g".to_string());
+        coord.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
+        let coordinator = Arc::new(Mutex::new(coord));
+
+        // Build a real commit manager (no auto-commit; this test
+        // exercises the explicit `commit_sync` path).
+        let commit = Arc::new(CommitRequestManager::new(
+            &config,
+            metadata.clone(),
+            subs.clone(),
+            "g".to_string(),
+            None,
+            0,
+        ));
+
+        // Enqueue a commit request — Java's `commitSync` path that lands
+        // on `CommitRequestManager.unsentOffsetCommits`.
+        let tp = TopicPartition::new("t".to_string(), 0);
+        let mut offsets: HashMap<TopicPartition, OffsetAndMetadata> = HashMap::new();
+        offsets.insert(tp.clone(), OffsetAndMetadata::new(42).expect("offset is non-negative"));
+        let _commit_rx = commit.commit_sync(offsets, i64::MAX, 0);
+
+        // Pre-condition: the delegate's unsent queue is empty.
+        let request_managers = Arc::new(Mutex::new(RequestManagers::new(
+            Some(coordinator.clone()),
+            None,
+            Some(commit.clone()),
+            None,
+            None,
+            Some(make_offsets_manager(&config, subs.clone(), metadata.clone())),
+            None,
+        )));
+        let delegate = Arc::new(AsyncMutex::new(make_delegate(&config, metadata.clone())));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let mut thread = ConsumerNetworkThread::new(
+            time as Arc<dyn ThreadTime>,
+            rx,
+            reaper,
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+        );
+
+        // Drive one iteration. `run_once` must call
+        // `commit.poll_with_coordinator(coord, now)` between coordinator
+        // and heartbeat (Java order), draining the unsent commit into
+        // the delegate.
+        thread.run_once().await;
+
+        // Verify the delegate's unsent queue picked up the commit. Java
+        // `runOnce`'s `requestManagers.entries()` walks would have
+        // `addAll(pollResult)`-ed the commit-built `UnsentRequest` here.
+        let delegate_guard = delegate.lock().await;
+        let unsent_count = delegate_guard.unsent_requests().len() as i64;
+        let inflight_count = delegate_guard.inflight_request_count() as i64;
+        // The request may be inflight already (if the network client's
+        // `ready(node)` returned true) or still in `unsent_requests` —
+        // either way the count of (unsent + inflight) must be ≥ 1, proving
+        // `poll_with_coordinator` was actually called from `run_once`.
+        assert!(
+            unsent_count + inflight_count >= 1,
+            "expected the commit to land on the delegate (unsent={} inflight={})",
+            unsent_count,
+            inflight_count
+        );
     }
 }

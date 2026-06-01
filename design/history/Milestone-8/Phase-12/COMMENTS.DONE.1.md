@@ -59,3 +59,48 @@ Fixup commit references `143f30a`.
 Structurally subsumed by Issue 2's fix (option (a) — consolidate via components). The `let _ = (group_metadata, group_assignment_snapshot);` line and the "intentionally dropped" comment have been removed; the Arcs are now part of the `AsyncKafkaConsumerComponents` flow and reach both the membership listener registration site AND the consumer struct's `group_metadata` field. No separate fixup is required — the same commit that closes Issue 2 closes this.
 
 Fixup commit references `143f30a`.
+
+---
+
+## Issue 1: `CommitRequestManager` is never polled in production — pending commit/offset-fetch requests will sit forever in `unsent_offset_commits` / `unsent_offset_fetches`
+
+**Commit**: `143f30a` (Phase 12 commit 2/N)
+**File**: `src/consumer/internals/consumer_network_thread.rs` (bg-task skips commit), `src/consumer/internals/commit_request_manager.rs` (dyn-trait `poll` returns empty)
+**Severity**: **blocking**
+**Java reference**: `kafka/clients/src/main/java/org/apache/kafka/clients/consumer/internals/CommitRequestManager.java:181-209` (`poll(currentTimeMs)`); `kafka/.../RequestManagers.java:91-101` (entries includes commit)
+
+### Description
+
+The slot-sharing refactor changed `RequestManagers.commit` to `Option<Arc<CommitRequestManager>>` and SKIPPED it from `entries()`. The bg-task's `run_once` polled `coordinator` explicitly but never `commit` — `commit_sync().await`, `committed().await`, async-commit, and auto-commit all hung in production because `unsent_offset_commits` / `unsent_offset_fetches` were never drained into `UnsentRequest`s for the network client delegate.
+
+### Resolution
+
+Two changes:
+
+1. **Method signature**: `CommitRequestManager::poll_with_coordinator` now takes `&self` (was `&mut self`) — all mutation flows through interior mutability on `Arc<CommitRequestManagerInner>`. This lets the bg-task call into the method through the shared `Arc<CommitRequestManager>` handle returned by `RequestManagers::commit_handle()` without needing exclusive ownership.
+
+2. **Bg-task wire-up**: `ConsumerNetworkThread::run_once` now invokes `commit.poll_with_coordinator(coord, now)` between the coordinator poll and the heartbeat poll — mirroring Java's `requestManagers.entries()` walk order
+(`coordinator → commit → heartbeat`). The returned `PollResult` is folded into the `try_connect` + `add_all_from_poll_result` machinery alongside the other before-membership entries. `cleanup()` also drives `commit.drain_pending_offset_commit_requests()` (Java `CommitRequestManager.pollOnClose`) so close-path commits are shipped.
+
+Regression test `run_once_drives_commit_poll_with_coordinator` enqueues a commit via `manager.commit_sync(...)`, drives one `thread.run_once().await`, and asserts the delegate's `unsent + inflight` count is ≥ 1 — proves the wire-up.
+
+Fixup commit references `143f30a`.
+
+---
+
+## Issue 4: `FetchRequestManager::is_unavailable` / `maybe_throw_auth_failure` no-ops swallow auth errors silently — observable behavior gap from Java
+
+**Commit**: `143f30a` (Phase 12 commit 2/N)
+**File**: `src/consumer/async_kafka_consumer.rs` (closure construction in fetch wire-up)
+**Severity**: nit (in Phase 12 PLAINTEXT-only scope) → upgrade to **blocking** for any phase that wires SSL/SASL
+
+### Resolution
+
+Applied option (b) per the issue's resolution guidance: closures kept as no-ops with an updated inline comment that:
+- Explicitly characterizes the `maybe_throw_auth_failure` no-op as a **correctness gap** (not just a "one extra round-trip" performance hit, as the original Phase-12 commit message had framed it).
+- Adds a `FIXME(phase-9-sasl)` marker calling for delegate-backed snapshots of node-availability + auth-failure maps before SSL/SASL wiring lands.
+- References the Java contract (`AbstractFetch.java:452-457`) and Phase 9's SASL milestone.
+
+Phase 12 is PLAINTEXT-only and does not exercise this path; the deferral is documented in code per the Critic's preferred option.
+
+Fixup commit references `143f30a`.

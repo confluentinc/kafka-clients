@@ -1082,9 +1082,17 @@ impl CommitRequestManager {
     /// and the `PollResult`. The caller passes a mutable `&mut` to the
     /// coordinator request manager so failures can be propagated.
     ///
+    /// Takes `&self` despite mutating internal state — all mutation goes
+    /// through interior mutability (`Arc<CommitRequestManagerInner>` whose
+    /// `state` / `closing` fields are `Mutex`-guarded). This lets the
+    /// bg-task call into `poll_with_coordinator` through the shared
+    /// `Arc<CommitRequestManager>` handle (`RequestManagers::commit_handle`)
+    /// without needing exclusive ownership — matching the Java pattern
+    /// where `requestManagers.entries()` iterates immutable references.
+    ///
     /// Mirrors Java's `poll(long currentTimeMs)`.
     pub(crate) fn poll_with_coordinator(
-        &mut self,
+        &self,
         coordinator: &mut CoordinatorRequestManager,
         current_time_ms: i64,
     ) -> PollResult {
@@ -2250,7 +2258,6 @@ mod tests {
         }
         // Advance past the auto-commit interval (1000ms — configured in
         // `test_config`) and call the hook.
-        let mut manager = manager;
         let after_expiry_ms = 2_000;
         manager.update_timer_and_maybe_commit(after_expiry_ms);
         // (a) Timer reset to a fresh interval.
@@ -2379,7 +2386,6 @@ mod tests {
         // Drive `poll_with_coordinator` to ship the request.
         let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let mut manager = manager;
         let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
         assert_eq!(poll_result.unsent_requests.len(), 1);
 
@@ -2430,7 +2436,7 @@ mod tests {
         use crate::common::Node;
         use crate::consumer::internals::coordinator_request_manager::CoordinatorRequestManager;
 
-        let mut manager = make_manager(0, false);
+        let manager = make_manager(0, false);
         // Short deadline so a small number of retriable failures trips
         // it. The retry driver advances its local `current_time_ms` by
         // `retry_backoff_ms` per retriable error; once that local clock
@@ -2614,7 +2620,6 @@ mod tests {
         // entry to the network client, exposing its completion handler.
         let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let mut manager = manager;
         let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
         assert_eq!(
             poll_result.unsent_requests.len(),
@@ -2714,7 +2719,6 @@ mod tests {
 
         let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let mut manager = manager;
         let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
         assert_eq!(poll_result.unsent_requests.len(), 1);
         let mut unsent_requests = poll_result.unsent_requests;
@@ -2774,7 +2778,6 @@ mod tests {
 
         let mut coordinator = CoordinatorRequestManager::new(100, 1_000, GROUP_ID);
         coordinator.set_coordinator_for_test(Node::new(0, "localhost".to_string(), 9092));
-        let mut manager = manager;
         let poll_result = manager.poll_with_coordinator(&mut coordinator, 1);
         assert_eq!(poll_result.unsent_requests.len(), 1);
         let mut unsent_requests = poll_result.unsent_requests;

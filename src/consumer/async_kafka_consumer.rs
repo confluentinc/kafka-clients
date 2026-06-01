@@ -739,6 +739,17 @@ where
         // chain is constructed once and cloned/wrapped here; the
         // commit-callback invoker owns its own ConsumerInterceptors
         // instance for `on_commit` dispatch (per Phase-9 design).
+        //
+        // TODO(milestone-N-interceptors): share the consumer's
+        // `_interceptors` Arc here when reflection-based interceptor
+        // loading lands. Java line 446 passes the SAME `interceptors`
+        // reference to both the consumer and the invoker; the Rust
+        // translation currently constructs a fresh empty
+        // `ConsumerInterceptors` for the invoker. Behaviorally
+        // identical today (both end up with empty Vecs in this
+        // milestone), but would diverge once interceptor loading is
+        // wired — the invoker would dispatch through its empty list
+        // while the consumer's interceptors held the loaded list.
         let _offset_commit_callback_invoker: Arc<OffsetCommitCallbackInvoker<K, V>> =
             Arc::new(OffsetCommitCallbackInvoker::new(ConsumerInterceptors::<K, V>::new(Vec::new())));
 
@@ -877,15 +888,38 @@ where
             // crossing into a sync `Fn` boundary. Synchronously
             // acquiring an async mutex inside a sync `Fn` is not
             // possible without blocking. Phase 12 ships with no-op
-            // closures (always-available, never-auth-fail); the
-            // production bridge lands as a Phase-12 follow-up that
-            // exposes a sync snapshot of the delegate's
-            // node-availability map. The behavior gap is: the fetch
-            // manager treats every node as available, so it may
-            // schedule fetches to nodes that the delegate has
-            // disconnected. The delegate filters those at send-time, so
-            // the practical impact is one extra round-trip per
-            // disconnected-node fetch attempt — not a correctness bug.
+            // closures (always-available, never-auth-fail).
+            //
+            // Behavior gap (Critic Issue 4):
+            //   * `is_unavailable` no-op: the fetch manager treats
+            //     every node as available, so it may schedule fetches
+            //     to nodes the delegate has disconnected. The delegate
+            //     filters those at send-time, so the practical impact
+            //     is one extra round-trip per disconnected-node fetch
+            //     attempt — not a correctness bug.
+            //   * `maybe_throw_auth_failure` no-op IS a correctness
+            //     gap. Java's `AbstractFetch.java:452-457` calls
+            //     `isUnavailable(node)` THEN `maybeThrowAuthFailure(node)`
+            //     to surface cached auth errors observable on the
+            //     consumer side BEFORE the broker connection has been
+            //     established. With the no-op `|_| Ok(())`, an auth
+            //     error stays invisible until the broker actually RSTs
+            //     the next reconnect attempt, then surfaces via the
+            //     background event queue with delayed semantics.
+            //
+            // Phase 12 is PLAINTEXT-only (PLAN.md §"Out of scope"); the
+            // auth path is not exercised here. The closures MUST be
+            // replaced with delegate-backed snapshots before any
+            // SSL/SASL wiring lands.
+            //
+            // FIXME(phase-9-sasl): wire a sync snapshot of the
+            // delegate's node-availability + auth-failure maps. The
+            // delegate writes on `add_all_from_poll_result` /
+            // `handle_disconnections`; the closures read. Without this,
+            // an `AbstractFetch.maybeThrowAuthFailure`-equivalent path
+            // cannot surface `SASL_AUTHENTICATION_FAILED` from the
+            // delegate's cached state — auth errors will only appear
+            // after a subsequent broker round-trip.
             let is_unavailable: crate::consumer::internals::fetch_request_manager::IsUnavailableFn =
                 Arc::new(|_n: &Node| false);
             let maybe_auth: crate::consumer::internals::fetch_request_manager::MaybeAuthFailureFn =
