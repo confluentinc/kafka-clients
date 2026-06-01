@@ -417,6 +417,41 @@ impl ConsumerStateNotifier {
         );
         *guard = Some(next);
     }
+
+    /// Java: `private void resetGroupMetadata()`
+    /// (`AsyncKafkaConsumer.java:1857-1865`).
+    ///
+    /// Resets the cached [`ConsumerGroupMetadata`] to the
+    /// `UNKNOWN_GENERATION_ID` / `UNKNOWN_MEMBER_ID` defaults,
+    /// preserving the original `groupId` and `groupInstanceId`. Called
+    /// by [`AsyncKafkaConsumer::unsubscribe`] after the unsubscribe
+    /// event completes, matching Java's
+    /// `processBackgroundEvents(...)` → `resetGroupMetadata()` sequence
+    /// at line 1843-1848.
+    ///
+    /// Mirrors Java's `updateAndGet` over the Optional: if the slot is
+    /// `None` (assignment-only consumer never populated the cache), the
+    /// slot stays `None` — Java's `oldGroupMetadataOptional.map(...)`
+    /// short-circuits on empty.
+    pub(crate) fn reset_group_metadata(&self) {
+        let mut guard = self.group_metadata.lock().unwrap();
+        if let Some(old) = guard.as_ref() {
+            // Mirror Java's `initializeConsumerGroupMetadata(oldGroupId, oldGroupInstanceId)`:
+            // build fresh metadata with UNKNOWN epoch + member, preserving
+            // the old group_id + group_instance_id.
+            #[allow(deprecated)]
+            let next = ConsumerGroupMetadata::with_details(
+                old.group_id().to_string(),
+                -1, // JoinGroupRequest.UNKNOWN_GENERATION_ID
+                "", // JoinGroupRequest.UNKNOWN_MEMBER_ID
+                old.group_instance_id().map(str::to_string),
+            );
+            *guard = Some(next);
+        }
+        // Java's `oldGroupMetadataOptional.map(...)` short-circuits when
+        // the slot is empty (assignment-only consumer never populated the
+        // cache); we mirror that by leaving the slot as None.
+    }
 }
 
 impl MemberStateListener for ConsumerStateNotifier {
@@ -1009,6 +1044,16 @@ where
 
         // Reset the listener field — the previous subscription is gone.
         *self.rebalance_listener.lock().unwrap() = None;
+
+        // Java: `resetGroupMetadata()` at `AsyncKafkaConsumer.java:1848`,
+        // called UNCONDITIONALLY after `processBackgroundEvents(...)` —
+        // both on the success path and on `TimeoutException`. Mirror
+        // Java's placement: clear the cached generation_id / member_id
+        // before returning, preserving the old group_id +
+        // group_instance_id (the slot stays Some(...) so subsequent
+        // group_metadata() observations match Java's "post-unsubscribe"
+        // contract; see Issue 21).
+        self.state_notifier.reset_group_metadata();
 
         match result {
             Ok(()) => Ok(()),
@@ -3714,13 +3759,12 @@ mod tests {
     //     observed via the `KafkaError` returned from `new_consumer` on
     //     bad config).
     //   - testGroupMetadataIsResetAfterUnsubscribe (Java line 1350-1374)
-    //     — depends on the bg-task `MemberStateListener` resetting the
-    //     cache after `UnsubscribeEvent` completes. The Rust analog
-    //     fires via `state_notifier.on_member_epoch_updated(None, ...)`
-    //     but it's invoked by the bg-task that has not been wired in
-    //     these unit tests (the test stand-in consumer's
-    //     `network_thread_close` JoinHandle is a noop spawn). Covered by
-    //     state-notifier tests above + integration tests in Phase 12.
+    //     — translated below as
+    //     `group_metadata_is_reset_after_unsubscribe`. Per Issue 21
+    //     fixup, `unsubscribe()` now calls
+    //     `state_notifier.reset_group_metadata()` after the unsubscribe
+    //     event completes, mirroring Java line 1848's
+    //     `resetGroupMetadata()`.
     //   - testSubscribeToNullTopicCollection, testSubscriptionOnNullTopic,
     //     testAssignOnNullTopicPartition, testAssignOnNullTopicInPartition
     //     — Rust's type system makes `null` cases unrepresentable.
@@ -3851,6 +3895,43 @@ mod tests {
         assert_eq!(new.member_id(), "memberId");
         assert_eq!(new.generation_id(), 42);
         assert_eq!(new.group_instance_id(), old.group_instance_id());
+    }
+
+    /// Java: `testGroupMetadataIsResetAfterUnsubscribe` (Java line
+    /// 1350-1374). After `unsubscribe()` returns, the cached
+    /// `group_metadata()` carries the original `group_id` +
+    /// `group_instance_id` but the `generation_id` /
+    /// `member_id` slots are reset to
+    /// `JoinGroupRequest.UNKNOWN_GENERATION_ID` (-1) /
+    /// `JoinGroupRequest.UNKNOWN_MEMBER_ID` ("").
+    ///
+    /// Mirrors Java line 1848's `resetGroupMetadata()` call from
+    /// `unsubscribe()`; Issue 21 fixup.
+    #[tokio::test]
+    async fn group_metadata_is_reset_after_unsubscribe() {
+        let (mut consumer, handles) = make_test_consumer_with_channels();
+        // Pre-condition: populate `group_metadata` cache as if a heartbeat
+        // landed (Java has the bg-task `MemberStateListener` populate it
+        // during the lifecycle; we simulate the same here).
+        let notifier = consumer.state_notifier();
+        notifier.on_member_epoch_updated(Some(42), "memberId");
+        let pre = consumer.group_metadata();
+        assert_eq!(pre.generation_id(), 42, "pre-condition: cache populated");
+        assert_eq!(pre.member_id(), "memberId");
+        assert_eq!(pre.group_id(), "test-group");
+
+        // Drive unsubscribe to completion.
+        let completer = auto_complete_next_event(handles.app_event_rx);
+        consumer.unsubscribe().await.expect("ok");
+        let _ = completer.await.expect("task ok").expect("event received");
+
+        // Post-condition: group_metadata is reset — generation_id back to
+        // -1, member_id back to "", but group_id preserved.
+        let post = consumer.group_metadata();
+        assert_eq!(post.generation_id(), -1, "generation_id reset to UNKNOWN");
+        assert_eq!(post.member_id(), "", "member_id reset to UNKNOWN");
+        assert_eq!(post.group_id(), "test-group", "group_id preserved");
+        assert_eq!(post.group_instance_id(), None, "group_instance_id preserved");
     }
 
     /// Java: `testSubscribeGeneratesEvent` (Java line 1191-1200) —

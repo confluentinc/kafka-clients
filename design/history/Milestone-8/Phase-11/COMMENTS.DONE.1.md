@@ -384,3 +384,36 @@ Each section records the original Critic finding + the resolving commit.
     `assertTrue(consumer.assignment().contains(tp))` by driving the
     test handle through `assign_from_user` on the shared
     `SubscriptionState`.
+
+
+---
+
+# Phase 11 Batch 3 — Resolved Critic Comments (N=1)
+
+---
+
+## Issue 21: `unsubscribe()` does not translate Java's `resetGroupMetadata()` — RESOLVED
+
+- **Original commit**: `0d88bb9` Phase 11 (3/N) (`unsubscribe` body).
+- **Resolving commit**: fixup of Phase 11 (3/N) — adds
+  `ConsumerStateNotifier::reset_group_metadata()` (mirrors Java
+  `AsyncKafkaConsumer.java:1857-1865`) and wires it into `unsubscribe()`
+  immediately after the `process_background_events_until` drain returns,
+  matching Java's placement at line 1848 (unconditional, fires on both
+  the success path and the `TimeoutException` log-and-return path).
+- **Resolution**: `reset_group_metadata()` writes a fresh
+  `ConsumerGroupMetadata` with `UNKNOWN_GENERATION_ID` (-1) /
+  `UNKNOWN_MEMBER_ID` ("") into the cache, preserving the old
+  `group_id` and `group_instance_id`. Mirrors Java's
+  `initializeConsumerGroupMetadata(oldGroupId, oldGroupInstanceId)`
+  semantics. Java's `oldGroupMetadataOptional.map(...)`
+  short-circuit on empty is preserved — assignment-only consumers
+  never populate the cache and the slot stays `None`.
+- **Verification**: `group_metadata_is_reset_after_unsubscribe` —
+  populates the cache via `state_notifier.on_member_epoch_updated`,
+  asserts the pre-condition (`generation_id=42`, `member_id="memberId"`),
+  drives `unsubscribe()` to completion, and asserts the post-condition
+  (`generation_id=-1`, `member_id=""`, `group_id` preserved). The
+  skip rationale for `testGroupMetadataIsResetAfterUnsubscribe` is
+  updated to point at the new test.
+
