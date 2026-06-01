@@ -309,6 +309,18 @@ impl CoordinatorRequestManager {
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_millis() as i64)
                 .unwrap_or(0);
+            // Java: `CoordinatorRequestManager.java:124` —
+            // `getAndClearFatalError()` runs UNCONDITIONALLY at the top
+            // of the `whenComplete` lambda, before branching on success
+            // vs. failure. Mirror that here: clear the fatal error
+            // first, then dispatch on the response variant. Without
+            // this, a stale `GroupAuthorizationFailed` from a prior
+            // attempt would survive a subsequent transport-level
+            // failure that Java would have wiped clean (and would then
+            // be re-surfaced to the user by
+            // `AbstractHeartbeatRequestManager::maybe_propagate_coordinator_fatal_error_event`
+            // on the next heartbeat poll).
+            inner_for_handler.fatal_error.lock().expect("fatal_error poisoned").take();
             match response_rx.await {
                 Ok(Ok(mut client_response)) => match client_response.take_response_body() {
                     Some(ConcreteResponse::FindCoordinator(resp)) => {
@@ -832,5 +844,48 @@ mod tests {
         // Coordinator stays unknown (it was never set), and the
         // mark-coordinator-unknown anchor is recorded by the forwarder.
         assert!(manager.coordinator().is_none());
+    }
+
+    /// Phase 12.5 regression — fatal-error clearing on the failure
+    /// path. Java's `CoordinatorRequestManager.java:124`
+    /// (`getAndClearFatalError()`) runs UNCONDITIONALLY at the top of
+    /// the `whenComplete` lambda, before branching on success vs.
+    /// failure. A stale `GroupAuthorizationFailed` from a prior
+    /// attempt must NOT survive a subsequent transport-level failure.
+    /// Without the fix, the forwarder's `Ok(Err(_))` / `Err(_recv)`
+    /// arms left `fatal_error` populated, and
+    /// `AbstractHeartbeatRequestManager::maybe_propagate_coordinator_fatal_error_event`
+    /// would re-surface a stale auth error to the user after a
+    /// transient network blip.
+    #[tokio::test]
+    async fn test_response_routing_failure_path_clears_fatal_error() {
+        let mut manager = setup_manager();
+        // Step 1: seed a fatal error via a prior GROUP_AUTHORIZATION_FAILED.
+        expect_find_coordinator_request(&mut manager, Errors::GroupAuthorizationFailed, 0);
+        assert!(
+            manager.fatal_error().is_some(),
+            "test precondition: a fatal error should be seeded before the transport failure"
+        );
+
+        // Step 2: drive a new request and fire a transport-layer
+        // (retriable) NetworkException through the handler. Java's
+        // `whenComplete` clears the fatal first, then dispatches to
+        // `onFailedResponse`. Because `NetworkException` is retriable,
+        // `onFailedResponse` returns early and does NOT re-seed a
+        // fatal; the net observable effect is `fatal_error.is_none()`.
+        let result = manager.poll(RETRY_BACKOFF_MS);
+        assert_eq!(1, result.unsent_requests.len());
+        let unsent = result.unsent_requests.into_iter().next().unwrap();
+        unsent
+            .handler()
+            .on_failure(RETRY_BACKOFF_MS, KafkaError::new(Errors::NetworkException));
+
+        // Wait deterministically for the forwarder to run; the
+        // fatal-error clear is the side effect we observe.
+        wait_until(|| manager.fatal_error().is_none()).await;
+        assert!(
+            manager.fatal_error().is_none(),
+            "fatal error must be cleared at the top of the forwarder, before the failure arm runs"
+        );
     }
 }
