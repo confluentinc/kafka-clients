@@ -263,6 +263,16 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         self.running.load(Ordering::Acquire)
     }
 
+    /// Returns a clone of the `Arc<AtomicBool>` running flag — used by
+    /// the Phase-12 production ctor to build the
+    /// `NetworkThreadCloseHandle.signal_close_fn` closure before
+    /// `self` is moved into `tokio::spawn`. Setting this to `false`
+    /// (in combination with firing the wakeup trigger) is the public
+    /// signal to exit the bg-task loop.
+    pub(crate) fn running_handle(&self) -> Arc<AtomicBool> {
+        Arc::clone(&self.running)
+    }
+
     /// Java: `maximumTimeToWait()` — read-only accessor exposed to the
     /// app side.
     pub(crate) fn maximum_time_to_wait(&self) -> i64 {

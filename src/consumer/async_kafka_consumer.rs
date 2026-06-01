@@ -924,18 +924,170 @@ where
             let _ = (group_metadata, group_assignment_snapshot);
         }
 
-        // Suppress unused warnings: every binding above is the precursor
-        // for commit (3/N) which threads these into the bg-task spawn +
-        // `new_with_components` hand-off. The `Err(...)` below is the
-        // PLAN-mandated placeholder for commit (2/N).
-        let _ = (&subscriptions, &metadata, &fetch_buffer, &client_id, &request_managers);
+        // ═══════════════════════════════════════════════════════════════
+        // Phase 12 commit (3/N): bg-task spawn + components hand-off.
+        // ═══════════════════════════════════════════════════════════════
+        //
+        // Java lines 466-501 — the remaining `ApplicationEventProcessor`
+        // + `ApplicationEventHandler` + `CompletableEventReaper` +
+        // `ConsumerRebalanceListenerInvoker` + `ConsumerNetworkThread`
+        // build + spawn. Each Java step maps line-for-line to the Rust
+        // block below.
+        use crate::consumer::internals::consumer_network_thread::{
+            ConsumerNetworkThread, SystemThreadTime, ThreadTime,
+        };
+        use crate::consumer::internals::events::application_event_processor::ApplicationEventProcessor;
 
-        Err(KafkaError::unsupported_version(
-            "AsyncKafkaConsumer production constructor wiring lands in Phase 12 \
-             commit (3/N) (bg-task spawn + new_with_components hand-off). \
-             Commit (2/N) only builds the RequestManagers + state-notifier \
-             registration.",
-        ))
+        let time: Arc<dyn ThreadTime> = Arc::new(SystemThreadTime);
+
+        // Java lines 466-470 — `applicationEventProcessor`.
+        let application_event_reaper: Arc<std::sync::Mutex<CompletableEventReaper>> =
+            Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let app_event_processor = ApplicationEventProcessor::new(
+            Arc::clone(&request_managers),
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+            Arc::clone(&application_event_reaper),
+        );
+
+        // Java lines 471-481 — `applicationEventHandler`.
+        let application_event_handler = Arc::new(ApplicationEventHandler::new(_app_event_tx));
+
+        // Java lines 482-487 — `rebalanceListenerInvoker`.
+        let rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
+
+        // Java line 491 — `backgroundEventReaper`. We reuse the same
+        // `CompletableEventReaper` as the application reaper since the
+        // Rust translation has one reaper per consumer (Phase 10 design
+        // pattern #2). Java has two reapers but uses them
+        // interchangeably for the consumer's purposes.
+
+        // Wakeup primitive shared with the bg task.
+        let wakeup_trigger = WakeupTrigger::new();
+
+        // Java lines 494-500 — `fetchCollector`.
+        let fetch_collector_time: Arc<dyn crate::consumer::internals::fetch_collector::FetchCollectorTime> =
+            Arc::new(crate::consumer::internals::fetch_collector::SystemFetchCollectorTime);
+        let fetch_collector = Arc::new(FetchCollector::new(
+            Arc::clone(&metadata),
+            Arc::clone(&subscriptions),
+            fetch_config,
+            Arc::clone(&_deserializers),
+            fetch_collector_time,
+        ));
+
+        // Java line 506 — `config.logUnused()` → `log::debug!(...)`.
+        log::debug!("Kafka consumer initialized");
+
+        // ── Bg-task spawn ──
+        //
+        // Construct `ConsumerNetworkThread` and spawn its run loop.
+        // `signal_close_fn` / `wakeup_fn` are erased through
+        // [`NetworkThreadCloseHandle`] so the outer `AsyncKafkaConsumer`
+        // struct stays non-generic over `K`.
+        let max_time_to_wait_ms: Arc<AtomicI64> = Arc::new(AtomicI64::new(0));
+
+        let network_thread = ConsumerNetworkThread::new(
+            Arc::clone(&time),
+            _app_event_rx,
+            Arc::clone(&application_event_reaper),
+            app_event_processor,
+            Arc::clone(&_network_client_delegate),
+            Arc::clone(&request_managers),
+            membership_opt,
+            wakeup_trigger.clone(),
+        );
+
+        // Capture the running-flag + wakeup handles before moving
+        // `network_thread` into `tokio::spawn`. The erased closures
+        // call these to signal close / wake the bg task without
+        // holding a reference to the concrete `K` type.
+        let signal_close_running = network_thread.running_handle();
+        let signal_close_wakeup = wakeup_trigger.clone();
+        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            signal_close_running.store(false, Ordering::Release);
+            signal_close_wakeup.wakeup();
+        });
+        let wakeup_for_fn = wakeup_trigger.clone();
+        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            wakeup_for_fn.wakeup();
+        });
+
+        // The `max_time_to_wait_ms` slot stays at the initial value
+        // `0` in Phase 12 — no copy-back wiring from the bg task's
+        // internal `cached_max_time_to_wait_ms`. Tests that observe
+        // the value go through the bg task's `maximum_time_to_wait()`
+        // accessor directly via test infra; the app-side
+        // `AsyncKafkaConsumer::maximum_time_to_wait_ms()` accessor
+        // returns 0 until a future commit adds the copy-back.
+
+        let join_handle: JoinHandle<()> = tokio::spawn(async move {
+            let mut thread = network_thread;
+            while thread.is_running() {
+                thread.run_once().await;
+            }
+            thread.cleanup().await;
+        });
+
+        let network_thread_close = NetworkThreadCloseHandle::new(signal_close_fn, wakeup_fn, join_handle);
+
+        // ── Assemble `AsyncKafkaConsumerComponents` and hand off ──
+        //
+        // The Phase-11 test seam stays — the production path builds the
+        // components struct and calls `Self::new_with_components(...)`
+        // which constructs the `ConsumerStateNotifier` internally (a
+        // separate notifier from the one we registered above on the
+        // membership manager; Phase-11 contract).
+        //
+        // Note on the two-notifier design (deliberate Phase 12 split,
+        // see PLAN.md §"State-notifier registration"):
+        //   * The notifier registered on the membership manager earlier
+        //     in this ctor observes heartbeat-response member-epoch
+        //     updates from the bg task and pushes them into ITS OWN
+        //     `group_metadata` Arc — which is dropped at the end of the
+        //     registration block, leaving the membership manager
+        //     holding the only strong reference to the notifier (via
+        //     its listener vec).
+        //   * The notifier reconstructed inside `new_with_components`
+        //     drives the app-side
+        //     `state_notifier()`/`group_metadata()`/
+        //     `group_assignment_snapshot` accessors. Tests register the
+        //     `new_with_components` notifier directly via
+        //     `consumer.state_notifier()` — the production ctor's
+        //     dual-notifier wiring means the production
+        //     `group_metadata()` reads only update when tests OR a
+        //     future single-notifier consolidation drives them.
+        //
+        // A follow-up commit can collapse these into a single notifier
+        // by threading the notifier through `AsyncKafkaConsumerComponents`
+        // and registering it on the membership manager inside
+        // `new_with_components`. Phase-11 PLAN.md `state_notifier`-
+        // related TODO comments call this out for follow-up.
+
+        let components = AsyncKafkaConsumerComponents {
+            config,
+            client_id,
+            group_id,
+            subscriptions,
+            metadata,
+            request_managers,
+            background_event_rx: _bg_event_rx,
+            application_event_handler,
+            completable_event_reaper: application_event_reaper,
+            max_time_to_wait_ms,
+            wakeup_trigger,
+            network_thread_close,
+            fetch_buffer,
+            fetch_collector,
+            rebalance_listener_invoker,
+            offset_commit_callback_invoker: _offset_commit_callback_invoker,
+            deserializers: _deserializers,
+            interceptors: _interceptors,
+            isolation_level: _isolation_level,
+            time,
+        };
+
+        Ok(Self::new_with_components(components))
     }
 
     pub(crate) fn new_with_components(components: AsyncKafkaConsumerComponents<K, V>) -> Self {
