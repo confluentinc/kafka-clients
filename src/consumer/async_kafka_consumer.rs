@@ -2180,7 +2180,7 @@ where
             first_pass = false;
 
             // Stage 3: collect fetched records.
-            let mut records = self.poll_for_fetches();
+            let mut records = self.poll_for_fetches()?;
             if !records.is_empty() {
                 // Java: `sendPrefetches(timer)` — eagerly enqueue the next
                 // batch of fetches so the user's processing overlaps with
@@ -2338,20 +2338,11 @@ where
     ///
     /// In the Rust translation the buffer-drain is a pure CPU operation
     /// (no broker round-trip); the `FetchCollector::collect_fetch` call
-    /// returns immediately. If decoding fails for any reason we surface an
-    /// empty fetch (Java's `Fetch.empty()` fallback) and rely on the bg
-    /// task to repopulate the buffer on the next AsyncPoll iteration.
-    fn poll_for_fetches(&self) -> ConsumerRecords<K, V> {
-        // Java holds a poll-fetch-spin lock that we elide here — the
-        // `FetchBuffer` is internally locked. On error we log + return
-        // empty so the outer `poll()` loop can retry on the next iteration.
-        match self.fetch_collector.collect_fetch(&self.fetch_buffer) {
-            Ok(records) => records,
-            Err(err) => {
-                log::warn!("collect_fetch returned an error: {err}");
-                ConsumerRecords::empty()
-            },
-        }
+    /// returns immediately. Errors (e.g. `OffsetOutOfRange`,
+    /// `TopicAuthorizationFailed`) propagate to the caller — Java raises
+    /// them out of `poll(Duration)` and the Rust contract matches.
+    fn poll_for_fetches(&self) -> Result<ConsumerRecords<K, V>, KafkaError> {
+        self.fetch_collector.collect_fetch(&self.fetch_buffer)
     }
 
     // ── Commit ─────────────────────────────────────────────────────────

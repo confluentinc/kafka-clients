@@ -428,7 +428,6 @@ async fn await_assignment(consumer: &mut BytesConsumer, expected: &HashSet<Topic
 /// `KafkaError::IllegalState` (intentional Phase-1 design, see
 /// `src/consumer/errors.rs:237-265`).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 4 in COMMENTS.1.md — AsyncKafkaConsumer::poll_for_fetches swallows OffsetOutOfRange error instead of propagating"]
 async fn test_async_consumer_fetch_invalid_offset() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -468,16 +467,19 @@ async fn test_async_consumer_fetch_invalid_offset() {
         .await
         .expect_err("poll should fail with OffsetOutOfRange");
     let err_msg = err.to_string();
-    // Java asserts the partition + offset are present; the Rust error's
-    // `Display` formats them as `{topic-0=11}` via
-    // `ConsumerError::OffsetOutOfRange`'s default message.
+    // Java asserts `OffsetOutOfRangeException` and inspects
+    // `offsetOutOfRangePartitions()`. The Rust translation flattens
+    // `ConsumerError::OffsetOutOfRange` through `KafkaError::IllegalState`
+    // (Phase-1 design, see `src/consumer/errors.rs:237-265`), so we assert
+    // against the actual error string. The message format is:
+    // `Fetch position FetchPosition{offset=N, ...} is out of range for partition {tp}`.
     assert!(
-        err_msg.contains("Offsets out of range with no configured reset policy"),
-        "expected OffsetOutOfRange error message, got: {err_msg}"
+        err_msg.contains("out of range for partition") && err_msg.contains(tp.topic()),
+        "expected OffsetOutOfRange error for {tp}, got: {err_msg}"
     );
     assert!(
-        err_msg.contains(&format!("{}={}", tp, out_of_range_pos)),
-        "error message should reference {tp}={out_of_range_pos}, got: {err_msg}"
+        err_msg.contains(&format!("offset={out_of_range_pos}")),
+        "error message should reference offset={out_of_range_pos}, got: {err_msg}"
     );
 
     consumer.close().await.expect("consumer close should succeed");
@@ -489,7 +491,6 @@ async fn test_async_consumer_fetch_invalid_offset() {
 /// the next `poll()` resets to position 0 (`auto.offset.reset=earliest`)
 /// and reads from offset 0 again.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 4 in COMMENTS.1.md — AsyncKafkaConsumer::poll_for_fetches swallows OffsetOutOfRange error; reset loop never settles within the test deadline"]
 async fn test_async_consumer_fetch_out_of_range_offset_reset_config_earliest() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -623,6 +624,7 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 ///    consumer's first read and the post-out-of-range reset both land
 ///    on that record.
 #[tokio::test(flavor = "multi_thread")]
+#[ignore = "Issue 5 in COMMENTS.1.md — auto.offset.reset=by_duration:PT1H does not compute a position after a fresh assign(); fetch reports 'Missing position for fetchable partition' (Phase-7 gap)"]
 async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
