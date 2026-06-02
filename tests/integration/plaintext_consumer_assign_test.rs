@@ -23,30 +23,30 @@
 //!
 //! # Translated methods (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! - Translated (PASSING):
-//!   - `testAsyncAssignAndConsumeSkippingPosition`
-//!     → `test_async_assign_and_consume_skipping_position`
-//! - Translated (`#[ignore]`-gated on production-code gaps documented in
-//!   `design/history/Milestone-8/Phase-13/COMMENTS.1.md`):
-//!   - `testAsyncAssignAndCommitAsyncNotCommitted`
-//!     → `test_async_assign_and_commit_async_not_committed` — Issue 1
-//!     (committed() does not retry NotCoordinator)
-//!   - `testAsyncAssignAndCommitSyncNotCommitted`
-//!     → `test_async_assign_and_commit_sync_not_committed` — Issue 1
-//!   - `testAsyncAssignAndCommitSyncAllConsumed`
-//!     → `test_async_assign_and_commit_sync_all_consumed` — Issue 3
-//!     (commit_sync after successful poll still times out on assign-only flows)
-//!   - `testAsyncAssignAndConsume`
-//!     → `test_async_assign_and_consume` — Issue 4
-//!     (poll() surfaces NotCoordinator as fatal on the OffsetFetch-on-startup path)
-//!   - `testAsyncAssignAndFetchCommittedOffsets`
-//!     → `test_async_assign_and_fetch_committed_offsets` — Issue 1
-//!   - `testAsyncAssignAndConsumeFromCommittedOffsets`
-//!     → `test_async_assign_and_consume_from_committed_offsets` — Issue 2
-//!     (commit_sync_offsets on a fresh consumer never recovers from NotCoordinator)
-//!   - `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes`
-//!     → `test_async_assign_and_retrieving_committed_offsets_multiple_times`
-//!     — Issues 3 + 4
+//! All 8 KIP-848 tests are translated and pass. Phase-13a's pilot
+//! `#[ignore]` markers were closed by Phase-13a's `fetch_offsets_with_retries`
+//! retry loop + coordinator-unknown wiring (see commit fixing Issue 1 in
+//! `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`); that single
+//! fix resolved all four documented production gaps because the retry
+//! driver also feeds the OffsetFetch-on-startup path and the
+//! commit-after-poll path.
+//!
+//! - `testAsyncAssignAndCommitAsyncNotCommitted`
+//!   → `test_async_assign_and_commit_async_not_committed`
+//! - `testAsyncAssignAndCommitSyncNotCommitted`
+//!   → `test_async_assign_and_commit_sync_not_committed`
+//! - `testAsyncAssignAndCommitSyncAllConsumed`
+//!   → `test_async_assign_and_commit_sync_all_consumed`
+//! - `testAsyncAssignAndConsume`
+//!   → `test_async_assign_and_consume`
+//! - `testAsyncAssignAndConsumeSkippingPosition`
+//!   → `test_async_assign_and_consume_skipping_position`
+//! - `testAsyncAssignAndFetchCommittedOffsets`
+//!   → `test_async_assign_and_fetch_committed_offsets`
+//! - `testAsyncAssignAndConsumeFromCommittedOffsets`
+//!   → `test_async_assign_and_consume_from_committed_offsets`
+//! - `testAsyncAssignAndRetrievingCommittedOffsetsMultipleTimes`
+//!   → `test_async_assign_and_retrieving_committed_offsets_multiple_times`
 //!
 //! # SKIPped methods
 //!
@@ -453,9 +453,6 @@ impl OffsetCommitCallback for CountConsumerCommitCallback {
 /// the pending-callback queue via
 /// `OffsetCommitCallbackInvoker::invoke_pending_callbacks`).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gap (Issue 1 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    `committed()` does not retry on NotCoordinator — un-ignore once \
-    fetch_offsets_with_retries in commit_request_manager.rs grows a retry loop"]
 async fn test_async_assign_and_commit_async_not_committed() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -515,9 +512,6 @@ async fn test_async_assign_and_commit_async_not_committed() {
 /// (no offsets argument) commits "all consumed" — which is empty since
 /// `poll()` was never called.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gap (Issue 1 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    `committed()` does not retry on NotCoordinator — un-ignore once \
-    fetch_offsets_with_retries in commit_request_manager.rs grows a retry loop"]
 async fn test_async_assign_and_commit_sync_not_committed() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -558,9 +552,6 @@ async fn test_async_assign_and_commit_sync_not_committed() {
 /// (line 140). Assign + `seek(tp, 0)`, consume all 10,000 records, then
 /// `commit_sync()` — the committed offset should equal `num_records`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gap (Issue 3 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    commit_sync after a successful poll cycle still times out at 60s for assign-only flows — \
-    coordinator-channel liveness audit needed"]
 async fn test_async_assign_and_commit_sync_all_consumed() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -600,10 +591,6 @@ async fn test_async_assign_and_commit_sync_all_consumed() {
 /// consume 10 records via `consumeAndVerifyRecords`, assert
 /// `position(tp) == numRecords`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gap (Issue 4 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    poll() surfaces NotCoordinator as fatal — the OffsetFetch-on-startup path that \
-    resolves the initial position does not retry NotCoordinator. Workaround test \
-    `test_async_assign_and_consume_skipping_position` inserts a `seek` to bypass."]
 async fn test_async_assign_and_consume() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -681,9 +668,6 @@ async fn test_async_assign_and_consume_skipping_position() {
 /// consumer #2 in the same group asserts the same committed offset is
 /// visible.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gap (Issue 1 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    consumer #2's first `committed()` call hits NotCoordinator without retry — \
-    blocks on the fetch_offsets_with_retries gap"]
 async fn test_async_assign_and_fetch_committed_offsets() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -740,10 +724,6 @@ async fn test_async_assign_and_fetch_committed_offsets() {
 /// `commit_sync_offsets(...)`; consumer #2 reads from that offset and
 /// verifies the remaining records.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gap (Issue 2 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    `commit_sync_offsets` immediately after assign on a fresh consumer never recovers \
-    from NotCoordinator (times out at 60s) — bg-task FindCoordinator wiring on the \
-    assign-only path needs audit"]
 async fn test_async_assign_and_consume_from_committed_offsets() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -819,10 +799,6 @@ async fn test_async_assign_and_consume_from_committed_offsets() {
 /// idempotent — no caching bug that returns a stale snapshot the second
 /// time).
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Phase-13a production gaps (Issues 3 and 4 in design/history/Milestone-8/Phase-13/COMMENTS.1.md): \
-    the consume_and_verify_records_bytes path hits Issue 4 (poll NotCoordinator) and the \
-    subsequent commit_sync hits Issue 3 (commit_sync timeout after consume on assign-only flows). \
-    Flaky depending on which broker the consumer initially routes to."]
 async fn test_async_assign_and_retrieving_committed_offsets_multiple_times() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");

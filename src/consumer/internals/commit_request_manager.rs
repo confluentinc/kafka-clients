@@ -354,6 +354,18 @@ impl OffsetFetchRequestState {
         *guard = Some(tx);
         rx
     }
+
+    /// Seed the inner [`RequestState`]'s `num_attempts` counter by
+    /// invoking `on_failed_attempt(now_ms)` `n` times. Used by the
+    /// `fetch_offsets` retry driver to carry exponential-backoff
+    /// continuity across retries (each retry creates a fresh state
+    /// instance because the original is consumed by the send path).
+    /// Mirrors [`OffsetCommitRequestState::seed_failed_attempts`].
+    fn seed_failed_attempts(&mut self, n: i32, now_ms: i64) {
+        for _ in 0..n {
+            self.state.on_failed_attempt(now_ms);
+        }
+    }
 }
 
 // =========================================================================
@@ -394,6 +406,24 @@ struct CommitRequestManagerInner {
     /// object identity; the Rust translation needs an explicit id.
     next_request_id: AtomicU64,
     state: Mutex<CommitRequestManagerState>,
+    /// `Arc<CoordinatorRequestManager>` set via [`CommitRequestManager::set_coordinator`]
+    /// at consumer construction time. Java holds this as a direct
+    /// field on `CommitRequestManager`
+    /// (`CommitRequestManager.java:148` — `coordinatorRequestManager`).
+    ///
+    /// Read-paths (response handlers, retry drivers) call
+    /// [`CoordinatorRequestManager::mark_coordinator_unknown`] on
+    /// `NotCoordinator`/`CoordinatorNotAvailable` errors so the next
+    /// bg-task `poll(now)` re-issues `FindCoordinator`. Mirrors Java's
+    /// `OffsetFetchRequestState.onFailure` / `OffsetCommitRequestState.onResponse`
+    /// `coordinatorRequestManager.markCoordinatorUnknown(...)` calls
+    /// (`CommitRequestManager.java:804,1092`).
+    ///
+    /// Set asynchronously after construction because both managers
+    /// reference each other (Java does so in the same constructor by
+    /// passing the coordinator in; in Rust the consumer-construction
+    /// flow builds `coordinator` then `commit`, then calls the setter).
+    coordinator: Mutex<Option<Arc<CoordinatorRequestManager>>>,
 }
 
 /// Mutable runtime state. Held behind `Mutex<...>` so the BG-task `poll`
@@ -467,8 +497,23 @@ impl CommitRequestManager {
             closing: Mutex::new(false),
             next_request_id: AtomicU64::new(0),
             state: Mutex::new(state),
+            coordinator: Mutex::new(None),
         });
         Self { inner }
+    }
+
+    /// Wire up the [`CoordinatorRequestManager`] handle that response
+    /// handlers and retry drivers use to call
+    /// [`CoordinatorRequestManager::mark_coordinator_unknown`] on
+    /// `NotCoordinator`/`CoordinatorNotAvailable` errors.
+    ///
+    /// Mirrors Java's direct field reference set by the
+    /// `CommitRequestManager` constructor — in Rust the two managers
+    /// reference each other through `Arc`s, so the consumer wires them
+    /// up after both are constructed.
+    pub(crate) fn set_coordinator(&self, coordinator: Arc<CoordinatorRequestManager>) {
+        let mut guard = self.inner.coordinator.lock().expect("commit manager coordinator slot poisoned");
+        *guard = Some(coordinator);
     }
 
     /// Returns a new `CommitRequestManager` handle that **shares** the
@@ -930,6 +975,11 @@ impl CommitRequestManager {
             guard.member_info.clone()
         };
         let request_id = self.inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+        // Preserve the requested partition set so the retry driver can
+        // rebuild a fresh `OffsetFetchRequestState` on retriable errors
+        // (Java reuses the same state object via `resetFuture()`; the
+        // Rust send path consumes it).
+        let requested_partitions = partitions.clone();
         let (request, request_rx) = OffsetFetchRequestState::new(
             request_id,
             partitions,
@@ -953,7 +1003,7 @@ impl CommitRequestManager {
         let result_tx = Arc::new(Mutex::new(Some(tx)));
         let inner = Arc::clone(&self.inner);
         tokio::spawn(async move {
-            fetch_offsets_with_retries(inner, request_rx, result_tx, deadline_ms, now_ms).await;
+            fetch_offsets_with_retries(inner, request_rx, result_tx, requested_partitions, deadline_ms, now_ms).await;
         });
         rx
     }
@@ -1556,10 +1606,15 @@ fn handle_offset_commit_response(
             return;
         },
     };
-    classify_and_complete_commit(&inner.group_id, request, &response);
+    classify_and_complete_commit(inner, request, &response);
 }
 
-fn classify_and_complete_commit(group_id: &str, request: OffsetCommitRequestState, response: &OffsetCommitResponse) {
+fn classify_and_complete_commit(
+    inner: &Arc<CommitRequestManagerInner>,
+    request: OffsetCommitRequestState,
+    response: &OffsetCommitResponse,
+) {
+    let group_id = inner.group_id.as_str();
     let mut unauthorized: HashSet<String> = HashSet::new();
     for topic in response.topics() {
         for partition in &topic.partitions {
@@ -1576,6 +1631,10 @@ fn classify_and_complete_commit(group_id: &str, request: OffsetCommitRequestStat
                     return;
                 },
                 Errors::CoordinatorNotAvailable | Errors::NotCoordinator | Errors::RequestTimedOut => {
+                    // Java line 801-806: mark coordinator unknown before
+                    // surfacing the error so the retry driver's next
+                    // commit attempt re-discovers the coordinator.
+                    inner.mark_coordinator_unknown(error.message(), current_time_ms_now());
                     request.complete_err(KafkaError::new(error));
                     return;
                 },
@@ -1619,7 +1678,7 @@ fn classify_and_complete_commit(group_id: &str, request: OffsetCommitRequestStat
 }
 
 fn handle_offset_fetch_response(
-    _inner: &Arc<CommitRequestManagerInner>,
+    inner: &Arc<CommitRequestManagerInner>,
     group_id: &str,
     topic_names_cache: &HashMap<Uuid, String>,
     future_tx: FetchFutureTx,
@@ -1646,6 +1705,13 @@ fn handle_offset_fetch_response(
     };
     let group_error = Errors::for_code(group_response.error_code);
     if group_error != Errors::None {
+        // Java line 1090-1092: on NOT_COORDINATOR / COORDINATOR_NOT_AVAILABLE,
+        // refresh the coordinator before completing the future
+        // exceptionally so the retry driver's next OffsetFetch goes to
+        // a freshly discovered coordinator.
+        if matches!(group_error, Errors::NotCoordinator | Errors::CoordinatorNotAvailable) {
+            inner.mark_coordinator_unknown(&format!("error response {:?}", group_error), current_time_ms_now());
+        }
         send(Err(classify_fetch_group_error(group_error, group_id)));
         return;
     }
@@ -1741,16 +1807,45 @@ fn classify_fetch_group_error(error: Errors, group_id: &str) -> KafkaError {
     }
 }
 
+/// Wall-clock `System.currentTimeMillis()` equivalent used by response
+/// handlers and retry drivers that don't carry an injected
+/// `current_time_ms` parameter. Mirrors Java's bg-task `time.milliseconds()`
+/// inside `OffsetFetchRequestState.onFailure`.
+fn current_time_ms_now() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_millis() as i64)
+        .unwrap_or(i64::MAX)
+}
+
 impl CommitRequestManagerInner {
     fn coordinator_node(&self) -> Option<crate::common::Node> {
-        // The bg task owns the CoordinatorRequestManager directly; the
-        // commit manager's UnsentRequest needs the coordinator node at
-        // build time. The node is set by the bg task wiring (Phase 10),
-        // which calls `poll_with_coordinator(coordinator, ...)`.
-        // For Phase 9 unit tests, we don't have a coordinator wired in;
-        // returning `None` means the NetworkClientDelegate will pick the
-        // least-loaded node (used as a fallback in tests).
-        None
+        // Read the coordinator handle (if wired) and return its currently
+        // known coordinator node — the bg task updates the coordinator
+        // state on every `FindCoordinator` response. If no handle is
+        // wired (Phase 9 unit tests) or no coordinator is known yet, the
+        // returned `None` lets `NetworkClientDelegate` pick the
+        // least-loaded node as a fallback.
+        let guard = self.coordinator.lock().expect("commit manager coordinator slot poisoned");
+        guard.as_ref().and_then(|c| c.coordinator())
+    }
+
+    /// Call [`CoordinatorRequestManager::mark_coordinator_unknown`] if a
+    /// coordinator handle has been wired via [`CommitRequestManager::set_coordinator`].
+    /// Mirrors Java's
+    /// `coordinatorRequestManager.markCoordinatorUnknown(error.message(), currentTimeMs)`
+    /// calls scattered through `OffsetFetchRequestState.onFailure` and
+    /// `OffsetCommitRequestState.onResponse`
+    /// (`CommitRequestManager.java:804,1092`).
+    fn mark_coordinator_unknown(&self, cause: &str, current_time_ms: i64) {
+        let coord = {
+            let guard = self.coordinator.lock().expect("commit manager coordinator slot poisoned");
+            guard.as_ref().map(Arc::clone)
+        };
+        if let Some(coord) = coord {
+            coord.mark_coordinator_unknown(cause, current_time_ms);
+        }
     }
 }
 
@@ -1973,17 +2068,115 @@ async fn auto_commit_sync_before_rebalance_with_retries(
     }
 }
 
+/// Drive an `OffsetFetch` retry loop.
+///
+/// Mirrors Java's `CommitRequestManager.fetchOffsetsWithRetries`
+/// (`CommitRequestManager.java:544-571`). The Java implementation uses
+/// `CompletableFuture::whenComplete` to recurse on retriable errors:
+///
+/// ```java
+/// currentResult.whenComplete((res, error) -> {
+///     pendingRequests.inflightOffsetFetches.remove(fetchRequest);
+///     if (error == null) { result.complete(res); }
+///     else if (error instanceof RetriableException || isStaleEpochErrorAndValidEpochAvailable(error)) {
+///         if (fetchRequest.isExpired()) {
+///             result.completeExceptionally(maybeWrapAsTimeoutException(error));
+///         } else {
+///             fetchRequest.resetFuture();
+///             fetchOffsetsWithRetries(fetchRequest, result);
+///         }
+///     } else { result.completeExceptionally(error); }
+/// });
+/// ```
+///
+/// In Rust the per-attempt `OffsetFetchRequestState` is consumed by the
+/// send path (its inner state lives only inside `inflight_offset_fetches`
+/// until the response handler removes it). Each retry therefore allocates
+/// a fresh `OffsetFetchRequestState` and pushes it onto
+/// `unsent_offset_fetches`, carrying the failed-attempt counter forward
+/// via [`OffsetFetchRequestState::seed_failed_attempts`] so the inner
+/// `RequestState.num_attempts` (driving the `ExponentialBackoff`) ramps
+/// up across retries.
+///
+/// Retry-eligibility predicate (Java line 559):
+///   * `error.is_retriable()` — any retriable error (NotCoordinator,
+///     CoordinatorNotAvailable, CoordinatorLoadInProgress, etc.); OR
+///   * `StaleMemberEpoch` AND the consumer has a valid member epoch
+///     (Java's `isStaleEpochErrorAndValidEpochAvailable`).
+///
+/// Deadline expiry (Java's `maybeWrapAsTimeoutException`) surfaces as
+/// [`KafkaError::timeout`] wrapping the original error message.
 async fn fetch_offsets_with_retries(
-    _inner: Arc<CommitRequestManagerInner>,
-    request_rx: oneshot::Receiver<FetchResult>,
+    inner: Arc<CommitRequestManagerInner>,
+    initial_request_rx: oneshot::Receiver<FetchResult>,
     result_tx: FetchFutureTx,
-    _deadline_ms: i64,
-    _now_ms: i64,
+    requested_partitions: HashSet<TopicPartition>,
+    deadline_ms: i64,
+    now_ms: i64,
 ) {
-    let outcome = match request_rx.await {
-        Ok(Ok(v)) => Ok(v),
-        Ok(Err(err)) => Err(err),
-        Err(_) => Err(KafkaError::new(Errors::NetworkException)),
+    let mut request_rx = initial_request_rx;
+    let mut current_time_ms = now_ms;
+    let mut attempts: i32 = 0;
+    let outcome: FetchResult = loop {
+        match request_rx.await {
+            Ok(Ok(value)) => break Ok(value),
+            Ok(Err(err)) => {
+                // Java line 573-575: `isStaleEpochErrorAndValidEpochAvailable`
+                // requires the consumer to currently hold a member epoch.
+                let has_valid_member_epoch = {
+                    let guard = inner.state.lock().expect("commit manager state poisoned");
+                    guard.member_info.member_epoch.is_some()
+                };
+                let is_stale_epoch_retriable = err.error() == Errors::StaleMemberEpoch && has_valid_member_epoch;
+                let is_retriable = err.is_retriable() || is_stale_epoch_retriable;
+                if !is_retriable {
+                    break Err(err);
+                }
+                // Retriable error. Advance the local "now" by the
+                // configured retry backoff (mirrors Java's bg-task tick
+                // which re-polls the request only after the
+                // exponential-backoff window elapses) and check the
+                // deadline. If expired, wrap as TimeoutException.
+                let backoff = inner.retry_backoff_ms.max(0);
+                current_time_ms = current_time_ms.saturating_add(backoff);
+                attempts += 1;
+                if current_time_ms >= deadline_ms {
+                    log::debug!(
+                        "OffsetFetch request for {:?} timed out and won't be retried anymore",
+                        requested_partitions
+                    );
+                    break Err(KafkaError::timeout(format!(
+                        "Failed to fetch committed offsets within the deadline: {}",
+                        err.error().message()
+                    )));
+                }
+                // Re-enqueue a fresh OffsetFetchRequestState with
+                // continuity in the backoff attempt counter. The
+                // bg-task `poll_with_coordinator` will pick it up on
+                // its next iteration once the coordinator is known.
+                let member_info = {
+                    let guard = inner.state.lock().expect("commit manager state poisoned");
+                    guard.member_info.clone()
+                };
+                let request_id = inner.next_request_id.fetch_add(1, Ordering::Relaxed);
+                let (mut retry_request, retry_rx) = OffsetFetchRequestState::new(
+                    request_id,
+                    requested_partitions.clone(),
+                    member_info,
+                    inner.retry_backoff_ms,
+                    inner.retry_backoff_max_ms,
+                    deadline_ms,
+                    current_time_ms,
+                );
+                retry_request.seed_failed_attempts(attempts, current_time_ms);
+                {
+                    let mut guard = inner.state.lock().expect("commit manager state poisoned");
+                    guard.pending.unsent_offset_fetches.push(retry_request);
+                }
+                request_rx = retry_rx;
+            },
+            Err(_) => break Err(KafkaError::new(Errors::NetworkException)),
+        }
     };
     let mut guard = result_tx.lock().expect("fetch_offsets tx poisoned");
     if let Some(tx) = guard.take() {

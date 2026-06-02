@@ -814,6 +814,22 @@ where
             ))
         });
 
+        // Wire the CoordinatorRequestManager handle into the
+        // CommitRequestManager. Java passes the coordinator directly to
+        // the `CommitRequestManager` constructor
+        // (`AsyncKafkaConsumer.java` calling
+        // `CommitRequestManager.<init>(coordinatorRequestManager, ...)`).
+        // In Rust both managers are `Arc`-shared and reference each
+        // other through interior mutability; wiring happens after both
+        // are built. Without this, the commit manager's response
+        // handlers and retry drivers cannot call
+        // `mark_coordinator_unknown` on `NotCoordinator` /
+        // `CoordinatorNotAvailable` errors — which is what drives the
+        // bg-task's next `poll(now)` to re-issue `FindCoordinator`.
+        if let (Some(coord_arc), Some(commit_arc)) = (coordinator.as_ref(), commit.as_ref()) {
+            commit_arc.set_coordinator(Arc::clone(coord_arc));
+        }
+
         // Java lines 502-505 — `if (groupMetadata.get().isPresent() &&
         // groupProtocol == CONSUMER) config.ignore(GROUP_REMOTE_ASSIGNOR_CONFIG)`.
         // Rust does not track "ignored" config keys (no `ConfigDef`
