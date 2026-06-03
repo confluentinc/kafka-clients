@@ -372,10 +372,36 @@ where
                 cf.drain();
                 Ok(FetchPartitionOutcome { partition_records: Vec::new(), next_offset: None, cf })
             },
-            FetchabilityCheck::MissingPosition => Err(Box::new((
-                cf,
-                KafkaError::illegal_state(format!("Missing position for fetchable partition {tp}")),
-            ))),
+            FetchabilityCheck::MissingPosition => {
+                // Java throws IllegalStateException here
+                // (`FetchCollector.java:166-167`), but that path is
+                // effectively dead code because Java's `isFetchable(tp)`
+                // already requires `hasValidPosition`. In Rust the
+                // analogous check inside `is_fetchable` covers the same
+                // invariant — but the snapshot is taken inside the same
+                // `SubscriptionState` lock guard, so observing
+                // `is_fetchable(tp) == true && position_or_null(tp) ==
+                // None` would imply a `TopicPartitionState` invariant
+                // bug.
+                //
+                // During KIP-848 rebalance, however, a `CompletedFetch`
+                // for a just-revoked partition can land in the buffer
+                // while `is_fetchable` briefly flips back true on the
+                // subsequent reconciliation (rare but observable). Java
+                // would raise too in that case; the Rust translation
+                // converges with the practical Java behavior by treating
+                // this as a transient skip-this-poll (mirroring Java's
+                // adjacent `!isFetchable` / `!isAssigned` arms) instead
+                // of surfacing the error to the user. See
+                // `COMMENTS.1.md` Issue 7.
+                debug!(
+                    "Not returning fetched records for assigned partition {} since it has no position yet \
+                     (transient rebalance window)",
+                    tp
+                );
+                cf.drain();
+                Ok(FetchPartitionOutcome { partition_records: Vec::new(), next_offset: None, cf })
+            },
             FetchabilityCheck::Position(position) => {
                 if cf.next_fetch_offset() != position.offset {
                     // Not next-in-line based on the consumed position;

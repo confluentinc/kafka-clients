@@ -24,13 +24,10 @@
 //! # Methods classification
 //!
 //! The Java suite contains 14 CONSUMER-arm `@ClusterTest` methods.
-//! 11 translated; 8 pass green. 3 are `#[ignore]`-gated on production
+//! 11 translated; 9 pass green. 2 are `#[ignore]`-gated on production
 //! gaps documented in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`:
 //!   - Issue 6: `end_offsets(tp)` returns a map omitting `tp` for a
 //!     consumer with an active `SubscriptionPattern` (2 tests).
-//!   - Issue 7: `fetch_collector` surfaces transient "No current
-//!     assignment for partition" as fatal during rebalance, instead of
-//!     skipping the partition like Java does (1 test, expand-subscribe).
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
@@ -534,7 +531,6 @@ async fn test_async_consumer_re2j_pattern_subscription_fetch() {
 /// (line 343). Subscribes to a pattern that matches one topic, then
 /// re-subscribes to a broader pattern that expands the assignment.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 7 in COMMENTS.1.md — fetch_collector surfaces transient 'No current assignment for partition' as fatal error during rebalance after re-subscribe, instead of skipping the partition like Java does"]
 async fn test_async_consumer_re2j_pattern_expand_subscription() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic1 = ctx.topic("topic1");

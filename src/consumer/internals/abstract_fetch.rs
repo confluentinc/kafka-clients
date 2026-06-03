@@ -524,18 +524,50 @@ impl AbstractFetch {
         let mut fetchable_partitions_by_node: HashMap<i32, IndexMap<TopicPartition, PartitionData>> = HashMap::new();
 
         for partition in unbuffered {
-            // Get position; bail out the whole call if the position is
-            // unexpectedly missing (Java throws IllegalStateException).
+            // Get position. Java's `positionForPartition` throws
+            // `IllegalStateException` if the position is missing
+            // (`AbstractFetch.java:508-515`) and Java's `position()`
+            // throws if the partition is no longer assigned. In Java the
+            // window between `fetchablePartitions()` (snapshot) and
+            // `position(tp)` (per-partition query) is narrow because
+            // both methods are `synchronized` on the same monitor —
+            // Java rarely hits the race in practice.
+            //
+            // In the Rust translation the bg task interleaves
+            // application events between the snapshot and the
+            // per-partition query, so a KIP-848 rebalance landing
+            // mid-loop can flip the partition from assigned-and-
+            // fetchable to unassigned. Surfacing `IllegalState` here
+            // fails the entire `createFetchRequests` batch and
+            // propagates to the user's `poll()` call — diverging from
+            // Java's practical behavior where the next poll iteration
+            // recovers.
+            //
+            // We treat both `Ok(None)` (no position yet) and
+            // `Err(no-current-assignment)` as transient skip-this-poll
+            // signals (mirroring Java's `isFetchable == false`
+            // adjacent path in `FetchCollector.collectFetch`). The
+            // partition is dropped from this fetch batch; the next
+            // `createFetchRequests` cycle re-reads `fetchable_partitions`
+            // under a fresh snapshot. See `COMMENTS.1.md` Issue 7.
             let position = {
                 let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
                 match guard.position(&partition) {
                     Ok(Some(p)) => p.clone(),
                     Ok(None) => {
-                        return Err(crate::common::KafkaError::illegal_state(format!(
-                            "Missing position for fetchable partition {partition}"
-                        )));
+                        trace!(
+                            "Skipping fetch for partition {partition} because it has no position yet \
+                             (transient — partition was fetchable at snapshot but lost its position before query)"
+                        );
+                        continue;
                     },
-                    Err(e) => return Err(e),
+                    Err(_e) => {
+                        trace!(
+                            "Skipping fetch for partition {partition} because it is no longer assigned \
+                             (transient rebalance window between fetchable_partitions snapshot and position query)"
+                        );
+                        continue;
+                    },
                 }
             };
 

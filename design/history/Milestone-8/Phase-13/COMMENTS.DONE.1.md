@@ -177,3 +177,84 @@ production-code diff is concentrated in:
 - `tests/integration/plaintext_consumer_assign_test.rs`
   - 7 `#[ignore]` attributes removed.
   - Module-level rustdoc rewritten to reflect the closed gaps.
+
+---
+
+## Issue 7 — fetch_collector surfaces transient "No current assignment for partition" as fatal error during rebalance
+
+Originally filed by: Manager during Phase 13a (3/N) — PlaintextConsumerSubscriptionTest.
+
+**Affected Rust test:**
+  - `tests/integration/plaintext_consumer_subscription_test.rs::test_async_consumer_re2j_pattern_expand_subscription`
+
+**Symptom:** Test exercises `unsubscribe()` + `subscribe_pattern(broader_pattern)` to expand subscription. Mid-rebalance, `consumer.poll(100ms)` raised:
+
+```
+IllegalState("No current assignment for partition <topic1>-1")
+```
+
+**Java contract:** `pollForFetches()` does NOT raise on transient internal-state issues. A partition that becomes unassigned between `fetchablePartitions()` snapshot and the per-partition `position()` query — or that briefly has no position — is silently skipped. That partition produces no records this poll cycle; the next poll re-checks against a fresh snapshot.
+
+**Root cause:** Two Rust call sites surfaced the `IllegalState` upward instead of skipping:
+
+1. `src/consumer/internals/fetch_collector.rs:375-378` — the `FetchabilityCheck::MissingPosition` arm raised
+   `KafkaError::illegal_state("Missing position for fetchable partition ...")`. This branch is "dead code"
+   under Java's lock model because `isFetchable(tp) ⇒ hasValidPosition(tp)`. In Rust the same invariant
+   holds *within a single lock guard*, but a `CompletedFetch` for a just-revoked partition can still land
+   in the buffer between the bg task's prior fetchable snapshot and the collector's pass.
+2. `src/consumer/internals/abstract_fetch.rs:529-540` — `prepare_fetch_requests` returned
+   `Err(IllegalState("No current assignment for partition X"))` for a partition that became unassigned
+   between the `fetchable_partitions()` snapshot (line 508-511) and the per-partition `position()` query.
+   Java has the same window (Java methods are `synchronized` per call, not per scope) but the timing is
+   tighter in Java's classic flow. The Rust KIP-848 bg-task interleaves application events between
+   snapshot and query, so the race surfaces on every `unsubscribe + re-subscribe` rebalance.
+
+The Phase 13a (2/N) fix to Issue 4 was correct for `OffsetOutOfRange` (real, surfaceable error) but
+over-propagated these two transient signals.
+
+**Fix landed:**
+
+- `src/consumer/internals/fetch_collector.rs:375-403` — `FetchabilityCheck::MissingPosition` now drains
+  the in-flight `CompletedFetch` and returns an empty `FetchPartitionOutcome` instead of `Err`. Mirrors
+  the adjacent `NotAssigned` / `NotFetchable` arms.
+- `src/consumer/internals/abstract_fetch.rs:526-571` — in `prepare_fetch_requests`, both `Ok(None)` (no
+  position yet) and `Err(...)` (no current assignment) from `guard.position(&partition)` now `continue`
+  to skip the partition, instead of returning `Err` for the whole batch.
+
+Both call sites are commented with a reference to this Issue and a rationale block explaining the deviation
+from Java's literal `throw IllegalStateException` behavior. The deviation is documented per CLAUDE.md §10
+(deviations from Java need explicit rationale in source comments).
+
+**Surfaceable errors preserved (regression-tested):**
+
+- `OffsetOutOfRange` with no reset policy — still propagates (Issue 4 regression test
+  `test_async_consumer_fetch_invalid_offset` passes).
+- `TopicAuthorization` — still propagates
+  (`test_fetch_with_topic_authorization_failed` passes).
+- `CorruptMessage` — still propagates (`test_fetch_with_corrupt_message` passes).
+- Unexpected error codes (catch-all `IllegalState` in `handle_initialize_errors`) — still propagate
+  (`test_fetch_with_other_errors` passes).
+
+**Validation:**
+
+- `cargo test --lib fetch_collector` — 16/16 pass.
+- `cargo test --lib` — 1700/1700 pass (no regression).
+- Subscription suite: 9 pass + 2 ignored (Issue 6 still active).
+- Fetch suite: 8 pass + 1 ignored (Issue 5 still active).
+- Format-check + lint clean.
+
+**Side effect on Issue 5:** This fix changes Issue 5's failure mode. Previously the
+`by_duration:PT1H` test surfaced `IllegalState("Missing position for fetchable partition ...")` quickly.
+With this fix, that error is now swallowed and the test will hang waiting for a position that never
+materializes (until the test deadline). Issue 5 remains `#[ignore]`-gated; the underlying gap
+(`by_duration` reset path is incomplete in `OffsetsRequestManager`) is unchanged.
+
+**Files modified:**
+
+- `src/consumer/internals/fetch_collector.rs` — `MissingPosition` arm now skips (24-line replacement).
+- `src/consumer/internals/abstract_fetch.rs` — `prepare_fetch_requests` per-partition loop now skips
+  `Ok(None)` and `Err(...)` from `position()` (43-line replacement with documentation).
+- `tests/integration/plaintext_consumer_subscription_test.rs` — `#[ignore]` attribute removed from
+  `test_async_consumer_re2j_pattern_expand_subscription`; module-level rustdoc updated (9 pass + 2
+  ignored, was 8 pass + 3 ignored).
+- `design/history/Milestone-8/Phase-13/COMMENTS.1.md` — Issue 7 block replaced with pointer to this entry.
