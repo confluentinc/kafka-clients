@@ -27,14 +27,28 @@ use crate::api_versions_request_data::ApiVersionsRequestData;
 use crate::common::network::ByteBufferSend;
 use crate::common::protocol::Message;
 use crate::common::protocol::{ApiKeys, ByteBufferAccessor, Readable};
+use crate::consumer_group_heartbeat_request_data::ConsumerGroupHeartbeatRequestData;
+use crate::fetch_request_data::FetchRequestData;
+use crate::find_coordinator_request_data::FindCoordinatorRequestData;
+use crate::list_offsets_request_data::ListOffsetsRequestData;
 use crate::metadata_request_data::MetadataRequestData;
+use crate::offset_commit_request_data::OffsetCommitRequestData;
+use crate::offset_fetch_request_data::OffsetFetchRequestData;
+use crate::offset_for_leader_epoch_request_data::OffsetForLeaderEpochRequestData;
 use crate::produce_request_data::ProduceRequestData;
 use crate::sasl_authenticate_request_data::SaslAuthenticateRequestData;
 use crate::sasl_handshake_request_data::SaslHandshakeRequestData;
 
 use super::ApiVersionsRequest;
 use super::ConcreteResponse;
+use super::ConsumerGroupHeartbeatRequest;
+use super::FetchRequest;
+use super::FindCoordinatorRequest;
+use super::ListOffsetsRequest;
 use super::MetadataRequest;
+use super::OffsetCommitRequest;
+use super::OffsetFetchRequest;
+use super::OffsetsForLeaderEpochRequest;
 use super::ProduceRequest;
 use super::RequestAndSize;
 use super::RequestHeader;
@@ -88,10 +102,24 @@ pub enum ConcreteRequest {
     Metadata(MetadataRequest),
     /// A Produce request.
     Produce(ProduceRequest),
+    /// A Fetch request (consumer fetch loop).
+    Fetch(FetchRequest),
     /// A SASL handshake request.
     SaslHandshake(SaslHandshakeRequest),
     /// A SASL authenticate request.
     SaslAuthenticate(SaslAuthenticateRequest),
+    /// A FindCoordinator request.
+    FindCoordinator(FindCoordinatorRequest),
+    /// A ListOffsets request.
+    ListOffsets(ListOffsetsRequest),
+    /// An OffsetsForLeaderEpoch request.
+    OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest),
+    /// A ConsumerGroupHeartbeat request (KIP-848).
+    ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest),
+    /// An OffsetCommit request.
+    OffsetCommit(OffsetCommitRequest),
+    /// An OffsetFetch request.
+    OffsetFetch(OffsetFetchRequest),
 }
 
 impl ConcreteRequest {
@@ -101,8 +129,15 @@ impl ConcreteRequest {
             Self::ApiVersions(r) => r.version(),
             Self::Metadata(r) => r.version(),
             Self::Produce(r) => r.version(),
+            Self::Fetch(r) => r.version(),
             Self::SaslHandshake(r) => r.version(),
             Self::SaslAuthenticate(r) => r.version(),
+            Self::FindCoordinator(r) => r.version(),
+            Self::ListOffsets(r) => r.version(),
+            Self::OffsetsForLeaderEpoch(r) => r.version(),
+            Self::ConsumerGroupHeartbeat(r) => r.version(),
+            Self::OffsetCommit(r) => r.version(),
+            Self::OffsetFetch(r) => r.version(),
         }
     }
 
@@ -112,8 +147,15 @@ impl ConcreteRequest {
             Self::ApiVersions(r) => r.api_key(),
             Self::Metadata(r) => r.api_key(),
             Self::Produce(r) => r.api_key(),
+            Self::Fetch(r) => r.api_key(),
             Self::SaslHandshake(r) => r.api_key(),
             Self::SaslAuthenticate(r) => r.api_key(),
+            Self::FindCoordinator(r) => r.api_key(),
+            Self::ListOffsets(r) => r.api_key(),
+            Self::OffsetsForLeaderEpoch(r) => r.api_key(),
+            Self::ConsumerGroupHeartbeat(r) => r.api_key(),
+            Self::OffsetCommit(r) => r.api_key(),
+            Self::OffsetFetch(r) => r.api_key(),
         }
     }
 
@@ -129,8 +171,15 @@ impl ConcreteRequest {
             Self::ApiVersions(r) => SendBuilder::build_request_send(header, r.data()),
             Self::Metadata(r) => SendBuilder::build_request_send(header, r.data()),
             Self::Produce(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::Fetch(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslHandshake(r) => SendBuilder::build_request_send(header, r.data()),
             Self::SaslAuthenticate(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::FindCoordinator(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::ListOffsets(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::OffsetCommit(r) => SendBuilder::build_request_send(header, r.data()),
+            Self::OffsetFetch(r) => SendBuilder::build_request_send(header, r.data()),
         }
     }
 
@@ -173,10 +222,31 @@ impl ConcreteRequest {
             Self::Produce(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
+            Self::Fetch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
             Self::SaslHandshake(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
             Self::SaslAuthenticate(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::FindCoordinator(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::ListOffsets(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::OffsetsForLeaderEpoch(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::ConsumerGroupHeartbeat(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::OffsetCommit(r) => {
+                super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
+            },
+            Self::OffsetFetch(r) => {
                 super::request_utils::serialize(header.data(), header.header_version(), r.data(), r.version())
             },
         }
@@ -194,8 +264,15 @@ impl ConcreteRequest {
             Self::ApiVersions(r) => Self::serialize_body(r.data(), r.version()),
             Self::Metadata(r) => Self::serialize_body(r.data(), r.version()),
             Self::Produce(r) => Self::serialize_body(r.data(), r.version()),
+            Self::Fetch(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslHandshake(r) => Self::serialize_body(r.data(), r.version()),
             Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), r.version()),
+            Self::FindCoordinator(r) => Self::serialize_body(r.data(), r.version()),
+            Self::ListOffsets(r) => Self::serialize_body(r.data(), r.version()),
+            Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), r.version()),
+            Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data(), r.version()),
+            Self::OffsetCommit(r) => Self::serialize_body(r.data(), r.version()),
+            Self::OffsetFetch(r) => Self::serialize_body(r.data(), r.version()),
         }
     }
 
@@ -223,8 +300,15 @@ impl ConcreteRequest {
             Self::ApiVersions(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::Metadata(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::Produce(r) => r.get_error_response(throttle_time_ms, error),
+            Self::Fetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::SaslHandshake(r) => Some(r.get_error_response(throttle_time_ms, error)),
             Self::SaslAuthenticate(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::FindCoordinator(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ListOffsets(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::OffsetsForLeaderEpoch(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::ConsumerGroupHeartbeat(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::OffsetCommit(r) => Some(r.get_error_response(throttle_time_ms, error)),
+            Self::OffsetFetch(r) => Some(r.get_error_response(throttle_time_ms, error)),
         }
     }
 
@@ -257,6 +341,10 @@ impl ConcreteRequest {
                 let data = ProduceRequestData::read(readable, api_version)?;
                 Ok(Self::Produce(ProduceRequest::new(data, api_version)))
             },
+            ApiKeys::FETCH => {
+                let data = FetchRequestData::read(readable, api_version)?;
+                Ok(Self::Fetch(FetchRequest::new(data, api_version)))
+            },
             ApiKeys::SASL_HANDSHAKE => {
                 let data = SaslHandshakeRequestData::read(readable, api_version)?;
                 Ok(Self::SaslHandshake(SaslHandshakeRequest::new(data, api_version)))
@@ -264,6 +352,36 @@ impl ConcreteRequest {
             ApiKeys::SASL_AUTHENTICATE => {
                 let data = SaslAuthenticateRequestData::read(readable, api_version)?;
                 Ok(Self::SaslAuthenticate(SaslAuthenticateRequest::new(data, api_version)))
+            },
+            ApiKeys::FIND_COORDINATOR => {
+                let data = FindCoordinatorRequestData::read(readable, api_version)?;
+                Ok(Self::FindCoordinator(FindCoordinatorRequest::new(data, api_version)))
+            },
+            ApiKeys::LIST_OFFSETS => {
+                let data = ListOffsetsRequestData::read(readable, api_version)?;
+                Ok(Self::ListOffsets(ListOffsetsRequest::new(data, api_version)))
+            },
+            ApiKeys::OFFSET_FOR_LEADER_EPOCH => {
+                let data = OffsetForLeaderEpochRequestData::read(readable, api_version)?;
+                Ok(Self::OffsetsForLeaderEpoch(OffsetsForLeaderEpochRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::CONSUMER_GROUP_HEARTBEAT => {
+                let data = ConsumerGroupHeartbeatRequestData::read(readable, api_version)?;
+                Ok(Self::ConsumerGroupHeartbeat(ConsumerGroupHeartbeatRequest::new(
+                    data,
+                    api_version,
+                )))
+            },
+            ApiKeys::OFFSET_COMMIT => {
+                let data = OffsetCommitRequestData::read(readable, api_version)?;
+                Ok(Self::OffsetCommit(OffsetCommitRequest::new(data, api_version)))
+            },
+            ApiKeys::OFFSET_FETCH => {
+                let data = OffsetFetchRequestData::read(readable, api_version)?;
+                Ok(Self::OffsetFetch(OffsetFetchRequest::new(data, api_version)))
             },
             _ => Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -279,8 +397,15 @@ impl std::fmt::Display for ConcreteRequest {
             Self::ApiVersions(r) => write!(f, "{r}"),
             Self::Metadata(r) => write!(f, "{r}"),
             Self::Produce(r) => write!(f, "{r}"),
+            Self::Fetch(r) => write!(f, "{r}"),
             Self::SaslHandshake(r) => write!(f, "{r}"),
             Self::SaslAuthenticate(r) => write!(f, "{r}"),
+            Self::FindCoordinator(r) => write!(f, "{r}"),
+            Self::ListOffsets(r) => write!(f, "{r}"),
+            Self::OffsetsForLeaderEpoch(r) => write!(f, "{r}"),
+            Self::ConsumerGroupHeartbeat(r) => write!(f, "{r}"),
+            Self::OffsetCommit(r) => write!(f, "{r}"),
+            Self::OffsetFetch(r) => write!(f, "{r}"),
         }
     }
 }

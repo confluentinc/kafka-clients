@@ -21,3 +21,24 @@
 - [Milestone 4 Phase 1 patterns](review_milestone4_phase1.md) — Ownership-consuming async methods break Java retry patterns, panic vs Result
 - [MockProducer patterns](review_mockproducer_patterns.md) — Option::take() changes error injection from persistent to one-shot; Mutex reentrance
 - [FFI Producer patterns](review_ffi_producer_patterns.md) — Out-parameter null-init on error paths, batch partial-failure cleanup
+- [M8 Phase 1 patterns](review_m8_phase1_patterns.md) — Consumer foundation: ConfigDef `atLeast` validator gaps, ConsumerError flattening, public-class-in-internal-package re-export
+- [M8 Phase 2 patterns](review_m8_phase2_patterns.md) — Trait surface: Clone-on-panic leaks bounds into Consumer<K,V>; happy-path clones; weak PartialEq substitutes for assertEquals
+- [M8 Phase 4 patterns](review_m8_phase4_patterns.md) — debug_assert masks IllegalStateException in release; Display format divergence from Java toString; HashSet from BTreeSet loses ordering
+- [M8 Phase 3 patterns](review_m8_phase3_patterns.md) — MockConsumer: &self-vs-mutating-position shape mismatch; listener inline invocation; map+iter+mutate translation
+- [M8 Phase 5 patterns](review_m8_phase5_patterns.md) — Event-layer: CompletableApplicationEvent<T> must yield CompletableEventHandle<T>; AsyncPoll non-completable; Arc::ptr_eq vs Java identity; marker-interface translation
+- [M8 Phase 6 patterns](review_m8_phase6_patterns.md) — KafkaError::Timeout not retriable in Rust (RetriableException mismatch); NetworkClientDelegate expiry/onClose test gaps; trivial log-capture tests
+- [M8 Phase 6 fix-cycle](review_m8_phase6_fix_cycle.md) — Audit is_retriable side-effects by receiver type not textual matches; inline mod-tests sees private fields
+- [M8 Phase 7a patterns](review_m8_phase7a_patterns.md) — §27 receive-path: per-record Arc<str> alloc + DefaultRecord clone violate zero-copy; Notify race; transactional code path partially missing
+- [M8 Phase 7a fix-cycle](review_m8_phase7a_fix_cycle.md) — §27 fix verification grep patterns; Notify pin+enable; ControlRecordType fail-loud divergence
+- [M8 Phase 7b patterns](review_m8_phase7b_patterns.md) — CompletableFuture single-slot vs Rust queue; IllegalStateException scope; new-method-no-test pattern; §27 audit heuristics
+- [M8 Phase 8b patterns](review_m8_phase8b_patterns.md) — §31 listener-present check; Err swallow; unsafe impl Send smell; plan test-count inflation; Timer.update side effects
+- [M8 Phase 10 wire-prereq patterns](review_m8_phase10_wire_prereq_patterns.md) — outer hook + inner stub; isStaleEpochErrorAndValidEpochAvailable predicate; check-order parity; test name vs body
+- [M8 Phase 10 round-2 patterns](review_m8_phase10_round2.md) — phase-ordering invariant from RequestManagers.entries(); canCommit gate collapse; exception-cache scope; transient-topic leak
+- [M8 Phase 10 round-3 patterns](review_m8_phase10_round3.md) — `let _ = handle;` drop semantics vs Java's never-completed future; probe Arc clone can mask production drop behavior
+- [M8 Phase 11 batch-1 patterns](review_m8_phase11_batch1.md) — acquireAndEnsureOpen drops closed-check too; one-shot drain vs Java iterative loop; store-listener-before-await consistency
+- [M8 Phase 11 batch-2 patterns](review_m8_phase11_batch2.md) — bg-task ack blocks app-side add_and_get → deadlock; wakeup setActiveTask missing; groupAssignmentSnapshot + MemberStateListener gap; .await.ok() swallows fatal errors
+- [M8 Phase 11 batch-3 patterns](review_m8_phase11_batch3.md) — skip-rationale-as-nonexistent-path; shared helper leaks wakeup decision (commit_inner → commit_async); skip section must enumerate Java tests
+- [M8 Phase 12 patterns](review_m8_phase12_patterns.md) — production-ctor wire-up: entries-skip without driver, dual-notifier on shared-state, separated Arc<AtomicI64>, auth no-op framing
+- [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped when RM lacks `take_response_receiver`+spawn pattern; rustdoc claims ≠ code reality
+- [M8 Phase 12.5 patterns](review_m8_phase12_5.md) — Pre-branch whenComplete side effects (e.g. getAndClearFatalError) easy to miss in async forwarder translation; yield_now-based regression tests fragility
+- [M8 Phase 12.5 round-3](review_m8_phase12_5_round3.md) — Java switch `default:` arm fatal fallback omitted in Option::unwrap_or; Fenced arm spurious ErrorEvent diverges from Java
