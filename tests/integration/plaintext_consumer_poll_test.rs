@@ -30,7 +30,7 @@
 //! / `records-lag` metric — the metrics module is deferred Milestone-8-wide
 //! per `consumer-threading.md` §20.
 //!
-//! Of the 8 translated, 5 are `#[ignore]`-gated on production gaps
+//! Of the 8 translated, 1 is `#[ignore]`-gated on a production gap
 //! documented in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`:
 //!
 //!   - **Issue 8** (1 test): `ConsumerRebalanceListener` callbacks cannot
@@ -415,12 +415,19 @@ async fn await_non_empty_records_count(
     poll_timeout: Duration,
     deadline_duration: Duration,
 ) -> usize {
+    // Skip records produced by `ensure_topic_with_2_partitions` (the
+    // "__provisioner__" key/value pair written per partition to force
+    // broker-side topic auto-create). Java has admin-client-based topic
+    // create; Rust does not. Without this filter, `auto.offset.reset=earliest`
+    // would count the provisioner alongside the real records (Issue 11
+    // in COMMENTS.DONE.1.md).
     let deadline = Instant::now() + deadline_duration;
     while Instant::now() < deadline {
         let records = consumer.poll(poll_timeout).await.expect("poll should succeed");
         let count = records
             .into_iter()
             .filter(|r| r.topic() == partition.topic() && r.partition() == partition.partition())
+            .filter(|r| r.key().as_deref().map(|k| k.as_slice()) != Some(b"__provisioner__".as_slice()))
             .count();
         if count > 0 {
             return count;
@@ -548,7 +555,6 @@ async fn test_async_consumer_max_poll_records() {
 /// `poll_timer_is_expired(current_time_ms)` and transitions the member
 /// to LeaveGroup, causing the broker-side fence + rejoin sequence.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 10 in COMMENTS.1.md — broker assignment latency on a fresh group can exceed max.poll.interval.ms=1000, triggering an extra fence-rejoin during the initial join window (callsToAssigned=2 instead of 1)"]
 async fn test_async_consumer_max_poll_interval_ms() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -560,8 +566,16 @@ async fn test_async_consumer_max_poll_interval_ms() {
     ensure_topic_with_2_partitions(&producer, &topic).await;
     producer.close().await.expect("producer close should succeed");
 
+    // Java's test uses max.poll.interval.ms=1000 (sleeps 3s). The
+    // Rust translation runs against a 3-broker testcontainers cluster
+    // whose first-heartbeat → assignment round-trip latency on a fresh
+    // KIP-848 group can exceed 1000ms, expiring the poll-timer during
+    // the initial join window (Issue 10 in COMMENTS.DONE.1.md). The
+    // test's behavioral contract is "fence-rejoin after the poll
+    // interval elapses without a poll" — preserved here by using
+    // max.poll.interval.ms=5000 + sleep 7s (still > interval).
     let mut consumer = new_consumer::<Vec<u8>, Vec<u8>>(
-        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("max.poll.interval.ms", "1000")]),
+        make_consumer_config_bytes(ctx.bootstrap_servers(), &group_id, &[("max.poll.interval.ms", "5000")]),
         Box::new(ByteArrayDeserializer),
         Box::new(ByteArrayDeserializer),
     )
@@ -589,12 +603,10 @@ async fn test_async_consumer_max_poll_interval_ms() {
     );
 
     // After we extend longer than max.poll a rebalance should be
-    // triggered. Java sleeps 3s here. The Rust translation needs to
-    // sleep AND drive the bg task (no app-side poll in this window —
-    // that is the test's whole point), so a plain `tokio::time::sleep`
-    // is the correct primitive: the bg task runs its heartbeat loop
-    // independently and will issue the LeaveGroup on its own.
-    tokio::time::sleep(Duration::from_secs(3)).await;
+    // triggered. Java sleeps 3s (max.poll.interval.ms=1000); Rust
+    // sleeps 7s (max.poll.interval.ms=5000) — same intent, longer
+    // wall-clock to compensate for broker latency on testcontainers.
+    tokio::time::sleep(Duration::from_secs(7)).await;
 
     await_rebalance_with_deadline(consumer.as_mut(), &counters, Duration::from_secs(90)).await;
     assert_eq!(
@@ -1125,7 +1137,6 @@ impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
 /// rejoining on the next poll, with the new topic as subscription, and
 /// successfully consume records from `tpOther`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 11 in COMMENTS.1.md — auto.offset.reset=earliest causes consumer to see the no-op provisioner record at offset 0 in addition to the 10 real records, breaking the count assertion. Pre-existing test-fixture issue surfaced after Issue 9 was fixed; needs a topic-provisioning approach that doesn't write a record on every partition."]
 async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
