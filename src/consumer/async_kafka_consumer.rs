@@ -85,6 +85,7 @@ use crate::consumer::internals::events::completable_event_reaper::CompletableEve
 use crate::consumer::internals::fetch_buffer::FetchBuffer;
 use crate::consumer::internals::fetch_collector::FetchCollector;
 use crate::consumer::internals::member_state_listener::MemberStateListener;
+use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use crate::consumer::internals::offset_commit_callback_invoker::OffsetCommitCallbackInvoker;
 use crate::consumer::internals::request_managers::RequestManagers;
 use crate::consumer::internals::subscription_state::SubscriptionState;
@@ -3015,7 +3016,7 @@ where
         if timeout.is_zero() {
             // Java: `if (timeout.isZero()) { applicationEventHandler.add(listOffsetsEvent); return new HashMap<>(); }`.
             let (handle, _receiver, _erased) =
-                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
             self.application_event_handler.add(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
                 now_ms,
@@ -3024,13 +3025,13 @@ where
         }
 
         let (handle, receiver, _erased) =
-            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
         // Java's `beginningOffsets` / `endOffsets` do NOT call
         // `setActiveTask` — `enable_wakeup=false`. Issue 10 / §31: the
         // drain helper interleaves bg-event processing so a mid-wait
         // listener callback is serviced on the caller's task.
         let result = self
-            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
+            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: false },
                 receiver,
                 deadline_ms,
@@ -3040,6 +3041,28 @@ where
             .await;
         match result {
             Ok(offsets_map) => {
+                // Java's `beginningOrEndOffset(...)` (`AsyncKafkaConsumer.java:1366-1411`)
+                // returns a map keyed on every requested partition mapped
+                // to `entry.getValue().offset()`. The Rust translation
+                // now mirrors that all-or-error contract: every
+                // requested partition that the bg task surfaced a
+                // result for is in the output. The bg task uses
+                // `OffsetAndTimestampInternal` (matching Java) so the
+                // broker's `timestamp == -1` sentinel for
+                // `EARLIEST` / `LATEST` no longer maps to `None`.
+                //
+                // A `None` entry here means the bg task explicitly
+                // surfaced "no offset" for the partition — Java's
+                // null-value semantic — which is impossible on the
+                // success path with a valid broker response but can
+                // still appear if the global result is somehow
+                // partially populated. We preserve Java's "filter null
+                // values silently" behaviour for parity with
+                // `OffsetsForTimes`; see COMMENTS.DONE.1.md Issue 6
+                // for the regression where the `None`→drop filter
+                // silently elided every entry due to
+                // OffsetAndTimestamp::with_leader_epoch rejecting
+                // negative timestamps.
                 let mut out = HashMap::with_capacity(offsets_map.len());
                 for (tp, opt) in offsets_map {
                     if let Some(oat) = opt {
@@ -3090,7 +3113,7 @@ where
         if timeout.is_zero() {
             // Java: `if (timeout.toMillis() == 0L) { applicationEventHandler.add(...); return listOffsetsEvent.emptyResults(); }`.
             let (handle, _receiver, _erased) =
-                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+                make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
             let empty_keys = timestamps_to_search.keys().cloned().collect::<Vec<_>>();
             self.application_event_handler.add(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
@@ -3106,12 +3129,12 @@ where
         }
 
         let (handle, receiver, _erased) =
-            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(deadline_ms);
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(deadline_ms);
         // Java's `offsetsForTimes` does NOT call `setActiveTask` —
         // `enable_wakeup=false`. Issue 10 / §31: drain helper still
         // interleaves bg-event processing.
         let result = self
-            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(
+            .submit_and_drain::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(
                 ApplicationEvent::ListOffsets { handle, timestamps_to_search, require_timestamps: true },
                 receiver,
                 deadline_ms,
@@ -3121,11 +3144,22 @@ where
             .await;
         match result {
             Ok(offsets_map) => {
-                // Java filters out null values silently; mirror by skipping.
+                // Java's `offsetsForTimes` (`AsyncKafkaConsumer.java:1303-1344`)
+                // filters out null values silently and converts each
+                // `OffsetAndTimestampInternal` to the public-class
+                // `OffsetAndTimestamp` via
+                // `entry.getValue().buildOffsetAndTimestamp()`. The
+                // `require_timestamps=true` path guarantees the broker
+                // returns a non-negative timestamp (matching the
+                // user-supplied target time), so the build should not
+                // fail in practice. If it does (e.g. broker bug), we
+                // propagate the IllegalArgument so the user observes
+                // the broker misbehaviour rather than silently
+                // dropping the entry.
                 let mut out = HashMap::with_capacity(offsets_map.len());
                 for (tp, opt) in offsets_map {
                     if let Some(oat) = opt {
-                        out.insert(tp, oat);
+                        out.insert(tp, oat.build_offset_and_timestamp()?);
                     }
                 }
                 Ok(out)
@@ -7386,15 +7420,14 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    let mut result: HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>> =
-                        HashMap::new();
+                    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> = HashMap::new();
                     result.insert(
                         TopicPartition::new("t0".to_string(), 2),
-                        Some(crate::consumer::OffsetAndTimestamp::new(5, 1).expect("ok")),
+                        Some(OffsetAndTimestampInternal::new(5, 1, None)),
                     );
                     result.insert(
                         TopicPartition::new("t0".to_string(), 3),
-                        Some(crate::consumer::OffsetAndTimestamp::new(6, 3).expect("ok")),
+                        Some(OffsetAndTimestampInternal::new(6, 3, None)),
                     );
                     handle.complete(result);
                     return;
@@ -7659,15 +7692,14 @@ mod tests {
         let drainer = tokio::spawn(async move {
             while let Some(env) = handles.app_event_rx.recv().await {
                 if let ApplicationEvent::ListOffsets { handle, .. } = env.event {
-                    let mut result: HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>> =
-                        HashMap::new();
+                    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> = HashMap::new();
                     result.insert(
                         TopicPartition::new("t0".to_string(), 2),
-                        Some(crate::consumer::OffsetAndTimestamp::new(5, 1).expect("ok")),
+                        Some(OffsetAndTimestampInternal::new(5, 1, None)),
                     );
                     result.insert(
                         TopicPartition::new("t0".to_string(), 3),
-                        Some(crate::consumer::OffsetAndTimestamp::new(6, 3).expect("ok")),
+                        Some(OffsetAndTimestampInternal::new(6, 3, None)),
                     );
                     handle.complete(result);
                     return;

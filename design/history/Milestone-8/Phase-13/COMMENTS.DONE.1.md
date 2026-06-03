@@ -441,3 +441,187 @@ the consumer from completing its first heartbeat → assignment → reset loop q
 
 **Pass count delta (fetch suite):** before 8/9 (1 ignored: Issue 5). After: 9/9. Other suites
 unchanged.
+
+---
+
+## Phase 13a (6/N) — Issue 6 RESOLVED — `endOffsets` silently elided every assigned partition
+
+**Filed by:** Actor N=1 during translation of `PlaintextConsumerSubscriptionTest.java`
+**Resolved by:** Actor N=1 (Phase 13a (6/N))
+**Resolution date:** 2026-06-03
+
+**Affected tests (un-ignored in this fixup):**
+
+- `tests/integration/plaintext_consumer_subscription_test.rs::test_async_consumer_re2j_pattern_subscription_fetch`
+- `tests/integration/plaintext_consumer_subscription_test.rs::test_topic_id_subscription_with_re2j_regex_and_offsets_fetch`
+
+### Issue 6: `end_offsets(tp)` returns a map omitting `tp` for a consumer with an active `SubscriptionPattern`
+
+**Symptom (originally filed):** A consumer that calls
+`subscribe_pattern(...)`, awaits assignment, then calls
+`end_offsets(&[tp])` for an assigned partition `tp` receives a map
+that succeeds at the Rust API level but **does not include** `tp`.
+Stable across 30s of retries.
+
+**Root cause (turned out NOT to be the metadata-refresh hypothesis filed):**
+
+The `OffsetsRequestManager` was reaching the broker correctly and
+the broker was responding with the high watermark. The issue was at
+the very last step of [`OffsetFetcherUtils::buildOffsetsForTimesResult`](../../../../src/consumer/internals/offset_fetcher_utils.rs):
+
+```
+let oat = OffsetAndTimestamp::with_leader_epoch(
+    offset_data.offset,
+    offset_data.timestamp.unwrap_or(-1),
+    offset_data.leader_epoch,
+)
+.ok();
+result.insert(tp.clone(), oat);
+```
+
+For an `endOffsets` / `beginningOffsets` ListOffsets request (target
+timestamp = `LATEST` / `EARLIEST`), the broker's response carries
+`timestamp = -1` (the wire-level "no timestamp" sentinel — there
+isn't a record-level timestamp associated with the high watermark
+itself). The Rust public `OffsetAndTimestamp::with_leader_epoch`
+rejects negative timestamps (matching Java's public-class
+constructor), so `.ok()` returned `None`. The downstream
+`beginning_or_end_offsets` filter at
+`async_kafka_consumer.rs:3042-3049` then silently dropped the entry.
+
+Java sidesteps the public-class validation by routing the bg-task
+event payload through `OffsetAndTimestampInternal` (a
+loosely-validated package-private companion type that allows
+negative offsets and timestamps —
+`OffsetsRequestManager.java:213`,
+`OffsetAndTimestampInternal.java:26`) and converts to the public
+class only at the `offsetsForTimes` boundary (where the user-supplied
+timestamp guarantees non-negative values).
+
+The Rust translation was using the public-class constructor
+throughout — both `offsetsForTimes` (correct) and `endOffsets` /
+`beginningOffsets` (incorrect for the negative-timestamp case).
+
+**Fix:**
+
+1. New file
+   [`src/consumer/internals/offset_and_timestamp_internal.rs`](../../../../src/consumer/internals/offset_and_timestamp_internal.rs)
+   adds `OffsetAndTimestampInternal` — `pub(crate)` per
+   `consumer-threading.md` §20 (internals stay crate-private).
+   Accessor methods (`offset()`, `timestamp()`, `leader_epoch()`)
+   match the Java equivalents. `build_offset_and_timestamp()`
+   converts to the public class with the usual validation.
+2. `build_offsets_for_times_result` in
+   `src/consumer/internals/offset_fetcher_utils.rs` now returns
+   `HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>`.
+   The previous public-class constructor call (which failed for
+   `timestamp == -1`) is replaced by a direct
+   `OffsetAndTimestampInternal::new`.
+3. Event payload type:
+   `ApplicationEvent::ListOffsets.handle` and the
+   `OffsetsRequestManager::fetch_offsets` channel type are both
+   updated to `OffsetAndTimestampInternal`.
+4. `beginning_or_end_offsets` in
+   `src/consumer/async_kafka_consumer.rs` continues to call
+   `.offset()` on the internal type (timestamp is intentionally
+   discarded — Java reads only the offset for `endOffsets`).
+5. `offsets_for_times_timeout` calls
+   `OffsetAndTimestampInternal::build_offset_and_timestamp()?` to
+   convert each entry, matching Java's
+   `OffsetAndTimestampInternal::buildOffsetAndTimestamp`. The
+   `require_timestamps=true` path guarantees non-negative
+   timestamps from the broker so the conversion succeeds in
+   practice; on broker-side bugs we propagate the
+   `IllegalArgument` rather than silently dropping the entry.
+
+**Why the filed metadata-refresh hypothesis (1) was wrong:**
+
+With `RUST_LOG=debug` tracing added to
+`OffsetsRequestManager::fetch_offsets` and `apply_partial_result`
+(temporarily, before the fix), the debug output confirmed:
+
+- `cluster.leader_for(tp)` returned `Some(Node)` (metadata was
+  fully populated for the subscription-pattern path).
+- A single ListOffsets request was sent (`requests_to_send_count =
+  1`, `requests_to_retry_count = 0`).
+- The broker responded with the high watermark
+  (`fetched=[topic1-0]`, `retry={}`).
+- The state finalized correctly
+  (`expected_responses=1 → 0`, `remaining_to_search empty=true`,
+  `waiters_count=1`).
+- The `oneshot::Sender::send` succeeded.
+
+The result-building step (`build_offsets_for_times_result`) then
+inserted `None` instead of `Some(OffsetAndTimestamp)` because
+`with_leader_epoch(offset, -1, epoch)` errored on the negative
+timestamp.
+
+**Why the assign-route worked while the subscribe-pattern route
+didn't (in the original filed report):**
+
+Both routes exercise the same `build_offsets_for_times_result`
+bug. The Phase 13a-suite-1 (PlaintextConsumerAssignTest) tests use
+`position(tp)` (which doesn't go through `endOffsets`), and the
+Phase 13a-suite-2 (PlaintextConsumerFetchTest) tests either skipped
+calls to `endOffsets(tp)` directly or used the helper that
+tolerated empty maps. The subscription tests exercised
+`end_offsets(tp)` directly and asserted on the returned value, so
+they were the first to surface the bug. The filed hypothesis
+("server-side push doesn't trigger `request_update_for_new_topics`")
+mis-read the symptom — it's a pure result-marshalling bug, not a
+metadata-refresh ordering issue.
+
+**Pattern (reusable for future Issues):**
+
+When `Issue X` references a "silent `None`→drop filter" in code,
+audit the **upstream `None`-source** before assuming the filter
+itself is the bug. Here the filter was the symptom; the bug was in
+the public-class constructor being called for a value that
+legitimately carries the broker's "no timestamp" sentinel. Java's
+public/internal type split (`OffsetAndTimestamp` vs
+`OffsetAndTimestampInternal`) is the canonical Java idiom for "same
+field, different validation depending on caller"; in Rust this
+translates to a `pub(crate)` companion type with a fallible
+`build_*` conversion.
+
+**Validation:**
+
+- `cargo build` clean.
+- `cargo test --lib` — 1704/1704 pass.
+- `cargo test --features integration-tests --test integration plaintext_consumer_subscription -- --test-threads=1` — 11/11 pass (was 9/11 with 2 ignored on Issue 6).
+- `cargo xtask format-check` clean.
+- `cargo xtask lint` clean.
+
+**Files modified (this fixup):**
+
+- `src/consumer/internals/offset_and_timestamp_internal.rs` (new).
+- `src/consumer/internals/mod.rs` — register new module.
+- `src/consumer/internals/offset_fetcher_utils.rs` —
+  `build_offsets_for_times_result` returns
+  `Option<OffsetAndTimestampInternal>`; drop the now-unused
+  `OffsetAndTimestamp` import.
+- `src/consumer/internals/offsets_request_manager.rs` —
+  `fetch_offsets` channel + `FetchOffsetsWaiter` typed to the
+  internal; deviation-note rewritten; drop the `OffsetAndTimestamp`
+  import.
+- `src/consumer/internals/events/application_event.rs` —
+  `ApplicationEvent::ListOffsets.handle` typed to the internal;
+  rustdoc rewritten; drop the `OffsetAndTimestamp` import.
+- `src/consumer/internals/events/application_event_processor.rs` —
+  `process_list_offsets` handle type + test handles updated to the
+  internal type.
+- `src/consumer/async_kafka_consumer.rs` — `beginning_or_end_offsets`
+  + `offsets_for_times_timeout` event handles use the internal;
+  `offsets_for_times_timeout` converts via
+  `build_offset_and_timestamp()?`. Two unit-test drainers updated
+  to construct `OffsetAndTimestampInternal` instead of
+  `OffsetAndTimestamp`.
+- `tests/integration/plaintext_consumer_subscription_test.rs` —
+  `#[ignore]` removed from both affected tests; module-level
+  rustdoc, the per-test rustdoc, and the `end_offset_with_retry`
+  helper rustdoc rewritten.
+- `design/history/Milestone-8/Phase-13/COMMENTS.1.md` — Issue 6
+  block replaced with pointer to this entry.
+
+**Pass count delta (subscription suite):** before 9/11 (2 ignored:
+Issue 6). After: 11/11. Other suites unchanged.

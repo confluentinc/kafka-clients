@@ -64,13 +64,13 @@ use crate::common::requests::{
 };
 use crate::common::{IsolationLevel, KafkaError, Node, TopicPartition};
 use crate::consumer::OffsetAndMetadata;
-use crate::consumer::OffsetAndTimestamp;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 
 use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
 use super::commit_request_manager::CommitRequestManager;
 use super::consumer_metadata::ConsumerMetadata;
 use super::network_client_delegate::{PollResult, UnsentRequest};
+use super::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use super::offset_fetcher_utils::{
     ListOffsetData, ListOffsetResult, OffsetFetcherUtilsState, build_offsets_for_times_result,
     has_usable_offset_for_leader_epoch_version, regroup_fetch_positions_by_leader, regroup_partition_map_by_node,
@@ -106,7 +106,8 @@ pub(crate) enum PendingCompletion {
 /// Sender used to deliver the global outcome of a `fetch_offsets` call
 /// to one waiter. Aliased to keep the `Vec<...>` declaration tractable
 /// for clippy's `type_complexity` lint.
-type FetchOffsetsWaiter = oneshot::Sender<Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError>>;
+type FetchOffsetsWaiter =
+    oneshot::Sender<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError>>;
 
 /// Per-`fetch_offsets` request state. Mirrors Java's
 /// `OffsetsRequestManager.ListOffsetsRequestState`.
@@ -735,7 +736,7 @@ impl OffsetsRequestManager {
         &mut self,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         require_timestamps: bool,
-    ) -> oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError>> {
+    ) -> oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError>> {
         let (tx, rx) = oneshot::channel();
         if timestamps_to_search.is_empty() {
             let _ = tx.send(Ok(HashMap::new()));
@@ -2650,9 +2651,9 @@ mod tests {
     /// spawned forwarder is drained and applied to the request state.
     async fn await_fetch_result(
         mgr: &mut OffsetsRequestManager,
-        rx: oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError>>,
+        rx: oneshot::Receiver<Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError>>,
         now_ms: i64,
-    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestamp>>, KafkaError> {
+    ) -> Result<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>, KafkaError> {
         // Drive the runtime forward to give the forwarder task room to
         // run, then drain pending completions.
         let mut rx = rx;
@@ -2686,13 +2687,13 @@ mod tests {
     /// with a known leader → request enqueued → success response →
     /// outer future resolves with the offset.
     ///
-    /// **Rust deviation note:** Java's `OffsetAndTimestampInternal`
-    /// permits negative timestamps (the broker may omit timestamps for
-    /// earliest/latest queries), but the Rust public `OffsetAndTimestamp`
-    /// enforces non-negative. The `ListOffsetsEvent` API uses
-    /// `Option<OffsetAndTimestamp>` to preserve the sentinel semantics —
-    /// negative timestamps surface as `None`. This test therefore uses
-    /// timestamp=100 so the assertion can pin the offset value.
+    /// The event payload carries
+    /// [`OffsetAndTimestampInternal`](super::offset_and_timestamp_internal::OffsetAndTimestampInternal),
+    /// which (matching Java) allows the broker-returned
+    /// `timestamp == -1` sentinel for `EARLIEST` / `LATEST` queries.
+    /// COMMENTS.DONE.1.md Issue 6 closed a regression where the
+    /// translation used the public-class constructor and silently
+    /// surfaced these entries as `None`.
     #[tokio::test(flavor = "current_thread")]
     async fn fetch_offsets_success_single_partition() {
         let (mut mgr, _commit_rm, _subs) = new_manager_with_commit();

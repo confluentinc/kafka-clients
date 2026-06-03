@@ -895,7 +895,10 @@ impl ApplicationEventProcessor {
     fn process_list_offsets(
         &mut self,
         handle: super::completable_event::CompletableEventHandle<
-            HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>>,
+            HashMap<
+                TopicPartition,
+                Option<crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal>,
+            >,
         >,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         require_timestamps: bool,
@@ -2497,8 +2500,12 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn list_offsets_empty_timestamps_resolves_immediately() {
         let mut fx = setup_processor(true);
-        let (handle, rx) =
-            CompletableEventHandle::<HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>>>::new(60_000);
+        let (handle, rx) = CompletableEventHandle::<
+            HashMap<
+                TopicPartition,
+                Option<crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal>,
+            >,
+        >::new(60_000);
         fx.processor.process(ApplicationEvent::ListOffsets {
             handle,
             timestamps_to_search: HashMap::new(),
@@ -2737,7 +2744,10 @@ mod tests {
         for require_timestamps in [true, false] {
             let mut fx = setup_processor(true);
             let (handle, rx) = CompletableEventHandle::<
-                HashMap<TopicPartition, Option<crate::consumer::OffsetAndTimestamp>>,
+                HashMap<
+                    TopicPartition,
+                    Option<crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal>,
+                >,
             >::new(20_000);
             fx.processor.process(ApplicationEvent::ListOffsets {
                 handle,

@@ -24,10 +24,11 @@
 //! # Methods classification
 //!
 //! The Java suite contains 14 CONSUMER-arm `@ClusterTest` methods.
-//! 11 translated; 9 pass green. 2 are `#[ignore]`-gated on production
-//! gaps documented in `design/history/Milestone-8/Phase-13/COMMENTS.1.md`:
-//!   - Issue 6: `end_offsets(tp)` returns a map omitting `tp` for a
-//!     consumer with an active `SubscriptionPattern` (2 tests).
+//! 11 translated; 11 pass green. Issue 6 (silent `None`→drop in
+//! `endOffsets` due to public-class `OffsetAndTimestamp` validation)
+//! is resolved in COMMENTS.DONE.1.md by routing the bg-task payload
+//! through `OffsetAndTimestampInternal` to match Java's
+//! `OffsetsRequestManager::fetchOffsets` signature.
 //!
 //! ## Translated (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
@@ -477,7 +478,6 @@ async fn test_async_consumer_re2j_pattern_subscription() {
 /// verification mirrors Java's semantics regardless of the
 /// auto-create-vs-admin distinction.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 6 in COMMENTS.1.md — end_offsets(tp) returns a map omitting tp for a consumer with active SubscriptionPattern, even after 30s of retries (production gap, Phase-13a)"]
 async fn test_async_consumer_re2j_pattern_subscription_fetch() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -594,15 +594,15 @@ async fn test_async_consumer_re2j_pattern_expand_subscription() {
 /// rather than assuming the topic was created empty as Java does.
 ///
 /// The Java assertion `unassigned_partition -> 0L` is replaced by
-/// "the end_offsets call succeeds and includes the assigned partition";
-/// the unassigned-partition entry can be absent in the Rust
-/// `end_offsets` map when the partition has `None` for its offset
-/// (Rust's `beginning_or_end_offsets` filters out `None` entries —
-/// `async_kafka_consumer.rs:3042-3049`). This matches Java behavior for
-/// failures but diverges for a freshly-created empty topic when
-/// metadata hasn't fully propagated. See COMMENTS.1.md Issue 6.
+/// "the end_offsets call succeeds and includes the assigned partition":
+/// Java's contract is that `endOffsets(...)` returns one entry per
+/// requested partition (its high watermark) or raises. With the
+/// `OffsetAndTimestampInternal`-payload fix landed in
+/// COMMENTS.DONE.1.md Issue 6 the Rust translation now matches that
+/// contract for any assigned partition; we still defensively drop
+/// `None` entries (which can only arise from a broker bug) rather
+/// than surface them.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 6 in COMMENTS.1.md — end_offsets(tp) returns a map omitting tp for a consumer with active SubscriptionPattern, even after 30s of retries (production gap, Phase-13a)"]
 async fn test_topic_id_subscription_with_re2j_regex_and_offsets_fetch() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -1074,11 +1074,11 @@ fn ctx_prefix<'a>(prefixed_topic: &'a str, base: &str) -> &'a str {
 }
 
 /// Calls `consumer.end_offsets(&[tp])` and retries while the result
-/// map omits `tp` (Rust's `beginning_or_end_offsets` drops partitions
-/// whose `OffsetAndTimestamp` resolved to `None`, which happens during
-/// the metadata-propagation window for freshly-provisioned topics in
-/// these tests — see Issue 6 in
-/// `design/history/Milestone-8/Phase-13/COMMENTS.1.md`).
+/// map omits `tp`. Issue 6 (COMMENTS.DONE.1.md) closed the root-cause
+/// path that silently elided every assigned-partition entry; the
+/// retry loop is retained because freshly-provisioned topics still
+/// have a brief metadata-propagation window in which the broker can
+/// legitimately return no leader yet.
 ///
 /// Returns the resolved end_offset value, or panics on timeout.
 async fn end_offset_with_retry(consumer: &mut BytesConsumer, tp: &TopicPartition, deadline_duration: Duration) -> i64 {

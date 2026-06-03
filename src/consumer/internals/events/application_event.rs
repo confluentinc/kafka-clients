@@ -38,7 +38,8 @@ use crate::common::{IsolationLevel, KafkaError, PartitionInfo, TopicPartition};
 use crate::consumer::consumer_rebalance_listener::ConsumerRebalanceListener;
 use crate::consumer::consumer_rebalance_listener_method_name::ConsumerRebalanceListenerMethodName;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
-use crate::consumer::{GroupMembershipOperation, OffsetAndMetadata, OffsetAndTimestamp, SubscriptionPattern};
+use crate::consumer::internals::offset_and_timestamp_internal::OffsetAndTimestampInternal;
+use crate::consumer::{GroupMembershipOperation, OffsetAndMetadata, SubscriptionPattern};
 
 use super::completable_event::CompletableEventHandle;
 
@@ -129,19 +130,31 @@ pub(crate) enum ApplicationEvent {
     },
     /// `ListOffsetsEvent`. Implements [`MetadataErrorNotifiable`].
     ///
-    /// Returns `HashMap<TopicPartition, Option<OffsetAndTimestamp>>` —
-    /// the `Option` mirrors Java's nullable-map-value sentinel
+    /// Returns
+    /// `HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>` —
+    /// matching Java's
+    /// `Map<TopicPartition, OffsetAndTimestampInternal>` payload.
+    /// `OffsetAndTimestampInternal` permits the broker-returned
+    /// `timestamp == -1` sentinel for `EARLIEST` / `LATEST` queries
+    /// (see Java's `OffsetAndTimestampInternal.java` class doc, and
+    /// COMMENTS.DONE.1.md Issue 6 for the regression where translating
+    /// this as the public-class `OffsetAndTimestamp` silently elided
+    /// every `endOffsets(tp)` entry). The `Option` wrapper mirrors
+    /// Java's nullable-map-value sentinel
     /// (`ListOffsetsEvent.emptyResults()` populates `null` per
-    /// partition) that the bg task uses when no offset is found.
+    /// partition) that the bg task uses when no offset is found at
+    /// all.
     ///
-    /// Note: Java returns `Map<TopicPartition, OffsetAndTimestampInternal>`
-    /// where `OffsetAndTimestampInternal` permits negative offsets /
-    /// timestamps. We deviate by using `Option<OffsetAndTimestamp>` to
-    /// preserve the sentinel semantics without introducing a second
-    /// internal type — the app-side `offsets_for_times` translates each
-    /// result before returning to the user.
+    /// App side: `offsets_for_times` calls
+    /// `OffsetAndTimestampInternal::build_offset_and_timestamp` per
+    /// entry to convert to the public-class
+    /// [`crate::consumer::OffsetAndTimestamp`].
+    /// `beginning_or_end_offsets` reads `.offset()` directly off this
+    /// payload (the broker may return `timestamp == -1` for
+    /// `LATEST` / `EARLIEST`, but the public surface returns only the
+    /// offset value).
     ListOffsets {
-        handle: CompletableEventHandle<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>,
+        handle: CompletableEventHandle<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>,
         timestamps_to_search: HashMap<TopicPartition, i64>,
         require_timestamps: bool,
     },
@@ -641,7 +654,7 @@ mod tests {
 
         // `ListOffsets` is notifiable.
         let (handle, mut rx, _erased) =
-            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestamp>>>(0);
+            make_completable_event::<HashMap<TopicPartition, Option<OffsetAndTimestampInternal>>>(0);
         let ev =
             ApplicationEvent::ListOffsets { handle, timestamps_to_search: HashMap::new(), require_timestamps: false };
         assert!(ev.on_metadata_error(KafkaError::timeout("md")));

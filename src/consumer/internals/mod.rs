@@ -42,6 +42,7 @@ pub(crate) mod heartbeat_request_state;
 pub(crate) mod member_state;
 pub(crate) mod member_state_listener;
 pub(crate) mod network_client_delegate;
+pub(crate) mod offset_and_timestamp_internal;
 pub(crate) mod offset_commit_callback_invoker;
 pub(crate) mod offset_fetcher_utils;
 pub(crate) mod offsets_for_leader_epoch_client;

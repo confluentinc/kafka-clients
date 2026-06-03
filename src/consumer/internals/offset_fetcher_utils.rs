@@ -35,13 +35,13 @@ use crate::common::requests::ListOffsetsResponse;
 use crate::common::requests::list_offsets_response::{UNKNOWN_EPOCH, UNKNOWN_OFFSET};
 use crate::common::requests::offsets_for_leader_epoch_request::supports_topic_permission;
 use crate::common::{KafkaError, Node, TopicPartition};
-use crate::consumer::OffsetAndTimestamp;
 use crate::consumer::errors::ConsumerError;
 use crate::list_offsets_request_data::ListOffsetsPartition;
 use crate::node_api_versions::NodeApiVersions;
 
 use super::auto_offset_reset_strategy::AutoOffsetResetStrategy;
 use super::consumer_metadata::ConsumerMetadata;
+use super::offset_and_timestamp_internal::OffsetAndTimestampInternal;
 use super::offsets_for_leader_epoch_client::OffsetForEpochResult;
 use super::subscription_state::{FetchPosition, LogTruncation, SubscriptionState};
 
@@ -145,29 +145,42 @@ pub(crate) fn regroup_partition_map_by_node<T: Clone>(
     result
 }
 
-/// Builds an `OffsetAndTimestamp` result map from a `timestamps_to_search`
-/// input plus per-partition fetched offsets.
+/// Builds an `OffsetAndTimestampInternal` result map from a
+/// `timestamps_to_search` input plus per-partition fetched offsets.
 ///
 /// Each input partition appears in the output (as `None` when no offset
-/// was returned for it). Translated from
-/// `OffsetFetcherUtils.buildOffsetsForTimesResult`.
+/// was returned for it; `Some(_)` otherwise — including the
+/// `endOffsets`/`beginningOffsets` case where the broker returns
+/// `timestamp == -1` as the "no timestamp" sentinel).
+///
+/// Translates Java's `OffsetFetcherUtils.buildOffsetsForTimeInternalResult`
+/// (NOT the public-class `buildOffsetsForTimesResult`): the result is
+/// the internal `OffsetAndTimestampInternal` so it can carry the broker's
+/// negative-timestamp sentinel without failing validation. The
+/// `offsetsForTimes` public API converts to [`OffsetAndTimestamp`] at
+/// its boundary; `endOffsets`/`beginningOffsets` reads `.offset()`
+/// directly.
+///
+/// Mirrors COMMENTS.DONE.1.md Issue 6: a previous translation used the
+/// public-class constructor here and silently produced `None` for every
+/// `endOffsets(tp)` because `OffsetAndTimestamp::with_leader_epoch`
+/// rejected `timestamp == -1`.
 pub(crate) fn build_offsets_for_times_result(
     timestamps_to_search: &HashMap<TopicPartition, i64>,
     fetched_offsets: &HashMap<TopicPartition, ListOffsetData>,
-) -> HashMap<TopicPartition, Option<OffsetAndTimestamp>> {
-    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestamp>> =
+) -> HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> {
+    let mut result: HashMap<TopicPartition, Option<OffsetAndTimestampInternal>> =
         HashMap::with_capacity(timestamps_to_search.len());
     for tp in timestamps_to_search.keys() {
         result.insert(tp.clone(), None);
     }
     for (tp, offset_data) in fetched_offsets {
-        let oat = OffsetAndTimestamp::with_leader_epoch(
+        let oat = OffsetAndTimestampInternal::new(
             offset_data.offset,
             offset_data.timestamp.unwrap_or(-1),
             offset_data.leader_epoch,
-        )
-        .ok();
-        result.insert(tp.clone(), oat);
+        );
+        result.insert(tp.clone(), Some(oat));
     }
     result
 }
