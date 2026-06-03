@@ -23,19 +23,20 @@
 //!
 //! # Translated methods (KIP-848 / `GroupProtocol.CONSUMER` arm only)
 //!
-//! All 9 KIP-848 tests are translated. 7 of 9 pass end-to-end. 2 are
-//! `#[ignore]`-gated on a single newly-surfaced production gap:
-//! `AsyncKafkaConsumer::poll_for_fetches` swallows the error from
-//! `FetchCollector::collect_fetch` instead of propagating it to the
-//! `poll()` caller (Java's `pollForFetches` does NOT catch). See
-//! `design/history/Milestone-8/Phase-13/COMMENTS.1.md` Issue 4.
-//! Affected tests:
-//!
-//!   - `test_async_consumer_fetch_invalid_offset` — relies on
-//!     `OffsetOutOfRange` being surfaced after `seek(out_of_range)`.
-//!   - `test_async_consumer_fetch_out_of_range_offset_reset_config_earliest`
-//!     — relies on the same surface for the reset-loop to settle
-//!     within the test deadline.
+//! All 9 KIP-848 tests are translated and pass end-to-end. Previously
+//! `test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration`
+//! was `#[ignore]`-gated on Issue 5 (`auto.offset.reset=by_duration:PT1H`
+//! never landing on a position). Issue 5 was resolved transitively by the
+//! Issue 7 fix (transient-state skip in `fetch_collector` /
+//! `abstract_fetch`) and the Issue 9 fix (KIP-848 `GroupIdNotFound` retry
+//! + poll-timer init): once these fixes let the consumer ride out the
+//! transient "Missing position" / fence-rejoin states, the `by_duration`
+//! `ListOffsetsByTimestamp` reset path — which was already wired in
+//! `AutoOffsetResetStrategy::timestamp()` and consumed by
+//! `OffsetFetcherUtils::get_offset_reset_strategy_for_partitions` and
+//! `OffsetsRequestManager::send_list_offsets_requests_and_reset_positions`
+//! — successfully computes the time-bounded position. See
+//! `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md` Issue 5.
 //!
 //! - `testAsyncConsumerFetchInvalidOffset`
 //!   → `test_async_consumer_fetch_invalid_offset`
@@ -624,7 +625,6 @@ async fn test_async_consumer_fetch_out_of_range_offset_reset_config_latest() {
 ///    consumer's first read and the post-out-of-range reset both land
 ///    on that record.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 5 in COMMENTS.1.md — auto.offset.reset=by_duration:PT1H does not compute a position after a fresh assign(); fetch reports 'Missing position for fetchable partition' (Phase-7 gap)"]
 async fn test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");

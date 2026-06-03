@@ -378,3 +378,66 @@ Three-part fix:
 **Pass count delta (poll suite):** before 3/8 (5 ignored: Issues 8/9/9/9/9). After: 5/8
 (3 ignored: Issues 8/10/11). Other suites unchanged: assign 8/8, fetch 8/9 (Issue 5),
 subscription 9/11 (Issue 6).
+
+---
+
+## Issue 5: `auto.offset.reset=by_duration:PT1H` does not compute position after fresh `assign()`
+
+Originally filed by: Manager during Phase 13a (2/N) re-run after Issue 4 was fixed.
+
+**Affected Rust test:**
+  - `tests/integration/plaintext_consumer_fetch_test.rs::test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration`
+
+**Symptom (when originally filed):** Consumer constructed with `auto.offset.reset=by_duration:PT1H`,
+fresh `assign(vec![tp])` to a topic-partition with records produced within the last hour. First `poll()`
+returned: `IllegalState("Missing position for fetchable partition <topic>-0")`. Per the Phase 13a (3/N)
+"Side effect on Issue 5" note in the Issue 7 entry above, the symptom morphed after Issue 7's fix:
+the `IllegalState` was swallowed and the test instead hung waiting for a position that never
+materialized.
+
+**Resolution:** Closed transitively — no additional code change required. The `by_duration` wire
+path was already complete:
+
+- `src/consumer/internals/auto_offset_reset_strategy.rs::timestamp()` already returns
+  `Some(now_millis - duration_millis)` for the `ByDuration` arm (lines 144–152), mirroring Java's
+  `OffsetResetStrategy.BY_DURATION → currentTimeMs - duration` in `OffsetFetcherUtils.resetPositions`.
+- `src/consumer/internals/offset_fetcher_utils.rs::get_offset_reset_strategy_for_partitions` already
+  accepts any strategy whose `timestamp()` is `Some(_)` (line 355) and does not single-case
+  `EARLIEST`/`LATEST`.
+- `src/consumer/internals/offsets_request_manager.rs::send_list_offsets_requests_and_reset_positions`
+  already drives one `ListOffsets` request per leader using the per-partition timestamp from
+  `strategy.timestamp()` (lines 821–828) — no special-case for `EARLIEST_TIMESTAMP` /
+  `LATEST_TIMESTAMP` vs. a positive timestamp value.
+
+The original failure mode and its post-Issue-7 hang both arose from *upstream* gaps that prevented
+the consumer from completing its first heartbeat → assignment → reset loop quickly enough on the
+3-broker KIP-848 cluster:
+
+1. **Issue 7's fix** (`fetch_collector` / `abstract_fetch` skip-on-transient-state) stopped the
+   surface-level `IllegalState` race that masked the eventual reset.
+2. **Issue 9's fix** (KIP-848 `GroupIdNotFound` retry + poll-timer init i64::MAX sentinel) let the
+   STALE → JOINING transition complete before `poll_for_fetches` reported a missing position. With
+   both fixes in place the `ListOffsetsByTimestamp` response (carrying the offset of the first
+   record at or after `now − 1h`) arrives and `OffsetFetcherUtils::reset_position_if_needed` seats
+   the position via `maybe_seek_unvalidated`.
+
+**Validation:**
+
+- `cargo build` clean.
+- `cargo test --lib` — 1700+ pass (no regression).
+- `cargo test --features integration-tests --test integration plaintext_consumer_fetch -- --include-ignored --test-threads=1`:
+  - 9/9 tests pass (one isolated flake on `_latest` cleared on retry; not related to this fix
+    or test).
+- `cargo xtask format-check` clean.
+- `cargo xtask lint` clean.
+
+**Files modified (this fixup):**
+
+- `tests/integration/plaintext_consumer_fetch_test.rs` — `#[ignore]` attribute removed from
+  `test_async_consumer_fetch_out_of_range_offset_reset_config_by_duration`; module-level rustdoc
+  rewritten ("All 9 KIP-848 tests are translated and pass end-to-end").
+- `design/history/Milestone-8/Phase-13/COMMENTS.1.md` — Issue 5 block replaced with pointer to
+  this entry.
+
+**Pass count delta (fetch suite):** before 8/9 (1 ignored: Issue 5). After: 9/9. Other suites
+unchanged.
