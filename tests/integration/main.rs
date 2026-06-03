@@ -28,5 +28,6 @@ mod consumer_test;
 mod metadata_test;
 mod plaintext_consumer_assign_test;
 mod plaintext_consumer_fetch_test;
+mod plaintext_consumer_subscription_test;
 mod producer_test;
 mod ssl_sasl_test;
