@@ -79,9 +79,31 @@ pub(crate) struct AbstractHeartbeatRequestManager {
     /// Channel for surfacing errors and rebalance-listener callback
     /// events back to the application thread.
     pub(crate) background_event_handler: Arc<BackgroundEventHandler>,
-    /// Absolute wall-clock millisecond expiration for the poll timer.
-    /// Java models this with a `Timer`; Rust stores the deadline
-    /// directly (mirroring [`HeartbeatRequestState`]).
+    /// Absolute wall-clock millisecond expiration for the poll timer, or
+    /// [`i64::MAX`] as a sentinel meaning "not armed yet".
+    ///
+    /// Java models this with a `Timer` armed at construction
+    /// (`AbstractHeartbeatRequestManager.java:119`:
+    /// `this.pollTimer = time.timer(maxPollIntervalMs);`). In the Rust
+    /// translation the timer is **not** armed at construction — it is
+    /// armed by the first [`Self::reset_poll_timer`] call from the
+    /// `ApplicationEventProcessor::process(AsyncPollEvent)` arm
+    /// (mirroring Java's `hrm.resetPollTimer(event.pollTimeMs())`).
+    ///
+    /// **Why the deviation from Java**: Java's bg-thread starts running
+    /// the heartbeat manager's `poll()` more or less immediately on
+    /// consumer construction, and the `pollTimer.update(now)` call
+    /// inside `poll()` keeps the timer tracking real time. The Rust bg
+    /// task has higher latency to spin up (one `tokio::spawn` + the
+    /// first response round-trip) — with `max.poll.interval.ms=1000`
+    /// the consumer can already be near-expired by the time the user's
+    /// first `poll()` call lands, and the consumer fences itself during
+    /// the initial join sequence. By deferring the timer arm to the
+    /// first `reset_poll_timer` (Java's `resetPollTimer` is called on
+    /// every `AsyncPollEvent`, so semantics are preserved for the
+    /// steady-state case), we ensure the initial join + assignment
+    /// window has a full `max.poll.interval.ms` budget. See Issue 9 in
+    /// `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
     poll_timer_expires_at_ms: i64,
 }
 
@@ -119,7 +141,11 @@ impl AbstractHeartbeatRequestManager {
             coordinator_request_manager,
             heartbeat_request_state,
             background_event_handler,
-            poll_timer_expires_at_ms: current_time_ms + i64::from(max_poll_interval_ms),
+            // Deviation from Java: poll timer is NOT armed at
+            // construction. It is armed by the first
+            // `reset_poll_timer` call from the AsyncPoll event
+            // arm. See [`Self::poll_timer_expires_at_ms`] doc-comment.
+            poll_timer_expires_at_ms: i64::MAX,
         }
     }
 
@@ -127,7 +153,7 @@ impl AbstractHeartbeatRequestManager {
     /// [`HeartbeatRequestState`] (mirrors Java's package-private second
     /// constructor).
     pub(crate) fn with_state(
-        current_time_ms: i64,
+        _current_time_ms: i64,
         config: &ConsumerConfig,
         coordinator_request_manager: Arc<CoordinatorRequestManager>,
         heartbeat_request_state: HeartbeatRequestState,
@@ -139,7 +165,10 @@ impl AbstractHeartbeatRequestManager {
             coordinator_request_manager,
             heartbeat_request_state,
             background_event_handler,
-            poll_timer_expires_at_ms: current_time_ms + i64::from(max_poll_interval_ms),
+            // See [`Self::poll_timer_expires_at_ms`] doc-comment — the
+            // timer is armed by the first `reset_poll_timer` call, not
+            // at construction.
+            poll_timer_expires_at_ms: i64::MAX,
         }
     }
 
@@ -148,15 +177,21 @@ impl AbstractHeartbeatRequestManager {
         current_time_ms >= self.poll_timer_expires_at_ms
     }
 
-    /// Returns remaining ms on the poll timer, clamped at 0.
+    /// Returns remaining ms on the poll timer, clamped at 0. When the
+    /// timer is not armed yet (Issue 9), [`Self::poll_timer_expires_at_ms`]
+    /// is [`i64::MAX`] and `saturating_sub` produces [`i64::MAX`] — i.e.
+    /// "infinite time remaining".
     pub(crate) fn poll_timer_remaining_ms(&self, current_time_ms: i64) -> i64 {
-        (self.poll_timer_expires_at_ms - current_time_ms).max(0)
+        self.poll_timer_expires_at_ms.saturating_sub(current_time_ms).max(0)
     }
 
     /// Returns ms by which the poll timer is overdue (negative if not
-    /// expired). Mirrors Java's `Timer.isExpiredBy()`.
+    /// expired). Mirrors Java's `Timer.isExpiredBy()`. When the timer is
+    /// not armed yet (Issue 9), [`Self::poll_timer_expires_at_ms`] is
+    /// [`i64::MAX`] and `saturating_sub` produces [`i64::MIN`] — i.e.
+    /// "very not overdue".
     pub(crate) fn poll_timer_is_expired_by(&self, current_time_ms: i64) -> i64 {
-        current_time_ms - self.poll_timer_expires_at_ms
+        current_time_ms.saturating_sub(self.poll_timer_expires_at_ms)
     }
 
     /// Resets the poll timer so it expires `max_poll_interval_ms` from
@@ -238,6 +273,14 @@ impl AbstractHeartbeatRequestManager {
                 // Backoff and retry.
                 HeartbeatErrorAction::Handled
             },
+            // Note: `Errors::GroupIdNotFound` is intentionally NOT
+            // handled at the abstract layer — it falls through to
+            // `DelegateToSpecific` so the consumer-specific layer
+            // (`ConsumerHeartbeatRequestManager::handle_specific_exception_in_response`)
+            // can branch on the current `memberEpoch`. See that
+            // method's `GROUP_ID_NOT_FOUND` arm for the rationale and
+            // Issue 9 in
+            // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
             Errors::GroupAuthorizationFailed => HeartbeatErrorAction::Fatal(KafkaError::with_message(
                 Errors::GroupAuthorizationFailed,
                 error_message.to_string(),
@@ -371,20 +414,35 @@ mod tests {
         AbstractHeartbeatRequestManager::new(now, &config, coord, beh)
     }
 
-    /// Poll timer starts running on construction.
+    /// Poll timer is NOT armed at construction (Issue 9 fix in
+    /// `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`).
+    /// `poll_timer_is_expired` returns `false` for any `current_time_ms`
+    /// until the first [`AbstractHeartbeatRequestManager::reset_poll_timer`]
+    /// call arms it.
     #[test]
-    fn poll_timer_starts_running() {
+    fn poll_timer_not_armed_at_construction() {
         let mgr = make_state(0);
         assert!(!mgr.poll_timer_is_expired(0));
-        // Default max.poll.interval.ms is 300_000.
-        assert!(mgr.poll_timer_is_expired(300_000));
+        // Even with `current_time_ms` far beyond the default
+        // `max.poll.interval.ms=300_000`, the timer is not expired
+        // because it has not been armed.
+        assert!(!mgr.poll_timer_is_expired(300_000));
+        assert!(!mgr.poll_timer_is_expired(i64::MAX - 1));
     }
 
-    /// Reset re-arms the timer from the new "now".
+    /// First call to `reset_poll_timer` arms the timer at
+    /// `current_time_ms + max_poll_interval_ms`.
     #[test]
-    fn reset_poll_timer_rearms() {
+    fn reset_poll_timer_arms_then_rearms() {
         let mut mgr = make_state(0);
-        assert!(mgr.poll_timer_is_expired(300_000));
+        // Initially not expired (not armed).
+        assert!(!mgr.poll_timer_is_expired(300_000));
+        // First call arms it: expires at `100 + 300_000`.
+        mgr.reset_poll_timer(100);
+        assert!(!mgr.poll_timer_is_expired(100));
+        assert!(!mgr.poll_timer_is_expired(300_099));
+        assert!(mgr.poll_timer_is_expired(300_100));
+        // Second call re-arms relative to the new "now".
         mgr.reset_poll_timer(300_000);
         assert!(!mgr.poll_timer_is_expired(300_000));
         assert!(mgr.poll_timer_is_expired(600_000));

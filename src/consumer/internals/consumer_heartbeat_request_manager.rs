@@ -686,7 +686,7 @@ impl ConsumerHeartbeatRequestManager {
 
     /// Wrap the shared `classify_response_error` dispatch with the
     /// Consumer-specific extras (UNSUPPORTED_VERSION, UNRELEASED_INSTANCE_ID,
-    /// FENCED_INSTANCE_ID).
+    /// FENCED_INSTANCE_ID, GROUP_ID_NOT_FOUND).
     pub(crate) fn handle_specific_exception_in_response(
         &mut self,
         error: crate::common::protocol::Errors,
@@ -724,6 +724,62 @@ impl ConsumerHeartbeatRequestManager {
                     error,
                     error_message.to_string(),
                 )))
+            },
+            Errors::GroupIdNotFound => {
+                // KIP-848 fence-and-rejoin transient. See Issue 9 in
+                // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
+                //
+                // The broker returns `GROUP_ID_NOT_FOUND` from
+                // `getOrMaybeCreateConsumerGroup(...,
+                // createIfNotExists = memberEpoch == 0, ...)`
+                // (`GroupMetadataManager.java:2326-2327`) only when
+                // both:
+                //
+                //   1. The group does not exist on the broker
+                //      (typically because it was just reaped after the
+                //      last member left), AND
+                //   2. `createIfNotExists` is `false`, which happens
+                //      when `memberEpoch != 0`.
+                //
+                // Java treats this as fatal
+                // (`AbstractHeartbeatRequestManager.java:435-441`'s
+                // default arm); we deviate here to keep the consumer
+                // recoverable. Behavior depends on the membership
+                // manager's current epoch:
+                //
+                // - **memberEpoch > 0** (member previously in-group;
+                //   group has been reaped): treat as `Fenced`. The
+                //   `Fenced` flow transitions through FENCED → JOINING,
+                //   which sets `memberEpoch = 0` (Java's `resetEpoch`).
+                //   The next heartbeat carries the fresh epoch and
+                //   re-creates the group on the broker.
+                // - **memberEpoch == 0** (first heartbeat after a
+                //   fresh subscribe; or a previously-fenced consumer
+                //   that hasn't yet been able to send the rejoin):
+                //   the broker should have created the group on this
+                //   heartbeat — receiving `GROUP_ID_NOT_FOUND` here
+                //   means the broker hit a transient bad state.
+                //   Backoff + retry by treating as `Handled`. The
+                //   `classify_response_error` caller in the abstract
+                //   layer already calls `on_failed_attempt(...)`
+                //   before we reach this method, so the next
+                //   heartbeat is naturally backed off.
+                let member_epoch = self.membership_manager.member_epoch();
+                if member_epoch == 0 {
+                    log::warn!(
+                        "ConsumerGroupHeartbeatRequest failed with GROUP_ID_NOT_FOUND on first heartbeat \
+                         (memberEpoch=0): {}. Will retry with backoff.",
+                        error_message
+                    );
+                    Some(HeartbeatErrorAction::Handled)
+                } else {
+                    log::warn!(
+                        "ConsumerGroupHeartbeatRequest failed with GROUP_ID_NOT_FOUND while rejoining \
+                         (memberEpoch={member_epoch}): {error_message}. Member will rejoin from scratch."
+                    );
+                    self.inner.heartbeat_request_state.reset();
+                    Some(HeartbeatErrorAction::Fenced)
+                }
             },
             _ => None,
         }

@@ -1885,7 +1885,15 @@ async fn commit_sync_with_retries(
         match request_rx.await {
             Ok(Ok(value)) => break Ok(value),
             Ok(Err(err)) => {
-                let retriable = err.is_retriable();
+                // KIP-848 transient: see the doc-comment in
+                // [`fetch_offsets_with_retries`] for the rationale.
+                // `OffsetCommit` can also surface
+                // `GROUP_ID_NOT_FOUND` from the broker during the
+                // initial join window or during fence-rejoin cycles;
+                // treat it as retriable in the driver. See Issue 9 in
+                // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
+                let is_group_creation_in_progress = err.error() == Errors::GroupIdNotFound;
+                let retriable = err.is_retriable() || is_group_creation_in_progress;
                 if !retriable {
                     // Java's commitSyncExceptionForError wraps
                     // STALE_MEMBER_EPOCH as a CommitFailedException;
@@ -1984,7 +1992,12 @@ async fn auto_commit_sync_before_rebalance_with_retries(
                 // is a RetriableException OR the stale-epoch case AND a
                 // valid member epoch is currently known.
                 let is_stale_epoch_with_valid_epoch = err.error() == Errors::StaleMemberEpoch && has_valid_member_epoch;
-                let is_retriable_for_rebalance = err.is_retriable() || is_stale_epoch_with_valid_epoch;
+                // KIP-848 transient: see [`fetch_offsets_with_retries`]
+                // for the rationale (Issue 9 in
+                // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`).
+                let is_group_creation_in_progress = err.error() == Errors::GroupIdNotFound;
+                let is_retriable_for_rebalance =
+                    err.is_retriable() || is_stale_epoch_with_valid_epoch || is_group_creation_in_progress;
                 if !is_retriable_for_rebalance {
                     log::debug!("Auto-commit sync before rebalance failed with non-retriable error: {err}");
                     break Err(err);
@@ -2128,7 +2141,25 @@ async fn fetch_offsets_with_retries(
                     guard.member_info.member_epoch.is_some()
                 };
                 let is_stale_epoch_retriable = err.error() == Errors::StaleMemberEpoch && has_valid_member_epoch;
-                let is_retriable = err.is_retriable() || is_stale_epoch_retriable;
+                // KIP-848 transient: a fresh consumer (or one rejoining
+                // after a fence) may dispatch `OffsetFetch` before the
+                // broker has finished creating the consumer group (the
+                // group is created on first heartbeat). Java's
+                // production semantics do not retry `GROUP_ID_NOT_FOUND`
+                // explicitly (`CommitRequestManager.java:1099-1101`
+                // catches it in the final `else` and wraps as
+                // non-retriable). However, on KIP-848 brokers we
+                // observe it as a transient during the join window and
+                // during fence-rejoin cycles, where retrying after the
+                // backoff lets the heartbeat manager land its first HB
+                // first and the broker registers the group. Treat it as
+                // retriable in the driver, without
+                // [`CommitRequestManagerInner::mark_coordinator_unknown`]
+                // — the coordinator is correct; the group simply does
+                // not exist yet. See Issue 9 in
+                // `design/history/Milestone-8/Phase-13/COMMENTS.DONE.1.md`.
+                let is_group_creation_in_progress = err.error() == Errors::GroupIdNotFound;
+                let is_retriable = err.is_retriable() || is_stale_epoch_retriable || is_group_creation_in_progress;
                 if !is_retriable {
                     break Err(err);
                 }

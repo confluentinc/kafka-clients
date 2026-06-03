@@ -1272,6 +1272,28 @@ impl ApplicationEventProcessor {
                         if let Err(e) = mm.abstract_mm.on_consumer_poll(join_epoch) {
                             log::warn!("on_consumer_poll failed: {}", e);
                         }
+                        // Java's `resetPollTimer(pollMs)` checks
+                        // `pollTimer.isExpired()` BEFORE the reset and
+                        // calls `membershipManager().maybeRejoinStaleMember()`
+                        // when expired
+                        // (`AbstractHeartbeatRequestManager.java:265-274`).
+                        // Required for fence-rejoin recovery: when the
+                        // poll timer expires the heartbeat manager
+                        // transitions the member to STALE via leave
+                        // group; the next `poll()` is what brings it
+                        // back to JOINING. Without this, the member
+                        // remains STALE forever and `max.poll.interval.ms`
+                        // -driven fence tests cannot rejoin.
+                        if hrm.inner().poll_timer_is_expired(poll_time_ms) {
+                            log::warn!(
+                                "Time between subsequent calls to poll() was longer than the configured \
+                                 max.poll.interval.ms, exceeded approximately by {} ms. Member {} will rejoin \
+                                 the group now.",
+                                hrm.inner().poll_timer_is_expired_by(poll_time_ms),
+                                mm.member_id(),
+                            );
+                            mm.abstract_mm.maybe_rejoin_stale_member(join_epoch);
+                        }
                         hrm.inner_mut().reset_poll_timer(poll_time_ms);
                     }
                 }

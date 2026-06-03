@@ -548,7 +548,7 @@ async fn test_async_consumer_max_poll_records() {
 /// `poll_timer_is_expired(current_time_ms)` and transitions the member
 /// to LeaveGroup, causing the broker-side fence + rejoin sequence.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 9 in COMMENTS.1.md — GroupIdNotFound surfaces from OffsetFetch before first heartbeat lands; poll timer also starts at consumer construction, not first poll()"]
+#[ignore = "Issue 10 in COMMENTS.1.md — broker assignment latency on a fresh group can exceed max.poll.interval.ms=1000, triggering an extra fence-rejoin during the initial join window (callsToAssigned=2 instead of 1)"]
 async fn test_async_consumer_max_poll_interval_ms() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -863,7 +863,6 @@ impl ConsumerRebalanceListener for DelayInAssignmentListener {
 /// inside `on_partitions_assigned`), `ensureNoRebalance` confirms the
 /// member is still in the group.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 9 in COMMENTS.1.md — GroupIdNotFound surfaces from OffsetFetch before first heartbeat lands; same root cause as test_async_consumer_max_poll_interval_ms"]
 async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -910,7 +909,6 @@ async fn test_async_consumer_max_poll_interval_ms_delay_in_assignment() {
 /// the poll timer is reset on the poll-completion path; no rebalance
 /// should be triggered.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 9 in COMMENTS.1.md — flaky when run after the other max.poll.interval.ms=1000 tests on the same shared cluster; passes alone. Same root cause as Issue 9."]
 async fn test_async_consumer_max_poll_interval_ms_shorter_than_poll_timeout() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");
@@ -1127,7 +1125,7 @@ impl ConsumerRebalanceListener for DelayedRevocationFenceListener {
 /// rejoining on the next poll, with the new topic as subscription, and
 /// successfully consume records from `tpOther`.
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "Issue 9 in COMMENTS.1.md — GroupIdNotFound surfaces from OffsetFetch before first heartbeat lands; max.poll.interval.ms=1000 makes the race deterministic"]
+#[ignore = "Issue 11 in COMMENTS.1.md — auto.offset.reset=earliest causes consumer to see the no-op provisioner record at offset 0 in addition to the 10 real records, breaking the count assertion. Pre-existing test-fixture issue surfaced after Issue 9 was fixed; needs a topic-provisioning approach that doesn't write a record on every partition."]
 async fn test_async_consumer_recovery_on_poll_after_delayed_rebalance() {
     let mut ctx = TestContext::new(cluster_config_with_kip848_3brokers()).await;
     let topic = ctx.topic("topic");

@@ -651,15 +651,42 @@ impl AbstractMembershipManager {
         Ok(())
     }
 
-    /// Java: `maybeRejoinStaleMember()`. Marker for the
-    /// (Phase 10-managed) stale-rejoin path. We mirror Java's flag
-    /// reset behavior; the actual rejoin is driven by the bg task.
-    pub(crate) fn maybe_rejoin_stale_member(&self) {
-        let mut guard = match self.inner.lock() {
-            Ok(g) => g,
-            Err(p) => p.into_inner(),
+    /// Java: `maybeRejoinStaleMember()`
+    /// (`AbstractMembershipManager.java:776-783`). Resets the
+    /// `isPollTimerExpired` flag; if the member is currently STALE,
+    /// transitions it to JOINING so the next heartbeat re-joins the
+    /// group with `memberEpoch=0`.
+    ///
+    /// **Translation note**: Java's `transitionToJoining()` happens via
+    /// `staleMemberAssignmentRelease.whenComplete((__, error) -> transitionToJoining())`
+    /// — i.e. after the onPartitionsLost callback that ran during the
+    /// fence flow completes. In Rust the listener is invoked
+    /// synchronously on the caller's task via the §31 handshake
+    /// (`process_background_events`), so by the time the next
+    /// `consumer.poll()` arms `AsyncPoll` and the AEP arm calls into
+    /// here, the onPartitionsLost callback has already returned. We
+    /// therefore transition inline without a whenComplete dance.
+    ///
+    /// `join_group_epoch` is supplied by the caller — Phase 10's AEP
+    /// `AsyncPoll` arm reads it via
+    /// [`crate::consumer::internals::consumer_membership_manager::ConsumerMembershipManager::join_group_epoch`]
+    /// just before invoking this method.
+    pub(crate) fn maybe_rejoin_stale_member(&self, join_group_epoch: i32) {
+        let should_transition_to_joining = {
+            let mut guard = match self.inner.lock() {
+                Ok(g) => g,
+                Err(p) => p.into_inner(),
+            };
+            guard.is_poll_timer_expired = false;
+            guard.state == MemberState::Stale
         };
-        guard.is_poll_timer_expired = false;
+        if should_transition_to_joining {
+            // Re-acquire the lock for the transition — `transition_to_joining`
+            // takes its own guard.
+            if let Err(e) = self.transition_to_joining(join_group_epoch) {
+                log::warn!("maybe_rejoin_stale_member: transition_to_joining failed: {}", e);
+            }
+        }
     }
 
     /// Java: `transitionToFatal()`.
