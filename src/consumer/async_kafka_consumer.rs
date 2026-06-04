@@ -650,6 +650,13 @@ where
         let (_app_event_tx, _app_event_rx) = mpsc::unbounded_channel::<
             crate::consumer::internals::events::application_event::ApplicationEventEnvelope,
         >();
+        // Shared wake signal: the app side fires it on every
+        // `ApplicationEventHandler::add`; the bg task `select!`s on it so a
+        // freshly enqueued event preempts the network poll immediately
+        // (Java's `wakeupNetworkThread()`). Without it, events submitted
+        // while the bg task is parked in `poll_default` wait up to
+        // `MAX_POLL_TIMEOUT_MS` before being serviced.
+        let event_notify = Arc::new(tokio::sync::Notify::new());
 
         // Java line 411 — `subscriptions = createSubscriptionState(config,
         // logContext)`. The `auto.offset.reset` strategy is parsed once at
@@ -1073,7 +1080,8 @@ where
         );
 
         // Java lines 471-481 — `applicationEventHandler`.
-        let application_event_handler = Arc::new(ApplicationEventHandler::new(_app_event_tx));
+        let application_event_handler =
+            Arc::new(ApplicationEventHandler::new(_app_event_tx, Arc::clone(&event_notify)));
 
         // Java lines 482-487 — `rebalanceListenerInvoker`.
         let rebalance_listener_invoker = ConsumerRebalanceListenerInvoker::new(Arc::clone(&subscriptions));
@@ -1127,6 +1135,7 @@ where
             membership_opt.clone(),
             wakeup_trigger.clone(),
             Arc::clone(&max_time_to_wait_ms),
+            Arc::clone(&event_notify),
         );
 
         // Capture the running-flag + wakeup handles before moving
@@ -3984,7 +3993,10 @@ mod tests {
         // Test stand-in for the bg task's app-event receiver. Tests hold
         // this `app_event_rx` and pull events off it themselves.
         let (app_handler_tx, app_event_rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
-        let app_handler = Arc::new(ApplicationEventHandler::new(app_handler_tx));
+        let app_handler = Arc::new(ApplicationEventHandler::new(
+            app_handler_tx,
+            Arc::new(tokio::sync::Notify::new()),
+        ));
         let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
         let max_time = Arc::new(AtomicI64::new(0));
         let wakeup = WakeupTrigger::new();

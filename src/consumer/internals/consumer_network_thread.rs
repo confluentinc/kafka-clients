@@ -100,7 +100,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI64, Ordering};
 
-use tokio::sync::{Mutex as AsyncMutex, mpsc, watch};
+use tokio::sync::{Mutex as AsyncMutex, Notify, mpsc, watch};
 use tokio_util::sync::CancellationToken;
 
 use crate::kafka_client::KafkaClient;
@@ -191,6 +191,15 @@ pub(crate) struct ConsumerNetworkThread<K: KafkaClient + Send + 'static> {
     /// Watch-channel subscription used to re-read the current wakeup
     /// token at the top of every iteration.
     wakeup_rx: watch::Receiver<CancellationToken>,
+    /// Wake signal fired by the app side whenever an application event is
+    /// enqueued (the same `Arc<Notify>` held by
+    /// [`super::events::application_event_handler::ApplicationEventHandler`]).
+    /// The `run_once` network-poll `select!` has a `notified()` arm so a
+    /// freshly enqueued event preempts the (up to `MAX_POLL_TIMEOUT_MS`)
+    /// blocking poll immediately — the Rust analog of Java's
+    /// `add()` → `wakeupNetworkThread()` → `Selector.wakeup()`. Without it
+    /// fetches would only be issued on the `MAX_POLL_TIMEOUT_MS` cadence.
+    event_notify: Arc<Notify>,
     /// Shutdown signal — flipped to `true` by [`Self::signal_close`].
     /// The bg-task loop exits cleanly the next iteration.
     running: Arc<AtomicBool>,
@@ -238,6 +247,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
         membership: Option<Arc<ConsumerMembershipManager>>,
         wakeup: WakeupTrigger,
         cached_max_time_to_wait_ms: Arc<AtomicI64>,
+        event_notify: Arc<Notify>,
     ) -> Self {
         // Seed the shared slot with `MAX_POLL_TIMEOUT_MS` — Java's
         // `ApplicationEventHandler.maximumTimeToWait()` returns
@@ -255,6 +265,7 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
             request_managers,
             wakeup,
             wakeup_rx,
+            event_notify,
             running: Arc::new(AtomicBool::new(true)),
             cached_max_time_to_wait_ms,
             close_timeout_ms: AtomicI64::new(DEFAULT_CLOSE_TIMEOUT_MS),
@@ -562,6 +573,21 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
                     // the wakeup. Java's equivalent is the
                     // `WakeupException` thrown by the selector.
                     log::trace!("Network-client poll preempted by wakeup");
+                }
+                _ = self.event_notify.notified() => {
+                    // An application event was enqueued while we were about
+                    // to (or already) park in `poll_default`. Break out so
+                    // the next `run_once` iteration drains it via
+                    // `process_application_events` and ships the resulting
+                    // request immediately, instead of waiting up to
+                    // `MAX_POLL_TIMEOUT_MS`. This is the Rust analog of
+                    // Java's `add()` → `wakeupNetworkThread()` →
+                    // `Selector.wakeup()`. `notify_one()` stores a permit
+                    // when no waiter is parked, so an event enqueued in the
+                    // gap between the top-of-loop `try_recv` drain and this
+                    // `select!` is not lost — the permit makes the next
+                    // `notified()` resolve immediately.
+                    log::trace!("Network-client poll preempted by application-event notify");
                 }
                 _ = delegate_guard.poll_default(poll_wait_time_ms, current_time_ms) => {}
             }
@@ -1030,6 +1056,12 @@ mod tests {
         poll_call_count: Arc<AtomicUsize>,
         poll_timeouts: Arc<Mutex<Vec<i64>>>,
         has_in_flight_script: Arc<Mutex<VecDeque<bool>>>,
+        /// When `true`, `poll(...)` parks on `poll_release` before
+        /// delegating — simulates a real socket poll blocking on I/O
+        /// readiness. Used by the application-event-notify regression test
+        /// to prove the `run_once` `select!` preempts a blocked poll.
+        poll_block: Arc<AtomicBool>,
+        poll_release: Arc<Notify>,
     }
 
     impl CountingClient {
@@ -1039,6 +1071,8 @@ mod tests {
                 poll_call_count: Arc::new(AtomicUsize::new(0)),
                 poll_timeouts: Arc::new(Mutex::new(Vec::new())),
                 has_in_flight_script: Arc::new(Mutex::new(VecDeque::new())),
+                poll_block: Arc::new(AtomicBool::new(false)),
+                poll_release: Arc::new(Notify::new()),
             }
         }
 
@@ -1050,6 +1084,9 @@ mod tests {
         }
         fn has_in_flight_script(&self) -> Arc<Mutex<VecDeque<bool>>> {
             self.has_in_flight_script.clone()
+        }
+        fn poll_block(&self) -> Arc<AtomicBool> {
+            self.poll_block.clone()
         }
     }
 
@@ -1078,6 +1115,13 @@ mod tests {
         async fn poll(&mut self, timeout: i64, now: i64) -> Vec<crate::ClientResponse> {
             self.poll_call_count.fetch_add(1, Ordering::SeqCst);
             self.poll_timeouts.lock().unwrap().push(timeout);
+            if self.poll_block.load(Ordering::SeqCst) {
+                // Block until explicitly released — emulates a socket poll
+                // waiting on I/O readiness. The notify regression test
+                // never releases this, so the only way out of `run_once`'s
+                // poll phase is the `event_notify.notified()` `select!` arm.
+                self.poll_release.notified().await;
+            }
             self.inner.poll(timeout, now).await
         }
         async fn disconnect(&mut self, node_id: &str) {
@@ -1230,6 +1274,7 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
         );
         (
             CountingFixture { thread, time, delegate, reaper, tx },
@@ -1237,6 +1282,61 @@ mod tests {
             poll_timeouts,
             has_in_flight_script,
         )
+    }
+
+    /// Regression test for the ~5-second fetch-latency bug: an application
+    /// event enqueued while the bg task is parked in `poll_default` must
+    /// preempt the (up to `MAX_POLL_TIMEOUT_MS`) network poll immediately,
+    /// via the `event_notify.notified()` arm of `run_once`'s `select!`.
+    ///
+    /// The fixture's `CountingClient` is put into blocking mode so its
+    /// `poll(...)` never returns on its own (emulates waiting on socket
+    /// readiness with no data). Pre-fix, `run_once`'s `select!` had only
+    /// the wakeup token and the (now-blocked) poll, so it would hang here;
+    /// the `tokio::time::timeout` guard turns that hang into a test
+    /// failure. With the fix, the stored `notify_one()` permit drives the
+    /// `notified()` arm and `run_once` returns promptly.
+    #[tokio::test]
+    async fn application_event_notify_preempts_blocking_network_poll() {
+        let config = make_config();
+        let subs = Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)));
+        let metadata = make_metadata(&config, subs.clone());
+        let request_managers = Arc::new(Mutex::new(RequestManagers::with_dyn_managers(Vec::new())));
+        let counting_delegate = make_counting_delegate(&config, metadata.clone());
+        // Make the network poll block forever to emulate a socket wait.
+        counting_delegate
+            .client_for_test_ref()
+            .poll_block()
+            .store(true, Ordering::SeqCst);
+        let delegate = Arc::new(AsyncMutex::new(counting_delegate));
+        let reaper = Arc::new(std::sync::Mutex::new(CompletableEventReaper::new()));
+        let processor =
+            ApplicationEventProcessor::new(request_managers.clone(), metadata.clone(), subs.clone(), reaper.clone());
+        let (_tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
+        let time: Arc<MockTime> = Arc::new(MockTime::new(1_000));
+        let wakeup = WakeupTrigger::new();
+        let event_notify = Arc::new(Notify::new());
+        let mut thread = ConsumerNetworkThread::new(
+            time.clone() as Arc<dyn ThreadTime>,
+            rx,
+            reaper.clone(),
+            processor,
+            delegate.clone(),
+            request_managers,
+            None,
+            wakeup,
+            Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::clone(&event_notify),
+        );
+
+        // Mirror the app side's `ApplicationEventHandler::add`, which fires
+        // `event_notify.notify_one()` after enqueuing. The permit is stored
+        // even though `run_once` is not yet parked on `notified()`.
+        event_notify.notify_one();
+
+        tokio::time::timeout(Duration::from_secs(2), thread.run_once())
+            .await
+            .expect("run_once must be preempted by the application-event notify, not block on the poll");
     }
 
     fn make_offsets_manager(
@@ -1300,6 +1400,7 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
         );
         (thread, tx, reaper, time, request_managers)
     }
@@ -1352,6 +1453,7 @@ mod tests {
             Some(membership.clone()),
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
         );
         (thread, membership)
     }
@@ -1809,6 +1911,7 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
         );
 
         // 1. Notifiable handle with a large deadline so the reaper
@@ -1875,6 +1978,7 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
         );
 
         // Plant the metadata error.
@@ -1988,6 +2092,7 @@ mod tests {
             None,
             wakeup,
             Arc::new(AtomicI64::new(MAX_POLL_TIMEOUT_MS)),
+            Arc::new(Notify::new()),
         );
 
         // Drive one iteration. `run_once` must call

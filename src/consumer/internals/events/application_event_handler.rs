@@ -31,7 +31,9 @@
 //! [`tokio::sync::mpsc::UnboundedSender::send`] is sync, so [`add`] is a
 //! synchronous `fn`.
 
-use tokio::sync::{mpsc, oneshot};
+use std::sync::Arc;
+
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::KafkaError;
 
@@ -43,13 +45,27 @@ use super::application_event::{ApplicationEvent, ApplicationEventEnvelope};
 /// at construction by Phase 10).
 pub(crate) struct ApplicationEventHandler {
     sender: mpsc::UnboundedSender<ApplicationEventEnvelope>,
+    /// Wakes the background task as soon as an event is enqueued.
+    ///
+    /// Java's `add()` calls `wakeupNetworkThread()` →
+    /// `networkClientDelegate.wakeup()` → `Selector.wakeup()` right after
+    /// pushing the event, so the I/O thread breaks out of its blocking
+    /// `poll(...)` immediately instead of waiting up to
+    /// `MAX_POLL_TIMEOUT_MS`. Sending on the unbounded channel does NOT
+    /// wake the bg task (it drains via non-blocking `try_recv`, not
+    /// `recv().await`, per `consumer-threading.md` §10), so this `Notify`
+    /// is the Rust analog of that wakeup. The same `Arc` is shared with
+    /// [`ConsumerNetworkThread`], whose `run_once` `select!` has a
+    /// `notified()` arm that preempts the network poll.
+    event_notify: Arc<Notify>,
 }
 
 impl ApplicationEventHandler {
     /// Constructor. Takes the **sender** half of the unbounded channel —
-    /// the background task constructed in Phase 10 owns the receiver.
-    pub(crate) fn new(sender: mpsc::UnboundedSender<ApplicationEventEnvelope>) -> Self {
-        Self { sender }
+    /// the background task constructed in Phase 10 owns the receiver — and
+    /// the shared [`Notify`] used to wake that task on each `add()`.
+    pub(crate) fn new(sender: mpsc::UnboundedSender<ApplicationEventEnvelope>, event_notify: Arc<Notify>) -> Self {
+        Self { sender, event_notify }
     }
 
     /// Java: `add(ApplicationEvent event)`.
@@ -65,7 +81,15 @@ impl ApplicationEventHandler {
                 "Background task is shut down; cannot enqueue {}",
                 err.0.event.type_name()
             ))
-        })
+        })?;
+        // Java: `wakeupNetworkThread()` — alert the I/O thread that it has
+        // something to process so it breaks out of its blocking poll
+        // immediately rather than after MAX_POLL_TIMEOUT_MS. `notify_one()`
+        // stores a permit if the bg task is not currently parked on
+        // `notified()`, so a wake is never lost in the gap between the
+        // bg task's `try_recv` drain and its `select!`.
+        self.event_notify.notify_one();
+        Ok(())
     }
 
     /// Java: `addAndGet(event)`.
@@ -105,7 +129,7 @@ mod tests {
     #[tokio::test]
     async fn add_enqueues_event_with_timestamp() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handler = ApplicationEventHandler::new(tx);
+        let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
         handler.add(ApplicationEvent::CommitOnClose, 42).expect("send ok");
 
         let env = rx.recv().await.expect("got envelope");
@@ -114,10 +138,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_wakes_the_shared_notify() {
+        // Java: `add()` calls `wakeupNetworkThread()`. The Rust analog is
+        // `event_notify.notify_one()`. A clone of the same `Notify` held by
+        // the (would-be) bg task must observe a wake after `add()`.
+        let (tx, _rx) = mpsc::unbounded_channel();
+        let notify = Arc::new(Notify::new());
+        let handler = ApplicationEventHandler::new(tx, Arc::clone(&notify));
+
+        handler.add(ApplicationEvent::CommitOnClose, 0).expect("send ok");
+
+        // `notify_one()` stored a permit before anyone awaited, so
+        // `notified()` resolves immediately. Guard with a timeout so a
+        // missing wake fails the test instead of hanging.
+        tokio::time::timeout(std::time::Duration::from_secs(1), notify.notified())
+            .await
+            .expect("add() must wake the shared Notify");
+    }
+
+    #[tokio::test]
     async fn add_returns_error_when_receiver_dropped() {
         let (tx, rx) = mpsc::unbounded_channel::<ApplicationEventEnvelope>();
         drop(rx);
-        let handler = ApplicationEventHandler::new(tx);
+        let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
         let err = handler.add(ApplicationEvent::CommitOnClose, 0).expect_err("must fail");
         assert!(matches!(err, KafkaError::IllegalState(_)));
     }
@@ -125,7 +168,7 @@ mod tests {
     #[tokio::test]
     async fn add_and_get_returns_completed_value() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handler = ApplicationEventHandler::new(tx);
+        let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
 
         let (handle, receiver, _erased) = make_completable_event::<()>(0);
         let event = ApplicationEvent::CreateFetchRequests { handle };
@@ -151,7 +194,7 @@ mod tests {
     #[tokio::test]
     async fn add_and_get_propagates_kafka_error_from_handle() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handler = ApplicationEventHandler::new(tx);
+        let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
 
         let (handle, receiver, _erased) = make_completable_event::<()>(0);
         let event = ApplicationEvent::CreateFetchRequests { handle };
@@ -174,7 +217,7 @@ mod tests {
     #[tokio::test]
     async fn add_and_get_returns_error_when_handle_dropped_without_completion() {
         let (tx, mut rx) = mpsc::unbounded_channel();
-        let handler = ApplicationEventHandler::new(tx);
+        let handler = ApplicationEventHandler::new(tx, Arc::new(Notify::new()));
 
         let (handle, receiver, erased) = make_completable_event::<()>(0);
         let event = ApplicationEvent::CreateFetchRequests { handle };
