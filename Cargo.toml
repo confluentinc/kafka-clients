@@ -21,7 +21,7 @@ serde_json = "1.0"
 generator = { path = "generator" }
 uuid = { version = "1", features = ["v4"] }
 rand = "0.9"
-tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync"] }
+tokio = { version = "1", features = ["net", "io-util", "rt", "rt-multi-thread", "macros", "time", "sync", "signal"] }
 tokio-util = "0.7"
 tokio-rustls = "0.26"
 rustls = { version = "0.23", features = ["logging", "std", "tls12"] }
