@@ -260,6 +260,18 @@ impl KafkaChannel {
         self.transport_layer.is_connected()
     }
 
+    /// Whether the transport supports non-blocking `try_read` (plaintext does;
+    /// SSL/mocks do not). Lets the selector drain it in a tight loop.
+    pub fn supports_try_read(&self) -> bool {
+        self.transport_layer.supports_try_read()
+    }
+
+    /// Bytes already read into the in-progress receive (0 if none / fresh).
+    /// Used by the selector to avoid yielding mid-message on a wakeup.
+    pub fn current_receive_bytes_read(&self) -> usize {
+        self.receive.as_ref().map_or(0, |r| r.bytes_read())
+    }
+
     /// Returns the channel ID.
     pub fn id(&self) -> &str {
         &self.id

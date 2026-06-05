@@ -217,6 +217,14 @@ impl TransportLayer for PlaintextTransportLayer {
         })
     }
 
+    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+        self.stream_mut()?.try_read(dst)
+    }
+
+    fn supports_try_read(&self) -> bool {
+        true
+    }
+
     /// Writes data to this channel from the given buffer.
     ///
     /// Waits for the socket to become writable, then writes data.

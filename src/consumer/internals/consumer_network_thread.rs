@@ -554,42 +554,56 @@ impl<K: KafkaClient + Send + 'static> ConsumerNetworkThread<K> {
 
         // ──── Phase 4: poll the network client ────
         //
-        // Only `.await` boundary in `run_once` that must be cancel-safe
-        // against the wakeup token (`consumer-threading.md` §11).
-        // `tokio::select!` with `biased;` to prefer the shutdown / wakeup
-        // signals over the (potentially long) network poll.
+        // The network poll performs connection setup (`initiate_connect`) and
+        // I/O. It must NOT be cancelled mid-flight: a `tokio::select!` that
+        // races it against the wakeup signals would drop the poll future at an
+        // `.await` — e.g. right after `connection_states.connecting()` marked a
+        // node `Connecting` but before the socket is created — permanently
+        // stranding that node (CLAUDE.md §9.6.1; full analysis in
+        // `design/current/consumer-join-stall-rootcause.md`).
+        //
+        // Instead we run the poll to completion and deliver wakeups the way
+        // Java does (`Selector.wakeup()`): the wakeup token and the
+        // application-event notify *poke the selector's wakeup primitive*,
+        // which makes the in-progress poll return at a safe boundary. The poll
+        // future is pinned and driven by `&mut`, so the signal arms run their
+        // body and loop without ever dropping it.
         let token = self.wakeup_rx.borrow().clone();
         {
             let mut delegate_guard = self.network_client_delegate.lock().await;
-            tokio::select! {
-                biased;
-                _ = token.cancelled() => {
-                    // Wakeup or shutdown fired — exit the poll early.
-                    // The `KafkaClient::poll` is already wakeup-aware
-                    // via `delegate.wakeup()` (which we call from
-                    // `Self::wakeup`/`signal_close`), but the
-                    // `select!` arm gives us a cancellation point
-                    // even if the network client did not propagate
-                    // the wakeup. Java's equivalent is the
-                    // `WakeupException` thrown by the selector.
-                    log::trace!("Network-client poll preempted by wakeup");
+            // Lock-free handle to the selector's wakeup `Notify`, grabbed under
+            // the lock we already hold. `poll_fut` borrows the guard for its
+            // whole duration, so we cannot call `delegate.wakeup()` while it
+            // runs — but firing this `Arc<Notify>` needs no lock.
+            let network_wakeup = delegate_guard.wakeup_handle();
+            let poll_fut = delegate_guard.poll_default(poll_wait_time_ms, current_time_ms);
+            tokio::pin!(poll_fut);
+            // After the first poke we only await the poll to finish: the guards
+            // disable the signal arms so we neither busy-spin on the (still
+            // cancelled, until rotated) token nor rebuild the consumed
+            // event-notify permit.
+            let mut poked = false;
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = &mut poll_fut => break,
+                    // Wakeup or shutdown fired. Java analog: `Selector.wakeup()`.
+                    _ = token.cancelled(), if !poked => {
+                        log::trace!("Network-client poll woken by wakeup");
+                        network_wakeup.notify_one();
+                        poked = true;
+                    }
+                    // An application event was enqueued (Java:
+                    // `add()` → `wakeupNetworkThread()`). `notify_one()` stores a
+                    // permit even if `run_once` was not yet parked here, so an
+                    // event enqueued in the gap between the top-of-loop drain and
+                    // this `select!` is not lost.
+                    _ = self.event_notify.notified(), if !poked => {
+                        log::trace!("Network-client poll woken by application-event notify");
+                        network_wakeup.notify_one();
+                        poked = true;
+                    }
                 }
-                _ = self.event_notify.notified() => {
-                    // An application event was enqueued while we were about
-                    // to (or already) park in `poll_default`. Break out so
-                    // the next `run_once` iteration drains it via
-                    // `process_application_events` and ships the resulting
-                    // request immediately, instead of waiting up to
-                    // `MAX_POLL_TIMEOUT_MS`. This is the Rust analog of
-                    // Java's `add()` → `wakeupNetworkThread()` →
-                    // `Selector.wakeup()`. `notify_one()` stores a permit
-                    // when no waiter is parked, so an event enqueued in the
-                    // gap between the top-of-loop `try_recv` drain and this
-                    // `select!` is not lost — the permit makes the next
-                    // `notified()` resolve immediately.
-                    log::trace!("Network-client poll preempted by application-event notify");
-                }
-                _ = delegate_guard.poll_default(poll_wait_time_ms, current_time_ms) => {}
             }
         }
 
@@ -1154,7 +1168,15 @@ mod tests {
             self.inner.has_ready_nodes(now)
         }
         fn wakeup(&self) {
-            self.inner.wakeup()
+            self.inner.wakeup();
+            // Release a blocked poll, mirroring a real selector whose
+            // `wakeup()` fires the same `Notify` its `poll()` awaits.
+            self.poll_release.notify_one();
+        }
+        fn wakeup_handle(&self) -> Arc<Notify> {
+            // The blocking `poll()` above awaits `poll_release`; hand that out
+            // so the bg task's poke wakes it, just like the real selector.
+            self.poll_release.clone()
         }
         fn new_client_request(
             &mut self,

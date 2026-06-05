@@ -573,6 +573,15 @@ impl<K: KafkaClient + Send> NetworkClientDelegate<K> {
         self.client.wakeup();
     }
 
+    /// Returns a lock-free handle to the underlying selector's wakeup
+    /// primitive. The bg task grabs this once (under the delegate lock it
+    /// already holds) and fires it from `select!` arms to wake an in-progress
+    /// `poll()` without cancelling it. See
+    /// `design/current/consumer-join-stall-rootcause.md`.
+    pub(crate) fn wakeup_handle(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        self.client.wakeup_handle()
+    }
+
     /// Returns `true` if the node has previously failed to connect and is
     /// inside the connection-delay backoff window.
     ///

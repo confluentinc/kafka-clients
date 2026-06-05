@@ -545,6 +545,11 @@ impl KafkaClient for MockClient {
         // No-op for mock
     }
 
+    fn wakeup_handle(&self) -> Arc<tokio::sync::Notify> {
+        // The mock client never blocks on I/O; return an unused handle.
+        Arc::new(tokio::sync::Notify::new())
+    }
+
     fn new_client_request(
         &mut self,
         node_id: &str,

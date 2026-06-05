@@ -175,6 +175,20 @@ pub trait TransportLayer: Send {
     /// Returns an error if the read fails.
     fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
+    /// Non-blocking read of currently-available bytes (does NOT await
+    /// readiness). `Err(WouldBlock)` if none right now, `Ok(0)` for EOF, else
+    /// bytes read. Lets the selector drain a readable socket in a tight loop
+    /// (Java-NIO `pollSelectionKeys` style) without per-chunk async overhead.
+    /// Default: unsupported — callers fall back to the async [`read`].
+    fn try_read(&mut self, _dst: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+
+    /// Whether [`try_read`](Self::try_read) is a real non-blocking read.
+    fn supports_try_read(&self) -> bool {
+        false
+    }
+
     /// Writes data to this channel from the given buffer.
     ///
     /// # Arguments

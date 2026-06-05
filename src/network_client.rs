@@ -30,6 +30,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
+use tokio::sync::Notify;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
 
@@ -1356,6 +1357,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
 
     fn wakeup(&self) {
         self.selector.wakeup();
+    }
+
+    fn wakeup_handle(&self) -> Arc<Notify> {
+        self.selector.wakeup_handle()
     }
 
     fn new_client_request(

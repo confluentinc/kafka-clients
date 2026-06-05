@@ -194,9 +194,36 @@ I/O-bound on the same `NetworkClient`).
     registration order — do NOT iterate over a `HashMap`.
   - Drain application events with `try_recv` in a `while let` loop, NOT
     `recv().await`, mirroring Java's `drainTo`. Drain unbounded (Java does).
-  - The only `await` boundary that must be cancel-safe against the wakeup
-    token is `network_client.poll(...)`. Wrap it in
-    `tokio::select! { biased; shutdown; wakeup; network_poll }`.
+  - **The network poll must run to completion — do NOT cancel it.** It is
+    tempting to race `network_client.poll(...)` against the wakeup / shutdown
+    signals in a `tokio::select!` arm so the poll "returns early" on a wakeup.
+    Do not: the poll is **not cancel-safe**. It performs connection setup —
+    `initiate_connect` calls `connection_states.connecting()` (a persisted side
+    effect) and *then* `await`s `current_address()` / `selector.connect()`,
+    because the Rust `Selector::connect` awaits the TCP handshake instead of
+    being non-blocking like Java NIO. A `select!` that drops the poll at that
+    `await` strands the node in `Connecting` with no socket; it only recovers
+    after the ~10 s connection-setup-timeout (CLAUDE.md §9.6.1). This produced a
+    severe intermittent join stall — full analysis in
+    `design/current/consumer-join-stall-rootcause.md`.
+
+    (Earlier wording here said to "wrap the poll in `tokio::select!` against the
+    wakeup token" and asserted it "must be cancel-safe". The requirement was
+    right; the assumption that the poll *was* cancel-safe was never verified and
+    was false — hence this correction.)
+  - Deliver the wakeup the way Java does (`Selector.wakeup()`) instead: pin the
+    poll future, drive it with `&mut`, and from the wakeup-token /
+    application-event `select!` arms **poke the selector's wakeup primitive**
+    (`delegate.wakeup_handle()` → `Arc<Notify>`, fired lock-free) rather than
+    letting an arm complete and drop the poll. The selector's `poll()` returns
+    when that notify fires, so the in-progress poll finishes at a safe boundary.
+    `tokio::select!` cancellation drops the losing future and loses its side
+    effects; Java's `Selector.wakeup()` returns `select()` cleanly — they are
+    NOT equivalent.
+  - This applies to any site that `await`s `network_client.poll(...)`. (The
+    alternative that would make cancellation safe is to make `Selector::connect`
+    non-blocking like Java NIO, so the poll has no side-effect-before-`await`;
+    that is not currently done.)
   - Do NOT `tokio::spawn` inside the bg task for per-request or per-event
     work (CLAUDE.md §11).
 

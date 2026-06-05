@@ -163,9 +163,16 @@ impl Receive for NetworkReceive {
         Box::pin(async {
             let mut total_read = 0;
 
-            // Phase 1: Read the 4-byte size header
+            // Phase 1: Read the 4-byte size header (non-blocking on transports
+            // that support `try_read`, so the whole receive drains without
+            // per-chunk async overhead).
             if self.size_bytes_read < SIZE_LENGTH {
-                match channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await {
+                let header_result = if channel.supports_try_read() {
+                    channel.try_read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH])
+                } else {
+                    channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await
+                };
+                match header_result {
                     Ok(0) => {
                         // Ok(0) means EOF (remote closed connection).
                         // Matches Java: bytesRead < 0 → EOFException.
@@ -213,28 +220,49 @@ impl Receive for NetworkReceive {
                 );
             }
 
-            // Phase 3: Read payload data
+            // Phase 3: Read payload data.
+            //
+            // On transports with non-blocking `try_read` (plaintext), drain ALL
+            // currently-available socket bytes in a tight loop rather than one
+            // chunk per call — Java-NIO read pattern. Avoids the per-chunk
+            // readiness/timer overhead that throttled large fetch reads
+            // (design/current/consumer-throughput-bottleneck.md, UPDATE 4).
             if let Some(ref mut buf) = self.buffer
                 && self.buffer_bytes_read < buf.len()
             {
-                match channel.read(&mut buf[self.buffer_bytes_read..]).await {
-                    Ok(0) => {
-                        // Ok(0) means EOF (remote closed). In Java,
-                        // `bytesRead < 0` during the payload phase always
-                        // throws `EOFException`, regardless of what was
-                        // read earlier in the same call.
-                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
-                    },
-                    Ok(bytes_read) => {
-                        total_read += bytes_read;
-                        self.buffer_bytes_read += bytes_read;
-                    },
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // No data available right now. Matches Java NIO
-                        // non-blocking returning 0: return bytes read so far.
-                        return Ok(total_read);
-                    },
-                    Err(e) => return Err(e),
+                if channel.supports_try_read() {
+                    loop {
+                        match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
+                            Ok(0) => {
+                                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                            },
+                            Ok(bytes_read) => {
+                                total_read += bytes_read;
+                                self.buffer_bytes_read += bytes_read;
+                                if self.buffer_bytes_read >= buf.len() {
+                                    break; // receive complete
+                                }
+                            },
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                return Ok(total_read); // socket drained for now
+                            },
+                            Err(e) => return Err(e),
+                        }
+                    }
+                } else {
+                    match channel.read(&mut buf[self.buffer_bytes_read..]).await {
+                        Ok(0) => {
+                            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                        },
+                        Ok(bytes_read) => {
+                            total_read += bytes_read;
+                            self.buffer_bytes_read += bytes_read;
+                        },
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            return Ok(total_read);
+                        },
+                        Err(e) => return Err(e),
+                    }
                 }
             }
 

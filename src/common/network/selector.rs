@@ -411,14 +411,24 @@ impl Selector {
 
         if should_read {
             let channel = self.channels.get_mut(channel_id).unwrap();
-            // Use timeout to avoid blocking on this channel's readability.
-            // If not ready, we skip and retry on the next poll() iteration.
-            let read_result = tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await;
-            let bytes = match read_result {
-                Ok(Ok(b)) => b,
-                Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
-                Ok(Err(e)) => return Err(e),
-                Err(_elapsed) => 0, // timeout = not ready
+            // For transports with a real non-blocking `try_read` (plaintext),
+            // `channel.read()` is itself non-blocking and drains all available
+            // bytes — call it directly (no `timeout(0)` `Sleep` per read). For
+            // others (SSL/mocks) keep the zero-timeout guard so an async read
+            // that would await readiness is skipped to the next poll iteration.
+            let bytes = if channel.supports_try_read() {
+                match channel.read().await {
+                    Ok(b) => b,
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => 0,
+                    Err(e) => return Err(e),
+                }
+            } else {
+                match tokio::time::timeout(std::time::Duration::ZERO, channel.read()).await {
+                    Ok(Ok(b)) => b,
+                    Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => 0,
+                    Ok(Err(e)) => return Err(e),
+                    Err(_elapsed) => 0,
+                }
             };
             if bytes != 0 {
                 self.made_read_progress_last_poll = true;
@@ -557,6 +567,16 @@ impl Selector {
         }
         self.channels.values().next()
     }
+    /// True if any channel is mid-message — it has read part of a receive but
+    /// not completed it. The selector must not yield to a wakeup-poke in this
+    /// state, or large reads get fragmented across `run_once` round-trips (the
+    /// throughput bug; see design/current/consumer-throughput-bottleneck.md).
+    /// A freshly-created empty receive (bytes_read == 0) does NOT count, so the
+    /// between-fetch wakeup that triggers the next fetch is still honored.
+    fn any_channel_mid_receive(&self) -> bool {
+        self.channels.values().any(|c| c.current_receive_bytes_read() > 0)
+    }
+
     /// Collect readiness futures for channels interested in I/O.
     fn collect_readiness_futures(&self) -> Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> {
         let mut futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> = Vec::new();
@@ -641,6 +661,10 @@ impl Selectable for Selector {
 
     fn wakeup(&self) {
         self.notify.notify_one();
+    }
+
+    fn wakeup_handle(&self) -> Arc<Notify> {
+        self.notify.clone()
     }
 
     async fn close(&mut self) {
@@ -767,23 +791,56 @@ impl Selectable for Selector {
                     let readiness_futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> =
                         self.collect_readiness_futures();
 
+                    // An explicit wakeup (`Selector::wakeup()`) makes the poll
+                    // return at this safe boundary, mirroring Java NIO where
+                    // `Selector.wakeup()` causes the in-progress `select()` to
+                    // return. Without returning here, a wakeup only triggers one
+                    // more non-blocking pass and the poll keeps blocking until
+                    // the deadline — which defeats the network-thread wakeup and
+                    // is part of the consumer join-stall root cause
+                    // (`design/current/consumer-join-stall-rootcause.md`).
                     let notify = self.notify.clone();
-                    if readiness_futs.is_empty() {
+                    // `notify.notified() => true` returns the poll on wakeup. A
+                    // `wakeup()` issued just *before* this poll parked stores a
+                    // permit, so the next poll returns immediately with no I/O —
+                    // this is intentional and matches Java NIO, where a
+                    // `Selector.wakeup()` before `select()` makes that `select()`
+                    // return at once. The early return is harmless (empty
+                    // `responses`); the caller simply loops.
+                    let woke_by_wakeup = if readiness_futs.is_empty() {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => {},
-                            _ = tokio::time::sleep_until(dl) => {},
+                            _ = notify.notified() => true,
+                            _ = tokio::time::sleep_until(dl) => false,
                         }
                     } else {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => {},
-                            _ = select_all(readiness_futs) => {},
-                            _ = tokio::time::sleep_until(dl) => {},
+                            _ = notify.notified() => true,
+                            _ = select_all(readiness_futs) => false,
+                            _ = tokio::time::sleep_until(dl) => false,
                         }
+                    };
+                    if woke_by_wakeup && !self.any_channel_mid_receive() {
+                        break;
                     }
+                    // Mid-message: keep draining rather than yielding to the
+                    // poke — finishing the in-flight receive avoids fragmenting
+                    // the read across run_once round-trips.
                 },
-                _ => break,
+                _ => {
+                    // Immediate return (timeout 0 / deadline passed): there is no
+                    // blocking `select!` wait this pass. On transports with a
+                    // synchronous `try_read`, the read path performs no `.await`
+                    // of its own, so a single pass can complete without ever
+                    // yielding to the runtime. Yield once before returning so the
+                    // I/O driver and any cooperatively-scheduled peer tasks make
+                    // progress — otherwise a caller that spin-loops `poll(0)` on a
+                    // single-threaded runtime would starve them. Cheap (once per
+                    // poll, not per read chunk) and harmless when there is work.
+                    tokio::task::yield_now().await;
+                    break;
+                },
             }
         }
 
