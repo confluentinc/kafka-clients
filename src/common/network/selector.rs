@@ -752,6 +752,15 @@ impl Selectable for Selector {
         // the tokio reactor deliver readiness events, repeating until we make
         // progress or the timeout expires. This matches Java NIO's
         // nioSelector.select(timeout) which blocks until I/O or timeout.
+        //
+        // `deferred_wakeup` carries a wakeup that arrived while a channel was
+        // mid-receive: the `select!` already consumed the `Notify` permit, so we
+        // must not drop it. We give the in-flight receive exactly one more drain
+        // pass (next loop iteration) and, if that pass makes no progress, honor
+        // the wakeup by returning — never re-entering `select!` with the permit
+        // already gone (which would block until the deadline and lose the
+        // wakeup, unlike Java's `Selector.wakeup()` which always returns).
+        let mut deferred_wakeup = false;
         loop {
             // Process channels with buffered data
             if data_in_buffers {
@@ -779,6 +788,14 @@ impl Selectable for Selector {
                 || !self.disconnected.is_empty();
 
             if made_progress {
+                break;
+            }
+
+            // A wakeup arrived last iteration while a channel was mid-receive; we
+            // gave the receive one more drain pass above and it made no progress,
+            // so honor the deferred wakeup now rather than blocking in `select!`
+            // with the already-consumed permit.
+            if deferred_wakeup {
                 break;
             }
 
@@ -821,12 +838,19 @@ impl Selectable for Selector {
                             _ = tokio::time::sleep_until(dl) => false,
                         }
                     };
-                    if woke_by_wakeup && !self.any_channel_mid_receive() {
-                        break;
+                    if woke_by_wakeup {
+                        if self.any_channel_mid_receive() {
+                            // Mid-message: don't abandon the in-flight receive to
+                            // the poke (which would fragment the read across
+                            // run_once round-trips). Give it one more drain pass,
+                            // but remember the wakeup — the `select!` consumed the
+                            // permit, so the loop's `deferred_wakeup` check will
+                            // honor it if that pass makes no progress.
+                            deferred_wakeup = true;
+                        } else {
+                            break;
+                        }
                     }
-                    // Mid-message: keep draining rather than yielding to the
-                    // poke — finishing the in-flight receive avoids fragmenting
-                    // the read across run_once round-trips.
                 },
                 _ => {
                     // Immediate return (timeout 0 / deadline passed): there is no

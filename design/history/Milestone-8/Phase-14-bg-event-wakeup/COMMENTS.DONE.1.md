@@ -142,3 +142,147 @@ reasoning is auditable.
   the second statement of Java's `add()` that the original port dropped; the
   existing §10/§11 guidance already anticipated that severing `recv().await`
   requires a separate wake primitive (PLAN.md correctly cites this).
+
+---
+
+# Critic review — read-bound throughput fix (tight `try_read` drain), commit 9966df1 (2026-06-05)
+
+Reviewed the read-bound portion only (join-stall portion already reviewed above).
+Files: `transport_layer.rs`, `plaintext_transport_layer.rs`, `network_receive.rs`,
+`kafka_channel.rs`, `selector.rs`. Checked against Java `NetworkReceive.readFrom`,
+`Selector.attemptRead`/`pollSelectionKeys`/`wakeup()`, and `consumer-threading.md`
+§10/§27.
+
+**Overall:** the core `try_read` drain is correct. EOF (`Ok(0)`) → `UnexpectedEof`
+and `WouldBlock` → return-partial mapping matches Java's `bytesRead < 0 →
+EOFException` / non-blocking-returns-0 semantics. The drain loop reads only into
+`buf[buffer_bytes_read..]` and breaks at `>= buf.len()`, so it cannot over-read
+past the message boundary into the next message (Question 4: no over-read, no
+fragmentation — confirmed). Zero-copy §27 respected: drains straight into the
+receive's owned `Vec<u8>`, no intermediate buffer. The `yield_now()` on the
+immediate/deadline-passed arm (Question 3) is correct and sufficient — it only
+runs when there is no blocking wait and no progress, so it does not mask a real
+busy-spin, and for positive-timeout callers it is just the normal expiry path.
+
+Confirmed safe (Question 1 — no false EOF): the size-header slice
+`size_buf[size_bytes_read..SIZE_LENGTH]` is always non-empty under the
+`size_bytes_read < SIZE_LENGTH` guard; the payload loop is gated by
+`buffer_bytes_read < buf.len()` so a zero-size payload (`buf.len()==0`) never
+enters the loop and never calls `try_read` on an empty slice. `TcpStream::try_read`
+returns `Ok(0)` on a non-empty buffer only at EOF. No path misreads `Ok(0)` as EOF.
+
+Issues below ordered by severity.
+
+---
+
+## Issue 6: `any_channel_mid_receive()` gate can swallow a wakeup for the rest of a poll (mid-receive then socket-stall)
+- **File**: `src/common/network/selector.rs:810-829` (the `woke_by_wakeup &&
+  !self.any_channel_mid_receive()` gate)
+- **Severity**: Behavior Mismatch (vs Java `Selector.wakeup()`; bounded, not a hang)
+- **Description**: When the `notify` permit fires, `notify.notified()` resolves and
+  *consumes the permit* (sets `woke_by_wakeup = true`). If any channel is
+  mid-receive (`current_receive_bytes_read() > 0`), the loop does NOT break and
+  re-iterates. On the next iteration `attempt_read` may return immediately with
+  `WouldBlock` (socket drained, receive still incomplete — e.g. the peer has sent
+  a partial payload and paused, or TCP segmentation split the fetch). `made_progress`
+  is then false, so it re-enters the `select!` — but the wakeup permit has already
+  been consumed, so the `notify.notified()` arm no longer resolves. The wakeup is
+  effectively lost for the remainder of this `poll()`; the poll now blocks on
+  `select_all(readiness_futs)` / `sleep_until(dl)` until either more payload bytes
+  arrive or the deadline expires.
+
+  In Java, `Selector.wakeup()` makes the in-progress `select()` return immediately
+  regardless of any channel's mid-read state (Java reads happen synchronously
+  inside one `pollSelectionKeys` and never straddle `select()` calls). So a wakeup
+  issued during a mid-receive-then-stall is delivered at once in Java but can be
+  delayed up to `poll_wait_time_ms` here.
+
+  Practical impact is bounded (not a permanent hang): the wakeup's consumers are
+  the bg `run()` loop re-checking `is_running()` (shutdown) and draining a freshly
+  enqueued application event. Both are only *delayed* until the poll's deadline,
+  not lost forever — `run()` re-checks `is_running()` after every `run_once`. But
+  it is a real latency regression vs Java for shutdown / event-dispatch latency
+  whenever a fetch payload is split across TCP reads and the second half is briefly
+  delayed. Worst-case added latency ≈ the poll deadline (`maximumTimeToWait`, up to
+  `MAX_POLL_TIMEOUT_MS`).
+- **Expected**: Preserve the wakeup intent across the "drain wins over fragmentation"
+  decision. Options: (a) do not consume the permit when staying for a mid-receive —
+  re-arm it (e.g. `self.notify.notify_one()`) before re-looping so the next
+  `select!` still observes the wakeup; or (b) track a `pending_wakeup` bool set when
+  `woke_by_wakeup && mid_receive`, and break out as soon as the in-flight receive
+  completes OR on the next pass that makes no read progress (so a stalled socket
+  does not hold the wakeup hostage to the deadline). Either keeps the
+  no-fragmentation behavior while not silently dropping the wakeup.
+- **Actual**: Permit consumed and not re-armed; wakeup delivery delayed to the poll
+  deadline if the mid-receive channel then stalls.
+
+---
+
+## Issue 7: No unit test covers the `try_read` drain path in `NetworkReceive::read_from`
+- **File**: `src/common/network/network_receive.rs` (tests, lines ~282+)
+- **Severity**: Missing Requirement (test coverage)
+- **Description**: The new tight-drain branch (the `if channel.supports_try_read()`
+  block in both the size-header and payload phases) has zero coverage in the
+  `network_receive` unit tests. `MockTransportLayer` does NOT override
+  `try_read`/`supports_try_read`, so every existing `read_from` test exercises only
+  the async (`else`) branch. The drain loop's specific behaviors — (a) draining a
+  multi-chunk payload across several `try_read` calls within one `read_from`, (b)
+  `WouldBlock` mid-payload returning the partial `total_read` and leaving the
+  receive resumable, (c) `Ok(0)`/EOF *mid-payload* inside the loop surfacing
+  `UnexpectedEof` — are not directly unit-tested. The EchoServer selector tests
+  (`test_send_large_request` = 40 KB, `test_large_message_sequence`) do exercise
+  the path end-to-end over real TCP and are valuable, but they cannot
+  deterministically force a WouldBlock-mid-payload or an EOF-mid-payload, and
+  `test_server_disconnect` only tests EOF while *idle* (no in-progress receive),
+  never EOF arriving mid-payload.
+- **Expected**: Extend `MockTransportLayer` with a `try_read`/`supports_try_read`
+  variant (or add a small drainable mock) and add `read_from` unit tests for:
+  multi-chunk drain in one call; WouldBlock mid-payload → `Ok(partial)` then resume;
+  `Ok(0)` mid-payload → `UnexpectedEof`. This is the per-section testing-discipline
+  (error messages / partial states asserted, not just happy path) the DoD calls for.
+- **Actual**: New branch only covered indirectly via large EchoServer round-trips;
+  the WouldBlock-mid-payload and EOF-mid-payload sub-cases are untested.
+
+---
+
+## Non-issues confirmed (read-bound; checked, no action needed)
+
+- **EOF vs WouldBlock in both phases**: `Ok(0)` → `UnexpectedEof` (Java
+  `EOFException`), `WouldBlock` → return partial. No empty-slice or zero-size path
+  produces a false `Ok(0)` — size slice always non-empty under its guard; payload
+  loop never entered for `buf.len()==0`. (Question 1.)
+- **No over-read / no cross-message bleed**: drain reads `buf[buffer_bytes_read..]`
+  and breaks at `>= buf.len()`; `buf` is sized exactly to the header's
+  `requested_buffer_size`. Next message's bytes remain in the socket for the next
+  receive. (Question 4.)
+- **`yield_now()` correctness**: only on the immediate/deadline-passed arm; one per
+  poll, not per chunk; does not change positive-timeout semantics beyond a single
+  cooperative yield on an otherwise non-awaiting fast pass. (Question 3.)
+- **§27 zero-copy**: drains directly into the `NetworkReceive`-owned buffer; no
+  per-chunk copy, no intermediate buffer. (Question 5.)
+- **§10 network-poll**: poll still runs to completion; the try_read change does not
+  reintroduce a cancellation point. (Question 5.)
+- **SSL/mock fallthrough**: `ssl_transport_layer` does not override
+  `try_read`/`supports_try_read`, so it keeps `supports_try_read()==false` and uses
+  the async path + `timeout(0)` guard in `attempt_read`. Correct and intended.
+- **`attempt_read` direct `channel.read().await` for try_read transports**: the
+  underlying `read_from` is now synchronous (no readiness await) for plaintext, so
+  dropping the `timeout(0)` `Sleep` is safe — it cannot block. Correct.
+
+---
+
+## RESOLUTION (Actor, 2026-06-06) — both issues fixed in fixup of 9966df1
+
+- **Issue 6 (RESOLVED, option b):** added a `deferred_wakeup` bool in `Selector::poll`.
+  When `woke_by_wakeup && any_channel_mid_receive()`, set `deferred_wakeup` and give the
+  in-flight receive exactly one more drain pass instead of dropping the consumed permit.
+  After the next pass: if it made progress we return with the data (wakeup effectively
+  honored); if it made no progress, the new `if deferred_wakeup { break; }` check (placed
+  right after the `made_progress` break) honors the wakeup immediately rather than
+  re-entering `select!` with the permit gone. No wakeup lost, no busy-spin, bounded to one
+  drain pass. selector.rs:755-845.
+- **Issue 7 (RESOLVED):** added `ChunkedTryReadMock` (`supports_try_read()==true`,
+  `try_read` returns ≤`chunk` bytes/call, configurable EOF-vs-WouldBlock on exhaustion)
+  and three `network_receive` unit tests: multi-chunk payload drained in one `read_from`;
+  WouldBlock mid-payload → `Ok(partial)` then resume to completion; `Ok(0)` mid-payload →
+  `UnexpectedEof`. Full lib suite 1709 passed.
