@@ -345,3 +345,33 @@ behind the current fetch's decode. Closing this needs fetch prefetch/pipelining
 (issue a fetch to a node as soon as its buffered data is consumed, not after the
 whole response is drained), and is tracked as a distinct optimization, not part
 of this read-bound fix.
+
+---
+
+## UPDATE 6 (2026-06-08) — ceiling re-measured after the latency fix
+
+The steady-state latency fix (design/current/consumer-latency-findings.md UPDATE
+part 2) keeps a fetch continuously in flight (`send_prefetches` before the
+`await_wakeup` block) — exactly the "no prefetch overlap" change this doc flagged
+as the remaining throughput follow-up. Re-measured the static-backlog ceiling on
+a 12.7M-record backlog (1 KB, 12 partitions), `--no-produce --offset-reset
+earliest`, 30 s sustained:
+
+  **~370k msg/s sustained** (361 MiB/s), steady across all intervals
+  (370/373/368/369/377k), CPU ~86% (under one core), RSS stable ~130–240 MB.
+
+Progression on the same single broker: original read-bound **139k** → tight
+`try_read` drain fix **~233k** → continuous-prefetch latency fix **~370k**
+(2.65× over original). Java KIP-848 on the same broker: **886k**.
+
+Still ~2.4× below Java, and CPU is only ~86% of one core — **not CPU-bound**, the
+consumer still waits. Remaining gap (consumer-side; Java proves the broker serves
+faster):
+  1. **One fetch in flight per node.** Continuous prefetch keeps exactly one
+     fetch outstanding per node; the next fetch is not sent until the current
+     response is fully drained, so fetch N+1's network round-trip does not overlap
+     fetch N's decode. Deeper pipelining (≥2 in-flight per node, or fetching while
+     decoding) is the likely next lever.
+  2. **Per-record `to_vec()` decode allocation** (the §27 zero-copy violation in
+     `default_record.rs`). At 370k msg/s this allocation is a real CPU cost.
+Both are separate follow-ups, not addressed here.
