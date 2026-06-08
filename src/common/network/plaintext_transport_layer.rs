@@ -217,6 +217,14 @@ impl TransportLayer for PlaintextTransportLayer {
         })
     }
 
+    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+        self.stream_mut()?.try_read(dst)
+    }
+
+    fn supports_try_read(&self) -> bool {
+        true
+    }
+
     /// Writes data to this channel from the given buffer.
     ///
     /// Waits for the socket to become writable, then writes data.
@@ -243,26 +251,5 @@ impl TransportLayer for PlaintextTransportLayer {
     fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         let stream = self.stream_mut()?;
         stream.try_write_vectored(srcs)
-    }
-
-    /// Synchronous, non-blocking read directly from the underlying TCP stream.
-    ///
-    /// Mirrors [`try_write_vectored`](Self::try_write_vectored): no `.await`,
-    /// no `Future`, no `Box::pin`, no `tokio::time::Sleep` registration. Used
-    /// by `Selector::attempt_read` to replace the
-    /// `tokio::time::timeout(Duration::ZERO, channel.read()).await` wrapper,
-    /// whose Tokio timer-driver register/deregister round-trip dominated the
-    /// hot read loop (see
-    /// `design/history/ATTEMPT_READ_TIMEOUT_ZERO_ISSUE.md`).
-    ///
-    /// Java NIO performs the equivalent of this call: a single non-blocking
-    /// `socketChannel.read(buf)` syscall after `epoll_wait` proved readiness.
-    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
-        let stream = self.stream_mut()?;
-        stream.try_read(dst)
-    }
-
-    fn supports_try_read(&self) -> bool {
-        true
     }
 }

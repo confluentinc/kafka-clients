@@ -480,13 +480,21 @@ impl Selector {
 
         if should_read {
             let channel = self.channels.get_mut(channel_id).unwrap();
-            // Fix A (read-path bottleneck): use the synchronous `try_read` path
-            // when the transport supports it. The previous
+            // Fix A (read-path bottleneck): for transports with a real
+            // non-blocking `try_read` (plaintext), use the synchronous
+            // `try_read` path. The previous
             // `tokio::time::timeout(Duration::ZERO, channel.read()).await`
             // wrapper paid ~546us per call to register/deregister a Sleep on
             // the timer driver, capping single-Sender throughput at ~12K msg/s.
+            // `try_read` drains all currently-available socket bytes in a tight
+            // loop (see `NetworkReceive`), matching Java-NIO's read pattern and
+            // avoiding the per-chunk readiness/timer overhead that throttled
+            // large fetch reads
+            // (design/current/consumer-throughput-bottleneck.md, UPDATE 4).
             // SSL transports keep the async fallback because rustls's I/O state
-            // machine is driven through the async TLS stream.
+            // machine is driven through the async TLS stream; the zero-timeout
+            // guard skips an async read that would await readiness to the next
+            // poll iteration.
             let read_result = if channel.supports_try_read() {
                 channel.try_read()
             } else {
@@ -618,6 +626,16 @@ impl Selector {
         }
         self.channels.values().next()
     }
+    /// True if any channel is mid-message — it has read part of a receive but
+    /// not completed it. The selector must not yield to a wakeup-poke in this
+    /// state, or large reads get fragmented across `run_once` round-trips (the
+    /// throughput bug; see design/current/consumer-throughput-bottleneck.md).
+    /// A freshly-created empty receive (bytes_read == 0) does NOT count, so the
+    /// between-fetch wakeup that triggers the next fetch is still honored.
+    fn any_channel_mid_receive(&self) -> bool {
+        self.channels.values().any(|c| c.current_receive_bytes_read() > 0)
+    }
+
     /// Collect readiness futures for channels interested in I/O.
     ///
     /// Channels mid-handshake (TLS or SASL) also register interest so that the
@@ -725,6 +743,10 @@ impl Selectable for Selector {
         self.notify.notify_one();
     }
 
+    fn wakeup_handle(&self) -> Arc<Notify> {
+        self.notify.clone()
+    }
+
     fn wakeup_notify(&self) -> Arc<Notify> {
         self.notify.clone()
     }
@@ -816,6 +838,15 @@ impl Selectable for Selector {
         // the tokio reactor deliver readiness events, repeating until we make
         // progress or the timeout expires. This matches Java NIO's
         // nioSelector.select(timeout) which blocks until I/O or timeout.
+        //
+        // `deferred_wakeup` carries a wakeup that arrived while a channel was
+        // mid-receive: the `select!` already consumed the `Notify` permit, so we
+        // must not drop it. We give the in-flight receive exactly one more drain
+        // pass (next loop iteration) and, if that pass makes no progress, honor
+        // the wakeup by returning — never re-entering `select!` with the permit
+        // already gone (which would block until the deadline and lose the
+        // wakeup, unlike Java's `Selector.wakeup()` which always returns).
+        let mut deferred_wakeup = false;
         loop {
             // Process channels with buffered data (reads only)
             if data_in_buffers {
@@ -850,6 +881,14 @@ impl Selectable for Selector {
                 break;
             }
 
+            // A wakeup arrived last iteration while a channel was mid-receive; we
+            // gave the receive one more drain pass above and it made no progress,
+            // so honor the deferred wakeup now rather than blocking in `select!`
+            // with the already-consumed permit.
+            if deferred_wakeup {
+                break;
+            }
+
             // No progress — wait for I/O readiness on any channel, wakeup,
             // or deadline. This replaces the former 1ms busy-poll with
             // proper event-driven readiness, matching Java NIO's
@@ -859,30 +898,63 @@ impl Selectable for Selector {
                     let readiness_futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> =
                         self.collect_readiness_futures();
 
+                    // An explicit wakeup (`Selector::wakeup()`) makes the poll
+                    // return at this safe boundary, mirroring Java NIO where
+                    // `Selector.wakeup()` causes the in-progress `select()` to
+                    // return. Without returning here, a wakeup only triggers one
+                    // more non-blocking pass and the poll keeps blocking until
+                    // the deadline — which defeats the network-thread wakeup and
+                    // is part of the consumer join-stall root cause
+                    // (`design/current/consumer-join-stall-rootcause.md`).
                     let notify = self.notify.clone();
-                    if readiness_futs.is_empty() {
+                    // `notify.notified() => true` returns the poll on wakeup. A
+                    // `wakeup()` issued just *before* this poll parked stores a
+                    // permit, so the next poll returns immediately with no I/O —
+                    // this is intentional and matches Java NIO, where a
+                    // `Selector.wakeup()` before `select()` makes that `select()`
+                    // return at once. The early return is harmless (empty
+                    // `responses`); the caller simply loops.
+                    let woke_by_wakeup = if readiness_futs.is_empty() {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => { break; },
-                            _ = tokio::time::sleep_until(dl) => { break; },
+                            _ = notify.notified() => true,
+                            _ = tokio::time::sleep_until(dl) => false,
                         }
                     } else {
                         tokio::select! {
                             biased;
-                            _ = notify.notified() => { break; },
-                            _ = select_all(readiness_futs) => {},
-                            _ = tokio::time::sleep_until(dl) => { break; },
+                            _ = notify.notified() => true,
+                            _ = select_all(readiness_futs) => false,
+                            _ = tokio::time::sleep_until(dl) => false,
+                        }
+                    };
+                    if woke_by_wakeup {
+                        if self.any_channel_mid_receive() {
+                            // Mid-message: don't abandon the in-flight receive to
+                            // the poke (which would fragment the read across
+                            // run_once round-trips). Give it one more drain pass,
+                            // but remember the wakeup — the `select!` consumed the
+                            // permit, so the loop's `deferred_wakeup` check will
+                            // honor it if that pass makes no progress.
+                            deferred_wakeup = true;
+                        } else {
+                            break;
                         }
                     }
                 },
                 _ => {
-                    // Fix A companion: with the read path now fully sync
-                    // (no `timeout(ZERO, …).await`), a `poll(0)` sweep can
-                    // contain no `.await` points at all. Callers that
-                    // busy-loop `poll(0)` would then starve the Tokio I/O
-                    // reactor — OS readiness never reaches the channel and
-                    // idle expiry trips with a spurious disconnect. Yield
-                    // once before breaking so the reactor gets a tick.
+                    // Immediate return (timeout 0 / deadline passed): there is no
+                    // blocking `select!` wait this pass. On transports with a
+                    // synchronous `try_read`, the read path performs no `.await`
+                    // of its own (Fix A: no `timeout(ZERO, …).await`), so a
+                    // single pass can complete without ever yielding to the
+                    // runtime. Yield once before returning so the I/O driver and
+                    // any cooperatively-scheduled peer tasks make progress —
+                    // otherwise a caller that spin-loops `poll(0)` on a
+                    // single-threaded runtime would starve the Tokio I/O reactor
+                    // (OS readiness never reaches the channel and idle expiry
+                    // trips with a spurious disconnect). Cheap (once per poll,
+                    // not per read chunk) and harmless when there is work.
                     tokio::task::yield_now().await;
                     break;
                 },

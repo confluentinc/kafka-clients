@@ -80,66 +80,57 @@ impl DefaultRecordBatch {
         Self { buffer: data.to_vec() }
     }
 
+    /// Returns a borrowing view over this batch's buffer.
+    ///
+    /// Lets owned accessors delegate to the shared [`DefaultRecordBatchRef`]
+    /// readers (single source of truth for the wire-format field offsets) and
+    /// lets the consumer receive path parse a batch header straight out of a
+    /// `&[u8]` slice without a per-batch `to_vec` (see `consumer-threading.md`
+    /// §27).
+    pub fn as_ref(&self) -> DefaultRecordBatchRef<'_> {
+        DefaultRecordBatchRef { buffer: &self.buffer }
+    }
+
     /// Returns the magic byte of this batch.
     pub fn magic(&self) -> i8 {
-        self.buffer[RecordBatch::MAGIC_OFFSET] as i8
+        self.as_ref().magic()
     }
 
     /// Validate the record batch, returning an error if corrupt.
     ///
     /// Corresponds to Java's `ensureValid()`.
     pub fn ensure_valid(&self) -> Result<(), InvalidRecordError> {
-        if self.size_in_bytes() < RecordBatch::RECORD_BATCH_OVERHEAD {
-            return Err(InvalidRecordError::new(format!(
-                "Record batch is corrupt (the size {} is smaller than the minimum allowed overhead {})",
-                self.size_in_bytes(),
-                RecordBatch::RECORD_BATCH_OVERHEAD
-            )));
-        }
-
-        if !self.is_valid() {
-            return Err(InvalidRecordError::new(format!(
-                "Record is corrupt (stored crc = {}, computed crc = {})",
-                self.checksum(),
-                self.compute_checksum()
-            )));
-        }
-
-        Ok(())
+        self.as_ref().ensure_valid()
     }
 
     /// Returns the base timestamp of the batch.
     pub fn base_timestamp(&self) -> i64 {
-        read_i64(&self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET)
+        self.as_ref().base_timestamp()
     }
 
     /// Returns the max timestamp of the batch.
     pub fn max_timestamp(&self) -> i64 {
-        read_i64(&self.buffer, RecordBatch::MAX_TIMESTAMP_OFFSET)
+        self.as_ref().max_timestamp()
     }
 
     /// Returns the timestamp type of this batch.
     pub fn timestamp_type(&self) -> TimestampType {
-        if (self.attributes() & TIMESTAMP_TYPE_MASK) == 0 {
-            TimestampType::CreateTime
-        } else {
-            TimestampType::LogAppendTime
-        }
+        self.as_ref().timestamp_type()
     }
 
     /// Returns the base offset of this batch.
     pub fn base_offset(&self) -> i64 {
-        read_i64(&self.buffer, RecordBatch::BASE_OFFSET_OFFSET)
+        self.as_ref().base_offset()
     }
 
     /// Returns the last offset of this batch.
     pub fn last_offset(&self) -> i64 {
-        self.base_offset() + self.last_offset_delta() as i64
+        self.as_ref().last_offset()
     }
 
     /// Returns the producer ID of this batch.
     pub fn producer_id(&self) -> i64 {
-        read_i64(&self.buffer, RecordBatch::PRODUCER_ID_OFFSET)
+        self.as_ref().producer_id()
     }
 
     /// Returns the producer epoch of this batch.
@@ -149,12 +140,12 @@ impl DefaultRecordBatch {
 
     /// Returns the base sequence of this batch.
     pub fn base_sequence(&self) -> i32 {
-        read_i32(&self.buffer, RecordBatch::BASE_SEQUENCE_OFFSET)
+        self.as_ref().base_sequence()
     }
 
     /// Returns the last offset delta of this batch.
     fn last_offset_delta(&self) -> i32 {
-        read_i32(&self.buffer, RecordBatch::LAST_OFFSET_DELTA_OFFSET)
+        self.as_ref().last_offset_delta()
     }
 
     /// Returns the last sequence number of this batch.
@@ -169,22 +160,22 @@ impl DefaultRecordBatch {
 
     /// Returns the compression type of this batch.
     pub fn compression_type(&self) -> CompressionType {
-        CompressionType::for_id(self.attributes() & COMPRESSION_CODEC_MASK).unwrap_or(CompressionType::None)
+        self.as_ref().compression_type()
     }
 
     /// Returns whether this batch uses compression.
     pub fn is_compressed(&self) -> bool {
-        self.compression_type() != CompressionType::None
+        self.as_ref().is_compressed()
     }
 
     /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
     pub fn size_in_bytes(&self) -> usize {
-        LOG_OVERHEAD + read_i32(&self.buffer, RecordBatch::LENGTH_OFFSET) as usize
+        self.as_ref().size_in_bytes()
     }
 
     /// Returns the number of records in this batch.
     fn count(&self) -> i32 {
-        read_i32(&self.buffer, RecordBatch::RECORDS_COUNT_OFFSET)
+        self.as_ref().records_count()
     }
 
     /// Returns the record count, or `None` for legacy batches.
@@ -194,7 +185,7 @@ impl DefaultRecordBatch {
 
     /// Returns whether this batch is transactional.
     pub fn is_transactional(&self) -> bool {
-        (self.attributes() & TRANSACTIONAL_FLAG_MASK) > 0
+        self.as_ref().is_transactional()
     }
 
     /// Returns whether the delete horizon flag is set.
@@ -213,33 +204,32 @@ impl DefaultRecordBatch {
 
     /// Returns whether this is a control batch.
     pub fn is_control_batch(&self) -> bool {
-        (self.attributes() & CONTROL_FLAG_MASK) > 0
+        self.as_ref().is_control_batch()
     }
 
     /// Returns the partition leader epoch.
     pub fn partition_leader_epoch(&self) -> i32 {
-        read_i32(&self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET)
+        self.as_ref().partition_leader_epoch()
     }
 
     /// Returns the stored CRC32C checksum.
     pub fn checksum(&self) -> u32 {
-        read_u32(&self.buffer, RecordBatch::CRC_OFFSET)
+        self.as_ref().checksum()
     }
 
     /// Returns whether the CRC matches the computed value.
     pub fn is_valid(&self) -> bool {
-        self.size_in_bytes() >= RecordBatch::RECORD_BATCH_OVERHEAD && self.checksum() == self.compute_checksum()
+        self.as_ref().is_valid()
     }
 
     /// Compute the CRC32C over the attributes through the end of the batch.
     fn compute_checksum(&self) -> u32 {
-        crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..])
+        self.as_ref().compute_checksum()
     }
 
     /// Returns the attributes byte (lower byte of the 2-byte attributes field).
     fn attributes(&self) -> u8 {
-        // Read the i16 attributes but only use the lower byte
-        read_i16(&self.buffer, RecordBatch::ATTRIBUTES_OFFSET) as u8
+        self.as_ref().attributes()
     }
 
     /// Write the batch data to a writer.
@@ -291,6 +281,36 @@ impl DefaultRecordBatch {
     /// Returns a mutable reference to the underlying buffer.
     pub fn buffer_mut(&mut self) -> &mut Vec<u8> {
         &mut self.buffer
+    }
+
+    /// The number of records declared in the batch header.
+    pub fn records_count(&self) -> i32 {
+        self.as_ref().records_count()
+    }
+
+    /// The log-append timestamp for the batch, if the batch uses
+    /// `LogAppendTime`, else `None`. Used when decoding record timestamps.
+    pub fn log_append_time(&self) -> Option<i64> {
+        self.as_ref().log_append_time()
+    }
+
+    /// The raw, possibly-compressed records section of this batch (the bytes
+    /// after the batch header), borrowed from the underlying buffer.
+    pub fn records_section(&self) -> &[u8] {
+        self.as_ref().records_section()
+    }
+
+    /// Decompress this batch's records section into a fresh owned buffer.
+    ///
+    /// Only valid for compressed batches. The returned `Vec<u8>` is the
+    /// decompressed record bytes, suitable for borrowing per-record refs via
+    /// [`DefaultRecord::read_ref_from_buffer`]. Per `consumer-threading.md`
+    /// §27, this allocation happens once per compressed batch — never per
+    /// record.
+    ///
+    /// Returns an error if the batch is corrupt or decompression fails.
+    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
+        self.as_ref().decompress_records()
     }
 
     /// Iterate over the records in this batch.
@@ -599,6 +619,199 @@ impl DefaultRecordBatch {
         let crc_end = position + size_in_bytes;
         let crc = crc32c::crc32c(&buffer[crc_start..crc_end]);
         write_u32(&mut buffer[position..], RecordBatch::CRC_OFFSET, crc);
+    }
+}
+
+/// A borrowing view of a single v2+ record batch header, reading its fields
+/// directly out of a `&[u8]` slice without owning the batch's bytes.
+///
+/// This is the zero-copy analog of [`DefaultRecordBatch`]: it exposes the same
+/// read-only header accessors (which are pure offset reads into the buffer) but
+/// holds only a borrow. The consumer receive path uses it so that locating and
+/// parsing the next batch in a fetch response does NOT require copying the
+/// batch's bytes into an owned `Vec` per batch (`consumer-threading.md` §27).
+/// [`DefaultRecordBatch`]'s own accessors delegate here to avoid duplicating
+/// the wire-format offset constants.
+///
+/// The slice must begin at the batch's `BASE_OFFSET` and extend at least to the
+/// end of the batch (`size_in_bytes()` bytes); the cursor that constructs it
+/// already knows the batch boundary from the length field.
+#[derive(Clone, Copy, Debug)]
+pub struct DefaultRecordBatchRef<'a> {
+    buffer: &'a [u8],
+}
+
+impl<'a> DefaultRecordBatchRef<'a> {
+    /// Wraps a slice that begins at a batch header. The slice may extend past
+    /// the end of this batch (e.g. into following batches); size-bounded reads
+    /// use [`Self::size_in_bytes`].
+    pub fn new(buffer: &'a [u8]) -> Self {
+        Self { buffer }
+    }
+
+    /// Returns the magic byte of this batch.
+    pub fn magic(&self) -> i8 {
+        self.buffer[RecordBatch::MAGIC_OFFSET] as i8
+    }
+
+    /// Returns the base timestamp of the batch.
+    pub fn base_timestamp(&self) -> i64 {
+        read_i64(self.buffer, RecordBatch::BASE_TIMESTAMP_OFFSET)
+    }
+
+    /// Returns the max timestamp of the batch.
+    pub fn max_timestamp(&self) -> i64 {
+        read_i64(self.buffer, RecordBatch::MAX_TIMESTAMP_OFFSET)
+    }
+
+    /// Returns the timestamp type of this batch.
+    pub fn timestamp_type(&self) -> TimestampType {
+        if (self.attributes() & TIMESTAMP_TYPE_MASK) == 0 {
+            TimestampType::CreateTime
+        } else {
+            TimestampType::LogAppendTime
+        }
+    }
+
+    /// Returns the base offset of this batch.
+    pub fn base_offset(&self) -> i64 {
+        read_i64(self.buffer, RecordBatch::BASE_OFFSET_OFFSET)
+    }
+
+    /// Returns the last offset delta of this batch.
+    fn last_offset_delta(&self) -> i32 {
+        read_i32(self.buffer, RecordBatch::LAST_OFFSET_DELTA_OFFSET)
+    }
+
+    /// Returns the last offset of this batch.
+    pub fn last_offset(&self) -> i64 {
+        self.base_offset() + self.last_offset_delta() as i64
+    }
+
+    /// Returns the producer ID of this batch.
+    pub fn producer_id(&self) -> i64 {
+        read_i64(self.buffer, RecordBatch::PRODUCER_ID_OFFSET)
+    }
+
+    /// Returns the base sequence of this batch.
+    pub fn base_sequence(&self) -> i32 {
+        read_i32(self.buffer, RecordBatch::BASE_SEQUENCE_OFFSET)
+    }
+
+    /// Returns the compression type of this batch.
+    pub fn compression_type(&self) -> CompressionType {
+        CompressionType::for_id(self.attributes() & COMPRESSION_CODEC_MASK).unwrap_or(CompressionType::None)
+    }
+
+    /// Returns whether this batch uses compression.
+    pub fn is_compressed(&self) -> bool {
+        self.compression_type() != CompressionType::None
+    }
+
+    /// Returns the total size of this batch in bytes (including LOG_OVERHEAD).
+    pub fn size_in_bytes(&self) -> usize {
+        LOG_OVERHEAD + read_i32(self.buffer, RecordBatch::LENGTH_OFFSET) as usize
+    }
+
+    /// Returns the number of records declared in the batch header.
+    pub fn records_count(&self) -> i32 {
+        read_i32(self.buffer, RecordBatch::RECORDS_COUNT_OFFSET)
+    }
+
+    /// Returns whether this batch is transactional.
+    pub fn is_transactional(&self) -> bool {
+        (self.attributes() & TRANSACTIONAL_FLAG_MASK) > 0
+    }
+
+    /// Returns whether this is a control batch.
+    pub fn is_control_batch(&self) -> bool {
+        (self.attributes() & CONTROL_FLAG_MASK) > 0
+    }
+
+    /// Returns the partition leader epoch.
+    pub fn partition_leader_epoch(&self) -> i32 {
+        read_i32(self.buffer, RecordBatch::PARTITION_LEADER_EPOCH_OFFSET)
+    }
+
+    /// Returns the stored CRC32C checksum.
+    pub fn checksum(&self) -> u32 {
+        read_u32(self.buffer, RecordBatch::CRC_OFFSET)
+    }
+
+    /// Compute the CRC32C over the attributes through the end of the batch.
+    fn compute_checksum(&self) -> u32 {
+        crc32c::crc32c(&self.buffer[RecordBatch::ATTRIBUTES_OFFSET..self.size_in_bytes()])
+    }
+
+    /// Returns whether the CRC matches the computed value.
+    pub fn is_valid(&self) -> bool {
+        self.size_in_bytes() >= RecordBatch::RECORD_BATCH_OVERHEAD && self.checksum() == self.compute_checksum()
+    }
+
+    /// Validate the record batch, returning an error if corrupt.
+    ///
+    /// Corresponds to Java's `ensureValid()`.
+    pub fn ensure_valid(&self) -> Result<(), InvalidRecordError> {
+        if self.size_in_bytes() < RecordBatch::RECORD_BATCH_OVERHEAD {
+            return Err(InvalidRecordError::new(format!(
+                "Record batch is corrupt (the size {} is smaller than the minimum allowed overhead {})",
+                self.size_in_bytes(),
+                RecordBatch::RECORD_BATCH_OVERHEAD
+            )));
+        }
+
+        if !self.is_valid() {
+            return Err(InvalidRecordError::new(format!(
+                "Record is corrupt (stored crc = {}, computed crc = {})",
+                self.checksum(),
+                self.compute_checksum()
+            )));
+        }
+
+        Ok(())
+    }
+
+    /// Returns the attributes byte (lower byte of the 2-byte attributes field).
+    fn attributes(&self) -> u8 {
+        read_i16(self.buffer, RecordBatch::ATTRIBUTES_OFFSET) as u8
+    }
+
+    /// The log-append timestamp for the batch, if the batch uses
+    /// `LogAppendTime`, else `None`. Used when decoding record timestamps.
+    pub fn log_append_time(&self) -> Option<i64> {
+        if self.timestamp_type() == TimestampType::LogAppendTime {
+            Some(self.max_timestamp())
+        } else {
+            None
+        }
+    }
+
+    /// The raw, possibly-compressed records section of this batch (the bytes
+    /// after the batch header), borrowed from the underlying buffer and bounded
+    /// to this batch's declared size.
+    pub fn records_section(&self) -> &'a [u8] {
+        &self.buffer[RecordBatch::RECORDS_OFFSET..self.size_in_bytes()]
+    }
+
+    /// Decompress this batch's records section into a fresh owned buffer.
+    ///
+    /// Only valid for compressed batches. The returned `Vec<u8>` is the
+    /// decompressed record bytes, suitable for borrowing per-record refs via
+    /// [`DefaultRecord::read_ref_from_buffer`]. Per `consumer-threading.md`
+    /// §27, this allocation happens once per compressed batch — never per
+    /// record.
+    ///
+    /// Returns an error if the batch is corrupt or decompression fails.
+    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
+        let records_data = self.records_section();
+        let compression = Compression::of(self.compression_type());
+        let mut reader = compression
+            .wrap_for_input(records_data, self.magic())
+            .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
+        let mut decompressed = Vec::new();
+        io::Read::read_to_end(&mut reader, &mut decompressed)
+            .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
+        Ok(decompressed)
     }
 }
 

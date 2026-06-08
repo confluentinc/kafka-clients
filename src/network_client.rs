@@ -1435,6 +1435,10 @@ impl<S: Selectable, H: HostResolver> KafkaClient for NetworkClient<S, H> {
         self.selector.wakeup();
     }
 
+    fn wakeup_handle(&self) -> Arc<Notify> {
+        self.selector.wakeup_handle()
+    }
+
     fn wakeup_notify(&self) -> Arc<Notify> {
         self.selector.wakeup_notify()
     }

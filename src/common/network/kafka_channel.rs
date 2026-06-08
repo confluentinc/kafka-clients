@@ -260,6 +260,18 @@ impl KafkaChannel {
         self.transport_layer.is_connected()
     }
 
+    /// Whether the transport supports non-blocking `try_read` (plaintext does;
+    /// SSL/mocks do not). Lets the selector drain it in a tight loop.
+    pub fn supports_try_read(&self) -> bool {
+        self.transport_layer.supports_try_read()
+    }
+
+    /// Bytes already read into the in-progress receive (0 if none / fresh).
+    /// Used by the selector to avoid yielding mid-message on a wakeup.
+    pub fn current_receive_bytes_read(&self) -> usize {
+        self.receive.as_ref().map_or(0, |r| r.bytes_read())
+    }
+
     /// Returns the channel ID.
     pub fn id(&self) -> &str {
         &self.id
@@ -461,15 +473,6 @@ impl KafkaChannel {
         }
 
         Ok(bytes_received)
-    }
-
-    /// Whether the underlying transport implements a synchronous `try_read`.
-    ///
-    /// Plaintext returns `true`; SSL returns `false` and goes through the
-    /// async `read` path because rustls must drive its I/O state machine
-    /// through the async TLS stream.
-    pub fn supports_try_read(&self) -> bool {
-        self.transport_layer.supports_try_read()
     }
 
     /// Synchronous, non-blocking mirror of [`read`](Self::read).

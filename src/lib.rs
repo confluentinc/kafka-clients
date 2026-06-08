@@ -23,6 +23,8 @@ pub mod cluster_connection_states;
 pub mod common;
 pub(crate) mod common_client_configs;
 pub mod connection_state;
+pub mod consumer;
+pub mod fetch_session_handler;
 pub mod host_resolver;
 pub mod in_flight_requests;
 pub mod kafka_client;
@@ -37,6 +39,8 @@ pub(crate) mod network_client;
 pub(crate) mod network_client_utils;
 pub mod node_api_versions;
 pub mod producer;
+#[cfg(test)]
+pub(crate) mod test_alloc_tracker;
 
 #[cfg(feature = "ffi")]
 pub mod ffi;
