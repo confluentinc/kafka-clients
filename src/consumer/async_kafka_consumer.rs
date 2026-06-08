@@ -2195,8 +2195,9 @@ where
             self.check_inflight_poll(poll_deadline_ms, first_pass).await?;
             first_pass = false;
 
-            // Stage 3: collect fetched records.
-            let mut records = self.poll_for_fetches()?;
+            // Stage 3: collect fetched records (blocks on the FetchBuffer
+            // wakeup when none are buffered yet — see `poll_for_fetches`).
+            let mut records = self.poll_for_fetches(poll_deadline_ms).await?;
             if !records.is_empty() {
                 // Java: `sendPrefetches(timer)` — eagerly enqueue the next
                 // batch of fetches so the user's processing overlaps with
@@ -2352,12 +2353,72 @@ where
     /// Java: `private Fetch<K, V> pollForFetches(Timer timer)`
     /// (`AsyncKafkaConsumer.java:1872-1932`).
     ///
-    /// In the Rust translation the buffer-drain is a pure CPU operation
-    /// (no broker round-trip); the `FetchCollector::collect_fetch` call
-    /// returns immediately. Errors (e.g. `OffsetOutOfRange`,
-    /// `TopicAuthorizationFailed`) propagate to the caller — Java raises
-    /// them out of `poll(Duration)` and the Rust contract matches.
-    fn poll_for_fetches(&self) -> Result<ConsumerRecords<K, V>, KafkaError> {
+    /// Collects buffered records; if none are available yet, **blocks** on
+    /// the [`FetchBuffer`] wakeup until the background task adds data, the
+    /// timeout elapses, or `wakeup()` fires — then collects again. This is
+    /// the faithful translation of Java's `pollForFetches`, which calls
+    /// `fetchBuffer.awaitWakeup(pollTimer)` between the two `collectFetch()`
+    /// calls. The earlier Rust port dropped that block and the caller
+    /// re-checked in a tight loop, which (a) busy-spun a core whenever the
+    /// buffer was momentarily empty and (b) left no fetch reliably in flight
+    /// while waiting — the steady-state latency tail
+    /// (`design/current/consumer-latency-findings.md`). Blocking here parks
+    /// an idle consumer and lets a long-polling fetch's response wake the
+    /// wait the instant it lands (`FetchBuffer::add` → `await_wakeup`).
+    ///
+    /// Errors (e.g. `OffsetOutOfRange`, `TopicAuthorizationFailed`)
+    /// propagate to the caller — Java raises them out of `poll(Duration)`.
+    async fn poll_for_fetches(&self, poll_deadline_ms: i64) -> Result<ConsumerRecords<K, V>, KafkaError> {
+        // Java: `pollTimeout = min(maximumTimeToWait, timer.remainingMs())`
+        // when committed-offset management is enabled (always true for a
+        // group consumer). Capping at `maximumTimeToWait` bounds how long
+        // this blocks so the poll loop re-runs `check_inflight_poll` —
+        // draining §31 background events / rebalance callbacks — at least
+        // that often. The heartbeat manager's `maximum_time_to_wait` shrinks
+        // during membership work, exactly as in Java.
+        let remaining = self.remaining_ms(poll_deadline_ms);
+        let poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
+
+        // Java's first `collectFetch()` — return immediately if data is ready.
+        let fetch = self.fetch_collector.collect_fetch(&self.fetch_buffer)?;
+        if !fetch.is_empty() {
+            return Ok(fetch);
+        }
+        if poll_timeout_ms <= 0 {
+            // No time left to wait; the caller's loop re-checks the deadline.
+            return Ok(fetch);
+        }
+
+        // Ensure a fetch is in flight before we block. `await_wakeup` only
+        // wakes when the bg task adds fetched data, so blocking with no fetch
+        // outstanding strands the wait until `maximum_time_to_wait` even
+        // though records may be available at the broker. This happens when
+        // the consumer has just caught up and the prefetch chain
+        // (`poll`-returns-records → `send_prefetches`) did not fire — the
+        // residual latency tail in `design/current/consumer-latency-findings.md`.
+        // `createFetchRequests` is a no-op for any node that already has a
+        // fetch in flight (the in-flight skip in `prepare_fetch_requests`),
+        // so this issues a fetch only when none is outstanding. The issued
+        // fetch long-polls at the broker (`fetch.max.wait.ms`) and its
+        // response wakes us the instant data lands.
+        self.send_prefetches();
+
+        // Java: `wakeupTrigger.setFetchAction(fetchBuffer); fetchBuffer
+        // .awaitWakeup(pollTimer);`. The Rust wakeup model (§11) realizes
+        // the `setFetchAction` side by racing the cancellation token instead
+        // of a back-channel: when `wakeup()` cancels the token this arm
+        // wins, the poll() loop top calls `maybe_trigger_wakeup`, and
+        // `KafkaError::Wakeup` is surfaced + the token rotated.
+        let token = self.wakeup_trigger.current_token();
+        tokio::select! {
+            biased;
+            _ = token.cancelled() => {}
+            _ = self.fetch_buffer.await_wakeup(Duration::from_millis(poll_timeout_ms as u64)) => {}
+        }
+
+        // Java's second `collectFetch()` — may still be empty on a timeout or
+        // a wakeup; the caller's loop re-checks the deadline / surfaces the
+        // wakeup.
         self.fetch_collector.collect_fetch(&self.fetch_buffer)
     }
 

@@ -307,10 +307,27 @@ impl FetchRequestManager {
         };
 
         if prepared.is_empty() {
-            // No fetchable partitions: wake the buffer so a polling
-            // consumer doesn't wait needlessly, complete ALL pending
-            // acks with Ok(()), and return empty.
-            self.abstract_fetch.fetch_buffer.wakeup();
+            // Complete ALL pending acks with Ok(()) and return empty.
+            //
+            // Only wake a consumer blocked in `FetchBuffer::await_wakeup` if
+            // there is genuinely nothing coming. When nodes already have an
+            // in-flight fetch, `prepare_fetch_requests` skipped them — a
+            // response is on the way and will wake the buffer via `add`, so
+            // waking here is wrong: the app's `await_wakeup` would return,
+            // re-trigger `createFetchRequests` (empty again — same in-flight
+            // skip), and wake again, busy-looping. Wait for the in-flight
+            // fetch instead. Only an empty pending-set means no fetch is
+            // outstanding (no fetchable partitions / all paused), in which
+            // case waking avoids a needless wait.
+            //
+            // (Java wakes unconditionally here, but its `poll()` does not
+            // re-issue `createFetchRequests` on every loop iteration the way
+            // the Rust poll loop does, so Java does not spin. The Rust poll
+            // loop ensures a fetch is in flight before blocking, which makes
+            // the unconditional wake a spin — hence this guard.)
+            if self.abstract_fetch.nodes_with_pending_fetch_requests.is_empty() {
+                self.abstract_fetch.fetch_buffer.wakeup();
+            }
             for tx in pending_acks {
                 let _ = tx.send(Ok(()));
             }
@@ -515,6 +532,7 @@ mod tests {
     use crate::common::internals::ClusterResourceListeners;
     use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
     use std::collections::HashSet;
+    use std::time::{Duration, Instant};
 
     fn make_subscriptions() -> Arc<Mutex<SubscriptionState>> {
         Arc::new(Mutex::new(SubscriptionState::new(AutoOffsetResetStrategy::LATEST)))
@@ -586,6 +604,53 @@ mod tests {
         // The ack should have been completed Ok(()).
         let received = rx.await.expect("ack receiver");
         assert!(received.is_ok());
+    }
+
+    /// Regression (latency): when `prepare_fetch_requests` returns empty
+    /// because nodes already have an in-flight fetch, `poll` must NOT wake
+    /// the `FetchBuffer` — a response is on the way and will wake it via
+    /// `add`. Waking here busy-loops a consumer blocked in
+    /// `FetchBuffer::await_wakeup` (it returns, re-triggers
+    /// `createFetchRequests`, which is empty again via the same in-flight
+    /// skip, wakes again...). See `design/current/consumer-latency-findings.md`.
+    #[tokio::test]
+    async fn test_poll_empty_with_inflight_does_not_wake_buffer() {
+        let mut mgr = make_manager();
+        let buffer = mgr.abstract_fetch.fetch_buffer.clone();
+        // Simulate an in-flight fetch to node 1.
+        mgr.abstract_fetch.nodes_with_pending_fetch_requests.insert(1);
+        let rx = mgr.create_fetch_requests();
+        let _ = mgr.poll(100);
+        assert!(rx.await.expect("ack receiver").is_ok());
+        // The buffer must NOT have been woken: `await_wakeup` blocks for
+        // ~the full timeout rather than returning immediately.
+        let start = Instant::now();
+        buffer.await_wakeup(Duration::from_millis(120)).await;
+        assert!(
+            start.elapsed() >= Duration::from_millis(80),
+            "await_wakeup returned early ({:?}) — buffer was woken despite an in-flight fetch",
+            start.elapsed()
+        );
+    }
+
+    /// Counterpart: with NO in-flight fetch and nothing fetchable, `poll`
+    /// DOES wake the buffer so a blocked consumer does not wait needlessly
+    /// (Java's unconditional wake for the genuinely-nothing-to-fetch case).
+    #[tokio::test]
+    async fn test_poll_empty_no_inflight_wakes_buffer() {
+        let mut mgr = make_manager();
+        let buffer = mgr.abstract_fetch.fetch_buffer.clone();
+        let rx = mgr.create_fetch_requests();
+        let _ = mgr.poll(100);
+        assert!(rx.await.expect("ack receiver").is_ok());
+        // The buffer was woken → `await_wakeup` returns promptly.
+        let start = Instant::now();
+        buffer.await_wakeup(Duration::from_millis(500)).await;
+        assert!(
+            start.elapsed() < Duration::from_millis(100),
+            "await_wakeup blocked ({:?}) — buffer was not woken when nothing is in flight",
+            start.elapsed()
+        );
     }
 
     /// `create_fetch_requests` and `enqueue_create_fetch_requests` both

@@ -173,3 +173,55 @@ instead of spinning, and ensure a fetch is always in flight while waiting (issue
 `createFetchRequests` whenever a fetchable node has no in-flight fetch). This
 would close the residual tail and likely also help the throughput ceiling
 (continuous prefetch overlap).
+
+---
+
+## UPDATE (2026-06-08, part 2) — residual tail fixed (Option 1: faithful `awaitWakeup`)
+
+Dug into the residual tail. Found the Rust `poll()` had **dropped Java's
+`fetchBuffer.awaitWakeup(pollTimeout)` block**: `poll_for_fetches` was a pure
+sync `collect_fetch`, and the poll loop re-checked in a tight loop. Confirmed
+empirically: at 1000 msg/s (idle) the consumer burned **103% CPU busy-spinning**.
+`FetchBuffer::await_wakeup` existed (translated + unit-tested) but was never wired
+into the poll path — an incomplete translation.
+
+### Java vs Rust (the gap)
+Java `pollForFetches`: `collectFetch()`; if empty, `fetchBuffer.awaitWakeup(
+min(maximumTimeToWait, remaining))` **blocks** (woken by the bg `fetchBuffer.add`);
+`collectFetch()` again. A fetch issued by the per-poll `AsyncPollEvent`
+long-polls at the broker while the app blocks, so new data wakes the consumer
+immediately. Rust had the first `collect` only.
+
+### Fix (landed)
+1. **Block like Java.** `poll_for_fetches` is now `async` and, when the first
+   collect is empty, blocks on `fetch_buffer.await_wakeup(min(maximum_time_to_wait_ms,
+   remaining))`, `select!`'d against the §11 wakeup token (the Rust equivalent of
+   Java's `wakeupTrigger.setFetchAction(fetchBuffer)`), then collects again.
+   Eliminates the busy-spin; data wakes the wait the instant `add` fires.
+2. **Keep a fetch in flight.** Before blocking, call `send_prefetches()` so a
+   fetch is always outstanding (long-polling) while we wait — `createFetchRequests`
+   is a no-op for nodes that already have one. Closes the "caught up, no fetch in
+   flight" gap that otherwise stranded the wait until `maximum_time_to_wait`.
+3. **No-spin guard** (`FetchRequestManager::poll_internal`). When
+   `prepare_fetch_requests` returns empty *because nodes already have an in-flight
+   fetch*, do **not** `fetch_buffer.wakeup()` — a response is on the way. Only wake
+   when the in-flight set is empty (genuinely nothing to fetch). Without this, the
+   prefetch-before-block from (2) busy-looped (`wakeup` → `await_wakeup` returns →
+   re-trigger → empty via in-flight skip → `wakeup` → …), which spiked idle CPU to
+   140%. Two regression tests added
+   (`test_poll_empty_with_inflight_does_not_wake_buffer`, `..._no_inflight_wakes_buffer`).
+
+### Results (default config, no config change)
+
+| Rate | avg | p50 | p95 | p99 | p99.9 | (orig avg / p99) |
+|------|-----|-----|-----|-----|-------|-------------------|
+| 50k  | 1.2 | 1   | 3   | 9   | 43    | (253 / 832)       |
+| 100k | 1.4 | 1   | 4   | 12  | 90    | (275 / 894)       |
+| 200k | 2.3 | 1   | 6   | 33  | 172   | (315 / 1289)      |
+
+Idle CPU (1000 msg/s): **103% → ~4%**. avg ~150× better, p99 ~40–100× better,
+stable across rates. Full lib suite 1711 passed; clippy clean.
+
+The earlier UPDATE's framing ("config is the only lever") is now superseded: the
+latency floor was two consumer bugs — the bg-not-woken stall (part 1) and the
+dropped `awaitWakeup` + no-fetch-in-flight gap (part 2) — both fixed in code.
