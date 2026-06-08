@@ -34,7 +34,7 @@ pub mod timestamp_type;
 pub use compression_ratio_estimator::CompressionRatioEstimator;
 pub use compression_type::CompressionType;
 pub use default_record::{DefaultRecord, DefaultRecordRef};
-pub use default_record_batch::DefaultRecordBatch;
+pub use default_record_batch::{DefaultRecordBatch, DefaultRecordBatchRef};
 pub use invalid_record_error::InvalidRecordError;
 pub use memory_records::MemoryRecords;
 pub use memory_records_builder::MemoryRecordsBuilder;
