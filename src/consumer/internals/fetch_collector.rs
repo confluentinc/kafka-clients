@@ -1317,20 +1317,25 @@ mod tests {
     /// `Vec<u8>::clone` of fetch-buffer bytes, or per-record
     /// `DefaultRecord` deep-clone, this test fails loudly.
     ///
-    /// Current measurement (Phase 7b): ~4.2 allocs/record. The budget is
-    /// set generously above that to absorb small inter-version changes
-    /// in the std library / our header / Vec growth without becoming
-    /// brittle, while still flagging a 2× regression caused by an
-    /// accidental clone of topic name / record bytes / DefaultRecord.
+    /// Current measurement (Phase 16, after the §27 zero-copy decode):
+    /// ~2.2 allocs/record — exactly the user deserializer's key + value
+    /// `String::from_utf8`, with NO copy of the raw key/value bytes out of
+    /// the fetch buffer. (Before Phase 16 this was ~4.2 allocs/record,
+    /// because `DefaultRecord` owned `Vec<u8>` key/value and was decoded
+    /// eagerly per batch — two extra `to_vec()` copies per record.) The
+    /// budget is set just above the measured value to lock in the win while
+    /// absorbing small std-library / Vec-growth variation, and to flag any
+    /// regression that re-introduces a per-record byte copy.
     #[test]
     fn test_collect_fetch_per_record_allocation_budget() {
         const RECORD_COUNT: i32 = 100;
-        // Empirical baseline is ~4.2 allocs/record (key + value
-        // String::from_utf8 internals, RecordHeaders::from_slice
-        // amortized, Vec push amortized). Budget at 6 catches a
-        // regression that adds even one per-record allocation
-        // (e.g. accidental String::from for topic).
-        const ALLOC_BUDGET_PER_RECORD: usize = 6;
+        // Empirical baseline is ~2.2 allocs/record (key + value
+        // String::from_utf8 — the user deserializer's `T` output, which is
+        // the ONLY allocation §27 permits per record). Budget at 4 catches
+        // a regression that re-adds a per-record byte copy (key `to_vec`,
+        // value `to_vec`, topic `String::from`, or `DefaultRecord` clone),
+        // each of which would push this toward the pre-Phase-16 ~4.2.
+        const ALLOC_BUDGET_PER_RECORD: usize = 4;
         // Top-level overhead budget (one-time allocations: IndexMap,
         // HashMap, CompletedFetch::ensure_cursor's one-time MemoryRecords
         // setup, ConsumerRecords construction, etc.). Empirically ~22

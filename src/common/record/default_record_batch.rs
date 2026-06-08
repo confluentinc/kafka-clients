@@ -293,6 +293,48 @@ impl DefaultRecordBatch {
         &mut self.buffer
     }
 
+    /// The number of records declared in the batch header.
+    pub fn records_count(&self) -> i32 {
+        self.count()
+    }
+
+    /// The log-append timestamp for the batch, if the batch uses
+    /// `LogAppendTime`, else `None`. Used when decoding record timestamps.
+    pub fn log_append_time(&self) -> Option<i64> {
+        if self.timestamp_type() == TimestampType::LogAppendTime {
+            Some(self.max_timestamp())
+        } else {
+            None
+        }
+    }
+
+    /// The raw, possibly-compressed records section of this batch (the bytes
+    /// after the batch header), borrowed from the underlying buffer.
+    pub fn records_section(&self) -> &[u8] {
+        &self.buffer[RecordBatch::RECORDS_OFFSET..]
+    }
+
+    /// Decompress this batch's records section into a fresh owned buffer.
+    ///
+    /// Only valid for compressed batches. The returned `Vec<u8>` is the
+    /// decompressed record bytes, suitable for borrowing per-record refs via
+    /// [`DefaultRecord::read_ref_from_buffer`]. Per `consumer-threading.md`
+    /// §27, this allocation happens once per compressed batch — never per
+    /// record.
+    ///
+    /// Returns an error if the batch is corrupt or decompression fails.
+    pub fn decompress_records(&self) -> Result<Vec<u8>, InvalidRecordError> {
+        let records_data = self.records_section();
+        let compression = Compression::of(self.compression_type());
+        let mut reader = compression
+            .wrap_for_input(records_data, self.magic())
+            .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
+        let mut decompressed = Vec::new();
+        io::Read::read_to_end(&mut reader, &mut decompressed)
+            .map_err(|e| InvalidRecordError::new(format!("Failed to decompress record stream: {}", e)))?;
+        Ok(decompressed)
+    }
+
     /// Iterate over the records in this batch.
     ///
     /// For uncompressed batches, reads records directly from the buffer.

@@ -33,21 +33,23 @@
 //! - `topic_arc: Arc<str>` is allocated ONCE per `CompletedFetch` from
 //!   `partition.topic()` and cloned cheaply per `ConsumerRecord` — no
 //!   `String::from_utf8` or `Arc::from(&str)` per record.
-//! - Per-record reads of `DefaultRecord` go through `peek_current_record`
-//!   which returns `&DefaultRecord`. We never `.clone()` a `DefaultRecord`
-//!   on the happy path; the only deep copy of record payload is whatever
-//!   the user's `Deserializer<T>` does internally.
-//! - Headers are owned per the milestone-8 §27 ruling (`Headers` built
-//!   from `DefaultRecord::headers()`); a future revisit may borrow.
+//! - Per-record reads go through `peek_current_record`, which parses a
+//!   borrowing `DefaultRecordRef` directly out of the batch's record bytes
+//!   on demand — the key and value bytes are `&[u8]` slices into the fetch
+//!   buffer (or, for compressed batches, into the cursor's once-per-batch
+//!   decompression buffer). We never copy key/value bytes out of the buffer;
+//!   the only deep copy of record payload is whatever the user's
+//!   `Deserializer<T>` does internally.
+//! - Headers are owned per the milestone-8 §27 ruling (`RecordHeaders` built
+//!   from `DefaultRecordRef::headers()`, the single owned-copy point); a
+//!   future revisit may borrow.
 //! - No per-record `tokio::spawn`. The whole struct is sync.
-//! - Iteration is lazy via a `BatchCursor`: at most one batch's records
-//!   are materialized at a time, not the full fetch. **Known limitation
-//!   (tracked for Phase 7b/c):** within a single batch, `iter_records()`
-//!   returns `Vec<DefaultRecord>` eagerly — to fully realize §27's
-//!   "one batch at a time" intent down to the record granularity, the
-//!   underlying `DefaultRecordBatch` needs a streaming iterator. The
-//!   cross-batch lazy property is preserved; within-batch eager
-//!   materialization is acceptable for Milestone-8.
+//! - Iteration is lazy via a `BatchCursor`: records are decoded one at a
+//!   time, on demand, by walking the current batch's record bytes with a
+//!   byte cursor. We never materialize a `Vec<DefaultRecord>` of owned
+//!   copies — neither across batches nor within a batch. Compressed batches
+//!   are decompressed once into an owned buffer held by the cursor; records
+//!   then borrow from it (no re-decompression and no per-record copy).
 //!
 //! # READ_COMMITTED limitations
 //!
@@ -80,7 +82,9 @@ use crate::common::KafkaError;
 use crate::common::TopicPartition;
 use crate::common::header::internals::RecordHeaders;
 use crate::common::memory::buffer_supplier::BufferSupplier;
-use crate::common::record::{DefaultRecord, MemoryRecords, Record, RecordVersion, TimestampType};
+use crate::common::record::{
+    DefaultRecord, DefaultRecordRef, MemoryRecords, RecordBatch, RecordVersion, TimestampType,
+};
 use crate::common::serialization::Deserializer;
 use crate::consumer::ConsumerRecord;
 use crate::consumer::internals::fetch_config::FetchConfig;
@@ -119,6 +123,11 @@ impl PartialOrd for AbortedTxnByFirstOffset {
 #[derive(Clone, Debug)]
 struct BatchMetadata {
     base_offset: i64,
+    base_timestamp: i64,
+    base_sequence: i32,
+    /// The batch's log-append timestamp (max timestamp), used when
+    /// `timestamp_type == LogAppendTime` to override per-record timestamps.
+    last_offset_timestamp: i64,
     last_offset: i64,
     next_offset: i64,
     timestamp_type: TimestampType,
@@ -186,14 +195,13 @@ pub(crate) struct CompletedFetch {
 /// Cursor through the batches and records inside a [`CompletedFetch`].
 ///
 /// Owns a `MemoryRecords` constructed from a clone of the partition's
-/// records buffer; we accept this clone for Milestone-8 because the
+/// records buffer; we accept this one-time clone for Milestone-8 because the
 /// existing `MemoryRecords::new` takes `Vec<u8>`. A future revision may
 /// extend `MemoryRecords` to accept a borrowed slice (preserving §27 more
-/// strictly), but the §27 contract is *currently* satisfied at the
-/// `CompletedFetch` interface boundary: the
-/// `partition_data.records: Option<Vec<u8>>` is the canonical owner; we
-/// take one move of those bytes into the cursor's `MemoryRecords` on the
-/// first iteration, never per record.
+/// strictly), but the §27 *per-record* contract is fully satisfied: that
+/// buffer is the canonical owner of the record bytes, and individual records
+/// are parsed as borrowing [`DefaultRecordRef`]s pointing into it — no
+/// per-record copy.
 #[derive(Debug)]
 struct BatchCursor {
     /// Records buffer cloned out of `partition_data.records` exactly once
@@ -205,11 +213,29 @@ struct BatchCursor {
     /// Metadata of the batch we're currently iterating; `None` before the
     /// first batch is loaded.
     current_batch: Option<BatchMetadata>,
-    /// Records of the current batch, materialized by
-    /// `DefaultRecordBatch::iter_records`. Empty between batches.
-    current_records: Vec<DefaultRecord>,
-    /// Index of the next record to return from `current_records`.
-    record_index: usize,
+    /// Where the current batch's record bytes live, and how to decode the
+    /// next record. The key/value/header bytes of each record are borrowed
+    /// from this source — never copied.
+    record_source: RecordSource,
+    /// Byte offset of the next record to decode, relative to the start of
+    /// the current batch's (decompressed) record section.
+    record_byte_offset: usize,
+    /// Number of records left to decode in the current batch.
+    records_remaining: i32,
+}
+
+/// Where the current batch's record bytes come from. Uncompressed batches
+/// borrow their bytes directly from the cursor's `MemoryRecords` buffer (we
+/// remember the byte range so we don't re-walk the batch iterator per
+/// record). Compressed batches are decompressed once into an owned buffer.
+#[derive(Debug)]
+enum RecordSource {
+    /// No batch loaded yet (or iteration finished).
+    None,
+    /// Uncompressed: record bytes are `memory_records.buffer()[range]`.
+    Borrowed(std::ops::Range<usize>),
+    /// Compressed: record bytes are the owned decompressed buffer.
+    Owned(Vec<u8>),
 }
 
 impl CompletedFetch {
@@ -345,8 +371,9 @@ impl CompletedFetch {
             memory_records,
             next_batch_offset: Some(0),
             current_batch: None,
-            current_records: Vec::new(),
-            record_index: 0,
+            record_source: RecordSource::None,
+            record_byte_offset: 0,
+            records_remaining: 0,
         });
     }
 
@@ -406,10 +433,10 @@ impl CompletedFetch {
                 break;
             }
 
-            // §27: read DefaultRecord / batch metadata via shared
-            // borrows — no clones. We deserialize while holding the
-            // borrow, then mutate self.cursor.record_index AFTER the
-            // borrow is dropped.
+            // §27: read the record as a borrowing `DefaultRecordRef` — the
+            // key/value bytes are slices into the fetch (or decompression)
+            // buffer, never copied. We deserialize while holding the borrow,
+            // then advance the cursor's byte offset AFTER the borrow drops.
             let key_result;
             let value_result;
             let leader_epoch;
@@ -419,11 +446,23 @@ impl CompletedFetch {
             let offset;
             let timestamp;
             let record_size_in_bytes;
+            let record_bytes_consumed;
             let headers_owned;
             {
                 let (record, batch_meta) = self.peek_current_record().expect("verified non-empty above");
                 let topic_str: &str = &self.topic_arc;
-                headers_owned = RecordHeaders::from_slice(record.headers());
+                // The only owned copy of record payload on the happy path:
+                // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
+                // owned headers on the emitted `ConsumerRecord`).
+                let headers_vec = record.headers().map_err(|e| {
+                    KafkaError::illegal_state(format!(
+                        "Record for partition {} at offset {} has invalid headers, cause: {}",
+                        self.partition,
+                        record.offset(),
+                        e
+                    ))
+                })?;
+                headers_owned = RecordHeaders::from_headers(headers_vec);
                 key_result = match record.key() {
                     None => Ok(None),
                     Some(key_bytes) => key_deserializer
@@ -443,6 +482,7 @@ impl CompletedFetch {
                 offset = record.offset();
                 timestamp = record.timestamp();
                 record_size_in_bytes = record.size_in_bytes();
+                record_bytes_consumed = record.size_in_bytes() as usize;
             }
 
             let key = match key_result {
@@ -492,9 +532,12 @@ impl CompletedFetch {
             self.next_fetch_offset = offset + 1;
             self.cached_record_exception = None;
             out.push(consumer_record);
-            // Advance the record cursor — we successfully consumed this record.
+            // Advance the record cursor — we successfully consumed this
+            // record. Move the byte offset past it and decrement the
+            // remaining-records count.
             if let Some(cursor) = &mut self.cursor {
-                cursor.record_index += 1;
+                cursor.record_byte_offset += record_bytes_consumed;
+                cursor.records_remaining -= 1;
             }
         }
 
@@ -514,14 +557,14 @@ impl CompletedFetch {
     /// §27 zero-copy note: the previous version returned an owned
     /// `(DefaultRecord, BatchMetadata)` tuple, which forced a deep clone
     /// of the record's key + value bytes on every iteration. The current
-    /// version returns a boolean and leaves the record in
-    /// `cursor.current_records[cursor.record_index]`; callers use
-    /// [`Self::peek_current_record`] to read it by reference.
+    /// version returns a boolean and leaves the cursor positioned at the
+    /// next record's byte offset; callers use [`Self::peek_current_record`]
+    /// to read it by reference.
     fn advance_to_next_fetched_record(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
         loop {
             // Reload current batch if exhausted.
             let needs_new_batch = match &self.cursor {
-                Some(cursor) => cursor.record_index >= cursor.current_records.len(),
+                Some(cursor) => cursor.records_remaining <= 0,
                 None => true,
             };
             if needs_new_batch {
@@ -546,60 +589,81 @@ impl CompletedFetch {
             //
             // Scope the borrow so the early-skip mutations below can
             // touch the cursor freely.
-            let (record_offset, is_control_batch, crc_validation_err) = {
+            let (record_offset, record_bytes_consumed, is_control_batch) = {
                 let (record, batch_meta) = self.peek_current_record().expect("cursor verified non-empty above");
-                let offset = record.offset();
-                let is_control = batch_meta.is_control_batch;
-                let crc_err = if config.check_crcs {
-                    record.ensure_valid().err()
-                } else {
-                    None
-                };
-                (offset, is_control, crc_err)
+                // Per-record CRC validation: v2 records carry no per-record
+                // CRC (the CRC covers the whole batch and is checked in
+                // `load_next_batch`), so `ensure_valid` is infallible here —
+                // matching Java's `DefaultRecord`. The `config.check_crcs`
+                // gate is therefore a no-op at the record level.
+                (record.offset(), record.size_in_bytes() as usize, batch_meta.is_control_batch)
             };
 
             // Skip out-of-range records.
             if record_offset < self.next_fetch_offset {
-                if let Some(cursor) = &mut self.cursor {
-                    cursor.record_index += 1;
-                }
+                self.advance_record_cursor(record_bytes_consumed);
                 continue;
-            }
-
-            // CRC validation if configured.
-            if let Some(e) = crc_validation_err {
-                return Err(KafkaError::illegal_state(format!(
-                    "Record for partition {} at offset {} is invalid, cause: {}",
-                    self.partition, record_offset, e
-                )));
             }
 
             if is_control_batch {
                 // Control records are not returned to the user — advance
                 // nextFetchOffset and skip.
                 self.next_fetch_offset = record_offset + 1;
-                if let Some(cursor) = &mut self.cursor {
-                    cursor.record_index += 1;
-                }
+                self.advance_record_cursor(record_bytes_consumed);
                 continue;
             }
             return Ok(true);
         }
     }
 
-    /// Returns the current record (the one at `cursor.record_index`) and
-    /// its enclosing batch metadata, both by reference. Returns `None`
+    /// Advances the within-batch record cursor by `record_bytes_consumed`
+    /// bytes and decrements the remaining-records count.
+    fn advance_record_cursor(&mut self, record_bytes_consumed: usize) {
+        if let Some(cursor) = &mut self.cursor {
+            cursor.record_byte_offset += record_bytes_consumed;
+            cursor.records_remaining -= 1;
+        }
+    }
+
+    /// Parses the current record (the one at `cursor.record_byte_offset`)
+    /// into a borrowing [`DefaultRecordRef`] and returns it together with its
+    /// enclosing batch metadata, both borrowing from `self`. Returns `None`
     /// if no current record.
     ///
-    /// §27 zero-copy note: never `.clone()`s a `DefaultRecord` — that
-    /// would deep-copy key + value + headers per call.
-    fn peek_current_record(&self) -> Option<(&DefaultRecord, &BatchMetadata)> {
+    /// §27 zero-copy note: the returned `DefaultRecordRef` borrows the
+    /// record's key/value/header bytes directly from the cursor's record
+    /// source — no copy. The per-record parse is varint decoding only; the
+    /// payload bytes are never touched.
+    fn peek_current_record(&self) -> Option<(DefaultRecordRef<'_>, &BatchMetadata)> {
         let cursor = self.cursor.as_ref()?;
-        if cursor.record_index >= cursor.current_records.len() {
+        if cursor.records_remaining <= 0 {
             return None;
         }
-        let record = &cursor.current_records[cursor.record_index];
         let batch_meta = cursor.current_batch.as_ref()?;
+        let records_bytes = match &cursor.record_source {
+            RecordSource::None => return None,
+            RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
+            RecordSource::Owned(buf) => buf.as_slice(),
+        };
+        if cursor.record_byte_offset >= records_bytes.len() {
+            return None;
+        }
+        let log_append_time = if batch_meta.timestamp_type == TimestampType::LogAppendTime {
+            Some(batch_meta.last_offset_timestamp)
+        } else {
+            None
+        };
+        // The bytes were validated when the batch was loaded
+        // (`load_next_batch` walks the batch's records once to find ranges);
+        // a parse failure here would indicate a logic bug, not bad input.
+        let (record, _consumed) = DefaultRecord::read_ref_from_buffer(
+            &records_bytes[cursor.record_byte_offset..],
+            batch_meta.base_offset,
+            batch_meta.base_timestamp,
+            batch_meta.base_sequence,
+            log_append_time,
+        )
+        .ok()?;
         Some((record, batch_meta))
     }
 
@@ -609,10 +673,15 @@ impl CompletedFetch {
     /// batches remain.
     fn load_next_batch(&mut self, config: &FetchConfig) -> Result<bool, KafkaError> {
         loop {
-            // Phase 1: pull batch metadata + records out of the cursor in
-            // a tight scope that drops the &mut self.cursor borrow before
-            // touching the other self fields.
-            let (start_pos, batch_meta, records_opt) = {
+            // Phase 1: pull batch metadata + record-source descriptor out of
+            // the cursor in a tight scope that drops the &mut self.cursor
+            // borrow before touching the other self fields.
+            //
+            // §27: for uncompressed batches we record the byte *range* of the
+            // batch's records section in `memory_records.buffer()` and borrow
+            // it lazily per record (no copy). For compressed batches we
+            // decompress once into an owned buffer held by the cursor.
+            let (start_pos, batch_meta, source, records_count) = {
                 let cursor = match &mut self.cursor {
                     Some(c) => c,
                     None => return Ok(false),
@@ -621,14 +690,17 @@ impl CompletedFetch {
                     return Ok(false);
                 };
 
-                // Walk MemoryRecords' batches to find the one at start_pos.
-                let batch_iter = cursor.memory_records.batches();
+                // Walk MemoryRecords' batches to find the one at start_pos,
+                // tracking the absolute byte offset of the batch within the
+                // buffer so we can borrow its records section directly.
+                let mut batch_start_in_buffer = 0usize;
                 let mut current_batch_opt = None;
-                for (current_pos, batch) in batch_iter.enumerate() {
+                for (current_pos, batch) in cursor.memory_records.batches().enumerate() {
                     if current_pos == start_pos {
                         current_batch_opt = Some(batch);
                         break;
                     }
+                    batch_start_in_buffer += batch.size_in_bytes();
                 }
                 let Some(batch) = current_batch_opt else {
                     cursor.next_batch_offset = None;
@@ -650,6 +722,9 @@ impl CompletedFetch {
 
                 let meta = BatchMetadata {
                     base_offset: batch.base_offset(),
+                    base_timestamp: batch.base_timestamp(),
+                    base_sequence: batch.base_sequence(),
+                    last_offset_timestamp: batch.max_timestamp(),
                     last_offset: batch.last_offset(),
                     next_offset: batch.last_offset() + 1,
                     timestamp_type: batch.timestamp_type(),
@@ -661,18 +736,32 @@ impl CompletedFetch {
                     magic: batch.magic(),
                 };
 
-                // Decode the batch's records right away so we don't need
-                // to re-walk the iterator outside this scope.
-                let records = batch.iter_records().map_err(|e| {
-                    KafkaError::illegal_state(format!(
-                        "Record batch for partition {} at offset {} is invalid, cause: {}",
-                        self.partition, meta.base_offset, e
-                    ))
-                })?;
+                // Build the record-source descriptor for this batch.
+                let source = if batch.is_compressed() {
+                    // Decompress once per batch into an owned buffer; records
+                    // then borrow from it.
+                    let decompressed = batch.decompress_records().map_err(|e| {
+                        KafkaError::illegal_state(format!(
+                            "Record batch for partition {} at offset {} is invalid, cause: {}",
+                            self.partition, meta.base_offset, e
+                        ))
+                    })?;
+                    RecordSource::Owned(decompressed)
+                } else {
+                    // Borrow the records section directly from the canonical
+                    // buffer. `batch.size_in_bytes()` includes LOG_OVERHEAD,
+                    // so the records section is
+                    // [batch_start + RECORD_BATCH_OVERHEAD, batch_start + size).
+                    let records_start = batch_start_in_buffer + RecordBatch::RECORD_BATCH_OVERHEAD;
+                    let records_end = batch_start_in_buffer + batch.size_in_bytes();
+                    RecordSource::Borrowed(records_start..records_end)
+                };
+
+                let records_count = batch.records_count();
                 // Always advance the cursor's next-batch pointer here so
                 // both the skip path and the load path move forward.
                 cursor.next_batch_offset = Some(start_pos + 1);
-                (start_pos, meta, Some(records))
+                (start_pos, meta, source, records_count)
             };
 
             // Phase 2: now that the cursor borrow is dropped, we can
@@ -712,15 +801,20 @@ impl CompletedFetch {
                     );
                     self.next_fetch_offset = batch_meta.next_offset;
                     let _ = start_pos; // silence unused-warning on the skip path
+                    // `source` (incl. any decompression buffer) is dropped
+                    // here — we never decode this aborted batch's records.
                     continue;
                 }
             }
 
-            // Install the batch as the current one.
+            // Install the batch as the current one. We use the batch
+            // header's declared record count (not the offset span, which can
+            // exceed the record count after log compaction).
             if let Some(cursor) = &mut self.cursor {
-                cursor.current_records = records_opt.expect("records collected above");
+                cursor.record_source = source;
+                cursor.record_byte_offset = 0;
+                cursor.records_remaining = records_count;
                 cursor.current_batch = Some(batch_meta);
-                cursor.record_index = 0;
             }
             return Ok(true);
         }
