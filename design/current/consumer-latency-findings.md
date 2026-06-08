@@ -93,3 +93,83 @@ cargo build -p consumer-perf --release
 # (the fetch.max.wait.ms A/B required temporarily lowering the ConsumerConfig
 #  default; there is no CLI flag for it yet.)
 ```
+
+---
+
+## UPDATE (2026-06-08) — Root cause traced and primary fix landed
+
+Followed up the "config is a workaround" concern by instrumenting the fetch
+lifecycle (timestamps at fetch SEND, wire-arrival of the response, the bg-task
+handling of the response, and `createFetchRequests` triggers) and running at
+50k/s.
+
+### What the trace showed
+Steady state is a **burst of fetches with ~1ms round-trips, then a ~500ms gap
+with no fetch activity**, repeating. In the gap:
+
+```
+t=...339  FT-WIRE   fetch response arrives on the socket (≈1ms RTT)
+   … 498ms with the bg task parked in its network poll …
+t=...837  FT-RECV   the response is finally handled by run_once
+t=...837  FT-SEND   the next fetch is finally sent
+```
+
+The response was on the socket in ~1ms but was not **handled** (decoded into the
+`FetchBuffer`) for ~500ms. Producer-side latency is negligible (0.5ms avg, 6ms
+p99), so this is entirely consumer-side.
+
+### Root cause (primary)
+A fetch response is routed from the network client back to `AbstractFetch`
+through a spawned forwarder → mpsc channel → `drain_pending_completions()` at the
+top of the next `run_once`. Enqueuing that completion **did not wake the bg
+task's network poll**. So when the consumer has caught up (no backlog keeping
+`run_once` cycling), the bg task stays parked in `NetworkClientDelegate::poll`
+for the full `poll_wait_time_ms` (= `maximumTimeToWait`, up to
+`MAX_POLL_TIMEOUT_MS`) **after the response already arrived**, before the next
+`run_once` drains it into the buffer. That parked window is the latency: records
+produced during it age up to ~the poll/`fetch.max.wait` window. Java instead runs
+the response handler **synchronously inside the poll** (`handleFetchSuccess →
+fetchBuffer.add`), so data is buffered immediately.
+
+This also explains why lowering `fetch.max.wait.ms` alone barely helped (the
+broker returns in ~15ms once a fetch is sent — the problem was the *parked bg
+task not draining the already-received response*, not the broker holding), and
+why the app poll-timeout was the dominant lever (it sets `maximumTimeToWait`,
+hence the park duration).
+
+### Fix (landed)
+`FetchRequestManager` now holds a clone of the bg task's `event_notify`
+(`completion_notify`); each response forwarder pokes it right after enqueuing the
+`PendingFetchCompletion`. This is the same wake the application-event enqueue
+path uses — it makes the network poll return at a safe boundary so the next
+`run_once` drains the completion within ~1 cycle instead of after
+`maximumTimeToWait`. Measured WIRE→handle lag dropped from ~500ms (p99) to **p99
+1ms, max 6ms**.
+
+Result on **default config** (poll 500, fetch.max.wait 500), no config change:
+
+| Rate | avg | p50 | p90 | p95 | p99 | p99.9 | (was avg / p99) |
+|------|-----|-----|-----|-----|-----|-------|------------------|
+| 50k  | 20  | 1   | 3   | 163 | 441 | 512   | (253 / 832)      |
+| 100k | 19  | 1   | 5   | 136 | 432 | 513   | (275 / 894)      |
+| 200k | 43  | 2   | 177 | 341 | 482 | 542   | (315 / 1289)     |
+
+avg and p50 improve ~10–250× (p50 247→1ms). Full lib suite green (1709), clippy
+clean.
+
+### Residual tail (secondary, follow-up)
+A residual ~450ms p99/p99.9 tail remains: ~6 rare large inter-fetch gaps per 30s
+(378–500ms). Mechanism: when the consumer catches up and `poll()` returns empty,
+**no fetch is left in flight** (the chain `poll-returns-records → send_prefetches
+→ next fetch` breaks on an empty return), so newly produced records wait until
+the next `poll()` call re-triggers a fetch. Java avoids this because
+`pollForFetches` **blocks on `fetchBuffer.awaitWakeup(pollTimeout)` with the
+per-poll fetch still in flight (long-polling)** — the broker holds that fetch and
+wakes the consumer the instant data lands.
+
+Recommended follow-up fix (more invasive — its own change + review): make the
+Rust app `poll()` block on the `FetchBuffer` wakeup (like Java's `awaitWakeup`)
+instead of spinning, and ensure a fetch is always in flight while waiting (issue
+`createFetchRequests` whenever a fetchable node has no in-flight fetch). This
+would close the residual tail and likely also help the throughput ceiling
+(continuous prefetch overlap).

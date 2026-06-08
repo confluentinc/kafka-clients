@@ -952,7 +952,7 @@ where
             let maybe_auth: crate::consumer::internals::fetch_request_manager::MaybeAuthFailureFn =
                 Arc::new(|_n: &Node| Ok::<(), KafkaError>(()));
 
-            Some(FetchRequestManager::new(
+            let mut frm = FetchRequestManager::new(
                 Arc::clone(&metadata),
                 Arc::clone(&subscriptions),
                 fetch_config.clone(),
@@ -960,7 +960,13 @@ where
                 Arc::new(BufferSupplier::create()),
                 is_unavailable,
                 maybe_auth,
-            ))
+            );
+            // Wake the bg task when a fetch response is ready so it is drained
+            // into the FetchBuffer promptly, instead of waiting for the
+            // network poll's maximumTimeToWait. Reuses the same `event_notify`
+            // the application-event enqueue path pokes.
+            frm.set_completion_notify(Arc::clone(&event_notify));
+            Some(frm)
         };
 
         // Wrap the assembled `RequestManagers` in

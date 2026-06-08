@@ -31,7 +31,7 @@
 use std::sync::{Arc, Mutex};
 
 use log::trace;
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::{mpsc, oneshot, Notify};
 
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;
@@ -145,6 +145,22 @@ pub(crate) struct FetchRequestManager {
     /// (`mpsc::UnboundedReceiver` is `Send` but not `Sync`;
     /// single-ownership keeps it sound.)
     pending_completion_rx: mpsc::UnboundedReceiver<PendingFetchCompletion>,
+    /// Cloned into each spawned response forwarder. After a forwarder
+    /// enqueues a [`PendingFetchCompletion`], it pokes this `Notify` so the
+    /// bg task's network poll returns at a safe boundary and the next
+    /// `run_once` drains the completion (→ `FetchBuffer::add`) promptly.
+    ///
+    /// Without this, a fetch response that arrives on the wire while the bg
+    /// task is parked in its network poll is not handled until the poll's
+    /// `maximumTimeToWait` elapses (up to `MAX_POLL_TIMEOUT_MS`). When the
+    /// consumer has caught up — so there is no backlog keeping `run_once`
+    /// cycling — that adds up to ~`fetch.max.wait.ms` of latency per record
+    /// even though the data was already on the socket. This is the same wake
+    /// the application-event enqueue path uses (it is a clone of the bg
+    /// task's `event_notify`); a default no-listener `Notify` is used until
+    /// the production path installs the real one via
+    /// [`Self::set_completion_notify`].
+    completion_notify: Arc<Notify>,
 }
 
 impl FetchRequestManager {
@@ -177,7 +193,17 @@ impl FetchRequestManager {
             maybe_throw_auth_failure,
             pending_completion_tx,
             pending_completion_rx,
+            completion_notify: Arc::new(Notify::new()),
         }
+    }
+
+    /// Installs the bg task's wakeup `Notify` (a clone of `event_notify`) so
+    /// response forwarders can wake the network poll when a fetch completion
+    /// is ready. See [`Self::completion_notify`]. Called by the production
+    /// consumer wiring after construction; tests that don't drive a real bg
+    /// task can leave the default no-listener `Notify` in place.
+    pub(crate) fn set_completion_notify(&mut self, notify: Arc<Notify>) {
+        self.completion_notify = notify;
     }
 
     /// Signals that the consumer wants requests to be created for the
@@ -316,6 +342,7 @@ impl FetchRequestManager {
 
             let response_rx = unsent.take_response_receiver().expect("receiver fresh");
             let tx = self.pending_completion_tx.clone();
+            let completion_notify = Arc::clone(&self.completion_notify);
             let request_data_for_forwarder = request_data.clone();
             let fetch_target_for_forwarder = target_node.clone();
             let for_close_flag = for_close;
@@ -356,6 +383,11 @@ impl FetchRequestManager {
                 // the send error in case the manager has been dropped
                 // during a shutdown race.
                 let _ = tx.send(completion);
+                // Wake the bg task so the next `run_once` drains this
+                // completion (→ `FetchBuffer::add`) promptly, instead of the
+                // response sitting in the channel until the network poll's
+                // `maximumTimeToWait` elapses. See `completion_notify`.
+                completion_notify.notify_one();
             });
             requests.push(unsent);
         }
