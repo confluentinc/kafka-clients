@@ -3044,13 +3044,15 @@ mod tests {
         let _rx = mgr.fetch_offsets(timestamps, false);
 
         let res = RequestManager::poll(&mut mgr, 0);
-        let unsent = res.unsent_requests.into_iter().next().expect("one unsent");
-        let builder = unsent.request_builder().expect("builder present");
+        let mut unsent = res.unsent_requests.into_iter().next().expect("one unsent");
+        assert_eq!(
+            *unsent.request_builder().expect("builder present").api_key(),
+            ApiKeys::LIST_OFFSETS
+        );
         // Java's `unsentRequest.requestBuilder().build()` returns an
         // `AbstractRequest` that is downcast to `ListOffsetsRequest`. The
         // Rust equivalent is `builder.build()` → `ConcreteRequest::ListOffsets`.
-        assert_eq!(*builder.api_key(), ApiKeys::LIST_OFFSETS);
-        let built = builder.build().expect("build");
+        let built = unsent.request_builder_mut().expect("builder present").build().expect("build");
         let request = match built {
             crate::common::requests::ConcreteRequest::ListOffsets(r) => r,
             other => panic!("expected ListOffsetsRequest, got {other:?}"),

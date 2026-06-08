@@ -1178,6 +1178,9 @@ mod tests {
             // so the bg task's poke wakes it, just like the real selector.
             self.poll_release.clone()
         }
+        fn wakeup_notify(&self) -> Arc<Notify> {
+            self.poll_release.clone()
+        }
         fn new_client_request(
             &mut self,
             node_id: &str,

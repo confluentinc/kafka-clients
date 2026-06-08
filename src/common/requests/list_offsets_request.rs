@@ -88,6 +88,11 @@ impl ListOffsetsRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut ListOffsetsRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -303,7 +308,7 @@ impl RequestBuilder for ListOffsetsRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,

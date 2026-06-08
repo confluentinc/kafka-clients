@@ -869,13 +869,19 @@ mod tests {
         let _rx = manager.request_topic_metadata(topic.to_string(), i64::MAX);
         let res = manager.poll(0);
         assert_eq!(1, res.unsent_requests.len());
-        let unsent = res.unsent_requests.into_iter().next().unwrap();
-        let builder = unsent.request_builder().expect("builder still present");
-        assert_eq!(&ApiKeys::METADATA, builder.api_key());
+        let mut unsent = res.unsent_requests.into_iter().next().unwrap();
+        assert_eq!(
+            &ApiKeys::METADATA,
+            unsent.request_builder().expect("builder still present").api_key()
+        );
         // Java cross-checks `assertInstanceOf(MetadataRequest.class, ...)`;
         // the Rust equivalent is matching on the `ConcreteRequest`
         // variant the builder produces.
-        let concrete = builder.build().expect("builder.build() ok");
+        let concrete = unsent
+            .request_builder_mut()
+            .expect("builder still present")
+            .build()
+            .expect("builder.build() ok");
         let metadata = match &concrete {
             crate::common::requests::ConcreteRequest::Metadata(m) => m,
             other => panic!("expected Metadata, got {other:?}"),
@@ -892,10 +898,16 @@ mod tests {
         let _rx = manager.request_all_topics_metadata(i64::MAX);
         let res = manager.poll(0);
         assert_eq!(1, res.unsent_requests.len());
-        let unsent = res.unsent_requests.into_iter().next().unwrap();
-        let builder = unsent.request_builder().expect("builder still present");
-        assert_eq!(&ApiKeys::METADATA, builder.api_key());
-        let concrete = builder.build().expect("builder.build() ok");
+        let mut unsent = res.unsent_requests.into_iter().next().unwrap();
+        assert_eq!(
+            &ApiKeys::METADATA,
+            unsent.request_builder().expect("builder still present").api_key()
+        );
+        let concrete = unsent
+            .request_builder_mut()
+            .expect("builder still present")
+            .build()
+            .expect("builder.build() ok");
         let metadata = match &concrete {
             crate::common::requests::ConcreteRequest::Metadata(m) => m,
             other => panic!("expected Metadata, got {other:?}"),

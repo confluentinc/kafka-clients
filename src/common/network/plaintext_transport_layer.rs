@@ -247,4 +247,9 @@ impl TransportLayer for PlaintextTransportLayer {
             stream.try_write_vectored(srcs)
         })
     }
+
+    fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let stream = self.stream_mut()?;
+        stream.try_write_vectored(srcs)
+    }
 }

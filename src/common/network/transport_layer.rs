@@ -236,4 +236,14 @@ pub trait TransportLayer: Send {
         &'a mut self,
         srcs: &'a [io::IoSlice<'a>],
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+
+    /// Attempts a non-blocking vectored write without creating a Future.
+    ///
+    /// Returns `WouldBlock` if the transport cannot write immediately.
+    /// Transports that support synchronous writes (e.g., plaintext) override
+    /// this to avoid the heap allocation of [`write_vectored`](Self::write_vectored).
+    fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let _ = srcs;
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
 }

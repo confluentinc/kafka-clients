@@ -137,6 +137,11 @@ impl FetchRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut FetchRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -522,8 +527,10 @@ impl crate::common::requests::RequestBuilder for FetchRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> std::io::Result<crate::common::requests::ConcreteRequest> {
-        Ok(crate::common::requests::ConcreteRequest::Fetch(self.build_version(version)))
+    fn build_version(&mut self, version: i16) -> std::io::Result<crate::common::requests::ConcreteRequest> {
+        Ok(crate::common::requests::ConcreteRequest::Fetch(
+            FetchRequestBuilder::build_version(self, version),
+        ))
     }
 }
 

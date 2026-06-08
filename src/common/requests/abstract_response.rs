@@ -107,20 +107,20 @@ impl ConcreteResponse {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn to_send(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferSend> {
+    pub fn to_send(&mut self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferSend> {
         match self {
-            Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::Metadata(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::Produce(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::Fetch(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::FindCoordinator(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::ListOffsets(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data(), version),
-            Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data(), version),
+            Self::ApiVersions(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::Metadata(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::Produce(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::Fetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::SaslHandshake(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::SaslAuthenticate(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::FindCoordinator(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ListOffsets(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::OffsetsForLeaderEpoch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::ConsumerGroupHeartbeat(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::OffsetCommit(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
+            Self::OffsetFetch(r) => SendBuilder::build_response_send(header, r.data_mut(), version),
         }
     }
 
@@ -131,43 +131,43 @@ impl ConcreteResponse {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn serialize_with_header(&self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferAccessor> {
+    pub fn serialize_with_header(&mut self, header: &ResponseHeader, version: i16) -> io::Result<ByteBufferAccessor> {
         match self {
             Self::ApiVersions(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Metadata(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Produce(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::Fetch(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::SaslHandshake(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::SaslAuthenticate(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::FindCoordinator(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ListOffsets(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetsForLeaderEpoch(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::ConsumerGroupHeartbeat(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetCommit(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
             Self::OffsetFetch(r) => {
-                super::request_utils::serialize(header.data(), header.header_version(), r.data(), version)
+                super::request_utils::serialize(header.data(), header.header_version(), r.data_mut(), version)
             },
         }
     }
@@ -179,25 +179,25 @@ impl ConcreteResponse {
     /// # Errors
     ///
     /// Returns an error if serialization fails.
-    pub fn serialize(&self, version: i16) -> io::Result<ByteBufferAccessor> {
+    pub fn serialize(&mut self, version: i16) -> io::Result<ByteBufferAccessor> {
         match self {
-            Self::ApiVersions(r) => Self::serialize_body(r.data(), version),
-            Self::Metadata(r) => Self::serialize_body(r.data(), version),
-            Self::Produce(r) => Self::serialize_body(r.data(), version),
-            Self::Fetch(r) => Self::serialize_body(r.data(), version),
-            Self::SaslHandshake(r) => Self::serialize_body(r.data(), version),
-            Self::SaslAuthenticate(r) => Self::serialize_body(r.data(), version),
-            Self::FindCoordinator(r) => Self::serialize_body(r.data(), version),
-            Self::ListOffsets(r) => Self::serialize_body(r.data(), version),
-            Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data(), version),
-            Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data(), version),
-            Self::OffsetCommit(r) => Self::serialize_body(r.data(), version),
-            Self::OffsetFetch(r) => Self::serialize_body(r.data(), version),
+            Self::ApiVersions(r) => Self::serialize_body(r.data_mut(), version),
+            Self::Metadata(r) => Self::serialize_body(r.data_mut(), version),
+            Self::Produce(r) => Self::serialize_body(r.data_mut(), version),
+            Self::Fetch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::SaslHandshake(r) => Self::serialize_body(r.data_mut(), version),
+            Self::SaslAuthenticate(r) => Self::serialize_body(r.data_mut(), version),
+            Self::FindCoordinator(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ListOffsets(r) => Self::serialize_body(r.data_mut(), version),
+            Self::OffsetsForLeaderEpoch(r) => Self::serialize_body(r.data_mut(), version),
+            Self::ConsumerGroupHeartbeat(r) => Self::serialize_body(r.data_mut(), version),
+            Self::OffsetCommit(r) => Self::serialize_body(r.data_mut(), version),
+            Self::OffsetFetch(r) => Self::serialize_body(r.data_mut(), version),
         }
     }
 
     /// Serializes a message body at a given version.
-    fn serialize_body(msg: &impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
+    fn serialize_body(msg: &mut impl Message, version: i16) -> io::Result<ByteBufferAccessor> {
         let mut cache = crate::common::protocol::ObjectSerializationCache::new();
         let size = Message::size(msg, &mut cache, version)?;
         let mut buf = ByteBufferAccessor::new(size as usize);

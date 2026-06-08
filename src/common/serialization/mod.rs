@@ -77,4 +77,22 @@ pub trait Serializer<T: ?Sized> {
     ) -> Result<Option<Vec<u8>>, KafkaError> {
         self.serialize(topic, data)
     }
+
+    /// Serialize owned data, avoiding a clone when the input is already bytes.
+    ///
+    /// The default implementation borrows `data` and delegates to
+    /// [`serialize_with_headers`](Serializer::serialize_with_headers).
+    /// Implementations for types that are already byte buffers (e.g. `Vec<u8>`)
+    /// can override this to pass ownership through without copying.
+    fn serialize_owned_with_headers(
+        &self,
+        topic: &str,
+        headers: &RecordHeaders,
+        data: Option<T>,
+    ) -> Result<Option<Vec<u8>>, KafkaError>
+    where
+        T: Sized,
+    {
+        self.serialize_with_headers(topic, headers, data.as_ref())
+    }
 }

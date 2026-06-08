@@ -63,6 +63,7 @@ use tokio::task::JoinHandle;
 
 use regex::Regex;
 
+use crate::common::utils::LogContext;
 use crate::common::{IsolationLevel, KafkaError, TopicPartition};
 use crate::consumer::ConsumerGroupMetadata;
 use crate::consumer::ConsumerRecords;
@@ -716,6 +717,14 @@ where
         let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
         let selector = Selector::with_defaults(config.connections_max_idle_ms, channel_builder);
         let shared_metadata = metadata.metadata_arc();
+        // Mirrors Java's `AsyncKafkaConsumer` `LogContext` prefix
+        // `[Consumer clientId=..., groupId=...] `.
+        let log_context = match config.group_id() {
+            Some(group_id) => {
+                LogContext::new(format!("[Consumer clientId={}, groupId={}] ", config.client_id(), group_id))
+            },
+            None => LogContext::new(format!("[Consumer clientId={}] ", config.client_id())),
+        };
         let network_client = NetworkClient::with_metadata(
             selector,
             shared_metadata,
@@ -733,6 +742,7 @@ where
             DefaultHostResolver::new(),
             config.metadata_max_age_ms, // rebootstrap_trigger_ms
             MetadataRecoveryStrategy::None,
+            log_context,
         );
         let _network_client_delegate = Arc::new(tokio::sync::Mutex::new(NetworkClientDelegate::new(
             &config,

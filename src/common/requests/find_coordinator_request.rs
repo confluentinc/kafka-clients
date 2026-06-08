@@ -100,6 +100,11 @@ impl FindCoordinatorRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut FindCoordinatorRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -207,7 +212,7 @@ impl RequestBuilder for FindCoordinatorRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         // Mirrors `FindCoordinatorRequest.Builder.build(short version)`.
         if version < 1 && self.data.key_type == CoordinatorType::Transaction.id() {
             return Err(io::Error::new(
@@ -269,7 +274,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Transaction.id());
         data.set_key("txn-id".to_string());
-        let builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = FindCoordinatorRequestBuilder::new(data);
         let err = builder.build_version(0).expect_err("v0 transaction key must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("Cannot create a v0 FindCoordinator request"), "got: {msg}");
@@ -282,7 +287,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_coordinator_keys(vec!["g1".to_string(), "g2".to_string()]);
-        let builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = FindCoordinatorRequestBuilder::new(data);
         let err = builder.build_version(3).expect_err("pre-v4 batched keys must be rejected");
         let msg = err.to_string();
         assert!(msg.contains("4 or later"), "got: {msg}");
@@ -295,7 +300,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_coordinator_keys(vec!["only".to_string()]);
-        let builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = FindCoordinatorRequestBuilder::new(data);
         let built = builder.build_version(3).expect("pre-v4 build with one key");
         match built {
             ConcreteRequest::FindCoordinator(req) => {
@@ -314,7 +319,7 @@ mod tests {
         let mut data = FindCoordinatorRequestData::new();
         data.set_key_type(CoordinatorType::Group.id());
         data.set_key("g1".to_string());
-        let builder = FindCoordinatorRequestBuilder::new(data);
+        let mut builder = FindCoordinatorRequestBuilder::new(data);
         let built = builder.build_version(4).expect("v4 build");
         match built {
             ConcreteRequest::FindCoordinator(req) => {

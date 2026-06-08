@@ -184,6 +184,13 @@ pub trait KafkaClient {
     /// `NetworkClientDelegate` lock and without cancelling the poll.
     fn wakeup_handle(&self) -> Arc<Notify>;
 
+    /// Returns the [`Notify`] handle used by the underlying selector's poll loop.
+    ///
+    /// This allows the producer to share the selector's wakeup mechanism,
+    /// so that `notify_one()` on the returned handle causes both `selector.poll()`
+    /// and `client.poll()` to return promptly without cancelling in-progress I/O.
+    fn wakeup_notify(&self) -> Arc<Notify>;
+
     /// Create a new `ClientRequest`.
     ///
     /// # Arguments

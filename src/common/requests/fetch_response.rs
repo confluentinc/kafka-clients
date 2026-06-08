@@ -69,6 +69,11 @@ impl FetchResponse {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut FetchResponseData {
+        &mut self.data
+    }
+
     /// Returns the API key of this response.
     pub fn api_key(&self) -> &'static ApiKeys {
         &ApiKeys::FETCH

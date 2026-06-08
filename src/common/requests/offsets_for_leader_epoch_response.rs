@@ -62,6 +62,11 @@ impl OffsetsForLeaderEpochResponse {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut OffsetForLeaderEpochResponseData {
+        &mut self.data
+    }
+
     /// Returns the throttle time in milliseconds.
     pub fn throttle_time_ms(&self) -> i32 {
         self.data.throttle_time_ms

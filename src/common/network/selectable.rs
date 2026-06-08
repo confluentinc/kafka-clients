@@ -78,6 +78,15 @@ pub trait Selectable: Send {
     /// blocking wait return at a safe boundary.
     fn wakeup_handle(&self) -> Arc<Notify>;
 
+    /// Returns the [`Notify`] handle used by the selector's poll loop.
+    ///
+    /// Callers can use this to share the selector's wakeup mechanism,
+    /// ensuring that `notify_one()` on the returned handle causes the
+    /// selector's `poll()` to return promptly.
+    fn wakeup_notify(&self) -> Arc<Notify> {
+        Arc::new(Notify::new())
+    }
+
     /// Close this selector.
     fn close(&mut self) -> impl std::future::Future<Output = ()> + Send;
 

@@ -61,6 +61,7 @@ translate javadoc to rustdoc. Never change the contract of public API.
     6. **Tokio-specific pitfalls** (no Java equivalent — Java threads do not have cancellation semantics):
        - `tokio::select!` cancels the losing branch's future mid-execution. Never put operations with side effects (incrementing a counter, sending on a channel, writing to a buffer) inside a `select!` arm unless the future is cancellation-safe. Use `biased;` when ordering matters.
        - Holding a `MutexGuard` across an `.await` point deadlocks the async runtime — always drop locks before awaiting.
+    7. About naming, whenever we're talking about a "thread" in Java let's use the term "task" in Rust. E.g. in log messages.
 10. **Error handling**: follow [Rust guidelines](https://doc.rust-lang.org/book/ch09-03-to-panic-or-not-to-panic.html) for error handling.
     1. Avoid `panic` for public API, use it only if there's no way to recover from a particular error, such as an OOM or a
        `ArithmeticException` like division by zero.

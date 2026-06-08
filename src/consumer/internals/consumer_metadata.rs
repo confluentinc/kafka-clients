@@ -33,6 +33,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::common::internals::ClusterResourceListeners;
 use crate::common::requests::MetadataRequestBuilder;
+use crate::common::utils::LogContext;
 use crate::consumer::ConsumerConfig;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 use crate::metadata::{Metadata, MetadataOverrides};
@@ -165,6 +166,7 @@ impl ConsumerMetadata {
                 new_topics_request_builder_fn: None,
                 post_update_fn: None,
             },
+            LogContext::empty(),
         ));
 
         Self { metadata, inner, subscription, allow_auto_topic_creation }

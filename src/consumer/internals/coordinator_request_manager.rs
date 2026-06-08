@@ -455,11 +455,17 @@ mod tests {
         // Mirror `CoordinatorRequestManagerTest.buildResponse`: build the
         // FindCoordinatorRequest at its latest version, synthesise a
         // FindCoordinatorResponse, and wrap them inside a ClientResponse.
-        let builder = unsent.request_builder().expect("builder still present");
-        let api_version = builder.latest_allowed_version();
+        let api_version = unsent
+            .request_builder()
+            .expect("builder still present")
+            .latest_allowed_version();
         // Drive the builder forward to produce a concrete request so we
         // can grab the version for the header.
-        let _abstract_request: ConcreteRequest = builder.build_version(api_version).expect("build ok");
+        let _abstract_request: ConcreteRequest = unsent
+            .request_builder_mut()
+            .expect("builder still present")
+            .build_version(api_version)
+            .expect("build ok");
         let header = RequestHeader::new(&ApiKeys::FIND_COORDINATOR, api_version, "", 1).expect("header ok");
         let response_body = FindCoordinatorResponse::prepare_response(error, GROUP_ID, &node());
         ClientResponse::with_timeout(

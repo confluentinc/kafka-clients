@@ -77,6 +77,11 @@ impl ConsumerGroupHeartbeatRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut ConsumerGroupHeartbeatRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -153,7 +158,7 @@ impl RequestBuilder for ConsumerGroupHeartbeatRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         // Mirrors `ConsumerGroupHeartbeatRequest.Builder.build(short version)`.
         if version == 0 && self.data.subscribed_topic_regex.is_some() {
             return Err(io::Error::new(io::ErrorKind::Unsupported, REGEX_RESOLUTION_NOT_SUPPORTED_MSG));
@@ -182,7 +187,7 @@ mod tests {
     fn test_v0_regex_rejected() {
         let mut data = ConsumerGroupHeartbeatRequestData::new();
         data.set_subscribed_topic_regex(Some("topic-.*".to_string()));
-        let builder = ConsumerGroupHeartbeatRequestBuilder::new(data);
+        let mut builder = ConsumerGroupHeartbeatRequestBuilder::new(data);
         let err = builder.build_version(0).expect_err("v0 with regex must be rejected");
         assert!(err.to_string().contains("regular expressions"), "got: {err}");
     }
@@ -192,7 +197,7 @@ mod tests {
     fn test_v1_regex_accepted() {
         let mut data = ConsumerGroupHeartbeatRequestData::new();
         data.set_subscribed_topic_regex(Some("topic-.*".to_string()));
-        let builder = ConsumerGroupHeartbeatRequestBuilder::new(data);
+        let mut builder = ConsumerGroupHeartbeatRequestBuilder::new(data);
         let built = builder.build_version(1).expect("v1 build with regex");
         match built {
             ConcreteRequest::ConsumerGroupHeartbeat(req) => {

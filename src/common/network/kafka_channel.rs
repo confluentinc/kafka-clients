@@ -404,6 +404,14 @@ impl KafkaChannel {
         self.send.is_some()
     }
 
+    /// Returns `true` if the transport layer has buffered ciphertext or other
+    /// pending bytes that need to be flushed to the socket. Used by the
+    /// selector to decide whether to register write-interest for a handshaking
+    /// channel.
+    pub(crate) fn has_pending_writes(&self) -> bool {
+        self.transport_layer.has_pending_writes()
+    }
+
     /// Sets the send for this channel.
     ///
     /// # Errors
@@ -467,6 +475,40 @@ impl KafkaChannel {
         Ok(bytes_received)
     }
 
+    /// Synchronous, non-blocking mirror of [`read`](Self::read).
+    ///
+    /// Calls [`NetworkReceive::try_read_from`] instead of awaiting
+    /// [`Receive::read_from`], which in turn calls
+    /// [`TransportLayer::try_read`] directly without `Box::pin(async {…})`,
+    /// without `tokio::time::timeout(Duration::ZERO, …)` and without any
+    /// timer-driver registration. Used by `Selector::attempt_read`.
+    ///
+    /// On `WouldBlock` from the transport, returns `Ok(0)` (handled inside
+    /// `try_read_from`); the caller treats that as "no progress this tick"
+    /// and retries on the next selector iteration.
+    pub fn try_read(&mut self) -> io::Result<usize> {
+        if self.receive.is_none() {
+            self.receive = Some(NetworkReceive::with_max_size(self.max_receive_size, &self.id));
+        }
+
+        let bytes_received = {
+            let receive = self.receive.as_mut().unwrap();
+            let transport = &mut *self.transport_layer;
+            receive.try_read_from(transport)?
+        };
+
+        // Check if we should mute due to memory pressure
+        if let Some(ref recv) = self.receive
+            && recv.required_memory_amount_known()
+            && !recv.memory_allocated()
+            && self.is_in_mutable_state()
+        {
+            self.mute();
+        }
+
+        Ok(bytes_received)
+    }
+
     /// Returns the current in-progress receive, if any.
     pub fn current_receive(&self) -> Option<&NetworkReceive> {
         self.receive.as_ref()
@@ -492,7 +534,54 @@ impl KafkaChannel {
         self.mid_write = true;
         let transport = &mut *self.transport_layer;
         let send = self.send.as_mut().unwrap();
-        send.write_to(transport).await
+        match send.try_write_to(transport) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Socket buffer is full. Fall back to async with zero timeout
+                // to avoid blocking.
+                match tokio::time::timeout(std::time::Duration::ZERO, send.write_to(transport)).await {
+                    Ok(Ok(n)) => Ok(n),
+                    Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+                    Ok(Err(e)) => Err(e),
+                    Err(_elapsed) => Ok(0),
+                }
+            },
+            result => result,
+        }
+    }
+
+    /// Writes data with true async yielding for concurrent I/O across channels.
+    ///
+    /// Unlike `write()` which uses `timeout(Duration::ZERO)` to prevent blocking,
+    /// this method lets the underlying TLS write suspend at TCP wait points.
+    /// Safe when called from a concurrent context (e.g. `join_all`) because
+    /// suspending one channel's write allows other channels' writes to proceed.
+    pub async fn write_concurrent(&mut self) -> io::Result<usize> {
+        if self.send.is_none() {
+            return Ok(0);
+        }
+
+        self.mid_write = true;
+        let transport = &mut *self.transport_layer;
+        let send = self.send.as_mut().unwrap();
+        match send.try_write_to(transport) {
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                // Socket buffer is full. Bound the await so the caller (and
+                // the read pass on the next poll iteration) can make progress.
+                // With a single channel, an unbounded await deadlocks the
+                // test echo server because the client never re-enters its
+                // read pass to drain the response data, which back-pressures
+                // the server's reads. With multiple channels, a small budget
+                // still permits useful overlap of one channel's TCP wait with
+                // another channel's encrypt+write.
+                match tokio::time::timeout(std::time::Duration::from_millis(1), send.write_to(transport)).await {
+                    Ok(Ok(n)) => Ok(n),
+                    Ok(Err(e)) if e.kind() == io::ErrorKind::WouldBlock => Ok(0),
+                    Ok(Err(e)) => Err(e),
+                    Err(_elapsed) => Ok(0),
+                }
+            },
+            result => result,
+        }
     }
 
     /// Accumulates network thread time for this channel.

@@ -214,6 +214,19 @@ impl UnsentRequest {
         self.request_builder.as_deref()
     }
 
+    /// Returns a mutable reference to the request builder, or `None` if it
+    /// has already been consumed via [`Self::take_request_builder`].
+    ///
+    /// Mirrors [`Self::request_builder`] but allows driving the builder
+    /// forward through `RequestBuilder::build_version`, which serializes the
+    /// underlying message (`&mut self`).
+    pub(crate) fn request_builder_mut(&mut self) -> Option<&mut dyn RequestBuilder> {
+        match self.request_builder {
+            Some(ref mut b) => Some(b.as_mut()),
+            None => None,
+        }
+    }
+
     /// Returns the optional target node.
     ///
     /// Java: `node()`.

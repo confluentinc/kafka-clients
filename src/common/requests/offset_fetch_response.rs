@@ -90,6 +90,11 @@ impl OffsetFetchResponse {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut OffsetFetchResponseData {
+        &mut self.data
+    }
+
     /// Returns the version of this response.
     pub fn version(&self) -> i16 {
         self.version

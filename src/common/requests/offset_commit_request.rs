@@ -76,6 +76,11 @@ impl OffsetCommitRequest {
         &self.data
     }
 
+    /// Returns a mutable reference to the underlying data.
+    pub(crate) fn data_mut(&mut self) -> &mut OffsetCommitRequestData {
+        &mut self.data
+    }
+
     /// Returns the API version of this request.
     pub fn version(&self) -> i16 {
         self.version
@@ -209,7 +214,7 @@ impl RequestBuilder for OffsetCommitRequestBuilder {
         self.latest_allowed_version
     }
 
-    fn build_version(&self, version: i16) -> io::Result<ConcreteRequest> {
+    fn build_version(&mut self, version: i16) -> io::Result<ConcreteRequest> {
         if version < self.oldest_allowed_version || version > self.latest_allowed_version {
             return Err(io::Error::new(
                 io::ErrorKind::Unsupported,
@@ -307,7 +312,7 @@ mod tests {
     fn build_version_out_of_range_returns_err() {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
-        let builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let mut builder = OffsetCommitRequestBuilder::for_topic_names(data);
         let result = builder.build_version(10);
         assert!(result.is_err());
     }
@@ -320,7 +325,7 @@ mod tests {
         let mut topic = OffsetCommitRequestTopic::new();
         topic.set_name("t".to_string()); // no topic_id set
         data.set_topics(vec![topic]);
-        let builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let mut builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
         let err = builder.build_version(10).unwrap_err();
         assert!(err.to_string().contains("topic ids"));
     }
@@ -334,7 +339,7 @@ mod tests {
         topic.set_topic_id(Uuid::new(1, 2));
         // name left empty
         data.set_topics(vec![topic]);
-        let builder = OffsetCommitRequestBuilder::for_topic_names(data);
+        let mut builder = OffsetCommitRequestBuilder::for_topic_names(data);
         let err = builder.build_version(9).unwrap_err();
         assert!(err.to_string().contains("topic names"));
     }
@@ -345,7 +350,7 @@ mod tests {
         let mut data = OffsetCommitRequestData::new();
         data.set_group_id("g".to_string());
         data.set_group_instance_id(Some("instance-a".to_string()));
-        let builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
+        let mut builder = OffsetCommitRequestBuilder::for_topic_ids_or_names(data);
         let err = builder.build_version(6).unwrap_err();
         assert!(err.to_string().contains("group.instance.id"));
     }
