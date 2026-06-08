@@ -71,7 +71,7 @@ pub const PRODUCER_METRIC_GROUP_NAME: &str = "producer-metrics";
 #[derive(Debug)]
 struct ClusterAndWaitTime {
     /// The cluster metadata.
-    cluster: Arc<Cluster>,
+    cluster: Cluster,
     /// Time in ms spent waiting for metadata.
     waited_on_metadata_ms: i64,
 }
