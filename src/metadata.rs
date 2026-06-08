@@ -26,12 +26,12 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::Notify;
 
-use log::{debug, error, info, trace};
+use crate::{kafka_debug, kafka_error, kafka_info, kafka_trace};
 
 use crate::common::Cluster;
 use crate::common::ClusterResource;
@@ -45,6 +45,7 @@ use crate::common::requests::MetadataRequestBuilder;
 use crate::common::requests::RECORD_BATCH_NO_PARTITION_LEADER_EPOCH;
 use crate::common::requests::{MetadataResponse, PartitionMetadata};
 use crate::common::utils::ExponentialBackoff;
+use crate::common::utils::LogContext;
 
 use super::MetadataSnapshot;
 use super::common_client_configs;
@@ -137,6 +138,10 @@ pub struct Metadata {
     /// (e.g., `ProducerMetadata.update()`) to perform additional work after the base
     /// update completes.
     post_update_fn: Option<Box<PostUpdateFn>>,
+    /// Contextual log message prefix.
+    ///
+    /// Translated from Java's `LogContext logContext` field in `Metadata`.
+    log_context: LogContext,
 }
 
 /// Inner mutable state of `Metadata`, protected by a mutex.
@@ -151,14 +156,14 @@ struct MetadataInner {
     fatal_err: Option<KafkaError>,
     invalid_topics: HashSet<String>,
     unauthorized_topics: HashSet<String>,
-    metadata_snapshot: MetadataSnapshot,
+    metadata_snapshot: Arc<MetadataSnapshot>,
     need_full_update: bool,
     need_partial_update: bool,
     equivalent_response_count: i64,
     cluster_resource_listeners: ClusterResourceListeners,
     is_closed: bool,
     last_seen_leader_epochs: HashMap<TopicPartition, i32>,
-    bootstrap_addresses: Vec<SocketAddr>,
+    bootstrap_addresses: Vec<(String, SocketAddr)>,
 }
 
 /// Result of `new_metadata_request_and_version`.
@@ -254,63 +259,32 @@ impl Metadata {
         metadata_expire_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
     ) -> Self {
-        let refresh_backoff = ExponentialBackoff::new(
+        Self::with_log_context(
             refresh_backoff_ms,
-            common_client_configs::RETRY_BACKOFF_EXP_BASE,
             refresh_backoff_max_ms,
-            common_client_configs::RETRY_BACKOFF_JITTER,
+            metadata_expire_ms,
+            cluster_resource_listeners,
+            LogContext::empty(),
         )
-        .expect("Invalid backoff parameters");
-
-        Self {
-            inner: Mutex::new(MetadataInner {
-                refresh_backoff,
-                metadata_expire_ms,
-                last_refresh_ms: 0,
-                last_successful_refresh_ms: 0,
-                attempts: 0,
-                request_version: 0,
-                update_version: 0,
-                need_full_update: false,
-                need_partial_update: false,
-                equivalent_response_count: 0,
-                cluster_resource_listeners,
-                is_closed: false,
-                last_seen_leader_epochs: HashMap::new(),
-                invalid_topics: HashSet::new(),
-                unauthorized_topics: HashSet::new(),
-                metadata_snapshot: MetadataSnapshot::empty(),
-                fatal_err: None,
-                bootstrap_addresses: Vec::new(),
-            }),
-            update_notify: Notify::new(),
-            retain_topic_fn: None,
-            enable_partial_updates: false,
-            request_builder_fn: None,
-            new_topics_request_builder_fn: None,
-            post_update_fn: None,
-        }
     }
 
-    /// Creates a new `Metadata` instance with custom behavior overrides.
-    ///
-    /// This corresponds to the Java pattern of subclassing `Metadata` to override
-    /// `retainTopic()`, `newMetadataRequestBuilder()`,
-    /// `newMetadataRequestBuilderForNewTopics()`, and `update()`.
+    /// Creates a new `Metadata` instance with a `LogContext`.
     ///
     /// # Arguments
     /// * `refresh_backoff_ms` - The minimum amount of time between metadata refreshes
+    ///   to avoid busy polling
     /// * `refresh_backoff_max_ms` - The maximum amount of time to wait between metadata
     ///   refreshes
     /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
+    ///   without refresh
     /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
-    /// * `overrides` - Configuration for overriding default behavior
-    pub fn with_overrides(
+    /// * `log_context` - Contextual log message prefix
+    pub fn with_log_context(
         refresh_backoff_ms: i64,
         refresh_backoff_max_ms: i64,
         metadata_expire_ms: i64,
         cluster_resource_listeners: ClusterResourceListeners,
-        overrides: MetadataOverrides,
+        log_context: LogContext,
     ) -> Self {
         let refresh_backoff = ExponentialBackoff::new(
             refresh_backoff_ms,
@@ -337,7 +311,67 @@ impl Metadata {
                 last_seen_leader_epochs: HashMap::new(),
                 invalid_topics: HashSet::new(),
                 unauthorized_topics: HashSet::new(),
-                metadata_snapshot: MetadataSnapshot::empty(),
+                metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
+                fatal_err: None,
+                bootstrap_addresses: Vec::new(),
+            }),
+            update_notify: Notify::new(),
+            retain_topic_fn: None,
+            enable_partial_updates: false,
+            request_builder_fn: None,
+            new_topics_request_builder_fn: None,
+            post_update_fn: None,
+            log_context,
+        }
+    }
+
+    /// Creates a new `Metadata` instance with custom behavior overrides.
+    ///
+    /// This corresponds to the Java pattern of subclassing `Metadata` to override
+    /// `retainTopic()`, `newMetadataRequestBuilder()`,
+    /// `newMetadataRequestBuilderForNewTopics()`, and `update()`.
+    ///
+    /// # Arguments
+    /// * `refresh_backoff_ms` - The minimum amount of time between metadata refreshes
+    /// * `refresh_backoff_max_ms` - The maximum amount of time to wait between metadata
+    ///   refreshes
+    /// * `metadata_expire_ms` - The maximum amount of time that metadata can be retained
+    /// * `cluster_resource_listeners` - Listeners notified of cluster resource updates
+    /// * `overrides` - Configuration for overriding default behavior
+    pub fn with_overrides(
+        refresh_backoff_ms: i64,
+        refresh_backoff_max_ms: i64,
+        metadata_expire_ms: i64,
+        cluster_resource_listeners: ClusterResourceListeners,
+        overrides: MetadataOverrides,
+        log_context: LogContext,
+    ) -> Self {
+        let refresh_backoff = ExponentialBackoff::new(
+            refresh_backoff_ms,
+            common_client_configs::RETRY_BACKOFF_EXP_BASE,
+            refresh_backoff_max_ms,
+            common_client_configs::RETRY_BACKOFF_JITTER,
+        )
+        .expect("Invalid backoff parameters");
+
+        Self {
+            inner: Mutex::new(MetadataInner {
+                refresh_backoff,
+                metadata_expire_ms,
+                last_refresh_ms: 0,
+                last_successful_refresh_ms: 0,
+                attempts: 0,
+                request_version: 0,
+                update_version: 0,
+                need_full_update: false,
+                need_partial_update: false,
+                equivalent_response_count: 0,
+                cluster_resource_listeners,
+                is_closed: false,
+                last_seen_leader_epochs: HashMap::new(),
+                invalid_topics: HashSet::new(),
+                unauthorized_topics: HashSet::new(),
+                metadata_snapshot: Arc::new(MetadataSnapshot::empty()),
                 fatal_err: None,
                 bootstrap_addresses: Vec::new(),
             }),
@@ -347,19 +381,20 @@ impl Metadata {
             request_builder_fn: overrides.request_builder_fn,
             new_topics_request_builder_fn: overrides.new_topics_request_builder_fn,
             post_update_fn: overrides.post_update_fn,
+            log_context,
         }
     }
 
     /// Gets the current cluster info without blocking.
-    pub fn fetch(&self) -> Cluster {
+    pub fn fetch(&self) -> Arc<Cluster> {
         let inner = self.inner.lock().unwrap();
-        inner.metadata_snapshot.cluster().clone()
+        inner.metadata_snapshot.cluster_arc()
     }
 
     /// Gets the current metadata snapshot.
-    pub fn fetch_metadata_snapshot(&self) -> MetadataSnapshot {
+    pub fn fetch_metadata_snapshot(&self) -> Arc<MetadataSnapshot> {
         let inner = self.inner.lock().unwrap();
-        inner.metadata_snapshot.clone()
+        Arc::clone(&inner.metadata_snapshot)
     }
 
     /// Returns the time until the cluster info can be updated (i.e., backoff time has elapsed).
@@ -474,31 +509,42 @@ impl Metadata {
         let mut inner = self.inner.lock().unwrap();
         let old_epoch = inner.last_seen_leader_epochs.get(topic_partition).copied();
 
-        trace!(
+        kafka_trace!(
+            self.log_context,
             "Determining if we should replace existing epoch {:?} with new epoch {} for partition {}",
-            old_epoch, leader_epoch, topic_partition
+            old_epoch,
+            leader_epoch,
+            topic_partition
         );
 
         let updated = match old_epoch {
             None => {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "Not replacing null epoch with new epoch {} for partition {}",
-                    leader_epoch, topic_partition
+                    leader_epoch,
+                    topic_partition
                 );
                 false
             },
             Some(old) if leader_epoch > old => {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "Updating last seen epoch from {} to {} for partition {}",
-                    old, leader_epoch, topic_partition
+                    old,
+                    leader_epoch,
+                    topic_partition
                 );
                 inner.last_seen_leader_epochs.insert(topic_partition.clone(), leader_epoch);
                 true
             },
             Some(old) => {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "Not replacing existing epoch {} with new epoch {} for partition {}",
-                    old, leader_epoch, topic_partition
+                    old,
+                    leader_epoch,
+                    topic_partition
                 );
                 false
             },
@@ -579,12 +625,12 @@ impl Metadata {
         }
     }
 
-    /// Bootstraps the metadata with the given addresses.
-    pub fn bootstrap(&self, addresses: Vec<SocketAddr>) {
+    /// Bootstraps the metadata with the given (hostname, address) pairs.
+    pub fn bootstrap(&self, addresses: Vec<(String, SocketAddr)>) {
         let mut inner = self.inner.lock().unwrap();
         inner.need_full_update = true;
         inner.update_version += 1;
-        inner.metadata_snapshot = MetadataSnapshot::bootstrap(&addresses);
+        inner.metadata_snapshot = Arc::new(MetadataSnapshot::bootstrap(&addresses));
         inner.bootstrap_addresses = addresses;
     }
 
@@ -592,10 +638,10 @@ impl Metadata {
     pub fn rebootstrap(&self) {
         let mut inner = self.inner.lock().unwrap();
         let addresses = inner.bootstrap_addresses.clone();
-        info!("Rebootstrapping with {:?}", addresses);
+        kafka_info!(self.log_context, "Rebootstrapping with {:?}", addresses);
         inner.need_full_update = true;
         inner.update_version += 1;
-        inner.metadata_snapshot = MetadataSnapshot::bootstrap(&addresses);
+        inner.metadata_snapshot = Arc::new(MetadataSnapshot::bootstrap(&addresses));
     }
 
     /// Updates metadata assuming the current request version.
@@ -649,25 +695,33 @@ impl Metadata {
             }
         };
 
-        inner.metadata_snapshot =
-            Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms, &retain);
+        inner.metadata_snapshot = Arc::new(Self::handle_metadata_response(
+            &mut inner,
+            response,
+            is_partial_update,
+            now_ms,
+            &retain,
+            &self.log_context,
+        ));
 
-        let cluster = inner.metadata_snapshot.cluster().clone();
-        Self::maybe_set_metadata_error(&mut inner, &cluster);
+        let cluster = inner.metadata_snapshot.cluster_arc();
+        Self::maybe_set_metadata_error(&mut inner, &cluster, &self.log_context);
 
         // Remove epochs for topics we no longer retain
         inner.last_seen_leader_epochs.retain(|tp, _| retain(tp.topic(), false, now_ms));
 
         let new_cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
         if previous_cluster_id != new_cluster_id {
-            info!("Cluster ID: {:?}", new_cluster_id);
+            kafka_info!(self.log_context, "Cluster ID: {}", new_cluster_id.as_deref().unwrap_or("null"));
         }
         let cluster_resource = inner.metadata_snapshot.cluster_resource();
         inner.cluster_resource_listeners.on_update(&cluster_resource);
 
-        debug!(
+        kafka_debug!(
+            self.log_context,
             "Updated cluster metadata updateVersion {} to {}",
-            inner.update_version, inner.metadata_snapshot
+            inner.update_version,
+            inner.metadata_snapshot
         );
 
         // Release the inner lock before calling the post-update callback to avoid
@@ -719,7 +773,12 @@ impl Metadata {
             };
 
             if new_leader.epoch.is_none() || new_leader.leader_id.is_none() {
-                debug!("For {}, incoming leader information is incomplete {}", partition, new_leader);
+                kafka_debug!(
+                    self.log_context,
+                    "For {}, incoming leader information is incomplete {}",
+                    partition,
+                    new_leader
+                );
                 continue;
             }
 
@@ -727,27 +786,35 @@ impl Metadata {
             if let Some(current_epoch) = current_leader.epoch
                 && new_epoch <= current_epoch
             {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "For {}, incoming leader({}) is not-newer than the one in the existing metadata {}, so ignoring.",
-                    partition, new_leader, current_leader
+                    partition,
+                    new_leader,
+                    current_leader
                 );
                 continue;
             }
 
             let new_leader_id = new_leader.leader_id.unwrap();
             if !new_nodes.contains_key(&new_leader_id) {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "For {}, incoming leader({}), the corresponding node information for node-id {} is missing, so ignoring.",
-                    partition, new_leader, new_leader_id
+                    partition,
+                    new_leader,
+                    new_leader_id
                 );
                 continue;
             }
 
             let existing_metadata = inner.metadata_snapshot.partition_metadata(partition);
             if existing_metadata.is_none() {
-                debug!(
+                kafka_debug!(
+                    self.log_context,
                     "For {}, incoming leader({}), partition metadata is no longer cached, ignoring.",
-                    partition, new_leader
+                    partition,
+                    new_leader
                 );
                 continue;
             }
@@ -768,7 +835,7 @@ impl Metadata {
         }
 
         if update_partition_metadata.is_empty() {
-            debug!("No relevant metadata updates.");
+            kafka_debug!(self.log_context, "No relevant metadata updates.");
             return HashSet::new();
         }
 
@@ -788,7 +855,7 @@ impl Metadata {
         let cluster_id = inner.metadata_snapshot.cluster_resource().cluster_id().map(|s| s.to_string());
         let controller = inner.metadata_snapshot.cluster().controller().cloned();
 
-        inner.metadata_snapshot = inner.metadata_snapshot.merge_with(
+        inner.metadata_snapshot = Arc::new(inner.metadata_snapshot.merge_with(
             cluster_id,
             new_nodes,
             update_partition_metadata,
@@ -798,7 +865,7 @@ impl Metadata {
             controller,
             topic_ids_for_updated,
             |_topic, _is_internal| true,
-        );
+        ));
 
         let cluster_resource = inner.metadata_snapshot.cluster_resource();
         inner.cluster_resource_listeners.on_update(&cluster_resource);
@@ -806,22 +873,30 @@ impl Metadata {
         updated_partitions
     }
 
-    fn maybe_set_metadata_error(inner: &mut MetadataInner, cluster: &Cluster) {
+    fn maybe_set_metadata_error(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         Self::clear_recoverable_errors(inner);
-        Self::check_invalid_topics(inner, cluster);
-        Self::check_unauthorized_topics(inner, cluster);
+        Self::check_invalid_topics(inner, cluster, log_context);
+        Self::check_unauthorized_topics(inner, cluster, log_context);
     }
 
-    fn check_invalid_topics(inner: &mut MetadataInner, cluster: &Cluster) {
+    fn check_invalid_topics(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         if !cluster.invalid_topics().is_empty() {
-            error!("Metadata response reported invalid topics {:?}", cluster.invalid_topics());
+            kafka_error!(
+                log_context,
+                "Metadata response reported invalid topics {:?}",
+                cluster.invalid_topics()
+            );
             inner.invalid_topics = cluster.invalid_topics().clone();
         }
     }
 
-    fn check_unauthorized_topics(inner: &mut MetadataInner, cluster: &Cluster) {
+    fn check_unauthorized_topics(inner: &mut MetadataInner, cluster: &Cluster, log_context: &LogContext) {
         if !cluster.unauthorized_topics().is_empty() {
-            error!("Topic authorization failed for topics {:?}", cluster.unauthorized_topics());
+            kafka_error!(
+                log_context,
+                "Topic authorization failed for topics {:?}",
+                cluster.unauthorized_topics()
+            );
             inner.unauthorized_topics = cluster.unauthorized_topics().clone();
         }
     }
@@ -833,6 +908,7 @@ impl Metadata {
         is_partial_update: bool,
         now_ms: i64,
         retain_topic: &dyn Fn(&str, bool, i64) -> bool,
+        log_context: &LogContext,
     ) -> MetadataSnapshot {
         // All encountered topics
         let mut topics = HashSet::new();
@@ -880,14 +956,17 @@ impl Metadata {
                         metadata_response.has_reliable_leader_epochs(),
                         effective_topic_id,
                         old_topic_id,
+                        log_context,
                     ) {
                         partitions.push(pm);
                     }
 
                     if Self::is_invalid_metadata_error(partition_metadata.error) {
-                        debug!(
+                        kafka_debug!(
+                            log_context,
                             "Requesting metadata update for partition {} due to error {:?}",
-                            partition_metadata.topic_partition, partition_metadata.error
+                            partition_metadata.topic_partition,
+                            partition_metadata.error
                         );
                         inner.need_full_update = true;
                         if inner.equivalent_response_count > 0 {
@@ -897,7 +976,8 @@ impl Metadata {
                 }
             } else {
                 if Self::is_invalid_metadata_error(metadata.error()) {
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Requesting metadata update for topic {} due to error {:?}",
                         topic_name,
                         metadata.error()
@@ -949,6 +1029,7 @@ impl Metadata {
         has_reliable_leader_epoch: bool,
         topic_id: Option<Uuid>,
         old_topic_id: Option<Uuid>,
+        log_context: &LogContext,
     ) -> Option<PartitionMetadata> {
         let tp = &partition_metadata.topic_partition;
         if let Some(new_epoch) = partition_metadata.leader_epoch.filter(|_| has_reliable_leader_epoch) {
@@ -957,9 +1038,11 @@ impl Metadata {
             match current_epoch {
                 None => {
                     // No previous info, insert new epoch
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Setting the last seen epoch of partition {} to {} since the last known epoch was undefined.",
-                        tp, new_epoch
+                        tp,
+                        new_epoch
                     );
                     inner.last_seen_leader_epochs.insert(tp.clone(), new_epoch);
                     inner.equivalent_response_count = 0;
@@ -967,18 +1050,25 @@ impl Metadata {
                 },
                 Some(_) if topic_id.is_some() && topic_id != old_topic_id => {
                     // Topic ID changed (topic deleted and re-created)
-                    info!(
+                    kafka_info!(
+                        log_context,
                         "Resetting the last seen epoch of partition {} to {} since the associated topicId changed from {:?} to {:?}",
-                        tp, new_epoch, old_topic_id, topic_id
+                        tp,
+                        new_epoch,
+                        old_topic_id,
+                        topic_id
                     );
                     inner.last_seen_leader_epochs.insert(tp.clone(), new_epoch);
                     inner.equivalent_response_count = 0;
                     Some(partition_metadata.clone())
                 },
                 Some(current) if new_epoch >= current => {
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Updating last seen epoch for partition {} from {} to epoch {} from new metadata",
-                        tp, current, new_epoch
+                        tp,
+                        current,
+                        new_epoch
                     );
                     inner.last_seen_leader_epochs.insert(tp.clone(), new_epoch);
                     if new_epoch > current {
@@ -988,9 +1078,12 @@ impl Metadata {
                 },
                 Some(current) => {
                     // Old epoch, ignore
-                    debug!(
+                    kafka_debug!(
+                        log_context,
                         "Got metadata for an older epoch {} (current is {}) for partition {}, not updating",
-                        new_epoch, current, tp
+                        new_epoch,
+                        current,
+                        tp
                     );
                     inner.metadata_snapshot.partition_metadata(tp).cloned()
                 },
@@ -1342,7 +1435,7 @@ mod tests {
             ClusterResourceListeners::new(),
         );
         let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
-        metadata.bootstrap(vec![addr]);
+        metadata.bootstrap(vec![("127.0.0.1".to_string(), addr)]);
 
         assert_eq!(0, metadata.time_to_allow_update(now));
         assert_eq!(0, metadata.time_to_next_update(now));
@@ -1461,7 +1554,7 @@ mod tests {
         let metadata = Metadata::new(REFRESH_BACKOFF_MS, REFRESH_BACKOFF_MAX_MS, METADATA_EXPIRE_MS, listeners);
 
         let addr: SocketAddr = "127.0.0.1:9002".parse().unwrap();
-        metadata.bootstrap(vec![addr]);
+        metadata.bootstrap(vec![("127.0.0.1".to_string(), addr)]);
         assert!(
             !on_update_called.load(Ordering::SeqCst),
             "ClusterResourceListener should not be called when metadata is updated with bootstrap Cluster"
@@ -1894,8 +1987,11 @@ mod tests {
 
         // Sentinel instances
         let address: SocketAddr = "127.0.0.1:0".parse().unwrap();
-        let from_metadata = MetadataSnapshot::bootstrap(&[address]).cluster().clone();
-        let from_cluster = Cluster::bootstrap(&[address]);
+        let bootstrap_addr = ("127.0.0.1".to_string(), address);
+        let from_metadata = MetadataSnapshot::bootstrap(std::slice::from_ref(&bootstrap_addr))
+            .cluster()
+            .clone();
+        let from_cluster = Cluster::bootstrap(&[bootstrap_addr]);
         assert_eq!(from_metadata, from_cluster);
 
         let from_metadata_empty = MetadataSnapshot::empty().cluster().clone();
@@ -2286,7 +2382,7 @@ mod tests {
 
         // For versions < 9, leader epochs should not be reliable
         for version in ApiKeys::METADATA.oldest_version()..9 {
-            let mut readable = message_util::to_byte_buffer_accessor(&data, version).unwrap();
+            let mut readable = message_util::to_byte_buffer_accessor(&mut data, version).unwrap();
             let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
             assert!(
                 !response.has_reliable_leader_epochs(),
@@ -2306,7 +2402,7 @@ mod tests {
 
         // For versions >= 9, leader epochs should be reliable
         for version in 9..=ApiKeys::METADATA.latest_version() {
-            let mut readable = message_util::to_byte_buffer_accessor(&data, version).unwrap();
+            let mut readable = message_util::to_byte_buffer_accessor(&mut data, version).unwrap();
             let response = MetadataResponse::parse(&mut readable as &mut dyn Readable, version).unwrap();
             assert!(
                 response.has_reliable_leader_epochs(),
@@ -2398,6 +2494,7 @@ mod tests {
             METADATA_EXPIRE_MS,
             ClusterResourceListeners::new(),
             MetadataOverrides { enable_partial_updates: true, ..MetadataOverrides::default() },
+            LogContext::empty(),
         );
 
         assert!(!metadata.update_requested());
@@ -2630,6 +2727,7 @@ mod tests {
                 })),
                 ..MetadataOverrides::default()
             },
+            LogContext::empty(),
         );
 
         // Initialize a metadata instance with two topic variants "old" and "keep". Both will be retained.
@@ -2832,6 +2930,7 @@ mod tests {
                 })),
                 ..MetadataOverrides::default()
             },
+            LogContext::empty(),
         );
 
         // Initialize a metadata instance with two topics. Both will be retained.
@@ -2943,7 +3042,7 @@ mod tests {
         let snapshot = metadata.fetch_metadata_snapshot();
         let cluster = metadata.fetch();
         // Validate metadata snapshot & cluster are setup as expected.
-        assert_eq!(&cluster, snapshot.cluster());
+        assert_eq!(cluster.as_ref(), snapshot.cluster());
         assert_eq!(old_node_count as usize, snapshot.cluster().nodes().len());
         assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic1));
         assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic2));
@@ -2954,8 +3053,8 @@ mod tests {
         let num_threads = 6;
         let barrier = Arc::new(std::sync::Barrier::new(num_threads));
         let at_least_updated = Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let new_snapshot: Arc<Mutex<Option<MetadataSnapshot>>> = Arc::new(Mutex::new(None));
-        let new_cluster: Arc<Mutex<Option<Cluster>>> = Arc::new(Mutex::new(None));
+        let new_snapshot: Arc<Mutex<Option<Arc<MetadataSnapshot>>>> = Arc::new(Mutex::new(None));
+        let new_cluster: Arc<Mutex<Option<Arc<Cluster>>>> = Arc::new(Mutex::new(None));
 
         let mut handles = Vec::new();
         for i in 0..num_threads {
