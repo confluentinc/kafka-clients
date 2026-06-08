@@ -1024,6 +1024,25 @@ mod tests {
         records.buffer().to_vec()
     }
 
+    /// Like [`new_records`] but with the batch records compressed, to
+    /// exercise the `RecordSource::Owned` (decompress-once) path.
+    fn new_compressed_records(base_offset: i64, count: i32, first_message_id: i64) -> Vec<u8> {
+        let simple_records: Vec<SimpleRecord> = (0..count)
+            .map(|i| {
+                let value = format!("value-{}", first_message_id + i as i64);
+                SimpleRecord::new(0, Some("key".as_bytes().to_vec()), Some(value.into_bytes()), vec![])
+            })
+            .collect();
+        let records = MemoryRecords::with_records_at_offset(
+            2,
+            base_offset,
+            Compression::gzip(),
+            TimestampType::CreateTime,
+            &simple_records,
+        );
+        records.buffer().to_vec()
+    }
+
     fn new_completed_fetch(fetch_offset: i64, records_bytes: Vec<u8>) -> CompletedFetch {
         let mut partition_data = PartitionData::new();
         partition_data.set_records(Some(records_bytes));
@@ -1053,6 +1072,41 @@ mod tests {
             .unwrap();
         assert_eq!(10, records.len());
         assert_eq!(10, records[0].offset());
+
+        let records = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(1, records.len());
+        assert_eq!(20, records[0].offset());
+
+        let records = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(0, records.len());
+    }
+
+    /// Exercises the compressed-batch decode path (`RecordSource::Owned`):
+    /// records are decompressed once into an owned buffer, then each record's
+    /// key/value is borrowed from it — same observable result as the
+    /// uncompressed path.
+    #[test]
+    fn test_simple_compressed() {
+        let fetch_offset = 5;
+        let starting_offset = 10;
+        let num_records = 11; // offsets 10..20 inclusive
+        let bytes = new_compressed_records(starting_offset, num_records, fetch_offset);
+        let mut cf = new_completed_fetch(fetch_offset, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let key_de = StringDeserializer;
+        let value_de = StringDeserializer;
+
+        let records = cf
+            .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+            .unwrap();
+        assert_eq!(10, records.len());
+        assert_eq!(10, records[0].offset());
+        assert_eq!(Some(&"key".to_string()), records[0].key());
+        assert_eq!(Some(&"value-5".to_string()), records[0].value());
 
         let records = cf
             .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
