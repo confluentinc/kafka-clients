@@ -1,6 +1,19 @@
 RUST_PROJECT_ROOT = $(CURDIR)
-RUSTFLAGS_NATIVE = -C target-cpu=native
-CFLAGS_NATIVE = -march=native -mtune=native
+
+ARCH := $(shell uname -m)
+
+ifeq ($(ARCH),x86_64)
+  # x86-64-v3: AVX/AVX2/BMI/FMA — Haswell and later (~2013+). Faster than the
+  # baseline while staying portable across all v3-capable x86-64 hosts
+  RUSTFLAGS_NATIVE = -C target-cpu=x86-64-v3
+  CFLAGS_NATIVE = -march=x86-64-v3 -mtune=generic
+else
+  # No x86-64-vN equivalent on other arches (e.g. aarch64): the toolchain
+  # default target-cpu is already the portable generic baseline, so don't
+  # override it. -mtune=generic only affects scheduling, not compatibility.
+  RUSTFLAGS_NATIVE =
+  CFLAGS_NATIVE = -mtune=generic
+endif
 
 .PHONY: all init build devel-build build-rust submodules build-c init-venv build-python devel-build devel-build-rust devel-build-c devel-build-python init test test-rust test-integration test-c test-python build-grpc-images test-multilanguage verify format-check lint clean
 
