@@ -70,6 +70,23 @@ impl<T: Send + 'static> KafkaFuture<T> {
         Self { inner }
     }
 
+    /// Create a `KafkaFuture` that is already resolved with the given result.
+    ///
+    /// Useful when the result is known at the time the future is constructed —
+    /// for example when implementing the [`Producer`](crate::producer::Producer)
+    /// trait by awaiting a remote call and wrapping the response in a future
+    /// to satisfy the trait's return type. Analogous to [`std::future::ready`].
+    ///
+    /// Both [`get`](Self::get) and [`get_timeout`](Self::get_timeout) resolve
+    /// immediately with a clone of the result; [`is_done`](Self::is_done)
+    /// returns `true`.
+    pub fn completed(result: Result<T, KafkaError>) -> Self
+    where
+        T: Clone + Sync,
+    {
+        Self { inner: Arc::new(CompletedFuture { result }) }
+    }
+
     /// Await the result of this future.
     ///
     /// This is the Rust equivalent of Java's `Future.get()`.
@@ -114,5 +131,67 @@ impl<T: Send + 'static> Clone for KafkaFuture<T> {
 impl<T: Send + 'static> std::fmt::Debug for KafkaFuture<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("KafkaFuture").field("is_done", &self.is_done()).finish()
+    }
+}
+
+/// Internal `KafkaFutureOps` impl for an already-resolved future.
+///
+/// Used by [`KafkaFuture::completed`] to wrap a value that is already known
+/// when the future is constructed. The result is cloned on each `get` call
+/// so the future is reusable, matching Java's `Future` semantics.
+struct CompletedFuture<T: Clone + Send + Sync + 'static> {
+    result: Result<T, KafkaError>,
+}
+
+impl<T: Clone + Send + Sync + 'static> KafkaFutureOps<T> for CompletedFuture<T> {
+    fn get(&self) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>> {
+        let result = self.result.clone();
+        Box::pin(async move { result })
+    }
+
+    fn get_timeout(
+        &self,
+        _timeout: Duration,
+    ) -> Pin<Box<dyn std::future::Future<Output = Result<T, KafkaError>> + Send + '_>> {
+        let result = self.result.clone();
+        Box::pin(async move { result })
+    }
+
+    fn is_done(&self) -> bool {
+        true
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn completed_resolves_with_ok_value() {
+        let f: KafkaFuture<i32> = KafkaFuture::completed(Ok(42));
+        assert!(f.is_done());
+        assert_eq!(f.get().await.unwrap(), 42);
+        // Reusable across multiple gets, matching Java Future semantics.
+        assert_eq!(f.get().await.unwrap(), 42);
+        assert_eq!(f.get_timeout(Duration::from_secs(1)).await.unwrap(), 42);
+    }
+
+    #[tokio::test]
+    async fn completed_resolves_with_err_value() {
+        let f: KafkaFuture<i32> = KafkaFuture::completed(Err(KafkaError::IllegalArgument("test".to_string())));
+        assert!(f.is_done());
+        assert!(matches!(f.get().await, Err(KafkaError::IllegalArgument(_))));
+        assert!(matches!(
+            f.get_timeout(Duration::from_secs(1)).await,
+            Err(KafkaError::IllegalArgument(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn completed_clone_shares_underlying_result() {
+        let f1: KafkaFuture<String> = KafkaFuture::completed(Ok("hello".to_string()));
+        let f2 = f1.clone();
+        assert_eq!(f1.get().await.unwrap(), "hello");
+        assert_eq!(f2.get().await.unwrap(), "hello");
     }
 }
