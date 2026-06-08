@@ -64,6 +64,20 @@ pub trait Selectable: Send {
     /// Wakeup this selector if it is blocked on I/O.
     fn wakeup(&self);
 
+    /// Returns a lock-free handle to this selector's wakeup primitive.
+    ///
+    /// Not present in Java: there, `Selector.wakeup()` is called directly
+    /// across threads because `nioSelector.wakeup()` is itself thread-safe.
+    /// In Rust the selector lives behind the `NetworkClientDelegate`'s async
+    /// `Mutex`, which is held for the whole duration of a `poll()`. To wake an
+    /// in-progress poll from another task *without* taking that lock (and
+    /// without cancelling the poll — see the join-stall root cause in
+    /// `design/current/consumer-join-stall-rootcause.md`), callers grab this
+    /// `Arc<Notify>` once and fire `notify_one()` on it. It is the same
+    /// `Notify` the selector's own `poll()` awaits, so firing it makes the
+    /// blocking wait return at a safe boundary.
+    fn wakeup_handle(&self) -> Arc<Notify>;
+
     /// Returns the [`Notify`] handle used by the selector's poll loop.
     ///
     /// Callers can use this to share the selector's wakeup mechanism,

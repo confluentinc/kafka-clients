@@ -175,6 +175,20 @@ pub trait TransportLayer: Send {
     /// Returns an error if the read fails.
     fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
 
+    /// Non-blocking read of currently-available bytes (does NOT await
+    /// readiness). `Err(WouldBlock)` if none right now, `Ok(0)` for EOF, else
+    /// bytes read. Lets the selector drain a readable socket in a tight loop
+    /// (Java-NIO `pollSelectionKeys` style) without per-chunk async overhead.
+    /// Default: unsupported — callers fall back to the async [`read`].
+    fn try_read(&mut self, _dst: &mut [u8]) -> io::Result<usize> {
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+
+    /// Whether [`try_read`](Self::try_read) is a real non-blocking read.
+    fn supports_try_read(&self) -> bool {
+        false
+    }
+
     /// Writes data to this channel from the given buffer.
     ///
     /// # Arguments
@@ -231,33 +245,5 @@ pub trait TransportLayer: Send {
     fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
         let _ = srcs;
         Err(io::Error::from(io::ErrorKind::WouldBlock))
-    }
-
-    /// Attempts a non-blocking read without creating a Future.
-    ///
-    /// Mirrors [`try_write_vectored`](Self::try_write_vectored) for the read path.
-    /// Returns `WouldBlock` if the transport cannot read immediately. Transports
-    /// that support synchronous reads (e.g., plaintext) override this to avoid
-    /// the per-call cost of `tokio::time::timeout(Duration::ZERO, …)` over the
-    /// async [`read`](Self::read).
-    ///
-    /// # Returns
-    ///
-    /// The number of bytes read, possibly zero. `Ok(0)` indicates EOF (remote
-    /// closed the connection), consistent with Tokio's `TcpStream::try_read`
-    /// and `AsyncRead`.
-    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
-        let _ = dst;
-        Err(io::Error::from(io::ErrorKind::WouldBlock))
-    }
-
-    /// Whether this transport implements `try_read` synchronously.
-    ///
-    /// Default `false` so transports that inherit the trait default (which
-    /// returns `WouldBlock`) are not treated as "not ready" by callers like
-    /// `Selector::attempt_read`. Plaintext overrides to `true`; SSL keeps the
-    /// default and goes through the async `read` path.
-    fn supports_try_read(&self) -> bool {
-        false
     }
 }

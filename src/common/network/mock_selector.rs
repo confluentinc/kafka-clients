@@ -216,6 +216,12 @@ impl super::selectable::Selectable for MockSelector {
 
     fn wakeup(&self) {}
 
+    fn wakeup_handle(&self) -> std::sync::Arc<tokio::sync::Notify> {
+        // The mock selector never blocks on real I/O, so its `poll()` does not
+        // await this primitive; return an unused handle to satisfy the trait.
+        std::sync::Arc::new(tokio::sync::Notify::new())
+    }
+
     async fn close(&mut self) {}
 
     fn close_channel(&mut self, id: &str) -> impl std::future::Future<Output = ()> + Send {

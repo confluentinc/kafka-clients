@@ -205,24 +205,34 @@ impl NetworkReceive {
             );
         }
 
-        // Phase 3: Read payload data
+        // Phase 3: Read payload data.
+        //
+        // Drain ALL currently-available socket bytes in a tight loop rather
+        // than one chunk per call — Java-NIO read pattern. Avoids the
+        // per-chunk readiness/timer overhead that throttled large fetch reads
+        // (design/current/consumer-throughput-bottleneck.md, UPDATE 4).
         if let Some(ref mut buf) = self.buffer
             && self.buffer_bytes_read < buf.len()
         {
-            match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
-                Ok(0) => {
-                    return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
-                },
-                Ok(bytes_read) => {
-                    total_read += bytes_read;
-                    self.buffer_bytes_read += bytes_read;
-                },
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    return Ok(total_read);
-                },
-                Err(e) => {
-                    return Err(e);
-                },
+            loop {
+                match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
+                    Ok(0) => {
+                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                    },
+                    Ok(bytes_read) => {
+                        total_read += bytes_read;
+                        self.buffer_bytes_read += bytes_read;
+                        if self.buffer_bytes_read >= buf.len() {
+                            break; // receive complete
+                        }
+                    },
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        return Ok(total_read); // socket drained for now
+                    },
+                    Err(e) => {
+                        return Err(e);
+                    },
+                }
             }
         }
 
@@ -254,9 +264,16 @@ impl Receive for NetworkReceive {
         Box::pin(async {
             let mut total_read = 0;
 
-            // Phase 1: Read the 4-byte size header
+            // Phase 1: Read the 4-byte size header (non-blocking on transports
+            // that support `try_read`, so the whole receive drains without
+            // per-chunk async overhead).
             if self.size_bytes_read < SIZE_LENGTH {
-                match channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await {
+                let header_result = if channel.supports_try_read() {
+                    channel.try_read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH])
+                } else {
+                    channel.read(&mut self.size_buf[self.size_bytes_read..SIZE_LENGTH]).await
+                };
+                match header_result {
                     Ok(0) => {
                         // Ok(0) means EOF (remote closed connection).
                         // Matches Java: bytesRead < 0 → EOFException.
@@ -306,30 +323,59 @@ impl Receive for NetworkReceive {
                 );
             }
 
-            // Phase 3: Read payload data
+            // Phase 3: Read payload data.
+            //
+            // On transports with non-blocking `try_read` (plaintext), drain ALL
+            // currently-available socket bytes in a tight loop rather than one
+            // chunk per call — Java-NIO read pattern. Avoids the per-chunk
+            // readiness/timer overhead that throttled large fetch reads
+            // (design/current/consumer-throughput-bottleneck.md, UPDATE 4).
             if let Some(ref mut buf) = self.buffer
                 && self.buffer_bytes_read < buf.len()
             {
-                match channel.read(&mut buf[self.buffer_bytes_read..]).await {
-                    Ok(0) => {
-                        // Ok(0) means EOF (remote closed). In Java,
-                        // `bytesRead < 0` during the payload phase always
-                        // throws `EOFException`, regardless of what was
-                        // read earlier in the same call.
-                        return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
-                    },
-                    Ok(bytes_read) => {
-                        total_read += bytes_read;
-                        self.buffer_bytes_read += bytes_read;
-                    },
-                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                        // No data available right now. Matches Java NIO
-                        // non-blocking returning 0: return bytes read so far.
-                        return Ok(total_read);
-                    },
-                    Err(e) => {
-                        return Err(e);
-                    },
+                if channel.supports_try_read() {
+                    loop {
+                        match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
+                            Ok(0) => {
+                                // Ok(0) means EOF (remote closed). In Java,
+                                // `bytesRead < 0` during the payload phase
+                                // always throws `EOFException`, regardless of
+                                // what was read earlier in the same call.
+                                return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                            },
+                            Ok(bytes_read) => {
+                                total_read += bytes_read;
+                                self.buffer_bytes_read += bytes_read;
+                                if self.buffer_bytes_read >= buf.len() {
+                                    break; // receive complete
+                                }
+                            },
+                            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                                return Ok(total_read); // socket drained for now
+                            },
+                            Err(e) => return Err(e),
+                        }
+                    }
+                } else {
+                    match channel.read(&mut buf[self.buffer_bytes_read..]).await {
+                        Ok(0) => {
+                            // Ok(0) means EOF (remote closed). In Java,
+                            // `bytesRead < 0` during the payload phase always
+                            // throws `EOFException`, regardless of what was
+                            // read earlier in the same call.
+                            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
+                        },
+                        Ok(bytes_read) => {
+                            total_read += bytes_read;
+                            self.buffer_bytes_read += bytes_read;
+                        },
+                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                            // No data available right now. Matches Java NIO
+                            // non-blocking returning 0: return bytes read so far.
+                            return Ok(total_read);
+                        },
+                        Err(e) => return Err(e),
+                    }
                 }
             }
 
@@ -463,6 +509,165 @@ mod tests {
         ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
             Box::pin(async { Ok(0) })
         }
+    }
+
+    /// A mock transport that supports the non-blocking [`try_read`](TransportLayer::try_read)
+    /// path, returning at most `chunk` bytes per call so a single `read_from`
+    /// exercises the tight drain loop across several `try_read` calls.
+    ///
+    /// When the buffer is exhausted it returns `Ok(0)` (EOF) if `eof_on_exhaustion`
+    /// is `true`, else `WouldBlock` — matching a closed connection vs. a still-open
+    /// non-blocking channel with no data right now.
+    struct ChunkedTryReadMock {
+        data: Vec<u8>,
+        pos: usize,
+        chunk: usize,
+        eof_on_exhaustion: bool,
+    }
+
+    impl ChunkedTryReadMock {
+        fn new(data: Vec<u8>, chunk: usize, eof_on_exhaustion: bool) -> Self {
+            Self { data, pos: 0, chunk, eof_on_exhaustion }
+        }
+
+        fn read_chunk(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            let remaining = self.data.len() - self.pos;
+            if remaining == 0 {
+                return if self.eof_on_exhaustion {
+                    Ok(0) // EOF: remote closed the connection
+                } else {
+                    Err(io::Error::from(io::ErrorKind::WouldBlock)) // still open, no data now
+                };
+            }
+            let to_read = remaining.min(self.chunk).min(dst.len());
+            dst[..to_read].copy_from_slice(&self.data[self.pos..self.pos + to_read]);
+            self.pos += to_read;
+            Ok(to_read)
+        }
+    }
+
+    impl TransportLayer for ChunkedTryReadMock {
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            Ok("127.0.0.1:9092".parse().unwrap())
+        }
+        fn ready(&self) -> bool {
+            true
+        }
+        fn finish_connect(&mut self) -> Pin<Box<dyn Future<Output = io::Result<bool>> + Send + '_>> {
+            Box::pin(async { Ok(true) })
+        }
+        fn disconnect(&mut self) {}
+        fn is_connected(&self) -> bool {
+            true
+        }
+        fn handshake(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn add_interest_ops(&mut self, _ops: InterestOps) {}
+        fn remove_interest_ops(&mut self, _ops: InterestOps) {}
+        fn is_mute(&self) -> bool {
+            false
+        }
+        fn has_bytes_buffered(&self) -> bool {
+            false
+        }
+        fn has_pending_writes(&self) -> bool {
+            false
+        }
+        fn is_open(&self) -> bool {
+            true
+        }
+        fn close(&mut self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+        fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
+            Box::pin(async { Ok(()) })
+        }
+        // Required by the trait; the `supports_try_read` path means `read_from`
+        // uses `try_read` instead, but provide a consistent single-chunk impl.
+        fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            let r = self.read_chunk(dst);
+            Box::pin(async move { r })
+        }
+        fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            self.read_chunk(dst)
+        }
+        fn supports_try_read(&self) -> bool {
+            true
+        }
+        fn write<'a>(&'a mut self, _src: &'a [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { Ok(0) })
+        }
+        fn write_vectored<'a>(
+            &'a mut self,
+            _srcs: &'a [io::IoSlice<'a>],
+        ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
+            Box::pin(async { Ok(0) })
+        }
+    }
+
+    /// The `try_read` tight-drain path reads a header + multi-chunk payload to
+    /// completion in a single `read_from` call (Java-NIO `pollSelectionKeys`
+    /// drain pattern), without fragmenting across calls.
+    #[tokio::test]
+    async fn test_try_read_drains_multi_chunk_payload_in_one_call() {
+        let payload: Vec<u8> = (0..64u8).collect();
+        let mut wire = 64_i32.to_be_bytes().to_vec();
+        wire.extend_from_slice(&payload);
+
+        // chunk=16 forces the 64-byte payload to drain over 4 `try_read` calls
+        // inside one `read_from`. Header (4B) fits in the first chunk.
+        let mut channel = ChunkedTryReadMock::new(wire, 16, false);
+        let mut receive = NetworkReceive::with_max_size(128, "0");
+
+        let read = receive.read_from(&mut channel).await.unwrap();
+        assert_eq!(4 + 64, read, "header + full payload drained in one read_from");
+        assert!(receive.complete(), "receive must complete in a single drain");
+        assert_eq!(Some(&payload[..]), receive.payload());
+    }
+
+    /// `WouldBlock` mid-payload returns the partial bytes read so far (receive not
+    /// complete) and is resumed by a subsequent `read_from` — no data lost, no EOF.
+    #[tokio::test]
+    async fn test_try_read_wouldblock_mid_payload_returns_partial() {
+        // Only header + 40 of 64 payload bytes available now; still-open channel.
+        let payload_part: Vec<u8> = (0..40u8).collect();
+        let mut wire = 64_i32.to_be_bytes().to_vec();
+        wire.extend_from_slice(&payload_part);
+
+        let mut channel = ChunkedTryReadMock::new(wire, 16, false);
+        let mut receive = NetworkReceive::with_max_size(128, "0");
+
+        let read = receive.read_from(&mut channel).await.unwrap();
+        assert_eq!(4 + 40, read, "header + available payload");
+        assert!(!receive.complete(), "receive not complete on WouldBlock mid-payload");
+
+        // Remaining 24 bytes arrive; receive completes on the next call.
+        let rest: Vec<u8> = (40..64u8).collect();
+        let mut channel2 = ChunkedTryReadMock::new(rest, 16, false);
+        let read2 = receive.read_from(&mut channel2).await.unwrap();
+        assert_eq!(24, read2);
+        assert!(receive.complete(), "receive completes once the payload tail arrives");
+    }
+
+    /// `Ok(0)` mid-payload means EOF (remote closed) → `UnexpectedEof`, matching
+    /// Java's `bytesRead < 0` → `EOFException` during a payload read.
+    #[tokio::test]
+    async fn test_try_read_eof_mid_payload_errors() {
+        // Header says 64 bytes but only 40 are sent, then the connection closes.
+        let payload_part: Vec<u8> = (0..40u8).collect();
+        let mut wire = 64_i32.to_be_bytes().to_vec();
+        wire.extend_from_slice(&payload_part);
+
+        let mut channel = ChunkedTryReadMock::new(wire, 16, true);
+        let mut receive = NetworkReceive::with_max_size(128, "0");
+
+        let result = receive.read_from(&mut channel).await;
+        let err = result.expect_err("EOF mid-payload must error");
+        assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
     }
 
     /// Translated from `NetworkReceiveTest.testBytesRead` in
