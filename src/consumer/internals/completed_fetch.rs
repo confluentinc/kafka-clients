@@ -432,7 +432,7 @@ impl CompletedFetch {
                 if !has_next {
                     break;
                 }
-            } else if self.peek_current_record().is_none() {
+            } else if self.peek_current_record()?.is_none() {
                 break;
             }
 
@@ -452,7 +452,20 @@ impl CompletedFetch {
             let record_bytes_consumed;
             let headers_owned;
             {
-                let (record, batch_meta) = self.peek_current_record().expect("verified non-empty above");
+                // Verified non-empty: `advance_to_next_fetched_record` returned
+                // `true` (or a cached exception positioned us here and the
+                // `peek` above returned `Some`). The `?` propagates a
+                // malformed-record-body error; a `None` here would mean the
+                // record went missing between positioning and reading, which
+                // is the premature-EOF (declared count > actual) state — surface
+                // it as a recoverable error rather than panicking.
+                let Some((record, batch_meta)) = self.peek_current_record()? else {
+                    return Err(KafkaError::illegal_state(format!(
+                        "Incorrect declared batch size for partition {}, premature EOF reached \
+                         (declared record count exceeds the records present in the batch)",
+                        self.partition
+                    )));
+                };
                 let topic_str: &str = &self.topic_arc;
                 // The only owned copy of record payload on the happy path:
                 // the §27-sanctioned `RecordHeaders` (Milestone-8 holds
@@ -571,6 +584,17 @@ impl CompletedFetch {
                 None => true,
             };
             if needs_new_batch {
+                // Declared count < actual ("too little"): we consumed all
+                // `records_count` declared records but the batch's record
+                // section still has unconsumed bytes. Java's
+                // `DefaultRecordBatch.RecordIterator` validates this via
+                // `ensureNoneRemaining()` and throws `InvalidRecordException`
+                // ("...records still remaining"), independent of CRC. Mirror
+                // that here rather than silently dropping the trailing
+                // records. The check is O(1) — it compares the already-walked
+                // byte offset against the (already-known) record section
+                // length, with no re-walk or copy.
+                self.ensure_current_batch_fully_consumed()?;
                 if !self.load_next_batch(config)? {
                     // No more batches. Advance to the next-after-last-batch
                     // offset (mirrors Java's `nextFetchOffset = currentBatch.nextOffset()`).
@@ -593,7 +617,22 @@ impl CompletedFetch {
             // Scope the borrow so the early-skip mutations below can
             // touch the cursor freely.
             let (record_offset, record_bytes_consumed, is_control_batch) = {
-                let (record, batch_meta) = self.peek_current_record().expect("cursor verified non-empty above");
+                // Declared count > actual ("too many"): the batch header
+                // declares more records than the record section actually
+                // contains. `records_remaining > 0` (we did NOT take the
+                // `needs_new_batch` branch), yet `peek_current_record` yields
+                // `None` because the record bytes are exhausted. Java's
+                // `DefaultRecordBatch.RecordIterator` reads past EOF and throws
+                // `InvalidRecordException` ("...premature EOF reached"),
+                // independent of CRC. Surface a recoverable error rather than
+                // panicking via `.expect`.
+                let Some((record, batch_meta)) = self.peek_current_record()? else {
+                    return Err(KafkaError::illegal_state(format!(
+                        "Incorrect declared batch size for partition {}, premature EOF reached \
+                         (declared record count exceeds the records present in the batch)",
+                        self.partition
+                    )));
+                };
                 // Per-record CRC validation: v2 records carry no per-record
                 // CRC (the CRC covers the whole batch and is checked in
                 // `load_next_batch`), so `ensure_valid` is infallible here —
@@ -628,37 +667,99 @@ impl CompletedFetch {
         }
     }
 
+    /// Validates that the currently-loaded batch, whose declared record count
+    /// has just been exhausted (`records_remaining <= 0`), has no record bytes
+    /// left over.
+    ///
+    /// This is the analog of Java `DefaultRecordBatch.RecordIterator`'s
+    /// `ensureNoneRemaining()`, which throws `InvalidRecordException`
+    /// ("Incorrect declared batch size, records still remaining") when the
+    /// declared record count is *fewer* than the records actually present
+    /// (the "too little" direction). Without this check the cursor would
+    /// silently drop the trailing valid records and advance to the next
+    /// batch. Java performs this validation independently of CRC, so it must
+    /// fire even under `check.crcs=false`.
+    ///
+    /// O(1): compares the already-walked `record_byte_offset` against the
+    /// (already-known) length of the batch's record section — no re-walk and
+    /// no copy. Returns `Ok(())` when there is no batch loaded yet (nothing to
+    /// validate).
+    fn ensure_current_batch_fully_consumed(&self) -> Result<(), KafkaError> {
+        let Some(cursor) = self.cursor.as_ref() else {
+            return Ok(());
+        };
+        // Only meaningful once a batch has been loaded and its declared count
+        // consumed. `current_batch == None` means we have not loaded a batch
+        // yet (first iteration).
+        if cursor.current_batch.is_none() || cursor.records_remaining > 0 {
+            return Ok(());
+        }
+        let records_len = match &cursor.record_source {
+            RecordSource::None => return Ok(()),
+            RecordSource::Borrowed(range) => range.len(),
+            RecordSource::Owned(buf) => buf.len(),
+        };
+        if cursor.record_byte_offset < records_len {
+            return Err(KafkaError::illegal_state(format!(
+                "Incorrect declared batch size for partition {}, records still remaining in batch \
+                 (declared record count is fewer than the records present)",
+                self.partition
+            )));
+        }
+        Ok(())
+    }
+
     /// Parses the current record (the one at `cursor.record_byte_offset`)
     /// into a borrowing [`DefaultRecordRef`] and returns it together with its
-    /// enclosing batch metadata, both borrowing from `self`. Returns `None`
-    /// if no current record.
+    /// enclosing batch metadata, both borrowing from `self`.
+    ///
+    /// Returns:
+    ///   - `Ok(None)` when no record is positioned at the cursor — either the
+    ///     declared record count is exhausted (`records_remaining <= 0`) or the
+    ///     batch's record bytes are exhausted (`record_byte_offset` past end).
+    ///   - `Ok(Some(..))` when a record is parsed.
+    ///   - `Err(..)` when the record body is individually malformed (e.g. a bad
+    ///     varint). This is a recoverable [`KafkaError`] — the receive path no
+    ///     longer walks/validates the batch's records on load (the O(N²) walk was
+    ///     removed in the §27/O(1) batch-loading change), so a malformed record
+    ///     body is genuine bad input that must surface to the caller, not be
+    ///     swallowed. Mirrors Java `DefaultRecordBatch.RecordIterator` reading
+    ///     past EOF / failing to decode a record.
     ///
     /// §27 zero-copy note: the returned `DefaultRecordRef` borrows the
     /// record's key/value/header bytes directly from the cursor's record
     /// source — no copy. The per-record parse is varint decoding only; the
     /// payload bytes are never touched.
-    fn peek_current_record(&self) -> Option<(DefaultRecordRef<'_>, &BatchMetadata)> {
-        let cursor = self.cursor.as_ref()?;
+    fn peek_current_record(&self) -> Result<Option<(DefaultRecordRef<'_>, &BatchMetadata)>, KafkaError> {
+        let Some(cursor) = self.cursor.as_ref() else {
+            return Ok(None);
+        };
         if cursor.records_remaining <= 0 {
-            return None;
+            return Ok(None);
         }
-        let batch_meta = cursor.current_batch.as_ref()?;
+        let Some(batch_meta) = cursor.current_batch.as_ref() else {
+            return Ok(None);
+        };
         let records_bytes = match &cursor.record_source {
-            RecordSource::None => return None,
+            RecordSource::None => return Ok(None),
             RecordSource::Borrowed(range) => &cursor.memory_records.buffer()[range.clone()],
             RecordSource::Owned(buf) => buf.as_slice(),
         };
         if cursor.record_byte_offset >= records_bytes.len() {
-            return None;
+            return Ok(None);
         }
         let log_append_time = if batch_meta.timestamp_type == TimestampType::LogAppendTime {
             Some(batch_meta.last_offset_timestamp)
         } else {
             None
         };
-        // The bytes were validated when the batch was loaded
-        // (`load_next_batch` walks the batch's records once to find ranges);
-        // a parse failure here would indicate a logic bug, not bad input.
+        // A parse failure here is bad input (the record body is malformed),
+        // not a logic bug: the receive path no longer re-walks the batch's
+        // records on load, so this is the first time the record body is
+        // decoded. Surface it as a recoverable error rather than panicking
+        // or silently dropping the rest of the batch — matching Java
+        // `DefaultRecordBatch.RecordIterator`, which throws
+        // `InvalidRecordException` (CRC-independent).
         let (record, _consumed) = DefaultRecord::read_ref_from_buffer(
             &records_bytes[cursor.record_byte_offset..],
             batch_meta.base_offset,
@@ -666,8 +767,13 @@ impl CompletedFetch {
             batch_meta.base_sequence,
             log_append_time,
         )
-        .ok()?;
-        Some((record, batch_meta))
+        .map_err(|e| {
+            KafkaError::illegal_state(format!(
+                "Record batch for partition {} at offset {} is invalid, cause: {}",
+                self.partition, batch_meta.base_offset, e
+            ))
+        })?;
+        Ok(Some((record, batch_meta)))
     }
 
     /// Loads the next batch into the cursor. Skips aborted-transaction
@@ -1206,6 +1312,264 @@ mod tests {
             assert_eq!(base_offset + total as i64, cf.next_fetch_offset());
             assert!(cf.is_consumed());
         }
+    }
+
+    /// Builds a single uncompressed v2 batch at `base_offset` holding `count`
+    /// `value-{offset}` records, then overwrites its declared record count with
+    /// `declared_count`. The CRC is NOT recomputed, so this fixture must be
+    /// driven with `check.crcs=false` — exactly the configuration under which
+    /// Java's `DefaultRecordBatch.RecordIterator` count validation (which is
+    /// CRC-independent) still has to fire.
+    fn batch_with_overridden_record_count(base_offset: i64, count: i32, declared_count: i32) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_with_magic(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+        );
+        for i in 0..count {
+            let offset = base_offset + i as i64;
+            let value = format!("value-{offset}");
+            builder.append_with_offset_bytes(offset, 0, None, Some(value.as_bytes()));
+        }
+        let records = builder.build();
+        let mut buf = records.buffer().to_vec();
+        buf[RecordBatch::RECORDS_COUNT_OFFSET..RecordBatch::RECORDS_COUNT_OFFSET + 4]
+            .copy_from_slice(&declared_count.to_be_bytes());
+        buf
+    }
+
+    /// Builds a single v2 batch with the given control / transactional flags
+    /// and producer id, holding `count` `value-{offset}` records. The CRC is
+    /// recomputed after the producer state is written by the builder, so the
+    /// batch is valid under `check.crcs=true`.
+    #[allow(clippy::too_many_arguments)]
+    fn batch_full(
+        base_offset: i64,
+        count: i32,
+        producer_id: i64,
+        is_transactional: bool,
+        is_control_batch: bool,
+    ) -> Vec<u8> {
+        let mut builder = MemoryRecords::builder_full(
+            512,
+            RecordBatch::MAGIC_VALUE_V2,
+            Compression::none(),
+            TimestampType::CreateTime,
+            base_offset,
+            -1, // log_append_time
+            producer_id,
+            0, // producer_epoch
+            0, // base_sequence
+            is_transactional,
+            is_control_batch,
+            -1, // partition_leader_epoch
+            512,
+        );
+        for i in 0..count {
+            let offset = base_offset + i as i64;
+            let value = format!("value-{offset}");
+            builder.append_with_offset_bytes(offset, 0, None, Some(value.as_bytes()));
+        }
+        builder.build().buffer().to_vec()
+    }
+
+    /// Builds a [`PartitionData`] declaring an aborted transaction for
+    /// `producer_id` starting at `first_offset`, carrying `records_bytes`.
+    fn partition_data_with_aborted_txn(records_bytes: Vec<u8>, producer_id: i64, first_offset: i64) -> PartitionData {
+        let mut txn = AbortedTransaction::new();
+        txn.set_producer_id(producer_id);
+        txn.set_first_offset(first_offset);
+        let mut partition_data = PartitionData::new();
+        partition_data.set_records(Some(records_bytes));
+        partition_data.set_aborted_transactions(Some(vec![txn]));
+        partition_data
+    }
+
+    /// Issue-1 regression: a batch whose header declares MORE records than are
+    /// actually present ("too many") must surface a recoverable [`KafkaError`]
+    /// through the receive-path cursor — NOT panic via `.expect`. The old
+    /// `iter_records()` path validated this; the new incremental cursor must
+    /// too. Mirrors Java `DefaultRecordBatch.RecordIterator` reading past EOF
+    /// (`InvalidRecordException`, "...premature EOF reached"), which is
+    /// CRC-independent, so we drive it under `check.crcs=false`.
+    #[test]
+    fn test_invalid_record_count_too_many_through_fetch_records() {
+        // 3 real records, header declares 5.
+        let bytes = batch_with_overridden_record_count(0, 3, 5);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let key_de = StringDeserializer;
+        let value_de = StringDeserializer;
+
+        let result = cf.fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10);
+        let err = result.expect_err("declared count > actual must error, not panic or truncate");
+        assert!(
+            err.message().contains("premature EOF") && err.message().contains("test-0"),
+            "unexpected error message: {}",
+            err.message()
+        );
+        // Recoverable, not fatal: propagates out of poll() rather than aborting.
+        assert!(!err.is_fatal(), "invalid-record-count error must be recoverable");
+    }
+
+    /// Issue-1 regression: a batch whose header declares FEWER records than are
+    /// actually present ("too little") must surface a recoverable
+    /// [`KafkaError`] — NOT silently drop the trailing valid records. Mirrors
+    /// Java `ensureNoneRemaining()` ("...records still remaining"), which is
+    /// CRC-independent, so we drive it under `check.crcs=false`.
+    #[test]
+    fn test_invalid_record_count_too_little_through_fetch_records() {
+        // 3 real records, header declares 2 — the 3rd would be silently lost
+        // under the buggy cursor.
+        let bytes = batch_with_overridden_record_count(0, 3, 2);
+        let mut cf = new_completed_fetch(0, bytes);
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, false);
+        let key_de = StringDeserializer;
+        let value_de = StringDeserializer;
+
+        // Pull the first (valid) records, then the next call must error rather
+        // than reporting exhaustion (which would be a silent drop).
+        let mut saw_error = false;
+        let mut total = 0;
+        for _ in 0..5 {
+            match cf.fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 1) {
+                Ok(batch) => {
+                    if batch.is_empty() {
+                        break;
+                    }
+                    total += batch.len();
+                },
+                Err(e) => {
+                    assert!(
+                        e.message().contains("records still remaining") && e.message().contains("test-0"),
+                        "unexpected error message: {}",
+                        e.message()
+                    );
+                    assert!(!e.is_fatal(), "invalid-record-count error must be recoverable");
+                    saw_error = true;
+                    break;
+                },
+            }
+        }
+        assert!(saw_error, "declared count < actual must error, not silently drop records");
+        assert_eq!(2, total, "only the declared-count records are returned before the error");
+    }
+
+    /// Builds a v2 batch whose attributes carry the control-batch flag, holding
+    /// `count` records (the producer builder forbids appending genuine control
+    /// records, so we build an ordinary data batch and flip the control-flag
+    /// bit in the attributes, recomputing the CRC so the batch stays valid under
+    /// `check.crcs=true`). The cursor's `is_control_batch` branch keys off this
+    /// flag, which is what the test exercises.
+    fn control_batch(base_offset: i64, count: i32, producer_id: i64) -> Vec<u8> {
+        const CONTROL_FLAG_MASK: u8 = 0x20;
+        let mut buf = batch_full(base_offset, count, producer_id, true, false);
+        // Attributes is an i16 at ATTRIBUTES_OFFSET; the control flag lives in
+        // the low byte (big-endian, so the last of the two bytes).
+        let attr_lo = RecordBatch::ATTRIBUTES_OFFSET + 1;
+        buf[attr_lo] |= CONTROL_FLAG_MASK;
+        // Recompute the CRC over [ATTRIBUTES_OFFSET..] (single-batch buffer).
+        let crc = crc32c::crc32c(&buf[RecordBatch::ATTRIBUTES_OFFSET..]);
+        buf[RecordBatch::CRC_OFFSET..RecordBatch::CRC_OFFSET + 4].copy_from_slice(&crc.to_be_bytes());
+        buf
+    }
+
+    /// Issue-2: a control batch interleaved between two data batches in a
+    /// single multi-batch fetch payload must be skipped (its records are not
+    /// returned to the user) while the surrounding data records are returned in
+    /// offset order. Exercises the `is_control_batch` branch of
+    /// `advance_to_next_fetched_record` through the incremental cursor.
+    #[test]
+    fn test_control_batch_skipped_mid_payload() {
+        let mut buf = Vec::new();
+        // Data batch: offsets 0..=1.
+        buf.extend_from_slice(&batch_full(0, 2, RecordBatch::NO_PRODUCER_ID, false, false));
+        // Control batch in the middle: offset 2 (1 control record). Needs a
+        // producer id (control batches are transactional control markers).
+        buf.extend_from_slice(&control_batch(2, 1, 1000));
+        // Data batch: offsets 3..=4.
+        buf.extend_from_slice(&batch_full(3, 2, RecordBatch::NO_PRODUCER_ID, false, false));
+
+        let mut cf = new_completed_fetch(0, buf);
+        // READ_UNCOMMITTED: control batches are still skipped at the record
+        // level (Java does not return control records to the user).
+        let fetch_config = make_fetch_config(IsolationLevel::ReadUncommitted, true);
+        let key_de = StringDeserializer;
+        let value_de = StringDeserializer;
+
+        let mut collected: Vec<ConsumerRecord<String, String>> = Vec::new();
+        loop {
+            let batch = cf
+                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            collected.extend(batch);
+        }
+
+        // Offsets 0,1,3,4 returned; control offset 2 skipped.
+        let offsets: Vec<i64> = collected.iter().map(|r| r.offset()).collect();
+        assert_eq!(
+            vec![0, 1, 3, 4],
+            offsets,
+            "control batch must be skipped, surrounding data in order"
+        );
+        assert_eq!(Some(&"value-0".to_string()), collected[0].value());
+        assert_eq!(Some(&"value-4".to_string()), collected[3].value());
+    }
+
+    /// Issue-2: an aborted-transaction batch interleaved between two committed
+    /// data batches in a single fetch payload must be skipped under
+    /// READ_COMMITTED (matching Java's `isBatchAborted`), while surrounding
+    /// committed records are returned in order. Exercises the
+    /// aborted-transaction `next_batch_start`-advance path of
+    /// `load_next_batch` through the incremental cursor.
+    #[test]
+    fn test_aborted_transaction_batch_skipped_mid_payload() {
+        let aborted_pid = 42;
+        let mut buf = Vec::new();
+        // Committed (non-transactional) data batch: offsets 0..=1.
+        buf.extend_from_slice(&batch_full(0, 2, RecordBatch::NO_PRODUCER_ID, false, false));
+        // Aborted transactional data batch from `aborted_pid`: offsets 2..=3.
+        buf.extend_from_slice(&batch_full(2, 2, aborted_pid, true, false));
+        // Committed (non-transactional) data batch: offsets 4..=5.
+        buf.extend_from_slice(&batch_full(4, 2, RecordBatch::NO_PRODUCER_ID, false, false));
+
+        let partition_data = partition_data_with_aborted_txn(buf, aborted_pid, 2);
+        let mut cf = CompletedFetch::new_full(
+            make_subscriptions(),
+            Arc::new(BufferSupplier::create()),
+            tp("test", 0),
+            partition_data,
+            0,
+        );
+        let fetch_config = make_fetch_config(IsolationLevel::ReadCommitted, true);
+        let key_de = StringDeserializer;
+        let value_de = StringDeserializer;
+
+        let mut collected: Vec<ConsumerRecord<String, String>> = Vec::new();
+        loop {
+            let batch = cf
+                .fetch_records::<String, String>(&fetch_config, &key_de, &value_de, 10)
+                .unwrap();
+            if batch.is_empty() {
+                break;
+            }
+            collected.extend(batch);
+        }
+
+        // Offsets 0,1,4,5 returned; aborted offsets 2,3 skipped.
+        let offsets: Vec<i64> = collected.iter().map(|r| r.offset()).collect();
+        assert_eq!(
+            vec![0, 1, 4, 5],
+            offsets,
+            "aborted batch must be skipped, committed data in order"
+        );
+        assert_eq!(Some(&"value-0".to_string()), collected[0].value());
+        assert_eq!(Some(&"value-5".to_string()), collected[3].value());
     }
 
     /// Translated from `CompletedFetchTest.testNegativeFetchCount`.
