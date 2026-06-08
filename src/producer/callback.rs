@@ -12,21 +12,17 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! Producer types (org.apache.kafka.clients.producer)
+//! Producer callback type.
+//!
+//! Translated from `org.apache.kafka.clients.producer.Callback`.
 
-pub mod callback;
-pub(crate) mod internals;
-pub mod kafka_producer;
-pub mod mock_producer;
-pub mod producer_config;
-pub mod producer_record;
-pub mod producer_trait;
-pub mod record_metadata;
+use crate::common::KafkaError;
+use crate::producer::RecordMetadata;
 
-pub use callback::Callback;
-pub use kafka_producer::KafkaProducer;
-pub use mock_producer::MockProducer;
-pub use producer_config::ProducerConfig;
-pub use producer_record::ProducerRecord;
-pub use producer_trait::Producer;
-pub use record_metadata::RecordMetadata;
+/// Type alias for the producer send callback.
+///
+/// In Java, `Callback` is an interface with a single
+/// `onCompletion(RecordMetadata, Exception)` method. We use `FnOnce` because
+/// each callback is invoked exactly once when the batch completes, fails, or
+/// is aborted.
+pub type Callback = Box<dyn FnOnce(Option<&RecordMetadata>, Option<&KafkaError>) + Send + Sync>;

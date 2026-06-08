@@ -43,11 +43,12 @@ use crate::common::record::abstract_records;
 use crate::common::utils::ExponentialBackoff;
 use crate::common::utils::LogContext;
 use crate::metadata_snapshot::MetadataSnapshot;
+use crate::producer::Callback;
 use crate::producer::internals::BufferPool;
 use crate::producer::internals::BuiltInPartitioner;
 use crate::producer::internals::FutureRecordMetadata;
 use crate::producer::internals::IncompleteBatches;
-use crate::producer::internals::{Callback, ProducerBatch};
+use crate::producer::internals::ProducerBatch;
 use crate::producer::record_metadata;
 
 /// Partitioner configuration for the built-in partitioner.

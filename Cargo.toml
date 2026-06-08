@@ -1,5 +1,5 @@
 [workspace]
-members = [".", "generator", "xtask"]
+members = [".", "generator", "xtask", "multilanguage-test-server"]
 
 [package]
 name = "confluent-kafka-rust"
@@ -8,6 +8,10 @@ edition = "2024"
 
 [features]
 integration-tests = []
+# Run the producer integration tests against multiple language backends
+# (native Rust, Python via gRPC, C via gRPC). See
+# design/history/MILESTONE-6/DESIGN-multilanguage-tests.md for details.
+multilanguage-tests = ["integration-tests"]
 ffi = ["dep:cbindgen", "dep:env_logger"]
 
 [lib]
@@ -42,6 +46,14 @@ testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
 env_logger = "0.11"
+# Used only when --features multilanguage-tests is enabled. tonic + prost
+# do NOT leak into the production cdylib because dev-dependencies are
+# excluded from non-test builds.
+tonic = "0.12"
+prost = "0.13"
+tokio-stream = "0.1"
+paste = "1"
+multilanguage-test-server = { path = "multilanguage-test-server" }
 
 [[test]]
 name = "common"
