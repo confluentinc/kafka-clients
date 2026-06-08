@@ -222,4 +222,42 @@ pub trait TransportLayer: Send {
         &'a mut self,
         srcs: &'a [io::IoSlice<'a>],
     ) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>>;
+
+    /// Attempts a non-blocking vectored write without creating a Future.
+    ///
+    /// Returns `WouldBlock` if the transport cannot write immediately.
+    /// Transports that support synchronous writes (e.g., plaintext) override
+    /// this to avoid the heap allocation of [`write_vectored`](Self::write_vectored).
+    fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+        let _ = srcs;
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+
+    /// Attempts a non-blocking read without creating a Future.
+    ///
+    /// Mirrors [`try_write_vectored`](Self::try_write_vectored) for the read path.
+    /// Returns `WouldBlock` if the transport cannot read immediately. Transports
+    /// that support synchronous reads (e.g., plaintext) override this to avoid
+    /// the per-call cost of `tokio::time::timeout(Duration::ZERO, …)` over the
+    /// async [`read`](Self::read).
+    ///
+    /// # Returns
+    ///
+    /// The number of bytes read, possibly zero. `Ok(0)` indicates EOF (remote
+    /// closed the connection), consistent with Tokio's `TcpStream::try_read`
+    /// and `AsyncRead`.
+    fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+        let _ = dst;
+        Err(io::Error::from(io::ErrorKind::WouldBlock))
+    }
+
+    /// Whether this transport implements `try_read` synchronously.
+    ///
+    /// Default `false` so transports that inherit the trait default (which
+    /// returns `WouldBlock`) are not treated as "not ready" by callers like
+    /// `Selector::attempt_read`. Plaintext overrides to `true`; SSL keeps the
+    /// default and goes through the async `read` path.
+    fn supports_try_read(&self) -> bool {
+        false
+    }
 }
