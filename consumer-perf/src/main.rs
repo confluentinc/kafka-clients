@@ -344,7 +344,11 @@ fn spawn_producer(args: &Args) -> std::io::Result<Child> {
         .num_records
         .unwrap_or_else(|| args.throughput * (args.duration_s + 30) + args.warmup_messages);
     // `-1` = unbounded peak (kafka-producer-perf-test convention).
-    let throughput_arg = if args.peak { "-1".to_string() } else { args.throughput.to_string() };
+    let throughput_arg = if args.peak {
+        "-1".to_string()
+    } else {
+        args.throughput.to_string()
+    };
     println!(
         ">>> Launching producer: throughput={} ({}), {} bytes, ~{} records",
         throughput_arg,

@@ -30,9 +30,9 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use log::{debug, error, info, trace, warn};
 use rand::Rng;
-use tokio::sync::Notify;
 use rand::SeedableRng;
 use rand::rngs::StdRng;
+use tokio::sync::Notify;
 
 use crate::common::network::NetworkSend;
 use crate::common::network::Receive;

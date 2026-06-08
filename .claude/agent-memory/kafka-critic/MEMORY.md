@@ -42,3 +42,8 @@
 - [M8 Phase 12 round-3](review_m8_phase12_round3.md) — UnsentRequest response oneshot dropped when RM lacks `take_response_receiver`+spawn pattern; rustdoc claims ≠ code reality
 - [M8 Phase 12.5 patterns](review_m8_phase12_5.md) — Pre-branch whenComplete side effects (e.g. getAndClearFatalError) easy to miss in async forwarder translation; yield_now-based regression tests fragility
 - [M8 Phase 12.5 round-3](review_m8_phase12_5_round3.md) — Java switch `default:` arm fatal fallback omitted in Option::unwrap_or; Fenced arm spurious ErrorEvent diverges from Java
+- [M8 Phase 13a patterns](review_m8_phase13a.md) — single-root-cause fix audit; ctor-time setter wiring (Mutex<Option<Arc<...>>>); coordinator-unknown wire-up missing unit tests despite Java parameterized parity
+- [M8 Phase 14 patterns](review_m8_phase14.md) — dropped second-statement wakeup (Selector.wakeup→Notify); cancel-safety on tokio version; biased Notify non-starvation; poll_block test-teeth pattern
+- [Join-stall fix review](review_join_stall_fix.md) — cancel-safe poll fix; symmetric producer bug, rule contradiction, stale Notify permit, preserve-state test gap
+- [Latency pollForFetches review](review_m8_latency_pollforfetches.md) — dropped retryBackoffMs clamp (OffsetsRM lacks max_time_to_wait override); §31 drain bound is Java-parity; await_wakeup race-safe
+- [M8 Phase 16 zero-copy](review_m8_phase16_zerocopy.md) — header-count-as-loop-bound panics/silently-drops vs iter_records validation; stale-justification comment trap; move-not-clone take audit; batch-level tests go stale when caller drops API

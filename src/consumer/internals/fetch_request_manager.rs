@@ -31,7 +31,7 @@
 use std::sync::{Arc, Mutex};
 
 use log::trace;
-use tokio::sync::{mpsc, oneshot, Notify};
+use tokio::sync::{Notify, mpsc, oneshot};
 
 use crate::common::memory::buffer_supplier::BufferSupplier;
 use crate::common::protocol::Errors;

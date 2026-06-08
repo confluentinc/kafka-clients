@@ -33,7 +33,7 @@ use confluent_kafka::common::serialization::Deserializer;
 use confluent_kafka::consumer::{ConsumerConfig, new_consumer};
 
 const BOOTSTRAP_SERVERS: &str = "localhost:9092";
-const TOPIC: &str = "test-topic";
+const TOPIC: &str = "test-topic-consumer";
 const GROUP_ID: &str = "consumer-test-group";
 const POLL_TIMEOUT: Duration = Duration::from_millis(1000);
 
