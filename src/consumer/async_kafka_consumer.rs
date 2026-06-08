@@ -2377,7 +2377,7 @@ where
         // that often. The heartbeat manager's `maximum_time_to_wait` shrinks
         // during membership work, exactly as in Java.
         let remaining = self.remaining_ms(poll_deadline_ms);
-        let poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
+        let mut poll_timeout_ms = self.maximum_time_to_wait_ms().min(remaining);
 
         // Java's first `collectFetch()` — return immediately if data is ready.
         let fetch = self.fetch_collector.collect_fetch(&self.fetch_buffer)?;
@@ -2387,6 +2387,28 @@ where
         if poll_timeout_ms <= 0 {
             // No time left to wait; the caller's loop re-checks the deadline.
             return Ok(fetch);
+        }
+
+        // Java (`AsyncKafkaConsumer.java:1888-1904`): clamp the wait to
+        // `retry.backoff.ms` when there are no assigned partitions, or any
+        // assigned partition lacks a valid position. In those states the
+        // background task is looking up positions (offset reset / committed
+        // fetch) and may be backing off after a failure, so blocking for the
+        // full timeout would stall poll() unnecessarily. This matters in this
+        // port specifically because `OffsetsRequestManager` does not shrink
+        // `maximum_time_to_wait`, so without this clamp the `await_wakeup`
+        // below could park up to `MAX_POLL_TIMEOUT_MS` during the
+        // join / post-rebalance window before positions are valid. No
+        // `.await` is held across the `SubscriptionState` guard (§16).
+        if poll_timeout_ms > self.retry_backoff_ms {
+            let needs_backoff = {
+                let subs = self.subscriptions.lock().unwrap();
+                let assigned = subs.assigned_partitions();
+                assigned.is_empty() || assigned.iter().any(|tp| !subs.has_valid_position(tp))
+            };
+            if needs_backoff {
+                poll_timeout_ms = self.retry_backoff_ms;
+            }
         }
 
         // Ensure a fetch is in flight before we block. `await_wakeup` only
