@@ -26,6 +26,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::net::SocketAddr;
+use std::sync::Arc;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -386,9 +387,16 @@ impl Metadata {
     }
 
     /// Gets the current cluster info without blocking.
-    pub fn fetch(&self) -> Cluster {
+    ///
+    /// Returns a cheap, reference-counted handle to the current point-in-time
+    /// cluster snapshot. This is an O(1) refcount bump rather than a deep clone
+    /// of the entire `Cluster`. `Arc<Cluster>` derefs to `Cluster`, so read-only
+    /// callers are unaffected. A subsequent metadata update swaps in a new
+    /// snapshot under the lock, so previously returned `Arc`s remain valid
+    /// point-in-time views.
+    pub fn fetch(&self) -> Arc<Cluster> {
         let inner = self.inner.lock().unwrap();
-        inner.metadata_snapshot.cluster().clone()
+        inner.metadata_snapshot.cluster_arc()
     }
 
     /// Gets the current metadata snapshot.
@@ -701,7 +709,7 @@ impl Metadata {
         inner.metadata_snapshot =
             Self::handle_metadata_response(&mut inner, response, is_partial_update, now_ms, &retain, &retain_with_id);
 
-        let cluster = inner.metadata_snapshot.cluster().clone();
+        let cluster = inner.metadata_snapshot.cluster_arc();
         Self::maybe_set_metadata_error(&mut inner, &cluster);
 
         // Remove epochs for topics we no longer retain
@@ -3000,7 +3008,7 @@ mod tests {
         let snapshot = metadata.fetch_metadata_snapshot();
         let cluster = metadata.fetch();
         // Validate metadata snapshot & cluster are setup as expected.
-        assert_eq!(&cluster, snapshot.cluster());
+        assert_eq!(cluster.as_ref(), snapshot.cluster());
         assert_eq!(old_node_count as usize, snapshot.cluster().nodes().len());
         assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic1));
         assert_eq!(Some(old_partition_count), snapshot.cluster().partition_count_for_topic(topic2));
@@ -3012,7 +3020,7 @@ mod tests {
         let barrier = Arc::new(std::sync::Barrier::new(num_threads));
         let at_least_updated = Arc::new(std::sync::atomic::AtomicBool::new(false));
         let new_snapshot: Arc<Mutex<Option<MetadataSnapshot>>> = Arc::new(Mutex::new(None));
-        let new_cluster: Arc<Mutex<Option<Cluster>>> = Arc::new(Mutex::new(None));
+        let new_cluster: Arc<Mutex<Option<Arc<Cluster>>>> = Arc::new(Mutex::new(None));
 
         let mut handles = Vec::new();
         for i in 0..num_threads {
@@ -3098,5 +3106,76 @@ mod tests {
                 new_partition_count_topic2
             );
         }
+    }
+
+    /// Phase 18: `fetch()` returns a cheap `Arc<Cluster>` handle, not a deep clone.
+    ///
+    /// Two `fetch()` calls without an intervening metadata update must return
+    /// `Arc`s that point to the same allocation, proving no deep clone occurred.
+    #[test]
+    fn test_fetch_returns_shared_arc_without_update() {
+        let metadata = new_metadata();
+        let mut partition_counts = HashMap::new();
+        partition_counts.insert("topic-1".to_string(), 5);
+        let response = request_test_utils::metadata_update_with_cluster_id(
+            "dummy",
+            1,
+            &HashMap::new(),
+            &partition_counts,
+            &|_tp| Some(100),
+        );
+        metadata.update_with_current_request_version(&response, false, 10);
+
+        let cluster1 = metadata.fetch();
+        let cluster2 = metadata.fetch();
+
+        // No intervening update: both handles share the same allocation.
+        assert!(
+            Arc::ptr_eq(&cluster1, &cluster2),
+            "fetch() must not deep-clone the cluster between calls without an update"
+        );
+    }
+
+    /// Phase 18: after a metadata update, `fetch()` returns a *different* `Arc`
+    /// reflecting the new cluster (point-in-time snapshot semantics preserved).
+    #[test]
+    fn test_fetch_returns_new_arc_after_update() {
+        let metadata = new_metadata();
+
+        let mut partition_counts = HashMap::new();
+        partition_counts.insert("topic-1".to_string(), 5);
+        let response1 = request_test_utils::metadata_update_with_cluster_id(
+            "dummy",
+            1,
+            &HashMap::new(),
+            &partition_counts,
+            &|_tp| Some(100),
+        );
+        metadata.update_with_current_request_version(&response1, false, 10);
+        let cluster_before = metadata.fetch();
+        assert_eq!(Some(5), cluster_before.partition_count_for_topic("topic-1"));
+
+        // A metadata update swaps the snapshot under the lock.
+        let mut new_partition_counts = HashMap::new();
+        new_partition_counts.insert("topic-1".to_string(), 8);
+        let response2 = request_test_utils::metadata_update_with_cluster_id(
+            "dummy",
+            2,
+            &HashMap::new(),
+            &new_partition_counts,
+            &|_tp| Some(101),
+        );
+        metadata.update_with_current_request_version(&response2, false, 20);
+        let cluster_after = metadata.fetch();
+
+        // The update produced a fresh snapshot: a different allocation.
+        assert!(
+            !Arc::ptr_eq(&cluster_before, &cluster_after),
+            "fetch() must return a new Arc after a metadata update"
+        );
+        // New handle reflects the updated cluster.
+        assert_eq!(Some(8), cluster_after.partition_count_for_topic("topic-1"));
+        // Previously returned handle still observes the old point-in-time snapshot.
+        assert_eq!(Some(5), cluster_before.partition_count_for_topic("topic-1"));
     }
 }
