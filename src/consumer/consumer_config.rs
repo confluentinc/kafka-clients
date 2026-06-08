@@ -34,6 +34,10 @@ use std::collections::HashMap;
 use log::warn;
 
 use crate::common::KafkaError;
+use crate::common::config::sasl_configs;
+use crate::common::config::ssl_configs;
+use crate::common::config::{SaslConfig, SslConfig};
+use crate::common::security::SecurityProtocol;
 use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
 
 /// Configuration for the Kafka Consumer.
@@ -177,8 +181,15 @@ pub struct ConsumerConfig {
     // --- Security ---
     /// `security.providers`
     pub(crate) security_providers: Option<String>,
-    /// `security.protocol`
-    pub(crate) security_protocol: String,
+    /// `security.protocol` - Protocol used to communicate with brokers.
+    /// Default: `SecurityProtocol::Plaintext`.
+    pub(crate) security_protocol: SecurityProtocol,
+
+    /// SASL configuration (mechanism, JAAS config, credentials).
+    pub(crate) sasl_config: SaslConfig,
+
+    /// SSL/TLS configuration.
+    pub(crate) ssl_config: SslConfig,
 
     // --- Config providers ---
     /// `config.providers`
@@ -255,7 +266,9 @@ impl Default for ConsumerConfig {
             share_acquire_mode: "batch_optimized".to_string(),
 
             security_providers: None,
-            security_protocol: "PLAINTEXT".to_string(),
+            security_protocol: SecurityProtocol::Plaintext,
+            sasl_config: SaslConfig::default(),
+            ssl_config: SslConfig::default(),
 
             config_providers: Vec::new(),
         }
@@ -406,6 +419,10 @@ impl ConsumerConfig {
     pub const SECURITY_PROVIDERS_CONFIG: &'static str = "security.providers";
     /// Config key: `security.protocol`.
     pub const SECURITY_PROTOCOL_CONFIG: &'static str = "security.protocol";
+    /// Config key: `sasl.mechanism`.
+    pub const SASL_MECHANISM_CONFIG: &'static str = sasl_configs::SASL_MECHANISM;
+    /// Config key: `sasl.jaas.config`.
+    pub const SASL_JAAS_CONFIG: &'static str = sasl_configs::SASL_JAAS_CONFIG;
 
     /// Config key: `config.providers`.
     pub const CONFIG_PROVIDERS_CONFIG: &'static str = "config.providers";
@@ -476,9 +493,9 @@ impl ConsumerConfig {
     pub fn value_deserializer_class(&self) -> Option<&str> {
         self.value_deserializer_class.as_deref()
     }
-    /// `security.protocol`.
+    /// `security.protocol` - the protocol name (e.g. `"PLAINTEXT"`, `"SASL_SSL"`).
     pub fn security_protocol(&self) -> &str {
-        &self.security_protocol
+        self.security_protocol.name()
     }
     /// `metadata.recovery.strategy`.
     pub fn metadata_recovery_strategy(&self) -> &str {
@@ -804,15 +821,23 @@ impl ConsumerConfig {
                     config.security_providers = if value.is_empty() { None } else { Some(value.clone()) };
                 },
                 Self::SECURITY_PROTOCOL_CONFIG => {
-                    let uc = value.to_ascii_uppercase();
-                    if !matches!(uc.as_str(), "PLAINTEXT" | "SSL" | "SASL_PLAINTEXT" | "SASL_SSL") {
-                        return Err(KafkaError::illegal_argument(format!(
-                            "Invalid value for '{}': {}",
+                    config.security_protocol = SecurityProtocol::for_name(value).ok_or_else(|| {
+                        KafkaError::illegal_argument(format!(
+                            "Invalid value for '{}': {}. Valid values are: {:?}",
                             Self::SECURITY_PROTOCOL_CONFIG,
-                            value
-                        )));
-                    }
-                    config.security_protocol = value.clone();
+                            value,
+                            SecurityProtocol::names()
+                        ))
+                    })?;
+                },
+                Self::SASL_MECHANISM_CONFIG => {
+                    config.sasl_config.mechanism = value.clone();
+                },
+                Self::SASL_JAAS_CONFIG => {
+                    config.sasl_config.jaas_config = if value.is_empty() { None } else { Some(value.clone()) };
+                },
+                key if key.starts_with("ssl.") => {
+                    ssl_configs::apply_ssl_config_key(&mut config.ssl_config, key, value);
                 },
                 Self::CONFIG_PROVIDERS_CONFIG => {
                     config.config_providers = split_csv(value);
@@ -900,5 +925,144 @@ mod tests {
         props.insert("bootstrap.servers".to_string(), "localhost:9092".to_string());
         let c = ConsumerConfig::from_properties(&props).unwrap();
         assert_eq!(c.bootstrap_servers(), &["localhost:9092".to_string()]);
+    }
+
+    /// Each of the four `security.protocol` values parses to the right enum.
+    #[test]
+    fn test_security_protocol_all_values() {
+        for (input, expected) in [
+            ("PLAINTEXT", SecurityProtocol::Plaintext),
+            ("SSL", SecurityProtocol::Ssl),
+            ("SASL_PLAINTEXT", SecurityProtocol::SaslPlaintext),
+            ("SASL_SSL", SecurityProtocol::SaslSsl),
+        ] {
+            let mut props = HashMap::new();
+            props.insert("security.protocol".to_string(), input.to_string());
+            let c = ConsumerConfig::from_properties(&props).unwrap();
+            assert_eq!(c.security_protocol, expected, "for input {input}");
+            assert_eq!(c.security_protocol(), expected.name());
+        }
+    }
+
+    /// `security.protocol` parsing is case-insensitive (mirrors Java/`for_name`).
+    #[test]
+    fn test_security_protocol_case_insensitive() {
+        let mut props = HashMap::new();
+        props.insert("security.protocol".to_string(), "sasl_ssl".to_string());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.security_protocol, SecurityProtocol::SaslSsl);
+    }
+
+    /// Invalid `security.protocol` → `illegal_argument` with asserted message
+    /// content (DoD §3): the config key, the bad value, and the valid names.
+    #[test]
+    fn test_invalid_security_protocol() {
+        let mut props = HashMap::new();
+        props.insert("security.protocol".to_string(), "abc".to_string());
+        let err = ConsumerConfig::from_properties(&props).unwrap_err();
+        let msg = format!("{}", err);
+        assert!(msg.contains("security.protocol"), "should contain config key, got: {msg}");
+        assert!(msg.contains("abc"), "should contain the invalid value, got: {msg}");
+        assert!(msg.contains("SASL_SSL"), "should list the valid protocol names, got: {msg}");
+    }
+
+    /// `sasl.mechanism` and `sasl.jaas.config` land on `sasl_config`.
+    #[test]
+    fn test_sasl_config_from_properties() {
+        let mut props = HashMap::new();
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert(
+            "sasl.jaas.config".to_string(),
+            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"alice\" password=\"secret\";"
+                .to_string(),
+        );
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.sasl_config.mechanism, "PLAIN");
+        assert_eq!(c.sasl_config.resolve_username(), Some("alice"));
+        assert_eq!(c.sasl_config.resolve_password(), Some("secret"));
+    }
+
+    /// Empty `sasl.jaas.config` → `None`.
+    #[test]
+    fn test_sasl_jaas_config_empty_is_none() {
+        let mut props = HashMap::new();
+        props.insert("sasl.jaas.config".to_string(), String::new());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.sasl_config.jaas_config, None);
+    }
+
+    /// `ssl.*` keys land on `ssl_config` via the shared helper.
+    #[test]
+    fn test_ssl_config_from_properties() {
+        let mut props = HashMap::new();
+        props.insert("ssl.truststore.location".to_string(), "/path/to/truststore.pem".to_string());
+        props.insert("ssl.keystore.location".to_string(), "/path/to/keystore.pem".to_string());
+        props.insert("ssl.endpoint.identification.algorithm".to_string(), String::new());
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.ssl_config.truststore_location.as_deref(), Some("/path/to/truststore.pem"));
+        assert_eq!(c.ssl_config.keystore_location.as_deref(), Some("/path/to/keystore.pem"));
+        assert_eq!(c.ssl_config.endpoint_identification_algorithm, "");
+    }
+
+    /// Builder selection: a protocol with no certificate requirement
+    /// (`SASL_PLAINTEXT` + PLAIN) builds `Ok`; `SASL_SSL` with no truststore
+    /// content → error (mirrors `channel_builders` / `SslFactory` validation).
+    ///
+    /// The `SASL_SSL`-with-*valid*-truststore happy path requires a real
+    /// parseable CA certificate, which is exercised in the Docker integration
+    /// test `tests/integration/sasl_ssl_consumer_test.rs` (it has access to the
+    /// `rcgen`/cluster-generated CA); here we cover the protocol-selection wiring
+    /// and the missing-ssl error branch without filesystem/cert dependencies.
+    #[test]
+    fn test_builder_selection() {
+        use crate::common::network::channel_builders;
+        use crate::common::utils::LogContext;
+
+        // SASL_PLAINTEXT with PLAIN credentials → Ok (no cert needed).
+        let mut props = HashMap::new();
+        props.insert("security.protocol".to_string(), "SASL_PLAINTEXT".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert(
+            "sasl.jaas.config".to_string(),
+            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"admin\" password=\"admin-secret\";"
+                .to_string(),
+        );
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        assert_eq!(c.security_protocol, SecurityProtocol::SaslPlaintext);
+        let builder = channel_builders::client_channel_builder(
+            c.security_protocol,
+            Some(&c.ssl_config),
+            Some(&c.sasl_config),
+            None,
+            c.client_id(),
+            LogContext::new("[test] ".to_string()),
+        );
+        assert!(builder.is_ok(), "SASL_PLAINTEXT with valid config should build");
+
+        // SASL_SSL with no ssl_config supplied at all → error: the
+        // `channel_builders` SASL_SSL arm requires ssl_config to be present.
+        let mut props = HashMap::new();
+        props.insert("security.protocol".to_string(), "SASL_SSL".to_string());
+        props.insert("sasl.mechanism".to_string(), "PLAIN".to_string());
+        props.insert(
+            "sasl.jaas.config".to_string(),
+            "org.apache.kafka.common.security.plain.PlainLoginModule required username=\"admin\" password=\"admin-secret\";"
+                .to_string(),
+        );
+        let c = ConsumerConfig::from_properties(&props).unwrap();
+        let builder = channel_builders::client_channel_builder(
+            c.security_protocol,
+            None, // missing ssl_config content
+            Some(&c.sasl_config),
+            None,
+            c.client_id(),
+            LogContext::new("[test] ".to_string()),
+        );
+        let err = match builder {
+            Ok(_) => panic!("SASL_SSL with no ssl_config should fail to build"),
+            Err(e) => e,
+        };
+        let msg = format!("{}", err);
+        assert!(msg.contains("ssl_config"), "error should mention ssl_config, got: {msg}");
     }
 }

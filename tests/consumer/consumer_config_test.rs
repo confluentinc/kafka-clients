@@ -109,8 +109,11 @@ fn test_case_insensitive_security_protocol() {
     let mut props = base_props();
     props.insert(ConsumerConfig::SECURITY_PROTOCOL_CONFIG.to_string(), "sasl_ssl".to_string());
     let config = ConsumerConfig::from_properties(&props).unwrap();
-    // The original-case value is preserved (mirroring Java's `originals()`).
-    assert_eq!(config.security_protocol(), "sasl_ssl");
+    // A lowercase value is parsed case-insensitively into the canonical
+    // `SecurityProtocol`, mirroring Java's `SecurityProtocol.forName` and the
+    // producer's `testCaseInsensitiveSecurityProtocol`. The accessor returns
+    // the canonical uppercase name.
+    assert_eq!(config.security_protocol(), "SASL_SSL");
 }
 
 /// Translated from `ConsumerConfigTest.testDefaultConsumerGroupConfig`.

@@ -258,7 +258,11 @@ async fn send_records_with_producer(
             Some(value),
         )
         .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
-        last_future = Some(producer.send(record).await.expect("send should not fail"));
+        last_future = Some(
+            <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
+                .await
+                .expect("send should not fail"),
+        );
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
@@ -781,7 +785,9 @@ async fn check_large_record(consumer_overrides: &[(&str, &str)], producer_record
         Some(expected_value.clone()),
     )
     .expect("ProducerRecord::with_partition should succeed");
-    let fut = producer.send(record).await.expect("send should not fail");
+    let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
+        .await
+        .expect("send should not fail");
     // ensure the broker has acknowledged before consuming.
     fut.get_timeout(Duration::from_secs(30)).await.expect("send should succeed");
 
@@ -874,11 +880,15 @@ async fn check_fetch_honours_size_if_large_record_not_first(
 
     // Java uses `producer.send(record).get()` to enforce ordering
     // (first send completes before the second).
-    let f1 = producer.send(small_record).await.expect("small send should not fail");
+    let f1 = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, small_record)
+        .await
+        .expect("small send should not fail");
     f1.get_timeout(Duration::from_secs(30))
         .await
         .expect("small send should succeed");
-    let f2 = producer.send(large_record).await.expect("large send should not fail");
+    let f2 = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, large_record)
+        .await
+        .expect("large send should not fail");
     f2.get_timeout(Duration::from_secs(30))
         .await
         .expect("large send should succeed");

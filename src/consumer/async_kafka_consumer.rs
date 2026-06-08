@@ -615,8 +615,8 @@ where
         use crate::DefaultHostResolver;
         use crate::client_utils;
         use crate::common::internals::ClusterResourceListeners;
-        use crate::common::network::PlaintextChannelBuilder;
         use crate::common::network::Selector;
+        use crate::common::network::channel_builders;
         use crate::consumer::internals::auto_offset_reset_strategy::AutoOffsetResetStrategy;
         use crate::consumer::internals::commit_request_manager::CommitRequestManager;
         use crate::consumer::internals::consumer_heartbeat_request_manager::ConsumerHeartbeatRequestManager;
@@ -713,10 +713,8 @@ where
         // Java lines 434-445 — `networkClientDelegateSupplier =
         // NetworkClientDelegate.supplier(...)`. Mirrors the producer's
         // `from_config` Selector / NetworkClient wiring at
-        // `src/producer/kafka_producer.rs:268-289`. PLAINTEXT only.
-        let channel_builder = Box::new(PlaintextChannelBuilder::new(None));
-        let selector = Selector::with_defaults(config.connections_max_idle_ms, channel_builder);
-        let shared_metadata = metadata.metadata_arc();
+        // `src/producer/kafka_producer.rs:278-292`.
+        //
         // Mirrors Java's `AsyncKafkaConsumer` `LogContext` prefix
         // `[Consumer clientId=..., groupId=...] `.
         let log_context = match config.group_id() {
@@ -725,6 +723,26 @@ where
             },
             None => LogContext::new(format!("[Consumer clientId={}] ", config.client_id())),
         };
+        // Java line 433 — `ChannelBuilder channelBuilder =
+        // ClientUtils.createChannelBuilder(config, time, logContext)`. Selects
+        // the channel builder from `security.protocol` + `ssl.*` / `sasl.*`
+        // (PLAINTEXT / SSL / SASL_PLAINTEXT / SASL_SSL); SASL mechanism PLAIN
+        // only. Errors surface as a `KafkaError` from the ctor (no panic).
+        let channel_builder = channel_builders::client_channel_builder(
+            config.security_protocol,
+            Some(&config.ssl_config),
+            Some(&config.sasl_config),
+            None, // listener_name
+            config.client_id(),
+            log_context.clone(),
+        )
+        .map_err(|e| KafkaError::illegal_argument(format!("Failed to create channel builder: {}", e)))?;
+        let selector = Selector::with_defaults_and_log_context(
+            config.connections_max_idle_ms,
+            channel_builder,
+            log_context.clone(),
+        );
+        let shared_metadata = metadata.metadata_arc();
         let network_client = NetworkClient::with_metadata(
             selector,
             shared_metadata,

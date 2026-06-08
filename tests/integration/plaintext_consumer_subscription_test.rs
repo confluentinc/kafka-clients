@@ -241,7 +241,11 @@ async fn send_records_with_producer(
             Some(value),
         )
         .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
-        last_future = Some(producer.send(record).await.expect("send should not fail"));
+        last_future = Some(
+            <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
+                .await
+                .expect("send should not fail"),
+        );
     }
     producer.flush().await.expect("producer.flush should succeed");
     if let Some(f) = last_future {
@@ -278,7 +282,9 @@ async fn ensure_topic_with_2_partitions(producer: &KafkaProducer<Vec<u8>, Vec<u8
             Some(b"__provisioner__".to_vec()),
         )
         .expect("ProducerRecord::with_partition should succeed");
-        let fut = producer.send(record).await.expect("provisioner send should succeed");
+        let fut = <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(producer, record)
+            .await
+            .expect("provisioner send should succeed");
         fut.get_timeout(Duration::from_secs(30))
             .await
             .expect("provisioner send should ack");

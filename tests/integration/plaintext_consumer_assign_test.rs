@@ -216,7 +216,11 @@ async fn send_records_bytes(bootstrap: &str, tp: &TopicPartition, num_records: u
             Some(value),
         )
         .expect("ProducerRecord::with_timestamp should not fail for non-negative ts/partition");
-        last_future = Some(producer.send(record).await.expect("send should not fail"));
+        last_future = Some(
+            <KafkaProducer<Vec<u8>, Vec<u8>> as Producer<Vec<u8>, Vec<u8>>>::send(&producer, record)
+                .await
+                .expect("send should not fail"),
+        );
     }
     // Flush ensures every send is acked before we hand back; the last
     // future's wait would also suffice but `flush()` better matches the
