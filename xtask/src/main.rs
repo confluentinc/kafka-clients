@@ -28,6 +28,7 @@ fn main() -> anyhow::Result<()> {
         Some("coverage") => coverage()?,
         Some("coverage-lcov") => coverage_lcov()?,
         Some("coverage-all") => coverage_all()?,
+        Some("test-multilanguage") => test_multilanguage()?,
         _ => print_help(),
     }
 
@@ -51,11 +52,11 @@ fn format_check() -> anyhow::Result<()> {
     println!("🔍 Checking Rust code formatting...");
 
     // Check main crate
-    let main_result = Command::new("cargo").args(&["fmt", "--", "--check"]).status()?;
+    let main_result = Command::new("cargo").args(["fmt", "--", "--check"]).status()?;
 
     // Check generator crate
     let gen_result = Command::new("cargo")
-        .args(&["fmt", "--manifest-path", "generator/Cargo.toml", "--", "--check"])
+        .args(["fmt", "--manifest-path", "generator/Cargo.toml", "--", "--check"])
         .status()?;
 
     if !main_result.success() || !gen_result.success() {
@@ -121,7 +122,7 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
         for file_entry in fs::read_dir(generated_dir)? {
             let file_entry = file_entry?;
             let file_path = file_entry.path();
-            if file_path.extension().map_or(false, |ext| ext == "rs") {
+            if file_path.extension().is_some_and(|ext| ext == "rs") {
                 files.push(file_path);
             }
         }
@@ -216,6 +217,15 @@ fn coverage_all() -> anyhow::Result<()> {
     Ok(())
 }
 
+fn test_multilanguage() -> anyhow::Result<()> {
+    println!("Running multilanguage integration tests (requires Docker)...");
+    println!("This builds the python + c gRPC server images, then runs");
+    println!("`cargo test --features integration-tests,multilanguage-tests`.");
+    // Delegated to the Makefile target so the image-build steps stay in
+    // one place; the Makefile shells out to bindings/{python,c}/Makefile.
+    run_command("make", &["test-multilanguage"])
+}
+
 fn run_coverage_lcov(extra_args: &[&str]) -> anyhow::Result<()> {
     fs::create_dir_all("coverage")?;
     let mut args = vec![
@@ -257,6 +267,7 @@ fn print_help() {
   coverage        Run unit test coverage (HTML report)
   coverage-lcov   Run unit test coverage (lcov for CI)
   coverage-all    Run all test coverage including integration (requires Docker)
+  test-multilanguage  Run producer integration tests against rust/python/c backends (requires Docker)
 
 Usage:
   cargo xtask format
@@ -266,6 +277,7 @@ Usage:
   cargo xtask lint-fix
   cargo xtask coverage
   cargo xtask coverage-lcov
-  cargo xtask coverage-all"
+  cargo xtask coverage-all
+  cargo xtask test-multilanguage"
     );
 }
