@@ -52,11 +52,11 @@ fn format_check() -> anyhow::Result<()> {
     println!("🔍 Checking Rust code formatting...");
 
     // Check main crate
-    let main_result = Command::new("cargo").args(&["fmt", "--", "--check"]).status()?;
+    let main_result = Command::new("cargo").args(["fmt", "--", "--check"]).status()?;
 
     // Check generator crate
     let gen_result = Command::new("cargo")
-        .args(&["fmt", "--manifest-path", "generator/Cargo.toml", "--", "--check"])
+        .args(["fmt", "--manifest-path", "generator/Cargo.toml", "--", "--check"])
         .status()?;
 
     if !main_result.success() || !gen_result.success() {
@@ -122,7 +122,7 @@ fn find_generated_files() -> anyhow::Result<Vec<PathBuf>> {
         for file_entry in fs::read_dir(generated_dir)? {
             let file_entry = file_entry?;
             let file_path = file_entry.path();
-            if file_path.extension().map_or(false, |ext| ext == "rs") {
+            if file_path.extension().is_some_and(|ext| ext == "rs") {
                 files.push(file_path);
             }
         }
