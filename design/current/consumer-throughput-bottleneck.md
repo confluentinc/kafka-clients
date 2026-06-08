@@ -375,3 +375,50 @@ faster):
   2. **Per-record `to_vec()` decode allocation** (the §27 zero-copy violation in
      `default_record.rs`). At 370k msg/s this allocation is a real CPU cost.
 Both are separate follow-ups, not addressed here.
+
+---
+
+## UPDATE 7 (2026-06-08) — §27 zero-copy decode: the real ceiling lever (370k → 644k)
+
+UPDATE 6's ~370k ceiling turned out NOT to be round-trip-bound. CPU profiling +
+code read found the limiter: `CompletedFetch::load_next_batch` re-walked
+`MemoryRecords::batches()` from index 0 on every call (once per batch → O(N²) over
+a fetch), and `BatchIterator::next()` `to_vec`-copied each batch
+(`memory_records.rs`), so the whole partition payload was copied many times over.
+The first §27 pass (per-record borrow, UPDATE part-2 of the latency doc) removed
+the per-*record* `to_vec` but left this per-*batch* O(N²) copy — which is why that
+pass did NOT move the ceiling (a corrected diagnosis: the first profile's
+`memmove` was real but not the per-record copy; it was this batch walk).
+
+Fix (commit c03e1d4, building on 395ca2f/46fcf95):
+  1. **Incremental cursor** — `BatchCursor` tracks the next batch's absolute byte
+     offset and advances it per batch; locating the next batch is O(1), not
+     O(start_pos). No more re-walk.
+  2. **Borrowing batch-header parse** — new `DefaultRecordBatchRef<'a>` reads batch
+     header fields from a `&[u8]` slice of the buffer; no `to_vec` per batch.
+     Uncompressed records section is `RecordSource::Borrowed(range)` into the
+     buffer; compressed decompresses once per batch (§27-permitted). Owned
+     `DefaultRecordBatch` accessors now delegate to the ref (single source of
+     truth); the owned `BatchIterator` API is untouched for producer callers.
+  3. **Clone eliminated** — `ensure_cursor` now *moves* `partition_data.records`
+     into `MemoryRecords` (was a clone), fully satisfying §27 "one buffer".
+
+### Measured (default config, 1 KB, 12 partitions, uncompressed backlog)
+- **Static-backlog ceiling: ~370k → ~644k msg/s** (629 MiB/s), sustained
+  (621/673/637/662/656k across intervals); **CPU dropped 85% → ~75%** (much less
+  work per record). 1.74× over UPDATE 6; now ~73% of Java's 886k (was ~42%).
+- Latency @ 100k/s: p99 12 → **9 ms** (no regression — slightly better), CPU
+  47% → **43%**. Idle CPU @ 1k/s: ~5% (unchanged). Receive-path allocation
+  budget: **2.15 allocs/record**.
+- Full lib suite **1715 passed**; clippy + format clean. New
+  `test_multi_batch_ordering_and_offsets` covers the ≥3-batch path end-to-end
+  (uncompressed + gzip).
+
+Ceiling progression: 139k (read-bound) → 233k (try_read drain) → 370k (continuous
+prefetch) → **644k (zero-copy batch loading)**. Java KIP-848: 886k.
+
+### Remaining gap to ~886k
+CPU is now ~75% of one core (not pegged) — the remaining ~25% is the
+single-fetch-in-flight-per-node round-trip (no overlap of fetch N+1's network RTT
+with fetch N's decode). Deeper fetch pipelining (≥2 in-flight per node) is the
+next lever; separate follow-up.
