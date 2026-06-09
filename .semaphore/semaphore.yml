@@ -62,7 +62,7 @@ blocks:
         # Secrets tab to track a different mainline branch. The sweep runs
         # only when the build is for this exact branch.
         - name: MAIN_BRANCH
-          value: dev/milestone-7
+          value: master
         # Path to the AK repo, relative to the translation_agent cwd set in
         # the prologue (which is `tools/translation_agent`). Defaults to the
         # `kafka` git submodule at the repo root.
