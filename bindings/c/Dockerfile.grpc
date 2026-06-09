@@ -1,0 +1,70 @@
+# syntax=docker/dockerfile:1.7
+# Copyright 2025 Confluent Inc.
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+
+# Multi-stage build for the C++ gRPC server image used by the
+# multilanguage integration test harness. See
+# design/history/MILESTONE-6/DESIGN-multilanguage-tests.md.
+#
+# Build context MUST be the repo root because we copy from target/,
+# bindings/c/, and multilanguage-test-server/. Use the Makefile target:
+#   make -C bindings/c grpc-image
+#
+# Tags the result as confluent-kafka-rust/c-grpc-server:dev.
+#
+# C++ rather than pure C: grpc_cpp is the realistic gRPC stack here.
+# What's under test is the C FFI (kafka_producer_*) called from C++,
+# not the gRPC layer itself.
+
+# ---------------------------------------------------------------------------
+# Stage 1: Compile kafka_grpc_server statically against libconfluent_kafka.a
+# and the system grpc++ / protobuf packages.
+# ---------------------------------------------------------------------------
+FROM debian:trixie-slim AS builder
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        build-essential cmake pkg-config \
+        libgrpc++-dev libprotobuf-dev \
+        protobuf-compiler protobuf-compiler-grpc \
+        ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build
+
+# Stage the source layout the standalone CMakeLists.txt expects.
+COPY bindings/c/grpc_server/CMakeLists.txt /build/CMakeLists.txt
+COPY bindings/c/grpc_server/server.cc /build/server.cc
+COPY target/release/libconfluent_kafka.a /build/lib/libconfluent_kafka.a
+COPY target/include/confluent_kafka.h /build/include/confluent_kafka.h
+COPY multilanguage-test-server/proto/producer_service.proto /build/proto/producer_service.proto
+
+RUN cmake -S . -B build -DCMAKE_BUILD_TYPE=Release && \
+    cmake --build build --parallel
+
+# ---------------------------------------------------------------------------
+# Stage 2: Minimal runtime — debian-slim with the grpc++ runtime libs.
+# ---------------------------------------------------------------------------
+FROM debian:trixie-slim AS runtime
+
+# Install libgrpc++-dev rather than the bare runtime SOname package,
+# because Debian renames lib*N (e.g. libgrpc++1.51 → libgrpc++1.62)
+# between releases and the dev meta-package always pulls in whichever
+# runtime is current. Costs a few MB of header files.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        libgrpc++-dev libprotobuf-dev ca-certificates && \
+    rm -rf /var/lib/apt/lists/*
+
+COPY --from=builder /build/build/kafka_grpc_server /usr/local/bin/kafka_grpc_server
+
+EXPOSE 50052
+
+# The Rust BackendPool waits for "listening" on stderr — keep server.cc's
+# log message in sync with backend_pool.rs's WaitFor::message_on_stderr.
+CMD ["/usr/local/bin/kafka_grpc_server"]

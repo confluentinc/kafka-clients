@@ -37,6 +37,10 @@ const KAFKA_TAG: &str = "4.2.0";
 
 /// Container port for the PLAINTEXT listener.
 const PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9092);
+/// PLAINTEXT listener exposed only on the inter-broker network — used by
+/// gRPC client containers in the multilanguage test harness so they can
+/// reach the broker by container hostname rather than via the host loopback.
+const CONTAINER_PORT_NUM: u16 = 9099;
 /// Container port for the SASL_PLAINTEXT listener.
 const SASL_PLAINTEXT_PORT: ContainerPort = ContainerPort::Tcp(9095);
 /// Container port for the SSL listener.
@@ -162,27 +166,31 @@ impl KafkaAllProtocols {
         // the actual protocols.
         env_vars.insert(
             "KAFKA_LISTENERS".into(),
-            "PLAINTEXT://0.0.0.0:9092,TLSONLY://0.0.0.0:9096,SASLPLAIN://0.0.0.0:9095,\
-             SASLTLS://0.0.0.0:9097,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094"
-                .into(),
+            format!(
+                "PLAINTEXT://0.0.0.0:9092,TLSONLY://0.0.0.0:9096,SASLPLAIN://0.0.0.0:9095,\
+                 SASLTLS://0.0.0.0:9097,BROKER://0.0.0.0:9093,CONTROLLER://0.0.0.0:9094,\
+                 CONTAINER://0.0.0.0:{CONTAINER_PORT_NUM}"
+            ),
         );
 
         // Advertised listeners use pre-reserved host ports for client
         // listeners (so metadata responses contain correct reachable
         // addresses) and the Docker network container name for the
-        // inter-broker listener.
+        // inter-broker listener and the CONTAINER listener used by the
+        // multilanguage gRPC client containers.
         env_vars.insert(
             "KAFKA_ADVERTISED_LISTENERS".into(),
             format!(
                 "PLAINTEXT://127.0.0.1:{},TLSONLY://127.0.0.1:{},SASLPLAIN://127.0.0.1:{},\
-                 SASLTLS://127.0.0.1:{},BROKER://{}:9093",
-                ports.plaintext, ports.ssl, ports.sasl_plaintext, ports.sasl_ssl, this_container
+                 SASLTLS://127.0.0.1:{},BROKER://{}:9093,\
+                 CONTAINER://{}:{CONTAINER_PORT_NUM}",
+                ports.plaintext, ports.ssl, ports.sasl_plaintext, ports.sasl_ssl, this_container, this_container
             ),
         );
         env_vars.insert(
             "KAFKA_LISTENER_SECURITY_PROTOCOL_MAP".into(),
             "PLAINTEXT:PLAINTEXT,TLSONLY:SSL,SASLPLAIN:SASL_PLAINTEXT,\
-             SASLTLS:SASL_SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT"
+             SASLTLS:SASL_SSL,BROKER:PLAINTEXT,CONTROLLER:PLAINTEXT,CONTAINER:PLAINTEXT"
                 .into(),
         );
 
@@ -287,6 +295,10 @@ pub struct KafkaCluster {
     sasl_plaintext_bootstrap_servers: String,
     /// Comma-separated `host:port` pairs for the SASL_SSL listener.
     sasl_ssl_bootstrap_servers: String,
+    /// Comma-separated `container_name:port` pairs for the CONTAINER
+    /// listener, reachable from sibling containers on the broker's
+    /// Docker network. Used by the multilanguage test harness.
+    container_bootstrap_servers: String,
     /// CA certificate PEM for SSL tests.
     ca_cert_pem: String,
     /// The config this cluster was started with.
@@ -376,6 +388,7 @@ impl KafkaCluster {
         let mut sasl_plaintext_addrs = Vec::with_capacity(containers.len());
         let mut sasl_ssl_addrs = Vec::with_capacity(containers.len());
 
+        let mut container_addrs = Vec::with_capacity(containers.len());
         for (i, container) in containers.iter().enumerate() {
             container_ids.push(container.id().to_string());
             let ports = &broker_ports[i];
@@ -384,6 +397,7 @@ impl KafkaCluster {
             ssl_addrs.push(format!("127.0.0.1:{}", ports.ssl));
             sasl_plaintext_addrs.push(format!("127.0.0.1:{}", ports.sasl_plaintext));
             sasl_ssl_addrs.push(format!("127.0.0.1:{}", ports.sasl_ssl));
+            container_addrs.push(format!("{}:{CONTAINER_PORT_NUM}", container_names[i]));
         }
 
         Self {
@@ -394,6 +408,7 @@ impl KafkaCluster {
             ssl_bootstrap_servers: ssl_addrs.join(","),
             sasl_plaintext_bootstrap_servers: sasl_plaintext_addrs.join(","),
             sasl_ssl_bootstrap_servers: sasl_ssl_addrs.join(","),
+            container_bootstrap_servers: container_addrs.join(","),
             ca_cert_pem,
             config: config.clone(),
         }
@@ -418,6 +433,14 @@ impl KafkaCluster {
     /// Bootstrap servers for the SASL_SSL listener.
     pub fn sasl_ssl_bootstrap_servers(&self) -> &str {
         &self.sasl_ssl_bootstrap_servers
+    }
+
+    /// Bootstrap servers reachable from sibling containers attached to
+    /// this cluster's Docker network — `<container_name>:9099` per
+    /// broker, advertising the CONTAINER listener. Used by the
+    /// multilanguage gRPC test harness.
+    pub fn container_bootstrap_servers(&self) -> &str {
+        &self.container_bootstrap_servers
     }
 
     /// CA certificate PEM for SSL tests.
