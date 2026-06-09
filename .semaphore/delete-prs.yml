@@ -1,0 +1,47 @@
+version: v1.0
+name: Delete translation PRs
+
+# Run as a Semaphore Task (configured in the project's Tasks tab).
+# Deletes pr_commit rows AND GitHub head branches for an explicit
+# list of PR numbers. Use to drop stale/failed/cancelled PRs without
+# nuking the entire rust_branch queue (which is what
+# `--seed --cleanup-prs` does).
+#
+# Required Task parameters:
+#   RUST_BRANCH   -- safety scope: only PRs whose stored rust_branch
+#                    matches will be processed; mismatch -> hard error
+#                    with no changes made.
+#   PR_NUMBERS    -- comma-separated, no spaces (e.g. "123,456,789").
+# Optional:
+#   DRY_RUN       -- "True" to print what would be deleted without
+#                    making any changes; "False" (default) executes.
+
+agent:
+  machine:
+    type: s1-prod-ubuntu24-04-arm64-0
+
+blocks:
+  - name: Delete translation PRs
+    task:
+      jobs:
+        - name: delete-prs
+          commands:
+            - checkout
+            - sem-version python 3.10
+            - (cd tools/translation_agent && pip install -e '.[dev]')
+            # Unlike seed.yml, this is NOT `|| true`-tolerant: deleting
+            # rows from a non-existent DB makes no sense, so a missing
+            # artifact should fail the job loudly.
+            - artifact pull project translation_agent.db
+            - |
+              : "${RUST_BRANCH:?RUST_BRANCH must be set as a Task parameter}"
+              : "${PR_NUMBERS:?PR_NUMBERS must be set as a Task parameter}"
+            - |
+              set -e
+              DRY_RUN_FLAG=""
+              if [ "${DRY_RUN:-False}" = "True" ]; then
+                DRY_RUN_FLAG="--dry-run"
+              fi
+              translation-agent --delete-prs $DRY_RUN_FLAG \
+                --rust-branch "${RUST_BRANCH}" \
+                --pr-numbers "${PR_NUMBERS}"

@@ -46,9 +46,7 @@ testcontainers-modules = { version = "0.15", features = ["kafka"] }
 rcgen = "0.13"
 tokio-rustls = "0.26"
 env_logger = "0.11"
-# Used only when --features multilanguage-tests is enabled. tonic + prost
-# do NOT leak into the production cdylib because dev-dependencies are
-# excluded from non-test builds.
+# Used only when --features multilanguage-tests is enabled.
 tonic = "0.12"
 prost = "0.13"
 tokio-stream = "0.1"
