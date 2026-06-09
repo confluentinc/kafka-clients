@@ -8,4 +8,4 @@ COMMENTS\.[0-9]*\.md
 COMMENTS\.TBR\.[0-9]*\.md
 /coverage
 # Consumer benchmark output (keep the repo readable; results are large/ephemeral)
-/consumer-perf/results/
+/consumer-perf/results/consumer-perf/compare/librdkafka_e2e

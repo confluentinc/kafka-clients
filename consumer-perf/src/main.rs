@@ -549,8 +549,8 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         props.insert("max.poll.records".to_string(), v.to_string());
     }
     if let Some(ref path) = args.client_config {
-        let content = std::fs::read_to_string(path)
-            .map_err(|e| format!("failed to read --client-config {path}: {e}"))?;
+        let content =
+            std::fs::read_to_string(path).map_err(|e| format!("failed to read --client-config {path}: {e}"))?;
         for line in content.lines() {
             let l = line.trim();
             if l.is_empty() || l.starts_with('#') {

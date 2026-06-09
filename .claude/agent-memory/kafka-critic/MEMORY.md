@@ -51,3 +51,5 @@
 - [Logging infrastructure patterns](review_logging_patterns.md) — LogContext wiring gaps: NetworkClient, CCS, SaslChannelBuilder get empty context
 - [PR#10 merge audit](review_merge_pr10.md) — selector poke-not-cancel, &mut serialize Records take(), Arc<Cluster> + retain_with_id; wakeup_notify default footgun
 - [M8 Phase 17 security-wiring](review_m8_phase17.md) — clean; consumer mirrors producer client_channel_builder; security_protocol() uppercase is Java-faithful; producer send-shadowing API smell (from PR#10)
+- [M8 Phase 19 SSL try_read + Arc<str>](review_m8_phase19.md) — sync-never-await is cancel-safe by construction; try_read==async read body parity; has_bytes_buffered re-poll; Arc<str> intern checklist
+- [M8 Phase 20 recv-CPU copy elim](review_m8_phase20_recv_cpu.md) — into_response_data move parity; alloc-budget non-tautology check (events not bytes); selector drain lifecycle; retained-clone caller audit
