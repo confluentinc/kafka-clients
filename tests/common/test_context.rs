@@ -82,6 +82,22 @@ impl TestContext {
         self.cluster.sasl_ssl_bootstrap_servers()
     }
 
+    /// Bootstrap servers reachable from sibling containers attached to
+    /// this cluster's Docker network. Used by the multilanguage gRPC
+    /// test harness — the python and c gRPC server containers cannot
+    /// reach the broker via the host's `127.0.0.1` loopback, so they
+    /// use these container-internal addresses instead.
+    pub fn container_bootstrap_servers(&self) -> &str {
+        self.cluster.container_bootstrap_servers()
+    }
+
+    /// Docker network name used by this cluster. Sibling gRPC client
+    /// containers must join this network to reach the broker via the
+    /// CONTAINER listener.
+    pub fn broker_network_name(&self) -> &str {
+        self.cluster.network_name()
+    }
+
     /// CA certificate PEM for SSL tests.
     pub fn ca_cert_pem(&self) -> &str {
         self.cluster.ca_cert_pem()

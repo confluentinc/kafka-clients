@@ -1,0 +1,206 @@
+// Copyright 2025 Confluent Inc.
+//
+// Licensed under the Apache License, Version 2.0 (the "License");
+// you may not use this file except in compliance with the License.
+// You may obtain a copy of the License at
+//
+//     http://www.apache.org/licenses/LICENSE-2.0
+//
+// Unless required by applicable law or agreed to in writing, software
+// distributed under the License is distributed on an "AS IS" BASIS,
+// WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+// See the License for the specific language governing permissions and
+// limitations under the License.
+
+// gRPC service exposing the org.apache.kafka.clients.producer.Producer
+// trait for the multilanguage integration test harness.
+//
+// This proto is used by:
+//   - the Rust MultilanguageProducer client (under tests/common)
+//   - the Python gRPC server (bindings/python/grpc_server.py)
+//   - the C++ gRPC server (bindings/c/grpc_server/server.cc)
+//
+// All three regenerate stubs from this single source of truth.
+//
+// Two deliberate simplifications relative to the Producer trait:
+//
+//  1. KafkaFuture is not modeled on the wire. Each Send call awaits the
+//     producer's future on the server side; the unary RPC response IS
+//     the resolved future.
+//
+//  2. send_with_callback's callback closure stays on the Rust client side.
+//     The proto only carries a `with_callback` flag so the server can
+//     log equivalent activity if desired.
+
+syntax = "proto3";
+
+package confluent.kafka.test;
+
+service ProducerService {
+  // Construct a new producer (KafkaProducer or MockProducer depending on
+  // config) and return an opaque server-local id.
+  rpc CreateProducer(CreateProducerRequest) returns (CreateProducerResponse);
+
+  // Send a record. The server awaits the producer's KafkaFuture before
+  // responding; the response carries either the RecordMetadata or the
+  // KafkaError that the future resolved with.
+  rpc Send(SendRequest) returns (SendResponse);
+
+  // Flush all buffered records.
+  rpc Flush(FlushRequest) returns (StatusResponse);
+
+  // Get partition metadata for the given topic.
+  rpc PartitionsFor(PartitionsForRequest) returns (PartitionsForResponse);
+
+  // Close the producer.
+  rpc Close(CloseRequest) returns (StatusResponse);
+
+  // Close with a timeout (milliseconds).
+  rpc CloseTimeout(CloseTimeoutRequest) returns (StatusResponse);
+}
+
+// ---------------------------------------------------------------------------
+// Producer lifecycle
+// ---------------------------------------------------------------------------
+
+message CreateProducerRequest {
+  // ProducerConfig key/value properties. At minimum, "bootstrap.servers"
+  // must be set for a real KafkaProducer; an empty config selects a
+  // MockProducer for client-side smoke testing.
+  map<string, string> config = 1;
+}
+
+message CreateProducerResponse {
+  // Opaque, server-local producer handle. Pass to subsequent RPCs.
+  uint64 producer_id = 1;
+  // Set on failure; producer_id is then 0.
+  optional KafkaError error = 2;
+}
+
+// ---------------------------------------------------------------------------
+// Send
+// ---------------------------------------------------------------------------
+
+message ProducerRecord {
+  string topic = 1;
+  optional int32 partition = 2;
+  optional int64 timestamp = 3;
+  optional bytes key = 4;
+  optional bytes value = 5;
+  repeated Header headers = 6;
+}
+
+message Header {
+  string key = 1;
+  bytes value = 2;
+}
+
+message SendRequest {
+  uint64 producer_id = 1;
+  ProducerRecord record = 2;
+  // Hint that the client supplied a callback. Servers may log this as
+  // equivalent to send_with_callback; semantically the response is
+  // identical to a plain Send.
+  bool with_callback = 3;
+}
+
+message SendResponse {
+  oneof result {
+    RecordMetadata metadata = 1;
+    KafkaError error = 2;
+  }
+}
+
+message RecordMetadata {
+  int64 offset = 1;
+  int64 timestamp = 2;
+  int32 serialized_key_size = 3;
+  int32 serialized_value_size = 4;
+  string topic = 5;
+  int32 partition = 6;
+}
+
+// ---------------------------------------------------------------------------
+// Flush / Close
+// ---------------------------------------------------------------------------
+
+message FlushRequest {
+  uint64 producer_id = 1;
+}
+
+message CloseRequest {
+  uint64 producer_id = 1;
+}
+
+message CloseTimeoutRequest {
+  uint64 producer_id = 1;
+  int64 timeout_ms = 2;
+}
+
+message StatusResponse {
+  // Empty on success; populated on failure.
+  optional KafkaError error = 1;
+}
+
+// ---------------------------------------------------------------------------
+// PartitionsFor
+// ---------------------------------------------------------------------------
+
+message PartitionsForRequest {
+  uint64 producer_id = 1;
+  string topic = 2;
+}
+
+message PartitionsForResponse {
+  repeated PartitionInfo partitions = 1;
+  optional KafkaError error = 2;
+}
+
+message PartitionInfo {
+  string topic = 1;
+  int32 partition = 2;
+  optional Node leader = 3;
+  repeated Node replicas = 4;
+  repeated Node in_sync_replicas = 5;
+  repeated Node offline_replicas = 6;
+}
+
+message Node {
+  int32 id = 1;
+  string host = 2;
+  int32 port = 3;
+  optional string rack = 4;
+}
+
+// ---------------------------------------------------------------------------
+// Errors
+// ---------------------------------------------------------------------------
+
+// Mirrors crate::common::KafkaError. The `variant` discriminator selects
+// which of the optional variant-specific fields are meaningful.
+message KafkaError {
+  enum Variant {
+    GENERIC = 0;
+    TOPIC_AUTHORIZATION = 1;
+    INVALID_TOPIC = 2;
+    GROUP_AUTHORIZATION = 3;
+    BUFFER_EXHAUSTED = 4;
+    ILLEGAL_ARGUMENT = 5;
+    ILLEGAL_STATE = 6;
+    TIMEOUT = 7;
+    RECORD_TOO_LARGE = 8;
+    SERIALIZATION = 9;
+  }
+
+  Variant variant = 1;
+  // Errors enum code (matches crate::common::protocol::Errors).
+  int32 code = 2;
+  string message = 3;
+  bool is_retriable = 4;
+  bool is_fatal = 5;
+
+  // Variant-specific payloads. Populated only for the matching variant.
+  repeated string unauthorized_topics = 6; // TopicAuthorization
+  repeated string invalid_topics = 7;      // InvalidTopic
+  optional string group_id = 8;            // GroupAuthorization
+}

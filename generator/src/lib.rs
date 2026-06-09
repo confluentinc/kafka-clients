@@ -4521,10 +4521,8 @@ fn get_default_value(field_type: &FieldType, default: Option<&serde_json::Value>
                             return s.to_string();
                         }
                     },
-                    FieldType::Float64 => {
-                        if s.parse::<f64>().is_ok() {
-                            return s.to_string();
-                        }
+                    FieldType::Float64 if s.parse::<f64>().is_ok() => {
+                        return s.to_string();
                     },
                     FieldType::Bool => {
                         if s == "true" {
