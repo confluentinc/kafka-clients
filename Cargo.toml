@@ -28,6 +28,11 @@ rustls = { version = "0.23", features = ["logging", "std", "tls12"] }
 rustls-pemfile = "2"
 webpki-roots = "0.26"
 indexmap = "2"
+# Fast, non-cryptographic hasher (FxHash) for the Selector's internal per-poll
+# channel-id maps/sets. The keys are internal connection ids, not attacker-
+# controlled, so SipHash's DoS resistance buys nothing while its per-lookup cost
+# dominates the high-frequency poll loop (see Phase 22 / TLS CPU profile).
+rustc-hash = "2"
 log = "0.4"
 env_logger = { version = "0.11", optional = true }
 flate2 = "1"

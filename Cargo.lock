@@ -432,6 +432,7 @@ dependencies = [
  "rand 0.9.4",
  "rcgen",
  "regex",
+ "rustc-hash",
  "rustls",
  "rustls-pemfile",
  "serde",

@@ -45,13 +45,14 @@ use super::{ChannelState, channel_state};
 
 use futures_util::future::select_all;
 use indexmap::IndexMap;
+use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::net::TcpSocket;
 use tokio::sync::Notify;
 
 use crate::common::utils::LogContext;
 use crate::{kafka_debug, kafka_error, kafka_trace};
 
-use std::collections::{HashMap, HashSet, LinkedList};
+use std::collections::{HashMap, LinkedList};
 use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
@@ -99,15 +100,22 @@ pub struct Selector {
     /// `channels.keys().cloned()` (and the equivalent clones into the tracking
     /// sets below) are refcount bumps rather than heap allocations. Lookups by
     /// `&str` continue to work because `Arc<str>: Borrow<str>`.
-    channels: HashMap<Arc<str>, KafkaChannel>,
+    ///
+    /// Uses `FxHashMap` (fast, non-cryptographic FxHash) rather than the default
+    /// SipHash: these maps/sets are looked up for every channel on every poll
+    /// iteration, and the keys are internal connection ids (not attacker-
+    /// controlled), so SipHash's DoS resistance is unnecessary while its
+    /// per-lookup cost dominated the high-frequency poll loop on a real network
+    /// (Phase 22 / TLS CPU profile: ~10% of CPU was channel-id hashing).
+    channels: FxHashMap<Arc<str>, KafkaChannel>,
     /// Channels that have been explicitly muted.
-    explicitly_muted_channels: HashSet<Arc<str>>,
+    explicitly_muted_channels: FxHashSet<Arc<str>>,
     /// Channels that have data buffered in intermediate buffers.
-    channels_with_buffered_read: HashSet<Arc<str>>,
+    channels_with_buffered_read: FxHashSet<Arc<str>>,
     /// Channels that connected immediately (before poll).
-    immediately_connected_keys: HashSet<Arc<str>>,
+    immediately_connected_keys: FxHashSet<Arc<str>>,
     /// Channels that are being closed gracefully (pending receives).
-    closing_channels: HashMap<Arc<str>, KafkaChannel>,
+    closing_channels: FxHashMap<Arc<str>, KafkaChannel>,
     /// Sends completed during the last poll.
     completed_sends: Vec<NetworkSend>,
     /// Receives completed during the last poll, keyed by channel ID.
@@ -128,6 +136,13 @@ pub struct Selector {
     notify: Arc<Notify>,
     /// Whether progress was made reading in the last poll.
     made_read_progress_last_poll: bool,
+    /// Reusable scratch buffer for the per-iteration snapshot of channel ids in
+    /// [`Self::poll`]. Hoisted to a field (taken via `mem::take`, refilled, and
+    /// restored each iteration) so the poll loop does not heap-allocate a fresh
+    /// `Vec<Arc<str>>` every time it runs — only `Arc` refcount bumps remain
+    /// (Phase 22; the allocation showed up as per-poll `malloc`/`from_iter` in
+    /// the TLS CPU profile).
+    poll_id_scratch: Vec<Arc<str>>,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `Selector`.
@@ -165,11 +180,11 @@ impl Selector {
         log_context: LogContext,
     ) -> Self {
         Self {
-            channels: HashMap::new(),
-            explicitly_muted_channels: HashSet::new(),
-            channels_with_buffered_read: HashSet::new(),
-            immediately_connected_keys: HashSet::new(),
-            closing_channels: HashMap::new(),
+            channels: FxHashMap::default(),
+            explicitly_muted_channels: FxHashSet::default(),
+            channels_with_buffered_read: FxHashSet::default(),
+            immediately_connected_keys: FxHashSet::default(),
+            closing_channels: FxHashMap::default(),
             completed_sends: Vec::new(),
             completed_receives: LinkedList::new(),
             disconnected: HashMap::new(),
@@ -184,6 +199,7 @@ impl Selector {
             },
             notify: Arc::new(Notify::new()),
             made_read_progress_last_poll: true,
+            poll_id_scratch: Vec::new(),
             log_context,
         }
     }
@@ -887,7 +903,14 @@ impl Selectable for Selector {
             }
 
             // Pass 1: Connect + Read all channels (sequential, fast)
-            let channel_ids: Vec<Arc<str>> = self.channels.keys().cloned().collect();
+            //
+            // Snapshot the channel ids into a reusable scratch `Vec` (taken from
+            // the struct, refilled, restored below) so this hot per-iteration
+            // pass performs only `Arc` refcount bumps, not a fresh heap
+            // allocation each time (Phase 22).
+            let mut channel_ids = std::mem::take(&mut self.poll_id_scratch);
+            channel_ids.clear();
+            channel_ids.extend(self.channels.keys().cloned());
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(&**id);
@@ -898,6 +921,10 @@ impl Selectable for Selector {
 
             // Pass 2: Write all channels concurrently
             self.poll_channels_write_concurrent(&channel_ids, start_select).await;
+
+            // Restore the scratch buffer (retains its capacity for next time).
+            channel_ids.clear();
+            self.poll_id_scratch = channel_ids;
 
             let made_progress = !self.completed_sends.is_empty()
                 || !self.completed_receives.is_empty()

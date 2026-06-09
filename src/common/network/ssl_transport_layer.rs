@@ -131,6 +131,23 @@ impl SslTransportLayer {
             write_buf: Vec::new(),
         }
     }
+
+    /// Logs the negotiated TLS protocol version, cipher suite, and key-exchange
+    /// group once per connection, right after the handshake completes.
+    ///
+    /// This is a diagnostic for performance investigation: the symmetric cipher
+    /// (AES-GCM vs ChaCha20-Poly1305) determines whether the bulk data path runs
+    /// on hardware AES (parity with OpenSSL) or in software (materially slower).
+    /// aws-lc-rs only prefers AES-GCM when hardware AES is detected, so confirming
+    /// the actually-negotiated suite rules in/out the cipher as a CPU-gap cause.
+    fn log_negotiated_params(conn: &rustls::ClientConnection) {
+        log::info!(
+            "TLS handshake complete: version={:?} cipher_suite={:?} kx_group={:?}",
+            conn.protocol_version(),
+            conn.negotiated_cipher_suite().map(|cs| cs.suite()),
+            conn.negotiated_key_exchange_group().map(|kx| kx.name()),
+        );
+    }
 }
 
 impl TransportLayer for SslTransportLayer {
@@ -209,6 +226,7 @@ impl TransportLayer for SslTransportLayer {
                 // returns false; if we exit here without flushing, the server
                 // will never see it and the session is wedged.
                 if !boxed.conn.is_handshaking() && !boxed.conn.wants_write() {
+                    Self::log_negotiated_params(&boxed.conn);
                     self.state = SslState::Ready(boxed);
                     return Ok(());
                 }
@@ -247,6 +265,7 @@ impl TransportLayer for SslTransportLayer {
                         if boxed.conn.is_handshaking() || boxed.conn.wants_write() {
                             return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "TLS handshake EOF"));
                         }
+                        Self::log_negotiated_params(&boxed.conn);
                         self.state = SslState::Ready(boxed);
                         return Ok(());
                     },
