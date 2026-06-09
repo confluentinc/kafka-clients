@@ -92,10 +92,37 @@ use crate::consumer::internals::request_managers::RequestManagers;
 use crate::consumer::internals::subscription_state::SubscriptionState;
 use crate::consumer::internals::wakeup_trigger::WakeupTrigger;
 
-/// Type-erased handle to the spawned consumer background task.
+/// Backing join mechanism for the consumer background task.
 ///
-/// Owns the `JoinHandle<()>` produced by `tokio::spawn(thread.run())`
-/// and the `Box<dyn Fn>` closures that close / wakeup the underlying
+/// The bg task can run in one of two execution strategies, both fully
+/// behavior-equivalent at the channel / shutdown level:
+///
+///   - [`BgJoin::Spawned`] — a `tokio::spawn`ed task on the caller's
+///     runtime. Used by unit tests and `new_with_components` (no-op
+///     handle). Joined on close via `JoinHandle::await`.
+///   - [`BgJoin::Dedicated`] — the production strategy (Phase 21): the
+///     bg loop runs on its own dedicated `std::thread` hosting a
+///     `current_thread` tokio runtime, removing the multi-thread
+///     scheduler park/unpark churn (~54% of consumer CPU per profiling).
+///     The bg loop signals completion on the `done` oneshot when it has
+///     finished `cleanup()`, after which the OS thread is reaped.
+enum BgJoin {
+    /// `tokio::spawn`ed task. Awaitable on close.
+    Spawned(Option<JoinHandle<()>>),
+    /// Dedicated OS thread hosting a `current_thread` runtime.
+    Dedicated {
+        /// Resolves when the bg loop has exited and `cleanup()` has
+        /// completed (sent from inside the dedicated thread).
+        done: Option<tokio::sync::oneshot::Receiver<()>>,
+        /// Handle to the OS thread; reaped (joined) after `done`.
+        thread: Option<std::thread::JoinHandle<()>>,
+    },
+}
+
+/// Type-erased handle to the consumer background task.
+///
+/// Owns the join mechanism ([`BgJoin`]) for the bg loop and the
+/// `Box<dyn Fn>` closures that close / wakeup the underlying
 /// `ConsumerNetworkThread<K>` regardless of its concrete `K`.
 ///
 /// Held by [`AsyncKafkaConsumer`] for the lifetime of the consumer
@@ -106,21 +133,39 @@ pub(crate) struct NetworkThreadCloseHandle {
     signal_close_fn: Box<dyn Fn() + Send + Sync>,
     /// Wakes the bg-task's `select!` on the wakeup token.
     wakeup_fn: Box<dyn Fn() + Send + Sync>,
-    /// Spawned tokio task. Awaitable on close.
-    join_handle: Option<JoinHandle<()>>,
+    /// How the bg loop is joined on close (tokio task vs dedicated thread).
+    join: BgJoin,
 }
 
 impl NetworkThreadCloseHandle {
-    /// Constructor used by [`AsyncKafkaConsumer::new_with_thread`]. The
+    /// Constructor used by `new_with_components` and unit tests. The
     /// closures capture the concrete `ConsumerNetworkThread<K>` clones
     /// of the close / wakeup state so the outer struct can stay
-    /// non-generic over `K`.
+    /// non-generic over `K`. The bg loop runs as a `tokio::spawn`ed task.
     pub(crate) fn new(
         signal_close_fn: Box<dyn Fn() + Send + Sync>,
         wakeup_fn: Box<dyn Fn() + Send + Sync>,
         join_handle: JoinHandle<()>,
     ) -> Self {
-        Self { signal_close_fn, wakeup_fn, join_handle: Some(join_handle) }
+        Self { signal_close_fn, wakeup_fn, join: BgJoin::Spawned(Some(join_handle)) }
+    }
+
+    /// Constructor used by the production [`AsyncKafkaConsumer::new`]
+    /// path (Phase 21). The bg loop runs on a dedicated `std::thread`
+    /// hosting a `current_thread` tokio runtime; `done` resolves when
+    /// the bg loop has finished `cleanup()`, and `thread` is the OS
+    /// thread handle reaped afterwards.
+    pub(crate) fn new_dedicated(
+        signal_close_fn: Box<dyn Fn() + Send + Sync>,
+        wakeup_fn: Box<dyn Fn() + Send + Sync>,
+        done: tokio::sync::oneshot::Receiver<()>,
+        thread: std::thread::JoinHandle<()>,
+    ) -> Self {
+        Self {
+            signal_close_fn,
+            wakeup_fn,
+            join: BgJoin::Dedicated { done: Some(done), thread: Some(thread) },
+        }
     }
 
     /// Signals the bg task to exit and wakes it from its current
@@ -135,19 +180,61 @@ impl NetworkThreadCloseHandle {
         (self.wakeup_fn)();
     }
 
-    /// Awaits the spawned task to completion. Returns `Ok(())` on clean
-    /// exit, or wraps the JoinError as a `KafkaError::illegal_state` on
-    /// panic.
+    /// Awaits the bg loop to completion. Returns `Ok(())` on clean exit,
+    /// or wraps a task / thread panic as a `KafkaError::illegal_state`.
+    ///
+    /// For [`BgJoin::Spawned`] this awaits the tokio `JoinHandle` exactly
+    /// as before. For [`BgJoin::Dedicated`] it first awaits the `done`
+    /// oneshot (which the dedicated thread fires after the bg loop exits
+    /// and `cleanup()` completes), then reaps the OS thread off the async
+    /// runtime via `spawn_blocking` so it does not block the close
+    /// future. Both paths are idempotent (a second call is a no-op) and
+    /// never hang if the bg loop already exited (a closed/`None` receiver
+    /// is treated as a clean exit).
     pub(crate) async fn await_join(&mut self) -> Result<(), KafkaError> {
-        if let Some(handle) = self.join_handle.take() {
-            match handle.await {
-                Ok(()) => Ok(()),
-                Err(join_err) => Err(KafkaError::illegal_state(format!(
-                    "Consumer network thread terminated with error: {join_err}"
-                ))),
-            }
-        } else {
-            Ok(())
+        match &mut self.join {
+            BgJoin::Spawned(handle) => {
+                if let Some(handle) = handle.take() {
+                    match handle.await {
+                        Ok(()) => Ok(()),
+                        Err(join_err) => Err(KafkaError::illegal_state(format!(
+                            "Consumer network thread terminated with error: {join_err}"
+                        ))),
+                    }
+                } else {
+                    Ok(())
+                }
+            },
+            BgJoin::Dedicated { done, thread } => {
+                // Wait for the bg loop to finish `cleanup()`. If the
+                // sender was dropped without sending (the dedicated thread
+                // already exited), `recv()` returns `Err(RecvError)` — we
+                // treat that as a clean exit and proceed to reap the
+                // thread, mirroring the `None` (already-joined) case.
+                if let Some(done_rx) = done.take() {
+                    let _ = done_rx.await;
+                }
+                // Reap the OS thread off the async runtime so the close
+                // future is not blocked on `JoinHandle::join`. A panic
+                // inside the dedicated thread is mapped to the SAME
+                // message shape as the `Spawned` panic path.
+                if let Some(thread) = thread.take() {
+                    let join_result = tokio::task::spawn_blocking(move || thread.join()).await;
+                    match join_result {
+                        // Outer: the spawn_blocking task itself; inner: the
+                        // dedicated OS thread.
+                        Ok(Ok(())) => Ok(()),
+                        Ok(Err(_panic)) => Err(KafkaError::illegal_state(
+                            "Consumer network thread terminated with error: panic".to_string(),
+                        )),
+                        Err(join_err) => Err(KafkaError::illegal_state(format!(
+                            "Consumer network thread terminated with error: {join_err}"
+                        ))),
+                    }
+                } else {
+                    Ok(())
+                }
+            },
         }
     }
 }
@@ -1198,15 +1285,52 @@ where
         // (`AsyncKafkaConsumer.java:354`); the Arc<AtomicI64> is the Rust
         // equivalent that bridges the two task boundaries.
 
-        let join_handle: JoinHandle<()> = tokio::spawn(async move {
-            let mut thread = network_thread;
-            while thread.is_running() {
-                thread.run_once().await;
-            }
-            thread.cleanup().await;
-        });
+        // Phase 21: run the bg loop on its OWN dedicated `std::thread`
+        // hosting a `current_thread` tokio runtime, instead of
+        // `tokio::spawn`ing it onto the caller's multi-thread
+        // work-stealing runtime. Profiling showed ~54% of consumer CPU
+        // was tokio multi-thread scheduler park/unpark churn from running
+        // this single high-frequency IO task on a ~12-worker pool; a
+        // dedicated single-thread runtime (librdkafka's model) removes it.
+        //
+        // This is purely an internal execution-strategy change — the
+        // shutdown sequencing (`signal_close_fn` + `wakeup_fn` flip the
+        // running flag and wake the selector; the bg loop exits on
+        // `is_running()==false` then `cleanup()`), the shared channels,
+        // and the `max_time_to_wait_ms` Arc are all identical to the
+        // `tokio::spawn` form.
+        //
+        // `enable_all()` is REQUIRED: the IO driver backs the
+        // Selector/mio loop and the time driver backs the heartbeat /
+        // poll-timeout timers. The §10 network-poll-to-completion
+        // (cancel-safety), the §11 `Selector`/`Notify` wakeup, and the
+        // §31 listener/commit callbacks (which run on the APP task — the
+        // bg only enqueues + awaits the oneshot) are all unaffected by
+        // moving the bg loop onto a `current_thread` runtime.
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build consumer io runtime");
+                rt.block_on(async move {
+                    let mut thread = network_thread;
+                    while thread.is_running() {
+                        thread.run_once().await;
+                    }
+                    thread.cleanup().await;
+                });
+                // Signal the close path that the bg loop + `cleanup()`
+                // have finished. Errors (receiver dropped before close)
+                // are benign — `await_join` treats them as a clean exit.
+                let _ = done_tx.send(());
+            })
+            .expect("spawn consumer io thread");
 
-        let network_thread_close = NetworkThreadCloseHandle::new(signal_close_fn, wakeup_fn, join_handle);
+        let network_thread_close =
+            NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
 
         // ── Assemble `AsyncKafkaConsumerComponents` and hand off ──
         //
@@ -7899,5 +8023,136 @@ mod tests {
         fn _accept_consumer<C: crate::consumer::Consumer<Vec<u8>, Vec<u8>>>(_c: C) {}
         // Only the type-level check matters — no runtime assertions.
         let _phantom: fn(AsyncKafkaConsumer<Vec<u8>, Vec<u8>>) = _accept_consumer;
+    }
+
+    // ── Phase 21: dedicated-IO-thread `NetworkThreadCloseHandle` tests ──
+    //
+    // The production `AsyncKafkaConsumer::new()` runs the bg loop on a
+    // dedicated `std::thread` hosting a `current_thread` runtime and
+    // builds a `NetworkThreadCloseHandle::new_dedicated(...)`. These
+    // tests model that exact construction (running flag → bg loop →
+    // wakeup → `done` oneshot → OS thread reap) without needing a broker,
+    // and assert the close path joins the dedicated thread cleanly within
+    // a bounded timeout (no hang), preserving the `Spawned`-path
+    // semantics (clean exit + panic mapping).
+
+    /// Builds a dedicated bg thread that mirrors the production loop:
+    /// a `current_thread` runtime spinning a `run_once`-style loop until
+    /// the running flag flips, firing `done` on exit. Returns the close
+    /// handle plus the running flag and a wakeup `Notify` the loop waits
+    /// on (so the test can prove `signal_close` + `wakeup` terminate it).
+    fn spawn_dedicated_bg() -> (NetworkThreadCloseHandle, Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+        let running = Arc::new(AtomicBool::new(true));
+        let wake = Arc::new(tokio::sync::Notify::new());
+
+        let loop_running = Arc::clone(&running);
+        let loop_wake = Arc::clone(&wake);
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io-test".into())
+            .spawn(move || {
+                let rt = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .expect("build test io runtime");
+                rt.block_on(async move {
+                    // Mirror the production `while is_running() { run_once().await }`
+                    // loop: block on the wakeup `Notify` each iteration so
+                    // the loop only proceeds when woken (as the real
+                    // selector poll returns on `Selector::wakeup`).
+                    while loop_running.load(Ordering::Acquire) {
+                        loop_wake.notified().await;
+                    }
+                    // Stand-in for `cleanup().await`.
+                });
+                let _ = done_tx.send(());
+            })
+            .expect("spawn test io thread");
+
+        let close_running = Arc::clone(&running);
+        let close_wake = Arc::clone(&wake);
+        let signal_close_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            close_running.store(false, Ordering::Release);
+            close_wake.notify_one();
+        });
+        let wakeup_wake = Arc::clone(&wake);
+        let wakeup_fn: Box<dyn Fn() + Send + Sync> = Box::new(move || {
+            wakeup_wake.notify_one();
+        });
+
+        let handle = NetworkThreadCloseHandle::new_dedicated(signal_close_fn, wakeup_fn, done_rx, thread_handle);
+        (handle, running, wake)
+    }
+
+    /// `signal_close()` + `wakeup()` terminate the dedicated bg loop and
+    /// `await_join()` cleanly reaps the OS thread within a bounded
+    /// timeout (no hang).
+    #[tokio::test]
+    async fn dedicated_close_handle_joins_cleanly() {
+        let (mut handle, running, _wake) = spawn_dedicated_bg();
+
+        handle.signal_close();
+        handle.wakeup();
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle.await_join())
+            .await
+            .expect("await_join must not hang");
+        assert!(result.is_ok(), "clean dedicated-thread join, got {result:?}");
+        assert!(!running.load(Ordering::Acquire), "running flag must be cleared");
+    }
+
+    /// `await_join()` on a `Dedicated` handle is idempotent: a second
+    /// call after a successful join is a no-op `Ok(())`, not a hang.
+    #[tokio::test]
+    async fn dedicated_await_join_is_idempotent() {
+        let (mut handle, _running, _wake) = spawn_dedicated_bg();
+
+        handle.signal_close();
+        handle.wakeup();
+
+        tokio::time::timeout(Duration::from_secs(5), handle.await_join())
+            .await
+            .expect("first await_join must not hang")
+            .expect("first await_join clean");
+
+        // Second call: receiver + thread already taken → immediate Ok.
+        let second = tokio::time::timeout(Duration::from_secs(1), handle.await_join())
+            .await
+            .expect("second await_join must not hang");
+        assert!(second.is_ok(), "idempotent second join, got {second:?}");
+    }
+
+    /// A panic inside the dedicated bg thread is mapped to the SAME
+    /// `KafkaError::illegal_state("Consumer network thread terminated
+    /// with error: ...")` shape as the `Spawned` JoinError path.
+    #[tokio::test]
+    async fn dedicated_thread_panic_maps_to_illegal_state() {
+        let (done_tx, done_rx) = tokio::sync::oneshot::channel::<()>();
+        let thread_handle = std::thread::Builder::new()
+            .name("kafka-consumer-io-test-panic".into())
+            .spawn(move || {
+                // Hold `done_tx` so it is dropped (not sent) on panic —
+                // `await_join` must treat the closed receiver as "loop
+                // exited" and still reap the panicking thread.
+                let _done_tx = done_tx;
+                panic!("boom");
+            })
+            .expect("spawn panicking test io thread");
+
+        let mut handle =
+            NetworkThreadCloseHandle::new_dedicated(Box::new(|| {}), Box::new(|| {}), done_rx, thread_handle);
+
+        let result = tokio::time::timeout(Duration::from_secs(5), handle.await_join())
+            .await
+            .expect("await_join must not hang on panic");
+        match result {
+            Err(KafkaError::IllegalState(msg)) => {
+                assert!(
+                    msg.contains("Consumer network thread terminated with error"),
+                    "unexpected message: {msg}"
+                );
+            },
+            other => panic!("expected IllegalState on thread panic, got {other:?}"),
+        }
     }
 }
