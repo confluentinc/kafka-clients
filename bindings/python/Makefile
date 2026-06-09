@@ -11,6 +11,7 @@ build:
 	pip install -e .
 
 test: build
+	pip install .[dev] || pip install --no-dependencies .[dev]
 	cd $(RUST_PROJECT_ROOT)/bindings/python && python -m pytest test/unit -v
 
 # Build the Python gRPC server image used by the multilanguage
