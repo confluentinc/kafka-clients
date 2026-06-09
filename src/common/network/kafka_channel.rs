@@ -34,10 +34,8 @@ use super::channel_state::State;
 use super::{ChannelState, channel_state};
 use super::{InterestOps, TransportLayer};
 
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 
 /// Minimum interval between re-authentication attempts: 1 second in nanoseconds.
 const MIN_REAUTH_INTERVAL_ONE_SECOND_NANOS: u64 = 1_000_000_000;
@@ -440,12 +438,16 @@ impl KafkaChannel {
         }
     }
 
-    pub(crate) fn transport_readable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        self.transport_layer.readable()
+    /// Poll-style read-readiness pass-through to the underlying transport
+    /// layer. Side-effect-free (registers the waker only); used by the
+    /// selector's single non-allocating readiness future (Phase 23).
+    pub(crate) fn poll_transport_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        self.transport_layer.poll_readable(cx)
     }
 
-    pub(crate) fn transport_writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
-        self.transport_layer.writable()
+    /// Poll-style write-readiness pass-through to the underlying transport layer.
+    pub(crate) fn poll_transport_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        self.transport_layer.poll_writable(cx)
     }
 
     /// Reads data from the transport layer into the current receive buffer.
@@ -879,6 +881,14 @@ mod tests {
 
         fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
+        }
+
+        fn poll_readable(&self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_writable(&self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
         }
 
         fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {

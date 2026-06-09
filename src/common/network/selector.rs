@@ -26,7 +26,8 @@
 //! The `poll()` method:
 //! 1. Iterates all channels, attempts non-blocking I/O (connect/read/write)
 //! 2. If no progress and timeout > 0, waits for I/O readiness on any channel
-//!    via `select_all` + `tokio::sync::Notify` for wakeup
+//!    via a single non-allocating readiness `poll_fn` over all channels
+//!    + `tokio::sync::Notify` for wakeup
 //! 3. Matches Java's sequential iteration over selectedKeys
 //!
 //! # Thread safety
@@ -43,7 +44,6 @@ use super::Selectable;
 use super::selectable::USE_DEFAULT_BUFFER_SIZE;
 use super::{ChannelState, channel_state};
 
-use futures_util::future::select_all;
 use indexmap::IndexMap;
 use rustc_hash::{FxHashMap, FxHashSet};
 use tokio::net::TcpSocket;
@@ -53,10 +53,8 @@ use crate::common::utils::LogContext;
 use crate::{kafka_debug, kafka_error, kafka_trace};
 
 use std::collections::{HashMap, LinkedList};
-use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
-use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -694,43 +692,84 @@ impl Selector {
         self.channels.values().any(|c| c.current_receive_bytes_read() > 0)
     }
 
-    /// Collect readiness futures for channels interested in I/O.
+    /// Returns `true` if any channel is currently interested in read or write
+    /// readiness, using the exact same per-channel interest predicate as
+    /// [`Self::poll_channel_readiness`]. Mirrors Java NIO having at least one
+    /// registered `SelectionKey` with a non-zero interest set.
+    fn has_interested_channel(&self) -> bool {
+        self.channels
+            .iter()
+            .any(|(id, channel)| self.channel_interest(id, channel) != (false, false))
+    }
+
+    /// Computes the read/write interest for a single channel.
     ///
-    /// Channels mid-handshake (TLS or SASL) also register interest so that the
-    /// outer `select_all` wakes the poll loop when handshake bytes arrive or the
-    /// socket becomes writable for outgoing handshake data. Without this, at
-    /// low throughput the handshake response can sit unread in the TCP buffer
-    /// until the connection-setup timeout expires (matching Java NIO, which
-    /// registers OP_READ | OP_WRITE based on SSLEngine / SASL state).
-    fn collect_readiness_futures(&self) -> Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> {
-        let mut futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> = Vec::new();
+    /// Returns `(want_read_or_handshake, want_write)`. This predicate is
+    /// byte-for-byte identical to the former `collect_readiness_futures`
+    /// (Phase 23) — any divergence re-introduces either the busy-spin or the
+    /// join stall.
+    ///
+    /// Channels mid-handshake (TLS or SASL) also register read interest so the
+    /// poll loop wakes when handshake bytes arrive (matching Java NIO, which
+    /// registers OP_READ | OP_WRITE based on SSLEngine / SASL state). Write
+    /// interest is registered only when there is actual outgoing data to push:
+    /// for ready channels a queued send, for handshaking channels unflushed
+    /// ciphertext (`has_pending_writes`). Blanket write-interest for handshaking
+    /// channels would fire immediately whenever the socket buffer is non-full
+    /// (almost always), busy-spinning the loop while a response sits unread in
+    /// the kernel buffer.
+    fn channel_interest(&self, id: &str, channel: &KafkaChannel) -> (bool, bool) {
+        let in_handshake = channel.is_connected() && !channel.ready();
+        let want_read = channel.ready()
+            && (channel.has_bytes_buffered() || !channel.is_muted())
+            && !self.has_completed_receive(id)
+            && !self.explicitly_muted_channels.contains(id);
+        let want_write = (channel.has_send() && channel.ready()) || (in_handshake && channel.has_pending_writes());
+        (want_read || in_handshake, want_write)
+    }
+
+    /// Single non-allocating readiness sweep over all channels, replacing the
+    /// former `Vec<Pin<Box<dyn Future>>>` + `select_all` (Phase 23). Mirrors
+    /// Java NIO's persistent `Selector.select()`: one `poll` registers the
+    /// waker for every interested channel and returns `Ready` as soon as any
+    /// becomes ready.
+    ///
+    /// Side-effect-free (CLAUDE rules `consumer-threading.md` §10): the only
+    /// effect is waker registration via the `poll_transport_*` calls. No bytes
+    /// are consumed and no connection state is mutated, so dropping this future
+    /// on a wakeup / deadline loses nothing.
+    ///
+    /// The interest predicate is computed by [`Self::channel_interest`] and is
+    /// identical to the old `collect_readiness_futures`.
+    fn poll_channel_readiness(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
+        let mut ready = false;
         for (id, channel) in &self.channels {
-            let in_handshake = channel.is_connected() && !channel.ready();
-            let want_read = channel.ready()
-                && (channel.has_bytes_buffered() || !channel.is_muted())
-                && !self.has_completed_receive(id)
-                && !self.explicitly_muted_channels.contains(id);
-            if want_read || in_handshake {
-                futs.push(channel.transport_readable());
+            let (want_read, want_write) = self.channel_interest(id, channel);
+
+            // Decrypted plaintext already buffered: do not wait on the socket
+            // (the existing code sets effective_timeout = 0 when
+            // `data_in_buffers`; this guards the in-loop case — preserve it).
+            if want_read && channel.has_bytes_buffered() {
+                ready = true;
+                continue;
             }
-            // Register write-interest only when there is actual outgoing data
-            // to push to the socket. For ready channels that means a queued
-            // send; for handshaking channels (TLS or SASL) it means the
-            // transport has buffered ciphertext that has not been fully
-            // flushed (e.g. rustls's `wants_write()`).
-            //
-            // Blanket-registering write-interest for all handshaking channels
-            // makes the writable future fire immediately whenever the TCP
-            // socket buffer is non-full, which is almost always — the
-            // outer `select_all` would then return without ever giving the
-            // kernel a chance to deliver readable bytes, busy-spinning the
-            // poll loop while a SASL response sits in the kernel buffer.
-            let want_write = (channel.has_send() && channel.ready()) || (in_handshake && channel.has_pending_writes());
-            if want_write {
-                futs.push(channel.transport_writable());
+
+            // Poll every interested channel (even after one is ready) so the
+            // waker is registered for ALL Pending channels — the task is then
+            // woken when ANY of them becomes ready. Returning `Ready` once any
+            // channel is ready is fine; the next poll re-sweeps.
+            if want_read && channel.poll_transport_readable(cx).is_ready() {
+                ready = true;
+            }
+            if want_write && channel.poll_transport_writable(cx).is_ready() {
+                ready = true;
             }
         }
-        futs
+        if ready {
+            std::task::Poll::Ready(())
+        } else {
+            std::task::Poll::Pending
+        }
     }
 }
 
@@ -971,8 +1010,19 @@ impl Selectable for Selector {
             // Selector.select(timeout) which uses epoll/kqueue.
             match deadline {
                 Some(dl) if tokio::time::Instant::now() < dl => {
-                    let readiness_futs: Vec<Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>> =
-                        self.collect_readiness_futures();
+                    // Whether any channel is interested in readiness right now.
+                    // When none are, fall back to the wakeup-vs-deadline-only
+                    // form (mirrors the former `readiness_futs.is_empty()`
+                    // branch).
+                    let any_interested = self.has_interested_channel();
+
+                    // Single non-allocating readiness future over all channels
+                    // (Phase 23), replacing the former per-channel
+                    // `Vec<Box<dyn Future>>` + `select_all`. It only registers
+                    // wakers (side-effect-free, §10 cancel-safe), so dropping it
+                    // on a wakeup / deadline loses nothing — the non-cancel-safe
+                    // network poll stays in pass-1, outside this `select!`.
+                    let readiness_wait = std::future::poll_fn(|cx| self.poll_channel_readiness(cx));
 
                     // An explicit wakeup (`Selector::wakeup()`) makes the poll
                     // return at this safe boundary, mirroring Java NIO where
@@ -990,7 +1040,7 @@ impl Selectable for Selector {
                     // `Selector.wakeup()` before `select()` makes that `select()`
                     // return at once. The early return is harmless (empty
                     // `responses`); the caller simply loops.
-                    let woke_by_wakeup = if readiness_futs.is_empty() {
+                    let woke_by_wakeup = if !any_interested {
                         tokio::select! {
                             biased;
                             _ = notify.notified() => true,
@@ -1000,7 +1050,7 @@ impl Selectable for Selector {
                         tokio::select! {
                             biased;
                             _ = notify.notified() => true,
-                            _ = select_all(readiness_futs) => false,
+                            _ = readiness_wait => false,
                             _ = tokio::time::sleep_until(dl) => false,
                         }
                     };
@@ -2160,4 +2210,114 @@ mod tests {
     // - testExpireClosedConnectionWithPendingReceives: similar to
     //   testExpireConnectionWithPendingReceives but with server close; the core
     //   behavior is already covered by test_expire_connection_with_pending_receives
+
+    /// Phase 23 — exercises the rewritten non-allocating readiness wait
+    /// (`poll_channel_readiness` driven through the `poll_fn` in `Selector::poll`)
+    /// against three distinct failure modes the rewrite must avoid:
+    ///
+    ///   (a) a channel that becomes readable wakes the parked `poll` (waker
+    ///       registration on the underlying socket works — the loss of which
+    ///       would only un-park on the deadline);
+    ///   (b) an explicit `wakeup()` returns the parked `poll` promptly (§11
+    ///       parity — the `notify.notified()` arm still wins);
+    ///   (c) an idle muted channel does NOT busy-spin: with no interested
+    ///       channel the wait parks to the deadline and returns *on* it, rather
+    ///       than returning `Ready` immediately and spinning the loop.
+    ///
+    /// Each sub-assertion is wrapped in `tokio::time::timeout` so a hung wait
+    /// path fails the test instead of blocking the suite. Uses the real TCP
+    /// loopback `EchoServer` scaffolding the other selector tests use, so it
+    /// drives the production socket-readiness path (no mock transport).
+    #[tokio::test]
+    async fn test_readiness_wait_path() {
+        use std::time::{Duration, Instant};
+
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+
+        // (a) A channel that becomes readable wakes the parked poll.
+        //
+        // Send a request; the echo response is not yet available, so the first
+        // poll parks on read-readiness. When the server echoes back, the
+        // registered waker fires and the poll returns with the response — well
+        // before the (generous) 5s timeout. If the waker were lost, the poll
+        // would only return on its own internal deadline.
+        selector.send(create_send("0", "readiness-wake")).unwrap();
+        let start = Instant::now();
+        let mut got_response = false;
+        // Bound the whole drain in a hard timeout so a hang fails the test.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Long per-poll timeout so the poll genuinely parks on socket
+                // readiness rather than returning on a short deadline; a working
+                // waker un-parks it as soon as the echo arrives.
+                selector.poll(5_000).await.unwrap();
+                if selector.completed_receives().iter().any(|r| r.source() == "0") {
+                    got_response = true;
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("(a) parked poll did not wake on socket readiness within 5s");
+        assert!(got_response, "(a) expected an echoed response from node 0");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "(a) readable channel should wake the parked poll well before the poll deadline"
+        );
+
+        // (b) wakeup() returns the parked poll promptly.
+        //
+        // The channel is now idle (no in-flight send/receive) but still read
+        // interested. Park `poll` on a long (10s) deadline, then fire wakeup()
+        // from another task after a short delay. The `notify.notified()` arm is
+        // the first `biased;` arm, so the poll must return promptly — far short
+        // of the 10s deadline. We assert it returns inside a 2s hard timeout.
+        let notify = selector.wakeup_notify();
+        let waker = tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            notify.notify_one();
+        });
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), selector.poll(10_000))
+            .await
+            .expect("(b) wakeup() did not return the parked poll within 2s")
+            .unwrap();
+        assert!(
+            start.elapsed() < Duration::from_secs(2),
+            "(b) wakeup() should return the parked poll promptly, not on the deadline"
+        );
+        waker.await.unwrap();
+
+        // (c) An idle muted channel does NOT spin.
+        //
+        // Muting the only channel makes `channel_interest` return
+        // (false, false) for it, so `has_interested_channel()` is false and the
+        // wait falls to the wakeup-vs-deadline-only form. With no wakeup and no
+        // readiness, the poll must park until the deadline and return *on* it —
+        // NOT return `Ready` immediately (which would busy-spin the loop). We
+        // assert the elapsed time is close to the requested timeout; a spurious
+        // `Ready` / busy-spin would return in ~0ms.
+        selector.mute("0");
+        let timeout_ms = 200;
+        let start = Instant::now();
+        // Hard cap well above the deadline so a genuine hang still fails.
+        tokio::time::timeout(Duration::from_secs(2), selector.poll(timeout_ms))
+            .await
+            .expect("(c) muted-channel poll hung past its deadline")
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis((timeout_ms as u64 * 8) / 10),
+            "(c) idle muted channel must wait to the deadline, not busy-spin \
+             (elapsed {elapsed:?}, expected >= ~{}ms)",
+            (timeout_ms * 8) / 10
+        );
+        selector.unmute("0");
+
+        // Cleanup.
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
 }

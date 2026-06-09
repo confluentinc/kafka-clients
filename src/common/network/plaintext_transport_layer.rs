@@ -202,6 +202,24 @@ impl TransportLayer for PlaintextTransportLayer {
         })
     }
 
+    fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match &self.stream {
+            Some(stream) => stream.poll_read_ready(cx),
+            None => {
+                std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")))
+            },
+        }
+    }
+
+    fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match &self.stream {
+            Some(stream) => stream.poll_write_ready(cx),
+            None => {
+                std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")))
+            },
+        }
+    }
+
     /// Reads data from this channel into the given buffer.
     ///
     /// Waits for the socket to become readable, then reads available data.

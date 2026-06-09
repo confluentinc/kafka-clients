@@ -95,7 +95,7 @@ impl ops::BitAnd for InterestOps {
 /// into this single trait. I/O methods return boxed futures for object safety (`dyn TransportLayer`).
 ///
 /// Per CLAUDE.md rule 8, all I/O is async using Tokio.
-pub trait TransportLayer: Send {
+pub trait TransportLayer: Send + Sync {
     /// Returns the remote address of the connected peer, if available.
     ///
     /// This replaces Java's `transportLayer.socketChannel().getRemoteAddress()`.
@@ -218,6 +218,21 @@ pub trait TransportLayer: Send {
     /// Takes `&self` (not `&mut self`) so multiple channels can be polled
     /// simultaneously.
     fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>>;
+
+    /// Poll-style read-readiness, mirroring Java NIO's persistent selector
+    /// registration. Side-effect-free: registers the waker on `cx` and returns;
+    /// does NOT consume bytes or mutate connection state, so it is cancel-safe
+    /// to drop (CLAUDE rules `consumer-threading.md` §10).
+    ///
+    /// Used by the [`Selector`](crate::common::network::Selector) poll loop to
+    /// wait on the readiness of every interested channel in a single
+    /// non-allocating future, instead of boxing one `readable()` future per
+    /// channel and `select_all`-ing them (Phase 23).
+    fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>>;
+
+    /// Poll-style write-readiness. Side-effect-free counterpart of
+    /// [`poll_readable`](Self::poll_readable) — see its docs.
+    fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>>;
 
     /// Writes data from multiple buffers to this channel (scatter-gather write).
     ///

@@ -494,6 +494,14 @@ mod tests {
             Box::pin(async { Ok(()) })
         }
 
+        fn poll_readable(&self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
+        fn poll_writable(&self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+
         fn read<'a>(&'a mut self, dst: &'a mut [u8]) -> Pin<Box<dyn Future<Output = io::Result<usize>> + Send + 'a>> {
             let remaining = self.data.len() - self.pos;
             let to_read = remaining.min(dst.len());
@@ -595,6 +603,12 @@ mod tests {
         }
         fn writable(&self) -> Pin<Box<dyn Future<Output = io::Result<()>> + Send + '_>> {
             Box::pin(async { Ok(()) })
+        }
+        fn poll_readable(&self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
+        }
+        fn poll_writable(&self, _cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            std::task::Poll::Ready(Ok(()))
         }
         // Required by the trait; the `supports_try_read` path means `read_from`
         // uses `try_read` instead, but provide a consistent single-chunk impl.

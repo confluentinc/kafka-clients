@@ -382,6 +382,32 @@ impl TransportLayer for SslTransportLayer {
         })
     }
 
+    /// Poll-style read-readiness on the underlying TCP socket. Matches the
+    /// semantics of the async [`readable`](Self::readable) above: readiness is
+    /// always observed on the raw socket (fresh ciphertext), never short-
+    /// circuited on already-buffered plaintext — the selector handles buffered
+    /// plaintext via `has_bytes_buffered()`. `Closed` resolves with
+    /// `NotConnected`.
+    fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match &self.state {
+            SslState::Handshaking(c) | SslState::Ready(c) => c.tcp.poll_read_ready(cx),
+            SslState::Closed => {
+                std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")))
+            },
+        }
+    }
+
+    /// Poll-style write-readiness on the underlying TCP socket, mirroring the
+    /// async [`writable`](Self::writable) above.
+    fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+        match &self.state {
+            SslState::Handshaking(c) | SslState::Ready(c) => c.tcp.poll_write_ready(cx),
+            SslState::Closed => {
+                std::task::Poll::Ready(Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed")))
+            },
+        }
+    }
+
     /// Reads decrypted plaintext from the TLS layer.
     ///
     /// Pulls fresh ciphertext from the TCP socket via `read_tls`, advances the

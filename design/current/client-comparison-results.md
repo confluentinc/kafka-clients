@@ -70,17 +70,43 @@ this cluster (the 8-CKU cluster itself does ~400 MB/s ingress); 400k was the
 
 ---
 
+## Table 2b — Phase 21 confirmation: 20-min run, 200k plaintext (Rust vs librdkafka-C)
+
+Local PLAINTEXT, 12 partitions, **200k** msg/s, latency-tuned, **20 min / 39 intervals
+each** (most stable run we have for these two). Rust = **Phase 21** (dedicated
+single-thread bg runtime). This is the run that isolates the Phase 21 CPU win.
+
+| Client | Throughput | avg | p50 | p90 | p95 | p99 | p99.9 | max | CPU (1 core) | RSS |
+|---|---|---|---|---|---|---|---|---|---|---|
+| **Rust (Phase 21)** | 200,025 | 3.26 | 1 | 2 | 6 | 72 | 301 | **400** | **43.6%** (40–48) | **28 MB** |
+| **librdkafka-C** | 200,030 | 2.32 | 1 | 2 | 5 | **35** | 273 | 548 | 38.2% (36–41) | 34 MB |
+
+latency in ms. **Phase 21 took Rust @200k from ~66.7% → 43.6% CPU** — now only
+**~1.14× librdkafka-C** (38.2%), down from ~1.7×. Memory is now *lower* than C
+(28 vs 34 MB); throughput tied; p50 identical. librdkafka-C keeps the tighter p99
+(35 vs 72), but Rust has the lower max (400 vs 548). Phase 21 closed ~85% of the
+plaintext CPU gap with **zero behavior divergence** (internal execution-strategy
+change only).
+
+---
+
 ## Table 4 — CPU efficiency summary (the headline differentiator)
 
 | Environment | librdkafka-C | Java | Rust | Rust ÷ C |
 |---|---|---|---|---|
-| Local plaintext, 300k (10-min) | **49.7%** | 71.5% | 84.7% | **~1.7×** |
-| Cloud SASL_SSL, 200k | ~40% | — | ~130% | ~3.3× |
-| Cloud SASL_SSL, 300k | ~60% | — | ~140% | ~2.3× |
+| Local plaintext, 300k (10-min, pre-Phase-21) | **49.7%** | 71.5% | 84.7% | ~1.7× |
+| **Local plaintext, 200k (20-min, Phase 21)** | **38.2%** | — | **43.6%** | **~1.14×** |
+| Cloud SASL_SSL, 200k (pre-Phase-21) | ~40% | — | ~130% | ~3.3× |
+| Cloud SASL_SSL, 300k (pre-Phase-21) | ~60% | — | ~140% | ~2.3× |
 
-CPU = % of one core. Ordering (local, all 3): **librdkafka-C < Java < Rust**
-(Rust ~1.2× Java, ~1.7× C; Java ~1.4× C). Java not measured on cloud. The
-local→cloud jump for Rust (1.7×→~2–3×) is the rustls-vs-OpenSSL TLS cost on SSL.
+CPU = % of one core. **Phase 21 (dedicated single-thread bg runtime) is the
+inflection point:** it removed the tokio multi-thread scheduler park/unpark churn
+(~54% of CPU in the profile) that came from running the single high-frequency bg
+task on the caller's work-stealing pool. On local plaintext that drops Rust from
+~1.7× → **~1.14× librdkafka-C** — effectively CPU parity. Cloud rows are still
+pre-Phase-21; re-measuring cloud SASL_SSL with Phase 21 is the next step (expect a
+similar drop, leaving the rustls-vs-OpenSSL TLS cost as the residual). Java not
+measured on cloud.
 
 The TLS amplification (1.7× → ~2–3×) is the rustls vs OpenSSL stream-processing cost
 (see "Why" below).
@@ -96,9 +122,12 @@ The TLS amplification (1.7× → ~2–3×) is the rustls vs OpenSSL stream-proce
    local 3-way (p99 28 ms); Rust beat native-C on the 10-min local run (p99 22 vs 57);
    on cloud SSL native-C had the tighter tail. All within the same band; tails are
    noisy on single runs.
-3. **CPU — the real differentiator.** Native librdkafka-C is the most CPU-frugal:
-   Rust uses **~1.7× (local plaintext)** to **~2–3× (cloud SASL_SSL)**. Java is roughly
-   in Rust's class locally. This is the gap to close for Rust as a librdkafka replacement.
+3. **CPU — the real differentiator, now largely closed locally by Phase 21.** Before
+   Phase 21, Rust used ~1.7× (local plaintext) to ~2–3× (cloud SASL_SSL) the CPU of
+   native librdkafka-C. **Phase 21 (dedicated single-thread bg runtime) brought local
+   plaintext to ~1.14× C (43.6% vs 38.2% @200k, 20-min) — effectively parity, with
+   lower memory.** The remaining gap is the cloud SASL_SSL TLS cost (rustls vs OpenSSL),
+   not yet re-measured with Phase 21.
 4. **Memory.** Rust and librdkafka-C are the same class (~30–50 MB process RSS); Java is
    a GC heap sawtooth (not directly comparable).
 
