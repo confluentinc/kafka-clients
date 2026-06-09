@@ -93,15 +93,21 @@ impl CloseMode {
 /// - Metrics deferred (no-op stubs)
 pub struct Selector {
     /// Active channels indexed by connection ID.
-    channels: HashMap<String, KafkaChannel>,
+    ///
+    /// The connection ID is stored as `Arc<str>` (CLAUDE.md §11: identifiers
+    /// cloned on every poll iteration) so that the per-poll
+    /// `channels.keys().cloned()` (and the equivalent clones into the tracking
+    /// sets below) are refcount bumps rather than heap allocations. Lookups by
+    /// `&str` continue to work because `Arc<str>: Borrow<str>`.
+    channels: HashMap<Arc<str>, KafkaChannel>,
     /// Channels that have been explicitly muted.
-    explicitly_muted_channels: HashSet<String>,
+    explicitly_muted_channels: HashSet<Arc<str>>,
     /// Channels that have data buffered in intermediate buffers.
-    channels_with_buffered_read: HashSet<String>,
+    channels_with_buffered_read: HashSet<Arc<str>>,
     /// Channels that connected immediately (before poll).
-    immediately_connected_keys: HashSet<String>,
+    immediately_connected_keys: HashSet<Arc<str>>,
     /// Channels that are being closed gracefully (pending receives).
-    closing_channels: HashMap<String, KafkaChannel>,
+    closing_channels: HashMap<Arc<str>, KafkaChannel>,
     /// Sends completed during the last poll.
     completed_sends: Vec<NetworkSend>,
     /// Receives completed during the last poll, keyed by channel ID.
@@ -111,7 +117,7 @@ pub struct Selector {
     /// Channels that connected during the last poll.
     connected: Vec<String>,
     /// Channels that failed to send.
-    failed_sends: Vec<String>,
+    failed_sends: Vec<Arc<str>>,
     /// Channel builder.
     channel_builder: Box<dyn ChannelBuilder>,
     /// Maximum receive size.
@@ -201,6 +207,18 @@ impl Selector {
         )
     }
 
+    /// Returns the interned `Arc<str>` key for `id` from the active channels
+    /// map, cloning the existing `Arc` (a refcount bump, no allocation) so the
+    /// tracking sets share one heap allocation per connection id. Falls back to
+    /// allocating a fresh `Arc<str>` only when the channel is not (yet) in the
+    /// map — the same situations where Java would have allocated a `String`.
+    fn intern_id(&self, id: &str) -> Arc<str> {
+        self.channels
+            .get_key_value(id)
+            .map(|(k, _)| Arc::clone(k))
+            .unwrap_or_else(|| Arc::from(id))
+    }
+
     fn ensure_not_registered(&self, id: &str) -> Result<(), String> {
         if self.channels.contains_key(id) {
             return Err(format!("There is already a connection for id {id}"));
@@ -263,9 +281,9 @@ impl Selector {
 
         // Remove closed channels after all their buffered receives have been processed
         // or if a send was requested
-        let closing_ids: Vec<String> = self.closing_channels.keys().cloned().collect();
+        let closing_ids: Vec<Arc<str>> = self.closing_channels.keys().cloned().collect();
         for id in closing_ids {
-            let send_failed = self.failed_sends.iter().position(|s| s == &id).map(|i| {
+            let send_failed = self.failed_sends.iter().position(|s| *s == id).map(|i| {
                 self.failed_sends.remove(i);
             });
             let has_pending = if send_failed.is_some() {
@@ -279,7 +297,8 @@ impl Selector {
         }
 
         for channel_id in &self.failed_sends {
-            self.disconnected.insert(channel_id.clone(), channel_state::FAILED_SEND.clone());
+            self.disconnected
+                .insert(channel_id.to_string(), channel_state::FAILED_SEND.clone());
         }
         self.failed_sends.clear();
         self.made_read_progress_last_poll = false;
@@ -368,7 +387,8 @@ impl Selector {
 
             let channel = self.channels.get(channel_id).unwrap();
             if channel.has_bytes_buffered() && !self.explicitly_muted_channels.contains(channel_id) {
-                self.channels_with_buffered_read.insert(channel_id.to_string());
+                let key = self.intern_id(channel_id);
+                self.channels_with_buffered_read.insert(key);
             }
 
             Ok(())
@@ -402,15 +422,15 @@ impl Selector {
     /// Channels are temporarily removed from the HashMap so each can be
     /// borrowed independently by `join_all`. While one channel's TLS write
     /// awaits TCP readiness, other channels' writes can proceed.
-    async fn poll_channels_write_concurrent(&mut self, channel_ids: &[String], current_time_nanos: u64) {
-        let mut extracted: Vec<(String, KafkaChannel)> = Vec::new();
+    async fn poll_channels_write_concurrent(&mut self, channel_ids: &[Arc<str>], current_time_nanos: u64) {
+        let mut extracted: Vec<(Arc<str>, KafkaChannel)> = Vec::new();
         for id in channel_ids {
             if let Some(channel) = self.channels.get(id)
                 && channel.has_send()
                 && channel.ready()
                 && let Some(channel) = self.channels.remove(id)
             {
-                extracted.push((id.clone(), channel));
+                extracted.push((Arc::clone(id), channel));
             }
         }
 
@@ -539,7 +559,7 @@ impl Selector {
 
         if close_mode == CloseMode::Graceful {
             // Check if there are pending receives
-            self.closing_channels.insert(id.to_string(), channel);
+            self.closing_channels.insert(Arc::from(id), channel);
             let has_pending = self.maybe_read_from_closing_channel(id).await;
             if !has_pending && let Some(channel) = self.closing_channels.remove(id) {
                 self.do_close_async(channel, close_mode.notify_disconnect()).await;
@@ -555,12 +575,12 @@ impl Selector {
 
     async fn do_close_async(&mut self, mut channel: KafkaChannel, notify_disconnect: bool) {
         let id = channel.id().to_string();
-        self.immediately_connected_keys.remove(&id);
-        self.channels_with_buffered_read.remove(&id);
+        self.immediately_connected_keys.remove(id.as_str());
+        self.channels_with_buffered_read.remove(id.as_str());
 
         let _ = channel.close().await;
 
-        self.explicitly_muted_channels.remove(&id);
+        self.explicitly_muted_channels.remove(id.as_str());
         if notify_disconnect {
             self.disconnected.insert(id, channel.state().clone());
         }
@@ -568,14 +588,14 @@ impl Selector {
 
     fn do_close(&mut self, channel: KafkaChannel, notify_disconnect: bool) {
         let id = channel.id().to_string();
-        self.immediately_connected_keys.remove(&id);
-        self.channels_with_buffered_read.remove(&id);
+        self.immediately_connected_keys.remove(id.as_str());
+        self.channels_with_buffered_read.remove(id.as_str());
 
         // Channel is dropped here, which closes the underlying TcpStream
         // The KafkaChannel's close() method is async, but dropping is sufficient
         // for cleanup since Tokio streams close on drop.
 
-        self.explicitly_muted_channels.remove(&id);
+        self.explicitly_muted_channels.remove(id.as_str());
         if notify_disconnect {
             self.disconnected.insert(id, channel.state().clone());
         }
@@ -588,14 +608,14 @@ impl Selector {
 
         let mgr = self.idle_expiry_manager.as_mut().unwrap();
         if let Some((connection_id, _last_active)) = mgr.poll_expired_connection(current_time_nanos)
-            && self.channels.contains_key(&connection_id)
+            && self.channels.contains_key(connection_id.as_str())
         {
             kafka_trace!(
                 self.log_context,
                 "About to close the idle connection from {} due to being idle",
                 connection_id
             );
-            if let Some(channel) = self.channels.get_mut(&connection_id) {
+            if let Some(channel) = self.channels.get_mut(connection_id.as_str()) {
                 channel.set_state(channel_state::EXPIRED.clone());
             }
             // Use graceful close to process any buffered receives before
@@ -622,7 +642,7 @@ impl Selector {
         if let Some(ref mgr) = self.idle_expiry_manager
             && let Some((id, _)) = mgr.lru_connections.first()
         {
-            return self.channels.get(id);
+            return self.channels.get(id.as_str());
         }
         self.channels.values().next()
     }
@@ -729,8 +749,11 @@ impl Selectable for Selector {
             };
 
         // The connection completed immediately (Tokio connect is async but resolves when done)
-        self.immediately_connected_keys.insert(id.to_string());
-        self.channels.insert(id.to_string(), channel);
+        // Intern the connection id once as a single `Arc<str>` shared between the
+        // channels map and the tracking sets (CLAUDE.md §11).
+        let key: Arc<str> = Arc::from(id);
+        self.immediately_connected_keys.insert(Arc::clone(&key));
+        self.channels.insert(key, channel);
 
         if let Some(ref mut mgr) = self.idle_expiry_manager {
             mgr.update(id, nanos_now());
@@ -752,7 +775,7 @@ impl Selectable for Selector {
     }
 
     async fn close(&mut self) {
-        let ids: Vec<String> = self.channels.keys().cloned().collect();
+        let ids: Vec<Arc<str>> = self.channels.keys().cloned().collect();
         for id in ids {
             self.close_channel(&id).await;
         }
@@ -774,21 +797,25 @@ impl Selectable for Selector {
         let connection_id = send.destination_id().to_string();
         self.open_or_closing_channel_or_fail(&connection_id)?;
 
-        if self.closing_channels.contains_key(&connection_id) {
+        if let Some((key, _)) = self.closing_channels.get_key_value(connection_id.as_str()) {
             // Ensure notification via `disconnected`, leave channel in the state
-            // in which closing was triggered
-            self.failed_sends.push(connection_id);
+            // in which closing was triggered. Reuse the interned id (refcount
+            // bump, no allocation).
+            let key = Arc::clone(key);
+            self.failed_sends.push(key);
         } else {
-            let channel = self.channels.get_mut(&connection_id).unwrap();
+            let channel = self.channels.get_mut(connection_id.as_str()).unwrap();
             match channel.set_send(send) {
                 Ok(()) => {},
                 Err(e) => {
                     // Update the state for consistency
                     channel.set_state(channel_state::FAILED_SEND.clone());
-                    self.failed_sends.push(connection_id.clone());
+                    // Error path only (matches Java allocating here); a fresh
+                    // `Arc<str>` is fine since the channel is about to be removed.
+                    self.failed_sends.push(Arc::from(connection_id.as_str()));
 
                     // Remove and close the channel
-                    if let Some(mut ch) = self.channels.remove(&connection_id) {
+                    if let Some(mut ch) = self.channels.remove(connection_id.as_str()) {
                         ch.disconnect();
                         self.connected.retain(|c| c != &connection_id);
                         self.do_close(ch, false);
@@ -850,7 +877,7 @@ impl Selectable for Selector {
         loop {
             // Process channels with buffered data (reads only)
             if data_in_buffers {
-                let buffered_ids: Vec<String> = self.channels_with_buffered_read.drain().collect();
+                let buffered_ids: Vec<Arc<str>> = self.channels_with_buffered_read.drain().collect();
                 for id in &buffered_ids {
                     if self.channels.contains_key(id) {
                         self.poll_channel_reads(id, false, start_select).await;
@@ -860,10 +887,10 @@ impl Selectable for Selector {
             }
 
             // Pass 1: Connect + Read all channels (sequential, fast)
-            let channel_ids: Vec<String> = self.channels.keys().cloned().collect();
+            let channel_ids: Vec<Arc<str>> = self.channels.keys().cloned().collect();
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
-                    let is_immediately = self.immediately_connected_keys.remove(id);
+                    let is_immediately = self.immediately_connected_keys.remove(&**id);
                     self.poll_channel_reads(id, is_immediately, start_select).await;
                 }
             }
@@ -994,13 +1021,17 @@ impl Selectable for Selector {
     }
 
     fn mute(&mut self, id: &str) {
-        if let Some(channel) = self.channels.get_mut(id) {
-            channel.mute();
-            self.explicitly_muted_channels.insert(id.to_string());
+        // Reuse the interned `Arc<str>` key from whichever map owns the channel
+        // (refcount bump, no allocation).
+        if let Some((key, _)) = self.channels.get_key_value(id) {
+            let key = Arc::clone(key);
+            self.channels.get_mut(&*key).unwrap().mute();
+            self.explicitly_muted_channels.insert(key);
             self.channels_with_buffered_read.remove(id);
-        } else if let Some(channel) = self.closing_channels.get_mut(id) {
-            channel.mute();
-            self.explicitly_muted_channels.insert(id.to_string());
+        } else if let Some((key, _)) = self.closing_channels.get_key_value(id) {
+            let key = Arc::clone(key);
+            self.closing_channels.get_mut(&*key).unwrap().mute();
+            self.explicitly_muted_channels.insert(key);
         }
     }
 
@@ -1015,24 +1046,25 @@ impl Selectable for Selector {
 
         if unmuted {
             self.explicitly_muted_channels.remove(id);
-            if let Some(channel) = self.channels.get(id)
+            if let Some((key, channel)) = self.channels.get_key_value(id)
                 && channel.has_bytes_buffered()
             {
-                self.channels_with_buffered_read.insert(id.to_string());
+                let key = Arc::clone(key);
+                self.channels_with_buffered_read.insert(key);
                 self.made_read_progress_last_poll = true;
             }
         }
     }
 
     fn mute_all(&mut self) {
-        let ids: Vec<String> = self.channels.keys().cloned().collect();
+        let ids: Vec<Arc<str>> = self.channels.keys().cloned().collect();
         for id in ids {
             self.mute(&id);
         }
     }
 
     fn unmute_all(&mut self) {
-        let ids: Vec<String> = self.channels.keys().cloned().collect();
+        let ids: Vec<Arc<str>> = self.channels.keys().cloned().collect();
         for id in ids {
             self.unmute(&id);
         }
@@ -1887,12 +1919,12 @@ mod tests {
 
         // Inserting a closing channel should make it lowest priority
         if let Some(channel) = selector.channels.remove("3") {
-            selector.closing_channels.insert("3".to_string(), channel);
+            selector.closing_channels.insert(Arc::from("3"), channel);
         }
         assert_eq!("3", selector.lowest_priority_channel().unwrap().id());
         // Restore channel
         if let Some(channel) = selector.closing_channels.remove("3") {
-            selector.channels.insert("3".to_string(), channel);
+            selector.channels.insert(Arc::from("3"), channel);
         }
 
         for i in 0..conns {
