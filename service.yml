@@ -74,3 +74,29 @@ semaphore:
         options:
           - "False"
           - "True"
+  - name: delete-prs
+    branch: master
+    scheduled: false
+    pipeline_file: .semaphore/delete-prs.yml
+    description: "Delete pr_commit rows and GitHub head branches for an
+      explicit list of PR numbers, scoped to a single rust_branch. Use to
+      drop stale/failed/cancelled PRs without resetting the entire
+      rust_branch queue. PRs whose stored rust_branch does not match
+      RUST_BRANCH are rejected with a hard error and no changes made."
+    parameters:
+      - name: RUST_BRANCH
+        required: true
+        description: "Safety scope: only PRs whose stored rust_branch
+          matches are processed; a mismatch is a hard error with no
+          changes made."
+      - name: PR_NUMBERS
+        required: true
+        description: "Comma-separated PR numbers, no spaces (e.g. \"123,456,789\")."
+      - name: DRY_RUN
+        required: true
+        default_value: "True"
+        description: "\"True\" prints what would be deleted without making
+          any changes; \"False\" executes the deletion."
+        options:
+          - "True"
+          - "False"
