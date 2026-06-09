@@ -21,7 +21,7 @@
 # Stage 1: Build _confluentkafka.so against the prebuilt Rust shared lib
 # and generate the gRPC proto stubs.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS builder
+FROM python:3.14-slim AS builder
 
 RUN apt-get update && \
     apt-get install -y --no-install-recommends gcc libc6-dev && \
@@ -62,7 +62,7 @@ RUN pip install --no-cache-dir grpcio==1.66.* grpcio-tools==1.66.* && \
 # ---------------------------------------------------------------------------
 # Stage 2: Minimal runtime — Python + grpcio + the bundled artifacts.
 # ---------------------------------------------------------------------------
-FROM python:3.11-slim AS runtime
+FROM python:3.14-slim AS runtime
 
 # protobuf is needed by the generated stubs at runtime; grpcio doesn't
 # pull it in transitively.
