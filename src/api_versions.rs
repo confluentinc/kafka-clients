@@ -98,6 +98,30 @@ impl ApiVersions {
         inner.node_api_versions.get(node_id).cloned()
     }
 
+    /// Returns the most recent version usable for the given API in the allowed range,
+    /// computed under the read lock without cloning the node's `NodeApiVersions`.
+    ///
+    /// The outer `Option` is `None` when the node is not known (no version information),
+    /// matching the `is_some()` discrimination used by callers that fall back to the
+    /// latest allowed version. When the node is known, the inner `Result` is the outcome
+    /// of [`NodeApiVersions::latest_usable_version_in_range`].
+    ///
+    /// This avoids the deep clone of `NodeApiVersions` (three `HashMap`s and a `Vec`)
+    /// that [`Self::get`] performs on every request build.
+    pub fn latest_usable_version_in_range(
+        &self,
+        node_id: &str,
+        api_key: &crate::common::protocol::ApiKeys,
+        oldest_allowed_version: i16,
+        latest_allowed_version: i16,
+    ) -> Option<Result<i16, crate::common::KafkaError>> {
+        let inner = self.inner.read().unwrap();
+        inner
+            .node_api_versions
+            .get(node_id)
+            .map(|v| v.latest_usable_version_in_range(api_key, oldest_allowed_version, latest_allowed_version))
+    }
+
     /// Returns the maximum finalized features epoch.
     pub fn max_finalized_features_epoch(&self) -> i64 {
         let inner = self.inner.read().unwrap();

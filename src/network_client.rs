@@ -440,13 +440,16 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             panic!("Attempt to send a request to node {} which is not ready.", node_id);
         }
 
-        let version_info = self.api_versions.get(&node_id);
-        let version = if let Some(ref vi) = version_info {
-            match vi.latest_usable_version_in_range(
-                client_request.api_key(),
-                client_request.request_builder().oldest_allowed_version(),
-                client_request.request_builder().latest_allowed_version(),
-            ) {
+        // Compute the usable version under the read lock without deep-cloning the node's
+        // NodeApiVersions (three HashMaps + a Vec) on every request build (Phase 20 Fix #1).
+        let usable_version = self.api_versions.latest_usable_version_in_range(
+            &node_id,
+            client_request.api_key(),
+            client_request.request_builder().oldest_allowed_version(),
+            client_request.request_builder().latest_allowed_version(),
+        );
+        let version = if let Some(result) = usable_version {
+            match result {
                 Ok(v) => v,
                 Err(_e) => {
                     kafka_debug!(
