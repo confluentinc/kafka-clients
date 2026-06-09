@@ -1012,6 +1012,16 @@ impl Selectable for Selector {
         self.completed_receives.iter().collect()
     }
 
+    fn drain_completed_receives(&mut self) -> Vec<(String, Option<Vec<u8>>)> {
+        // Move every NetworkReceive out of the list and take its payload Vec by
+        // move (no copy — §27 Phase 20 Fix #3). std::mem::take leaves the list
+        // empty so the next poll's clear() is a no-op.
+        std::mem::take(&mut self.completed_receives)
+            .into_iter()
+            .map(NetworkReceive::into_source_and_payload)
+            .collect()
+    }
+
     fn disconnected(&self) -> &HashMap<String, ChannelState> {
         &self.disconnected
     }

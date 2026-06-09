@@ -258,6 +258,16 @@ impl super::selectable::Selectable for MockSelector {
         self.completed_receives.iter().collect()
     }
 
+    fn drain_completed_receives(&mut self) -> Vec<(String, Option<Vec<u8>>)> {
+        // Mirror the Selector: move the receives out and take each payload Vec
+        // by move (§27 Phase 20 Fix #3). Leaves the list empty so the next
+        // poll's clear is a no-op.
+        std::mem::take(&mut self.completed_receives)
+            .into_iter()
+            .map(NetworkReceive::into_source_and_payload)
+            .collect()
+    }
+
     fn disconnected(&self) -> &HashMap<String, ChannelState> {
         &self.disconnected
     }
@@ -276,5 +286,32 @@ impl super::selectable::Selectable for MockSelector {
 
     fn is_channel_ready(&self, id: &str) -> bool {
         self.ready.contains(id)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::common::network::Selectable;
+
+    /// Phase 20 Fix #3: `drain_completed_receives` returns each receive's
+    /// source and payload by move and empties the internal list, so the next
+    /// poll's clear is a no-op (no double-process).
+    #[test]
+    fn test_drain_completed_receives_moves_and_empties() {
+        let mut sel = MockSelector::new();
+        sel.complete_receive(NetworkReceive::with_buffer("node-1", vec![1, 2, 3]));
+        sel.complete_receive(NetworkReceive::with_buffer("node-2", vec![4, 5]));
+        assert_eq!(2, sel.completed_receives().len());
+
+        let drained = sel.drain_completed_receives();
+        assert_eq!(2, drained.len());
+        assert_eq!(("node-1".to_string(), Some(vec![1, 2, 3])), drained[0]);
+        assert_eq!(("node-2".to_string(), Some(vec![4, 5])), drained[1]);
+
+        // The list is now empty — a second drain (or the next poll's clear)
+        // yields nothing, so the response is not double-processed.
+        assert!(sel.completed_receives().is_empty());
+        assert!(sel.drain_completed_receives().is_empty());
     }
 }

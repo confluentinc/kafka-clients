@@ -36,7 +36,6 @@ use rand::SeedableRng;
 use rand::rngs::StdRng;
 
 use crate::common::network::NetworkSend;
-use crate::common::network::Receive;
 use crate::common::network::Selectable;
 use crate::common::network::{ChannelState, channel_state};
 use crate::common::protocol::{ApiKeys, Errors};
@@ -612,14 +611,11 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
 
     /// Handle any completed receives and update the response list.
     async fn handle_completed_receives(&mut self, responses: &mut Vec<ClientResponse>, now: i64) {
-        // Collect owned copies so we release the borrow on self.selector
-        // before calling &mut self methods.
-        let receives: Vec<(String, Option<Vec<u8>>)> = self
-            .selector
-            .completed_receives()
-            .iter()
-            .map(|r| (Receive::source(*r).to_string(), r.payload().map(|p| p.to_vec())))
-            .collect();
+        // Drain the completed receives BY MOVE so the payload Vec<u8> is taken
+        // out of the selector without copying (§27 Phase 20 Fix #3), and the
+        // borrow on self.selector is released before calling &mut self methods.
+        // The list is now empty, so the next poll's clear() is a no-op.
+        let receives: Vec<(String, Option<Vec<u8>>)> = self.selector.drain_completed_receives();
 
         for (source, payload) in receives {
             let mut req = self.in_flight_requests.complete_next(&source);

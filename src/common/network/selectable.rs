@@ -117,6 +117,19 @@ pub trait Selectable: Send {
     /// The collection of receives that completed on the last `poll()` call.
     fn completed_receives(&self) -> Vec<&NetworkReceive>;
 
+    /// Drains the receives that completed on the last `poll()` call, returning
+    /// each receive's source id and payload buffer **by move** — the payload
+    /// `Vec<u8>` is taken out of the selector without copying (§27 receive-path
+    /// zero-copy, Phase 20 Fix #3).
+    ///
+    /// After this call the internal `completed_receives` list is empty, so the
+    /// next `poll()`'s clear is a no-op. Callers must therefore drain exactly
+    /// once per poll cycle (the network client does so in
+    /// `handle_completed_receives`). Unlike [`Self::completed_receives`], which
+    /// borrows and forces a `to_vec()` copy of each payload, this avoids the
+    /// per-fetch payload copy entirely.
+    fn drain_completed_receives(&mut self) -> Vec<(String, Option<Vec<u8>>)>;
+
     /// The connections that finished disconnecting on the last `poll()` call.
     /// Channel state indicates the local channel state at the time of disconnection.
     fn disconnected(&self) -> &HashMap<String, ChannelState>;

@@ -119,6 +119,16 @@ impl NetworkReceive {
         self.buffer.as_deref()
     }
 
+    /// Consumes the receive, returning its source id and payload buffer by
+    /// **move** — the payload `Vec<u8>` is taken out without copying (§27
+    /// receive-path zero-copy, Phase 20 Fix #3). Used by
+    /// `Selectable::drain_completed_receives` so the network client can parse
+    /// the response straight from the moved buffer instead of `to_vec()`-ing
+    /// it out of the selector.
+    pub fn into_source_and_payload(self) -> (String, Option<Vec<u8>>) {
+        (self.source, self.buffer)
+    }
+
     /// Returns the number of bytes read so far (both size header and payload).
     pub fn bytes_read(&self) -> usize {
         if self.buffer.is_none() {
@@ -878,5 +888,25 @@ mod tests {
         );
         let err = result.unwrap_err();
         assert_eq!(io::ErrorKind::UnexpectedEof, err.kind());
+    }
+
+    /// Phase 20 Fix #3: `into_source_and_payload` moves the source id and
+    /// payload buffer out of the receive without copying the bytes.
+    #[test]
+    fn test_into_source_and_payload_moves_buffer() {
+        let payload: Vec<u8> = (0..16u8).collect();
+        let receive = NetworkReceive::with_buffer("node-3", payload.clone());
+        let (source, buffer) = receive.into_source_and_payload();
+        assert_eq!("node-3", source);
+        assert_eq!(Some(payload), buffer);
+    }
+
+    /// An unallocated receive yields its source and `None` payload.
+    #[test]
+    fn test_into_source_and_payload_no_buffer() {
+        let receive = NetworkReceive::with_source("node-9");
+        let (source, buffer) = receive.into_source_and_payload();
+        assert_eq!("node-9", source);
+        assert!(buffer.is_none());
     }
 }
