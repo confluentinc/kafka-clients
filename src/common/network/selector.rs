@@ -369,31 +369,53 @@ impl Selector {
         let pre_connected = self.connected.len();
 
         let result: io::Result<()> = async {
-            let channel = self.channels.get_mut(channel_id).unwrap();
-            if is_immediately_connected || !channel.is_connected() {
-                if channel.finish_connect().await? {
-                    self.connected.push(channel_id.to_string());
-                    kafka_debug!(self.log_context, "Connected to node {}", channel_id);
-                } else {
-                    return Ok(());
+            // Resolve the channel handle ONCE for the connect / prepare / ready /
+            // reauthentication sequence, capturing the resulting selector-level
+            // bookkeeping as locals so the `&mut self.channels` borrow is released
+            // before we touch the other fields. This previously re-looked-up the
+            // channel by id 4 separate times per channel per poll — pure overhead
+            // on the steady-state hot path (Phase 22 follow-up: lookup-once).
+            let mut connect_logged = false;
+            // Number of times to append `channel_id` to `self.connected`
+            // (finish_connect transition, and/or the post-handshake ready
+            // transition — order preserved relative to the original code).
+            let mut push_connected: u8 = 0;
+            // Assigned once below (the early `return` path never reads it).
+            let reauth_receive: Option<NetworkReceive>;
+            {
+                let channel = self.channels.get_mut(channel_id).unwrap();
+                if is_immediately_connected || !channel.is_connected() {
+                    if channel.finish_connect().await? {
+                        push_connected += 1;
+                        connect_logged = true;
+                    } else {
+                        return Ok(());
+                    }
                 }
+
+                let was_ready = channel.ready();
+                if channel.is_connected() && !channel.ready() {
+                    channel.prepare().await?;
+                }
+
+                // Signal the post-handshake (TLS/SASL) ready transition so poll()
+                // exits and handle_initiate_api_version_requests fires without
+                // waiting for an external event.
+                if !was_ready && channel.ready() {
+                    push_connected += 1;
+                }
+
+                reauth_receive = channel.poll_response_received_during_reauthentication();
             }
 
-            let channel = self.channels.get_mut(channel_id).unwrap();
-            let was_ready = channel.ready();
-            if channel.is_connected() && !channel.ready() {
-                channel.prepare().await?;
-            }
-
-            let channel = self.channels.get_mut(channel_id).unwrap();
-            // Signal the post-handshake (TLS/SASL) ready transition so poll() exits and
-            // handle_initiate_api_version_requests fires without waiting for an external event.
-            if !was_ready && channel.ready() {
+            // Apply the captured bookkeeping now that the channel borrow is gone.
+            for _ in 0..push_connected {
                 self.connected.push(channel_id.to_string());
             }
-
-            let channel = self.channels.get_mut(channel_id).unwrap();
-            if let Some(receive) = channel.poll_response_received_during_reauthentication() {
+            if connect_logged {
+                kafka_debug!(self.log_context, "Connected to node {}", channel_id);
+            }
+            if let Some(receive) = reauth_receive {
                 self.add_to_completed_receives(receive);
             }
 
