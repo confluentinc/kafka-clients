@@ -69,7 +69,7 @@ blocks:
         - name: AK_REPO_PATH
           value: ./kafka
       jobs:
-        - name: sweep-or-per-pr
+        - name: "Sweep phase or PR planning or implementation (optional) followed by `make verify`"
           commands:
             - |
               set -e
