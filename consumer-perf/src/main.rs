@@ -135,6 +135,63 @@ impl LatencyHistogram {
     }
 }
 
+/// Records-per-poll distribution over non-empty polls. Each `record(n)` logs the
+/// number of records one `poll()` returned. Surfaces mean / min / p50 / p99 / max.
+/// Bucketed 0..=MAX_RPP (max.poll.records is bounded, so this is exact for the
+/// configured caps in these experiments).
+struct RecordsPerPoll {
+    buckets: Vec<u64>,
+    count: u64,
+    sum: u128,
+    min: u64,
+    max: u64,
+}
+
+impl RecordsPerPoll {
+    const MAX_RPP: usize = 100_000;
+
+    fn new() -> Self {
+        Self { buckets: vec![0; Self::MAX_RPP + 1], count: 0, sum: 0, min: u64::MAX, max: 0 }
+    }
+
+    fn record(&mut self, n: u64) {
+        let idx = (n as usize).min(Self::MAX_RPP);
+        self.buckets[idx] += 1;
+        self.count += 1;
+        self.sum += n as u128;
+        self.min = self.min.min(n);
+        self.max = self.max.max(n);
+    }
+
+    fn min(&self) -> u64 {
+        if self.count == 0 { 0 } else { self.min }
+    }
+    fn max(&self) -> u64 {
+        self.max
+    }
+    fn mean(&self) -> f64 {
+        if self.count == 0 {
+            0.0
+        } else {
+            self.sum as f64 / self.count as f64
+        }
+    }
+    fn percentile(&self, pct: f64) -> u64 {
+        if self.count == 0 {
+            return 0;
+        }
+        let target = (pct / 100.0 * self.count as f64).ceil() as u64;
+        let mut cumulative = 0u64;
+        for (i, &c) in self.buckets.iter().enumerate() {
+            cumulative += c;
+            if cumulative >= target {
+                return i as u64;
+            }
+        }
+        Self::MAX_RPP as u64
+    }
+}
+
 /// Samples this process's CPU usage (percent of a single core; may exceed 100%
 /// on multi-core work) and resident set size, between successive calls.
 struct ResourceSampler {
@@ -207,6 +264,16 @@ struct Args {
     retention_ms: i64,
     /// Override the producer's `--num-records` (else derived from throughput×duration).
     num_records: Option<u64>,
+    /// Fetch-config overrides injected into the consumer via
+    /// `ConsumerConfig::from_properties`. `None` => use the client default.
+    fetch_min_bytes: Option<i64>,
+    fetch_max_wait_ms: Option<i64>,
+    max_partition_fetch_bytes: Option<i64>,
+    fetch_max_bytes: Option<i64>,
+    max_poll_records: Option<i64>,
+    /// Kafka client properties file (e.g. SASL_SSL creds for Confluent Cloud).
+    /// Merged into the consumer props AND passed to the producer via `--producer.config`.
+    client_config: Option<String>,
 }
 
 impl Args {
@@ -234,6 +301,12 @@ impl Args {
             peak: false,
             retention_ms: 3_600_000,
             num_records: None,
+            fetch_min_bytes: None,
+            fetch_max_wait_ms: None,
+            max_partition_fetch_bytes: None,
+            fetch_max_bytes: None,
+            max_poll_records: None,
+            client_config: None,
         };
         let mut it = std::env::args().skip(1);
         while let Some(arg) = it.next() {
@@ -259,6 +332,14 @@ impl Args {
                 "--peak" => a.peak = true,
                 "--retention-ms" => a.retention_ms = next()?.parse().map_err(|e| format!("{e}"))?,
                 "--num-records" => a.num_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
+                "--fetch-min-bytes" => a.fetch_min_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
+                "--fetch-max-wait-ms" => a.fetch_max_wait_ms = Some(next()?.parse().map_err(|e| format!("{e}"))?),
+                "--max-partition-fetch-bytes" => {
+                    a.max_partition_fetch_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?)
+                },
+                "--fetch-max-bytes" => a.fetch_max_bytes = Some(next()?.parse().map_err(|e| format!("{e}"))?),
+                "--max-poll-records" => a.max_poll_records = Some(next()?.parse().map_err(|e| format!("{e}"))?),
+                "--client-config" => a.client_config = Some(next()?),
                 "--help" | "-h" => return Err("help".to_string()),
                 other => return Err(format!("unknown argument: {other}")),
             }
@@ -291,6 +372,11 @@ fn print_usage() {
                --peak                    Run the producer unbounded (--throughput -1); saturates the consumer\n  \
                --retention-ms <MS>       Topic retention.ms at create time (default: 3600000; lower bounds disk under peak)\n  \
                --num-records <N>         Override producer --num-records (default: throughput×(duration+30))\n  \
+               --fetch-min-bytes <N>     fetch.min.bytes (client default 1)\n  \
+               --fetch-max-wait-ms <N>   fetch.max.wait.ms (client default 500)\n  \
+               --max-partition-fetch-bytes <N>  max.partition.fetch.bytes (client default 1MB)\n  \
+               --fetch-max-bytes <N>     fetch.max.bytes (client default 50MB)\n  \
+               --max-poll-records <N>    max.poll.records (client default 500)\n  \
            -v, --verbose                 Log every poll (record counts / heartbeats)\n"
     );
 }
@@ -356,20 +442,30 @@ fn spawn_producer(args: &Args) -> std::io::Result<Child> {
         args.message_size,
         total_records
     );
+    let mut pargs: Vec<String> = vec![
+        "--topic".into(),
+        args.topic.clone(),
+        "--num-records".into(),
+        total_records.to_string(),
+        "--record-size".into(),
+        args.message_size.to_string(),
+        "--throughput".into(),
+        throughput_arg.clone(),
+    ];
+    if let Some(ref path) = args.client_config {
+        // SASL_SSL (or other) client properties for the producer; bootstrap +
+        // security come from the file. acks via --producer-props.
+        pargs.push("--producer.config".into());
+        pargs.push(path.clone());
+        pargs.push("--producer-props".into());
+        pargs.push("acks=1".into());
+    } else {
+        pargs.push("--producer-props".into());
+        pargs.push(format!("bootstrap.servers={}", args.bootstrap));
+        pargs.push("acks=1".into());
+    }
     Command::new(&bin)
-        .args([
-            "--topic",
-            &args.topic,
-            "--num-records",
-            &total_records.to_string(),
-            "--record-size",
-            &args.message_size.to_string(),
-            "--throughput",
-            &throughput_arg,
-            "--producer-props",
-            &format!("bootstrap.servers={}", args.bootstrap),
-            "acks=1",
-        ])
+        .args(&pargs)
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
@@ -431,7 +527,51 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // Auto-commit on: this is a throughput/latency probe, commit cost is part
     // of a realistic consumer; offsets don't matter (fresh group each run).
     println!("Offset reset: {}", args.offset_reset);
-    let config = ConsumerConfig::new(vec![args.bootstrap.clone()])
+    // Build the base config from a properties map seeded with bootstrap + any
+    // fetch-knob overrides (so the fetcher actually picks them up), THEN chain
+    // the existing builders. When no fetch flags are passed the map carries only
+    // bootstrap and the client defaults apply — identical to prior behavior.
+    let mut props: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    props.insert("bootstrap.servers".to_string(), args.bootstrap.clone());
+    if let Some(v) = args.fetch_min_bytes {
+        props.insert("fetch.min.bytes".to_string(), v.to_string());
+    }
+    if let Some(v) = args.fetch_max_wait_ms {
+        props.insert("fetch.max.wait.ms".to_string(), v.to_string());
+    }
+    if let Some(v) = args.max_partition_fetch_bytes {
+        props.insert("max.partition.fetch.bytes".to_string(), v.to_string());
+    }
+    if let Some(v) = args.fetch_max_bytes {
+        props.insert("fetch.max.bytes".to_string(), v.to_string());
+    }
+    if let Some(v) = args.max_poll_records {
+        props.insert("max.poll.records".to_string(), v.to_string());
+    }
+    if let Some(ref path) = args.client_config {
+        let content = std::fs::read_to_string(path)
+            .map_err(|e| format!("failed to read --client-config {path}: {e}"))?;
+        for line in content.lines() {
+            let l = line.trim();
+            if l.is_empty() || l.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = l.split_once('=') {
+                props.insert(k.trim().to_string(), v.trim().to_string());
+            }
+        }
+        println!("Client config: loaded {path} (SASL/SSL etc.)");
+    }
+    println!(
+        "Fetch config: fetch.min.bytes={} fetch.max.wait.ms={} max.partition.fetch.bytes={} \
+         fetch.max.bytes={} max.poll.records={}",
+        args.fetch_min_bytes.map_or("default".to_string(), |v| v.to_string()),
+        args.fetch_max_wait_ms.map_or("default".to_string(), |v| v.to_string()),
+        args.max_partition_fetch_bytes.map_or("default".to_string(), |v| v.to_string()),
+        args.fetch_max_bytes.map_or("default".to_string(), |v| v.to_string()),
+        args.max_poll_records.map_or("default".to_string(), |v| v.to_string()),
+    );
+    let config = ConsumerConfig::from_properties(&props)?
         .with_client_id("consumer-perf")
         .with_group_id(args.group_id.clone())
         .with_group_protocol("consumer")
@@ -549,6 +689,11 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
     // in the client, not this loop.
     let mut poll_nanos: u128 = 0;
     let mut proc_nanos: u128 = 0;
+    // Records-per-poll distribution over NON-EMPTY polls during the measurement
+    // window only (mirrors the C harness's batch_calls/batch_records, which count
+    // only batches that returned records, post-warmup). Each entry is the record
+    // count of one poll() that returned >=1 record.
+    let mut rpp = RecordsPerPoll::new();
 
     'outer: loop {
         let p0 = Instant::now();
@@ -576,6 +721,12 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         // Tight per-record loop: count, skip warmup, record e2e latency. No key/
         // value decode or assignment lookups — the LenDeserializer already ran in
         // the client, and bytes are derived from the fixed record size at summary.
+        // Track the records-per-poll distribution over the measurement window
+        // (post-warmup, non-empty polls only).
+        if warmup_complete {
+            rpp.record(records.count() as u64);
+        }
+
         let q0 = Instant::now();
         let poll_now = now_millis();
         for record in &records {
@@ -649,6 +800,16 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         100.0 * proc_nanos as f64 / busy,
         overall.count as f64 / polls.max(1) as f64,
     );
+    println!(
+        "Records/poll distribution (non-empty polls, post-warmup): \
+         n={} min={} mean={:.1} p50={} p99={} max={}",
+        rpp.count,
+        rpp.min(),
+        rpp.mean(),
+        rpp.percentile(50.0),
+        rpp.percentile(99.0),
+        rpp.max(),
+    );
 
     write_summary(
         &mut jsonl,
@@ -657,6 +818,7 @@ async fn run(args: Args) -> Result<(), Box<dyn std::error::Error>> {
         total_bytes,
         measured_duration_s,
         args.warmup_messages,
+        &rpp,
     )?;
 
     println!("\nResults written to: {}", run_dir.display());
@@ -694,6 +856,7 @@ fn emit_interval(
     jsonl.flush()
 }
 
+#[allow(clippy::too_many_arguments)]
 fn write_summary(
     jsonl: &mut File,
     run_dir: &Path,
@@ -701,6 +864,7 @@ fn write_summary(
     total_bytes: u128,
     duration_s: f64,
     warmup: u64,
+    rpp: &RecordsPerPoll,
 ) -> std::io::Result<()> {
     let measured = hist.count;
     let throughput_msg_s = if duration_s > 0.0 {
@@ -731,12 +895,20 @@ fn write_summary(
     );
     println!("{}", "=".repeat(70));
 
+    let rpp_n = rpp.count;
+    let rpp_min = rpp.min();
+    let rpp_mean = rpp.mean();
+    let rpp_p50 = rpp.percentile(50.0);
+    let rpp_p99 = rpp.percentile(99.0);
+    let rpp_max = rpp.max();
     writeln!(
         jsonl,
         "{{\"type\":\"summary\",\"client\":\"rust\",\"messages\":{measured},\"duration_s\":{duration_s:.2},\
          \"throughput_msg_s\":{throughput_msg_s:.2},\"throughput_mib_s\":{throughput_mb_s:.2},\
          \"lat_min_ms\":{min},\"lat_avg_ms\":{avg:.2},\"lat_p50_ms\":{p50},\"lat_p90_ms\":{p90},\
-         \"lat_p95_ms\":{p95},\"lat_p99_ms\":{p99},\"lat_p999_ms\":{p999},\"lat_max_ms\":{max}}}"
+         \"lat_p95_ms\":{p95},\"lat_p99_ms\":{p99},\"lat_p999_ms\":{p999},\"lat_max_ms\":{max},\
+         \"rpp_n\":{rpp_n},\"rpp_min\":{rpp_min},\"rpp_mean\":{rpp_mean:.2},\"rpp_p50\":{rpp_p50},\
+         \"rpp_p99\":{rpp_p99},\"rpp_max\":{rpp_max}}}"
     )?;
     jsonl.flush()?;
 

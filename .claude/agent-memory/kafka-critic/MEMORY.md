@@ -49,3 +49,5 @@
 - [M8 Phase 16 zero-copy](review_m8_phase16_zerocopy.md) — header-count-as-loop-bound panics/silently-drops vs iter_records validation; stale-justification comment trap; move-not-clone take audit; batch-level tests go stale when caller drops API
 - [Data path copy analysis](review_data_path_copies.md) — Only 2 actual memcpy in zero-copy path: record write_all into batch, writev to kernel
 - [Logging infrastructure patterns](review_logging_patterns.md) — LogContext wiring gaps: NetworkClient, CCS, SaslChannelBuilder get empty context
+- [PR#10 merge audit](review_merge_pr10.md) — selector poke-not-cancel, &mut serialize Records take(), Arc<Cluster> + retain_with_id; wakeup_notify default footgun
+- [M8 Phase 17 security-wiring](review_m8_phase17.md) — clean; consumer mirrors producer client_channel_builder; security_protocol() uppercase is Java-faithful; producer send-shadowing API smell (from PR#10)
