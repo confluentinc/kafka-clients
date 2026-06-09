@@ -429,10 +429,10 @@ impl FetchRequestManager {
     /// equivalent work here on the bg-task to keep all
     /// `&mut AbstractFetch` access serialized through `poll(now)` and
     /// to preserve §27 zero-copy (the response body bytes were moved
-    /// by ownership through the channel — `handle_fetch_success`
-    /// iterates the borrowed `&FetchResponse` and builds
-    /// `CompletedFetch` entries that hold their own `Arc<Bytes>`
-    /// slices without copying).
+    /// by ownership through the channel — `handle_fetch_success` takes
+    /// the owned `FetchResponse` by value and `into_response_data` MOVES
+    /// each `PartitionData` into the `CompletedFetch`, so the record
+    /// buffer is never copied between the wire and the fetch buffer).
     ///
     /// **§16 audit**: between draining the channel and calling
     /// `handle_fetch_success/_failure`, the only `Mutex` acquired is
@@ -455,10 +455,13 @@ impl FetchRequestManager {
                         self.abstract_fetch
                             .handle_close_fetch_session_success(&fetch_target, &request_data);
                     } else {
+                        // Phase 20 Fix #2b: pass the owned FetchResponse by value so
+                        // its PartitionData record bytes MOVE into the CompletedFetch
+                        // (no payload copy on the receive path — §27).
                         self.abstract_fetch.handle_fetch_success(
                             &fetch_target,
                             &request_data,
-                            &response,
+                            response,
                             request_version,
                         );
                     }

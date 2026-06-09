@@ -300,7 +300,7 @@ impl AbstractFetch {
         &mut self,
         fetch_target: &Node,
         request_data: &FetchSessionRequestData,
-        response: &FetchResponse,
+        response: FetchResponse,
         request_version: i16,
     ) {
         let session_id = request_data.metadata.session_id();
@@ -315,7 +315,7 @@ impl AbstractFetch {
             },
         };
 
-        if !handler.handle_response(response, request_version) {
+        if !handler.handle_response(&response, request_version) {
             // FETCH_SESSION_TOPIC_ID_ERROR drives a metadata refresh per
             // Java's `metadata.requestUpdate(false)`. Phase 7b's
             // FetchRequestManager owns the metadata-update trigger; we
@@ -324,7 +324,12 @@ impl AbstractFetch {
             return;
         }
 
-        let response_data = response.response_data(handler.session_topic_names(), request_version);
+        // Phase 20 Fix #2b: MOVE each PartitionData (and its owned record
+        // bytes) out of the response rather than cloning it — §27 zero-copy
+        // receive contract. `into_response_data` consumes the response, so the
+        // record buffer is never copied between the wire-decoded response and
+        // the CompletedFetch.
+        let response_data = response.into_response_data(handler.session_topic_names(), request_version);
         let mut needs_wakeup = true;
 
         for (partition, partition_data) in response_data {
@@ -357,10 +362,13 @@ impl AbstractFetch {
                 self.fetch_config.isolation_level, fetch_offset, partition
             );
 
+            // `partition` is the owned loop key; move it into the
+            // CompletedFetch (its topic is an Arc<str>, so even the prior
+            // clone was an Arc bump, not a String copy — §27 topic-name rule).
             let cf = CompletedFetch::new_full(
                 self.subscriptions.clone(),
                 self.decompression_buffer_supplier.clone(),
-                partition.clone(),
+                partition,
                 partition_data,
                 fetch_offset,
             );
@@ -947,5 +955,242 @@ mod tests {
         let af = make_abstract_fetch();
         let result = af.compute_buffered_nodes(&HashSet::new(), 0);
         assert!(result.is_empty());
+    }
+
+    // ── Phase 20 Fix #2b: handle_fetch_success moves records, no copy ───────
+
+    use crate::common::compress::Compression;
+    use crate::common::record::{MemoryRecords, SimpleRecord, TimestampType};
+    use crate::common::requests::fetch_metadata::INVALID_SESSION_ID;
+    use crate::common::serialization::Deserializer;
+    use crate::consumer::internals::deserializers::Deserializers;
+    use crate::consumer::internals::fetch_collector::{FetchCollector, SystemFetchCollectorTime};
+    use crate::fetch_response_data::{FetchResponseData, FetchableTopicResponse, PartitionData as RespPartitionData};
+
+    /// Minimal UTF-8 string deserializer for this test module.
+    struct StringDeserializer;
+    impl Deserializer<String> for StringDeserializer {
+        fn deserialize(&self, _topic: &str, data: &[u8]) -> Result<String, crate::common::KafkaError> {
+            Ok(String::from_utf8_lossy(data).into_owned())
+        }
+    }
+
+    fn encode_records(starting_offset: i64, count: i32) -> Vec<u8> {
+        let records: Vec<SimpleRecord> = (0..count)
+            .map(|i| SimpleRecord::new(0, Some(b"key".to_vec()), Some(format!("value-{i}").into_bytes()), vec![]))
+            .collect();
+        let mr = MemoryRecords::with_records_at_offset(
+            2,
+            starting_offset,
+            Compression::none(),
+            TimestampType::CreateTime,
+            &records,
+        );
+        mr.buffer().to_vec()
+    }
+
+    /// `handle_fetch_success` MOVES each `PartitionData` (and its owned
+    /// record bytes) into the `CompletedFetch` — no clone/copy of the payload
+    /// (§27). This drives a full fetch end-to-end: build a session for a
+    /// partition, hand it a response carrying a real record batch by value,
+    /// and verify the records survive the move (count, offsets, values).
+    #[test]
+    fn test_handle_fetch_success_moves_records_into_completed_fetch() {
+        const COUNT: i32 = 10;
+        let subs = make_subscriptions();
+        let metadata = make_consumer_metadata(subs.clone());
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+        let mut af = AbstractFetch::new(
+            metadata.clone(),
+            subs.clone(),
+            make_fetch_config(),
+            fetch_buffer.clone(),
+            Arc::new(BufferSupplier::create()),
+        );
+
+        let partition = TopicPartition::new("topic-a", 0);
+        // Assign + seek so the subscription has a fetch position for the
+        // CompletedFetch's offset bookkeeping.
+        {
+            let mut guard = subs.lock().expect("lock");
+            let mut set: HashSet<TopicPartition> = HashSet::new();
+            set.insert(partition.clone());
+            guard.assign_from_user(set).unwrap();
+            guard.seek(&partition, 0).unwrap();
+        }
+
+        let node = Node::new(1, "host".to_string(), 9092);
+        // Build a full-fetch session containing exactly this partition.
+        let handler = af.session_handler_or_create(node.id());
+        let mut builder = handler.new_builder();
+        builder.add(
+            partition.clone(),
+            PartitionData::new(
+                crate::common::Uuid::ZERO_UUID,
+                0,
+                INVALID_LOG_START_OFFSET,
+                1024 * 1024,
+                Some(0),
+            ),
+        );
+        let request_data = handler.build_request(builder);
+        af.nodes_with_pending_fetch_requests.insert(node.id());
+
+        // Build the matching v12 fetch response carrying a real record batch.
+        let records_bytes = encode_records(0, COUNT);
+        let records_len = records_bytes.len();
+        let mut rpd = RespPartitionData::new();
+        rpd.set_partition_index(0);
+        rpd.set_high_watermark(COUNT as i64);
+        rpd.set_records(Some(records_bytes));
+        let mut topic_resp = FetchableTopicResponse::new();
+        topic_resp.set_topic("topic-a".to_string());
+        topic_resp.set_partitions(vec![rpd]);
+        let mut data = FetchResponseData::new();
+        data.set_session_id(INVALID_SESSION_ID);
+        data.set_responses(vec![topic_resp]);
+        let response = FetchResponse::new(data);
+        assert_eq!(
+            records_len,
+            response.data().responses[0].partitions[0].records.as_ref().unwrap().len()
+        );
+
+        // Pass the FetchResponse BY VALUE — its records must move (no copy).
+        af.handle_fetch_success(&node, &request_data, response, 12);
+
+        // A CompletedFetch landed in the buffer; the pending request cleared.
+        assert!(af.has_completed_fetches(), "expected a CompletedFetch in the buffer");
+        assert!(!af.pending_fetch_node_ids().contains(&node.id()));
+
+        // Decode through FetchCollector to prove the moved bytes are intact:
+        // the records decode to the expected count, offsets, and values.
+        let deserializers: Arc<Deserializers<String, String>> =
+            Arc::new(Deserializers::new(Box::new(StringDeserializer), Box::new(StringDeserializer)));
+        let collector = FetchCollector::new(
+            metadata,
+            subs,
+            make_fetch_config(),
+            deserializers,
+            Arc::new(SystemFetchCollectorTime),
+        );
+        let fetch = collector.collect_fetch(&fetch_buffer).unwrap();
+        assert_eq!(COUNT as usize, fetch.count(), "all moved records must survive the move");
+
+        let recs = fetch.records_for_partition(&partition);
+        assert_eq!(COUNT as usize, recs.len());
+        for (i, rec) in recs.iter().enumerate() {
+            assert_eq!(i as i64, rec.offset(), "offset ordering preserved");
+            assert_eq!(format!("value-{i}"), *rec.value().expect("value present"));
+        }
+    }
+
+    /// §27 allocation-budget guard for the `handle_fetch_success` path
+    /// (Phase 20 Fix #2b): the per-partition record payload must be MOVED
+    /// into the `CompletedFetch`, never cloned. The pre-Phase-20 code did
+    /// `response.response_data(...)` (clone of every `PartitionData`,
+    /// including its `records: Option<Vec<u8>>`) plus `partition.clone()`.
+    ///
+    /// We hand `handle_fetch_success` a response with many partitions, each
+    /// carrying a large (16 KiB) record buffer, and assert the allocation
+    /// count over the move call stays within a tight per-partition budget. A
+    /// re-introduced per-partition `Vec<u8>` payload clone would add one heap
+    /// allocation per partition (the cloned records buffer), pushing the
+    /// count past the budget. Crucially the budget does NOT scale with the
+    /// payload SIZE — proving the bytes are not copied.
+    #[test]
+    fn test_handle_fetch_success_does_not_copy_payload() {
+        const PARTITIONS: i32 = 8;
+        const PAYLOAD_BYTES: usize = 16 * 1024;
+        let subs = make_subscriptions();
+        let metadata = make_consumer_metadata(subs.clone());
+        let fetch_buffer = Arc::new(FetchBuffer::new());
+        let mut af = AbstractFetch::new(
+            metadata,
+            subs.clone(),
+            make_fetch_config(),
+            fetch_buffer,
+            Arc::new(BufferSupplier::create()),
+        );
+
+        let node = Node::new(1, "host".to_string(), 9092);
+        let handler = af.session_handler_or_create(node.id());
+        let mut builder = handler.new_builder();
+        {
+            let mut guard = subs.lock().expect("lock");
+            let mut set: HashSet<TopicPartition> = HashSet::new();
+            for p in 0..PARTITIONS {
+                set.insert(TopicPartition::new("topic-a", p));
+            }
+            guard.assign_from_user(set).unwrap();
+            for p in 0..PARTITIONS {
+                guard.seek(&TopicPartition::new("topic-a", p), 0).unwrap();
+            }
+        }
+        for p in 0..PARTITIONS {
+            builder.add(
+                TopicPartition::new("topic-a", p),
+                PartitionData::new(
+                    crate::common::Uuid::ZERO_UUID,
+                    0,
+                    INVALID_LOG_START_OFFSET,
+                    1024 * 1024,
+                    Some(0),
+                ),
+            );
+        }
+        let request_data = handler.build_request(builder);
+        af.nodes_with_pending_fetch_requests.insert(node.id());
+
+        // One topic with PARTITIONS partitions, each carrying a real batch
+        // padded to PAYLOAD_BYTES so any payload copy would be unmistakable.
+        let mut partitions = Vec::new();
+        for p in 0..PARTITIONS {
+            let mut bytes = encode_records(0, 4);
+            bytes.resize(PAYLOAD_BYTES.max(bytes.len()), 0);
+            let mut rpd = RespPartitionData::new();
+            rpd.set_partition_index(p);
+            rpd.set_high_watermark(4);
+            rpd.set_records(Some(bytes));
+            partitions.push(rpd);
+        }
+        let mut topic_resp = FetchableTopicResponse::new();
+        topic_resp.set_topic("topic-a".to_string());
+        topic_resp.set_partitions(partitions);
+        let mut data = FetchResponseData::new();
+        data.set_session_id(INVALID_SESSION_ID);
+        data.set_responses(vec![topic_resp]);
+        let response = FetchResponse::new(data);
+
+        // Budget: a small constant per partition for CompletedFetch
+        // construction bookkeeping. The move path measures ~55 allocs for 8
+        // partitions; a re-added per-partition payload Vec<u8> clone (the
+        // pre-Phase-20 `response_data` instead of `into_response_data`) adds
+        // exactly one heap allocation per partition (the cloned records
+        // buffer) — measured at ~64 for 8 partitions. The budget is set tight
+        // enough that the clone breaks it but the move passes, and crucially
+        // does NOT scale with the payload SIZE (proving no byte copy).
+        const PER_PARTITION_BUDGET: usize = 7;
+        const OVERHEAD_BUDGET: usize = 2;
+
+        let alloc_count;
+        {
+            let _guard = crate::test_alloc_tracker::AllocTrackingGuard::new();
+            crate::test_alloc_tracker::AllocTrackingGuard::reset();
+            af.handle_fetch_success(&node, &request_data, response, 12);
+            alloc_count = crate::test_alloc_tracker::AllocTrackingGuard::count();
+        }
+
+        let max_allowed = OVERHEAD_BUDGET + PER_PARTITION_BUDGET * (PARTITIONS as usize);
+        assert!(
+            alloc_count <= max_allowed,
+            "handle_fetch_success payload-copy regression: {alloc_count} allocs for {PARTITIONS} partitions \
+             (budget {max_allowed}). A per-partition records Vec<u8> clone (response_data instead of \
+             into_response_data) would exceed this (consumer-threading.md §27)."
+        );
+        assert!(af.has_completed_fetches(), "expected CompletedFetch entries in the buffer");
+        eprintln!(
+            "§27 handle_fetch_success budget: {alloc_count} allocs for {PARTITIONS} partitions \
+             of {PAYLOAD_BYTES}-byte payloads (max allowed {max_allowed})"
+        );
     }
 }

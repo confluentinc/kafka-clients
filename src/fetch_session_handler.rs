@@ -199,8 +199,12 @@ impl FetchSessionHandler {
             return false;
         }
 
-        let response_data = response.response_data(&self.session_topic_names, version);
-        let topic_partitions: HashSet<TopicPartition> = response_data.keys().cloned().collect();
+        // Phase 20 Fix #2a: collect only the partition keys, without cloning the
+        // PartitionData payloads (the full response_data() clone was discarded after
+        // extracting its keys). Equivalent to the old
+        // `response.response_data(...).keys().cloned().collect()`.
+        let topic_partitions: HashSet<TopicPartition> =
+            response.response_partition_keys(&self.session_topic_names, version);
         let topic_ids = response.topic_ids();
 
         if self.next_metadata.is_full() {

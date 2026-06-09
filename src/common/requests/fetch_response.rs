@@ -147,6 +147,72 @@ impl FetchResponse {
         out
     }
 
+    /// Returns the set of [`TopicPartition`] keys present in this response,
+    /// resolving topic names exactly as [`Self::response_data`] does but
+    /// **without** cloning any [`PartitionData`] (and therefore without
+    /// copying the per-partition record bytes).
+    ///
+    /// This is the keys-only equivalent of
+    /// `self.response_data(topic_names, version).keys().cloned().collect()`,
+    /// used by `FetchSessionHandler::handle_response`, which only needs the
+    /// key set to validate the session and discards the payload (Phase 20
+    /// Fix #2a). The version-gated topic-name resolution and the silent skip
+    /// of unresolved v13+ topic IDs match `response_data` exactly.
+    pub fn response_partition_keys(
+        &self,
+        topic_names: &HashMap<Uuid, String>,
+        version: i16,
+    ) -> HashSet<TopicPartition> {
+        let mut out: HashSet<TopicPartition> = HashSet::new();
+        for topic_response in &self.data.responses {
+            let name = if version < 13 {
+                topic_response.topic.clone()
+            } else {
+                match topic_names.get(&topic_response.topic_id) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                }
+            };
+            for partition in &topic_response.partitions {
+                out.insert(TopicPartition::new(name.clone(), partition.partition_index));
+            }
+        }
+        out
+    }
+
+    /// Consumes the response and returns the per-partition response data
+    /// keyed by [`TopicPartition`], **moving** each [`PartitionData`] (and
+    /// its owned record bytes) out of the response — no clone, no copy of
+    /// the record buffer (§27 zero-copy receive contract, Phase 20 Fix #2b).
+    ///
+    /// Topic-name resolution and the silent skip of unresolved v13+ topic
+    /// IDs match [`Self::response_data`] exactly; only the ownership differs
+    /// (move vs clone).
+    ///
+    /// Translates the consuming variant of
+    /// `FetchResponse.responseData(Map<Uuid, String>, short)`.
+    pub fn into_response_data(
+        self,
+        topic_names: &HashMap<Uuid, String>,
+        version: i16,
+    ) -> IndexMap<TopicPartition, PartitionData> {
+        let mut out: IndexMap<TopicPartition, PartitionData> = IndexMap::new();
+        for topic_response in self.data.responses {
+            let name = if version < 13 {
+                topic_response.topic
+            } else {
+                match topic_names.get(&topic_response.topic_id) {
+                    Some(n) => n.clone(),
+                    None => continue,
+                }
+            };
+            for partition in topic_response.partitions {
+                out.insert(TopicPartition::new(name.clone(), partition.partition_index), partition);
+            }
+        }
+        out
+    }
+
     /// Returns the set of non-zero topic IDs reported in this response.
     ///
     /// The implementation does not gate on the protocol version — it
@@ -430,6 +496,99 @@ mod tests {
         assert_eq!(Errors::OffsetOutOfRange.code(), pd.error_code);
         assert_eq!(INVALID_HIGH_WATERMARK, pd.high_watermark);
         assert_eq!(Some(0), pd.records.as_ref().map(|v| v.len()));
+    }
+
+    fn partition_with_records(index: i32, offset: i64, records: Vec<u8>) -> PartitionData {
+        let mut p = PartitionData::new();
+        p.set_partition_index(index);
+        p.set_high_watermark(offset + 1);
+        p.set_records(Some(records));
+        p
+    }
+
+    /// Phase 20 Fix #2a: `response_partition_keys` must produce exactly the
+    /// same key set as the old `response_data(...).keys().cloned().collect()`,
+    /// for both v12 (topic in body) and v13+ (topic resolved via topic_names),
+    /// including the silent skip of unresolved v13+ topic IDs.
+    #[test]
+    fn test_response_partition_keys_matches_response_data_keys_v12() {
+        let mut t = FetchableTopicResponse::new();
+        t.set_topic("topic-a".to_string());
+        t.set_partitions(vec![
+            partition_with_records(0, 0, vec![1, 2, 3]),
+            partition_with_records(1, 10, vec![4, 5, 6, 7]),
+        ]);
+        let mut data = FetchResponseData::new();
+        data.set_responses(vec![t]);
+        let r = FetchResponse::new(data);
+
+        let expected: HashSet<TopicPartition> = r.response_data(&HashMap::new(), 12).keys().cloned().collect();
+        let keys = r.response_partition_keys(&HashMap::new(), 12);
+        assert_eq!(expected, keys);
+        assert_eq!(2, keys.len());
+        assert!(keys.contains(&TopicPartition::new("topic-a", 0)));
+        assert!(keys.contains(&TopicPartition::new("topic-a", 1)));
+    }
+
+    #[test]
+    fn test_response_partition_keys_matches_response_data_keys_v13_with_skip() {
+        let resolved = Uuid::new(1, 1);
+        let unresolved = Uuid::new(9, 9);
+        let mut t_ok = FetchableTopicResponse::new();
+        t_ok.set_topic_id(resolved);
+        t_ok.set_partitions(vec![partition_with_records(0, 0, vec![1, 2, 3])]);
+        let mut t_skip = FetchableTopicResponse::new();
+        t_skip.set_topic_id(unresolved);
+        t_skip.set_partitions(vec![partition_with_records(0, 0, vec![8, 8])]);
+        let mut data = FetchResponseData::new();
+        data.set_responses(vec![t_ok, t_skip]);
+        let r = FetchResponse::new(data);
+
+        let mut topic_names = HashMap::new();
+        topic_names.insert(resolved, "resolved".to_string());
+
+        let expected: HashSet<TopicPartition> = r.response_data(&topic_names, 13).keys().cloned().collect();
+        let keys = r.response_partition_keys(&topic_names, 13);
+        assert_eq!(expected, keys);
+        assert_eq!(1, keys.len(), "unresolved v13+ topic must be skipped, same as response_data");
+        assert!(keys.contains(&TopicPartition::new("resolved", 0)));
+    }
+
+    /// Phase 20 Fix #2b: `into_response_data` MOVES each `PartitionData` out
+    /// of the response (consuming it). The resulting map must carry exactly
+    /// the same keys and record bytes as the cloning `response_data`, proving
+    /// no record is dropped, duplicated, or corrupted by the move.
+    #[test]
+    fn test_into_response_data_moves_records_intact() {
+        let recs0 = vec![10u8, 11, 12];
+        let recs1 = vec![20u8, 21, 22, 23, 24];
+        let mut t = FetchableTopicResponse::new();
+        t.set_topic("topic-a".to_string());
+        t.set_partitions(vec![
+            partition_with_records(0, 100, recs0.clone()),
+            partition_with_records(1, 200, recs1.clone()),
+        ]);
+        let mut data = FetchResponseData::new();
+        data.set_responses(vec![t]);
+        let r = FetchResponse::new(data);
+
+        // Reference (cloning) map to compare against.
+        let cloned = r.response_data(&HashMap::new(), 12);
+        // Consuming map (moves the PartitionData payloads out).
+        let moved = r.into_response_data(&HashMap::new(), 12);
+
+        assert_eq!(cloned.len(), moved.len());
+        // Same keys, same order (IndexMap preserves insertion order).
+        let cloned_keys: Vec<&TopicPartition> = cloned.keys().collect();
+        let moved_keys: Vec<&TopicPartition> = moved.keys().collect();
+        assert_eq!(cloned_keys, moved_keys);
+
+        let p0 = &moved[&TopicPartition::new("topic-a", 0)];
+        let p1 = &moved[&TopicPartition::new("topic-a", 1)];
+        assert_eq!(recs0.as_slice(), records_or_fail(p0));
+        assert_eq!(recs1.as_slice(), records_or_fail(p1));
+        assert_eq!(101, p0.high_watermark);
+        assert_eq!(201, p1.high_watermark);
     }
 
     #[test]
