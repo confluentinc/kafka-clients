@@ -55,7 +55,6 @@ if TYPE_CHECKING:
 
 LOCK_ARTIFACT_NAME = "translation_agent.db.lock"
 LOCK_LOCAL_PATH = os.path.join(tempfile.gettempdir(), LOCK_ARTIFACT_NAME)
-DB_ARTIFACT_NAME_DEFAULT = "translation_agent.db"
 
 
 log = logging.getLogger(__name__)
@@ -161,12 +160,15 @@ def release_lock() -> None:
         )
 
 
-def pull_db(
-    db_path: str, *,
-    name: str = DB_ARTIFACT_NAME_DEFAULT,
-    allow_missing: bool = False,
-) -> None:
+def pull_db(db_path: str, *, allow_missing: bool = False) -> None:
     """Pull the DB artifact into the directory containing `db_path`.
+
+    The remote artifact name is the basename of `db_path` (e.g.
+    `--db-path /tmp/ta.db` pulls the `ta.db` artifact), so the artifact
+    name follows whatever local file the operator chose, and the pulled
+    file lands at `db_path` (`<dir>/<basename>`) -- exactly where the
+    tool later opens it. `push_db` uses the same basename, so push and
+    pull always agree.
 
     Default behavior is **strict**: any pull failure (artifact missing,
     network error, server down) raises so the orchestrator never
@@ -185,6 +187,7 @@ def pull_db(
     state with our outdated view. Operator must `rm` the local file
     to signal explicit intent to bootstrap fresh.
     """
+    name = os.path.basename(db_path)
     dest_dir = str(Path(db_path).parent or ".")
     try:
         semaphore.pull_project_artifact(name, dest_dir)
@@ -201,13 +204,18 @@ def pull_db(
         raise
 
 
-def push_db(db_path: str, *, name: str = DB_ARTIFACT_NAME_DEFAULT) -> None:
+def push_db(db_path: str) -> None:
     """Push the DB at `db_path` to the artifact store with --force.
+
+    The remote artifact name is the basename of `db_path`, mirroring
+    `pull_db`, so push and pull always agree on the artifact name for a
+    given `--db-path`.
 
     Reuses `semaphore.push_project_artifact` (which already passes
     `--force`). Always overwrites: the orchestrator is the sole writer
     while holding the lock, so there's no version to preserve.
     """
+    name = os.path.basename(db_path)
     semaphore.push_project_artifact(name, db_path)
 
 

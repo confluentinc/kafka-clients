@@ -12,7 +12,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import subprocess
+import time
 from io import StringIO
+
+import pytest
 
 from translation_agent import streaming
 
@@ -67,3 +71,38 @@ def test_run_with_prefix_handles_empty_output():
     assert captured == ""
     # No prefix when there's nothing to flush.
     assert sink.getvalue() == ""
+
+
+def test_run_with_prefix_times_out_on_silent_hang():
+    """A child that produces NO output and never exits must still hit the
+    deadline. Iterating proc.stdout directly would block forever here; the
+    reader-task + queue design lets the wall-clock timeout fire."""
+    sink = StringIO()
+    start = time.monotonic()
+    with pytest.raises(subprocess.TimeoutExpired):
+        streaming.run_with_prefix(
+            # Sleeps well past the timeout while emitting nothing.
+            ["sh", "-c", "sleep 30"],
+            pr_number=7,
+            timeout=0.5,
+            out_stream=sink,
+        )
+    elapsed = time.monotonic() - start
+    # We timed out promptly rather than waiting for the 30s sleep.
+    assert elapsed < 5
+
+
+def test_run_with_prefix_times_out_after_partial_output():
+    """Output already produced is flushed, then the deadline fires while
+    the child keeps running silently."""
+    sink = StringIO()
+    with pytest.raises(subprocess.TimeoutExpired) as ei:
+        streaming.run_with_prefix(
+            ["sh", "-c", "echo early; sleep 30"],
+            pr_number=8,
+            timeout=0.5,
+            out_stream=sink,
+        )
+    # The captured output up to the hang is preserved on the exception.
+    assert "early" in (ei.value.output or "")
+    assert "early" in sink.getvalue()

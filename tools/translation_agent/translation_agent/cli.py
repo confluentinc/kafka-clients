@@ -119,11 +119,6 @@ def _build_parser() -> argparse.ArgumentParser:
         "--no-artifact-push", action="store_true",
         help="Skip the Semaphore artifact push at the end of the run.",
     )
-    parser.add_argument(
-        "--artifact-name", default="translation_agent.db",
-        help="Semaphore project-artifact name for the sqlite DB "
-             "(default: %(default)s).",
-    )
 
     # Mode flags. Mutually exclusive so we can keep the spec wording literal:
     #   default       sweep mode

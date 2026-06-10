@@ -160,7 +160,9 @@ context manager that:
    when the artifact already exists; that failure means another runner
    holds the lock. Retry every 60 s, up to 10 attempts (10 minutes).
 2. **Pulls the latest DB** (`artifact pull project translation_agent.db`).
-   First-run absence is tolerated.
+   First-run absence is tolerated. The artifact name is the basename of
+   `--db-path` (so it's `translation_agent.db` by default); push and pull
+   use the same basename, and the pulled file lands at `--db-path`.
 3. **Opens a fresh sqlite connection**, yields it to the caller, closes.
 4. **Pushes the modified DB** if the session was opened as `write=True`
    AND the with-block exited cleanly. On exception the push is *skipped*

@@ -21,13 +21,21 @@ stderr-pipe full buffer (we'd never drain it). The merged stream is both
 streamed live and captured for downstream parsing.
 """
 
+import queue
 import subprocess
 import sys
+import threading
+import time
 from typing import List, Optional, TextIO, Tuple
 
 
 FLUSH_EVERY = 100
 PREFIX_TEMPLATE = ">>>>> From agent #{pr_number}"
+
+# Sentinel pushed onto the line queue by the reader task when stdout reaches
+# EOF (the child closed its output). Distinguishes "stream ended" from "no
+# line arrived within the poll window" without a separate flag.
+_EOF = object()
 
 
 def run_with_prefix(
@@ -43,7 +51,16 @@ def run_with_prefix(
     FLUSH_EVERY lines, each batch preceded by the prefix line. The full
     captured output is also returned so callers can parse it.
 
-    Returns (returncode, captured_output).
+    `timeout` (seconds) is a wall-clock deadline on the whole run. It is
+    enforced even when the child produces no output: reading happens on a
+    dedicated task and the main loop waits on a queue with the remaining
+    budget, so a hung `r2` that stops emitting newlines (but never exits)
+    still raises `subprocess.TimeoutExpired` instead of blocking forever.
+    Iterating `proc.stdout` directly cannot do this -- it blocks until the
+    child closes the stream.
+
+    Returns (returncode, captured_output). Raises subprocess.TimeoutExpired
+    (after killing the child) when the deadline elapses.
     """
     if out_stream is None:
         out_stream = sys.stdout
@@ -68,17 +85,65 @@ def run_with_prefix(
         buffer.clear()
 
     assert proc.stdout is not None
+
+    # Drain stdout on a dedicated task so the main loop can honour the
+    # deadline regardless of whether the child is producing output.
+    line_q: "queue.Queue" = queue.Queue()
+
+    def reader() -> None:
+        try:
+            for line in proc.stdout:
+                line_q.put(line)
+        finally:
+            line_q.put(_EOF)
+
+    reader_task = threading.Thread(target=reader, daemon=True)
+    reader_task.start()
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+
+    def kill_and_drain() -> None:
+        proc.kill()
+        proc.wait()
+        # Best-effort join only: a grandchild that inherited the stdout pipe
+        # (e.g. `sh -c "sleep 30"` keeps the write end open after sh dies)
+        # would otherwise block the reader on EOF indefinitely. The reader is
+        # a daemon task, so it's fine to abandon it -- it dies with the
+        # interpreter and we've already captured everything that arrived.
+        reader_task.join(timeout=1.0)
+        flush_buffer()
+
     try:
-        for line in proc.stdout:
-            captured.append(line)
-            buffer.append(line)
+        while True:
+            if deadline is None:
+                remaining = None
+            else:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    kill_and_drain()
+                    raise subprocess.TimeoutExpired(
+                        cmd, timeout, output="".join(captured),
+                    )
+            try:
+                item = line_q.get(timeout=remaining)
+            except queue.Empty:
+                kill_and_drain()
+                raise subprocess.TimeoutExpired(
+                    cmd, timeout, output="".join(captured),
+                )
+            if item is _EOF:
+                break
+            captured.append(item)
+            buffer.append(item)
             if len(buffer) >= FLUSH_EVERY:
                 flush_buffer()
         flush_buffer()
-        rc = proc.wait(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        proc.wait()
-        flush_buffer()
+        rc = proc.wait()
+    except BaseException:
+        # Never leak the child on any unexpected error path.
+        if proc.poll() is None:
+            proc.kill()
+            proc.wait()
         raise
+    reader_task.join()
     return rc, "".join(captured)

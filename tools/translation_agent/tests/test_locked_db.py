@@ -243,6 +243,24 @@ def test_push_db_invokes_force_push():
     )
 
 
+def test_pull_db_derives_artifact_name_from_db_path_basename():
+    """With a non-default --db-path, the artifact name follows the
+    local file's basename and the pull lands at db_path (<dir>/<basename>)."""
+    with patch.object(
+        locked_db.semaphore, "pull_project_artifact",
+    ) as mpull:
+        locked_db.pull_db("/tmp/state/ta_local.db")
+    mpull.assert_called_once_with("ta_local.db", "/tmp/state")
+
+
+def test_push_db_derives_artifact_name_from_db_path_basename():
+    with patch.object(
+        locked_db.semaphore, "push_project_artifact",
+    ) as mpush:
+        locked_db.push_db("/tmp/state/ta_local.db")
+    mpush.assert_called_once_with("ta_local.db", "/tmp/state/ta_local.db")
+
+
 # ---------- session ----------
 
 

@@ -306,9 +306,10 @@ def test_seed_pushes_artifact(tmp_path):
                   db_path=db_path)
     assert rc == 0
     assert mpush.call_count >= 1
-    # Each push uses the canonical artifact name + db_path tuple.
+    # Each push uses the artifact name derived from the db_path basename
+    # (here "t.db") + db_path tuple.
     for call in mpush.call_args_list:
-        assert call.args == ("translation_agent.db", db_path)
+        assert call.args == ("t.db", db_path)
 
 
 def test_no_artifact_push_skips(tmp_path):

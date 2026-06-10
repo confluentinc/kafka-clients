@@ -71,6 +71,15 @@ def _run_artifact(argv: list) -> None:
 def push_project_artifact(name: str, file_path: str) -> None:
     """Push file_path to the Semaphore project-level artifact `name`.
 
+    Passes `--destination name` so the remote artifact is always stored
+    under `name`, decoupled from the local file's basename. This keeps
+    push/pull symmetric: `pull_project_artifact` reads the artifact by
+    `name`, so the upload MUST land under exactly that name. Without the
+    explicit destination the CLI derives the remote name from
+    `file_path`'s basename, so a `--db-path` pointing at a
+    differently-named local file would upload under the wrong name and
+    the subsequent pull would 404.
+
     Raises FileNotFoundError if the `artifact` binary is not on PATH; raises
     subprocess.CalledProcessError on non-zero exit (with the CLI's
     stderr surfaced via _run_artifact's ERROR log).
@@ -79,7 +88,10 @@ def push_project_artifact(name: str, file_path: str) -> None:
         raise FileNotFoundError(ARTIFACT_NOT_INSTALLED_MSG)
     log.info("Pushing %s to Semaphore project artifact %r", file_path, name)
     _run_artifact(
-        [ARTIFACT_BINARY, "push", "project", file_path, "--force"],
+        [
+            ARTIFACT_BINARY, "push", "project", file_path,
+            "--destination", name, "--force",
+        ],
     )
 
 
