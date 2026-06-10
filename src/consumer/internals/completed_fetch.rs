@@ -72,10 +72,11 @@
 
 #![allow(dead_code)]
 
-use std::collections::{BinaryHeap, HashSet};
+use std::collections::BinaryHeap;
 use std::sync::{Arc, Mutex};
 
 use log::{debug, error};
+use rustc_hash::FxHashSet;
 
 use crate::common::IsolationLevel;
 use crate::common::KafkaError;
@@ -168,7 +169,11 @@ pub(crate) struct CompletedFetch {
     cursor: Option<BatchCursor>,
 
     /// Per-batch READ_COMMITTED state.
-    aborted_producer_ids: HashSet<i64>,
+    ///
+    /// FxHash (non-cryptographic) keyed by the internal producer id (`i64`);
+    /// checked per record on the abort path. The keys are not
+    /// attacker-controlled, so SipHash buys nothing here (Phase 25).
+    aborted_producer_ids: FxHashSet<i64>,
     aborted_transactions: BinaryHeap<AbortedTxnByFirstOffset>,
 
     /// Cached deserialization exception for retry semantics. Java
@@ -263,7 +268,7 @@ impl CompletedFetch {
             subscriptions: Some(subscriptions),
             decompression_buffer_supplier: Some(decompression_buffer_supplier),
             cursor: None,
-            aborted_producer_ids: HashSet::new(),
+            aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
             cached_record_exception: None,
             corrupt_last_record: false,
@@ -288,7 +293,7 @@ impl CompletedFetch {
             subscriptions: None,
             decompression_buffer_supplier: None,
             cursor: None,
-            aborted_producer_ids: HashSet::new(),
+            aborted_producer_ids: FxHashSet::default(),
             aborted_transactions,
             cached_record_exception: None,
             corrupt_last_record: false,

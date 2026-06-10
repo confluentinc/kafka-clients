@@ -19,6 +19,7 @@
 use std::collections::HashMap;
 
 use indexmap::IndexMap;
+use rustc_hash::FxBuildHasher;
 
 use crate::common::TopicPartition;
 
@@ -44,14 +45,18 @@ use crate::common::TopicPartition;
 // once `SubscriptionState` references this type.
 #[allow(dead_code)]
 pub(crate) struct PartitionStates<S> {
-    map: IndexMap<TopicPartition, S>,
+    // FxHash (non-cryptographic) keyed by `TopicPartition`, which is internal
+    // and not attacker-controlled. `IndexMap` preserves insertion order
+    // independent of the hasher, so the Java `LinkedHashMap`-equivalent
+    // ordering is unaffected — this is a per-lookup CPU win only (Phase 25).
+    map: IndexMap<TopicPartition, S, FxBuildHasher>,
 }
 
 #[allow(dead_code)]
 impl<S> PartitionStates<S> {
     /// Create an empty container.
     pub(crate) fn new() -> Self {
-        Self { map: IndexMap::new() }
+        Self { map: IndexMap::with_hasher(FxBuildHasher) }
     }
 
     /// Replace the contents with the given entries, batched by topic.

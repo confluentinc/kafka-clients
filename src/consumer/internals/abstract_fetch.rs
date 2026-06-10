@@ -59,6 +59,7 @@ use std::sync::{Arc, Mutex};
 
 use indexmap::IndexMap;
 use log::{debug, trace};
+use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 
 use crate::common::Node;
 use crate::common::TopicPartition;
@@ -105,12 +106,17 @@ pub(crate) struct AbstractFetch {
     /// only from the consumer's single network thread; the Rust port
     /// preserves single-task access (Phase 7b's `FetchRequestManager`
     /// owns this struct on the bg task) so a plain HashSet is enough.
-    pub(crate) nodes_with_pending_fetch_requests: HashSet<i32>,
+    pub(crate) nodes_with_pending_fetch_requests: FxHashSet<i32>,
     /// Whether `close` has been called.
     pub(crate) closed: bool,
 
     /// Per-node fetch session state.
-    session_handlers: HashMap<i32, FetchSessionHandler>,
+    ///
+    /// FxHash (non-cryptographic) keyed by the internal broker node id
+    /// (`i32`); looked up per fetch in `prepare_fetch_requests`. The keys are
+    /// not attacker-controlled, so SipHash's DoS resistance buys nothing while
+    /// its per-lookup cost shows on the per-fetch path (Phase 25).
+    session_handlers: FxHashMap<i32, FetchSessionHandler>,
 }
 
 impl AbstractFetch {
@@ -143,9 +149,9 @@ impl AbstractFetch {
             fetch_config,
             fetch_buffer,
             decompression_buffer_supplier,
-            nodes_with_pending_fetch_requests: HashSet::new(),
+            nodes_with_pending_fetch_requests: FxHashSet::default(),
             closed: false,
-            session_handlers: HashMap::new(),
+            session_handlers: FxHashMap::default(),
         }
     }
 
@@ -524,12 +530,15 @@ impl AbstractFetch {
 
         // Compute the set of nodes for which we have buffered data —
         // skip these so we don't evict the broker's fetch session cache.
-        let buffered_nodes: HashSet<i32> = self.compute_buffered_nodes(&buffered, current_time_ms);
+        let buffered_nodes: FxHashSet<i32> = self.compute_buffered_nodes(&buffered, current_time_ms);
 
         // For each unbuffered partition, find the target node and add the
-        // partition to that node's session-handler builder.
-        let mut node_targets: HashMap<i32, Node> = HashMap::new();
-        let mut fetchable_partitions_by_node: HashMap<i32, IndexMap<TopicPartition, PartitionData>> = HashMap::new();
+        // partition to that node's session-handler builder. These per-fetch
+        // temporaries are keyed by internal node id / `TopicPartition`, so
+        // they use FxHash (Phase 25) — rebuilt every fetch, never returned.
+        let mut node_targets: FxHashMap<i32, Node> = FxHashMap::default();
+        let mut fetchable_partitions_by_node: FxHashMap<i32, IndexMap<TopicPartition, PartitionData, FxBuildHasher>> =
+            FxHashMap::default();
 
         for partition in unbuffered {
             // Get position. Java's `positionForPartition` throws
@@ -707,8 +716,8 @@ impl AbstractFetch {
     /// Java's `Set<Integer> bufferedNodes(Set<TopicPartition>, long)`.
     /// Java does not pass `isUnavailable` here either — callers check
     /// availability at the outer prepare-step.
-    fn compute_buffered_nodes(&self, buffered: &HashSet<TopicPartition>, current_time_ms: i64) -> HashSet<i32> {
-        let mut ids: HashSet<i32> = HashSet::new();
+    fn compute_buffered_nodes(&self, buffered: &HashSet<TopicPartition>, current_time_ms: i64) -> FxHashSet<i32> {
+        let mut ids: FxHashSet<i32> = FxHashSet::default();
         let cluster = self.metadata.metadata_arc().fetch();
         for partition in buffered {
             let is_fetchable = {
@@ -734,7 +743,7 @@ impl AbstractFetch {
 
     /// Drains the pending-fetch set for testing visibility.
     #[cfg(test)]
-    pub(crate) fn pending_fetch_node_ids(&self) -> HashSet<i32> {
+    pub(crate) fn pending_fetch_node_ids(&self) -> FxHashSet<i32> {
         self.nodes_with_pending_fetch_requests.clone()
     }
 }
