@@ -141,6 +141,14 @@ pub struct Selector {
     /// (Phase 22; the allocation showed up as per-poll `malloc`/`from_iter` in
     /// the TLS CPU profile).
     poll_id_scratch: Vec<Arc<str>>,
+    /// Reusable scratch set for the per-iteration *ready* channel ids recorded
+    /// by [`Self::poll_channel_readiness`] (Phase 24). The poll loop takes this
+    /// via `mem::take`, the readiness wait refills it with the ids the reactor
+    /// flagged ready, and pass-1 processes only those (plus buffered /
+    /// immediately-connected channels) instead of sweeping every channel and
+    /// issuing a `recv` syscall on each. Hoisted to a field (like
+    /// [`Self::poll_id_scratch`]) so no per-poll `FxHashSet` allocation occurs.
+    ready_scratch: FxHashSet<Arc<str>>,
     /// Contextual log message prefix.
     ///
     /// Translated from Java's `LogContext logContext` field in `Selector`.
@@ -198,6 +206,7 @@ impl Selector {
             notify: Arc::new(Notify::new()),
             made_read_progress_last_poll: true,
             poll_id_scratch: Vec::new(),
+            ready_scratch: FxHashSet::default(),
             log_context,
         }
     }
@@ -741,8 +750,21 @@ impl Selector {
     ///
     /// The interest predicate is computed by [`Self::channel_interest`] and is
     /// identical to the old `collect_readiness_futures`.
-    fn poll_channel_readiness(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<()> {
-        let mut ready = false;
+    ///
+    /// Phase 24: in addition to returning `Ready`/`Pending`, this records the
+    /// ids of the channels it found ready into `ready_out` (cleared first), so
+    /// the poll loop can process only those — mirroring Java NIO's
+    /// `selector.select()` → `selectedKeys()` (process only the ready keys)
+    /// instead of sweeping every registered channel and issuing a `recv`
+    /// syscall on each. The recording is a pure read of selector state plus
+    /// `Arc` refcount bumps into a reusable scratch set — no I/O side effect, so
+    /// it remains cancel-safe to drop (§10).
+    fn poll_channel_readiness(
+        &self,
+        cx: &mut std::task::Context<'_>,
+        ready_out: &mut FxHashSet<Arc<str>>,
+    ) -> std::task::Poll<()> {
+        ready_out.clear();
         for (id, channel) in &self.channels {
             let (want_read, want_write) = self.channel_interest(id, channel);
 
@@ -750,25 +772,32 @@ impl Selector {
             // (the existing code sets effective_timeout = 0 when
             // `data_in_buffers`; this guards the in-loop case — preserve it).
             if want_read && channel.has_bytes_buffered() {
-                ready = true;
+                ready_out.insert(Arc::clone(id));
                 continue;
             }
 
             // Poll every interested channel (even after one is ready) so the
             // waker is registered for ALL Pending channels — the task is then
             // woken when ANY of them becomes ready. Returning `Ready` once any
-            // channel is ready is fine; the next poll re-sweeps.
+            // channel is ready is fine; the next poll re-sweeps. We still poll
+            // BOTH interests for every channel (not short-circuiting) to keep
+            // the Phase-23 waker-registration invariant: a channel left
+            // un-polled would never re-wake the parked task.
+            let mut channel_ready = false;
             if want_read && channel.poll_transport_readable(cx).is_ready() {
-                ready = true;
+                channel_ready = true;
             }
             if want_write && channel.poll_transport_writable(cx).is_ready() {
-                ready = true;
+                channel_ready = true;
+            }
+            if channel_ready {
+                ready_out.insert(Arc::clone(id));
             }
         }
-        if ready {
-            std::task::Poll::Ready(())
-        } else {
+        if ready_out.is_empty() {
             std::task::Poll::Pending
+        } else {
+            std::task::Poll::Ready(())
         }
     }
 }
@@ -951,6 +980,32 @@ impl Selectable for Selector {
         // already gone (which would block until the deadline and lose the
         // wakeup, unlike Java's `Selector.wakeup()` which always returns).
         let mut deferred_wakeup = false;
+
+        // Phase 24: ready-set sweep. `ready_ids` holds the channels the prior
+        // WAIT's readiness `poll_fn` flagged ready (empty on the first
+        // iteration). Pass-1 processes only `immediately_connected ∪ ready_ids`
+        // — mirroring Java NIO's `selector.select()` → `selectedKeys()` (process
+        // only the ready keys) instead of issuing a `recv` syscall on every
+        // registered channel each iteration. Taken from a reusable scratch field
+        // (refilled by the WAIT, restored after the loop) so no per-poll
+        // allocation occurs.
+        let mut ready_ids = std::mem::take(&mut self.ready_scratch);
+        ready_ids.clear();
+
+        // `process_all` forces pass-1 to sweep every channel for one iteration.
+        // It is set ONLY in two cases where there is no socket-readiness set to
+        // narrow the work and the channels involved are known to have work:
+        //   - the timeout-0 / `deadline = None` path (immediately-connected, or
+        //     made-progress-last + data-in-buffers): there is no WAIT this poll,
+        //     so no ready set is produced — fall back to processing all once
+        //     (the original behavior). This is rare (join / partial-read drain).
+        //   - a deferred wakeup's "one more drain pass" for a mid-receive
+        //     channel: the WAIT was cancelled by the wakeup so it produced no
+        //     ready set; sweep all so the in-flight receive is drained.
+        // Correctness strictly trumps the optimization (PLAN): when in doubt,
+        // process the channel.
+        let mut process_all = deadline.is_none();
+
         loop {
             // Process channels with buffered data (reads only)
             if data_in_buffers {
@@ -963,15 +1018,33 @@ impl Selectable for Selector {
                 self.poll_channels_write_concurrent(&buffered_ids, start_select).await;
             }
 
-            // Pass 1: Connect + Read all channels (sequential, fast)
+            // Pass 1: Connect + Read the *ready* channels (sequential, fast).
             //
-            // Snapshot the channel ids into a reusable scratch `Vec` (taken from
-            // the struct, refilled, restored below) so this hot per-iteration
-            // pass performs only `Arc` refcount bumps, not a fresh heap
-            // allocation each time (Phase 22).
+            // Snapshot the ids to process into the reusable scratch `Vec` (taken
+            // from the struct, refilled, restored below) so this hot
+            // per-iteration pass performs only `Arc` refcount bumps, not a fresh
+            // heap allocation each time (Phase 22). The set is:
+            //   - every channel, when `process_all` (no ready set available); or
+            //   - `immediately_connected ∪ ready_ids` otherwise — only the
+            //     channels the reactor flagged ready this iteration, plus any
+            //     that connected immediately (which need connect/prepare
+            //     processing even though no read-readiness was observed).
             let mut channel_ids = std::mem::take(&mut self.poll_id_scratch);
             channel_ids.clear();
-            channel_ids.extend(self.channels.keys().cloned());
+            if process_all {
+                channel_ids.extend(self.channels.keys().cloned());
+            } else {
+                // immediately-connected channels are always processed (connect /
+                // prepare), exactly as before.
+                channel_ids.extend(self.immediately_connected_keys.iter().cloned());
+                for id in &ready_ids {
+                    // Avoid a duplicate entry for a channel that is both ready
+                    // and immediately-connected.
+                    if !self.immediately_connected_keys.contains(&**id) {
+                        channel_ids.push(Arc::clone(id));
+                    }
+                }
+            }
             for id in &channel_ids {
                 if self.channels.contains_key(id) {
                     let is_immediately = self.immediately_connected_keys.remove(&**id);
@@ -980,12 +1053,21 @@ impl Selectable for Selector {
             }
             self.immediately_connected_keys.clear();
 
-            // Pass 2: Write all channels concurrently
+            // Pass 2: Write the same set of channels concurrently.
             self.poll_channels_write_concurrent(&channel_ids, start_select).await;
 
             // Restore the scratch buffer (retains its capacity for next time).
             channel_ids.clear();
             self.poll_id_scratch = channel_ids;
+
+            // Consumed this iteration's ready set / process-all fallback; clear
+            // it so the next iteration starts narrow again and only widens if
+            // the WAIT repopulates `ready_ids` (the WAIT's `poll_fn` also clears
+            // first, but the no-interest `select!` branch never runs it, so a
+            // stale set would otherwise be reprocessed) or a deferred wakeup
+            // forces a re-sweep.
+            ready_ids.clear();
+            process_all = false;
 
             let made_progress = !self.completed_sends.is_empty()
                 || !self.completed_receives.is_empty()
@@ -1022,7 +1104,7 @@ impl Selectable for Selector {
                     // wakers (side-effect-free, §10 cancel-safe), so dropping it
                     // on a wakeup / deadline loses nothing — the non-cancel-safe
                     // network poll stays in pass-1, outside this `select!`.
-                    let readiness_wait = std::future::poll_fn(|cx| self.poll_channel_readiness(cx));
+                    let readiness_wait = std::future::poll_fn(|cx| self.poll_channel_readiness(cx, &mut ready_ids));
 
                     // An explicit wakeup (`Selector::wakeup()`) makes the poll
                     // return at this safe boundary, mirroring Java NIO where
@@ -1063,6 +1145,12 @@ impl Selectable for Selector {
                             // permit, so the loop's `deferred_wakeup` check will
                             // honor it if that pass makes no progress.
                             deferred_wakeup = true;
+                            // The wakeup cancelled `readiness_wait`, so `ready_ids`
+                            // does not reflect a fresh readiness snapshot. Sweep
+                            // all channels on the drain pass so the mid-receive
+                            // channel is processed (correctness > optimization;
+                            // this path is rare — a wakeup landing mid-frame).
+                            process_all = true;
                         } else {
                             break;
                         }
@@ -1086,6 +1174,11 @@ impl Selectable for Selector {
                 },
             }
         }
+
+        // Restore the ready-set scratch buffer (retains its capacity for next
+        // time), mirroring the `poll_id_scratch` handling above.
+        ready_ids.clear();
+        self.ready_scratch = ready_ids;
 
         if self.completed_sends.is_empty()
             && self.completed_receives.is_empty()
