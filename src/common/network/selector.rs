@@ -2413,4 +2413,324 @@ mod tests {
         selector.close_channel("0").await;
         selector.poll(0).await.unwrap();
     }
+
+    // ---- Phase 24: ready-set sweep scaffolding ---------------------------
+    //
+    // A transport layer that wraps a real `PlaintextTransportLayer` and counts
+    // every `try_read` (recv syscall) per channel id into a shared map. Lets a
+    // test assert that the steady-state poll issues `try_read` ONLY on the
+    // channels the reactor flagged ready — not on idle channels.
+
+    use crate::common::network::transport_layer::{InterestOps, TransportLayer};
+    use crate::common::network::{ChannelMetadataRegistry, PlaintextAuthenticator, PlaintextTransportLayer};
+    use std::sync::Mutex as StdMutex;
+
+    /// Shared per-channel `try_read` call counter.
+    type TryReadCounts = Arc<StdMutex<HashMap<String, usize>>>;
+
+    struct CountingTransportLayer {
+        id: String,
+        inner: PlaintextTransportLayer,
+        counts: TryReadCounts,
+    }
+
+    impl TransportLayer for CountingTransportLayer {
+        fn peer_addr(&self) -> io::Result<SocketAddr> {
+            self.inner.peer_addr()
+        }
+        fn ready(&self) -> bool {
+            self.inner.ready()
+        }
+        fn finish_connect(
+            &mut self,
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<bool>> + Send + '_>> {
+            self.inner.finish_connect()
+        }
+        fn disconnect(&mut self) {
+            self.inner.disconnect()
+        }
+        fn is_connected(&self) -> bool {
+            self.inner.is_connected()
+        }
+        fn handshake(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.handshake()
+        }
+        fn add_interest_ops(&mut self, ops: InterestOps) {
+            self.inner.add_interest_ops(ops)
+        }
+        fn remove_interest_ops(&mut self, ops: InterestOps) {
+            self.inner.remove_interest_ops(ops)
+        }
+        fn is_mute(&self) -> bool {
+            self.inner.is_mute()
+        }
+        fn has_bytes_buffered(&self) -> bool {
+            self.inner.has_bytes_buffered()
+        }
+        fn has_pending_writes(&self) -> bool {
+            self.inner.has_pending_writes()
+        }
+        fn is_open(&self) -> bool {
+            self.inner.is_open()
+        }
+        fn close(&mut self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.close()
+        }
+        fn read<'a>(
+            &'a mut self,
+            dst: &'a mut [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            self.inner.read(dst)
+        }
+        fn try_read(&mut self, dst: &mut [u8]) -> io::Result<usize> {
+            // The whole point of the test scaffolding: record the recv syscall.
+            *self.counts.lock().unwrap().entry(self.id.clone()).or_insert(0) += 1;
+            self.inner.try_read(dst)
+        }
+        fn supports_try_read(&self) -> bool {
+            self.inner.supports_try_read()
+        }
+        fn write<'a>(
+            &'a mut self,
+            src: &'a [u8],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            self.inner.write(src)
+        }
+        fn readable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.readable()
+        }
+        fn writable(&self) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<()>> + Send + '_>> {
+            self.inner.writable()
+        }
+        fn poll_readable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            self.inner.poll_readable(cx)
+        }
+        fn poll_writable(&self, cx: &mut std::task::Context<'_>) -> std::task::Poll<io::Result<()>> {
+            self.inner.poll_writable(cx)
+        }
+        fn write_vectored<'a>(
+            &'a mut self,
+            srcs: &'a [io::IoSlice<'a>],
+        ) -> std::pin::Pin<Box<dyn std::future::Future<Output = io::Result<usize>> + Send + 'a>> {
+            self.inner.write_vectored(srcs)
+        }
+        fn try_write_vectored(&mut self, srcs: &[io::IoSlice<'_>]) -> io::Result<usize> {
+            self.inner.try_write_vectored(srcs)
+        }
+    }
+
+    struct CountingChannelBuilder {
+        counts: TryReadCounts,
+    }
+
+    impl ChannelBuilder for CountingChannelBuilder {
+        fn build_channel(
+            &self,
+            id: &str,
+            stream: tokio::net::TcpStream,
+            _peer_host: &str,
+            max_receive_size: i32,
+            metadata_registry: Box<dyn ChannelMetadataRegistry>,
+        ) -> io::Result<KafkaChannel> {
+            let transport_layer = Box::new(CountingTransportLayer {
+                id: id.to_string(),
+                inner: PlaintextTransportLayer::connected(stream),
+                counts: self.counts.clone(),
+            });
+            let authenticator = Box::new(PlaintextAuthenticator::new());
+            Ok(KafkaChannel::new(
+                id,
+                transport_layer,
+                authenticator,
+                max_receive_size,
+                metadata_registry,
+            ))
+        }
+
+        fn close(&mut self) {}
+    }
+
+    async fn create_counting_selector() -> (Selector, TryReadCounts) {
+        let counts: TryReadCounts = Arc::new(StdMutex::new(HashMap::new()));
+        let channel_builder = Box::new(CountingChannelBuilder { counts: counts.clone() });
+        let selector = Selector::new(
+            super::super::network_receive::UNLIMITED,
+            CONNECTION_MAX_IDLE_MS,
+            channel_builder,
+        );
+        (selector, counts)
+    }
+
+    fn try_reads_for(counts: &TryReadCounts, id: &str) -> usize {
+        *counts.lock().unwrap().get(id).unwrap_or(&0)
+    }
+
+    /// Phase 24 — the ready-set sweep processes ONLY the channels the reactor
+    /// flagged ready, never the idle ones, and never *permanently* excludes a
+    /// channel that later becomes readable.
+    ///
+    /// Two connected channels share one counting transport. Only channel "0"
+    /// has an in-flight request/echo; channel "1" is idle. We drive `poll` to
+    /// drain "0"'s echo, then assert:
+    ///
+    ///   (a) channel "1" (idle, read-interested, no data) received ZERO
+    ///       `try_read` syscalls during the steady-state drain — the old
+    ///       sweep-all loop would have issued one per poll iteration;
+    ///   (b) channel "0" received at least one `try_read` (it was ready and was
+    ///       processed — proving the ready set is actually driving pass-1, not
+    ///       silently skipping work);
+    ///   (c) when channel "1" later gets its own request, it IS processed and
+    ///       its echo is drained — no permanent exclusion / no stall.
+    ///
+    /// Wrapped in `tokio::time::timeout` so a stall fails the test instead of
+    /// hanging the suite. Uses the real TCP loopback `EchoServer`, so it drives
+    /// the production socket-readiness path with only `try_read` instrumented.
+    #[tokio::test]
+    async fn test_ready_set_sweep_skips_idle_channels() {
+        use std::time::Duration;
+
+        let server = EchoServer::new().await.unwrap();
+        let (mut selector, counts) = create_counting_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+        blocking_connect(&mut selector, "1", server.port()).await;
+
+        // Settle: drain the "immediately connected" process-all pass and any
+        // spurious post-connect socket readiness, so the selector is quiescent
+        // before we measure. (A freshly-connected channel forces a one-shot
+        // process-all pass and may report read-ready once; we want to measure
+        // the steady-state ready-set behavior, not connect bookkeeping.)
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // Baseline the counters AFTER settling. We only care about syscalls
+        // during the steady-state drain that follows.
+        let base0 = try_reads_for(&counts, "0");
+        let base1 = try_reads_for(&counts, "1");
+
+        // Only channel "0" sends; channel "1" stays idle.
+        selector.send(create_send("0", "ready-set-0")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                selector.poll(5_000).await.unwrap();
+                if selector.completed_receives().iter().any(|r| r.source() == "0") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("(a) channel 0's echo was not drained within 5s");
+
+        let after0 = try_reads_for(&counts, "0");
+        let after1 = try_reads_for(&counts, "1");
+
+        // (b) the ready channel WAS processed.
+        assert!(
+            after0 > base0,
+            "(b) ready channel 0 must receive at least one try_read (got {base0} -> {after0})"
+        );
+        // (a) the idle channel was NOT touched by a recv syscall.
+        assert_eq!(
+            after1, base1,
+            "(a) idle channel 1 must not receive any try_read during the drain \
+             (got {base1} -> {after1}); the ready-set sweep must skip idle channels"
+        );
+
+        // (c) channel "1" later becomes readable and IS processed — no
+        // permanent exclusion. (Mutation check: if a ready channel were wrongly
+        // excluded from the sweep, this drain would never complete and the
+        // timeout would fail the test.)
+        selector.send(create_send("1", "ready-set-1")).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                selector.poll(5_000).await.unwrap();
+                if selector.completed_receives().iter().any(|r| r.source() == "1") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("(c) previously-idle channel 1 was never processed — permanent exclusion / stall");
+        assert!(
+            try_reads_for(&counts, "1") > after1,
+            "(c) channel 1 must receive a try_read once it has data"
+        );
+
+        // Cleanup.
+        selector.close_channel("0").await;
+        selector.close_channel("1").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    /// Phase 24 — no busy-spin: once all ready channels are drained, a poll with
+    /// idle (read-interested, no-data) channels must PARK to its deadline rather
+    /// than returning `Ready` immediately and re-entering the loop at 100% CPU.
+    ///
+    /// If a channel that `poll_transport_readable` reports ready were left
+    /// unprocessed, the next WAIT would return immediately (reactor readiness
+    /// still set) and the loop would spin. Here the channel has NO data, so the
+    /// reactor never flags it ready and the poll must block to the deadline. We
+    /// assert the elapsed time is close to the requested timeout; a busy-spin
+    /// (or a spurious `Ready`) would return in ~0ms.
+    ///
+    /// Complements `test_readiness_wait_path` (c) (single muted channel) by
+    /// exercising the multi-channel ready-set path with an idle but
+    /// read-interested channel.
+    #[tokio::test]
+    async fn test_ready_set_sweep_no_busy_spin() {
+        use std::time::{Duration, Instant};
+
+        let server = EchoServer::new().await.unwrap();
+        let (mut selector, counts) = create_counting_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+        blocking_connect(&mut selector, "1", server.port()).await;
+
+        // Settle: drain the "immediately connected" state and any spurious
+        // post-connect socket readiness. A freshly-connected channel is in
+        // `immediately_connected_keys` (forcing a one-shot process-all pass) and
+        // its socket may report read-ready once before a `try_read` -> WouldBlock
+        // clears it. Poll a few short times so the selector reaches a quiescent
+        // state before we measure the parking behavior.
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // No sends: both channels are read-interested but have no data. The
+        // poll must park to its deadline (no readiness, no wakeup).
+        let timeout_ms = 200;
+        let base0 = try_reads_for(&counts, "0");
+        let base1 = try_reads_for(&counts, "1");
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(2), selector.poll(timeout_ms))
+            .await
+            .expect("no-busy-spin poll hung well past its deadline")
+            .unwrap();
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed >= Duration::from_millis((timeout_ms as u64 * 8) / 10),
+            "idle read-interested channels must park to the deadline, not busy-spin \
+             (elapsed {elapsed:?}, expected >= ~{}ms)",
+            (timeout_ms * 8) / 10
+        );
+        // With no data, neither channel should have been read in a tight spin.
+        // (One initial try_read on the first iteration's process-all fallback is
+        // possible since this poll has deadline=None? No: timeout_ms>0 so
+        // deadline is Some and the first iteration's ready set is empty — pass-1
+        // processes nothing, the WAIT parks. So zero new try_reads is expected.)
+        assert_eq!(
+            try_reads_for(&counts, "0"),
+            base0,
+            "idle channel 0 must not be read while parked"
+        );
+        assert_eq!(
+            try_reads_for(&counts, "1"),
+            base1,
+            "idle channel 1 must not be read while parked"
+        );
+
+        // Cleanup.
+        selector.close_channel("0").await;
+        selector.close_channel("1").await;
+        selector.poll(0).await.unwrap();
+    }
 }
