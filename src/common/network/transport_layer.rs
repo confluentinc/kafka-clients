@@ -189,6 +189,57 @@ pub trait TransportLayer: Send + Sync {
         false
     }
 
+    /// Non-blocking **appending** read: drains up to `limit` currently
+    /// available bytes onto the end of `buf` (growing `buf.len()`), without
+    /// requiring the destination to be pre-initialized. The receive path
+    /// (`NetworkReceive`) uses this so a payload buffer can be allocated
+    /// with `Vec::with_capacity` instead of `vec![0u8; n]` — the zeroing
+    /// memset of every received byte (~the full fetch throughput) is pure
+    /// waste because the socket bytes immediately overwrite it (Phase 28).
+    ///
+    /// Contract (mirrors [`try_read`](Self::try_read) over a whole drain):
+    /// - `Ok(n)` (n > 0): `n` bytes were appended; the socket may have more.
+    /// - `Ok(0)`: EOF (remote closed) with nothing appended this call.
+    /// - `Err(WouldBlock)`: nothing available right now, nothing appended.
+    ///
+    /// The default implementation drains via [`try_read`](Self::try_read)
+    /// into zero-initialized chunks (bounded re-zeroing), preserving exact
+    /// `try_read` semantics for transports without a cheaper override.
+    /// `SslTransportLayer` overrides this to append straight out of the
+    /// rustls plaintext buffer with no zeroing at all.
+    fn try_read_append(&mut self, buf: &mut Vec<u8>, limit: usize) -> io::Result<usize> {
+        /// Zero at most this much spare space per inner read — bounds the
+        /// re-zeroing a `WouldBlock`-heavy connection pays per call.
+        const CHUNK: usize = 64 * 1024;
+        let start = buf.len();
+        let target = start + limit;
+        let mut filled = start;
+        let result = loop {
+            let chunk_end = (filled + CHUNK).min(target);
+            if buf.len() < chunk_end {
+                buf.resize(chunk_end, 0);
+            }
+            match self.try_read(&mut buf[filled..chunk_end]) {
+                Ok(0) => break Ok(0), // EOF; progress (if any) reported below
+                Ok(n) => {
+                    filled += n;
+                    if filled == target {
+                        break Ok(filled - start);
+                    }
+                },
+                Err(e) => break Err(e),
+            }
+        };
+        buf.truncate(filled);
+        match result {
+            // EOF or WouldBlock after partial progress: report the progress;
+            // the terminal condition resurfaces on the next call.
+            Ok(0) if filled > start => Ok(filled - start),
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock && filled > start => Ok(filled - start),
+            other => other,
+        }
+    }
+
     /// Writes data to this channel from the given buffer.
     ///
     /// # Arguments

@@ -548,6 +548,75 @@ impl TransportLayer for SslTransportLayer {
         true
     }
 
+    /// Zero-free appending read (Phase 28): identical to
+    /// [`try_read`](Self::try_read) steps 1–2 (non-blocking `read_tls` +
+    /// `process_new_packets`), but step 3 appends the decrypted plaintext
+    /// onto `buf` via `Read::take(limit).read_to_end(...)` — `read_to_end`
+    /// writes into the `Vec`'s spare capacity without pre-zeroing it, so the
+    /// receive buffer never pays the `vec![0u8; n]` memset of the whole
+    /// payload. Error/EOF mapping matches `try_read` exactly:
+    /// - appended > 0 → `Ok(appended)` (progress; terminal conditions
+    ///   resurface on the next call),
+    /// - nothing appended + socket closed → `Ok(0)` (EOF),
+    /// - nothing appended + socket open → `Err(WouldBlock)`.
+    ///
+    /// (`read_to_end`'s documented contract: on error, all bytes read so far
+    /// have already been appended to `buf`.)
+    fn try_read_append(&mut self, buf: &mut Vec<u8>, limit: usize) -> io::Result<usize> {
+        let c = match &mut self.state {
+            SslState::Ready(c) => c,
+            SslState::Handshaking(_) => {
+                return Err(io::Error::new(io::ErrorKind::WouldBlock, "TLS handshake not yet complete"));
+            },
+            SslState::Closed => {
+                return Err(io::Error::new(io::ErrorKind::NotConnected, "transport layer is closed"));
+            },
+        };
+
+        // Step 1: pull fresh ciphertext from the socket (non-blocking).
+        let mut tcp_eof = false;
+        let mut adapter = TryReadAdapter(&c.tcp);
+        match c.conn.read_tls(&mut adapter) {
+            Ok(0) => tcp_eof = true,
+            Ok(_) => {},
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {},
+            Err(e) => return Err(e),
+        }
+
+        // Step 2: drive the TLS state machine.
+        if let Err(e) = c.conn.process_new_packets() {
+            return Err(io::Error::other(format!("TLS error: {e}")));
+        }
+
+        // Step 3: append buffered plaintext (no zeroing).
+        let start = buf.len();
+        match c.conn.reader().take(limit as u64).read_to_end(buf) {
+            Ok(_) => {
+                let appended = buf.len() - start;
+                if appended > 0 {
+                    Ok(appended)
+                } else if tcp_eof {
+                    // Plaintext drained AND socket closed -> propagate EOF.
+                    Ok(0)
+                } else {
+                    // No plaintext yet; ask caller to come back later.
+                    Err(io::Error::from(io::ErrorKind::WouldBlock))
+                }
+            },
+            Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                let appended = buf.len() - start;
+                if appended > 0 {
+                    Ok(appended)
+                } else if tcp_eof {
+                    Ok(0)
+                } else {
+                    Err(e)
+                }
+            },
+            Err(e) => Err(e),
+        }
+    }
+
     /// Writes plaintext into the TLS layer (encrypted by rustls before being
     /// sent). Encryption happens synchronously (no `await`); ciphertext is then
     /// pushed to TCP non-blockingly via `write_tls`. WouldBlock on the TCP
@@ -1056,6 +1125,73 @@ mod tests {
             saw_would_block,
             "expected WouldBlock while plaintext drained and socket still open"
         );
+        assert!(saw_eof, "expected Ok(0) (EOF) after server closed and plaintext drained");
+
+        let _ = transport.close().await;
+        let _ = server_task.await;
+    }
+
+    /// Phase 28: the zero-free appending read drains the same plaintext as
+    /// `try_read`, respects the `limit` cap (never appends past the message
+    /// boundary), maps "no plaintext + open socket" to `WouldBlock`, and
+    /// surfaces EOF as `Ok(0)` once the server closes and the plaintext is
+    /// drained.
+    #[tokio::test]
+    async fn test_try_read_append_limit_then_eof() {
+        let (factory, server_config) = build_paired_factory_and_server_config();
+        let (client_stream, server_stream) = make_localhost_pair().await;
+        let domain = SslFactory::create_server_name("localhost").unwrap();
+        let conn = make_client_conn(&factory);
+        let mut transport = SslTransportLayer::new(client_stream, conn, domain);
+
+        let server_task =
+            tokio::spawn(async move { drive_server_send(server_stream, server_config, b"hello-tls").await });
+
+        transport.handshake().await.expect("handshake failed");
+        transport.readable().await.unwrap();
+
+        // Drain "hello-tls" (9 bytes) with a 4-byte limit per call: the
+        // append must never exceed the requested limit, and `buf` must
+        // accumulate the exact plaintext across calls.
+        let mut buf: Vec<u8> = Vec::with_capacity(9);
+        let mut attempts = 0;
+        while buf.len() < 9 && attempts < 100 {
+            let before = buf.len();
+            let limit = (9 - buf.len()).min(4);
+            match transport.try_read_append(&mut buf, limit) {
+                Ok(0) => break, // EOF before all data (shouldn't happen here)
+                Ok(n) => {
+                    assert!(n <= limit, "appended {n} > limit {limit}");
+                    assert_eq!(buf.len(), before + n, "Ok(n) must equal bytes appended");
+                },
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    assert_eq!(buf.len(), before, "WouldBlock must append nothing");
+                    transport.readable().await.unwrap();
+                },
+                Err(e) => panic!("try_read_append failed: {e}"),
+            }
+            attempts += 1;
+        }
+        assert_eq!(&buf[..], b"hello-tls", "appended plaintext must match");
+
+        // Drain to EOF: Ok(0) with nothing appended once the server's
+        // close-notify + FIN are processed; WouldBlock while still open.
+        let mut saw_eof = false;
+        for _ in 0..200 {
+            let before = buf.len();
+            match transport.try_read_append(&mut buf, 64) {
+                Ok(0) => {
+                    assert_eq!(buf.len(), before, "EOF must append nothing");
+                    saw_eof = true;
+                    break;
+                },
+                Ok(_) => {}, // trailing plaintext; keep draining
+                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                    transport.readable().await.unwrap();
+                },
+                Err(e) => panic!("try_read_append failed during drain-to-EOF: {e}"),
+            }
+        }
         assert!(saw_eof, "expected Ok(0) (EOF) after server closed and plaintext drained");
 
         let _ = transport.close().await;

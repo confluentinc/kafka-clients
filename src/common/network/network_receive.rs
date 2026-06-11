@@ -205,9 +205,18 @@ impl NetworkReceive {
             }
         }
 
-        // Phase 2: Allocate buffer if size is known but not yet allocated
+        // Phase 2: Allocate buffer if size is known but not yet allocated.
+        //
+        // `with_capacity`, NOT `vec![0u8; n]` (Phase 28): the payload is
+        // appended via `try_read_append`, which fills the spare capacity
+        // without requiring it to be pre-initialized — zeroing every
+        // received byte (the full fetch throughput) was pure waste because
+        // the socket bytes immediately overwrite it. (Java zeroes its
+        // `ByteBuffer.allocate` too, but in TLAB; glibc memset was the Rust
+        // translation artifact.) `buffer_bytes_read` stays in sync with
+        // `buf.len()` in this append model.
         if self.buffer.is_none() && self.requested_buffer_size != -1 {
-            self.buffer = Some(vec![0u8; self.requested_buffer_size as usize]);
+            self.buffer = Some(Vec::with_capacity(self.requested_buffer_size as usize));
             self.buffer_bytes_read = 0;
             trace!(
                 "Allocated buffer of size {} for source {}",
@@ -221,20 +230,16 @@ impl NetworkReceive {
         // than one chunk per call — Java-NIO read pattern. Avoids the
         // per-chunk readiness/timer overhead that throttled large fetch reads
         // (design/current/consumer-throughput-bottleneck.md, UPDATE 4).
-        if let Some(ref mut buf) = self.buffer
-            && self.buffer_bytes_read < buf.len()
-        {
-            loop {
-                match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
+        if let Some(ref mut buf) = self.buffer {
+            let requested = self.requested_buffer_size as usize;
+            while buf.len() < requested {
+                match channel.try_read_append(buf, requested - buf.len()) {
                     Ok(0) => {
                         return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "EOF during payload read"));
                     },
                     Ok(bytes_read) => {
                         total_read += bytes_read;
-                        self.buffer_bytes_read += bytes_read;
-                        if self.buffer_bytes_read >= buf.len() {
-                            break; // receive complete
-                        }
+                        self.buffer_bytes_read = buf.len();
                     },
                     Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                         return Ok(total_read); // socket drained for now
@@ -262,9 +267,16 @@ impl Receive for NetworkReceive {
     }
 
     fn complete(&self) -> bool {
+        // Compare against the requested size, not `buffer.len()`: the
+        // append model (Phase 28, `try_read_append`) grows `buffer.len()`
+        // as bytes arrive (so len == bytes_read at all times), while the
+        // zero-initialized async-fallback model keeps len == requested
+        // throughout. `buffer_bytes_read == requested` is the completion
+        // condition in both.
         self.size_bytes_read == SIZE_LENGTH
             && self.buffer.is_some()
-            && self.buffer_bytes_read == self.buffer.as_ref().map_or(0, |b| b.len())
+            && self.requested_buffer_size >= 0
+            && self.buffer_bytes_read as i64 == self.requested_buffer_size as i64
     }
 
     fn read_from<'a>(
@@ -322,10 +334,21 @@ impl Receive for NetworkReceive {
                 }
             }
 
-            // Phase 2: Allocate buffer if size is known but not yet allocated
+            // Phase 2: Allocate buffer if size is known but not yet allocated.
+            //
+            // Transports with `try_read` fill via the appending
+            // `try_read_append` (Phase 28), so the buffer is allocated with
+            // `with_capacity` and NOT zeroed (the memset of every received
+            // byte was pure waste — see `try_read_from`). The async fallback
+            // (mock transports) reads into `&mut [u8]` and keeps the
+            // zero-initialized model.
             if self.buffer.is_none() && self.requested_buffer_size != -1 {
-                // Simple allocation (no memory pool for now)
-                self.buffer = Some(vec![0u8; self.requested_buffer_size as usize]);
+                let requested = self.requested_buffer_size as usize;
+                self.buffer = Some(if channel.supports_try_read() {
+                    Vec::with_capacity(requested)
+                } else {
+                    vec![0u8; requested]
+                });
                 self.buffer_bytes_read = 0;
                 trace!(
                     "Allocated buffer of size {} for source {}",
@@ -335,17 +358,17 @@ impl Receive for NetworkReceive {
 
             // Phase 3: Read payload data.
             //
-            // On transports with non-blocking `try_read` (plaintext), drain ALL
-            // currently-available socket bytes in a tight loop rather than one
-            // chunk per call — Java-NIO read pattern. Avoids the per-chunk
-            // readiness/timer overhead that throttled large fetch reads
-            // (design/current/consumer-throughput-bottleneck.md, UPDATE 4).
-            if let Some(ref mut buf) = self.buffer
-                && self.buffer_bytes_read < buf.len()
-            {
+            // On transports with non-blocking `try_read` (plaintext / SSL),
+            // drain ALL currently-available socket bytes in a tight loop
+            // rather than one chunk per call — Java-NIO read pattern. Avoids
+            // the per-chunk readiness/timer overhead that throttled large
+            // fetch reads (design/current/consumer-throughput-bottleneck.md,
+            // UPDATE 4).
+            if let Some(ref mut buf) = self.buffer {
                 if channel.supports_try_read() {
-                    loop {
-                        match channel.try_read(&mut buf[self.buffer_bytes_read..]) {
+                    let requested = self.requested_buffer_size as usize;
+                    while buf.len() < requested {
+                        match channel.try_read_append(buf, requested - buf.len()) {
                             Ok(0) => {
                                 // Ok(0) means EOF (remote closed). In Java,
                                 // `bytesRead < 0` during the payload phase
@@ -355,10 +378,7 @@ impl Receive for NetworkReceive {
                             },
                             Ok(bytes_read) => {
                                 total_read += bytes_read;
-                                self.buffer_bytes_read += bytes_read;
-                                if self.buffer_bytes_read >= buf.len() {
-                                    break; // receive complete
-                                }
+                                self.buffer_bytes_read = buf.len();
                             },
                             Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
                                 return Ok(total_read); // socket drained for now
@@ -366,7 +386,7 @@ impl Receive for NetworkReceive {
                             Err(e) => return Err(e),
                         }
                     }
-                } else {
+                } else if self.buffer_bytes_read < buf.len() {
                     match channel.read(&mut buf[self.buffer_bytes_read..]).await {
                         Ok(0) => {
                             // Ok(0) means EOF (remote closed). In Java,
