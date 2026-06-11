@@ -23,6 +23,8 @@
 use std::collections::HashMap;
 use std::sync::RwLock;
 
+use rustc_hash::FxHashMap;
+
 use super::NodeApiVersions;
 
 /// Information about finalized features and their epoch.
@@ -53,7 +55,10 @@ pub struct ApiVersions {
 
 #[derive(Debug)]
 struct ApiVersionsInner {
-    node_api_versions: HashMap<String, NodeApiVersions>,
+    /// Keyed by node-id string; looked up on every request build via
+    /// `latest_usable_version_in_range`. `FxHashMap` (Phase 27) — internal
+    /// only, never exposed.
+    node_api_versions: FxHashMap<String, NodeApiVersions>,
     /// The maximum finalized feature epoch of all the node api versions.
     max_finalized_features_epoch: i64,
     finalized_features: Option<HashMap<String, i16>>,
@@ -64,7 +69,7 @@ impl ApiVersions {
     pub fn new() -> Self {
         Self {
             inner: RwLock::new(ApiVersionsInner {
-                node_api_versions: HashMap::new(),
+                node_api_versions: FxHashMap::default(),
                 max_finalized_features_epoch: -1,
                 finalized_features: None,
             }),

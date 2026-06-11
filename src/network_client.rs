@@ -22,7 +22,6 @@
 //!
 //! This class is not thread-safe!
 
-use std::collections::HashMap;
 use std::net::SocketAddr;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicI64, AtomicU8, Ordering};
@@ -116,8 +115,9 @@ pub struct NetworkClient<S: Selectable, H: HostResolver> {
     discover_broker_versions: bool,
     /// API versions for each node.
     api_versions: Arc<ApiVersions>,
-    /// Nodes that need an ApiVersions fetch.
-    nodes_needing_api_versions_fetch: HashMap<String, ApiVersionsRequestBuilder>,
+    /// Nodes that need an ApiVersions fetch. `FxHashMap` (Phase 27):
+    /// touched every poll on the bg hot loop; internal only.
+    nodes_needing_api_versions_fetch: rustc_hash::FxHashMap<String, ApiVersionsRequestBuilder>,
     /// Aborted sends due to unsupported versions or disconnects.
     aborted_sends: Vec<ClientResponse>,
     /// The client state (ACTIVE, CLOSING, CLOSED).
@@ -217,7 +217,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             metadata_recovery_strategy,
             discover_broker_versions,
             api_versions,
-            nodes_needing_api_versions_fetch: HashMap::new(),
+            nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),
@@ -292,7 +292,7 @@ impl<S: Selectable, H: HostResolver> NetworkClient<S, H> {
             metadata_recovery_strategy,
             discover_broker_versions,
             api_versions,
-            nodes_needing_api_versions_fetch: HashMap::new(),
+            nodes_needing_api_versions_fetch: rustc_hash::FxHashMap::default(),
             aborted_sends: Vec::new(),
             state: Arc::new(AtomicU8::new(STATE_ACTIVE)),
             rand_offset: std::sync::Mutex::new(StdRng::from_os_rng()),

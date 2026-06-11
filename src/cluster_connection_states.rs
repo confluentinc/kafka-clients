@@ -16,10 +16,12 @@
 //!
 //! Translated from `org.apache.kafka.clients.ClusterConnectionStates`.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::fmt;
 use std::io;
 use std::net::IpAddr;
+
+use rustc_hash::FxHashMap;
 
 use super::ConnectionState;
 use super::HostResolver;
@@ -44,7 +46,13 @@ pub const CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER: f64 = 0.2;
 ///
 /// Translated from `org.apache.kafka.clients.ClusterConnectionStates`.
 pub struct ClusterConnectionStates<H: HostResolver> {
-    node_state: HashMap<String, NodeConnectionState>,
+    /// Keyed by node-id string; queried multiple times per network poll per
+    /// node (`is_ready` / `can_connect` / `state`). `FxHashMap` (Phase 27):
+    /// Java's `String` caches its hashCode so its lookups don't rehash;
+    /// Rust's default SipHash rehashes the full key per lookup. Private —
+    /// never exposed. (`connecting_nodes` below IS exposed by a public
+    /// accessor, so it stays on the std hasher per the boundary rule.)
+    node_state: FxHashMap<String, NodeConnectionState>,
     connecting_nodes: HashSet<String>,
     reconnect_backoff: ExponentialBackoff,
     connection_setup_timeout: ExponentialBackoff,
@@ -84,7 +92,7 @@ impl<H: HostResolver> ClusterConnectionStates<H> {
                 CLUSTER_CONNECTION_STATES_CONNECTION_SETUP_TIMEOUT_JITTER,
             )
             .expect("Invalid connection setup timeout jitter"),
-            node_state: HashMap::new(),
+            node_state: FxHashMap::default(),
             connecting_nodes: HashSet::new(),
             host_resolver,
             log_context,
