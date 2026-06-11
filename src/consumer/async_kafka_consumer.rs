@@ -2553,10 +2553,20 @@ where
         // join / post-rebalance window before positions are valid. No
         // `.await` is held across the `SubscriptionState` guard (§16).
         if poll_timeout_ms > self.retry_backoff_ms {
+            // Java copies the assignment set (`subscriptions.assignedPartitions()`)
+            // and iterates it calling `hasValidPosition(tp)` — a fresh HashSet +
+            // per-partition map lookup on EVERY poll(). The observable predicate
+            // is exactly "no assigned partitions, or any assigned partition
+            // lacks a valid position", which the existing Java-mirrored
+            // accessors compute allocation-free (`numAssignedPartitions`,
+            // `hasAllFetchPositions`). Java's copy is a cheap TLAB nursery
+            // allocation the GC absorbs; in Rust it was a malloc + 24 Arc
+            // clones + SipHash inserts per poll (~1.3% of app-thread CPU on
+            // the cloud profile). CLAUDE.md §11: keep it off the heap
+            // (Phase 27 Fix #3).
             let needs_backoff = {
                 let subs = self.subscriptions.lock().unwrap();
-                let assigned = subs.assigned_partitions();
-                assigned.is_empty() || assigned.iter().any(|tp| !subs.has_valid_position(tp))
+                subs.num_assigned_partitions() == 0 || !subs.has_all_fetch_positions()
             };
             if needs_backoff {
                 poll_timeout_ms = self.retry_backoff_ms;
