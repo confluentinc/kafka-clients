@@ -3317,4 +3317,208 @@ mod tests {
         selector.close_channel("0").await;
         selector.poll(0).await.unwrap();
     }
+
+    // ---- Phase 30: per-channel wakers (selectedKeys() on tokio) --------------
+
+    /// Phase 30 (dirty site #1) — send-after-arm wake. A channel parked on
+    /// read-only interest (its write direction NOT armed) must still pick up a
+    /// freshly queued send and complete the write without waiting out the poll
+    /// deadline. This exercises the `send()` dirty-mark -> re-arm path: without
+    /// the dirty mark, the next WAIT would not arm `want_write`, the writable
+    /// readiness would never be observed, and the write would stall until the
+    /// (here long) deadline.
+    ///
+    /// Mutation check (confirmed during development): removing the
+    /// `mark_interest_dirty` call from `send()`'s `Ok(())` arm leaves the write
+    /// unarmed; this test then blocks on the inner 5s `timeout` and FAILS.
+    #[tokio::test]
+    async fn test_send_after_arm_wakes_write() {
+        use std::time::{Duration, Instant};
+
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+
+        // Settle the immediately-connected / made-progress bookkeeping so the
+        // next poll genuinely parks on the readiness `select!` (eff_timeout > 0,
+        // deadline = Some) with the channel armed read-only. See the Phase-24/26
+        // selector tests for why three short settling polls are needed.
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // Park a WAIT with read-only interest, then queue a send. The send's
+        // dirty mark must cause the next poll to arm the write direction, fire
+        // on writable readiness, complete the send, and (with the echo coming
+        // back) drain the response — all well before a generous deadline.
+        selector.send(create_send("0", "send-after-arm")).unwrap();
+        let start = Instant::now();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                // Long per-poll deadline so a stall (missing re-arm) shows up as
+                // a timeout, not a fast deadline return.
+                selector.poll(5_000).await.unwrap();
+                if selector.completed_receives().iter().any(|r| r.source() == "0") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("(send-after-arm) the queued send never completed / round-tripped within 5s");
+        assert!(
+            start.elapsed() < Duration::from_secs(5),
+            "(send-after-arm) the write must be armed and complete promptly, not on the poll deadline"
+        );
+
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    /// Phase 30 (dirty sites #2 / #3) — unmute redelivery. A readiness event
+    /// that fires for a channel WHILE it is muted is recorded by the
+    /// `ChannelWaker` but the channel is not read (interest is off). When the
+    /// channel is later unmuted, the data must be delivered promptly even though
+    /// the fire happened during the muted window: `unmute()` marks the channel
+    /// dirty so the next WAIT re-arms `want_read`; tokio readiness is
+    /// level-triggered, so the re-arm observes the still-readable socket and the
+    /// data is drained.
+    ///
+    /// Mutation check (confirmed during development): removing the
+    /// `mark_interest_dirty` call from `unmute()` leaves the channel un-armed
+    /// after unmuting; the post-unmute drain then blocks on the inner 5s
+    /// `timeout` and the test FAILS.
+    #[tokio::test]
+    async fn test_unmute_redelivers_after_muted_fire() {
+        use std::time::Duration;
+
+        let server = EchoServer::new().await.unwrap();
+        let mut selector = create_selector().await;
+        blocking_connect(&mut selector, "0", server.port()).await;
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        // Send a request and drain the echo so the channel is quiescent first.
+        let resp = blocking_request(&mut selector, "0", "warmup").await;
+        assert_eq!(resp, "warmup");
+
+        // Mute the channel, then have the peer send (a fresh request whose echo
+        // arrives while muted). Poll a few times: with the channel muted there
+        // must be NO delivery even though the socket becomes readable (the fire
+        // is recorded against a now-uninterested channel).
+        selector.mute("0");
+        selector.send(create_send("0", "while-muted")).unwrap();
+        for _ in 0..5 {
+            selector.poll(20).await.unwrap();
+        }
+        assert!(
+            selector.completed_receives().iter().all(|r| r.source() != "0"),
+            "(unmute) a muted channel must not deliver receives even when its socket is readable"
+        );
+
+        // Now unmute: the dirty mark must re-arm read interest, the level-
+        // triggered readiness re-fires, and the echo is delivered promptly.
+        selector.unmute("0");
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                selector.poll(5_000).await.unwrap();
+                if selector.completed_receives().iter().any(|r| r.source() == "0") {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("(unmute) data sent while muted was not delivered after unmute within 5s");
+
+        selector.close_channel("0").await;
+        selector.poll(0).await.unwrap();
+    }
+
+    /// Phase 30 — multi-channel ready-set exactness. With N connected channels,
+    /// sending on K of them must process exactly those K (one `try_read` minimum
+    /// on each that has data) and leave the idle N-K untouched by any recv
+    /// syscall during the steady-state drain. Extends the Phase-24 skip-idle
+    /// test to the multi-ready case to prove the fired-queue delivers the exact
+    /// `selectedKeys()` set, not a superset (busy-spin) or subset (stall).
+    ///
+    /// Mutation checks (confirmed during development): (subset) dropping the
+    /// fired entry's id in `drain_fired_queue` (not inserting it into
+    /// `ready_out`) strands the active channels and the drain `timeout` FAILS;
+    /// (superset) making `arm_channel` treat every read-interested channel as
+    /// immediately ready (skipping the `poll_transport_readable` gate) puts the
+    /// idle channels in `ready_ids`, busy-spinning the poll loop so the test
+    /// never settles and times out.
+    #[tokio::test]
+    async fn test_multi_channel_ready_set_exactness() {
+        use std::time::Duration;
+
+        let server = EchoServer::new().await.unwrap();
+        let (mut selector, counts) = create_counting_selector().await;
+
+        // N = 4 channels; K = 2 will get a request.
+        let ids = ["0", "1", "2", "3"];
+        for id in &ids {
+            blocking_connect(&mut selector, id, server.port()).await;
+        }
+        for _ in 0..3 {
+            selector.poll(20).await.unwrap();
+        }
+
+        let base: Vec<usize> = ids.iter().map(|id| try_reads_for(&counts, id)).collect();
+
+        // Send on channels "1" and "3" only.
+        let active = ["1", "3"];
+        let idle = ["0", "2"];
+        for id in &active {
+            selector.send(create_send(id, &format!("ready-{id}"))).unwrap();
+        }
+
+        // Drain both active channels' echoes. `completed_receives` is wiped by
+        // each poll's `clear()`, and a poll typically returns one receive at a
+        // time, so accumulate the set of source ids observed across polls rather
+        // than expecting both in a single poll's snapshot.
+        let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                selector.poll(5_000).await.unwrap();
+                for r in selector.completed_receives() {
+                    seen.insert(r.source().to_string());
+                }
+                if active.iter().all(|id| seen.contains(*id)) {
+                    break;
+                }
+            }
+        })
+        .await
+        .expect("the K active channels' echoes were not all drained within 5s");
+
+        let after: Vec<usize> = ids.iter().map(|id| try_reads_for(&counts, id)).collect();
+
+        // Active channels were processed.
+        for id in &active {
+            let i = ids.iter().position(|x| x == id).unwrap();
+            assert!(
+                after[i] > base[i],
+                "active channel {id} must receive at least one try_read ({} -> {})",
+                base[i],
+                after[i]
+            );
+        }
+        // Idle channels were NOT touched by a recv syscall during the drain —
+        // the ready set is exactly the K active channels, not a superset.
+        for id in &idle {
+            let i = ids.iter().position(|x| x == id).unwrap();
+            assert_eq!(
+                after[i], base[i],
+                "idle channel {id} must not receive any try_read during the drain \
+                 ({} -> {}); the ready set must be exactly the active channels",
+                base[i], after[i]
+            );
+        }
+
+        for id in &ids {
+            selector.close_channel(id).await;
+        }
+        selector.poll(0).await.unwrap();
+    }
 }
