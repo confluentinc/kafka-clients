@@ -553,7 +553,6 @@ impl AbstractFetch {
         is_unavailable: impl Fn(&Node) -> bool,
         maybe_throw_auth_failure: impl Fn(&Node) -> Result<(), crate::common::KafkaError>,
     ) -> Result<HashMap<i32, (Node, FetchSessionRequestData)>, crate::common::KafkaError> {
-        let topic_ids = self.metadata.metadata_arc().topic_ids();
         let cluster = self.metadata.metadata_arc().fetch();
 
         // Phase 26 (Fix #2): port stock Java's first early-return
@@ -581,23 +580,31 @@ impl AbstractFetch {
             return Ok(HashMap::new());
         }
 
-        // Snapshot the buffered-partitions and fetchable-partitions sets
-        // under the SubscriptionState lock.
+        // Snapshot the buffered-partitions set, then take the
+        // SubscriptionState lock ONCE for the whole preparation (Phase 27
+        // Fix #4). The previous shape re-locked the mutex 2-3 times per
+        // partition per call and cloned `FetchPosition` (which carries a
+        // `Node` → heap `String`s) per partition; cloud profiling showed
+        // ~68% of this function's self-time in Arc-refcount + mutex futex
+        // traffic. Java's per-query `synchronized` blocks are biased/
+        // JIT-elided and its queries return references — holding one guard
+        // and borrowing is the closest Rust equivalent. Holding the lock
+        // across the loop only narrows the (already benign) interleaving
+        // window documented below; no `.await` occurs while it is held
+        // (consumer-threading.md §16).
         let buffered = self.fetch_buffer.buffered_partitions();
 
-        let buffered_clone = buffered.clone();
-        let unbuffered: Vec<TopicPartition> = {
-            let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            guard.fetchable_partitions(|tp| !buffered_clone.contains(tp))
-        };
+        let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
 
+        let unbuffered: Vec<TopicPartition> = guard.fetchable_partitions(|tp| !buffered.contains(tp));
         if unbuffered.is_empty() {
             return Ok(HashMap::new());
         }
 
         // Compute the set of nodes for which we have buffered data —
         // skip these so we don't evict the broker's fetch session cache.
-        let buffered_nodes: FxHashSet<i32> = self.compute_buffered_nodes(&buffered, current_time_ms);
+        let buffered_nodes: FxHashSet<i32> =
+            self.compute_buffered_nodes(&mut guard, &buffered, current_time_ms, &cluster);
 
         // For each unbuffered partition, find the target node and add the
         // partition to that node's session-handler builder. These per-fetch
@@ -615,54 +622,83 @@ impl AbstractFetch {
             // window between `fetchablePartitions()` (snapshot) and
             // `position(tp)` (per-partition query) is narrow because
             // both methods are `synchronized` on the same monitor —
-            // Java rarely hits the race in practice.
+            // Java rarely hits the race in practice. With the single
+            // guard held here the window is closed entirely; the
+            // transient skip arms below are kept for the `Ok(None)` /
+            // unassigned states that remain reachable (e.g. a position
+            // never set). See `COMMENTS.1.md` Issue 7.
             //
-            // In the Rust translation the bg task interleaves
-            // application events between the snapshot and the
-            // per-partition query, so a KIP-848 rebalance landing
-            // mid-loop can flip the partition from assigned-and-
-            // fetchable to unassigned. Surfacing `IllegalState` here
-            // fails the entire `createFetchRequests` batch and
-            // propagates to the user's `poll()` call — diverging from
-            // Java's practical behavior where the next poll iteration
-            // recovers.
-            //
-            // We treat both `Ok(None)` (no position yet) and
-            // `Err(no-current-assignment)` as transient skip-this-poll
-            // signals (mirroring Java's `isFetchable == false`
-            // adjacent path in `FetchCollector.collectFetch`). The
-            // partition is dropped from this fetch batch; the next
-            // `createFetchRequests` cycle re-reads `fetchable_partitions`
-            // under a fresh snapshot. See `COMMENTS.1.md` Issue 7.
-            let position = {
-                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-                match guard.position(&partition) {
-                    Ok(Some(p)) => p.clone(),
-                    Ok(None) => {
-                        trace!(
-                            "Skipping fetch for partition {partition} because it has no position yet \
-                             (transient — partition was fetchable at snapshot but lost its position before query)"
+            // Only `Copy` fields are read out of the position borrow so
+            // the borrow ends before the `&mut` replica query below.
+            let (position_offset, position_leader_epoch) = match guard.position(&partition) {
+                Ok(Some(p)) => {
+                    if p.current_leader.leader.is_none() {
+                        // Java's `maybeNodeForPosition` empty-leader arm.
+                        debug!(
+                            "Requesting metadata update for partition {partition} since the position {p} is missing the current leader node"
                         );
+                        self.metadata.metadata_arc().request_update(false);
                         continue;
-                    },
-                    Err(_e) => {
-                        trace!(
-                            "Skipping fetch for partition {partition} because it is no longer assigned \
-                             (transient rebalance window between fetchable_partitions snapshot and position query)"
-                        );
-                        continue;
-                    },
-                }
+                    }
+                    (p.offset, p.current_leader.epoch)
+                },
+                Ok(None) => {
+                    trace!(
+                        "Skipping fetch for partition {partition} because it has no position yet \
+                         (transient — partition was fetchable at snapshot but lost its position before query)"
+                    );
+                    continue;
+                },
+                Err(_e) => {
+                    trace!(
+                        "Skipping fetch for partition {partition} because it is no longer assigned \
+                         (transient rebalance window between fetchable_partitions snapshot and position query)"
+                    );
+                    continue;
+                },
             };
 
-            // Resolve the read-replica or leader node for this partition.
-            let node = match self.maybe_node_for_position(&partition, &position, current_time_ms, &cluster) {
-                Some(n) => n,
-                None => continue, // No leader yet — Java requests metadata update inside maybe_node_for_position.
+            // Java's `selectReadReplica(partition, leader, currentTimeMs)`
+            // inlined (its only callers are this loop and
+            // `compute_buffered_nodes`; inlining keeps the borrow scopes on
+            // the single guard tractable). Behavior is identical: prefer
+            // the (unexpired) read replica when it is online in the
+            // cluster snapshot; otherwise clear it, request a metadata
+            // update (Java `FetchUtils.requestMetadataUpdate` — performed
+            // directly on the held guard), and fall back to the leader.
+            let preferred = guard.preferred_read_replica(&partition, current_time_ms);
+            let replica_online = match preferred {
+                Some(replica_id) => {
+                    if cluster.node_if_online(&partition, replica_id).is_some() {
+                        Some(replica_id)
+                    } else {
+                        trace!(
+                            "Not fetching from {replica_id} for partition {partition} since it is marked offline or is missing from our metadata, using the leader instead"
+                        );
+                        // Stale metadata — clear preferred replica and request refresh.
+                        self.metadata.metadata_arc().request_update(false);
+                        guard.clear_preferred_read_replica(&partition);
+                        None
+                    }
+                },
+                None => None,
+            };
+            // Resolve the `&Node` borrow AFTER the `&mut` calls above. The
+            // replica node borrows the cluster snapshot; the leader node
+            // borrows the position inside the guard (Java uses exactly
+            // these two sources).
+            let node: &Node = match replica_online {
+                Some(replica_id) => cluster
+                    .node_if_online(&partition, replica_id)
+                    .expect("node_if_online verified Some above"),
+                None => match guard.position(&partition) {
+                    Ok(Some(p)) => p.current_leader.leader.as_ref().expect("leader verified Some above"),
+                    _ => unreachable!("position verified Some above; guard held continuously"),
+                },
             };
 
-            if is_unavailable(&node) {
-                maybe_throw_auth_failure(&node)?;
+            if is_unavailable(node) {
+                maybe_throw_auth_failure(node)?;
                 trace!(
                     "Skipping fetch for partition {partition} because node {} is awaiting reconnect backoff",
                     node.id()
@@ -684,30 +720,36 @@ impl AbstractFetch {
                 continue;
             }
 
-            // Add to the node's per-fetch partition map.
-            node_targets.entry(node.id()).or_insert(node.clone());
-            let topic_id = topic_ids
-                .get(partition.topic())
-                .copied()
-                .unwrap_or(crate::common::Uuid::ZERO_UUID);
+            // Add to the node's per-fetch partition map. The `Node` is
+            // cloned once per distinct node (not per partition).
+            let node_id = node.id();
+            node_targets.entry(node_id).or_insert_with(|| node.clone());
+            // Topic id from the same metadata snapshot (`Cluster` carries
+            // the topic-ids map; Java reads `metadata.topicIds()` which is
+            // a reference to the same snapshot map — the previous Rust
+            // shape deep-cloned the whole `HashMap<String, Uuid>` per call).
+            let topic_id = cluster.topic_id(partition.topic());
             let partition_data = PartitionData::new(
                 topic_id,
-                position.offset,
+                position_offset,
                 INVALID_LOG_START_OFFSET,
                 self.fetch_config.fetch_size,
-                position.current_leader.epoch,
+                position_leader_epoch,
             );
             fetchable_partitions_by_node
-                .entry(node.id())
+                .entry(node_id)
                 .or_default()
                 .insert(partition.clone(), partition_data);
 
             debug!(
-                "Added {} fetch request for partition {partition} at position {position} to node {}",
-                self.fetch_config.isolation_level,
-                node.id()
+                "Added {} fetch request for partition {partition} at offset {position_offset} to node {}",
+                self.fetch_config.isolation_level, node_id
             );
         }
+
+        // Release the SubscriptionState lock before building the session
+        // handlers (they only touch `self`).
+        drop(guard);
 
         // Now build the session-handler builders from the per-node
         // partition maps and produce the final `FetchSessionRequestData`.
@@ -727,83 +769,65 @@ impl AbstractFetch {
         Ok(out)
     }
 
-    /// Java's `Optional<Node> maybeNodeForPosition(TopicPartition,
-    /// FetchPosition, long)`. Returns `None` if the position's leader is
-    /// empty (and triggers a metadata update); otherwise returns the
-    /// read-replica or leader node.
-    fn maybe_node_for_position(
-        &self,
-        partition: &TopicPartition,
-        position: &crate::consumer::internals::subscription_state::FetchPosition,
-        current_time_ms: i64,
-        cluster: &crate::common::Cluster,
-    ) -> Option<Node> {
-        let leader_opt = position.current_leader.leader.clone();
-        let Some(leader) = leader_opt else {
-            debug!(
-                "Requesting metadata update for partition {partition} since the position {position} is missing the current leader node"
-            );
-            self.metadata.metadata_arc().request_update(false);
-            return None;
-        };
-        Some(self.select_read_replica(partition, leader, current_time_ms, cluster))
-    }
-
-    /// Java's `Node selectReadReplica(TopicPartition, Node, long)`.
-    fn select_read_replica(
-        &self,
-        partition: &TopicPartition,
-        leader_replica: Node,
-        current_time_ms: i64,
-        cluster: &crate::common::Cluster,
-    ) -> Node {
-        let preferred = {
-            let mut guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-            guard.preferred_read_replica(partition, current_time_ms)
-        };
-        if let Some(replica_id) = preferred {
-            if let Some(node) = cluster.node_if_online(partition, replica_id) {
-                return node.clone();
-            } else {
-                trace!(
-                    "Not fetching from {replica_id} for partition {partition} since it is marked offline or is missing from our metadata, using the leader instead"
-                );
-                // Stale metadata — clear preferred replica and request refresh.
-                crate::consumer::internals::fetch_utils::request_metadata_update(
-                    &self.metadata,
-                    &self.subscriptions,
-                    partition,
-                );
-                return leader_replica;
-            }
-        }
-        leader_replica
-    }
-
     /// Java's `Set<Integer> bufferedNodes(Set<TopicPartition>, long)`.
     /// Java does not pass `isUnavailable` here either — callers check
     /// availability at the outer prepare-step.
-    fn compute_buffered_nodes(&self, buffered: &HashSet<TopicPartition>, current_time_ms: i64) -> FxHashSet<i32> {
+    ///
+    /// Phase 27 Fix #4: operates on the caller's already-held
+    /// `SubscriptionState` guard instead of re-locking 2× per buffered
+    /// partition, and only reads node *ids* (no `FetchPosition` / `Node`
+    /// clones). The read-replica selection inlines Java's
+    /// `maybeNodeForPosition` → `selectReadReplica` chain with identical
+    /// behavior, including the empty-leader / stale-replica metadata-update
+    /// side effects.
+    fn compute_buffered_nodes(
+        &self,
+        guard: &mut crate::consumer::internals::subscription_state::SubscriptionState,
+        buffered: &HashSet<TopicPartition>,
+        current_time_ms: i64,
+        cluster: &crate::common::Cluster,
+    ) -> FxHashSet<i32> {
         let mut ids: FxHashSet<i32> = FxHashSet::default();
-        let cluster = self.metadata.metadata_arc().fetch();
         for partition in buffered {
-            let is_fetchable = {
-                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-                guard.is_fetchable(partition)
-            };
-            if !is_fetchable {
+            if !guard.is_fetchable(partition) {
                 continue;
             }
-            let position = {
-                let guard = self.subscriptions.lock().expect("SubscriptionState mutex poisoned");
-                match guard.position(partition) {
-                    Ok(Some(p)) => p.clone(),
-                    _ => continue,
-                }
+            // Java's `maybeNodeForPosition` empty-position / empty-leader
+            // arms. Only the leader id (Copy) is read from the borrow.
+            let leader_id = match guard.position(partition) {
+                Ok(Some(p)) => match p.current_leader.leader.as_ref() {
+                    Some(leader) => leader.id(),
+                    None => {
+                        debug!(
+                            "Requesting metadata update for partition {partition} since the position {p} is missing the current leader node"
+                        );
+                        self.metadata.metadata_arc().request_update(false);
+                        continue;
+                    },
+                },
+                _ => continue,
             };
-            if let Some(node) = self.maybe_node_for_position(partition, &position, current_time_ms, &cluster) {
-                ids.insert(node.id());
-            }
+            // Java's `selectReadReplica` (id-only — the buffered-nodes set
+            // stores ids).
+            let node_id = match guard.preferred_read_replica(partition, current_time_ms) {
+                Some(replica_id) => {
+                    if cluster.node_if_online(partition, replica_id).is_some() {
+                        replica_id
+                    } else {
+                        trace!(
+                            "Not fetching from {replica_id} for partition {partition} since it is marked offline or is missing from our metadata, using the leader instead"
+                        );
+                        // Stale metadata — clear preferred replica and
+                        // request refresh (Java `FetchUtils.requestMetadataUpdate`,
+                        // performed on the held guard).
+                        self.metadata.metadata_arc().request_update(false);
+                        guard.clear_preferred_read_replica(partition);
+                        leader_id
+                    }
+                },
+                None => leader_id,
+            };
+            ids.insert(node_id);
         }
         ids
     }
@@ -1179,7 +1203,9 @@ mod tests {
     #[test]
     fn test_compute_buffered_nodes_empty_set() {
         let af = make_abstract_fetch();
-        let result = af.compute_buffered_nodes(&HashSet::new(), 0);
+        let cluster = af.metadata.metadata_arc().fetch();
+        let mut guard = af.subscriptions.lock().expect("SubscriptionState mutex poisoned");
+        let result = af.compute_buffered_nodes(&mut guard, &HashSet::new(), 0, &cluster);
         assert!(result.is_empty());
     }
 
